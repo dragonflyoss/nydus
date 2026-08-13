@@ -70,7 +70,7 @@ pub fn run_nbd(args: NbdArgs) -> Result<()> {
     info!(
         "nydus nbd service attached to {} ({} blocks, {} bytes, {} worker thread(s))",
         args.device,
-        core.blocks(),
+        core.block_count(),
         core.device_size(),
         threads
     );

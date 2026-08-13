@@ -57,7 +57,7 @@ pub struct DirImage {
     /// SHA256 of the compressed data region (the data blob digest).
     pub data_digest: [u8; EROFS_BLOB_ID_SIZE],
     /// SHA256 of the whole full blob file.
-    pub full_blob_id: [u8; EROFS_BLOB_ID_SIZE],
+    pub full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
     pub blob_metadata: BlobMetadata,
     pub footer: BlobFooter,
     pub standalone_bootstrap: Option<Vec<u8>>,
@@ -156,12 +156,15 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
         &bootstrap_bytes,
         &blob_metadata,
     )?;
-    let full_blob_id = blob_writer_stream
+    let full_blob_digest = blob_writer_stream
         .finish()
         .context("failed to flush blob")?;
 
     let standalone_bootstrap = if options.standalone_bootstrap {
-        let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &full_blob_id)];
+        let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
+            blob_blocks,
+            &full_blob_digest,
+        )];
         Some(render_flattened_bootstrap(
             &mut inodes,
             epoch,
@@ -174,7 +177,7 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
 
     Ok(DirImage {
         data_digest: blob_id,
-        full_blob_id,
+        full_blob_digest,
         blob_metadata,
         footer,
         standalone_bootstrap,

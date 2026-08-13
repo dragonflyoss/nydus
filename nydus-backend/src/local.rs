@@ -18,8 +18,16 @@ struct ResolvedSource {
     cache_key: [u8; SHA256_DIGEST_SIZE],
     data_offset: u64,
     data_size: u64,
-    blob_metadata_offset: Option<u64>,
-    blob_metadata_size: Option<u64>,
+    /// Byte region of the embedded blob metadata inside a full blob, absent
+    /// for bare data sources.
+    blob_metadata_region: Option<EmbeddedRegion>,
+}
+
+/// A byte region embedded in a larger file.
+#[derive(Clone, Copy)]
+struct EmbeddedRegion {
+    offset: u64,
+    size: u64,
 }
 
 /// A resolved source and its lazily opened file handle, looked up together so
@@ -31,7 +39,7 @@ struct SourceEntry {
 }
 
 impl SourceEntry {
-    fn file(&self) -> io::Result<Arc<File>> {
+    fn open_file(&self) -> io::Result<Arc<File>> {
         if let Some(file) = self.file.get() {
             return Ok(file.clone());
         }
@@ -41,12 +49,12 @@ impl SourceEntry {
     }
 }
 
-pub struct LocalBackend {
+pub struct Local {
     root: PathBuf,
     sources: RwLock<HashMap<[u8; SHA256_DIGEST_SIZE], Arc<SourceEntry>>>,
 }
 
-impl LocalBackend {
+impl Local {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -63,7 +71,7 @@ impl LocalBackend {
         // `blob_id` only covers the data region here, so the cache key is the
         // digest of the whole file and has to be computed.
         let cache_key = sha256_file(path).map_err(io::Error::other)?;
-        let source = inspect_full_blob_source(path, cache_key)?.ok_or_else(|| {
+        let source = probe_full_blob_source(path, cache_key)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("nydus blob footer not found: {}", path.display()),
@@ -84,13 +92,13 @@ impl LocalBackend {
         Ok(backend)
     }
 
-    /// Build a `LocalBackend` from its YAML configuration, which only carries
+    /// Build a `Local` from its YAML configuration, which only carries
     /// the `dir` field pointing at the blob source directory.
     pub fn from_value(config: &serde_yaml::Value) -> io::Result<Self> {
-        let cfg: LocalDirConfig = serde_yaml::from_value(config.clone()).map_err(|e| {
+        let cfg: LocalDirConfig = serde_yaml::from_value(config.clone()).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid local backend config: {e}"),
+                format!("invalid local backend config: {err}"),
             )
         })?;
         Ok(Self::new(cfg.dir))
@@ -146,7 +154,7 @@ impl LocalBackend {
             }
             // The check above proves the whole file hashes to `blob_id`, so it
             // doubles as the cache key.
-            let source = inspect_full_blob_source(&exact, *blob_id)?.ok_or_else(|| {
+            let source = probe_full_blob_source(&exact, *blob_id)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("nydus blob footer not found: {}", exact.display()),
@@ -164,7 +172,7 @@ impl LocalBackend {
         ))
     }
 
-    fn resolve_source(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<ResolvedSource> {
+    fn resolved_source(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<ResolvedSource> {
         Ok(self.source_entry(blob_id)?.resolved.clone())
     }
 
@@ -174,8 +182,8 @@ impl LocalBackend {
             return fs::read(&blob_metadata_path);
         }
 
-        if let (Some(offset), Some(size)) = (source.blob_metadata_offset, source.blob_metadata_size)
-        {
+        if let Some(region) = source.blob_metadata_region {
+            let (offset, size) = (region.offset, region.size);
             let file = File::open(&source.path)?;
             let mut data = vec![0u8; size as usize];
             file.read_exact_at(&mut data, offset)?;
@@ -189,16 +197,16 @@ impl LocalBackend {
     }
 }
 
-impl BlobBackend for LocalBackend {
+impl BlobBackend for Local {
     fn cache_key(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<[u8; SHA256_DIGEST_SIZE]> {
-        Ok(self.resolve_source(blob_id)?.cache_key)
+        Ok(self.resolved_source(blob_id)?.cache_key)
     }
 
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-        let source = self.resolve_source(blob_id)?;
+        let source = self.resolved_source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&source)?;
         BlobMetadata::loader()
             .blob_id(*blob_id)
@@ -206,8 +214,8 @@ impl BlobBackend for LocalBackend {
             .map_err(io::Error::other)
     }
 
-    fn blob_metadata_to(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
-        let source = self.resolve_source(blob_id)?;
+    fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
+        let source = self.resolved_source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&source)?;
         let mut file = File::create(dst)?;
         file.write_all(&data)?;
@@ -233,12 +241,12 @@ impl BlobBackend for LocalBackend {
             ));
         }
         entry
-            .file()?
+            .open_file()?
             .read_exact_at(dst, entry.resolved.data_offset + offset)
     }
 }
 
-fn inspect_full_blob_source(
+fn probe_full_blob_source(
     path: &Path,
     cache_key: [u8; SHA256_DIGEST_SIZE],
 ) -> io::Result<Option<ResolvedSource>> {
@@ -251,8 +259,10 @@ fn inspect_full_blob_source(
         cache_key,
         data_offset: footer.compressed_data_offset(),
         data_size: footer.compressed_data_size(),
-        blob_metadata_offset: Some(footer.blob_metadata_offset()),
-        blob_metadata_size: Some(footer.blob_metadata_size()),
+        blob_metadata_region: Some(EmbeddedRegion {
+            offset: footer.blob_metadata_offset(),
+            size: footer.blob_metadata_size(),
+        }),
     }))
 }
 
@@ -288,7 +298,7 @@ mod tests {
             true,
         );
 
-        let backend = LocalBackend::new(dir.path().to_path_buf());
+        let backend = Local::new(dir.path().to_path_buf());
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();
         let mut data = vec![0u8; 4096];
         backend
@@ -315,7 +325,7 @@ mod tests {
             &blob_metadata(data_blob_id, &payload),
             false,
         );
-        let backend = LocalBackend::new(dir.path().to_path_buf());
+        let backend = Local::new(dir.path().to_path_buf());
 
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();
         let mut data = vec![0u8; 4096];

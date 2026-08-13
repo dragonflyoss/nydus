@@ -25,10 +25,10 @@ use nydus_error::{Context, Error, Result};
 
 use super::core::{
     align_fetch_range, decide, fd_identity, Decision, DenyReason, FanotifyCore, FetchError,
-    Response, FAN_CLASS_PRE_CONTENT, FAN_CLOEXEC, FAN_MARK_ADD, FAN_NONBLOCK,
+    FAN_CLASS_PRE_CONTENT, FAN_CLOEXEC, FAN_MARK_ADD, FAN_NONBLOCK,
 };
 use super::proto::{EventIter, PreContentEvent, FAN_PRE_ACCESS};
-use super::response::{FdResponseWriter, PendingPermission, ResponseWriter};
+use super::response::{FdResponseWriter, PendingPermission, Response, ResponseWriter};
 
 // 256 KiB holds ~5400 minimum-size events per read(2)
 // (24-byte fanotify_event_metadata + 24-byte RANGE record).
@@ -84,7 +84,12 @@ struct Completion {
 
 /// Coalescing key: identical (blob, aligned offset, aligned length) reads share
 /// one fetch job and are all answered by its single completion.
-type FetchKey = (BlobId, u64, u64);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FetchKey {
+    blob: BlobId,
+    offset: u64,
+    count: u64,
+}
 
 /// One in-flight fetch job and every permission event waiting on it. Concurrent
 /// reads of the same range (common at container start: many tasks page in the
@@ -414,501 +419,433 @@ fn serve(
         .send(())
         .map_err(|_| Error::Runtime("fanotify readiness receiver was dropped".to_string()))?;
 
-    let mut pending_jobs = HashMap::new();
-    let mut pending_table = PendingTable::new();
-    coordinate(
-        epfd.as_raw_fd(),
-        fan_raw,
-        &fan_weak,
+    Coordinator {
+        epfd: epfd.as_raw_fd(),
+        fan_fd: fan_raw,
+        fan_weak: &fan_weak,
         core,
-        &writer,
-        &pool,
-        &sink,
-        &completion_rx,
-        stop_raw,
-        wake_raw,
-        &mut pending_jobs,
-        &mut pending_table,
-    )
+        writer: &writer,
+        pool: &pool,
+        sink: &sink,
+        completion_rx: &completion_rx,
+        stop_fd: stop_raw,
+        wake_fd: wake_raw,
+        jobs: JobTable::new(),
+    }
+    .run()
 }
 
 // ---- event loop ----
 
-#[allow(clippy::too_many_arguments)]
-fn coordinate(
+/// The job state every admission and completion step works over: pending
+/// permission events by job id, their decided-flags, and the coalescing
+/// index. Owned by the [`Coordinator`]; separate so completion/shutdown
+/// logic is unit-testable without a live event loop.
+struct JobTable {
+    /// Jobs awaiting a fetch completion, keyed by job id.
+    pending_jobs: HashMap<u64, PendingJob>,
+    pending_table: PendingTable,
+    /// Reverse index (FetchKey -> job_id) for coalescing concurrent identical reads.
+    in_flight: HashMap<FetchKey, u64>,
+}
+
+impl JobTable {
+    fn new() -> Self {
+        Self {
+            pending_jobs: HashMap::new(),
+            pending_table: PendingTable::new(),
+            in_flight: HashMap::new(),
+        }
+    }
+}
+
+/// The event-loop coordinator: the shared service handles plus the
+/// [`JobTable`].
+struct Coordinator<'a> {
     epfd: RawFd,
     fan_fd: RawFd,
-    fan_weak: &Weak<OwnedFd>,
-    core: &Arc<FanotifyCore>,
-    writer: &Arc<dyn ResponseWriter>,
-    pool: &FetchPool,
-    sink: &Arc<CompletionSink>,
-    completion_rx: &mpsc::Receiver<Completion>,
+    fan_weak: &'a Weak<OwnedFd>,
+    core: &'a Arc<FanotifyCore>,
+    writer: &'a Arc<dyn ResponseWriter>,
+    pool: &'a FetchPool,
+    sink: &'a Arc<CompletionSink>,
+    completion_rx: &'a mpsc::Receiver<Completion>,
     stop_fd: RawFd,
     wake_fd: RawFd,
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-) -> Result<()> {
-    // Reverse index (FetchKey -> job_id) for coalescing concurrent identical reads.
-    let mut in_flight: HashMap<FetchKey, u64> = HashMap::new();
-
-    let outcome = event_loop(
-        epfd,
-        fan_fd,
-        fan_weak,
-        core,
-        writer,
-        pool,
-        sink,
-        completion_rx,
-        stop_fd,
-        wake_fd,
-        pending_jobs,
-        pending_table,
-        &mut in_flight,
-    );
-
-    // Unblock every reader regardless of why the loop exited. This must run on
-    // the fatal path too: `run` returns the fd to the caller, which then
-    // unmounts and drops it — and a still-blocked reader would wedge that
-    // unmount, after which the fail-open fd drop would corrupt a live mount.
-    shutdown_cleanup(
-        fan_fd,
-        writer,
-        completion_rx,
-        pending_jobs,
-        pending_table,
-        &mut in_flight,
-    );
-    outcome
+    jobs: JobTable,
 }
 
-/// The epoll loop. Returns `Ok(())` when the stop signal arrives, `Err` on any
-/// fatal condition. Never runs teardown itself — [`coordinate`] does that after,
-/// so clean and fatal exits share one cleanup path.
-#[allow(clippy::too_many_arguments)]
-fn event_loop(
-    epfd: RawFd,
-    fan_fd: RawFd,
-    fan_weak: &Weak<OwnedFd>,
-    core: &Arc<FanotifyCore>,
-    writer: &Arc<dyn ResponseWriter>,
-    pool: &FetchPool,
-    sink: &Arc<CompletionSink>,
-    completion_rx: &mpsc::Receiver<Completion>,
-    stop_fd: RawFd,
-    wake_fd: RawFd,
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-    in_flight: &mut HashMap<FetchKey, u64>,
-) -> Result<()> {
-    let mut buffer = vec![0u8; EVENT_BUFFER_SIZE];
-    let mut events = vec![
-        libc::epoll_event { events: 0, u64: 0 },
-        libc::epoll_event { events: 0, u64: 0 },
-        libc::epoll_event { events: 0, u64: 0 },
-    ];
+impl Coordinator<'_> {
+    fn run(mut self) -> Result<()> {
+        let outcome = self.event_loop();
 
-    loop {
-        // Block until a fanotify event, a completion wakeup (eventfd), or the
-        // stop signal. A completing fetch writes the eventfd, so there is no
-        // idle poll timer and no wake latency.
-        let nfds = unsafe { libc::epoll_wait(epfd, events.as_mut_ptr(), 3, -1) };
-        if nfds < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Err(err).context("epoll_wait");
-        }
-
-        for ev in events.iter().take(nfds as usize) {
-            let fd = ev.u64 as RawFd;
-
-            if fd == stop_fd {
-                debug!("fanotify: stop signal received; entering shutdown");
-                return Ok(());
-            }
-
-            if fd == wake_fd {
-                // Reset the eventfd counter; the completions are drained after
-                // the fd loop. Reading before draining avoids a lost wakeup.
-                let mut drain_buf = [0u8; 8];
-                let _ =
-                    unsafe { libc::read(wake_fd, drain_buf.as_mut_ptr() as *mut libc::c_void, 8) };
-            }
-
-            if fd == fan_fd && ev.events & EPOLLIN != 0 {
-                match read_events(fan_fd, &mut buffer) {
-                    Ok(0) => {} // EAGAIN: no events
-                    Ok(n) => admit_batch(
-                        fan_weak,
-                        core,
-                        writer,
-                        pool,
-                        sink,
-                        &buffer[..n],
-                        pending_jobs,
-                        pending_table,
-                        in_flight,
-                    )?,
-                    Err(err) => return Err(err).context("failed to read fanotify events"),
-                }
-            }
-        }
-
-        // Drain completions (non-blocking).
-        drain_completions(completion_rx, pending_jobs, pending_table, in_flight)?;
+        // Unblock every reader regardless of why the loop exited. This must run on
+        // the fatal path too: `run` returns the fd to the caller, which then
+        // unmounts and drops it — and a still-blocked reader would wedge that
+        // unmount, after which the fail-open fd drop would corrupt a live mount.
+        self.shutdown_cleanup();
+        outcome
     }
-}
 
-/// Best-effort teardown: deny every outstanding permission event and drain the
-/// kernel queue so no reader stays blocked. Runs after the loop exits for any
-/// reason; failures are logged, not propagated, because the caller still needs
-/// to unmount and the fetch group's fail-open will cover any true residue.
-fn shutdown_cleanup(
-    fan_fd: RawFd,
-    writer: &Arc<dyn ResponseWriter>,
-    completion_rx: &mpsc::Receiver<Completion>,
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-    in_flight: &mut HashMap<FetchKey, u64>,
-) {
-    if let Err(err) = deny_undecided(pending_jobs, pending_table, in_flight) {
-        warn!(
-            "fanotify: denying outstanding events during shutdown failed: {}",
-            err.report()
-        );
-    }
-    // In-flight fetches may still be completing; answer them so their readers
-    // unblock too.
-    if let Err(err) = drain_completions(completion_rx, pending_jobs, pending_table, in_flight) {
-        warn!(
-            "fanotify: draining completions during shutdown failed: {}",
-            err.report()
-        );
-    }
-    if let Err(err) = drain_kernel_queue(fan_fd, writer) {
-        warn!(
-            "fanotify: draining kernel queue during shutdown failed: {}",
-            err.report()
-        );
-    }
-}
+    /// The epoll loop. Returns `Ok(())` when the stop signal arrives, `Err` on
+    /// any fatal condition. Never runs teardown itself — [`Coordinator::run`]
+    /// does that after, so clean and fatal exits share one cleanup path.
+    fn event_loop(&mut self) -> Result<()> {
+        let mut buffer = vec![0u8; EVENT_BUFFER_SIZE];
+        let mut events = vec![
+            libc::epoll_event { events: 0, u64: 0 },
+            libc::epoll_event { events: 0, u64: 0 },
+            libc::epoll_event { events: 0, u64: 0 },
+        ];
 
-fn drain_completions(
-    rx: &mpsc::Receiver<Completion>,
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-    in_flight: &mut HashMap<FetchKey, u64>,
-) -> Result<()> {
-    loop {
-        match rx.try_recv() {
-            Ok(completion) => {
-                handle_completion(completion, pending_jobs, pending_table, in_flight)?
-            }
-            Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => {
-                return Err(Error::Runtime(
-                    "fanotify completion channel closed unexpectedly".to_string(),
-                ))
-            }
-        }
-    }
-}
-
-// ---- batch admission ----
-
-#[allow(clippy::too_many_arguments)]
-fn admit_batch(
-    fan_weak: &Weak<OwnedFd>,
-    core: &Arc<FanotifyCore>,
-    writer: &Arc<dyn ResponseWriter>,
-    pool: &FetchPool,
-    sink: &Arc<CompletionSink>,
-    bytes: &[u8],
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-    in_flight: &mut HashMap<FetchKey, u64>,
-) -> Result<()> {
-    for parsed in EventIter::new(bytes) {
-        let event = match parsed {
-            Ok(event) if event.is_overflow() => {
-                return Err(Error::Runtime(
-                    "fanotify queue overflow; stopping fail-closed".to_string(),
-                ));
-            }
-            Ok(event) => event,
-            Err(err) => {
-                // Deny the offending event's fd when the metadata was intact
-                // enough to extract it, so that one reader unblocks either way.
-                if let Some(fd) = err.event_fd() {
-                    if let Ok(owned) = owned_event_fd(fd) {
-                        let mut permission = PendingPermission::new(owned, writer.clone());
-                        respond(&mut permission, Response::Deny)?;
-                    }
-                }
-                if err.is_recoverable() {
-                    // The event's length was validated, so the next event's
-                    // boundary is known: deny just this unusable event and keep
-                    // serving the batch. One malformed event no longer takes the
-                    // whole daemon down and strands every other blocked reader.
-                    warn!(
-                        "fanotify: denying and skipping unusable event at offset {}: {:?}",
-                        err.offset, err.kind
-                    );
+        loop {
+            // Block until a fanotify event, a completion wakeup (eventfd), or the
+            // stop signal. A completing fetch writes the eventfd, so there is no
+            // idle poll timer and no wake latency.
+            let nfds = unsafe { libc::epoll_wait(self.epfd, events.as_mut_ptr(), 3, -1) };
+            if nfds < 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                // Structural corruption: the remaining bytes cannot be trusted
-                // as event boundaries, so stop fail-closed.
-                warn!(
-                    "fanotify: batch corruption at offset {}: {:?}; stopping fail-closed",
-                    err.offset, err.kind
-                );
-                return Err(Error::Protocol(format!(
-                    "fanotify batch parse error at offset {}: {:?}; stopping fail-closed",
-                    err.offset, err.kind
-                )));
+                return Err(err).context("epoll_wait");
             }
-        };
 
-        admit_event(
-            fan_weak,
-            core,
-            writer,
-            pool,
-            sink,
-            event,
-            pending_jobs,
-            pending_table,
-            in_flight,
-        )?;
-    }
-    Ok(())
-}
+            for ev in events.iter().take(nfds as usize) {
+                let fd = ev.u64 as RawFd;
 
-// ---- single-event admission ----
+                if fd == self.stop_fd {
+                    debug!("fanotify: stop signal received; entering shutdown");
+                    return Ok(());
+                }
 
-#[allow(clippy::too_many_arguments)]
-fn admit_event(
-    fan_weak: &Weak<OwnedFd>,
-    core: &Arc<FanotifyCore>,
-    writer: &Arc<dyn ResponseWriter>,
-    pool: &FetchPool,
-    sink: &Arc<CompletionSink>,
-    event: PreContentEvent,
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-    in_flight: &mut HashMap<FetchKey, u64>,
-) -> Result<()> {
-    let mut permission = PendingPermission::new(owned_event_fd(event.fd)?, writer.clone());
-    let range = match decide(&event) {
-        Decision::Fill(range) => range,
-        Decision::Deny(reason) => {
-            warn!("fanotify: immediate deny: {reason:?}");
-            respond(&mut permission, Response::Deny)?;
-            return Ok(());
+                if fd == self.wake_fd {
+                    // Reset the eventfd counter; the completions are drained after
+                    // the fd loop. Reading before draining avoids a lost wakeup.
+                    let mut drain_buf = [0u8; 8];
+                    let _ = unsafe {
+                        libc::read(self.wake_fd, drain_buf.as_mut_ptr() as *mut libc::c_void, 8)
+                    };
+                }
+
+                if fd == self.fan_fd && ev.events & EPOLLIN != 0 {
+                    match read_events(self.fan_fd, &mut buffer) {
+                        Ok(0) => {} // EAGAIN: no events
+                        Ok(n) => self.admit_batch(&buffer[..n])?,
+                        Err(err) => return Err(err).context("failed to read fanotify events"),
+                    }
+                }
+            }
+
+            // Drain completions (non-blocking).
+            self.drain_completions()?;
         }
-    };
-
-    let (dev, ino) = match fd_identity(permission.event_fd()) {
-        Ok(identity) => identity,
-        Err(err) => {
-            warn!("fanotify: fstat event fd failed: {}", err.report());
-            respond(&mut permission, Response::Deny)?;
-            return Ok(());
-        }
-    };
-    let Some(device) = core.device_for(dev, ino) else {
-        warn!(
-            "fanotify: {:?}: unknown event fd",
-            DenyReason::UnknownDevice
-        );
-        respond(&mut permission, Response::Deny)?;
-        return Ok(());
-    };
-    if device.is_redirect {
-        warn!(
-            "fanotify: {:?}: redirect slot {} received a data read",
-            DenyReason::RedirectRead,
-            device.index
-        );
-        respond(&mut permission, Response::Deny)?;
-        return Ok(());
     }
 
-    let (offset, count) = match align_fetch_range(range.offset, range.count, device.cache_size) {
-        Ok(range) => range,
-        Err(err) => {
-            warn!("fanotify: {:?}: {err:?}", DenyReason::InvalidRange);
-            respond(&mut permission, Response::Deny)?;
-            return Ok(());
-        }
-    };
-    match core.is_range_ready(&device.id, offset, count) {
-        Ok(true) => {
-            debug!(
-                "fanotify: range [{}, +{}) already ready for blob {}; allowing immediately",
-                offset, count, device.id
+    /// Best-effort teardown: deny every outstanding permission event and drain
+    /// the kernel queue so no reader stays blocked. Runs after the loop exits
+    /// for any reason; failures are logged, not propagated, because the caller
+    /// still needs to unmount and the fetch group's fail-open will cover any
+    /// true residue.
+    fn shutdown_cleanup(&mut self) {
+        if let Err(err) = self.jobs.deny_undecided() {
+            warn!(
+                "fanotify: denying outstanding events during shutdown failed: {}",
+                err.report()
             );
-            respond(&mut permission, Response::Allow)?;
-            if let Some(fd_arc) = fan_weak.upgrade() {
-                core.try_unmark(fd_arc.as_raw_fd(), &device.id);
-            }
-            return Ok(());
         }
-        Ok(false) => {}
-        Err(err) => {
-            warn!("fanotify: ready-range lookup failed: {}", err.report());
-            respond(&mut permission, Response::Deny)?;
-            return Ok(());
+        // In-flight fetches may still be completing; answer them so their readers
+        // unblock too.
+        if let Err(err) = self.drain_completions() {
+            warn!(
+                "fanotify: draining completions during shutdown failed: {}",
+                err.report()
+            );
+        }
+        if let Err(err) = drain_kernel_queue(self.fan_fd, self.writer) {
+            warn!(
+                "fanotify: draining kernel queue during shutdown failed: {}",
+                err.report()
+            );
         }
     }
 
-    // Coalesce: if an identical (blob, offset, count) fetch is already in
-    // flight, attach this reader to it rather than dispatch a duplicate. Safe
-    // because completions are processed only between batches, never mid-batch,
-    // so any job found in `in_flight` here is still pending.
-    let key: FetchKey = (device.id, offset, count);
-    if let Some(&job_id) = in_flight.get(&key) {
-        match pending_jobs.get_mut(&job_id) {
-            Some(entry) => {
-                entry.waiters.push(permission);
-                debug!(
-                    "fanotify: coalesced read into job {}: blob {} range [{}, +{})",
-                    job_id, device.id, offset, count
-                );
-                return Ok(());
-            }
-            None => {
-                return Err(Error::Runtime(format!(
-                    "in-flight key maps to missing job {job_id}"
-                )))
+    fn drain_completions(&mut self) -> Result<()> {
+        loop {
+            match self.completion_rx.try_recv() {
+                Ok(completion) => self.jobs.handle_completion(completion)?,
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(Error::Runtime(
+                        "fanotify completion channel closed unexpectedly".to_string(),
+                    ))
+                }
             }
         }
     }
 
-    let job_id = pending_table.admit();
+    // ---- batch admission ----
 
-    let id = device.id;
-    let cache_size = device.cache_size;
-    let core = Arc::clone(core);
-    let sink = Arc::clone(sink);
-
-    let fan_weak = fan_weak.clone();
-    pool.execute(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            core.fetch(&id, cache_size, offset, count)
-        }));
-        // After a successful fetch, check whether this was the last group of
-        // the blob. If the group_map's sticky ALL_READY flag is now set, remove
-        // the fanotify mark so the kernel stops generating events for this
-        // file entirely — subsequent reads hit the page cache without any
-        // daemon involvement.
-        if matches!(&result, Ok(Ok(()))) {
-            if let Some(fd_arc) = fan_weak.upgrade() {
-                core.try_unmark(fd_arc.as_raw_fd(), &id);
-            }
-        }
-        let result = match result {
-            Ok(fetch_result) => CompletionResult::Fetch(fetch_result),
-            Err(_) => CompletionResult::Panicked,
-        };
-        sink.complete(job_id, result);
-    });
-
-    let previous = pending_jobs.insert(
-        job_id,
-        PendingJob {
-            key,
-            waiters: vec![permission],
-        },
-    );
-    if previous.is_some() {
-        return Err(Error::Runtime(format!(
-            "duplicate fanotify job id {job_id}"
-        )));
-    }
-    in_flight.insert(key, job_id);
-    debug!(
-        "fanotify: job {} dispatched: blob {} range [{}, +{})",
-        job_id, device.id, offset, count
-    );
-    Ok(())
-}
-
-// ---- completion ----
-
-fn handle_completion(
-    completion: Completion,
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-    in_flight: &mut HashMap<FetchKey, u64>,
-) -> Result<()> {
-    match pending_table.on_completion(completion.job_id) {
-        CompletionAction::Decide => {
-            let mut event = pending_jobs.remove(&completion.job_id).ok_or_else(|| {
-                Error::Runtime(format!(
-                    "completion has no permission event: {}",
-                    completion.job_id
-                ))
-            })?;
-            in_flight.remove(&event.key);
-            let decision = match completion.result {
-                CompletionResult::Fetch(Ok(())) => {
-                    debug!(
-                        "fanotify: job {} fetch succeeded; allowing",
-                        completion.job_id
+    fn admit_batch(&mut self, bytes: &[u8]) -> Result<()> {
+        for parsed in EventIter::new(bytes) {
+            let event = match parsed {
+                Ok(event) if event.is_overflow() => {
+                    return Err(Error::Runtime(
+                        "fanotify queue overflow; stopping fail-closed".to_string(),
+                    ));
+                }
+                Ok(event) => event,
+                Err(err) => {
+                    // Deny the offending event's fd when the metadata was intact
+                    // enough to extract it, so that one reader unblocks either way.
+                    if let Some(fd) = err.event_fd() {
+                        if let Ok(owned) = owned_event_fd(fd) {
+                            let mut permission = PendingPermission::new(owned, self.writer.clone());
+                            respond(&mut permission, Response::Deny)?;
+                        }
+                    }
+                    if err.is_recoverable() {
+                        // The event's length was validated, so the next event's
+                        // boundary is known: deny just this unusable event and keep
+                        // serving the batch. One malformed event no longer takes the
+                        // whole daemon down and strands every other blocked reader.
+                        warn!(
+                            "fanotify: denying and skipping unusable event at offset {}: {:?}",
+                            err.offset, err.kind
+                        );
+                        continue;
+                    }
+                    // Structural corruption: the remaining bytes cannot be trusted
+                    // as event boundaries, so stop fail-closed.
+                    warn!(
+                        "fanotify: batch corruption at offset {}: {:?}; stopping fail-closed",
+                        err.offset, err.kind
                     );
-                    Response::Allow
-                }
-                CompletionResult::Fetch(Err(FetchError::Backend(err))) => {
-                    warn!("fanotify fetch backend failure: {}", err.report());
-                    Response::Deny
-                }
-                CompletionResult::Panicked => {
-                    warn!("fanotify fetch worker panicked");
-                    Response::Deny
+                    return Err(Error::Protocol(format!(
+                        "fanotify batch parse error at offset {}: {:?}; stopping fail-closed",
+                        err.offset, err.kind
+                    )));
                 }
             };
-            // Every reader coalesced onto this range gets the same answer.
-            for permission in &mut event.waiters {
-                respond(permission, decision)?;
+
+            self.admit_event(event)?;
+        }
+        Ok(())
+    }
+
+    // ---- single-event admission ----
+
+    fn admit_event(&mut self, event: PreContentEvent) -> Result<()> {
+        let mut permission = PendingPermission::new(owned_event_fd(event.fd)?, self.writer.clone());
+        let range = match decide(&event) {
+            Decision::Fill(range) => range,
+            Decision::Deny(reason) => {
+                warn!("fanotify: immediate deny: {reason:?}");
+                respond(&mut permission, Response::Deny)?;
+                return Ok(());
             }
-            Ok(())
-        }
-        CompletionAction::Late => {
-            debug!(
-                "fanotify: late completion for job {}; response already denied",
-                completion.job_id
+        };
+
+        let identity = match fd_identity(permission.event_fd()) {
+            Ok(identity) => identity,
+            Err(err) => {
+                warn!("fanotify: fstat event fd failed: {}", err.report());
+                respond(&mut permission, Response::Deny)?;
+                return Ok(());
+            }
+        };
+        let Some(device) = self.core.device_for(identity) else {
+            warn!(
+                "fanotify: {:?}: unknown event fd",
+                DenyReason::UnknownDevice
             );
-            Ok(())
+            respond(&mut permission, Response::Deny)?;
+            return Ok(());
+        };
+        if device.is_redirect {
+            warn!(
+                "fanotify: {:?}: redirect slot {} received a data read",
+                DenyReason::RedirectRead,
+                device.index
+            );
+            respond(&mut permission, Response::Deny)?;
+            return Ok(());
         }
-        CompletionAction::Unknown => Err(Error::Runtime(format!(
-            "unknown or duplicate fanotify completion for job {}",
-            completion.job_id
-        ))),
+
+        let (offset, count) = match align_fetch_range(range.offset, range.count, device.cache_size)
+        {
+            Ok(range) => (range.offset, range.count),
+            Err(err) => {
+                warn!("fanotify: {:?}: {err:?}", DenyReason::InvalidRange);
+                respond(&mut permission, Response::Deny)?;
+                return Ok(());
+            }
+        };
+        match self.core.is_range_ready(&device.id, offset, count) {
+            Ok(true) => {
+                debug!(
+                    "fanotify: range [{}, +{}) already ready for blob {}; allowing immediately",
+                    offset, count, device.id
+                );
+                respond(&mut permission, Response::Allow)?;
+                if let Some(fd_arc) = self.fan_weak.upgrade() {
+                    self.core.try_unmark(fd_arc.as_raw_fd(), &device.id);
+                }
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(err) => {
+                warn!("fanotify: ready-range lookup failed: {}", err.report());
+                respond(&mut permission, Response::Deny)?;
+                return Ok(());
+            }
+        }
+
+        // Coalesce: if an identical (blob, offset, count) fetch is already in
+        // flight, attach this reader to it rather than dispatch a duplicate. Safe
+        // because completions are processed only between batches, never mid-batch,
+        // so any job found in `in_flight` here is still pending.
+        let key = FetchKey {
+            blob: device.id,
+            offset,
+            count,
+        };
+        if let Some(&job_id) = self.jobs.in_flight.get(&key) {
+            match self.jobs.pending_jobs.get_mut(&job_id) {
+                Some(entry) => {
+                    entry.waiters.push(permission);
+                    debug!(
+                        "fanotify: coalesced read into job {}: blob {} range [{}, +{})",
+                        job_id, device.id, offset, count
+                    );
+                    return Ok(());
+                }
+                None => {
+                    return Err(Error::Runtime(format!(
+                        "in-flight key maps to missing job {job_id}"
+                    )))
+                }
+            }
+        }
+
+        let job_id = self.jobs.pending_table.admit();
+
+        let id = device.id;
+        let cache_size = device.cache_size;
+        let core = Arc::clone(self.core);
+        let sink = Arc::clone(self.sink);
+
+        let fan_weak = self.fan_weak.clone();
+        self.pool.execute(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                core.fetch(&id, cache_size, offset, count)
+            }));
+            // After a successful fetch, check whether this was the last group of
+            // the blob. If the group_map's sticky ALL_READY flag is now set, remove
+            // the fanotify mark so the kernel stops generating events for this
+            // file entirely — subsequent reads hit the page cache without any
+            // daemon involvement.
+            if matches!(&result, Ok(Ok(()))) {
+                if let Some(fd_arc) = fan_weak.upgrade() {
+                    core.try_unmark(fd_arc.as_raw_fd(), &id);
+                }
+            }
+            let result = match result {
+                Ok(fetch_result) => CompletionResult::Fetch(fetch_result),
+                Err(_) => CompletionResult::Panicked,
+            };
+            sink.complete(job_id, result);
+        });
+
+        let previous = self.jobs.pending_jobs.insert(
+            job_id,
+            PendingJob {
+                key,
+                waiters: vec![permission],
+            },
+        );
+        if previous.is_some() {
+            return Err(Error::Runtime(format!(
+                "duplicate fanotify job id {job_id}"
+            )));
+        }
+        self.jobs.in_flight.insert(key, job_id);
+        debug!(
+            "fanotify: job {} dispatched: blob {} range [{}, +{})",
+            job_id, device.id, offset, count
+        );
+        Ok(())
     }
 }
 
-// ---- shutdown ----
+impl JobTable {
+    // ---- completion ----
 
-fn deny_undecided(
-    pending_jobs: &mut HashMap<u64, PendingJob>,
-    pending_table: &mut PendingTable,
-    in_flight: &mut HashMap<FetchKey, u64>,
-) -> Result<()> {
-    for job_id in pending_table.mark_all_decided() {
-        if let Some(mut event) = pending_jobs.remove(&job_id) {
-            in_flight.remove(&event.key);
-            // Deny every reader coalesced onto this job. The kernel's fail-open
-            // on group close covers any residue past a fatal respond error.
-            for permission in &mut event.waiters {
-                respond(permission, Response::Deny)?;
+    fn handle_completion(&mut self, completion: Completion) -> Result<()> {
+        match self.pending_table.on_completion(completion.job_id) {
+            CompletionAction::Decide => {
+                let mut job = self
+                    .pending_jobs
+                    .remove(&completion.job_id)
+                    .ok_or_else(|| {
+                        Error::Runtime(format!(
+                            "completion has no permission event: {}",
+                            completion.job_id
+                        ))
+                    })?;
+                self.in_flight.remove(&job.key);
+                let response = match completion.result {
+                    CompletionResult::Fetch(Ok(())) => {
+                        debug!(
+                            "fanotify: job {} fetch succeeded; allowing",
+                            completion.job_id
+                        );
+                        Response::Allow
+                    }
+                    CompletionResult::Fetch(Err(FetchError::Backend(err))) => {
+                        warn!("fanotify fetch backend failure: {}", err.report());
+                        Response::Deny
+                    }
+                    CompletionResult::Panicked => {
+                        warn!("fanotify fetch worker panicked");
+                        Response::Deny
+                    }
+                };
+                // Every reader coalesced onto this range gets the same answer.
+                for permission in &mut job.waiters {
+                    respond(permission, response)?;
+                }
+                Ok(())
             }
+            CompletionAction::Late => {
+                debug!(
+                    "fanotify: late completion for job {}; response already denied",
+                    completion.job_id
+                );
+                Ok(())
+            }
+            CompletionAction::Unknown => Err(Error::Runtime(format!(
+                "unknown or duplicate fanotify completion for job {}",
+                completion.job_id
+            ))),
         }
     }
-    Ok(())
+
+    // ---- shutdown ----
+
+    fn deny_undecided(&mut self) -> Result<()> {
+        for job_id in self.pending_table.mark_all_decided() {
+            if let Some(mut job) = self.pending_jobs.remove(&job_id) {
+                self.in_flight.remove(&job.key);
+                // Deny every reader coalesced onto this job. The kernel's fail-open
+                // on group close covers any residue past a fatal respond error.
+                for permission in &mut job.waiters {
+                    respond(permission, Response::Deny)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Deny-drain every event currently queued on the fanotify fd. For the caller
@@ -1014,7 +951,7 @@ mod tests {
 
     use super::*;
 
-    /// Records every (fd, decision) written, and reports each write as the
+    /// Records every (fd, response) written, and reports each write as the
     /// full-size success `PendingPermission` expects.
     #[derive(Default)]
     struct RecordWriter {
@@ -1022,8 +959,8 @@ mod tests {
     }
 
     impl ResponseWriter for RecordWriter {
-        fn write_response(&self, event_fd: RawFd, decision: Response) -> io::Result<usize> {
-            self.calls.lock().unwrap().push((event_fd, decision));
+        fn write_response(&self, event_fd: RawFd, response: Response) -> io::Result<usize> {
+            self.calls.lock().unwrap().push((event_fd, response));
             // size_of::<fanotify_response>() = i32 + u32 = 8; a full write.
             Ok(8)
         }
@@ -1034,44 +971,41 @@ mod tests {
     }
 
     fn key() -> FetchKey {
-        (BlobId::from_str(&format!("{:064x}", 7)).unwrap(), 0, 4096)
+        FetchKey {
+            blob: BlobId::from_str(&format!("{:064x}", 7)).unwrap(),
+            offset: 0,
+            count: 4096,
+        }
     }
 
-    /// Two readers coalesced onto one job both receive the fetch's decision.
+    /// Two readers coalesced onto one job both receive the fetch's response.
     #[test]
     fn completion_answers_all_coalesced_waiters() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_jobs = HashMap::new();
-        let mut table = PendingTable::new();
-        let mut in_flight = HashMap::new();
+        let mut jobs = JobTable::new();
 
-        let job = table.admit();
-        pending_jobs.insert(
+        let job = jobs.pending_table.admit();
+        jobs.pending_jobs.insert(
             job,
             PendingJob {
                 key: key(),
                 waiters: vec![perm(&w), perm(&w)],
             },
         );
-        in_flight.insert(key(), job);
+        jobs.in_flight.insert(key(), job);
 
-        handle_completion(
-            Completion {
-                job_id: job,
-                result: CompletionResult::Fetch(Ok(())),
-            },
-            &mut pending_jobs,
-            &mut table,
-            &mut in_flight,
-        )
+        jobs.handle_completion(Completion {
+            job_id: job,
+            result: CompletionResult::Fetch(Ok(())),
+        })
         .unwrap();
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 2, "both waiters answered");
         assert!(calls.iter().all(|(_, d)| *d == Response::Allow));
-        assert!(pending_jobs.is_empty());
-        assert!(in_flight.is_empty(), "coalescing index cleared");
+        assert!(jobs.pending_jobs.is_empty());
+        assert!(jobs.in_flight.is_empty(), "coalescing index cleared");
     }
 
     /// A backend failure denies every coalesced reader, not just the leader.
@@ -1079,31 +1013,24 @@ mod tests {
     fn completion_backend_failure_denies_all_waiters() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_jobs = HashMap::new();
-        let mut table = PendingTable::new();
-        let mut in_flight = HashMap::new();
+        let mut jobs = JobTable::new();
 
-        let job = table.admit();
-        pending_jobs.insert(
+        let job = jobs.pending_table.admit();
+        jobs.pending_jobs.insert(
             job,
             PendingJob {
                 key: key(),
                 waiters: vec![perm(&w), perm(&w), perm(&w)],
             },
         );
-        in_flight.insert(key(), job);
+        jobs.in_flight.insert(key(), job);
 
-        handle_completion(
-            Completion {
-                job_id: job,
-                result: CompletionResult::Fetch(Err(FetchError::Backend(Error::Backend(
-                    "boom".to_string(),
-                )))),
-            },
-            &mut pending_jobs,
-            &mut table,
-            &mut in_flight,
-        )
+        jobs.handle_completion(Completion {
+            job_id: job,
+            result: CompletionResult::Fetch(Err(FetchError::Backend(Error::Backend(
+                "boom".to_string(),
+            )))),
+        })
         .unwrap();
 
         let calls = rec.calls.lock().unwrap();
@@ -1116,27 +1043,25 @@ mod tests {
     fn shutdown_denies_all_coalesced_waiters() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_jobs = HashMap::new();
-        let mut table = PendingTable::new();
-        let mut in_flight = HashMap::new();
+        let mut jobs = JobTable::new();
 
-        let job = table.admit();
-        pending_jobs.insert(
+        let job = jobs.pending_table.admit();
+        jobs.pending_jobs.insert(
             job,
             PendingJob {
                 key: key(),
                 waiters: vec![perm(&w), perm(&w)],
             },
         );
-        in_flight.insert(key(), job);
+        jobs.in_flight.insert(key(), job);
 
-        deny_undecided(&mut pending_jobs, &mut table, &mut in_flight).unwrap();
+        jobs.deny_undecided().unwrap();
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|(_, d)| *d == Response::Deny));
-        assert!(pending_jobs.is_empty());
-        assert!(in_flight.is_empty());
+        assert!(jobs.pending_jobs.is_empty());
+        assert!(jobs.in_flight.is_empty());
     }
 
     /// A fetch that completes after shutdown already denied the event is a
@@ -1145,31 +1070,24 @@ mod tests {
     fn late_completion_after_shutdown_is_noop() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_jobs = HashMap::new();
-        let mut table = PendingTable::new();
-        let mut in_flight = HashMap::new();
+        let mut jobs = JobTable::new();
 
-        let job = table.admit();
-        pending_jobs.insert(
+        let job = jobs.pending_table.admit();
+        jobs.pending_jobs.insert(
             job,
             PendingJob {
                 key: key(),
                 waiters: vec![perm(&w)],
             },
         );
-        in_flight.insert(key(), job);
+        jobs.in_flight.insert(key(), job);
 
-        deny_undecided(&mut pending_jobs, &mut table, &mut in_flight).unwrap();
+        jobs.deny_undecided().unwrap();
         // Fetch finishes late; the pending table still holds the job as decided.
-        handle_completion(
-            Completion {
-                job_id: job,
-                result: CompletionResult::Fetch(Ok(())),
-            },
-            &mut pending_jobs,
-            &mut table,
-            &mut in_flight,
-        )
+        jobs.handle_completion(Completion {
+            job_id: job,
+            result: CompletionResult::Fetch(Ok(())),
+        })
         .unwrap();
 
         let calls = rec.calls.lock().unwrap();

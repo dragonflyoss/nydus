@@ -175,8 +175,8 @@ impl FuseService {
                                 std::process::exit(130);
                             }
                         },
-                        Err(e) => {
-                            error!("signal wait error: {}", e);
+                        Err(err) => {
+                            error!("signal wait error: {}", err);
                             return;
                         }
                     }

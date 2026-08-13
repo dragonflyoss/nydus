@@ -4,7 +4,7 @@ use nydus::error::{Context, Error, Result};
 use crate::cli_common;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
-use nydus_backend::{build_backend, BlobBackend, LocalBackend};
+use nydus_backend::{build_backend, BlobBackend, Local};
 use nydus_config::DEFAULT_PREFETCH_THREADS;
 use nydus_core::ErofsReader;
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -130,9 +130,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
                 dir.display()
             )));
         }
-        Some(nydus_backend::metered(Arc::new(LocalBackend::new(
-            dir.clone(),
-        ))))
+        Some(nydus_backend::metered(Arc::new(Local::new(dir.clone()))))
     } else if let Some(config) = storage_config.as_ref() {
         Some(build_backend(&config.backend).context("failed to build blob backend")?)
     } else {
@@ -222,7 +220,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
 
     match &join_result {
         Ok(()) => {}
-        Err(e) => error!("background fuse session join returned error: {:?}", e),
+        Err(err) => error!("background fuse session join returned error: {:?}", err),
     }
 
     join_result.context("join failed")?;

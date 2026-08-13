@@ -63,13 +63,13 @@ impl DragonflyResponse {
 }
 
 /// Dragonfly SDK client wrapping a scheduler connection.
-pub(crate) struct DragonflySdk {
+pub(crate) struct DragonflyClient {
     client: Proxy,
 }
 
-impl DragonflySdk {
+impl DragonflyClient {
     /// Connect to the Dragonfly scheduler at `scheduler_endpoint`.
-    pub(crate) fn new(scheduler_endpoint: &str) -> std::io::Result<Arc<DragonflySdk>> {
+    pub(crate) fn new(scheduler_endpoint: &str) -> std::io::Result<Arc<DragonflyClient>> {
         let endpoint = scheduler_endpoint.to_string();
         let client = runtime()
             .block_on(async move {
@@ -79,8 +79,10 @@ impl DragonflySdk {
                     .build()
                     .await
             })
-            .map_err(|e| std::io::Error::other(format!("failed to build dragonfly proxy: {e}")))?;
-        Ok(Arc::new(DragonflySdk { client }))
+            .map_err(|err| {
+                std::io::Error::other(format!("failed to build dragonfly proxy: {err}"))
+            })?;
+        Ok(Arc::new(DragonflyClient { client }))
     }
 
     /// Issue a blob `GET` through Dragonfly with the given priority hint.
@@ -115,7 +117,7 @@ impl DragonflySdk {
                 Some(StatusCode::FORBIDDEN) => Err(DragonflyError::Forbidden(format!("{err}"))),
                 _ => Err(DragonflyError::Other(format!("{err}"))),
             },
-            Err(e) => Err(DragonflyError::Other(format!("{e}"))),
+            Err(err) => Err(DragonflyError::Other(format!("{err}"))),
         }
     }
 }

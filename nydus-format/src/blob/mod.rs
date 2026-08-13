@@ -19,7 +19,7 @@ pub use metadata::{
 use std::io::Write;
 
 use crate::erofs::bytes_to_blocks;
-use crate::error::{Context, FormatError, Result};
+use crate::error::{Context, Error, Result};
 use crate::utils::{align_up, write_zero_padding};
 
 /// Append the trailing regions of the full-blob layout
@@ -34,29 +34,29 @@ pub fn assemble_full_blob(
     blob_metadata: &BlobMetadata,
 ) -> Result<BlobFooter> {
     let bootstrap_size = u64::try_from(bootstrap.len())
-        .map_err(|err| FormatError::Overflow(format!("bootstrap exceeds u64: {err}")))?;
+        .map_err(|err| Error::Overflow(format!("bootstrap exceeds u64: {err}")))?;
     let bootstrap_blocks = bytes_to_blocks(bootstrap_size, "bootstrap")?;
     let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
-        .ok_or_else(|| FormatError::Overflow("bootstrap offset overflow".to_string()))?;
+        .ok_or_else(|| Error::Overflow("bootstrap offset overflow".to_string()))?;
     let blob_metadata_offset = align_up(
         bootstrap_offset
             .checked_add(bootstrap_size)
-            .ok_or_else(|| FormatError::Overflow("blob meta offset overflow".to_string()))?,
+            .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
     )
-    .ok_or_else(|| FormatError::Overflow("blob meta offset overflow".to_string()))?;
+    .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
     let blob_metadata_size = blob_metadata.metadata_size();
     let blob_metadata_blocks = bytes_to_blocks(blob_metadata_size, "blob meta")?;
 
-    let mut blob_metadata_bytes =
-        Vec::with_capacity(usize::try_from(blob_metadata_size).map_err(|err| {
-            FormatError::Overflow(format!("blob meta size exceeds usize: {err}"))
-        })?);
+    let mut blob_metadata_bytes = Vec::with_capacity(
+        usize::try_from(blob_metadata_size)
+            .map_err(|err| Error::Overflow(format!("blob meta size exceeds usize: {err}")))?,
+    );
     blob_metadata
         .write_to(&mut blob_metadata_bytes)
         .context("failed to serialize blob meta")?;
     if blob_metadata_bytes.len() as u64 != blob_metadata_size {
-        return Err(FormatError::InvalidImage(format!(
+        return Err(Error::InvalidImage(format!(
             "serialized blob meta size mismatch: expected {}, got {}",
             blob_metadata_size,
             blob_metadata_bytes.len()

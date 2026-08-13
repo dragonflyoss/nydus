@@ -9,7 +9,7 @@ use crate::build::inode::{
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
-    erofs_xattr_name_split, mode_to_erofs_file_type, ErofsChunkAddr, ErofsDeviceSlot,
+    erofs_xattr_name_split, mode_to_erofs_file_type, ErofsChunkAddr, ErofsDeviceSlot, XattrEntry,
     EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR,
     EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED,
     EROFS_NULL_ADDR,
@@ -34,7 +34,7 @@ struct MergeNode {
     mtime: u64,
     mtime_nsec: u32,
     nlink: u32,
-    xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
+    xattrs: Vec<XattrEntry>,
     data: MergeNodeData,
 }
 
@@ -48,7 +48,7 @@ struct MergeLinkId {
 enum MergeNodeData {
     RegularFile {
         chunk_index_entries: Vec<ErofsChunkAddr>,
-        chunk_bits: u32,
+        chunk_size_bits: u32,
     },
     Directory {
         children: BTreeMap<Vec<u8>, MergeNode>,
@@ -274,90 +274,96 @@ fn load_node(
     layer_id: u32,
     nid: u64,
     epoch: u64,
-    blob_indexes: &HashMap<u16, u16>,
+    local_to_global: &HashMap<u16, u16>,
 ) -> Result<MergeNode> {
     let inode = reader
         .inode(nid)
         .with_context(|| format!("failed to read inode {nid}"))?;
     let mode = inode.mode();
-    let mut xattrs: Vec<(u8, Vec<u8>, Vec<u8>)> = reader
+    let mut xattrs: Vec<XattrEntry> = reader
         .read_xattrs(nid, &inode)?
         .into_iter()
         .filter_map(|(name, value)| {
-            erofs_xattr_name_split(&name).map(|(index, suffix)| (index, suffix.to_vec(), value))
+            erofs_xattr_name_split(&name).map(|(index, suffix)| XattrEntry {
+                name_index: index,
+                suffix: suffix.to_vec(),
+                value,
+            })
         })
         .collect();
-    xattrs.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    xattrs.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
 
-    let data = match mode_to_erofs_file_type(mode) {
-        EROFS_FT_DIR => {
-            let mut children = BTreeMap::new();
-            for entry in reader.read_dir(nid, &inode)? {
-                if entry.name == b"." || entry.name == b".." {
-                    continue;
-                }
-                children.insert(
-                    entry.name.clone(),
-                    load_node(reader, layer_id, entry.nid, epoch, blob_indexes).with_context(
-                        || {
-                            format!(
-                                "failed to load child {}",
-                                String::from_utf8_lossy(&entry.name)
-                            )
-                        },
-                    )?,
-                );
-            }
-            MergeNodeData::Directory { children }
-        }
-        EROFS_FT_REG_FILE => {
-            if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
-                return Err(Error::Unsupported(
-                    "merge currently only supports chunk-based regular files".to_string(),
-                ));
-            }
-            let chunk_bits = reader.chunk_bits(&inode);
-            let chunk_index_entries = reader
-                .read_chunk_index_entries(nid, &inode)?
-                .into_iter()
-                .map(|index| {
-                    // A hole chunk carries no blob reference at all (its
-                    // on-disk device_id bits are part of the null sentinel),
-                    // so it passes through unchanged instead of being device
-                    // remapped.
-                    if index.blkaddr == EROFS_NULL_ADDR || index.device_id == 0 {
-                        Ok(index)
-                    } else {
-                        let mapped =
-                            blob_indexes.get(&index.device_id).copied().ok_or_else(|| {
-                                Error::InvalidImage(format!(
-                                    "missing global blob index mapping for source blob {}",
-                                    index.device_id
-                                ))
-                            })?;
-                        Ok(ErofsChunkAddr {
-                            blkaddr: index.blkaddr,
-                            device_id: mapped,
-                        })
+    let data =
+        match mode_to_erofs_file_type(mode) {
+            EROFS_FT_DIR => {
+                let mut children = BTreeMap::new();
+                for entry in reader.read_dir(nid, &inode)? {
+                    if entry.name == b"." || entry.name == b".." {
+                        continue;
                     }
-                })
-                .collect::<Result<Vec<_>>>()?;
-            MergeNodeData::RegularFile {
-                chunk_index_entries,
-                chunk_bits,
+                    children.insert(
+                        entry.name.clone(),
+                        load_node(reader, layer_id, entry.nid, epoch, local_to_global)
+                            .with_context(|| {
+                                format!(
+                                    "failed to load child {}",
+                                    String::from_utf8_lossy(&entry.name)
+                                )
+                            })?,
+                    );
+                }
+                MergeNodeData::Directory { children }
             }
-        }
-        EROFS_FT_SYMLINK => MergeNodeData::Symlink {
-            target: reader.read_symlink(nid, &inode)?,
-        },
-        EROFS_FT_CHRDEV | EROFS_FT_BLKDEV => MergeNodeData::SpecialDev { rdev: inode.rdev() },
-        EROFS_FT_FIFO | EROFS_FT_SOCK => MergeNodeData::SpecialNoData,
-        other => {
-            return Err(Error::Unsupported(format!(
-                "unsupported inode file type {other} while loading layer"
-            )))
-        }
-    };
+            EROFS_FT_REG_FILE => {
+                if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
+                    return Err(Error::Unsupported(
+                        "merge currently only supports chunk-based regular files".to_string(),
+                    ));
+                }
+                let chunk_size_bits = reader.chunk_bits(&inode);
+                let chunk_index_entries = reader
+                    .read_chunk_index_entries(nid, &inode)?
+                    .into_iter()
+                    .map(|index| {
+                        // A hole chunk carries no blob reference at all (its
+                        // on-disk device_id bits are part of the null sentinel),
+                        // so it passes through unchanged instead of being device
+                        // remapped.
+                        if index.blkaddr == EROFS_NULL_ADDR || index.device_id == 0 {
+                            Ok(index)
+                        } else {
+                            let mapped = local_to_global
+                                .get(&index.device_id)
+                                .copied()
+                                .ok_or_else(|| {
+                                    Error::InvalidImage(format!(
+                                        "missing global blob index mapping for source blob {}",
+                                        index.device_id
+                                    ))
+                                })?;
+                            Ok(ErofsChunkAddr {
+                                blkaddr: index.blkaddr,
+                                device_id: mapped,
+                            })
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                MergeNodeData::RegularFile {
+                    chunk_index_entries,
+                    chunk_size_bits,
+                }
+            }
+            EROFS_FT_SYMLINK => MergeNodeData::Symlink {
+                target: reader.read_symlink(nid, &inode)?,
+            },
+            EROFS_FT_CHRDEV | EROFS_FT_BLKDEV => MergeNodeData::SpecialDev { rdev: inode.rdev() },
+            EROFS_FT_FIFO | EROFS_FT_SOCK => MergeNodeData::SpecialNoData,
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "unsupported inode file type {other} while loading layer"
+                )))
+            }
+        };
 
     Ok(MergeNode {
         link_id: if mode_to_erofs_file_type(mode) == EROFS_FT_REG_FILE && inode.nlink() > 1 {
@@ -513,10 +519,10 @@ impl<'a> TreeNode<()> for &'a MergeNode {
         Ok(match &self.data {
             MergeNodeData::RegularFile {
                 chunk_index_entries,
-                chunk_bits,
+                chunk_size_bits,
             } => InodeData::RegularFile {
                 chunk_index_entries: chunk_index_entries.clone(),
-                chunk_size_bits: *chunk_bits,
+                chunk_size_bits: *chunk_size_bits,
             },
             MergeNodeData::Symlink { target } => InodeData::Symlink {
                 target: target.clone(),
@@ -552,7 +558,7 @@ mod tests {
     fn regular_file() -> MergeNode {
         merge_node(MergeNodeData::RegularFile {
             chunk_index_entries: Vec::new(),
-            chunk_bits: EROFS_BLKSZBITS as u32,
+            chunk_size_bits: EROFS_BLKSZBITS as u32,
         })
     }
 
@@ -794,7 +800,7 @@ mod tests {
             fs::File::create(&blob_path).unwrap(),
         )
         .unwrap();
-        let merge_source = dir.path().join(hex_string(&image.full_blob_id));
+        let merge_source = dir.path().join(hex_string(&image.full_blob_digest));
         fs::rename(&blob_path, &merge_source).unwrap();
 
         let source_blob_id = parse_source_blob_id(&merge_source).unwrap();
@@ -812,9 +818,9 @@ mod tests {
 
         // The layer bootstrap carries the prefetch xattr the build stamps on
         // its root after flattening; drop it so the roots compare equal.
-        merged[0].xattrs.retain(|(index, suffix, _)| {
-            !(*index == EROFS_XATTR_INDEX_TRUSTED
-                && suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
+        merged[0].xattrs.retain(|entry| {
+            !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED
+                && entry.suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
         });
 
         assert_eq!(built.len(), merged.len(), "inode count differs");

@@ -72,10 +72,10 @@ pub(crate) fn build_client(
 
     builder = match proxy_url {
         Some(url) => {
-            let proxy = reqwest::Proxy::all(url).map_err(|e| {
+            let proxy = reqwest::Proxy::all(url).map_err(|err| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("invalid proxy url {url}: {e}"),
+                    format!("invalid proxy url {url}: {err}"),
                 )
             })?;
             builder.proxy(proxy)
@@ -94,16 +94,16 @@ pub(crate) fn build_client(
     }
 
     for ca in &config.ca_cert_files {
-        let pem = std::fs::read(ca).map_err(|e| {
+        let pem = std::fs::read(ca).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("failed to read CA cert {ca}: {e}"),
+                format!("failed to read CA cert {ca}: {err}"),
             )
         })?;
-        let cert = reqwest::Certificate::from_pem(&pem).map_err(|e| {
+        let cert = reqwest::Certificate::from_pem(&pem).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid CA cert {ca}: {e}"),
+                format!("invalid CA cert {ca}: {err}"),
             )
         })?;
         builder = builder.add_root_certificate(cert);
@@ -111,7 +111,7 @@ pub(crate) fn build_client(
 
     builder
         .build()
-        .map_err(|e| io::Error::other(format!("failed to build http client: {e}")))
+        .map_err(|err| io::Error::other(format!("failed to build http client: {err}")))
 }
 
 /// An HTTP client for direct origin requests, wrapping a configured async client.

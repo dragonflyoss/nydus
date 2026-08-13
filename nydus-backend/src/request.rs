@@ -19,12 +19,12 @@ use super::proxy::HttpProxy;
 use super::{ReadContext, ReadKind};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
-use super::dragonfly_sdk::{DragonflyError, DragonflyResponse, DragonflySdk};
+use super::dragonfly_sdk::{DragonflyClient, DragonflyError, DragonflyResponse};
 
 /// Errors produced while issuing a request.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RequestError {
-    /// Transient network/transport failure (connection, timeout, ...).
+    /// Transient network/transport failure (origin, timeout, ...).
     #[error("network error: {0}")]
     Network(io::Error),
     /// Proxy denied the request (`403`).
@@ -40,37 +40,37 @@ pub(crate) enum RequestError {
 pub(crate) type RequestResult<T> = Result<T, RequestError>;
 
 /// A normalized response from any transport.
-pub(crate) enum Response {
+pub(crate) enum TransportResponse {
     Http(reqwest::Response),
     #[cfg(feature = "backend-dragonfly-proxy")]
     Dragonfly(DragonflyResponse),
 }
 
-impl Response {
+impl TransportResponse {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
-            Response::Http(r) => r.status(),
+            TransportResponse::Http(r) => r.status(),
             #[cfg(feature = "backend-dragonfly-proxy")]
-            Response::Dragonfly(r) => r.status,
+            TransportResponse::Dragonfly(r) => r.status,
         }
     }
 
     pub(crate) fn headers(&self) -> &HeaderMap {
         match self {
-            Response::Http(r) => r.headers(),
+            TransportResponse::Http(r) => r.headers(),
             #[cfg(feature = "backend-dragonfly-proxy")]
-            Response::Dragonfly(r) => &r.headers,
+            TransportResponse::Dragonfly(r) => &r.headers,
         }
     }
 
     /// Consume the response and return its body as a UTF-8 string.
     pub(crate) fn text(self) -> io::Result<String> {
         match self {
-            Response::Http(r) => runtime()
+            TransportResponse::Http(r) => runtime()
                 .block_on(async { r.text().await })
-                .map_err(|e| io::Error::other(format!("failed to read response body: {e}"))),
+                .map_err(|err| io::Error::other(format!("failed to read response body: {err}"))),
             #[cfg(feature = "backend-dragonfly-proxy")]
-            Response::Dragonfly(_) => Err(io::Error::other(
+            TransportResponse::Dragonfly(_) => Err(io::Error::other(
                 "text body not supported for dragonfly responses",
             )),
         }
@@ -78,60 +78,63 @@ impl Response {
 
     /// Consume the response and copy up to `buf.len()` body bytes into `buf`,
     /// returning the number of bytes written.
-    pub(crate) fn copy_to(self, buf: &mut [u8]) -> io::Result<usize> {
+    pub(crate) fn read_into(self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            Response::Http(r) => {
+            TransportResponse::Http(r) => {
                 let bytes = runtime()
                     .block_on(async { r.bytes().await })
-                    .map_err(|e| io::Error::other(format!("failed to read response body: {e}")))?;
+                    .map_err(|err| {
+                        io::Error::other(format!("failed to read response body: {err}"))
+                    })?;
                 let n = bytes.len().min(buf.len());
                 buf[..n].copy_from_slice(&bytes[..n]);
                 Ok(n)
             }
             #[cfg(feature = "backend-dragonfly-proxy")]
-            Response::Dragonfly(r) => r.read_into(buf),
+            TransportResponse::Dragonfly(r) => r.read_into(buf),
         }
     }
 }
 
 /// Which transport actually served a request, recorded in completion logs.
 #[derive(Debug, Clone, Copy)]
-enum ProxyType {
+enum Transport {
     /// Direct request to the origin.
-    None,
-    /// RequestDispatcher routed through an HTTP forward proxy.
-    Http,
-    /// RequestDispatcher routed through the Dragonfly SDK proxy.
+    Direct,
+    /// Routed through an HTTP forward proxy.
+    HttpProxy,
+    /// Routed through the Dragonfly SDK proxy.
     #[cfg_attr(not(feature = "backend-dragonfly-proxy"), allow(dead_code))]
     DragonflySdk,
 }
 
-impl ProxyType {
+impl Transport {
+    /// Log label; values are load-bearing for log consumers and stay as-is.
     fn as_str(self) -> &'static str {
         match self {
-            ProxyType::None => "none",
-            ProxyType::Http => "http",
-            ProxyType::DragonflySdk => "dragonfly_sdk",
+            Transport::Direct => "none",
+            Transport::HttpProxy => "http",
+            Transport::DragonflySdk => "dragonfly_sdk",
         }
     }
 }
 
 /// Dispatches requests across direct / HTTP-proxy / Dragonfly transports.
 pub(crate) struct RequestDispatcher {
-    connection: Arc<HttpClient>,
+    origin: Arc<HttpClient>,
     proxy: Option<Arc<HttpProxy>>,
     #[cfg(feature = "backend-dragonfly-proxy")]
-    dragonfly: Option<Arc<DragonflySdk>>,
+    dragonfly: Option<Arc<DragonflyClient>>,
 }
 
 impl RequestDispatcher {
     pub(crate) fn new(
-        connection: Arc<HttpClient>,
+        origin: Arc<HttpClient>,
         proxy: Option<Arc<HttpProxy>>,
-        #[cfg(feature = "backend-dragonfly-proxy")] dragonfly: Option<Arc<DragonflySdk>>,
+        #[cfg(feature = "backend-dragonfly-proxy")] dragonfly: Option<Arc<DragonflyClient>>,
     ) -> Arc<RequestDispatcher> {
         Arc::new(RequestDispatcher {
-            connection,
+            origin,
             proxy,
             #[cfg(feature = "backend-dragonfly-proxy")]
             dragonfly,
@@ -147,7 +150,7 @@ impl RequestDispatcher {
         headers: HeaderMap,
         ctx: ReadContext,
         allow_proxy: bool,
-    ) -> RequestResult<Response> {
+    ) -> RequestResult<TransportResponse> {
         if allow_proxy {
             #[cfg(feature = "backend-dragonfly-proxy")]
             if let Some(dragonfly) = &self.dragonfly {
@@ -158,18 +161,25 @@ impl RequestDispatcher {
 
             if let Some(proxy) = &self.proxy {
                 let mut headers = headers;
-                HttpProxy::decorate(&mut headers, ctx.kind);
-                return self.send(proxy.client(), method, url, headers, ctx, ProxyType::Http);
+                HttpProxy::apply_dragonfly_hints(&mut headers, ctx.kind);
+                return self.send(
+                    proxy.client(),
+                    method,
+                    url,
+                    headers,
+                    ctx,
+                    Transport::HttpProxy,
+                );
             }
         }
 
         self.send(
-            self.connection.client(),
+            self.origin.client(),
             method,
             url,
             headers,
             ctx,
-            ProxyType::None,
+            Transport::Direct,
         )
     }
 
@@ -181,8 +191,8 @@ impl RequestDispatcher {
         url: &str,
         headers: HeaderMap,
         ctx: ReadContext,
-        proxy_type: ProxyType,
-    ) -> RequestResult<Response> {
+        transport: Transport,
+    ) -> RequestResult<TransportResponse> {
         let start = Instant::now();
         let result = runtime().block_on(async {
             client
@@ -197,7 +207,7 @@ impl RequestDispatcher {
             Ok(resp) => {
                 let status = resp.status();
                 log_backend_request_done(
-                    proxy_type,
+                    transport,
                     &method,
                     url,
                     &headers,
@@ -207,12 +217,12 @@ impl RequestDispatcher {
                     None,
                     duration,
                 );
-                Ok(Response::Http(resp))
+                Ok(TransportResponse::Http(resp))
             }
-            Err(e) => {
-                let msg = e.to_string();
+            Err(err) => {
+                let msg = err.to_string();
                 log_backend_request_done(
-                    proxy_type,
+                    transport,
                     &method,
                     url,
                     &headers,
@@ -222,7 +232,7 @@ impl RequestDispatcher {
                     Some(&msg),
                     duration,
                 );
-                Err(RequestError::Network(io::Error::other(e)))
+                Err(RequestError::Network(io::Error::other(err)))
             }
         }
     }
@@ -230,12 +240,12 @@ impl RequestDispatcher {
     #[cfg(feature = "backend-dragonfly-proxy")]
     fn call_dragonfly(
         &self,
-        dragonfly: &Arc<DragonflySdk>,
+        dragonfly: &Arc<DragonflyClient>,
         url: &str,
         mut headers: HeaderMap,
         ctx: ReadContext,
-    ) -> RequestResult<Response> {
-        HttpProxy::decorate(&mut headers, ctx.kind);
+    ) -> RequestResult<TransportResponse> {
+        HttpProxy::apply_dragonfly_hints(&mut headers, ctx.kind);
         let priority = super::proxy::dragonfly_priority(ctx.kind);
 
         let start = Instant::now();
@@ -246,7 +256,7 @@ impl RequestDispatcher {
                 let status = resp.status;
                 let response_headers = resp.headers.clone();
                 log_backend_request_done(
-                    ProxyType::DragonflySdk,
+                    Transport::DragonflySdk,
                     &Method::GET,
                     url,
                     &headers,
@@ -256,12 +266,12 @@ impl RequestDispatcher {
                     None,
                     duration,
                 );
-                Ok(Response::Dragonfly(resp))
+                Ok(TransportResponse::Dragonfly(resp))
             }
             Err(err) => {
                 let msg = err.to_string();
                 log_backend_request_done(
-                    ProxyType::DragonflySdk,
+                    Transport::DragonflySdk,
                     &Method::GET,
                     url,
                     &headers,
@@ -291,7 +301,7 @@ impl RequestDispatcher {
 /// wall-clock duration in human-readable form.
 #[allow(clippy::too_many_arguments)]
 fn log_backend_request_done(
-    proxy_type: ProxyType,
+    transport: Transport,
     method: &Method,
     url: &str,
     headers: &HeaderMap,
@@ -306,8 +316,8 @@ fn log_backend_request_done(
         ReadKind::Prefetch => "prefetch",
     };
     debug!(
-        "backend request done: read_kind={read_kind} proxy_type={} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={}",
-        proxy_type.as_str(),
+        "backend request done: read_kind={read_kind} transport={} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={}",
+        transport.as_str(),
         format_duration(duration),
     );
 }

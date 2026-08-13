@@ -418,14 +418,23 @@ pub fn erofs_xattr_name_split(name: &[u8]) -> Option<(u8, &[u8])> {
 /// Compute the xattr ibody size for a list of xattr entries.
 /// Each entry: 4-byte header + name_suffix_len + value_len, 4-byte aligned.
 /// Plus the 12-byte ibody header.
-pub fn erofs_xattr_ibody_size(xattrs: &[(u8, Vec<u8>, Vec<u8>)]) -> usize {
+/// One extended attribute being built into an inode: the EROFS name-prefix
+/// index, the name suffix after that prefix, and the value bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XattrEntry {
+    pub name_index: u8,
+    pub suffix: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+pub fn erofs_xattr_ibody_size(xattrs: &[XattrEntry]) -> usize {
     if xattrs.is_empty() {
         return 0;
     }
 
     let mut size = EROFS_XATTR_IBODY_HEADER_SIZE;
-    for (_, suffix, value) in xattrs {
-        let entry_size = EROFS_XATTR_ENTRY_HEADER_SIZE + suffix.len() + value.len();
+    for entry in xattrs {
+        let entry_size = EROFS_XATTR_ENTRY_HEADER_SIZE + entry.suffix.len() + entry.value.len();
         size += round_up(entry_size, 4);
     }
 

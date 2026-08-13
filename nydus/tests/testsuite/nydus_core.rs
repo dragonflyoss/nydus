@@ -115,14 +115,14 @@ fn build_test_image_with_layout(
         0
     );
 
-    let full_blob_id = write_full_blob(
+    let full_blob_digest = write_full_blob(
         &staging,
         &blob_dir,
         &embedded_bootstrap_bytes,
         &blob_metadata,
     );
 
-    let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &full_blob_id)];
+    let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &full_blob_digest)];
     let bootstrap_bytes = if flattened {
         render_flattened_bootstrap(&mut inodes, 0, &device_slots, &[0u8; 16]).unwrap()
     } else {
@@ -138,7 +138,7 @@ fn build_test_image_with_layout(
     ))
     .unwrap();
 
-    (bootstrap, config, full_blob_id, corpus)
+    (bootstrap, config, full_blob_digest, corpus)
 }
 
 fn write_full_blob(
@@ -148,12 +148,13 @@ fn write_full_blob(
     blob_metadata: &nydus_format::blob::BlobMetadata,
 ) -> [u8; EROFS_BLOB_ID_SIZE] {
     let data = fs::read(data_path).unwrap();
-    let full_blob_id = fixture::assemble_full_blob(blob_dir, &data, bootstrap_bytes, blob_metadata);
+    let full_blob_digest =
+        fixture::assemble_full_blob(blob_dir, &data, bootstrap_bytes, blob_metadata);
     blob_metadata
-        .save(&blob_dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
+        .save(&blob_dir.join(format!("{}.blob.meta", hex_string(&full_blob_digest))))
         .unwrap();
     fs::remove_file(data_path).unwrap();
-    full_blob_id
+    full_blob_digest
 }
 
 #[test]
@@ -224,9 +225,9 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
     let trace = core.trace_snapshot();
-    assert_eq!(trace.patterns.len(), 1);
-    assert_eq!(trace.patterns[0].blob_index, 1);
-    assert_eq!(trace.patterns[0].group_index, 1);
+    assert_eq!(trace.entries.len(), 1);
+    assert_eq!(trace.entries[0].blob_index, 1);
+    assert_eq!(trace.entries[0].group_index, 1);
     assert_eq!(
         core.trace_json(),
         "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"group_index\":1}]}"

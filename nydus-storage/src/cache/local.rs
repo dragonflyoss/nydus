@@ -88,7 +88,7 @@ pub struct LocalBlobCache {
     blob_index: u32,
     group_map: GroupMap,
     blob_metadata: BlobMetadata,
-    cache_blob_path: PathBuf,
+    cache_data_path: PathBuf,
     prefetch_lock_path: PathBuf,
     /// Lazily opened cache data file. Double-checked: reads take the read
     /// lock (per-I/O hot path), the first opener takes the write lock and
@@ -125,10 +125,10 @@ impl LocalBlobCache {
         let cache_key_hex = hex_string(&cache_key);
         let blob_metadata_path = cache_dir.join(format!("{cache_key_hex}{BLOB_METADATA_SUFFIX}"));
         let blob_metadata =
-            cached_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
+            load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
         nydus_telemetry::metrics::track_blob_groups(cache_key, blob_metadata.group_count() as u64);
 
-        let cache_blob_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
+        let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
         let groupmap_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
         // The group_map is only meaningful together with the cache data file it
@@ -137,7 +137,7 @@ impl LocalBlobCache {
         // before creating the data file below, which would otherwise mask it.
         // (Removing the map while keeping the data is the safe direction and
         // needs no handling.)
-        let stale_groupmap = groupmap_path.exists() && !cache_blob_path.exists();
+        let stale_groupmap = groupmap_path.exists() && !cache_data_path.exists();
 
         // Create the cache data file eagerly, before the group_map, so that
         // "group_map file exists => data file exists" holds and the check above
@@ -147,7 +147,7 @@ impl LocalBlobCache {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&cache_blob_path)?;
+            .open(&cache_data_path)?;
         data_file.set_len(blob_metadata.total_uncompressed_size())?;
         drop(data_file);
 
@@ -172,7 +172,7 @@ impl LocalBlobCache {
             blob_index,
             group_map,
             blob_metadata,
-            cache_blob_path,
+            cache_data_path,
             prefetch_lock_path,
             cache_file: RwLock::new(None),
             backend,
@@ -203,7 +203,7 @@ impl LocalBlobCache {
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(&self.cache_blob_path)?,
+                .open(&self.cache_data_path)?,
         );
         file.set_len(self.blob_metadata.total_uncompressed_size())?;
         nydus_telemetry::metrics::inc_cache_opened_files();
@@ -223,7 +223,7 @@ impl LocalBlobCache {
                 io::ErrorKind::NotFound,
                 format!(
                     "cache data file was removed while in use: {}",
-                    self.cache_blob_path.display()
+                    self.cache_data_path.display()
                 ),
             ));
         }
@@ -342,7 +342,8 @@ impl LocalBlobCache {
             return Ok(());
         }
 
-        let (first_group, last_group) = self.group_span(offset, end)?;
+        let groups = self.group_span(offset, end)?;
+        let (first_group, last_group) = groups.into_inner();
 
         for group_index in first_group..=last_group {
             let group = *self.blob_metadata.group_at(group_index).ok_or_else(|| {
@@ -357,7 +358,7 @@ impl LocalBlobCache {
     /// space to the inclusive span of group indexes covering it: an O(1)
     /// group lookup at both ends. Groups are dense and contiguous, so every
     /// group between the first and last also overlaps the range.
-    fn group_span(&self, offset: u64, end: u64) -> io::Result<(usize, usize)> {
+    fn group_span(&self, offset: u64, end: u64) -> io::Result<std::ops::RangeInclusive<usize>> {
         let first = self
             .blob_metadata
             .group_index_for_byte_offset(offset)
@@ -366,7 +367,7 @@ impl LocalBlobCache {
             .blob_metadata
             .group_index_for_byte_offset(end - 1)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
-        Ok((first, last))
+        Ok(first..=last)
     }
 
     /// Fetch the contiguous compressed window covering `groups[batch]` from
@@ -542,7 +543,7 @@ impl BlobCache for LocalBlobCache {
         // Opening the cache file creates it (sparse) and sizes it to the dense
         // uncompressed address space.
         self.cache_file()?;
-        Ok(self.cache_blob_path.clone())
+        Ok(self.cache_data_path.clone())
     }
 
     fn cache_fd(&self) -> io::Result<RawFd> {
@@ -564,10 +565,10 @@ impl BlobCache for LocalBlobCache {
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob probe range overflow")
         })?;
-        let (first, last) = self.group_span(offset, end)?;
+        let (first, last) = self.group_span(offset, end)?.into_inner();
 
         self.group_map
-            .ready_ranges(first, last)?
+            .ready_group_ranges(first, last)?
             .into_iter()
             .map(|groups| {
                 let first_group = self.blob_metadata.group_at(groups.start).ok_or_else(|| {
@@ -774,7 +775,7 @@ impl BlobCache for LocalBlobCache {
     }
 }
 
-fn cached_blob_metadata(
+fn load_or_fetch_blob_metadata(
     blob_id: [u8; SHA256_DIGEST_SIZE],
     cache_dir: &Path,
     blob_metadata_path: &Path,
@@ -787,7 +788,7 @@ fn cached_blob_metadata(
             .prefix(".blob-meta-")
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
-        backend.blob_metadata_to(&blob_id, tmp.path())?;
+        backend.save_blob_metadata(&blob_id, tmp.path())?;
         if let Err(err) = BlobMetadata::loader()
             .verify_crc32()
             .blob_id(blob_id)
@@ -844,7 +845,7 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_backend::LocalBackend;
+    use nydus_backend::Local;
     use nydus_format::blob::{BlobMetadataChunk, BlobMetadataGroup};
     use nydus_format::utils::sha256_bytes;
     use std::path::Path;
@@ -874,14 +875,14 @@ mod tests {
     /// that cross-process sharing (group_map + prefetch lock + batch skip)
     /// actually eliminates duplicate backend traffic.
     struct CountingBackend {
-        inner: LocalBackend,
+        inner: Local,
         reads: AtomicUsize,
     }
 
     impl CountingBackend {
         fn new(dir: &Path) -> Arc<Self> {
             Arc::new(Self {
-                inner: LocalBackend::new(dir.to_path_buf()),
+                inner: Local::new(dir.to_path_buf()),
                 reads: AtomicUsize::new(0),
             })
         }
@@ -917,8 +918,7 @@ mod tests {
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
 
         let mut buf = vec![0u8; 1024];
@@ -936,8 +936,7 @@ mod tests {
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
         // Warm the cache: data file created, group marked ready, sticky
         // all-ready flag latched.
@@ -976,8 +975,7 @@ mod tests {
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
         // A live handle keeps the group_map mapped throughout, standing in for
         // a process that is already running when the accident happens.
@@ -1016,8 +1014,7 @@ mod tests {
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         // Two handles on the same cache directory model two concurrent
         // processes (flock contention applies across file descriptors even
         // within one process).
@@ -1048,8 +1045,7 @@ mod tests {
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
 
         // Make the lock path unopenable for writing (it is a directory):
@@ -1071,8 +1067,7 @@ mod tests {
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let owner =
             LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
         let reader = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
@@ -1205,8 +1200,7 @@ mod tests {
         raw[16] ^= 0xff;
         fs::write(&blob_metadata_path, raw).unwrap();
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let err = match LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend) {
             Ok(_) => panic!("corrupted blob meta crc32 should be rejected"),
             Err(err) => err,
@@ -1233,8 +1227,7 @@ mod tests {
         );
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
 
         let mut buf = vec![0u8; 1024];
@@ -1254,8 +1247,7 @@ mod tests {
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, false);
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
 
         let mut buf = vec![0u8; 512];
@@ -1290,8 +1282,7 @@ mod tests {
         let meta = blob_metadata(data_blob_id, &payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
-        let backend: Arc<dyn BlobBackend> =
-            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
         assert!(!cached.is_redirect_blob());
 

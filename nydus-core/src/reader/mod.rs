@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
 
-use nydus_backend::{BlobBackend, LocalBackend};
+use nydus_backend::{BlobBackend, Local};
 use nydus_format::blob::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 use nydus_format::erofs::{
     cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOB_ID_SIZE,
@@ -110,12 +110,12 @@ impl ErofsReader {
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
         let backend: Arc<dyn BlobBackend> = match blob_infos.as_slice() {
-            [info] => Arc::new(LocalBackend::with_full_blob_source(
+            [info] => Arc::new(Local::with_full_blob_source(
                 blob_dir.to_path_buf(),
                 info.blob_id,
                 blob_path,
             )?),
-            _ => Arc::new(LocalBackend::new(blob_dir.to_path_buf())),
+            _ => Arc::new(Local::new(blob_dir.to_path_buf())),
         };
         let blobs = BlobCaches::new(
             blob_infos

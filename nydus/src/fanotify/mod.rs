@@ -28,7 +28,8 @@ pub mod proto;
 pub mod response;
 pub mod service;
 
-pub use core::{BlobDevice, FanotifyCore, Response};
+pub use core::{BlobDevice, FanotifyCore};
 pub use mount::mount_erofs;
 pub use proto::{EventIter, ParseError, ParseErrorKind, PreContentEvent, Range};
+pub use response::Response;
 pub use service::{deny_queued_events, FanotifyService, FetchPool, StopHandle};

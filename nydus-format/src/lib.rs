@@ -3,7 +3,7 @@
 //!
 //! This crate sits below both of nydus's error planes: the data plane
 //! (`io::Result`) and the control plane consume the same parsers here and
-//! convert [`FormatError`] at their own boundaries.
+//! convert [`Error`] at their own boundaries.
 //!
 //! # Naming gradient
 //!
@@ -18,4 +18,4 @@ pub mod erofs;
 pub mod error;
 pub mod utils;
 
-pub use error::{FormatError, Result};
+pub use error::{Error, Result};

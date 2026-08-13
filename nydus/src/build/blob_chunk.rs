@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::mem;
 use std::path::Path;
 
-/// Manages writing chunk data to a separate blob device with SHA256 dedup.
+/// Manages writing chunk data to a separate blob device.
 pub struct BlobWriter {
     file: File,
     file_chunk_size: u32,
@@ -25,7 +25,6 @@ pub struct BlobWriter {
     group_buffer: Vec<u8>,
     blob_metadata_groups: Vec<BlobMetadataGroup>,
     blob_metadata_chunks: Vec<BlobMetadataChunk>,
-    pub saved_by_dedup: u64,
 }
 
 const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
@@ -100,7 +99,6 @@ impl BlobWriter {
             group_buffer: Vec::with_capacity(group_size as usize),
             blob_metadata_groups: Vec::new(),
             blob_metadata_chunks: Vec::new(),
-            saved_by_dedup: 0,
         })
     }
 
@@ -375,7 +373,6 @@ mod tests {
         // file_b starts right after it instead of being padded to a full chunk.
         assert_eq!(indexes_b[0].blkaddr, 257);
         assert_eq!(writer.total_blocks(), 513);
-        assert_eq!(writer.saved_by_dedup, 0);
 
         let entries = writer.blob_metadata_chunks();
         let groups = writer.blob_metadata_groups();

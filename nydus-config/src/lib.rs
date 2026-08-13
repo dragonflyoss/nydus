@@ -43,8 +43,9 @@ pub use nydus_backend::config::{BackendConfig, LocalDirConfig};
 pub(crate) struct CacheConfig {
     #[serde(rename = "type")]
     pub kind: String,
-    #[serde(default)]
-    pub config: serde_yaml::Value,
+    /// Serialized as `config` — the YAML key predates the rename.
+    #[serde(default, rename = "config")]
+    pub options: serde_yaml::Value,
 }
 
 /// Prefetch configuration controlling background blob prefetch.
@@ -93,7 +94,7 @@ impl Config {
                 self.cache.kind
             )));
         }
-        let cfg: LocalDirConfig = serde_yaml::from_value(self.cache.config.clone())
+        let cfg: LocalDirConfig = serde_yaml::from_value(self.cache.options.clone())
             .context("invalid local cache config")?;
         Ok(cfg.dir)
     }
@@ -121,7 +122,7 @@ prefetch:
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(config.backend.kind, "local");
         let backend_dir: PathBuf =
-            serde_yaml::from_value(config.backend.config["dir"].clone()).unwrap();
+            serde_yaml::from_value(config.backend.options["dir"].clone()).unwrap();
         assert_eq!(backend_dir, Path::new("/var/lib/nydus/blobs"));
         assert_eq!(
             config.cache_dir().unwrap(),
@@ -186,7 +187,7 @@ cache:
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(config.backend.kind, "registry");
         assert_eq!(
-            config.backend.config["host"].as_str(),
+            config.backend.options["host"].as_str(),
             Some("registry.example.com")
         );
         assert_eq!(config.cache_dir().unwrap(), Path::new("/cache"));

@@ -15,7 +15,7 @@ use nydus_core::Extent;
 use nydus_error::{Context, Error, Result};
 
 use super::core::{read_uffd_msg, UffdCore, UffdMsg};
-use super::proto::{FaultPolicy, ProtoConn, Request, VmaRegion};
+use super::proto::{Connection, FaultPolicy, Request, VmaRegion};
 
 pub struct UffdService {
     core: Arc<UffdCore>,
@@ -36,7 +36,7 @@ enum ConnectionEvent {
 
 struct UffdConn {
     core: Arc<UffdCore>,
-    proto: ProtoConn,
+    proto: Connection,
     message_rx: mpsc::Receiver<Result<Option<Request>>>,
     state: Option<HandshakeState>,
     shutdown: watch::Receiver<bool>,
@@ -124,7 +124,7 @@ impl UffdConn {
         stream: StdUnixStream,
         shutdown: watch::Receiver<bool>,
     ) -> Result<Self> {
-        let proto = ProtoConn::new(stream)?;
+        let proto = Connection::new(stream)?;
         let reader = proto.clone();
         let (message_tx, message_rx) = mpsc::channel(1);
         let mut reader_shutdown = shutdown.clone();
@@ -270,7 +270,7 @@ impl UffdConn {
             );
         }
 
-        // Keep prefault synchronous until ProtoConn guarantees serialized concurrent writes.
+        // Keep prefault synchronous until Connection guarantees serialized concurrent writes.
         if prefault && policy == FaultPolicy::Zerocopy {
             let ranges = self.core.prefault_ranges(&regions)?;
             self.send_ranges(Some(&regions), &ranges).await?;

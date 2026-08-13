@@ -20,7 +20,7 @@ use crate::cache::BlobCaches;
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" redirect blob).
 pub struct BlobPrefetcher {
-    blobs: Arc<BlobCaches>,
+    caches: Arc<BlobCaches>,
     priority: Vec<u16>,
     rest: Vec<u16>,
     threads: usize,
@@ -40,9 +40,9 @@ pub struct PrefetchPlan {
 impl BlobPrefetcher {
     /// `plan` is typically the result of `ErofsReader::prefetch_plan`, and
     /// `blobs` the matching cache set (`ErofsReader::blob_caches`).
-    pub fn new(blobs: Arc<BlobCaches>, plan: PrefetchPlan, threads: usize, full: bool) -> Self {
+    pub fn new(caches: Arc<BlobCaches>, plan: PrefetchPlan, threads: usize, full: bool) -> Self {
         Self {
-            blobs,
+            caches,
             priority: plan.priority,
             rest: plan.rest,
             threads: threads.max(1),
@@ -70,7 +70,7 @@ impl BlobPrefetcher {
         // not spent pulling whole source blobs.
         for blob_index in self.priority {
             if !self.full {
-                match self.blobs.is_redirect_blob(blob_index) {
+                match self.caches.is_redirect_blob(blob_index) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(err) => {
@@ -79,7 +79,7 @@ impl BlobPrefetcher {
                     }
                 }
             }
-            match self.blobs.prefetch_blob(blob_index, self.threads) {
+            match self.caches.prefetch_blob(blob_index, self.threads) {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
                 Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
@@ -94,7 +94,7 @@ impl BlobPrefetcher {
         let queue = Arc::new(Mutex::new(self.rest));
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let blobs = self.blobs.clone();
+            let blobs = self.caches.clone();
             let queue = queue.clone();
             let handle = thread::Builder::new()
                 .name("nydus_prefetch_worker".to_string())

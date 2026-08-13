@@ -100,9 +100,43 @@ device-table index.
 `MmapCache` (nydus-core) caches **fd → shared-mapping handles** in memory
 for the copy path.
 
+## Verb vocabulary
+
+One operation, one verb, project-wide. The table is derived from the verbs
+the codebase already uses consistently; new code picks from it:
+
+| verb | meaning | signature shape | examples |
+|---|---|---|---|
+| `open_*` | acquire a readable handle | takes a path/source | `open_blob`, `open_bootstrap`, `open_file` |
+| `parse*` | bytes → structure, no I/O | takes `&[u8]` | `BlobFooter::parse`, `ErofsInode::parse` |
+| `read_*` | obtain bytes/values through a handle | `read_into` fills a `&mut [u8]` | `read_at`, `read_dir`, `read_xattrs`, `read_into` |
+| `write_*` | stream into an `io::Write` sink | takes `&mut dyn Write` | `write_to`, `write_file_data_to` |
+| `save*` | persist to a filesystem path | takes `&Path` | `BlobMetadata::save`, `save_blob_metadata` |
+| `set_*` | in-memory mutation (setter) | | `set_redirect_url` |
+| `to_*` / `as_*` / `into_*` | conversions only (C-CONV) — never "write to" | | `to_hex`, `as_bytes`, `into_bytes` |
+| `fetch_*` | retrieval over the network | | `fetch_token`, `fetch_blob_size`, `Blobs::fetch` |
+| `load_*` (`load_or_fetch_*`) | read from local disk, optionally populating | | `load_or_fetch_blob_metadata` |
+| `probe_*` | side-effect-free readiness/lookup, `Option`/partial result | | `probe_flat_ranges`, `probe_full_blob_source` |
+| `ensure_*` | idempotent make-it-so | | `ensure_range` |
+| `prepare*` | idempotent first-use setup | | `BlobCache::prepare`, `Blobs::prepare_all` |
+| `for_each_*` | internal iteration with a callback | | `for_each_dir_entry`, `for_each_redirect_group` |
+| `is_*` / `has_*` | predicates | returns `bool` | `is_all_ready`, `has_magic` |
+| `resolve*` | name/id → concrete location | | `resolve_path`, `ExtentResolver` |
+| `plan_*` | pure computation producing a plan | no I/O | `plan_prefetch_batches` |
+| `record_*` / `inc_*` / `track_*` | telemetry emission | | `record_backend_read` |
+
 ## Naming checklist for new code
 
-- Never a bare domain noun: pick domain + role.
+- Never a bare domain noun — pick domain + role — **except when the crate or
+  module path already states the role**: inside `nydus-backend`, the
+  implementations are `Registry` and `Local`, resolved by
+  the crate (`io::Error`, `runtime::Runtime`, opendal's `services::S3`
+  anti-stutter rule); a `RegistryBackend` there would repeat the crate name.
+  The exception's exception: a flagship type named after the crate concept
+  itself is sanctioned (`regex::Regex`, `runtime::Runtime` — hence
+  `NydusCore` and the `BlobBackend` trait keep their names), and a qualifier
+  suffix stays when types from sibling crates routinely meet in one scope
+  (`BackendConfig` / `PrefetchConfig` inside `nydus-config`).
 - On-disk view → `Erofs*`/`Blob*` in nydus-format; minimally parsed →
   `Raw*` in nydus-core::reader; owned user API → bare name.
 - Mutually exclusive constructor modes → separate constructors

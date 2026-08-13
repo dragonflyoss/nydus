@@ -555,11 +555,11 @@ fn tracked_blob_refs(cache_key: &[u8; SHA256_DIGEST_SIZE]) -> Option<usize> {
 /// - labeled series are keyed as `<name>{label="value",...}` so they never
 ///   collide under a single metric name.
 #[derive(Debug, Clone, Default)]
-pub struct MetricsSnapshot {
+pub struct Snapshot {
     families: Vec<prometheus::proto::MetricFamily>,
 }
 
-impl Serialize for MetricsSnapshot {
+impl Serialize for Snapshot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -607,8 +607,8 @@ impl Serialize for MetricsSnapshot {
 
 /// Capture a serializable snapshot of every registered metric, sourced
 /// directly from the prometheus registry inside the private `Metrics` struct.
-pub fn snapshot() -> MetricsSnapshot {
-    MetricsSnapshot {
+pub fn snapshot() -> Snapshot {
+    Snapshot {
         families: METRICS.registry.gather(),
     }
 }

@@ -1,7 +1,7 @@
 use std::mem;
 
 use super::*;
-use crate::error::{Context, FormatError, Result};
+use crate::error::{Context, Error, Result};
 use crate::utils::digest::{hex_string, parse_sha256_hex};
 use crate::utils::le::{read_u16, read_u32, write_u16, write_u32};
 
@@ -137,7 +137,7 @@ impl ErofsDeviceSlot {
         // foreign device slot and must be rejected rather than silently
         // reinterpreted as raw digest bytes.
         let text = std::str::from_utf8(&self.tag).map_err(|_| {
-            FormatError::InvalidImage("device slot tag is not a sha256 hex blob id".to_string())
+            Error::InvalidImage("device slot tag is not a sha256 hex blob id".to_string())
         })?;
         parse_sha256_hex(text).context("device slot tag is not a sha256 hex blob id")
     }

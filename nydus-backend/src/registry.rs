@@ -3,7 +3,7 @@
 //! This backend resolves a blob by its full-blob digest and serves byte ranges
 //! over HTTP. The merged bootstrap's device slots carry the full-blob digest, so
 //! the same digest both addresses the registry blob and names the on-disk blob
-//! meta. [`read_range`](BlobBackend::read_range) fetches data ranges; blob meta
+//! meta. [`read_range_into`](BlobBackend::read_range_into) fetches data ranges; blob meta
 //! is normally hydrated from the cache directory (the bootstrap layer ships a
 //! `<full-blob>.blob.meta` per layer), and otherwise
 //! [`blob_metadata`](BlobBackend::blob_metadata) recovers it from the blob's
@@ -33,10 +33,10 @@ use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
 use super::http::{ConnectionConfig, HttpClient};
 use super::proxy::{HttpProxy, ProxyConfig};
-use super::request::{RequestDispatcher, RequestError, Response};
+use super::request::{RequestDispatcher, RequestError, TransportResponse};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
-use super::dragonfly_sdk::DragonflySdk;
+use super::dragonfly_sdk::DragonflyClient;
 
 const CLIENT_ID: &str = "nydus-registry-client";
 /// Per-request timeout. Kept short because a read holds the group's fetch
@@ -147,7 +147,7 @@ fn auth_header_value(value: &str) -> RegistryResult<reqwest::header::HeaderValue
 }
 
 /// Authentication challenge parsed from a `www-authenticate` header.
-enum Challenge {
+enum AuthChallenge {
     Basic,
     Bearer {
         realm: String,
@@ -169,7 +169,7 @@ struct RegistryState {
     /// Epoch second at which a cached bearer token expires (None for basic).
     token_expires_at: ArcSwapOption<u64>,
     /// Cache of resolved 3xx redirect URLs, keyed by blob hex digest.
-    cached_redirect: RwLock<HashMap<String, String>>,
+    redirect_urls: RwLock<HashMap<String, String>>,
 }
 
 impl RegistryState {
@@ -201,26 +201,26 @@ impl RegistryState {
         self.token_expires_at.store(None);
     }
 
-    fn redirect(&self, hex: &str) -> Option<String> {
-        self.cached_redirect.read().unwrap().get(hex).cloned()
+    fn redirect_url(&self, hex: &str) -> Option<String> {
+        self.redirect_urls.read().unwrap().get(hex).cloned()
     }
 
-    fn set_redirect(&self, hex: &str, url: String) {
-        self.cached_redirect
+    fn set_redirect_url(&self, hex: &str, url: String) {
+        self.redirect_urls
             .write()
             .unwrap()
             .insert(hex.to_string(), url);
     }
 
-    fn remove_redirect(&self, hex: &str) {
-        self.cached_redirect.write().unwrap().remove(hex);
+    fn remove_redirect_url(&self, hex: &str) {
+        self.redirect_urls.write().unwrap().remove(hex);
     }
 
     /// Parse a `www-authenticate` header value into a [`Challenge`].
-    fn parse_challenge(value: &str) -> Option<Challenge> {
+    fn parse_challenge(value: &str) -> Option<AuthChallenge> {
         let (scheme, rest) = value.split_once(' ')?;
         match scheme.trim() {
-            "Basic" => Some(Challenge::Basic),
+            "Basic" => Some(AuthChallenge::Basic),
             "Bearer" => {
                 let mut params = HashMap::new();
                 for pair in rest.split(',') {
@@ -228,7 +228,7 @@ impl RegistryState {
                         params.insert(k.trim(), v.trim().trim_matches('"'));
                     }
                 }
-                Some(Challenge::Bearer {
+                Some(AuthChallenge::Bearer {
                     realm: (*params.get("realm")?).to_string(),
                     service: params.get("service").copied().unwrap_or("").to_string(),
                     scope: params.get("scope").copied().unwrap_or("").to_string(),
@@ -264,23 +264,23 @@ fn default_token_expiration() -> u64 {
 /// Storage backend backed by an OCI image registry.
 pub(crate) struct Registry {
     state: Arc<RegistryState>,
-    request: Arc<RequestDispatcher>,
+    dispatcher: Arc<RequestDispatcher>,
     /// Whether reads are served through a proxy (HTTP mirror or Dragonfly),
     /// used to attribute backend read and CRC metrics.
     target: nydus_telemetry::metrics::BackendTarget,
     // Ensures the first authenticated request completes before a burst of
     // concurrent reads, so they can reuse the cached token instead of each
     // performing their own auth handshake.
-    first_done: AtomicBool,
+    first_read_done: AtomicBool,
 }
 
 impl Registry {
     /// Build a registry backend from its YAML configuration value.
     pub(crate) fn from_value(value: &serde_yaml::Value) -> io::Result<Self> {
-        let config: RegistryConfig = serde_yaml::from_value(value.clone()).map_err(|e| {
+        let config: RegistryConfig = serde_yaml::from_value(value.clone()).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid registry backend config: {e}"),
+                format!("invalid registry backend config: {err}"),
             )
         })?;
         Self::new(config)
@@ -305,7 +305,7 @@ impl Registry {
             .as_ref()
             .and_then(|p| p.dragonfly_scheduler_endpoint.as_deref())
         {
-            Some(endpoint) => Some(DragonflySdk::new(endpoint)?),
+            Some(endpoint) => Some(DragonflyClient::new(endpoint)?),
             None => None,
         };
         #[cfg(not(feature = "backend-dragonfly-proxy"))]
@@ -334,7 +334,7 @@ impl Registry {
             nydus_telemetry::metrics::BackendTarget::Origin
         };
 
-        let request = RequestDispatcher::new(
+        let dispatcher = RequestDispatcher::new(
             connection,
             proxy,
             #[cfg(feature = "backend-dragonfly-proxy")]
@@ -353,14 +353,14 @@ impl Registry {
             basic_auth,
             cached_auth: RwLock::new(String::new()),
             token_expires_at: ArcSwapOption::from(None),
-            cached_redirect: RwLock::new(HashMap::new()),
+            redirect_urls: RwLock::new(HashMap::new()),
         });
 
         Ok(Registry {
             state,
-            request,
+            dispatcher,
             target,
-            first_done: AtomicBool::new(false),
+            first_read_done: AtomicBool::new(false),
         })
     }
 
@@ -383,16 +383,16 @@ impl Registry {
             match self.try_read(blob_id, offset, dst, ctx) {
                 Ok(()) => return Ok(()),
                 // Proxy denials are not retryable.
-                Err(e @ RegistryError::ProxyForbidden(_)) => return Err(e),
+                Err(err @ RegistryError::ProxyForbidden(_)) => return Err(err),
                 // Prefetch should never hammer a rate-limited proxy.
-                Err(e @ RegistryError::ProxyTooManyRequests(_))
+                Err(err @ RegistryError::ProxyTooManyRequests(_))
                     if ctx.kind == ReadKind::Prefetch =>
                 {
-                    return Err(e);
+                    return Err(err);
                 }
-                Err(e) => {
+                Err(err) => {
                     if attempt >= max_attempts {
-                        return Err(e);
+                        return Err(err);
                     }
                     // Back off with jitter before retrying.
                     let base = 50u64 * attempt as u64;
@@ -415,16 +415,16 @@ impl Registry {
         let range = format!("bytes={offset}-{end}");
 
         // Fast path: a previously cached redirect URL.
-        if let Some(redirect) = self.state.redirect(&hex) {
+        if let Some(redirect) = self.state.redirect_url(&hex) {
             let mut headers = HeaderMap::new();
             headers.insert(RANGE, range.parse().unwrap());
             let resp = self
-                .request
+                .dispatcher
                 .call(Method::GET, &redirect, headers, ctx, true)?;
             let status = resp.status();
             if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 // The signed link expired; drop it and fall through to re-resolve.
-                self.state.remove_redirect(&hex);
+                self.state.remove_redirect_url(&hex);
             } else if status.is_success() {
                 return fill_exact(resp, dst);
             } else {
@@ -451,12 +451,12 @@ impl Registry {
             let mut redirect_headers = HeaderMap::new();
             redirect_headers.insert(RANGE, range.parse().unwrap());
             let redirected =
-                self.request
+                self.dispatcher
                     .call(Method::GET, &location, redirect_headers, ctx, true)?;
             if !redirected.status().is_success() {
                 return Err(status_error(redirected));
             }
-            self.state.set_redirect(&hex, location);
+            self.state.set_redirect_url(&hex, location);
             fill_exact(redirected, dst)
         } else if status.is_success() {
             fill_exact(resp, dst)
@@ -467,7 +467,7 @@ impl Registry {
 
     /// Resolve the total size of a blob via a `HEAD` request, following a single
     /// redirect to a signed CDN URL if necessary.
-    fn blob_size(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> RegistryResult<u64> {
+    fn fetch_blob_size(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> RegistryResult<u64> {
         let hex = hex_string(blob_id);
         let url = self.state.blob_url(&hex)?;
         let resp = self.authorized_request(
@@ -487,7 +487,7 @@ impl Registry {
                     RegistryError::UnexpectedResponse("missing redirect location".to_string())
                 })?
                 .to_string();
-            let redirected = self.request.call(
+            let redirected = self.dispatcher.call(
                 Method::HEAD,
                 &location,
                 HeaderMap::new(),
@@ -524,7 +524,7 @@ impl Registry {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> RegistryResult<BlobMetadata> {
-        let size = self.blob_size(blob_id)?;
+        let size = self.fetch_blob_size(blob_id)?;
         if size < NYDUS_BLOB_FOOTER_SIZE as u64 {
             return Err(RegistryError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -540,7 +540,7 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
         )?;
         let footer = BlobFooter::parse(&footer_bytes, size)
-            .map_err(|e| RegistryError::Io(io::Error::other(e)))?;
+            .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
 
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             RegistryError::Io(io::Error::new(
@@ -559,7 +559,7 @@ impl Registry {
         BlobMetadata::loader()
             .blob_id(*blob_id)
             .from_bytes(&blob_metadata_bytes)
-            .map_err(|e| RegistryError::Io(io::Error::other(e)))
+            .map_err(|err| RegistryError::Io(io::Error::other(err)))
     }
 
     /// Issue a request, transparently performing the auth handshake on `401`.
@@ -569,14 +569,14 @@ impl Registry {
         url: &str,
         mut headers: HeaderMap,
         ctx: ReadContext,
-    ) -> RegistryResult<Response> {
+    ) -> RegistryResult<TransportResponse> {
         let cached_auth = self.state.current_auth();
         if !cached_auth.is_empty() {
             headers.insert(AUTHORIZATION, auth_header_value(&cached_auth)?);
         }
 
         let resp = self
-            .request
+            .dispatcher
             .call(method.clone(), url, headers.clone(), ctx, true)?;
         if resp.status() != StatusCode::UNAUTHORIZED {
             return Ok(resp);
@@ -584,7 +584,7 @@ impl Registry {
 
         // Drop any stale token so the server returns the expected challenge.
         let challenge_resp = if headers.remove(AUTHORIZATION).is_some() {
-            self.request
+            self.dispatcher
                 .call(method.clone(), url, headers.clone(), ctx, true)?
         } else {
             resp
@@ -602,16 +602,16 @@ impl Registry {
 
         let auth_header = self.obtain_auth(challenge)?;
         headers.insert(AUTHORIZATION, auth_header_value(&auth_header)?);
-        let resp = self.request.call(method, url, headers, ctx, true)?;
+        let resp = self.dispatcher.call(method, url, headers, ctx, true)?;
         if resp.status().is_success() || resp.status().is_redirection() {
             self.state.set_auth(auth_header);
         }
         Ok(resp)
     }
 
-    fn obtain_auth(&self, challenge: Challenge) -> RegistryResult<String> {
+    fn obtain_auth(&self, challenge: AuthChallenge) -> RegistryResult<String> {
         match challenge {
-            Challenge::Basic => {
+            AuthChallenge::Basic => {
                 let basic = self.state.basic_auth.as_ref().ok_or_else(|| {
                     RegistryError::Unauthorized(
                         "registry requires basic-auth credentials".to_string(),
@@ -619,7 +619,7 @@ impl Registry {
                 })?;
                 Ok(format!("Basic {basic}"))
             }
-            Challenge::Bearer {
+            AuthChallenge::Bearer {
                 realm,
                 service,
                 scope,
@@ -631,8 +631,8 @@ impl Registry {
     }
 
     fn fetch_token(&self, realm: &str, service: &str, scope: &str) -> RegistryResult<String> {
-        let mut url =
-            Url::parse(realm).map_err(|e| RegistryError::InvalidUrl(format!("{realm}: {e}")))?;
+        let mut url = Url::parse(realm)
+            .map_err(|err| RegistryError::InvalidUrl(format!("{realm}: {err}")))?;
         {
             let mut query = url.query_pairs_mut();
             if !service.is_empty() {
@@ -650,7 +650,7 @@ impl Registry {
         }
 
         // Auth requests always go directly to the auth server, never via proxy.
-        let resp = self.request.call(
+        let resp = self.dispatcher.call(
             Method::GET,
             url.as_str(),
             headers,
@@ -662,8 +662,8 @@ impl Registry {
         }
 
         let body = resp.text().map_err(RegistryError::Io)?;
-        let mut token: TokenResponse = serde_json::from_str(&body).map_err(|e| {
-            RegistryError::UnexpectedResponse(format!("invalid token response: {e}"))
+        let mut token: TokenResponse = serde_json::from_str(&body).map_err(|err| {
+            RegistryError::UnexpectedResponse(format!("invalid token response: {err}"))
         })?;
         if token.token.is_empty() {
             token.token = token.access_token.clone();
@@ -701,11 +701,11 @@ impl BlobBackend for Registry {
             return Ok(());
         }
         // Serialize the very first read so its auth token can be reused.
-        if self.first_done.load(Ordering::Acquire) {
+        if self.first_read_done.load(Ordering::Acquire) {
             self.retry_read(blob_id, offset, dst, ctx)?;
         } else {
             let result = self.retry_read(blob_id, offset, dst, ctx);
-            self.first_done.store(true, Ordering::Release);
+            self.first_read_done.store(true, Ordering::Release);
             result?;
         }
         Ok(())
@@ -713,8 +713,8 @@ impl BlobBackend for Registry {
 }
 
 /// Read the response body and ensure it exactly fills `dst`.
-fn fill_exact(resp: Response, dst: &mut [u8]) -> RegistryResult<()> {
-    let n = resp.copy_to(dst).map_err(RegistryError::Io)?;
+fn fill_exact(resp: TransportResponse, dst: &mut [u8]) -> RegistryResult<()> {
+    let n = resp.read_into(dst).map_err(RegistryError::Io)?;
     if n != dst.len() {
         return Err(RegistryError::Io(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -725,7 +725,7 @@ fn fill_exact(resp: Response, dst: &mut [u8]) -> RegistryResult<()> {
 }
 
 /// Build an error from a non-success response, consuming its body for context.
-fn status_error(resp: Response) -> RegistryError {
+fn status_error(resp: TransportResponse) -> RegistryError {
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
     RegistryError::UnexpectedStatus(status, body)
@@ -739,7 +739,7 @@ mod tests {
     fn parses_bearer_challenge() {
         let header = r#"Bearer realm="https://auth.example.com/token",service="example.com",scope="repository:library/ubuntu:pull""#;
         match RegistryState::parse_challenge(header).unwrap() {
-            Challenge::Bearer {
+            AuthChallenge::Bearer {
                 realm,
                 service,
                 scope,
@@ -756,7 +756,7 @@ mod tests {
     fn parses_basic_challenge() {
         assert!(matches!(
             RegistryState::parse_challenge(r#"Basic realm="registry""#).unwrap(),
-            Challenge::Basic
+            AuthChallenge::Basic
         ));
     }
 
@@ -770,7 +770,7 @@ mod tests {
             basic_auth: None,
             cached_auth: RwLock::new(String::new()),
             token_expires_at: ArcSwapOption::from(None),
-            cached_redirect: RwLock::new(HashMap::new()),
+            redirect_urls: RwLock::new(HashMap::new()),
         };
         assert_eq!(
             state.blob_url("abc123").unwrap(),
@@ -805,7 +805,7 @@ proxy:
             basic_auth: None,
             cached_auth: RwLock::new("Bearer xyz".to_string()),
             token_expires_at: ArcSwapOption::from(Some(Arc::new(now_secs()))),
-            cached_redirect: RwLock::new(HashMap::new()),
+            redirect_urls: RwLock::new(HashMap::new()),
         };
         // Token expires "now", within the refresh margin, so it is cleared.
         assert_eq!(state.current_auth(), "");
