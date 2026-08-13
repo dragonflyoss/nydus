@@ -59,7 +59,7 @@ impl ErofsChunkIndex {
 
 /// Information about a single chunk index stored in an inode.
 #[derive(Clone)]
-pub struct ChunkAddr {
+pub struct ErofsChunkAddr {
     pub blkaddr: u64,
     pub device_id: u16,
 }

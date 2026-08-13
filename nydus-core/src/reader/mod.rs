@@ -17,7 +17,7 @@ use nydus_format::erofs::{
     EROFS_SUPER_OFFSET,
 };
 use nydus_storage::access_trace::TraceRecorder;
-use nydus_storage::cache::BlobCacheSet;
+use nydus_storage::cache::BlobCaches;
 use nydus_storage::prefetch::PrefetchPlan;
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
@@ -61,7 +61,7 @@ fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
 /// On-disk structs are cast directly from the mapped memory.
 pub struct ErofsReader {
     pub(crate) mmap: Mmap,
-    blobs: Arc<BlobCacheSet>,
+    blobs: Arc<BlobCaches>,
     /// Memoised device table. Pre-populated by the open paths that already
     /// parse it; metadata-only readers fill it on first use.
     blob_infos: OnceLock<Vec<RawBlobInfo>>,
@@ -84,7 +84,7 @@ impl ErofsReader {
 
         Ok(Self {
             mmap,
-            blobs: Arc::new(BlobCacheSet::empty()),
+            blobs: Arc::new(BlobCaches::empty()),
             blob_infos: OnceLock::new(),
             image_offset,
             sb_offset,
@@ -117,7 +117,7 @@ impl ErofsReader {
             )?),
             _ => Arc::new(LocalBackend::new(blob_dir.to_path_buf())),
         };
-        let blobs = BlobCacheSet::new(
+        let blobs = BlobCaches::new(
             blob_infos
                 .iter()
                 .map(|info| (info.blob_index, info.blob_id)),
@@ -152,7 +152,7 @@ impl ErofsReader {
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
 
-        let blobs = BlobCacheSet::new(
+        let blobs = BlobCaches::new(
             blob_infos
                 .iter()
                 .map(|info| (info.blob_index, info.blob_id)),
@@ -265,7 +265,7 @@ impl ErofsReader {
 
     /// The storage-side cache set shared with the read and prefetch paths,
     /// e.g. to construct a [`nydus_storage::prefetch::BlobPrefetcher`].
-    pub fn blob_cache_set(&self) -> Arc<BlobCacheSet> {
+    pub fn blob_caches(&self) -> Arc<BlobCaches> {
         self.blobs.clone()
     }
 

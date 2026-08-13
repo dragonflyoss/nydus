@@ -12,7 +12,7 @@ pub mod superblock;
 
 pub use block::{blocks_to_bytes, bytes_to_blocks};
 pub use chunk::ErofsChunkIndex;
-pub use chunk::{ChunkAddr, ErofsDeviceSlot};
+pub use chunk::{ErofsChunkAddr, ErofsDeviceSlot};
 pub use dir::ErofsDirent;
 pub use inode::{
     erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_icount,

@@ -1,6 +1,6 @@
 //! Per-blob lazy cache set: the storage-side companion of an opened image.
 //!
-//! [`BlobCacheSet`] owns one lazily opened [`LocalBlobCache`] per blob of the
+//! [`BlobCaches`] owns one lazily opened [`LocalBlobCache`] per blob of the
 //! bootstrap device table, plus the blob-level prefetch entry points that only
 //! touch those caches. The filesystem reader keeps the metadata half (device
 //! table parsing, prefetch xattr) and delegates all cache access here.
@@ -58,19 +58,19 @@ impl BlobSlot {
 }
 
 /// The set of per-blob lazy caches backing an opened image.
-pub struct BlobCacheSet {
-    blobs: HashMap<u16, BlobSlot>,
+pub struct BlobCaches {
+    slots: HashMap<u16, BlobSlot>,
     /// Keeps an anonymous cache directory alive when the caller did not
     /// provide one.
     _temporary_cache_dir: Option<TempDir>,
 }
 
-impl BlobCacheSet {
+impl BlobCaches {
     /// An empty set for metadata-only readers: every lookup fails with
     /// `NotFound` and no cache directory is created.
     pub fn empty() -> Self {
         Self {
-            blobs: HashMap::new(),
+            slots: HashMap::new(),
             _temporary_cache_dir: None,
         }
     }
@@ -78,7 +78,7 @@ impl BlobCacheSet {
     /// Build the set from `(blob_index, blob_id)` pairs. When `cache_dir` is
     /// `None` a temporary directory is created and kept alive by the set.
     pub fn new(
-        blobs: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
+        entries: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
         backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
@@ -91,7 +91,7 @@ impl BlobCacheSet {
         let cache_dir = cache_dir
             .or_else(|| temporary_cache_dir.as_ref().map(|dir| dir.path()))
             .ok_or_else(|| io::Error::other("failed to create cache directory"))?;
-        let blobs = blobs
+        let slots = entries
             .into_iter()
             .map(|(blob_index, blob_id)| {
                 (
@@ -108,19 +108,19 @@ impl BlobCacheSet {
             })
             .collect();
         Ok(Self {
-            blobs,
+            slots,
             _temporary_cache_dir: temporary_cache_dir,
         })
     }
 
     /// Whether the set contains the blob identified by `blob_index`.
     pub fn contains(&self, blob_index: u16) -> bool {
-        self.blobs.contains_key(&blob_index)
+        self.slots.contains_key(&blob_index)
     }
 
     /// The blob indexes in the set, in arbitrary order.
     pub fn indexes(&self) -> impl Iterator<Item = u16> + '_ {
-        self.blobs.keys().copied()
+        self.slots.keys().copied()
     }
 
     /// The (lazily opened) blob cache for the blob identified by `blob_index`.
@@ -138,7 +138,7 @@ impl BlobCacheSet {
     ///
     /// [`cache`]: Self::cache
     pub fn try_cache(&self, blob_index: u16) -> Option<io::Result<Arc<dyn BlobCache>>> {
-        self.blobs.get(&blob_index).map(BlobSlot::cache)
+        self.slots.get(&blob_index).map(BlobSlot::cache)
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
@@ -209,12 +209,12 @@ impl BlobCacheSet {
             }
             match self.try_cache(group.source_blob_index()) {
                 Some(Ok(source_cache)) => {
-                    source_cache.group_ready(group.source_group_index() as usize)
+                    source_cache.is_group_ready(group.source_group_index() as usize)
                 }
                 _ => false,
             }
         };
-        cache.stream_redirect_parallel(threads, &skip, &|group, decoded| {
+        cache.for_each_redirect_group(threads, &skip, &|group, decoded| {
             if !group.is_redirect() {
                 nydus_telemetry::metrics::inc_cache_redirect_skip_group();
                 warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");
