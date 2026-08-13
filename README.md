@@ -145,11 +145,20 @@ the page cache dropped before each job — warm nydus cache, cold page cache.
 
 ## Components
 
-| Component        | Path                     | Description                                                                                              |
-| ---------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `nydus`          | `nydus/src/bin/nydus/`         | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `uffd` / `fanotify` / `nbd`              |
-| `nydusify`       | `nydusify/`              | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                 |
-| `nydus-core` | `nydus-core/` | Library crate (`NydusCore`) for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
+| Component         | Path               | Description                                                                                               |
+| ----------------- | ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `nydus`           | `nydus/`           | Mount services (`fuse`, `fanotify`, `nbd`, `ublk`, `uffd`), the build/merge/check/optimize pipelines, and the CLI binary |
+| `nydus-core`      | `nydus-core/`      | Image runtime library (`NydusCore`, `ErofsReader`) for embedding the read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
+| `nydus-config`    | `nydus-config/`    | YAML config loading                                                                                        |
+| `nydus-storage`   | `nydus-storage/`   | Local blob cache, prefetch, and access tracing (data plane, `io::Result` only)                             |
+| `nydus-backend`   | `nydus-backend/`   | Blob sources: OCI registry, local directory, Dragonfly P2P (data plane, `io::Result` only)                 |
+| `nydus-format`    | `nydus-format/`    | On-disk format definitions: EROFS structures and the nydus blob format                                     |
+| `nydus-error`     | `nydus-error/`     | Control-plane error contract (`Error`, `report()`, `Context`)                                              |
+| `nydus-telemetry` | `nydus-telemetry/` | Metrics and logging setup                                                                                  |
+| `nydusify`        | `nydusify/`        | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                   |
+
+See [docs/nydus.md](docs/nydus.md#crate-architecture) for the dependency
+graph and the data-plane/control-plane split the crate boundaries enforce.
 
 ## Quick Start
 
@@ -220,11 +229,14 @@ make nydusify
 ```
 
 Library embedders should depend on the `nydus-core` crate
-(`nydus-core/`, re-exported by the root `nydus` crate), which
-carries the core read path without FUSE, CLI, or server dependencies:
+(`nydus-core/`), which carries the core read path without FUSE, CLI, or
+server dependencies:
 
 ```bash
-cargo build -p nydus-core --features backend-registry
+cargo build -p nydus-core
+
+# With the OCI registry backend enabled.
+cargo build -p nydus-core --features nydus-backend/backend-registry
 
 # Validate crates.io packaging (cargo publish dry run).
 make crate
