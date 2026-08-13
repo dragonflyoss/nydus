@@ -291,7 +291,7 @@ impl NbdWorker {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(err) => {
-                    warn!("nbd: failed to handle request: {err}");
+                    warn!("nbd: failed to handle request: {}", err.report());
                     break;
                 }
             }
@@ -353,7 +353,12 @@ impl NbdWorker {
                 match core.read_at(req.offset, buf) {
                     Ok(()) => wrote_data = true,
                     Err(err) => {
-                        warn!("nbd: read [{:#x}, +{}) failed: {err}", req.offset, req.len);
+                        warn!(
+                            "nbd: read [{:#x}, +{}) failed: {}",
+                            req.offset,
+                            req.len,
+                            err.report()
+                        );
                         code = NBD_EIO;
                     }
                 }

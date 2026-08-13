@@ -210,7 +210,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         Some(address) => match crate::api_server::ApiServer::start(address) {
             Ok(server) => Some(server),
             Err(err) => {
-                warn!("failed to start metrics apiserver: {}", err);
+                warn!("failed to start metrics apiserver: {}", err.report());
                 None
             }
         },

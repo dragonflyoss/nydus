@@ -137,14 +137,18 @@ pub fn run_nbd(args: NbdArgs) -> Result<()> {
                 // shutdown; if the session self-exited the mount is still up
                 // over a dead device, so try a final best-effort umount.
                 if let Err(err) = unmount(&mp) {
-                    debug!("post-join unmount of {}: {err}", mp.display());
+                    debug!("post-join unmount of {}: {}", mp.display(), err.report());
                 }
                 joined
             }
             Err(err) => {
                 // The session is live but nothing got mounted: stop it so the
                 // event loop and the workers drain through the joins below.
-                warn!("failed to mount {device} at {}: {err}", mp.display());
+                warn!(
+                    "failed to mount {device} at {}: {}",
+                    mp.display(),
+                    err.report()
+                );
                 service.stop();
                 let _ = doit_handle.join();
                 // Both `wait_for_capacity` and `mount_nbd` already attach

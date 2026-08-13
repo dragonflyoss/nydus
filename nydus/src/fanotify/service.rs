@@ -575,15 +575,24 @@ fn shutdown_cleanup(
     in_flight: &mut HashMap<FetchKey, u64>,
 ) {
     if let Err(err) = deny_undecided(pending_jobs, pending_table, in_flight) {
-        warn!("fanotify: denying outstanding events during shutdown failed: {err}");
+        warn!(
+            "fanotify: denying outstanding events during shutdown failed: {}",
+            err.report()
+        );
     }
     // In-flight fetches may still be completing; answer them so their readers
     // unblock too.
     if let Err(err) = drain_completions(completion_rx, pending_jobs, pending_table, in_flight) {
-        warn!("fanotify: draining completions during shutdown failed: {err}");
+        warn!(
+            "fanotify: draining completions during shutdown failed: {}",
+            err.report()
+        );
     }
     if let Err(err) = drain_kernel_queue(fan_fd, writer) {
-        warn!("fanotify: draining kernel queue during shutdown failed: {err}");
+        warn!(
+            "fanotify: draining kernel queue during shutdown failed: {}",
+            err.report()
+        );
     }
 }
 
@@ -705,7 +714,7 @@ fn admit_event(
     let (dev, ino) = match fd_identity(permission.event_fd()) {
         Ok(identity) => identity,
         Err(err) => {
-            warn!("fanotify: fstat event fd failed: {err}");
+            warn!("fanotify: fstat event fd failed: {}", err.report());
             respond(&mut permission, Response::Deny)?;
             return Ok(());
         }
@@ -750,7 +759,7 @@ fn admit_event(
         }
         Ok(false) => {}
         Err(err) => {
-            warn!("fanotify: ready-range lookup failed: {err}");
+            warn!("fanotify: ready-range lookup failed: {}", err.report());
             respond(&mut permission, Response::Deny)?;
             return Ok(());
         }
@@ -854,7 +863,7 @@ fn handle_completion(
                     Response::Allow
                 }
                 CompletionResult::Fetch(Err(FetchError::Backend(err))) => {
-                    warn!("fanotify fetch backend failure: {err}");
+                    warn!("fanotify fetch backend failure: {}", err.report());
                     Response::Deny
                 }
                 CompletionResult::Panicked => {

@@ -122,7 +122,7 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     match mount_erofs(&bootstrap, core.devices(), &mountpoint) {
         Ok(()) => info!("mounted file-backed EROFS at {}", mountpoint.display()),
         Err(err) => {
-            warn!("failed to mount file-backed EROFS: {err}");
+            warn!("failed to mount file-backed EROFS: {}", err.report());
             // Stop the loop and join it. The loop never served a request, so its
             // returned fd can be dropped without unmounting (nothing is mounted).
             stop.stop();
@@ -151,7 +151,10 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
         &mountpoint,
         || {
             if let Err(err) = deny_queued_events(&fan_fd) {
-                warn!("deny-draining fanotify events between unmount retries failed: {err}");
+                warn!(
+                    "deny-draining fanotify events between unmount retries failed: {}",
+                    err.report()
+                );
             }
         },
         "dropping the fanotify group fd will fail-open residual events and unfetched ranges on \

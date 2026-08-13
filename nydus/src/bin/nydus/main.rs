@@ -85,7 +85,7 @@ fn main() -> std::process::ExitCode {
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("Error: {err}");
+            eprintln!("Error: {}", err.report());
             std::process::ExitCode::FAILURE
         }
     }
