@@ -39,6 +39,75 @@ encoded ranges in the stored data region.
 - Introduce cross-layer global deduplication beyond the current single-build dedup.
 - Rework the full EROFS on-disk layout to match every upstream variant.
 
+## Crate Architecture
+
+The Rust side is a workspace of eight crates. The split exists to encode
+one distinction in the crate graph itself: the **data plane** (moving and
+caching blob bytes) versus the **control plane** (assembly, configuration,
+services). Data-plane crates return `io::Result` end-to-end so the original
+`errno` survives all the way to the kernel; control-plane crates use the
+structured `nydus_error::Error`. Because `nydus-backend` and `nydus-storage`
+do not depend on `nydus-error`, reaching for the wrong error type on the
+data plane is a compile error, not a review comment.
+
+```
+                        ┌───────────┐
+                        │   nydus   │  services + CLI (binary)
+                        └─────┬─────┘
+                              │
+                        ┌─────▼─────┐
+                        │nydus-core │  image runtime facade
+                        └─┬───┬───┬─┘
+              ┌───────────┘   │   └───────────┐
+        ┌─────▼──────┐ ┌──────▼──────┐        │
+        │nydus-config│ │nydus-storage│        │
+        └──┬──────┬──┘ └──┬───────┬──┘        │
+           │      │       │       │           │
+           │  ┌───▼───────▼───┐   │           │
+           │  │ nydus-backend │   │           │
+           │  └───┬───────┬───┘   │           │
+     ┌─────▼───┐  │   ┌───▼───────▼───┐       │
+     │  nydus- │  │   │nydus-telemetry│       │
+     │  error  │  │   └───────────────┘       │
+     └────┬────┘  │                           │
+          │  ┌────▼─────────────────────────┐ │
+          └─▶│         nydus-format         │◀┘
+             └──────────────────────────────┘
+```
+
+Dependencies point strictly downward; the arrows above are the complete
+inter-crate dependency set, enforced by each `Cargo.toml`.
+
+| Crate | Plane | Role | Errors |
+| ----- | ----- | ---- | ------ |
+| `nydus` | boundary | The five mount services (`fuse/`, `fanotify/`, `nbd/`, `ublk/`, `uffd/`), the build/optimize/check/unpack pipelines, and the CLI binary | each service's `core.rs` converts `Error` ↔ `errno` explicitly |
+| `nydus-core` | both | Image runtime facade: `NydusCore`, `ErofsReader`, path walk (`entry`), flattened device view (`extent`), blob table (`blob`) | `Error` for assembly/queries, `io::Result` on the read path |
+| `nydus-config` | control | Loads the YAML config file and converts it into the plain config structs owned by the crates below | `Error` |
+| `nydus-storage` | data | Local cache and reuse: `LocalBlobCache` (group decode, CRC, on-demand fill), `BlobCaches`, group ready-bitmaps, prefetch, access tracing | `io::Result` only |
+| `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
+| `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
+| `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
+| `nydus-telemetry` | leaf | Metrics (including `ReadKind`) and feature-gated logging setup; a leaf so every layer can record without cycles | — |
+
+`nydus-format` stays neutral by mirroring the error shape: its `FormatError`
+carries the same context-chain design, the data plane wraps it into
+`io::Error`, and the control plane converts it via
+`From<FormatError> for Error` with the message text preserved verbatim.
+
+Naming follows a gradient that tells the reader which layer a type belongs
+to: `Erofs*` / `Blob*` names (in `nydus-format`) are zero-copy on-disk
+views, `Raw*` names are minimally parsed lifetime-free forms, and bare
+names (`BlobInfo`, `DirEntry`) are the owned user-facing API.
+
+Each mount service in the `nydus` crate follows the same file pattern:
+`core.rs` (kernel-independent logic and the `Error` ↔ `errno` boundary),
+`proto.rs` (wire/ABI encoding), `service.rs` (event loop), and `mount.rs`.
+
+`nydusify` (Go, outside the workspace) converts, checks, and optimizes
+whole OCI images against a registry. It shares no code with the Rust side;
+the image format and the registry protocol are the only contracts between
+them.
+
 ## CLI Contract
 
 ### Build
@@ -725,12 +794,11 @@ id from the bootstrap device table. The trace feeds `nydus optimize` /
 `nydusify optimize`.
 
 Each completed backend request is also logged at `debug` level after it returns,
-carrying the request source, proxy type, method, URL, request headers, response
+carrying the request source, transport, method, URL, request headers, response
 status and headers (or an error), and the wall-clock duration.
 
-For library embedders (no apiserver socket), `nydus::metrics::snapshot()`
-returns a serializable `MetricsSnapshot` (re-exported as
-`nydus::MetricsSnapshot`) capturing every registered metric from the same
+For library embedders (no apiserver socket), `nydus_telemetry::metrics::snapshot()`
+returns a serializable `Snapshot` capturing every registered metric from the same
 registry. It serializes to a flat JSON map: counters as unsigned integers,
 gauges as signed integers, histograms expanded to `<name>_sum` / `<name>_count`,
 and labeled series keyed as `<name>{label="value",...}`. Embedders (e.g. a
@@ -1608,7 +1676,7 @@ all 50, vs ≈25s for one).
 
 ## Core (virtio-pmem integration)
 
-`nydus_core::NydusCore` (re-exported as `nydus::NydusCore`) is
+`nydus_core::NydusCore` is
 the library entry point for hypervisors
 that mount the nydus image inside the guest as a plain EROFS
 filesystem over virtio-pmem, instead of using `nydus fuse` on the host. The
@@ -1624,9 +1692,9 @@ through `ublk_drv` over `io_uring`; see
 	which mirrors the dense decoded block address space — a guest read of block
 	`N` lands at byte `N * 4096` of the backing file.
 - `NydusCore::new(bootstrap, Config)` parses the bootstrap and an already
-	loaded `nydus::Config` (same structure as `nydus fuse --config`) lazily;
+	loaded `nydus_config::Config` (same structure as `nydus fuse --config`) lazily;
 	per-blob work (blob meta download/validation, sparse cache file creation)
-	happens on first touch through `blob.prepare_entries()` or `blob.fetch`.
+	happens on first touch through `blobs.prepare_all()` or `blobs.fetch`.
 - When `config.prefetch.enable` is set, `new` spawns a background prefetch
 	worker before returning — the same two-phase workflow as `nydus fuse`
 	(redirect blob first, then the rest only under `prefetch.full`). The worker
@@ -1634,25 +1702,25 @@ through `ublk_drv` over `io_uring`; see
 	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.
 - Access traces are recorded on actual backend fetches (not cache hits), and
-	`nydus::metrics::snapshot()` exposes runtime counters for embedding into
-	hypervisor stats endpoints; a saved trace JSON can be replayed offline via
-	`nydus optimize --trace-file`. See [Metrics](#metrics).
+	`nydus_telemetry::metrics::snapshot()` exposes runtime counters for embedding
+	into hypervisor stats endpoints; a saved trace JSON can be replayed offline
+	via `nydus optimize --trace-file`. See [Metrics](#metrics).
 - `BlobId` is the public blob digest type. It converts to/from 64-character
 	SHA256 hex strings and `[u8; 32]` bytes.
-- `blob.prepare_entries()` lists the device table in order as `BlobInfo` entries:
+- `blobs.prepare_all()` lists the device table in order as `BlobInfo` entries:
 	blob index, `BlobId`, block count, cache path, cache size, and whether the
 	blob is an ondemand redirect blob. Calling it prepares the sparse cache data
 	files, so `BlobInfo.cache_path` is immediately suitable as a virtio-pmem
 	backing file and `BlobInfo.cache_size` is `blocks * 4096`.
-- `blob.fetch(id, offset, len)` guarantees the 4 KiB-aligned range is decoded,
+- `blobs.fetch(id, offset, len)` guarantees the 4 KiB-aligned range is decoded,
 	CRC-validated, and resident in the cache data file. It maps the range to
 	blob meta groups with the O(1) division lookup and reuses the regular cache
 	chain (`ensure_group`), so it is idempotent, concurrency-safe, and shares
 	trace/metrics recording with the FUSE path. Redirect blobs are rejected.
 - `fs.open(path)` resolves a path once and returns a `Node`; use
-	`entry.metadata()`, `entry.read_dir()`, `entry.read()`,
-	`entry.read_at(...)`, `entry.read_link()`, and `entry.xattrs()` for
-	metadata/data access without FUSE. Holding the entry avoids repeated path
+	`node.metadata()`, `node.read_dir()`, `node.read()`,
+	`node.read_at(...)`, `node.read_link()`, and `node.xattrs()` for
+	metadata/data access without FUSE. Holding the node avoids repeated path
 	resolution and is the only filesystem API surface.
 
 Complete example:
@@ -1660,9 +1728,10 @@ Complete example:
 ```rust
 use std::path::Path;
 
-use nydus_core::{Config, NydusCore};
+use nydus_config::Config;
+use nydus_core::NydusCore;
 
-fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> nydus_core::Result<()> {
+fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> nydus_error::Result<()> {
 	// Load the same YAML schema accepted by `nydus fuse --config`.
 	let config = Config::from_file(config_path)?;
 	let core = NydusCore::new(bootstrap, config)?;
@@ -1670,7 +1739,7 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> nydus_core::Result<
 	// Materialize every blob cache file before creating guest pmem devices.
 	// The vector is in bootstrap device-table order; `index` is the 1-based
 	// EROFS external-device index used by chunk indexes.
-	let blobs = core.blobs.prepare_entries()?;
+	let blobs = core.blobs.prepare_all()?;
 	for blob in &blobs {
 		println!(
 			"blob index={} id={} blocks={} cache={} bytes={} redirect={}",
@@ -1715,10 +1784,12 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> nydus_core::Result<
 ```
 
 The core needs neither FUSE nor the CLI stack: it lives in the
-standalone `nydus-core` crate (`nydus-core/`), which the root
-`nydus` crate re-exports. Depending on `nydus-core` with the
-`backend-registry` feature produces a minimal library surface (no
-fuser/hyper/tokio-server/clap) suitable for embedding.
+standalone `nydus-core` crate (`nydus-core/`). Depending on `nydus-core`
+produces a minimal library surface (no fuser/hyper/tokio-server/clap)
+suitable for embedding; enable the registry backend with
+`--features nydus-backend/backend-registry` when blobs are served from an
+OCI registry. See [Crate Architecture](#crate-architecture) for how the
+library crates layer.
 
 ## Merge Design
 
