@@ -4,11 +4,11 @@ use nydus::error::{Context, Error, Result};
 use crate::cli_common;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
-use nydus_core::config::DEFAULT_PREFETCH_THREADS;
-use nydus_core::fs::ErofsReader;
-use nydus_core::storage::backend::{build_backend, BlobBackend, LocalBackend};
-use nydus_core::storage::prefetch::BlobPrefetcher;
-use nydus_core::telemetry::logging::init_tracing;
+use nydus_backend::{build_backend, BlobBackend, LocalBackend};
+use nydus_config::DEFAULT_PREFETCH_THREADS;
+use nydus_core::ErofsReader;
+use nydus_storage::prefetch::BlobPrefetcher;
+use nydus_telemetry::logging::init_tracing;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -130,24 +130,15 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
                 dir.display()
             )));
         }
-        Some(nydus_core::storage::backend::metered(Arc::new(
-            LocalBackend::new(dir.clone()),
-        )))
+        Some(nydus_backend::metered(Arc::new(LocalBackend::new(
+            dir.clone(),
+        ))))
     } else if let Some(config) = storage_config.as_ref() {
         Some(build_backend(&config.backend).context("failed to build blob backend")?)
     } else {
         None
     };
 
-    match (&args.blob, &args.bootstrap, &backend) {
-        (Some(_), None, _) => {}
-        (None, Some(_), Some(_)) => {}
-        _ => {
-            return Err(Error::InvalidParameter(
-                "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config".to_string(),
-            ))
-        }
-    }
     if let Some(cache_dir) = &cache_dir {
         if cache_dir.exists() && !cache_dir.is_dir() {
             return Err(Error::InvalidParameter(format!(
@@ -157,12 +148,17 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         }
     }
 
-    let reader = ErofsReader::open(
-        args.blob.as_deref(),
-        args.bootstrap.as_deref(),
-        backend,
-        cache_dir.as_deref(),
-    )
+    let reader = match (&args.blob, &args.bootstrap, backend) {
+        (Some(blob), None, _) => ErofsReader::open_blob(blob),
+        (None, Some(bootstrap), Some(backend)) => {
+            ErofsReader::open_bootstrap(bootstrap, backend, cache_dir.as_deref(), None)
+        }
+        _ => {
+            return Err(Error::InvalidParameter(
+                "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config".to_string(),
+            ))
+        }
+    }
     .context("failed to open EROFS image")?;
 
     let reader = Arc::new(reader);

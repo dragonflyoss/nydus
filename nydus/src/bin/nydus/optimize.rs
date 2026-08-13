@@ -2,15 +2,13 @@ use clap::Args;
 use nydus::error::{Context, Error, Result};
 
 use crate::cli_common;
-use nydus_core::blob::BLOB_META_SUFFIX;
-use nydus_core::config::Config;
-use nydus_core::metadata::EROFS_BLOCK_SIZE;
-use nydus_core::optimize::{
-    build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file,
-};
-use nydus_core::storage::backend::build_backend;
-use nydus_core::telemetry::logging::init_command_tracing;
-use nydus_core::utils::hex_string;
+use nydus::optimize::{build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file};
+use nydus_backend::build_backend;
+use nydus_config::Config;
+use nydus_format::blob::BLOB_METADATA_SUFFIX;
+use nydus_format::erofs::EROFS_BLOCK_SIZE;
+use nydus_format::utils::hex_string;
+use nydus_telemetry::logging::init_command_tracing;
 use std::fs;
 use std::path::PathBuf;
 use tracing::info;
@@ -53,7 +51,7 @@ pub struct OptimizeArgs {
 }
 
 /// Resolve the CLI arguments, run the optimize pipeline from
-/// [`nydus_core::optimize`], and write out its artifacts.
+/// [`nydus::optimize`], and write out its artifacts.
 pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let _guards = init_command_tracing(args.log.log_level, args.log.console);
 
@@ -100,13 +98,13 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let blob_path = args.blob_dir.join(&digest_hex);
     fs::write(&blob_path, &ondemand.artifact)
         .with_context(|| format!("failed to write ondemand blob: {}", blob_path.display()))?;
-    let blob_meta_path = args
+    let blob_metadata_path = args
         .blob_dir
-        .join(format!("{digest_hex}{BLOB_META_SUFFIX}"));
+        .join(format!("{digest_hex}{BLOB_METADATA_SUFFIX}"));
     ondemand
-        .blob_meta
-        .save(&blob_meta_path)
-        .with_context(|| format!("failed to save blob meta: {}", blob_meta_path.display()))?;
+        .blob_metadata
+        .save(&blob_metadata_path)
+        .with_context(|| format!("failed to save blob meta: {}", blob_metadata_path.display()))?;
 
     fs::write(&args.bootstrap, &ondemand.bootstrap).with_context(|| {
         format!(
@@ -123,7 +121,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     println!("[ondemand blob]");
     println!("    ondemand_blob_digest: {digest_hex}");
     println!("    ondemand_blob_path: {}", blob_path.display());
-    println!("    blob_meta_path: {}", blob_meta_path.display());
+    println!("    blob_metadata_path: {}", blob_metadata_path.display());
     println!("    bootstrap_path: {}", args.bootstrap.display());
     println!("    group_count: {}", patterns.len());
     println!(

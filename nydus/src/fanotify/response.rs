@@ -4,7 +4,7 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
-use nydus_core::error::{Context, Error, Result};
+use nydus_error::{Context, Error, Result};
 use tracing::{error, warn};
 
 use super::core::Response;

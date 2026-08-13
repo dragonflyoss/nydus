@@ -2835,7 +2835,9 @@ dependencies = [
 name = "nydus"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "clap",
+ "crc32c",
  "fuser",
  "http-body-util",
  "hyper",
@@ -2843,7 +2845,13 @@ dependencies = [
  "libc",
  "libublk",
  "memmap2",
+ "nydus-backend",
+ "nydus-config",
  "nydus-core",
+ "nydus-error",
+ "nydus-format",
+ "nydus-storage",
+ "nydus-telemetry",
  "sendfd",
  "serde",
  "serde_json",
@@ -2856,38 +2864,115 @@ dependencies = [
  "tracing",
  "uuid",
  "xattr",
+ "zstd",
+]
+
+[[package]]
+name = "nydus-backend"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "blake3",
+ "crc32c",
+ "dragonfly-client-request",
+ "futures",
+ "libc",
+ "nydus-format",
+ "nydus-telemetry",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "nydus-config"
+version = "0.1.0"
+dependencies = [
+ "nydus-backend",
+ "nydus-error",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
 name = "nydus-core"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
+ "libc",
+ "memmap2",
+ "nydus-backend",
+ "nydus-config",
+ "nydus-error",
+ "nydus-format",
+ "nydus-storage",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "nydus-error"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nydus-format",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nydus-format"
+version = "0.1.0"
+dependencies = [
  "bitflags 2.11.0",
  "blake3",
  "crc32c",
- "dragonfly-client-request",
- "futures",
  "libc",
  "memmap2",
- "prometheus",
- "rand 0.8.6",
- "reqwest 0.12.28",
- "rolling-file",
- "serde",
- "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
+]
+
+[[package]]
+name = "nydus-storage"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "crc32c",
+ "libc",
+ "memmap2",
+ "nydus-backend",
+ "nydus-format",
+ "nydus-telemetry",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "xattr",
+ "zstd",
+]
+
+[[package]]
+name = "nydus-telemetry"
+version = "0.1.0"
+dependencies = [
+ "prometheus",
+ "rolling-file",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tracing",
  "tracing-appender",
  "tracing-panic",
  "tracing-subscriber",
- "url",
- "xattr",
- "zstd",
 ]
 
 [[package]]

@@ -16,14 +16,14 @@ use nydus::error::Error;
 use nydus::error::{Context, Result};
 #[cfg(any(feature = "fanotify", feature = "nbd"))]
 use nydus::mount::unmount;
-use nydus_core::config::Config;
+use nydus_config::Config;
 #[cfg(any(
     feature = "fanotify",
     feature = "nbd",
     feature = "ublk",
     feature = "uffd"
 ))]
-use nydus_core::telemetry::logging::{init_tracing, WorkerGuard};
+use nydus_telemetry::logging::{init_tracing, WorkerGuard};
 #[cfg(any(
     feature = "fanotify",
     feature = "nbd",

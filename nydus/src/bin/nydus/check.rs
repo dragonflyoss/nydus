@@ -1,12 +1,12 @@
 use clap::Args;
 use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
 use nydus::error::{Error, Result};
-use nydus_core::metadata::{
+use nydus_format::erofs::{
     ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
     EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
     EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
 };
-use nydus_core::utils::hex_string;
+use nydus_format::utils::hex_string;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -266,31 +266,31 @@ fn print_blob_info(index: usize, blob_index: u16, blob: &BlobSummary) {
     );
     println!(
         "    chunk_size: {}",
-        blob_meta_field(blob, |meta| meta.chunk_size)
+        blob_metadata_field(blob, |meta| meta.chunk_size)
     );
     println!(
         "    chunk_count: {}",
-        blob_meta_field(blob, |meta| meta.chunk_count)
+        blob_metadata_field(blob, |meta| meta.chunk_count)
     );
     println!(
         "    group_count: {}",
-        blob_meta_field(blob, |meta| meta.group_count)
+        blob_metadata_field(blob, |meta| meta.group_count)
     );
     println!(
         "    chunk_digester: {}",
-        blob_meta_field(blob, |meta| meta.digester)
+        blob_metadata_field(blob, |meta| meta.digester)
     );
     println!(
         "    chunk_compressor: {}",
-        blob_meta_field(blob, |meta| meta.compressor)
+        blob_metadata_field(blob, |meta| meta.compressor)
     );
     println!(
         "    blob_compressed_size: {}",
-        blob_meta_field_or(blob, |meta| meta.total_compressed_size, blob.data_size)
+        blob_metadata_field_or(blob, |meta| meta.total_compressed_size, blob.data_size)
     );
     println!(
         "    blob_uncompressed_size: {}",
-        blob_meta_field_or(
+        blob_metadata_field_or(
             blob,
             |meta| meta.total_uncompressed_size,
             Some(blob.declared_data_size),
@@ -325,22 +325,22 @@ fn digest_or_unknown(digest: &[u8; EROFS_BLOB_ID_SIZE]) -> String {
     }
 }
 
-fn blob_meta_field<T: ToString>(
+fn blob_metadata_field<T: ToString>(
     blob: &BlobSummary,
-    field: impl FnOnce(&nydus::check::BlobMetaSummary) -> T,
+    field: impl FnOnce(&nydus::check::BlobMetadataSummary) -> T,
 ) -> String {
-    blob.blob_meta
+    blob.blob_metadata
         .as_ref()
         .map(|meta| field(meta).to_string())
         .unwrap_or_else(|| "<unresolved>".to_string())
 }
 
-fn blob_meta_field_or<T: ToString>(
+fn blob_metadata_field_or<T: ToString>(
     blob: &BlobSummary,
-    field: impl FnOnce(&nydus::check::BlobMetaSummary) -> T,
+    field: impl FnOnce(&nydus::check::BlobMetadataSummary) -> T,
     fallback: Option<T>,
 ) -> String {
-    blob.blob_meta
+    blob.blob_metadata
         .as_ref()
         .map(|meta| field(meta).to_string())
         .or_else(|| fallback.map(|value| value.to_string()))

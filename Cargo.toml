@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["nydus", "nydus-core"]
+members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry"]
 
 [workspace.dependencies]
 libc = "0.2"
@@ -26,7 +26,7 @@ incremental = true
 [profile.release]
 opt-level = 3
 strip = "symbols"
-lto = "thin"
+lto = "fat"
 panic = "abort"
 codegen-units = 1
 

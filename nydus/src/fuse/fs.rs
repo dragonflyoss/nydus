@@ -13,13 +13,14 @@ use fuser::{
     ReplyXattr, Request,
 };
 
-use nydus_core::metadata::{
+use nydus_format::erofs::{
     is_nydus_xattr, ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO,
     EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
 };
-use nydus_core::telemetry::metrics;
+use nydus_telemetry::metrics;
 
-use nydus_core::fs::{ErofsReader, RawDirEntry};
+use nydus_core::reader::RawDirEntry;
+use nydus_core::ErofsReader;
 
 const FUSE_ROOT_ID: u64 = 1;
 const EROFS_FUSE_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);
@@ -51,14 +52,14 @@ impl ErofsFs {
 
     fn ino_to_nid(&self, ino: u64) -> u64 {
         if ino == FUSE_ROOT_ID {
-            self.reader.sb().root_nid()
+            self.reader.superblock().root_nid()
         } else {
             ino - FUSE_ROOT_ID
         }
     }
 
     fn nid_to_ino(&self, nid: u64) -> u64 {
-        if nid == self.reader.sb().root_nid() {
+        if nid == self.reader.superblock().root_nid() {
             FUSE_ROOT_ID
         } else {
             nid + FUSE_ROOT_ID
@@ -67,7 +68,7 @@ impl ErofsFs {
 
     fn make_attr(&self, nid: u64, inode: &ErofsInode<'_>) -> FileAttr {
         let ino = self.nid_to_ino(nid);
-        let sb = self.reader.sb();
+        let sb = self.reader.superblock();
         let block_size = 1u64 << sb.blkszbits;
         let mtime_secs = inode.mtime(sb.epoch());
         let mtime_nsec = inode.effective_mtime_nsec(sb.fixed_nsec());
@@ -495,7 +496,7 @@ impl Filesystem for ErofsFs {
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         let _m = FsOpMetric::new(metrics::FsOp::Statfs);
-        let sb = self.reader.sb();
+        let sb = self.reader.superblock();
         let block_size = 1u64 << sb.blkszbits;
         reply.statfs(
             sb.blocks(),

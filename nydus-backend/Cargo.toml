@@ -1,0 +1,58 @@
+[package]
+name = "nydus-backend"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "Data-plane blob backends for nydus: local directory, OCI registry, and proxied reads. All APIs return io::Result so the OS errno survives to the service edges."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "README.md"
+
+[features]
+default = []
+# Container image registry backend (OCI distribution).
+backend-registry = [
+  "dep:serde_json",
+  "dep:reqwest",
+  "dep:url",
+  "dep:arc-swap",
+  "dep:futures",
+  "dep:rand",
+  "dep:tokio",
+]
+# Dragonfly P2P SDK proxy support for the registry backend.
+backend-dragonfly-proxy = [
+  "backend-registry",
+  "dep:dragonfly-client-request",
+]
+
+[dependencies]
+arc-swap = { version = "1", optional = true }
+dragonfly-client-request = { version = "=1.4.0", optional = true }
+futures = { version = "0.3", optional = true }
+libc = { workspace = true }
+nydus-format = { version = "0.1.0", path = "../nydus-format" }
+nydus-telemetry = { version = "0.1.0", path = "../nydus-telemetry" }
+rand = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "stream",
+], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+serde_yaml = "0.9"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+  "io-util",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "sync"
+], optional = true }
+tracing = { workspace = true }
+url = { version = "2", optional = true }
+
+[dev-dependencies]
+blake3 = "1"
+crc32c = "0.6"
+tempfile = { workspace = true }

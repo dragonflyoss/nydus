@@ -1,0 +1,21 @@
+[package]
+name = "nydus-format"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "On-disk format layer for nydus images: blob layout (footer, blob meta), EROFS metadata structures, and the byte-level utilities they share."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "README.md"
+
+[dependencies]
+bitflags = "2"
+crc32c = "0.6"
+libc = { workspace = true }
+memmap2 = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+blake3 = "1"
+tempfile = { workspace = true }

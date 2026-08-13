@@ -23,10 +23,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use nydus_core::error::{Context, Error, Result};
-use nydus_core::fs::{copy_ranges, FileMaps};
-use nydus_core::metadata::EROFS_BLOCK_SIZE;
-use nydus_core::{Config, NydusCore};
+use nydus_config::Config;
+use nydus_core::extent::MmapCache;
+use nydus_core::NydusCore;
+use nydus_error::{Context, Error, Result};
+use nydus_format::erofs::EROFS_BLOCK_SIZE;
 
 /// EROFS block size as u64 — reuses the canonical constant from the core.
 const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
@@ -40,7 +41,7 @@ const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 pub struct NbdCore {
     core: Arc<NydusCore>,
     device_size: u64,
-    maps: FileMaps,
+    maps: MmapCache,
 }
 
 impl NbdCore {
@@ -65,7 +66,7 @@ impl NbdCore {
         Ok(Self {
             core,
             device_size: flat_size,
-            maps: FileMaps::default(),
+            maps: MmapCache::default(),
         })
     }
 
@@ -129,7 +130,8 @@ impl NbdCore {
         // Copy through the shared engine: zero fds serve zeros, everything else
         // is copied out of a shared mapping when possible (pread fallback), and
         // any uncovered tail is zero-filled defensively.
-        copy_ranges(&ranges, offset, self.core.zero_fd(), buf, &self.maps)
+        self.maps
+            .copy_ranges(&ranges, offset, self.core.zero_fd(), buf)
             .context("failed to copy flat ranges for nbd read")?;
         Ok(())
     }

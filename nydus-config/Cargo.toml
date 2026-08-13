@@ -1,0 +1,15 @@
+[package]
+name = "nydus-config"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "YAML storage configuration for nydus: schema, loading and validation, converting into the pure config structs owned by the data-plane crates."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "README.md"
+
+[dependencies]
+nydus-backend = { version = "0.1.0", path = "../nydus-backend" }
+nydus-error = { version = "0.1.0", path = "../nydus-error" }
+serde = { workspace = true }
+serde_yaml = "0.9"

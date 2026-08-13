@@ -4,6 +4,7 @@
 
 #![warn(unreachable_pub)]
 
+pub mod build;
 pub mod check;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
@@ -13,6 +14,8 @@ pub mod fuse;
 pub mod mount;
 #[cfg(feature = "nbd")]
 pub mod nbd;
+pub mod net;
+pub mod optimize;
 #[cfg(feature = "ublk")]
 pub mod ublk;
 #[cfg(feature = "uffd")]
@@ -22,5 +25,5 @@ pub mod unpack;
 #[cfg(feature = "fuse")]
 pub use fuse::ErofsFs;
 
-pub use nydus_core::error;
-pub use nydus_core::error::{Error, Result};
+pub use nydus_error as error;
+pub use nydus_error::{Error, Result};

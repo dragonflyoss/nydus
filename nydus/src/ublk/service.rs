@@ -10,7 +10,7 @@ use std::sync::Arc;
 use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
 use libublk::io::{BufDescList, UblkDev, UblkIOCtx, UblkQueue};
 use libublk::{BufDesc, UblkError, UblkFlags, UblkIORes};
-use nydus_core::error::{Error, Result};
+use nydus_error::{Error, Result};
 use tracing::{error, info};
 
 use super::core::{UblkCore, UBLK_LOGICAL_BLOCK_SIZE};

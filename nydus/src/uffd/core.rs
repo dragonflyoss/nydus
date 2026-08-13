@@ -3,10 +3,11 @@ use std::os::fd::RawFd;
 use std::path::Path;
 use std::sync::Arc;
 
-use nydus_core::error::{Context, Error, Result};
-use nydus_core::metadata::EROFS_BLOCK_SIZE;
-use nydus_core::utils::align_up;
-use nydus_core::{Config, FdRange, NydusCore, ResolveMode};
+use nydus_config::Config;
+use nydus_core::{Extent, NydusCore, ResolveMode};
+use nydus_error::{Context, Error, Result};
+use nydus_format::erofs::EROFS_BLOCK_SIZE;
+use nydus_format::utils::align_up;
 
 use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
 
@@ -84,7 +85,7 @@ impl UffdCore {
         regions: &[VmaRegion],
         policy: FaultPolicy,
         msg: &UffdMsg,
-    ) -> Result<Vec<FdRange>> {
+    ) -> Result<Vec<Extent>> {
         let Some((region, range)) = resolve_fault_range(regions, msg)? else {
             return Ok(Vec::new());
         };
@@ -106,7 +107,7 @@ impl UffdCore {
         }
     }
 
-    pub fn prefault_ranges(&self, regions: &[VmaRegion]) -> Result<Vec<FdRange>> {
+    pub fn prefault_ranges(&self, regions: &[VmaRegion]) -> Result<Vec<Extent>> {
         let mut ranges = Vec::new();
         for region in regions {
             let start = region.offset;
@@ -122,11 +123,11 @@ impl UffdCore {
         Ok(ranges)
     }
 
-    pub fn fetch_ranges(&self, device_offset: u64, len: u64) -> Result<Vec<FdRange>> {
+    pub fn fetch_ranges(&self, device_offset: u64, len: u64) -> Result<Vec<Extent>> {
         self.resolve_ranges(device_offset, len, ResolveMode::Fetch)
     }
 
-    pub fn probe_ranges(&self) -> Result<Vec<FdRange>> {
+    pub fn probe_ranges(&self) -> Result<Vec<Extent>> {
         self.resolve_ranges(0, self.device_size, ResolveMode::Probe)
     }
 
@@ -135,7 +136,7 @@ impl UffdCore {
         device_offset: u64,
         len: u64,
         mode: ResolveMode,
-    ) -> Result<Vec<FdRange>> {
+    ) -> Result<Vec<Extent>> {
         ensure_device_range(self.device_size, device_offset, len)?;
         let end = device_offset
             .checked_add(len)
@@ -157,7 +158,7 @@ impl UffdCore {
 
         let tail_start = device_offset.max(self.core.flat_size());
         if tail_start < end {
-            ranges.push(FdRange {
+            ranges.push(Extent {
                 fd: self.core.zero_fd(),
                 offset: 0,
                 len: end - tail_start,

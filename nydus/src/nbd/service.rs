@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nydus_core::error::{Context, Error, Result};
+use nydus_error::{Context, Error, Result};
 use tracing::{debug, warn};
 
 use super::core::NbdCore;

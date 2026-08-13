@@ -1,0 +1,21 @@
+[package]
+name = "nydus-error"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "The nydus error contract: the project-wide Error/Result and the Context extension trait."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "README.md"
+
+[features]
+default = []
+
+[dependencies]
+nydus-format = { version = "0.1.0", path = "../nydus-format" }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }
