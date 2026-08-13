@@ -21,7 +21,7 @@ use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 use super::group_lock::GroupLocks;
 use super::{
     decode_group_from_window, fetch_decode_validate_group_into, plan_prefetch_batches, BlobCache,
-    BlobCacheBuffers,
+    GroupBuffers,
 };
 
 #[derive(Clone)]
@@ -296,7 +296,7 @@ impl LocalBlobCache {
                 return Ok(());
             }
 
-            let mut buffers = BlobCacheBuffers::default();
+            let mut buffers = GroupBuffers::default();
             let decoded = fetch_decode_validate_group_into(
                 &self.blob_id,
                 &self.blob_metadata,
@@ -646,7 +646,7 @@ impl BlobCache for LocalBlobCache {
         }
     }
 
-    fn group_ready(&self, group_index: usize) -> bool {
+    fn is_group_ready(&self, group_index: usize) -> bool {
         self.group_map.is_ready(group_index).unwrap_or(false)
     }
 
@@ -656,7 +656,7 @@ impl BlobCache for LocalBlobCache {
         !self.blob_metadata.is_redirect_blob() && self.group_map.is_all_ready()
     }
 
-    fn stream_redirect_parallel(
+    fn for_each_redirect_group(
         &self,
         threads: usize,
         skip: &(dyn Fn(&BlobMetadataGroup) -> bool + Sync),
@@ -1032,7 +1032,7 @@ mod tests {
         // already reports everything ready.
         owner.group_map.set_ready(0).unwrap();
         assert!(waiter.prefetch_lock().is_none());
-        assert!(waiter.group_ready(0));
+        assert!(waiter.is_group_ready(0));
 
         // Once the owner releases the lock, it is acquirable again.
         drop(guard);
@@ -1167,7 +1167,7 @@ mod tests {
             let baseline = backend.reads();
             let delivered = AtomicUsize::new(0);
             cache
-                .stream_redirect_parallel(1, &|_group| skip_all, &|group, decoded| {
+                .for_each_redirect_group(1, &|_group| skip_all, &|group, decoded| {
                     assert!(group.is_redirect());
                     assert_eq!(decoded, payload);
                     delivered.fetch_add(1, Ordering::SeqCst);

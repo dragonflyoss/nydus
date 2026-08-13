@@ -9,7 +9,7 @@ use crate::build::inode::{
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
-    erofs_xattr_name_split, mode_to_erofs_file_type, ChunkAddr, ErofsDeviceSlot,
+    erofs_xattr_name_split, mode_to_erofs_file_type, ErofsChunkAddr, ErofsDeviceSlot,
     EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR,
     EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED,
     EROFS_NULL_ADDR,
@@ -47,7 +47,7 @@ struct MergeLinkId {
 #[derive(Clone)]
 enum MergeNodeData {
     RegularFile {
-        chunk_index_entries: Vec<ChunkAddr>,
+        chunk_index_entries: Vec<ErofsChunkAddr>,
         chunk_bits: u32,
     },
     Directory {
@@ -335,7 +335,7 @@ fn load_node(
                                     index.device_id
                                 ))
                             })?;
-                        Ok(ChunkAddr {
+                        Ok(ErofsChunkAddr {
                             blkaddr: index.blkaddr,
                             device_id: mapped,
                         })

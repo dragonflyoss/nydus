@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 
 use tracing::{info, warn};
 
-use crate::cache::BlobCacheSet;
+use crate::cache::BlobCaches;
 
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///
@@ -20,7 +20,7 @@ use crate::cache::BlobCacheSet;
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" redirect blob).
 pub struct BlobPrefetcher {
-    blobs: Arc<BlobCacheSet>,
+    blobs: Arc<BlobCaches>,
     priority: Vec<u16>,
     rest: Vec<u16>,
     threads: usize,
@@ -39,8 +39,8 @@ pub struct PrefetchPlan {
 
 impl BlobPrefetcher {
     /// `plan` is typically the result of `ErofsReader::prefetch_plan`, and
-    /// `blobs` the matching cache set (`ErofsReader::blob_cache_set`).
-    pub fn new(blobs: Arc<BlobCacheSet>, plan: PrefetchPlan, threads: usize, full: bool) -> Self {
+    /// `blobs` the matching cache set (`ErofsReader::blob_caches`).
+    pub fn new(blobs: Arc<BlobCaches>, plan: PrefetchPlan, threads: usize, full: bool) -> Self {
         Self {
             blobs,
             priority: plan.priority,

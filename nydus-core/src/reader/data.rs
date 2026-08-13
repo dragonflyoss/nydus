@@ -2,8 +2,9 @@ use std::io;
 use std::io::Write;
 
 use nydus_format::erofs::{
-    cast_ref, ChunkAddr, ErofsChunkIndex, ErofsInode, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
+    cast_ref, ErofsChunkAddr, ErofsChunkIndex, ErofsInode, EROFS_BLOCK_SIZE,
+    EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
 };
 use nydus_format::utils::round_up;
 
@@ -148,7 +149,7 @@ impl ErofsReader {
         &self,
         nid: u64,
         inode: &ErofsInode<'_>,
-    ) -> io::Result<Vec<ChunkAddr>> {
+    ) -> io::Result<Vec<ErofsChunkAddr>> {
         if inode.size() == 0 {
             return Ok(Vec::new());
         }
@@ -159,7 +160,7 @@ impl ErofsReader {
         let mut result = Vec::with_capacity(nchunks);
         for index in 0..nchunks {
             let entry = Self::chunk_index_entry_at(index_bytes, index);
-            result.push(ChunkAddr {
+            result.push(ErofsChunkAddr {
                 blkaddr: entry.blkaddr(),
                 device_id: entry.device_id(),
             });

@@ -3,8 +3,8 @@ use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
     erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_ibody_size,
     erofs_xattr_icount, erofs_xattr_name_split, mode_to_erofs_file_type,
-    needs_erofs_extended_inode, ChunkAddr, ErofsChunkIndex, ErofsInodeCompact, ErofsInodeExtended,
-    EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_FT_DIR,
+    needs_erofs_extended_inode, ErofsChunkAddr, ErofsChunkIndex, ErofsInodeCompact,
+    ErofsInodeExtended, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_FT_DIR,
     EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_ENTRY_HEADER_SIZE,
     EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
@@ -63,7 +63,7 @@ pub enum InodeData {
     /// Regular file: chunk indexes for chunk-based layout.
     RegularFile {
         /// List of chunk indexes (EROFS_CHUNK_INDEX_SIZE bytes each) for the file's data chunks.
-        chunk_index_entries: Vec<ChunkAddr>,
+        chunk_index_entries: Vec<ErofsChunkAddr>,
 
         /// Number of bits for the chunk size (e.g. 12 for 4KB chunks).
         chunk_size_bits: u32,

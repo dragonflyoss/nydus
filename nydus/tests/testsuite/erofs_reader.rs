@@ -14,7 +14,7 @@ use nydus::build::bootstrap::render_bootstrap;
 use nydus::build::inode::{build_tree, ChildRef, InodeData, InodeInfo};
 use nydus_core::ErofsReader;
 use nydus_format::erofs::{
-    erofs_xattr_ibody_size, ChunkAddr, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
+    erofs_xattr_ibody_size, ErofsChunkAddr, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
     EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER,
 };
 use nydus_format::utils::sha256_file;
@@ -71,11 +71,11 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
             is_extended: false,
             data: InodeData::RegularFile {
                 chunk_index_entries: vec![
-                    ChunkAddr {
+                    ErofsChunkAddr {
                         blkaddr: 11,
                         device_id: 0,
                     },
-                    ChunkAddr {
+                    ErofsChunkAddr {
                         blkaddr: 22,
                         device_id: 0,
                     },

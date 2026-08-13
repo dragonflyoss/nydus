@@ -1,6 +1,6 @@
+mod caches;
 mod group_lock;
 pub mod local;
-mod set;
 
 use std::io;
 use std::io::Cursor;
@@ -13,8 +13,8 @@ use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor, BlobMetadataGroup};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
+pub use caches::BlobCaches;
 pub use local::LocalBlobCache;
-pub use set::BlobCacheSet;
 
 pub trait BlobCache: Send + Sync {
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()>;
@@ -82,7 +82,7 @@ pub trait BlobCache: Send + Sync {
     /// True when the group at `group_index` is already decoded and resident in
     /// this blob's cache. Reflects updates from other processes sharing the
     /// same cache directory.
-    fn group_ready(&self, _group_index: usize) -> bool {
+    fn is_group_ready(&self, _group_index: usize) -> bool {
         false
     }
 
@@ -111,7 +111,7 @@ pub trait BlobCache: Send + Sync {
     /// or CRC validation are skipped with a warning so a single bad group
     /// cannot poison the whole redirect prefetch, and the first `cb` or
     /// backend error aborts the stream.
-    fn stream_redirect_parallel(
+    fn for_each_redirect_group(
         &self,
         _threads: usize,
         _skip: &(dyn Fn(&BlobMetadataGroup) -> bool + Sync),
@@ -137,7 +137,7 @@ pub trait BlobCache: Send + Sync {
 
 /// Target uncompressed size of one redirect-prefetch batch. The ondemand
 /// (redirect) blob's groups are split into batches of about this size and
-/// fetched concurrently by [`BlobCache::stream_redirect_parallel`]; a blob that
+/// fetched concurrently by [`BlobCache::for_each_redirect_group`]; a blob that
 /// fits within a single batch is streamed sequentially instead.
 pub const REDIRECT_PREFETCH_BATCH_SIZE: u64 = 16 * 1024 * 1024;
 
@@ -241,7 +241,7 @@ pub fn decode_group_from_window(
 }
 
 #[derive(Default)]
-pub struct BlobCacheBuffers {
+pub struct GroupBuffers {
     encoded: Vec<u8>,
     decoded: Vec<u8>,
 }
@@ -251,7 +251,7 @@ pub fn fetch_decode_validate_group_into<'a>(
     blob_metadata: &BlobMetadata,
     backend: &Arc<dyn BlobBackend>,
     group: &BlobMetadataGroup,
-    buffers: &'a mut BlobCacheBuffers,
+    buffers: &'a mut GroupBuffers,
     kind: ReadKind,
 ) -> io::Result<&'a [u8]> {
     let ctx = ReadContext::group(

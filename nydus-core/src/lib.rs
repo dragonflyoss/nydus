@@ -168,7 +168,7 @@ impl NydusCore {
         // teardown.
         if prefetch_enable {
             let prefetcher = BlobPrefetcher::new(
-                reader.blob_cache_set(),
+                reader.blob_caches(),
                 reader.prefetch_plan(),
                 prefetch_threads,
                 prefetch_full,
