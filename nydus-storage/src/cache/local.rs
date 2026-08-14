@@ -169,7 +169,7 @@ impl LocalBlobCache {
             // split them off with their readiness invisible to each other.
             group_map.reset()?;
             warn!(
-                "stale group_map without cache data file, reset: {}",
+                "stale readiness map without cache data file, reset: {}",
                 readiness_map_path.display()
             );
         }
@@ -331,12 +331,15 @@ impl LocalBlobCache {
 
     /// Ensure every CDC chunk record in `records` (indexes into the sorted
     /// record table) has its bytes decoded into the cache file at its logical
-    /// offset. `memo` deduplicates group decodes across the records of one
-    /// call, since consecutive records usually reference the same group.
+    /// offset. Records are processed in unique-offset order so the decode
+    /// `memo` (which deduplicates group decodes across the records of one
+    /// call) sees monotonic group accesses and each group is decoded once.
     fn ensure_cdc_records(&self, records: Range<usize>, cache_file: &File) -> io::Result<()> {
         let chunks = self.blob_metadata.cdc_chunks();
+        let mut order: Vec<usize> = records.collect();
+        order.sort_by_key(|&index| chunks[index].unique_byte_offset());
         let mut memo: HashMap<usize, Vec<u8>> = HashMap::new();
-        for index in records {
+        for index in order {
             self.ensure_cdc_record(index, &chunks[index], cache_file, &mut memo)?;
         }
         Ok(())
@@ -420,9 +423,9 @@ impl LocalBlobCache {
             .group_index_for_byte_offset(unique_end - 1)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
 
-        // Callers walk records in (mostly) increasing unique offset order, so
-        // groups below the current record's first group are never needed
-        // again; dropping them bounds the memo to the record's group span.
+        // Callers walk records in increasing unique offset order, so groups
+        // below the current record's first group are never needed again;
+        // dropping them bounds the memo to the record's group span.
         memo.retain(|group_index, _| *group_index >= first);
 
         let mut bytes = vec![0u8; chunk.size() as usize];
