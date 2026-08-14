@@ -252,12 +252,13 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(bootstrap_ranges[0].source_offset, 0);
     assert_eq!(bootstrap_ranges[0].len, EROFS_BLOCK_SIZE as u64);
 
-    // Fetch a block-aligned range in the middle; the cache file should be
-    // populated for that range and a second fetch is idempotent. The dense
-    // blob address space is independent of path order, so exact file
-    // content is covered by the static read API test below.
+    // Fetch a block-aligned range spanning more than one group's worth of
+    // data; the cache file should be populated for that range and a second
+    // fetch is idempotent. The dense blob address space is independent of
+    // path order, so exact file content is covered by the static read API
+    // test below.
     let block = EROFS_BLOCK_SIZE as u64;
-    let (blob_offset, len) = (256 * block, 16 * block);
+    let (blob_offset, len) = (block, 272 * block);
     let offset = descriptor.mapped_offset + blob_offset;
     assert!(core.probe_flat_ranges(offset, len).unwrap().is_empty());
     let fd_ranges = core.fetch_flat_ranges(offset, len).unwrap();
@@ -277,9 +278,10 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     core.blobs.fetch(&blob_id, offset, len).unwrap();
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
-    // The fetched logical range maps to CDC records whose unique bytes
-    // straddle the 1 MiB group boundary, so both covering unique-stream
-    // groups are traced in access order.
+    // The fetched logical range covers CDC records mapped to both of the
+    // first two unique-stream groups (records never straddle a group
+    // boundary — the builder pads instead), so both groups are traced in
+    // access order.
     let trace = core.trace_snapshot();
     assert_eq!(trace.entries.len(), 2);
     assert!(trace.entries.iter().all(|entry| entry.blob_index == 1));

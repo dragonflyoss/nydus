@@ -283,6 +283,18 @@ impl BlobWriter {
             let unique_byte_offset = match self.cdc_dedup.get(&digest) {
                 Some(offset) => *offset,
                 None => {
+                    // Groups must be self-contained: a redirect fill delivers
+                    // one decoded group at a time and can only complete
+                    // records whose unique bytes it fully contains. Pad the
+                    // unique stream with zeros up to the group boundary
+                    // whenever a new piece would straddle it, so no record
+                    // ever spans two groups (deduped records inherit the
+                    // invariant from their first occurrence).
+                    let group_size = self.group_size as u64;
+                    let space = group_size - self.cdc_unique_len % group_size;
+                    if cut.length as u64 > space && cut.length as u64 <= group_size {
+                        self.pad_group_stream_to_boundary(space as usize)?;
+                    }
                     let offset = self.cdc_unique_len;
                     self.append_to_group_stream(piece)?;
                     self.cdc_unique_len += cut.length as u64;
@@ -301,9 +313,22 @@ impl BlobWriter {
         Ok(())
     }
 
-    /// Append block-aligned data to the current group, flushing whenever it
-    /// fills to the group size. A chunk may straddle a group boundary, so groups
-    /// are pure block runs of exactly `group_size` (except the last).
+    /// Zero pad the unique stream to the next group boundary and flush the
+    /// group. Padding bytes are stored in the group (they compress to almost
+    /// nothing) but are never referenced by any CDC record, so they read back
+    /// only as part of the group and count toward `cdc_unique_len` to keep
+    /// unique offsets consistent with the stream.
+    fn pad_group_stream_to_boundary(&mut self, pad: usize) -> Result<()> {
+        debug_assert_eq!(pad, self.group_size as usize - self.group_buffer.len());
+        self.group_buffer.resize(self.group_size as usize, 0);
+        self.flush_group()?;
+        self.cdc_unique_len += pad as u64;
+        Ok(())
+    }
+
+    /// Append data to the current group, flushing whenever it fills to the
+    /// group size, so groups are pure block runs of exactly `group_size`
+    /// (except the last).
     fn append_to_group_stream(&mut self, mut data: &[u8]) -> Result<()> {
         let group_size = self.group_size as usize;
         while !data.is_empty() {
@@ -672,6 +697,86 @@ mod tests {
         assert_eq!(blob_metadata.header().metadata_size(), 8192);
         assert_eq!(blob_metadata.cdc_chunks()[0].logical_byte_offset(), 0);
         assert_eq!(blob_metadata.groups()[0].compressed_byte_offset(), 8192);
+    }
+
+    #[test]
+    fn cdc_records_never_straddle_a_group_boundary() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("blob.data");
+        let file_a = dir.path().join("a.bin");
+        let file_b = dir.path().join("b.bin");
+        let file_c = dir.path().join("c.bin");
+
+        // Small groups (one CDC max piece) with partial dedup: file_b's odd
+        // tail leaves the unique stream unaligned, so file_c's fresh pieces
+        // would straddle group boundaries without the builder's zero padding.
+        let group_size = CDC_MAX_CHUNK_SIZE;
+        let body = pseudo_random_bytes(group_size as usize);
+        fs::write(&file_a, &body).unwrap();
+        fs::write(&file_b, &body[..10_007]).unwrap();
+        let mut other = pseudo_random_bytes(4 * group_size as usize);
+        for byte in other.iter_mut() {
+            *byte = byte.wrapping_add(1);
+        }
+        fs::write(&file_c, &other).unwrap();
+
+        let file = File::create(&blob_path).unwrap();
+        let mut writer = BlobWriter::from_file(
+            file,
+            EROFS_BLOCK_SIZE,
+            group_size,
+            BlobMetadataCompressor::None,
+        )
+        .unwrap();
+        writer
+            .write_file_chunks(&file_a, body.len() as u64)
+            .unwrap();
+        writer.write_file_chunks(&file_b, 10_007).unwrap();
+        writer
+            .write_file_chunks(&file_c, other.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+
+        let blob_metadata = writer.blob_metadata([0x33; EROFS_BLOB_ID_SIZE], 0).unwrap();
+        assert!(blob_metadata.cdc_chunks().len() > 4);
+        // Padding must actually have kicked in: the unique stream is longer
+        // than the distinct piece bytes it stores.
+        let (_, unique) = writer.cdc_dedup_stats();
+        let piece_bytes: u64 = {
+            let mut uniq: Vec<(u64, u32)> = blob_metadata
+                .cdc_chunks()
+                .iter()
+                .map(|c| (c.unique_byte_offset(), c.size()))
+                .collect();
+            uniq.sort_unstable();
+            uniq.dedup();
+            uniq.iter().map(|&(_, size)| size as u64).sum()
+        };
+        assert!(
+            unique > piece_bytes,
+            "expected group-boundary zero padding in the unique stream \
+             (unique {unique}, piece bytes {piece_bytes})"
+        );
+        let group_size = group_size as u64;
+        for chunk in blob_metadata.cdc_chunks() {
+            let first_group = chunk.unique_byte_offset() / group_size;
+            let last_group = (chunk.unique_byte_end() - 1) / group_size;
+            assert_eq!(
+                first_group,
+                last_group,
+                "record at unique offset {} size {} straddles a group boundary",
+                chunk.unique_byte_offset(),
+                chunk.size()
+            );
+        }
+        // The padded unique stream is exactly what the groups describe.
+        assert_eq!(
+            blob_metadata.total_uncompressed_size(),
+            round_up(
+                writer.cdc_dedup_stats().1 as usize,
+                EROFS_BLOCK_SIZE as usize
+            ) as u64
+        );
     }
 
     fn pseudo_random_bytes(len: usize) -> Vec<u8> {

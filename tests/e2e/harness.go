@@ -449,11 +449,11 @@ func sha256File(t *testing.T, path string) string {
 }
 
 // wipeCacheDir removes every per-blob artifact so the next daemon starts
-// COLD. Leaving a stale .group.map behind makes the daemon believe groups
-// are ready while the re-created .blob.data is all zeros — reads would
-// return zeros without fetching. Wipe data+meta+map+lock.
+// COLD. Leaving a stale .group.map/.chunk.map behind makes the daemon believe
+// groups (or CDC records) are ready while the re-created .blob.data is all
+// zeros — reads would return zeros without fetching. Wipe data+meta+map+lock.
 func wipeCacheDir(cacheDir string) {
-	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.prefetch.lock"} {
+	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.chunk.map", "*.prefetch.lock"} {
 		matches, _ := filepath.Glob(filepath.Join(cacheDir, pattern))
 		for _, m := range matches {
 			_ = os.Remove(m)

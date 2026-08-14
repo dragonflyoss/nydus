@@ -258,8 +258,10 @@ impl LocalBlobCache {
     /// The CDC counterpart of a redirect fill: `decoded` holds one validated
     /// group of the unique data stream, so copy every record fully contained
     /// in the group's unique byte range to its logical cache offset and mark
-    /// those records ready. Records straddling a group boundary are left to
-    /// the on-demand path.
+    /// those records ready. The builder zero-pads the unique stream so no
+    /// record ever straddles a group boundary; a straddling record from a
+    /// foreign writer is left to the on-demand path (which reads every group
+    /// the record's unique range touches).
     fn fill_cdc_records_from_group(
         &self,
         group: &BlobMetadataGroup,

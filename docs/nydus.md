@@ -1168,10 +1168,15 @@ Header details:
 
 Chunk details:
 
-- CDC records are decoupled from groups: a record's unique bytes may straddle a
-	group boundary, and a group may contain many records' bytes. The chunk table
-	is a byte-granular mapping from the logical space to the unique stream, not
-	a per-group map.
+- CDC records are decoupled from groups: a group may contain many records'
+	bytes, and the chunk table is a byte-granular mapping from the logical space
+	to the unique stream, not a per-group map. The builder does guarantee one
+	group invariant: no record's unique bytes ever straddle a group boundary —
+	when a fresh piece would cross one, the unique stream is zero padded up to
+	the boundary first, so every group is self-contained (a decoded group alone
+	satisfies every record it holds). Readers must still tolerate straddling
+	records from foreign writers by decoding every group the record's unique
+	range touches.
 - `digest` is the BLAKE3 hash of the piece's bytes — the deduplication key.
 - `logical_byte_offset` is the piece's byte position in the dense logical
 	uncompressed address space that EROFS chunk indexes point into.
@@ -1186,7 +1191,11 @@ Group details:
 
 - Groups are formed by packing whole decoded blocks up to `--compress-size`
 	regardless of chunk boundaries, then compressing the batch as one unit. So
-	every group but the last is exactly `1 << group_block_bits` blocks.
+	every group but the last is exactly `1 << group_block_bits` blocks. The
+	builder zero-pads the unique stream to the group boundary when a fresh CDC
+	piece would straddle it (see Chunk details above), so the padding bytes are
+	stored inside the group — they compress to almost nothing and are never
+	referenced by any record.
 - `uncompressed_block_offset` is the decoded cache 4 KiB block offset for the
 	group. Groups are dense and contiguous in the decoded address space.
 - `compressed_byte_offset` is the encoded payload's byte offset within the data
@@ -1246,20 +1255,45 @@ Two address spaces are involved:
 	max 64 KiB) and only never-seen-before pieces (by BLAKE3 digest) are
 	appended, byte-granular, to the group stream, which is then grouped and
 	compressed exactly as before. Many CDC records may reference the same
-	unique bytes — that sharing is the deduplication.
+	unique bytes — that sharing is the deduplication. The builder zero-pads the
+	stream up to the next group boundary whenever a fresh piece would straddle
+	it, so every record's unique bytes live in exactly one group ("groups are
+	self-contained"); a deduped record inherits that invariant from the first
+	occurrence it points at, and the padding bytes are dead stream bytes no
+	record references.
 
 Records are sorted by `logical_byte_offset` and never overlap; logical ranges
 not covered by any record (tail-block padding, elided all-zero chunks) read
-back as zeros. The runtime looks a read up by binary-searching the records
-overlapping the logical range, maps each cold record's unique range to its
-group(s) with the same `>> group_block_bits` division, decodes those groups,
-and copies the record's bytes to its logical offset in the cache file;
-readiness is tracked per record in a `.chunk.map` sidecar (same format as the
-group map). `nydus optimize` operates at group granularity on the unique
-stream, so it supports CDC blobs directly: traced unique-stream groups are
-re-encoded into the ondemand blob, and the phase-0 redirect fill fans each
-decoded group's bytes out to the CDC records it fully covers, at their logical
-offsets in the source cache.
+back as zeros.
+
+Runtime design for CDC blobs:
+
+- **Cache layout.** The cache data file mirrors the logical space
+	(`logical_block_count * 4096` bytes); readiness is tracked per CDC record —
+	not per group — in a `.chunk.map` sidecar (same on-disk format as the
+	`.group.map` sidecar, one bit per chunk record). Non-CDC (groups-only)
+	blobs keep the per-group `.group.map`.
+- **On-demand reads.** A read binary-searches the records overlapping the
+	logical range, sorts the cold ones by unique offset, maps each record's
+	unique range to its group with the `>> group_block_bits` division, decodes
+	the group (memoized within the call, single-flight within the process,
+	cross-process claimed per record), and copies the record's bytes to its
+	logical offset in the cache file before marking the record ready. Records
+	from a foreign writer that straddle a group boundary are still handled by
+	decoding every group the unique range touches.
+- **Prefetch.** `prefetch_all` walks the records in unique-offset order so
+	each group is fetched and decoded roughly once, fanning every decoded
+	group's bytes out to all the records it contains.
+- **Redirect (ondemand-blob) fill.** `nydus optimize` operates at group
+	granularity on the unique stream, so it supports CDC blobs directly: traced
+	unique-stream groups are re-encoded into the ondemand blob, and the phase-0
+	redirect fill CRC-checks each decoded group and fans its bytes out to the
+	CDC records it fully contains, at their logical offsets in the source
+	cache. Because the builder guarantees records never straddle groups, a
+	filled group leaves no partially-warm records behind — a traced workload
+	replayed after prefetch is served entirely from cache with zero on-demand
+	backend reads. A fill that finds all its records already ready counts as a
+	cache hit instead of a redirect fill.
 
 ### Blocks, chunks and groups
 
@@ -1436,7 +1470,9 @@ The build pipeline now follows this sequence:
 	logical byte offset + unique byte offset + size). Only never-seen-before
 	pieces enter the unique data stream, which feeds a block-oriented group
 	builder that flushes a compression group whenever it fills to
-	`--compress-size`, regardless of piece boundaries.
+	`--compress-size`. When a fresh piece would straddle a group boundary the
+	unique stream is zero padded up to the boundary first, so no record ever
+	spans two groups.
 4. Compute CRC32C over each uncompressed group of the unique stream.
 5. Compress each group according to the blob_meta header compressor and append
 	the encoded bytes directly to the data region. Encoded groups are packed
@@ -1519,8 +1555,12 @@ blob digest:
 - `<full_blob_digest>.blob.data` stores decoded uncompressed data.
 - `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
 	the local backend.
-- `<full_blob_digest>.group.map` records which blob_meta groups have been decoded
-	(a shared readiness bitmap, see
+- `<full_blob_digest>.chunk.map` records, for a CDC data blob, which CDC chunk
+	records have been filled into the logical cache file (a shared readiness
+	bitmap, one bit per record, same on-disk format as the group map, see
+	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
+- `<full_blob_digest>.group.map` records, for a groups-only (non-CDC) blob,
+	which blob_meta groups have been decoded (a shared readiness bitmap, see
 	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 - `<full_blob_digest>.prefetch.lock` is the cross-process prefetch lock file
 	(empty; only its `flock` state matters).
@@ -1528,9 +1568,14 @@ blob digest:
 	single groups (empty; only its byte-range lock state matters, see
 	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 
-The cache data file mirrors the decoded address space one-to-one, so a group's
-bytes land at `uncompressed_block_offset * 4096` and EROFS chunk `blkaddr`
-offsets index into it directly:
+The cache data file mirrors the decoded address space one-to-one. For a
+groups-only blob that space is the group stream itself, so a group's bytes
+land at `uncompressed_block_offset * 4096`; for a CDC data blob it is the
+logical space (`logical_block_count * 4096` bytes), filled record by record
+from decoded unique-stream groups, and EROFS chunk `blkaddr` offsets index
+into it directly. The figure below shows the groups-only shape; a CDC blob
+replaces `.group.map` with `.chunk.map` (one bit per CDC record) and fills
+`.blob.data` at each record's `logical_byte_offset`:
 
 ```text
 cache directory, artifacts named by SHA256(full blob) = <hex>

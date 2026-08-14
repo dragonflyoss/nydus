@@ -646,7 +646,7 @@ func TestCacheSharingStaleGroupmapKeepsInode(t *testing.T) {
 		sha256File(t, filepath.Join(first.mnt, "shared.bin")))
 
 	sharedKey := sha256File(t, fixture.blobB)
-	groupmap := filepath.Join(cacheDir, sharedKey+".group.map")
+	groupmap := filepath.Join(cacheDir, sharedKey+".chunk.map")
 	blobData := filepath.Join(cacheDir, sharedKey+".blob.data")
 	require.FileExists(t, groupmap)
 	require.FileExists(t, blobData)
