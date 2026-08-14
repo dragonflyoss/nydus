@@ -244,6 +244,56 @@ jobs:
         run: |
           make test-bench
 
+  uffd-tests:
+    name: Run UFFD tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+
+      # The erofs module enables the loop-mounted whole-tree corpus diff in
+      # TestUffdRealFaultCopy; erofs-utils provides fsck.erofs for structural
+      # image validation.
+      - name: Load erofs kernel module and install erofs-utils
+        run: |
+          sudo modprobe erofs || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq erofs-utils
+
+      # UFFD_REQUIRE=1 turns missing userfaultfd runner capability into a hard
+      # unsupported-runner failure so this gate can never be silently skipped.
+      - name: Run UFFD tests
+        run: |
+          make test-uffd \
+            UFFD_REQUIRE=1 \
+            UFFD_EVIDENCE_DIR="$GITHUB_WORKSPACE/uffd-evidence"
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uffd-evidence
+          path: uffd-evidence/
+          if-no-files-found: ignore
+
   fanotify-tests:
     name: Run fanotify tests
     runs-on: ubuntu-latest

@@ -59,8 +59,8 @@ func TestUffdServiceSmoke(t *testing.T) {
 	buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, uffdSmokeRequestBlock)
 	writeLocalStorageConfig(t, configPath, blobDir, cacheDir)
 
-	cmd := startUffdService(t, nydusBin, bootstrapPath, configPath, socketPath, logDir)
-	defer stopUffdService(t, cmd)
+	svc := startUffdService(t, nydusBin, bootstrapPath, configPath, socketPath, logDir)
+	defer stopUffdService(t, svc)
 
 	conn := dialUffdSocket(t, socketPath)
 	defer func() {
@@ -78,7 +78,7 @@ func TestUffdServiceSmoke(t *testing.T) {
 	require.Equal(t, uint32(uffdSmokeRequestBlock), blockSize)
 
 	sendUffdRequest(t, conn, uffdMsgFetchRequest, encodeUffdDeviceRange(0, uint64(blockSize)))
-	fetchRanges, fetchFds := readUffdRangeResponses(t, conn)
+	fetchRanges, fetchFds, _ := readUffdRangeResponses(t, conn)
 	defer closeRawFds(fetchFds)
 	require.NotEmpty(t, fetchRanges)
 	require.Len(t, fetchFds, len(fetchRanges))
@@ -86,8 +86,16 @@ func TestUffdServiceSmoke(t *testing.T) {
 	require.Equal(t, uint64(0), fetchRanges[0].fileOffset)
 	require.Equal(t, uint64(blockSize), fetchRanges[0].length)
 
+	// The first returned FD backs the device head, which is the bootstrap
+	// blob: it must carry the EROFS superblock magic at byte offset 1024.
+	head := make([]byte, 4)
+	_, err := syscall.Pread(fetchFds[0], head, int64(fetchRanges[0].fileOffset)+erofsSuperOffset)
+	require.NoError(t, err)
+	require.Equal(t, uint32(erofsSuperMagic), binary.LittleEndian.Uint32(head),
+		"FETCH-returned FD must expose the EROFS superblock content")
+
 	sendUffdRequest(t, conn, uffdMsgProbeRequest, nil)
-	probeRanges, probeFds := readUffdRangeResponses(t, conn)
+	probeRanges, probeFds, _ := readUffdRangeResponses(t, conn)
 	defer closeRawFds(probeFds)
 	require.NotEmpty(t, probeRanges)
 	require.Len(t, probeFds, len(probeRanges))
@@ -105,7 +113,16 @@ type uffdRange struct {
 	length       uint64
 }
 
-func startUffdService(t *testing.T, nydusBin, bootstrapPath, configPath, socketPath, logDir string) *exec.Cmd {
+// uffdServiceProc tracks one `nydus uffd` service child process together
+// with its captured output for diagnostics.
+type uffdServiceProc struct {
+	cmd        *exec.Cmd
+	output     *bytes.Buffer
+	socketPath string
+	logDir     string
+}
+
+func startUffdService(t *testing.T, nydusBin, bootstrapPath, configPath, socketPath, logDir string) *uffdServiceProc {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(logDir, 0755))
 
@@ -118,9 +135,9 @@ func startUffdService(t *testing.T, nydusBin, bootstrapPath, configPath, socketP
 		"--log-dir", logDir,
 		"--threads", "1",
 	)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	output := &bytes.Buffer{}
+	cmd.Stdout = output
+	cmd.Stderr = output
 	require.NoError(t, cmd.Start())
 
 	require.Eventually(t, func() bool {
@@ -135,21 +152,21 @@ func startUffdService(t *testing.T, nydusBin, bootstrapPath, configPath, socketP
 		return true
 	}, 10*time.Second, 100*time.Millisecond, "nydus uffd did not start:\n%s", output.String())
 
-	return cmd
+	return &uffdServiceProc{cmd: cmd, output: output, socketPath: socketPath, logDir: logDir}
 }
 
-func stopUffdService(t *testing.T, cmd *exec.Cmd) {
+func stopUffdService(t *testing.T, svc *uffdServiceProc) {
 	t.Helper()
-	if cmd.Process == nil {
+	if svc == nil || svc.cmd.Process == nil || svc.cmd.ProcessState != nil {
 		return
 	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	_ = svc.cmd.Process.Signal(syscall.SIGTERM)
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() { done <- svc.cmd.Wait() }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
+		_ = svc.cmd.Process.Kill()
 		<-done
 	}
 }
@@ -182,10 +199,14 @@ func encodeUffdDeviceRange(offset, length uint64) []byte {
 	return payload
 }
 
-func readUffdRangeResponses(t *testing.T, conn *net.UnixConn) ([]uffdRange, []int) {
+// readUffdRangeResponses collects one logical RANGE_RESPONSE (possibly split
+// over several NEXT-linked frames) and returns the ranges, the received FDs
+// and the number of frames (batches) the response spanned.
+func readUffdRangeResponses(t *testing.T, conn *net.UnixConn) ([]uffdRange, []int, int) {
 	t.Helper()
 	var ranges []uffdRange
 	var fds []int
+	batches := 0
 	for {
 		header, payload, frameFds := readUffdFrame(t, conn)
 		require.Equal(t, uint16(uffdMsgRangeResponse), header.msgType)
@@ -193,8 +214,9 @@ func readUffdRangeResponses(t *testing.T, conn *net.UnixConn) ([]uffdRange, []in
 		require.Len(t, frameFds, len(frameRanges))
 		ranges = append(ranges, frameRanges...)
 		fds = append(fds, frameFds...)
+		batches++
 		if header.flags&uffdRangeResponseFlagNext == 0 {
-			return ranges, fds
+			return ranges, fds, batches
 		}
 	}
 }

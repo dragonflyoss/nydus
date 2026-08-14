@@ -1,0 +1,72 @@
+name: UFFD Stability
+
+# Daily stability run for the UFFD service: repeats the three real-fault
+# integration cases (managed copy, managed zeropage, zerocopy) 34 times each
+# by default — 102 core fault iterations per run. Any iteration failure fails
+# the run and there is no retry, so the first attempt is the recorded result.
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Repetitions of each real-fault case"
+        required: false
+        default: "34"
+
+env:
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  uffd-stability:
+    name: UFFD stability run (no retries)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+
+      # The erofs module enables the loop-mounted whole-tree corpus diff in
+      # TestUffdRealFaultCopy; erofs-utils provides fsck.erofs for structural
+      # image validation.
+      - name: Load erofs kernel module and install erofs-utils
+        run: |
+          sudo modprobe erofs || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq erofs-utils
+
+      # UFFD_REQUIRE=1 turns missing userfaultfd runner capability into a hard
+      # unsupported-runner failure so the stability signal can never be
+      # silently skipped.
+      - name: Run UFFD stability suite
+        run: |
+          make test-uffd-stability \
+            UFFD_REQUIRE=1 \
+            UFFD_EVIDENCE_DIR="$GITHUB_WORKSPACE/uffd-evidence" \
+            UFFD_STABILITY_COUNT="${{ github.event.inputs.count || '34' }}"
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uffd-stability-evidence
+          path: uffd-evidence/
+          if-no-files-found: ignore

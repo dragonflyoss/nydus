@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -125,8 +126,8 @@ func roDiffTree(t *testing.T, src, mnt string, compareMtimeNsec bool) {
 			if st.Mode&unix.S_IFMT == unix.S_IFLNK {
 				return
 			}
-			names := roListXattr(t, srcPath)
-			require.Equal(t, names, roListXattr(t, mntPath), "%s: xattr names", rel)
+			names := roVisibleXattrs(t, srcPath)
+			require.Equal(t, names, roVisibleXattrs(t, mntPath), "%s: xattr names", rel)
 			for _, name := range names {
 				require.Equal(t, roGetXattr(t, srcPath, name), roGetXattr(t, mntPath, name),
 					"%s: value of %s", rel, name)
@@ -208,6 +209,23 @@ func roExpectsExtendedInode(st *unix.Stat_t) bool {
 		st.Uid > uint32(^uint16(0)) ||
 		st.Gid > uint32(^uint16(0)) ||
 		st.Nlink > 1
+}
+
+// roVisibleXattrs lists the xattr names of path, excluding the nydus-internal
+// trusted.nydus.* namespace: the builder stamps trusted.nydus.prefetch.blobs
+// on the image root, which the nydus FUSE reader hides but a root-privileged
+// kernel EROFS mount of the raw device exposes. The internal namespace is not
+// part of the reproduced tree contract, so the differential ignores it on
+// both sides.
+func roVisibleXattrs(t *testing.T, path string) []string {
+	t.Helper()
+	var names []string
+	for _, name := range roListXattr(t, path) {
+		if !strings.HasPrefix(name, "trusted.nydus.") {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func roListXattr(t *testing.T, path string) []string {
