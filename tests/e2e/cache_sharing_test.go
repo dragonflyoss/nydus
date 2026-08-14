@@ -646,11 +646,11 @@ func TestCacheSharingStaleGroupmapKeepsInode(t *testing.T) {
 		sha256File(t, filepath.Join(first.mnt, "shared.bin")))
 
 	sharedKey := sha256File(t, fixture.blobB)
-	groupmap := filepath.Join(cacheDir, sharedKey+".chunk.map")
+	chunkmap := filepath.Join(cacheDir, sharedKey+".chunk.map")
 	blobData := filepath.Join(cacheDir, sharedKey+".blob.data")
-	require.FileExists(t, groupmap)
+	require.FileExists(t, chunkmap)
 	require.FileExists(t, blobData)
-	before := cacheFileInode(t, groupmap)
+	before := cacheFileInode(t, chunkmap)
 
 	// Simulate an external reclaimer that removes only the data file while the
 	// first mount is still running.
@@ -665,12 +665,12 @@ func TestCacheSharingStaleGroupmapKeepsInode(t *testing.T) {
 	require.Equal(t, sha256Bytes(fixture.files["shared.bin"]),
 		sha256File(t, filepath.Join(second.mnt, "shared.bin")))
 
-	after := cacheFileInode(t, groupmap)
-	t.Logf("groupmap inode before=%d after=%d", before, after)
+	after := cacheFileInode(t, chunkmap)
+	t.Logf("chunkmap inode before=%d after=%d", before, after)
 
 	// The bitmap is reset in place, so both processes keep observing the same
 	// file. Replacing it would split them onto separate inodes and each would
 	// publish readiness the other can never see.
 	require.Equal(t, before, after,
-		"the stale groupmap must be reset in place, not replaced")
+		"the stale chunkmap must be reset in place, not replaced")
 }
