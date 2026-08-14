@@ -107,6 +107,14 @@ pub fn build_ondemand_blob(
                     .with_context(|| format!("failed to open source blob {blob_index}"))?,
             ),
         };
+        if cache.blob_metadata().is_cdc() {
+            // A CDC blob's groups describe the deduplicated unique byte
+            // stream, not the logical space `read_at` addresses, so its group
+            // bytes cannot be re-sliced into an ondemand artifact this way.
+            return Err(Error::Unsupported(format!(
+                "source blob {blob_index} uses CDC chunk dedup; optimize does not support CDC blobs yet"
+            )));
+        }
 
         let group = *cache
             .blob_metadata()

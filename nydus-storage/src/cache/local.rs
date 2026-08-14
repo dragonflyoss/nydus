@@ -130,14 +130,25 @@ impl LocalBlobCache {
 
         let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
-        let groupmap_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
+        // CDC blobs track readiness per CDC chunk record (the unit filled into
+        // the logical cache space); fixed blobs track readiness per group.
+        let readiness_map_path = if blob_metadata.is_cdc() {
+            cache_dir.join(format!("{cache_key_hex}.chunk.map"))
+        } else {
+            cache_dir.join(format!("{cache_key_hex}.group.map"))
+        };
+        let readiness_count = if blob_metadata.is_cdc() {
+            blob_metadata.chunk_count()
+        } else {
+            blob_metadata.group_count()
+        };
         // The group_map is only meaningful together with the cache data file it
         // describes: a leftover group_map whose data file has been removed
         // would claim groups are ready while reads hit sparse zeros. Note this
         // before creating the data file below, which would otherwise mask it.
         // (Removing the map while keeping the data is the safe direction and
         // needs no handling.)
-        let stale_groupmap = groupmap_path.exists() && !cache_data_path.exists();
+        let stale_groupmap = readiness_map_path.exists() && !cache_data_path.exists();
 
         // Create the cache data file eagerly, before the group_map, so that
         // "group_map file exists => data file exists" holds and the check above
@@ -148,10 +159,10 @@ impl LocalBlobCache {
             .create(true)
             .truncate(false)
             .open(&cache_data_path)?;
-        data_file.set_len(blob_metadata.total_uncompressed_size())?;
+        data_file.set_len(blob_metadata.logical_uncompressed_size())?;
         drop(data_file);
 
-        let group_map = GroupMap::open(&groupmap_path, blob_metadata.group_count())?;
+        let group_map = GroupMap::open(&readiness_map_path, readiness_count)?;
         if stale_groupmap {
             // Reset in place rather than unlinking: handles already mapping
             // this file observe the reset, whereas a replacement inode would
@@ -159,7 +170,7 @@ impl LocalBlobCache {
             group_map.reset()?;
             warn!(
                 "stale group_map without cache data file, reset: {}",
-                groupmap_path.display()
+                readiness_map_path.display()
             );
         }
 
@@ -205,7 +216,7 @@ impl LocalBlobCache {
                 .truncate(false)
                 .open(&self.cache_data_path)?,
         );
-        file.set_len(self.blob_metadata.total_uncompressed_size())?;
+        file.set_len(self.blob_metadata.logical_uncompressed_size())?;
         nydus_telemetry::metrics::inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
@@ -318,6 +329,138 @@ impl LocalBlobCache {
         result
     }
 
+    /// Ensure every CDC chunk record in `records` (indexes into the sorted
+    /// record table) has its bytes decoded into the cache file at its logical
+    /// offset. `memo` deduplicates group decodes across the records of one
+    /// call, since consecutive records usually reference the same group.
+    fn ensure_cdc_records(&self, records: Range<usize>, cache_file: &File) -> io::Result<()> {
+        let chunks = self.blob_metadata.cdc_chunks();
+        let mut memo: HashMap<usize, Vec<u8>> = HashMap::new();
+        for index in records {
+            self.ensure_cdc_record(index, &chunks[index], cache_file, &mut memo)?;
+        }
+        Ok(())
+    }
+
+    /// The CDC analogue of `ensure_group`: single-flight per record within the
+    /// process, cross-process claim per record, then decode + publish.
+    fn ensure_cdc_record(
+        &self,
+        record_index: usize,
+        chunk: &nydus_format::blob::BlobMetadataCdcChunk,
+        cache_file: &File,
+        memo: &mut HashMap<usize, Vec<u8>>,
+    ) -> io::Result<()> {
+        if self.group_map.is_ready(record_index)? {
+            nydus_telemetry::metrics::inc_cache_hit_group();
+            return Ok(());
+        }
+
+        let (flight, leader) = {
+            let mut inflight = self.inflight_groups.lock().unwrap();
+            match inflight.get(&record_index) {
+                Some(flight) => (flight.clone(), false),
+                None => {
+                    let flight = Arc::new(GroupFlight::new());
+                    inflight.insert(record_index, flight.clone());
+                    (flight, true)
+                }
+            }
+        };
+        if !leader {
+            return flight.wait();
+        }
+
+        let _guard = LeaderGuard {
+            flight: flight.clone(),
+            group_index: record_index,
+            inflight: &self.inflight_groups,
+        };
+
+        let result = (|| {
+            if self.group_map.is_ready(record_index)? {
+                nydus_telemetry::metrics::inc_cache_hit_group();
+                return Ok(());
+            }
+
+            let _claim = self.group_locks.acquire(record_index);
+            if self.group_map.is_ready(record_index)? {
+                nydus_telemetry::metrics::inc_cache_hit_group();
+                return Ok(());
+            }
+
+            self.fill_cdc_record(chunk, cache_file, memo, ReadKind::OnDemand)?;
+            self.group_map.set_ready(record_index)?;
+            nydus_telemetry::metrics::inc_cache_ondemand_fill_group();
+            Ok(())
+        })();
+
+        flight.complete(&result);
+        result
+    }
+
+    /// Decode the group(s) covering `chunk`'s unique byte range (through
+    /// `memo`) and write the record's bytes into the cache file at the
+    /// record's logical byte offset. Does not touch the readiness map.
+    fn fill_cdc_record(
+        &self,
+        chunk: &nydus_format::blob::BlobMetadataCdcChunk,
+        cache_file: &File,
+        memo: &mut HashMap<usize, Vec<u8>>,
+        kind: ReadKind,
+    ) -> io::Result<()> {
+        let unique_offset = chunk.unique_byte_offset();
+        let unique_end = chunk.unique_byte_end();
+        let first = self
+            .blob_metadata
+            .group_index_for_byte_offset(unique_offset)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+        let last = self
+            .blob_metadata
+            .group_index_for_byte_offset(unique_end - 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+
+        // Callers walk records in (mostly) increasing unique offset order, so
+        // groups below the current record's first group are never needed
+        // again; dropping them bounds the memo to the record's group span.
+        memo.retain(|group_index, _| *group_index >= first);
+
+        let mut bytes = vec![0u8; chunk.size() as usize];
+        for group_index in first..=last {
+            let group = *self.blob_metadata.group_at(group_index).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
+            })?;
+            if !memo.contains_key(&group_index) {
+                if let Some(recorder) = self.trace_recorder.as_ref() {
+                    recorder.record_group_access(self.blob_index, group_index as u32);
+                } else {
+                    crate::access_trace::record_group_access(self.blob_index, group_index as u32);
+                }
+                let mut buffers = GroupBuffers::default();
+                let decoded = fetch_decode_validate_group_into(
+                    &self.blob_id,
+                    &self.blob_metadata,
+                    &self.backend,
+                    &group,
+                    &mut buffers,
+                    kind,
+                )?;
+                memo.insert(group_index, decoded.to_vec());
+            }
+            let decoded = &memo[&group_index];
+            let group_offset = group.uncompressed_byte_offset();
+            let copy_start = unique_offset.max(group_offset);
+            let copy_end = unique_end.min(group.uncompressed_byte_end());
+            bytes[(copy_start - unique_offset) as usize..(copy_end - unique_offset) as usize]
+                .copy_from_slice(
+                    &decoded[(copy_start - group_offset) as usize
+                        ..(copy_end - group_offset) as usize],
+                );
+        }
+
+        write_all_at(cache_file, chunk.logical_byte_offset(), &bytes)
+    }
+
     /// Ensure every group overlapping `[offset, offset + len)` is decoded and
     /// written to the cache file. Shared by `read_at` and `ensure_range`.
     fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
@@ -340,6 +483,14 @@ impl LocalBlobCache {
         if self.group_map.is_all_ready() {
             nydus_telemetry::metrics::inc_cache_hit_group();
             return Ok(());
+        }
+
+        // CDC blobs are looked up per record: binary-search the records
+        // overlapping the logical range; logical gaps between records are
+        // padding/holes that read back as zeros from the sparse cache file.
+        if self.blob_metadata.is_cdc() {
+            let records = self.blob_metadata.cdc_chunks_overlapping(offset, end);
+            return self.ensure_cdc_records(records, cache_file);
         }
 
         let groups = self.group_span(offset, end)?;
@@ -468,6 +619,27 @@ impl BlobCache for LocalBlobCache {
         // Prefetch writes the bulk of the cache, so it is worth one stat to
         // make sure the file it fills is still the one other processes read.
         self.ensure_data_file_linked(&cache_file)?;
+
+        // CDC blobs: walk records in unique-offset order so each group is
+        // decoded (roughly) once through the memo, and readiness is tracked
+        // per record.
+        if self.blob_metadata.is_cdc() {
+            let chunks = self.blob_metadata.cdc_chunks();
+            let mut order: Vec<usize> = (0..chunks.len()).collect();
+            order.sort_by_key(|&index| chunks[index].unique_byte_offset());
+            let mut memo: HashMap<usize, Vec<u8>> = HashMap::new();
+            for index in order {
+                if self.group_map.is_ready(index)? {
+                    continue;
+                }
+                self.fill_cdc_record(&chunks[index], &cache_file, &mut memo, ReadKind::Prefetch)?;
+                self.group_map.set_ready(index)?;
+                nydus_telemetry::metrics::inc_cache_fill_group();
+            }
+            self.group_map.latch_all_ready();
+            return Ok(());
+        }
+
         // Prefetch owns its decode buffers and does not take `fetch_lock`, so it
         // never blocks on-demand FUSE reads. The group_map is internally locked
         // and `set_ready` is idempotent, so racing with a read at worst decodes
@@ -565,6 +737,40 @@ impl BlobCache for LocalBlobCache {
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob probe range overflow")
         })?;
+
+        // CDC blobs: readiness is per record. Logical gaps between records
+        // (padding/holes) are always "ready" — the sparse cache file already
+        // reads back the correct zeros there.
+        if self.blob_metadata.is_cdc() {
+            let chunks = self.blob_metadata.cdc_chunks();
+            let records = self.blob_metadata.cdc_chunks_overlapping(offset, end);
+            let mut ranges: Vec<Range<u64>> = Vec::new();
+            let mut push = |start: u64, stop: u64| {
+                if start >= stop {
+                    return;
+                }
+                match ranges.last_mut() {
+                    Some(last) if last.end == start => last.end = stop,
+                    _ => ranges.push(start..stop),
+                }
+            };
+            let mut cursor = offset;
+            for index in records {
+                let chunk = &chunks[index];
+                let chunk_start = chunk.logical_byte_offset().max(offset);
+                let chunk_end = chunk.logical_byte_end().min(end);
+                // The gap before this record is ready zeros.
+                push(cursor, chunk_start);
+                if self.group_map.is_ready(index)? {
+                    push(chunk_start, chunk_end);
+                }
+                cursor = chunk_end;
+            }
+            // The tail gap after the last record is ready zeros.
+            push(cursor, end);
+            return Ok(ranges);
+        }
+
         let (first, last) = self.group_span(offset, end)?.into_inner();
 
         self.group_map
