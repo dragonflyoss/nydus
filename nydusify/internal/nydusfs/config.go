@@ -20,14 +20,20 @@ import (
 // registryBackendConfig is the `backend.config` section for the registry
 // backend understood by `nydus fuse --config`.
 type registryBackendConfig struct {
-	Host string `yaml:"host"`
-	Repo string `yaml:"repo"`
-	// PlainHTTP uses the http scheme to talk to the registry. The nydus-core
-	// config calls this key "insecure", unlike the rest of nydusify where
-	// Insecure means skip-TLS-verify.
-	PlainHTTP  bool   `yaml:"insecure"`
-	SkipVerify bool   `yaml:"skip_verify"`
-	Auth       string `yaml:"auth,omitempty"`
+	// Addr is the registry address including the scheme; the scheme selects
+	// between TLS (`https://`) and plain HTTP (`http://`).
+	Addr       string      `yaml:"addr"`
+	Repository string      `yaml:"repository"`
+	Auth       string      `yaml:"auth,omitempty"`
+	HTTP       httpSection `yaml:"http"`
+}
+
+type httpSection struct {
+	TLS tlsSection `yaml:"tls"`
+}
+
+type tlsSection struct {
+	SkipVerify bool `yaml:"skip_verify"`
 }
 
 type backendSection struct {
@@ -35,37 +41,32 @@ type backendSection struct {
 	Config registryBackendConfig `yaml:"config"`
 }
 
-type localDirSection struct {
+type storageSection struct {
 	Dir string `yaml:"dir"`
 }
 
-type cacheSection struct {
-	Type   string          `yaml:"type"`
-	Config localDirSection `yaml:"config"`
-}
-
 type prefetchSection struct {
-	Enable  bool `yaml:"enable"`
-	Threads int  `yaml:"threads"`
+	Scope string `yaml:"scope"`
 }
 
 type storageConfig struct {
 	Backend  backendSection  `yaml:"backend"`
-	Cache    cacheSection    `yaml:"cache"`
+	Storage  storageSection  `yaml:"storage"`
 	Prefetch prefetchSection `yaml:"prefetch"`
 }
 
-// prefetchThreads returns the worker thread count for the prefetch section:
-// the nydus default when prefetch is enabled, zero otherwise.
-func prefetchThreads(enable bool) int {
+// prefetchScope maps the prefetch toggle to a `prefetch.scope` value:
+// "ondemand" warms the recorded hot set when prefetch is enabled, "none"
+// keeps every read fully on-demand otherwise.
+func prefetchScope(enable bool) string {
 	if enable {
-		return 10
+		return "ondemand"
 	}
-	return 0
+	return "none"
 }
 
 // WriteRegistryConfig derives a registry-backed storage config for img, writes
-// it to configPath, and returns the rendered YAML. The registry host and
+// it to configPath, and returns the rendered YAML. The registry address and
 // repository are parsed from the image reference; credentials, TLS and HTTP
 // settings come from the provider's reg side (source or target) used to pull
 // the image. Blob prefetch runs only when prefetchEnable is set (a live mount
@@ -83,6 +84,11 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 		host = "registry-1.docker.io"
 	}
 
+	scheme := "https"
+	if provider.PlainHTTP(reg) {
+		scheme = "http"
+	}
+
 	var auth string
 	if username, password, err := provider.Credentials(host); err == nil && username != "" {
 		auth = basicAuthConfig(username, password)
@@ -92,18 +98,16 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 		Backend: backendSection{
 			Type: "registry",
 			Config: registryBackendConfig{
-				Host:       host,
-				Repo:       repo,
-				PlainHTTP:  provider.PlainHTTP(reg),
-				SkipVerify: provider.Insecure(reg),
+				Addr:       scheme + "://" + host,
+				Repository: repo,
 				Auth:       auth,
+				HTTP: httpSection{
+					TLS: tlsSection{SkipVerify: provider.Insecure(reg)},
+				},
 			},
 		},
-		Cache: cacheSection{
-			Type:   "local",
-			Config: localDirSection{Dir: cacheDir},
-		},
-		Prefetch: prefetchSection{Enable: prefetchEnable, Threads: prefetchThreads(prefetchEnable)},
+		Storage:  storageSection{Dir: cacheDir},
+		Prefetch: prefetchSection{Scope: prefetchScope(prefetchEnable)},
 	}
 
 	out, err := yaml.Marshal(cfg)

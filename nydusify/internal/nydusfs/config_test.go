@@ -22,9 +22,9 @@ func TestBasicAuthConfigEncodesRegistryBackendAuthString(t *testing.T) {
 		Backend: backendSection{
 			Type: "registry",
 			Config: registryBackendConfig{
-				Host: "reg.example.com",
-				Repo: "library/ubuntu",
-				Auth: got,
+				Addr:       "https://reg.example.com",
+				Repository: "library/ubuntu",
+				Auth:       got,
 			},
 		},
 	}
