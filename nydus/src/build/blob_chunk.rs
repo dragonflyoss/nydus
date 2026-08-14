@@ -1,16 +1,24 @@
 use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataGroup,
-    BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+    BlobMetadata, BlobMetadataCdcChunk, BlobMetadataChunk, BlobMetadataCompressor,
+    BlobMetadataGroup, BLOB_METADATA_DEFAULT_CHUNK_SIZE,
 };
 use nydus_format::erofs::{ErofsChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
 use nydus_format::utils::round_up;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem;
 use std::path::Path;
+
+/// FastCDC (v2020) cut-point parameters used for CDC chunk dedup, chosen from
+/// dedup experiments on real images (node/golang/python/pytorch): min 4 KiB,
+/// average 16 KiB, max 64 KiB gave the best dedup/metadata trade-off.
+pub const CDC_MIN_CHUNK_SIZE: u32 = 4096;
+pub const CDC_AVG_CHUNK_SIZE: u32 = 16384;
+pub const CDC_MAX_CHUNK_SIZE: u32 = 65536;
 
 /// Manages writing chunk data to a separate blob device.
 pub struct BlobWriter {
@@ -25,6 +33,19 @@ pub struct BlobWriter {
     group_buffer: Vec<u8>,
     blob_metadata_groups: Vec<BlobMetadataGroup>,
     blob_metadata_chunks: Vec<BlobMetadataChunk>,
+    cdc: bool,
+    cdc_chunks: Vec<BlobMetadataCdcChunk>,
+    // blake3 digest -> byte offset in the unique data stream. Sizes need not
+    // be stored: FastCDC cut points are content-defined, so equal content
+    // yields equal digests only for equal-size pieces (and blake3 collisions
+    // across sizes are not a practical concern).
+    cdc_dedup: HashMap<[u8; 32], u64>,
+    // Bytes appended to the unique (group) data stream so far, before the
+    // final block padding added by `finish`.
+    cdc_unique_len: u64,
+    // Real data bytes fed through the CDC splitter (excludes elided zero
+    // chunks and tail-block padding), for dedup statistics.
+    cdc_logical_len: u64,
 }
 
 const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
@@ -99,7 +120,30 @@ impl BlobWriter {
             group_buffer: Vec::with_capacity(group_size as usize),
             blob_metadata_groups: Vec::new(),
             blob_metadata_chunks: Vec::new(),
+            cdc: false,
+            cdc_chunks: Vec::new(),
+            cdc_dedup: HashMap::new(),
+            cdc_unique_len: 0,
+            cdc_logical_len: 0,
         })
+    }
+
+    /// Enable content-defined chunking: file data is split at FastCDC cut
+    /// points, deduplicated by blake3 digest, and only unique bytes enter the
+    /// group data stream. Must be called before any data is written.
+    pub fn with_cdc(mut self) -> Self {
+        self.cdc = true;
+        self
+    }
+
+    pub fn is_cdc(&self) -> bool {
+        self.cdc
+    }
+
+    /// `(logical_bytes, unique_bytes)` fed through the CDC splitter so far;
+    /// the difference is the data removed by deduplication.
+    pub fn cdc_dedup_stats(&self) -> (u64, u64) {
+        (self.cdc_logical_len, self.cdc_unique_len)
     }
 
     pub fn total_blocks(&self) -> u64 {
@@ -133,14 +177,25 @@ impl BlobWriter {
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         source_offset_bias: u64,
     ) -> Result<BlobMetadata> {
-        Ok(BlobMetadata::from_parts_with_options(
-            blob_id,
-            self.file_chunk_size / EROFS_BLOCK_SIZE,
-            self.compressor,
-            self.blob_metadata_groups.clone(),
-            self.blob_metadata_chunks.clone(),
-        )?
-        .with_compressed_offset_bias(source_offset_bias)?)
+        let blob_metadata = if self.cdc {
+            BlobMetadata::from_cdc_parts(
+                blob_id,
+                self.file_chunk_size / EROFS_BLOCK_SIZE,
+                self.compressor,
+                self.blob_metadata_groups.clone(),
+                self.cdc_chunks.clone(),
+                self.next_blkaddr,
+            )?
+        } else {
+            BlobMetadata::from_parts_with_options(
+                blob_id,
+                self.file_chunk_size / EROFS_BLOCK_SIZE,
+                self.compressor,
+                self.blob_metadata_groups.clone(),
+                self.blob_metadata_chunks.clone(),
+            )?
+        };
+        Ok(blob_metadata.with_compressed_offset_bias(source_offset_bias)?)
     }
 
     pub fn write_blob_metadata(
@@ -156,6 +211,13 @@ impl BlobWriter {
     }
 
     pub fn finish(&mut self) -> Result<()> {
+        // In CDC mode the unique data stream is byte granular, so the tail
+        // group must be zero padded to a whole block before it is flushed
+        // (groups always describe whole uncompressed blocks).
+        if self.cdc && !self.group_buffer.is_empty() {
+            let padded = round_up(self.group_buffer.len(), EROFS_BLOCK_SIZE as usize);
+            self.group_buffer.resize(padded, 0);
+        }
         self.flush_group()?;
         self.file.flush().context("failed to flush blob device")
     }
@@ -223,6 +285,17 @@ impl BlobWriter {
             Error::Overflow(format!("blob meta chunk block count exceeds u32: {err}"))
         })?;
 
+        if self.cdc {
+            // CDC mode: the chunk still occupies `block_count` logical blocks
+            // (EROFS chunk indexes are untouched), but its real bytes are
+            // split at content-defined cut points and deduplicated; only
+            // unique pieces enter the group stream. The tail-block padding is
+            // never stored: uncovered logical bytes read back as zeros.
+            self.next_blkaddr += block_count as u64;
+            self.append_cdc_pieces(data, addr * EROFS_BLOCK_SIZE as u64)?;
+            return Ok(addr);
+        }
+
         // Block-aligned chunk payload: real bytes followed by zero padding only
         // in its final block.
         let mut uncompressed = vec![0u8; write_len];
@@ -240,6 +313,39 @@ impl BlobWriter {
         self.append_to_group_stream(&uncompressed)?;
 
         Ok(addr)
+    }
+
+    /// Split one fixed chunk's real bytes at FastCDC cut points, recording a
+    /// CDC record per piece and appending only never-seen-before pieces to
+    /// the group (unique data) stream.
+    fn append_cdc_pieces(&mut self, data: &[u8], logical_byte_base: u64) -> Result<()> {
+        for cut in fastcdc::v2020::FastCDC::new(
+            data,
+            CDC_MIN_CHUNK_SIZE,
+            CDC_AVG_CHUNK_SIZE,
+            CDC_MAX_CHUNK_SIZE,
+        ) {
+            let piece = &data[cut.offset..cut.offset + cut.length];
+            let digest = *blake3::hash(piece).as_bytes();
+            let unique_byte_offset = match self.cdc_dedup.get(&digest) {
+                Some(offset) => *offset,
+                None => {
+                    let offset = self.cdc_unique_len;
+                    self.append_to_group_stream(piece)?;
+                    self.cdc_unique_len += cut.length as u64;
+                    self.cdc_dedup.insert(digest, offset);
+                    offset
+                }
+            };
+            self.cdc_logical_len += cut.length as u64;
+            self.cdc_chunks.push(BlobMetadataCdcChunk::new(
+                digest,
+                logical_byte_base + cut.offset as u64,
+                unique_byte_offset,
+                cut.length as u32,
+            )?);
+        }
+        Ok(())
     }
 
     /// Append block-aligned data to the current group, flushing whenever it

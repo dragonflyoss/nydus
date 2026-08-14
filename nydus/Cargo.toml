@@ -51,6 +51,7 @@ ublk = ["dep:libublk"]
 
 [dependencies]
 blake3 = "1"
+fastcdc = "3"
 clap = { version = "4", features = ["derive"], optional = true }
 crc32c = "0.6"
 fuser = { version = "0.17", optional = true }

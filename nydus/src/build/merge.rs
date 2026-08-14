@@ -796,6 +796,7 @@ mod tests {
                 compressor: BlobMetadataCompressor::None,
                 exclude: &exclude,
                 standalone_bootstrap: false,
+                cdc: false,
             },
             fs::File::create(&blob_path).unwrap(),
         )

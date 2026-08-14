@@ -39,9 +39,10 @@ const BLOB_METADATA_MAX_BLOCK_BITS: u8 = 19;
 const BLOB_METADATA_HEADER_CRC32_OFFSET: usize = 16;
 /// Bytes of the header actually carrying fields; the rest of the 4 KiB
 /// header block is a reserved compat area (writer-zeroed, reader-ignored).
-const BLOB_METADATA_HEADER_FIELD_BYTES: usize = 56;
+const BLOB_METADATA_HEADER_FIELD_BYTES: usize = 64;
 const BLOB_METADATA_GROUP_RESERVED: [u8; 6] = [0u8; 6];
 const BLOB_METADATA_CHUNK_RESERVED: u32 = 0;
+const BLOB_METADATA_CDC_CHUNK_RESERVED: u32 = 0;
 
 bitflags! {
     /// Feature bits, split EROFS-style: the low 16 bits are **incompatible**
@@ -55,6 +56,13 @@ bitflags! {
     pub struct BlobMetadataFlags: u32 {
         const COMPRESSOR_ZSTD = 1 << 0;
         const DIGESTER_BLAKE3 = 1 << 1;
+        /// Incompat: the chunk table holds variable-size CDC (content-defined
+        /// chunking) records ([`BlobMetadataCdcChunk`], 56 bytes each) instead
+        /// of fixed-size [`BlobMetadataChunk`] records. Groups then describe
+        /// the deduplicated *unique* data stream, while EROFS inode chunk
+        /// indexes keep pointing into the dense *logical* address space whose
+        /// size is carried by the header `logical_block_count` field.
+        const CHUNK_CDC = 1 << 2;
     }
 }
 
@@ -159,6 +167,12 @@ pub struct BlobMetadataHeader {
     /// `chunk_block_bits`. The read path maps a block to its group with
     /// `block >> group_block_bits`.
     group_block_bits: u8,
+    /// Size of the dense logical (deduplicated-view) address space in 4 KiB
+    /// blocks. Only meaningful when [`BlobMetadataFlags::CHUNK_CDC`] is set:
+    /// with dedup the logical space referenced by EROFS chunk indexes is
+    /// larger than the unique data space described by the groups, so it can
+    /// no longer be derived from the group table. Zero for non-CDC blobs.
+    logical_block_count: u64,
 }
 
 const _: () = assert!(size_of::<BlobMetadataHeader>() == BLOB_METADATA_HEADER_FIELD_BYTES);
@@ -177,6 +191,7 @@ impl Default for BlobMetadataHeader {
             group_count: 0,
             chunk_block_bits: BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT.trailing_zeros() as u8,
             group_block_bits: BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT.trailing_zeros() as u8,
+            logical_block_count: 0,
         }
     }
 }
@@ -239,8 +254,28 @@ impl BlobMetadataHeader {
         self.groups_offset
     }
 
+    /// Whether the chunk table holds variable-size CDC records.
+    pub fn is_cdc(&self) -> bool {
+        self.flags().contains(BlobMetadataFlags::CHUNK_CDC)
+    }
+
+    /// Size of the dense logical address space in 4 KiB blocks (CDC blobs
+    /// only; zero otherwise).
+    pub fn logical_block_count(&self) -> u64 {
+        self.logical_block_count
+    }
+
+    /// On-disk size of one chunk record, depending on the chunk table kind.
+    fn chunk_record_size(&self) -> u64 {
+        if self.is_cdc() {
+            size_of::<BlobMetadataCdcChunk>() as u64
+        } else {
+            size_of::<BlobMetadataChunk>() as u64
+        }
+    }
+
     pub fn chunk_bytes(&self) -> u64 {
-        self.chunk_count as u64 * size_of::<BlobMetadataChunk>() as u64
+        self.chunk_count as u64 * self.chunk_record_size()
     }
 
     pub fn group_bytes(&self) -> u64 {
@@ -264,9 +299,14 @@ impl BlobMetadataHeader {
         self.chunks_offset = BLOB_METADATA_HEADER_SIZE;
         self.groups_offset = self
             .chunks_offset
-            .checked_add(chunk_count as u64 * size_of::<BlobMetadataChunk>() as u64)
+            .checked_add(chunk_count as u64 * self.chunk_record_size())
             .ok_or_else(|| Error::Overflow("blob meta group offset overflow".to_string()))?;
         Ok(())
+    }
+
+    fn set_cdc(&mut self, logical_block_count: u64) {
+        self.flags |= BlobMetadataFlags::CHUNK_CDC.bits();
+        self.logical_block_count = logical_block_count;
     }
 
     fn set_chunk_block_count(&mut self, blocks: u32) -> Result<()> {
@@ -318,7 +358,9 @@ impl BlobMetadataHeader {
                 self.groups_offset
             )));
         }
-        if self.chunks_offset % align_of::<BlobMetadataChunk>() as u64 != 0 {
+        if self.chunks_offset % align_of::<BlobMetadataChunk>() as u64 != 0
+            || self.chunks_offset % align_of::<BlobMetadataCdcChunk>() as u64 != 0
+        {
             return Err(Error::InvalidImage(
                 "blob meta chunks offset is not aligned".to_string(),
             ));
@@ -326,6 +368,17 @@ impl BlobMetadataHeader {
         if self.groups_offset % align_of::<BlobMetadataGroup>() as u64 != 0 {
             return Err(Error::InvalidImage(
                 "blob meta groups offset is not aligned".to_string(),
+            ));
+        }
+        if self.is_cdc() {
+            if self.logical_block_count == 0 && self.chunk_count != 0 {
+                return Err(Error::InvalidImage(
+                    "blob meta CDC logical block count must be non-zero".to_string(),
+                ));
+            }
+        } else if self.logical_block_count != 0 {
+            return Err(Error::InvalidImage(
+                "blob meta logical block count requires the CDC flag".to_string(),
             ));
         }
         Ok(())
@@ -362,7 +415,8 @@ impl BlobMetadataHeader {
         data[48] = self.chunk_block_bits;
         data[49] = self.group_block_bits;
         // data[50..56] stays zero: reserved after the two u8 exponents.
-        // data[56..4096] stays zero: reserved header tail.
+        data[56..64].copy_from_slice(&self.logical_block_count.to_le_bytes());
+        // data[64..4096] stays zero: reserved header tail.
         data
     }
 
@@ -385,6 +439,7 @@ impl BlobMetadataHeader {
                 reader.read_exact(&mut pad)?;
                 bits
             },
+            logical_block_count: read_u64_from(reader)?,
         };
         // The rest of the header block is reserved for future compat fields.
         // Writers zero it, but readers deliberately do not enforce that
@@ -704,9 +759,130 @@ impl BlobMetadataChunk {
     }
 }
 
+/// A variable-size content-defined (CDC) chunk record — 56 bytes on disk,
+/// present when [`BlobMetadataFlags::CHUNK_CDC`] is set.
+///
+/// A CDC record maps one byte range of the dense *logical* address space
+/// (what EROFS inode chunk indexes point at) to the byte range holding its
+/// deduplicated content in the *unique* data stream (what the groups
+/// compress). Several records may share the same unique range — that is the
+/// deduplication. Records are sorted by logical offset and never overlap;
+/// logical bytes not covered by any record (file-tail block padding and
+/// holes) read as zeros.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlobMetadataCdcChunk {
+    digest: [u8; 32],
+    logical_byte_offset: u64,
+    unique_byte_offset: u64,
+    size: u32,
+    reserved: u32,
+}
+
+const _: () = assert!(size_of::<BlobMetadataCdcChunk>() == 56);
+
+impl BlobMetadataCdcChunk {
+    pub fn new(
+        digest: [u8; 32],
+        logical_byte_offset: u64,
+        unique_byte_offset: u64,
+        size: u32,
+    ) -> Result<Self> {
+        let chunk = Self {
+            digest,
+            logical_byte_offset,
+            unique_byte_offset,
+            size,
+            reserved: BLOB_METADATA_CDC_CHUNK_RESERVED,
+        };
+        chunk.validate()?;
+        Ok(chunk)
+    }
+
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Byte offset of this chunk within the dense logical address space.
+    pub fn logical_byte_offset(&self) -> u64 {
+        self.logical_byte_offset
+    }
+
+    /// Byte offset of this chunk's content within the unique data stream
+    /// described by the groups.
+    pub fn unique_byte_offset(&self) -> u64 {
+        self.unique_byte_offset
+    }
+
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
+    pub fn logical_byte_end(&self) -> u64 {
+        self.logical_byte_offset + self.size as u64
+    }
+
+    pub fn unique_byte_end(&self) -> u64 {
+        self.unique_byte_offset + self.size as u64
+    }
+
+    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        self.validate()?;
+        writer.write_all(&self.to_bytes())?;
+        Ok(())
+    }
+
+    fn to_bytes(self) -> [u8; 56] {
+        let mut data = [0u8; 56];
+        data[0..32].copy_from_slice(&self.digest);
+        data[32..40].copy_from_slice(&self.logical_byte_offset.to_le_bytes());
+        data[40..48].copy_from_slice(&self.unique_byte_offset.to_le_bytes());
+        data[48..52].copy_from_slice(&self.size.to_le_bytes());
+        data[52..56].copy_from_slice(&self.reserved.to_le_bytes());
+        data
+    }
+
+    pub fn read_from(reader: &mut dyn Read) -> Result<Self> {
+        let chunk = Self {
+            digest: read_digest(reader)?,
+            logical_byte_offset: read_u64_from(reader)?,
+            unique_byte_offset: read_u64_from(reader)?,
+            size: read_u32_from(reader)?,
+            reserved: read_u32_from(reader)?,
+        };
+        chunk.validate()?;
+        Ok(chunk)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.size == 0 {
+            return Err(Error::InvalidImage(
+                "blob meta CDC chunk size must be non-zero".to_string(),
+            ));
+        }
+        self.logical_byte_offset
+            .checked_add(self.size as u64)
+            .ok_or_else(|| {
+                Error::Overflow("blob meta CDC chunk logical byte range overflow".to_string())
+            })?;
+        self.unique_byte_offset
+            .checked_add(self.size as u64)
+            .ok_or_else(|| {
+                Error::Overflow("blob meta CDC chunk unique byte range overflow".to_string())
+            })?;
+        if self.reserved != BLOB_METADATA_CDC_CHUNK_RESERVED {
+            return Err(Error::InvalidImage(
+                "blob meta CDC chunk reserved field must be zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 enum BlobMetadataStorage {
     Owned {
         chunks: Vec<BlobMetadataChunk>,
+        cdc_chunks: Vec<BlobMetadataCdcChunk>,
         groups: Vec<BlobMetadataGroup>,
     },
     Mapped(Mmap),
@@ -750,7 +926,43 @@ impl BlobMetadata {
         let mut blob_metadata = Self {
             header,
             blob_id,
-            storage: BlobMetadataStorage::Owned { chunks, groups },
+            storage: BlobMetadataStorage::Owned {
+                chunks,
+                cdc_chunks: Vec::new(),
+                groups,
+            },
+        };
+        blob_metadata.header.crc32 = blob_metadata.compute_crc32();
+        Ok(blob_metadata)
+    }
+
+    /// Construct CDC blob metadata: groups describe the deduplicated unique
+    /// data stream, `cdc_chunks` map the dense logical address space (of
+    /// `logical_block_count` 4 KiB blocks) onto it.
+    pub fn from_cdc_parts(
+        blob_id: [u8; SHA256_DIGEST_SIZE],
+        chunk_block_count: u32,
+        compressor: BlobMetadataCompressor,
+        groups: Vec<BlobMetadataGroup>,
+        cdc_chunks: Vec<BlobMetadataCdcChunk>,
+        logical_block_count: u64,
+    ) -> Result<Self> {
+        let mut header = BlobMetadataHeader::default();
+        header.set_chunk_block_count(chunk_block_count)?;
+        header.set_compressor(compressor);
+        header.set_cdc(logical_block_count);
+        header.set_counts_and_offsets(cdc_chunks.len() as u32, groups.len() as u32)?;
+        header.group_block_bits = infer_group_block_bits(&groups)?;
+        validate_groups(&groups, header.group_block_count())?;
+        validate_cdc_chunks(&groups, &cdc_chunks, logical_block_count)?;
+        let mut blob_metadata = Self {
+            header,
+            blob_id,
+            storage: BlobMetadataStorage::Owned {
+                chunks: Vec::new(),
+                cdc_chunks,
+                groups,
+            },
         };
         blob_metadata.header.crc32 = blob_metadata.compute_crc32();
         Ok(blob_metadata)
@@ -761,13 +973,24 @@ impl BlobMetadata {
         for group in self.groups() {
             groups.push(group.with_compressed_byte_offset_bias(bias)?);
         }
-        Self::from_parts_with_options(
-            self.blob_id,
-            self.chunk_block_count(),
-            self.compressor(),
-            groups,
-            self.chunks().to_vec(),
-        )
+        if self.is_cdc() {
+            Self::from_cdc_parts(
+                self.blob_id,
+                self.chunk_block_count(),
+                self.compressor(),
+                groups,
+                self.cdc_chunks().to_vec(),
+                self.header.logical_block_count(),
+            )
+        } else {
+            Self::from_parts_with_options(
+                self.blob_id,
+                self.chunk_block_count(),
+                self.compressor(),
+                groups,
+                self.chunks().to_vec(),
+            )
+        }
     }
 
     pub fn header(&self) -> &BlobMetadataHeader {
@@ -803,10 +1026,46 @@ impl BlobMetadata {
     }
 
     pub fn chunks(&self) -> &[BlobMetadataChunk] {
+        if self.is_cdc() {
+            return &[];
+        }
         match &self.storage {
             BlobMetadataStorage::Owned { chunks, .. } => chunks,
             BlobMetadataStorage::Mapped(mmap) => mapped_chunks(mmap, &self.header),
         }
+    }
+
+    /// The CDC chunk records, sorted by logical byte offset. Empty when the
+    /// blob is not CDC.
+    pub fn cdc_chunks(&self) -> &[BlobMetadataCdcChunk] {
+        if !self.is_cdc() {
+            return &[];
+        }
+        match &self.storage {
+            BlobMetadataStorage::Owned { cdc_chunks, .. } => cdc_chunks,
+            BlobMetadataStorage::Mapped(mmap) => mapped_cdc_chunks(mmap, &self.header),
+        }
+    }
+
+    /// Whether the chunk table holds variable-size CDC dedup records.
+    pub fn is_cdc(&self) -> bool {
+        self.header.is_cdc()
+    }
+
+    /// Indexes of the CDC records overlapping the logical byte range
+    /// `[offset, end)`, via binary search over the sorted record table. The
+    /// range may include logical gaps (padding/holes) not covered by any
+    /// record; those bytes read as zeros.
+    pub fn cdc_chunks_overlapping(&self, offset: u64, end: u64) -> std::ops::Range<usize> {
+        let records = self.cdc_chunks();
+        if offset >= end {
+            return 0..0;
+        }
+        // First record whose logical end is past `offset`.
+        let first = records.partition_point(|record| record.logical_byte_end() <= offset);
+        // First record starting at or past `end`.
+        let last = records.partition_point(|record| record.logical_byte_offset() < end);
+        first..last
     }
 
     pub fn groups(&self) -> &[BlobMetadataGroup] {
@@ -854,6 +1113,19 @@ impl BlobMetadata {
         groups_total_uncompressed_size(self.groups())
     }
 
+    /// Size in bytes of the dense logical address space that EROFS chunk
+    /// indexes point into — what the cache data file must be sized to. For a
+    /// CDC blob this is the header's logical block count (dedup makes it
+    /// larger than the unique data described by the groups); otherwise the
+    /// logical and unique spaces coincide.
+    pub fn logical_uncompressed_size(&self) -> u64 {
+        if self.is_cdc() {
+            self.header.logical_block_count() * EROFS_BLOCK_SIZE as u64
+        } else {
+            self.total_uncompressed_size()
+        }
+    }
+
     pub fn total_compressed_size(&self) -> u64 {
         groups_total_compressed_size(self.groups())
     }
@@ -873,6 +1145,9 @@ impl BlobMetadata {
         for chunk in self.chunks() {
             crc32 = crc32c_append(crc32, &chunk.to_bytes());
         }
+        for chunk in self.cdc_chunks() {
+            crc32 = crc32c_append(crc32, &chunk.to_bytes());
+        }
         for group in self.groups() {
             crc32 = crc32c_append(crc32, &group.to_bytes());
         }
@@ -887,6 +1162,9 @@ impl BlobMetadata {
         self.header
             .write_to_with_crc32(writer, self.compute_crc32())?;
         for chunk in self.chunks() {
+            chunk.write_to(writer)?;
+        }
+        for chunk in self.cdc_chunks() {
             chunk.write_to(writer)?;
         }
         for group in self.groups() {
@@ -937,13 +1215,25 @@ impl BlobMetadata {
             validate_blob_metadata_crc32(data, &header)?;
         }
 
-        let mut chunks = Vec::with_capacity(header.chunk_count() as usize);
+        let mut chunks = Vec::new();
+        let mut cdc_chunks = Vec::new();
         cursor.set_position(header.chunks_offset());
-        for index in 0..header.chunk_count() as usize {
-            chunks.push(
-                BlobMetadataChunk::read_from(&mut cursor)
-                    .with_context(|| format!("failed to read blob meta chunk {index}"))?,
-            );
+        if header.is_cdc() {
+            cdc_chunks.reserve(header.chunk_count() as usize);
+            for index in 0..header.chunk_count() as usize {
+                cdc_chunks.push(
+                    BlobMetadataCdcChunk::read_from(&mut cursor)
+                        .with_context(|| format!("failed to read blob meta CDC chunk {index}"))?,
+                );
+            }
+        } else {
+            chunks.reserve(header.chunk_count() as usize);
+            for index in 0..header.chunk_count() as usize {
+                chunks.push(
+                    BlobMetadataChunk::read_from(&mut cursor)
+                        .with_context(|| format!("failed to read blob meta chunk {index}"))?,
+                );
+            }
         }
 
         let mut groups = Vec::with_capacity(header.group_count() as usize);
@@ -954,11 +1244,20 @@ impl BlobMetadata {
                     .with_context(|| format!("failed to read blob meta group {index}"))?,
             );
         }
-        validate_tables(&groups, &chunks, header.group_block_count())?;
+        if header.is_cdc() {
+            validate_groups(&groups, header.group_block_count())?;
+            validate_cdc_chunks(&groups, &cdc_chunks, header.logical_block_count())?;
+        } else {
+            validate_tables(&groups, &chunks, header.group_block_count())?;
+        }
         Ok(Self {
             header,
             blob_id,
-            storage: BlobMetadataStorage::Owned { chunks, groups },
+            storage: BlobMetadataStorage::Owned {
+                chunks,
+                cdc_chunks,
+                groups,
+            },
         })
     }
 
@@ -988,11 +1287,20 @@ impl BlobMetadata {
         if check_crc32 {
             validate_blob_metadata_crc32(&mmap, &header)?;
         }
-        validate_tables(
-            mapped_groups(&mmap, &header),
-            mapped_chunks(&mmap, &header),
-            header.group_block_count(),
-        )?;
+        if header.is_cdc() {
+            validate_groups(mapped_groups(&mmap, &header), header.group_block_count())?;
+            validate_cdc_chunks(
+                mapped_groups(&mmap, &header),
+                mapped_cdc_chunks(&mmap, &header),
+                header.logical_block_count(),
+            )?;
+        } else {
+            validate_tables(
+                mapped_groups(&mmap, &header),
+                mapped_chunks(&mmap, &header),
+                header.group_block_count(),
+            )?;
+        }
         Ok(Self {
             header,
             blob_id: [0u8; SHA256_DIGEST_SIZE],
@@ -1206,6 +1514,45 @@ fn validate_chunks(groups: &[BlobMetadataGroup], chunks: &[BlobMetadataChunk]) -
     Ok(())
 }
 
+fn validate_cdc_chunks(
+    groups: &[BlobMetadataGroup],
+    chunks: &[BlobMetadataCdcChunk],
+    logical_block_count: u64,
+) -> Result<()> {
+    let unique_size = groups_total_uncompressed_size(groups);
+    let logical_size = logical_block_count
+        .checked_mul(EROFS_BLOCK_SIZE as u64)
+        .ok_or_else(|| Error::Overflow("blob meta logical byte size overflow".to_string()))?;
+    let mut previous_logical_end = 0u64;
+    for (index, chunk) in chunks.iter().enumerate() {
+        chunk
+            .validate()
+            .with_context(|| format!("invalid blob meta CDC chunk {index}"))?;
+        // Records are sorted by logical offset and never overlap; gaps are
+        // allowed (padding/holes read as zeros).
+        if chunk.logical_byte_offset() < previous_logical_end {
+            return Err(Error::InvalidImage(format!(
+                "blob meta CDC chunks must be sorted and non-overlapping at index {index}"
+            )));
+        }
+        if chunk.logical_byte_end() > logical_size {
+            return Err(Error::InvalidImage(format!(
+                "blob meta CDC chunk {index} exceeds the logical byte range"
+            )));
+        }
+        // The referenced unique bytes must lie inside the group-described
+        // unique data stream (shared ranges are the point of dedup, so no
+        // uniqueness is enforced there).
+        if chunk.unique_byte_end() > unique_size {
+            return Err(Error::InvalidImage(format!(
+                "blob meta CDC chunk {index} exceeds the unique byte range"
+            )));
+        }
+        previous_logical_end = chunk.logical_byte_end();
+    }
+    Ok(())
+}
+
 fn groups_total_uncompressed_size(groups: &[BlobMetadataGroup]) -> u64 {
     groups
         .last()
@@ -1225,6 +1572,17 @@ fn mapped_chunks<'a>(data: &'a [u8], header: &BlobMetadataHeader) -> &'a [BlobMe
     let byte_len = header.chunk_count() as usize * size_of::<BlobMetadataChunk>();
     let bytes = &data[offset..offset + byte_len];
     let ptr = bytes.as_ptr().cast::<BlobMetadataChunk>();
+    unsafe { std::slice::from_raw_parts(ptr, header.chunk_count() as usize) }
+}
+
+fn mapped_cdc_chunks<'a>(
+    data: &'a [u8],
+    header: &BlobMetadataHeader,
+) -> &'a [BlobMetadataCdcChunk] {
+    let offset = header.chunks_offset() as usize;
+    let byte_len = header.chunk_count() as usize * size_of::<BlobMetadataCdcChunk>();
+    let bytes = &data[offset..offset + byte_len];
+    let ptr = bytes.as_ptr().cast::<BlobMetadataCdcChunk>();
     unsafe { std::slice::from_raw_parts(ptr, header.chunk_count() as usize) }
 }
 
