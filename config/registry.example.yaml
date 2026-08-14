@@ -12,69 +12,83 @@
 backend:
   type: registry
   config:
-    # Registry host[:port]. For the official Docker registry use
-    # "registry-1.docker.io"; for a local distribution registry use
-    # "127.0.0.1:5000".
-    host: 127.0.0.1:5000
+    # Registry address including the scheme; the scheme selects between TLS
+    # and plain HTTP. For the official Docker registry use
+    # "https://registry-1.docker.io"; for a local distribution registry
+    # started with --plain-http use "http://127.0.0.1:5000".
+    addr: http://127.0.0.1:5000
 
     # Image repository (no tag/digest), e.g. "library/ubuntu".
-    repo: library/nydus-demo
-
-    # Use the plain `http` scheme instead of `https`. Set to true for a local
-    # distribution registry started with --plain-http. Default: false.
-    insecure: true
-
-    # Skip TLS certificate verification (also tolerates self-signed certs).
-    # Ignored when `insecure: true`. Default: false.
-    skip_verify: false
-
-    # Per-request timeout in seconds (connect + read). Default: 5. Kept short
-    # because a read holds the group's fetch claim for its whole duration, and
-    # the readers waiting behind that claim are FUSE worker threads.
-    timeout: 5
-
-    # Number of retries for on-demand reads. Prefetch reads are tried once.
-    # Default: 3.
-    retry_limit: 3
+    repository: library/nydus-demo
 
     # Optional basic-auth credential: the base64-encoded `username:password`
     # string. Omit `auth` entirely for anonymous / token-only registries.
     # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
 
-    # Extra CA certificate PEM files to trust (in addition to the system roots).
-    # Useful for registries fronted by a private CA. Default: [].
-    ca_cert_files: []
-    # ca_cert_files:
-    #   - /etc/nydus/certs/registry-ca.pem
+    # HTTP client settings: timeouts, retries, and TLS trust. The whole block
+    # and every field are optional; the timeout and retry limits also apply to
+    # Dragonfly SDK requests.
+    http:
+      # Per-request timeout (connect + read), e.g. `5s` or `1m`; `0s` disables
+      # it. Default: 5s. Kept short because a read holds the group's fetch
+      # claim for its whole duration, and the readers waiting behind that
+      # claim are FUSE worker threads.
+      timeout: 5s
 
-    # Optional proxy. Blob requests are routed through the HTTP forward proxy
-    # `url` (e.g. a Dragonfly dfdaemon P2P agent), keeping their original
-    # upstream URL so the proxy knows what to back-source. When built with the
-    # `backend-dragonfly-proxy` feature, set `dragonfly_scheduler_endpoint` to
-    # route blob GETs through the Dragonfly client SDK instead. Omit the whole
-    # `proxy` block to talk to the origin registry directly.
+      # Maximum number of retry attempts per request, applied by the HTTP
+      # client's retry middleware and by the Dragonfly SDK. Default: 3.
+      max_retries: 3
+
+      # Optional proxy block routing every registry request through an HTTP
+      # forward proxy. Requests keep their original upstream URL, so a proxy
+      # like a Dragonfly dfdaemon knows what to back-source. Omit to connect
+      # directly to the origin.
+      #
+      # proxy:
+      #   # The proxy address including the scheme.
+      #   addr: http://127.0.0.1:65001
+
+      # TLS settings for connections to the registry.
+      tls:
+        # Skip TLS certificate verification (also tolerates self-signed
+        # certs). Ignored for an `http` address. Default: false.
+        skip_verify: false
+
+        # Optional CA certificate path with PEM format to trust in addition
+        # to the system roots; the file may bundle multiple certificates.
+        # Useful for registries fronted by a private CA.
+        #
+        # ca_cert: /etc/nydus/certs/registry-ca.pem
+
+    # Optional Dragonfly block (requires the `backend-dragonfly-proxy`
+    # feature). When set, blob GETs are routed through the Dragonfly client
+    # SDK for P2P distribution, falling back to the origin registry when a
+    # Dragonfly request still fails after the SDK's retries; every other
+    # request goes directly to the origin registry. Omit to talk to the
+    # origin directly.
     #
-    # proxy:
-    #   # HTTP forward-proxy URL.
-    #   url: http://127.0.0.1:65001
-    #   # Dragonfly scheduler endpoint (requires the backend-dragonfly-proxy
-    #   # feature). Takes precedence over `url` for GET requests.
-    #   dragonfly_scheduler_endpoint: http://127.0.0.1:65000
+    # dragonfly:
+    #   # The Dragonfly scheduler endpoint (gRPC).
+    #   scheduler_endpoint: http://127.0.0.1:65000
 
-cache:
-  type: local
-  config:
-    # Persistent chunk cache directory (equivalent to --cache-dir).
-    dir: /var/lib/nydus/cache
+storage:
+  # Persistent chunk cache directory (equivalent to --cache-dir). Optional:
+  # when unset (or the whole `storage` section is omitted), reads run
+  # diskless — every read fetches from the backend directly and nothing is
+  # written to disk. Kernel-served modes (fanotify/nbd/ublk/uffd) and
+  # `nydus optimize` require a directory.
+  dir: /var/lib/nydus/cache
 
 prefetch:
-  # Toggle background blob prefetch after mount.
-  enable: true
-  # Number of concurrent prefetch worker threads.
-  threads: 10
-  # Also prefetch every remaining blob in full after the priority blobs
-  # (phase 2). Default: false. Leave false for an optimized image so only the
-  # "ondemand" redirect blob is prefetched, warming the access-ordered hot set
-  # without pulling the whole image.
-  full: false
+  # Number of concurrently prefetched blobs.
+  concurrent_blob_count: 10
+  # Per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching one
+  # whole blob may take, while `http.timeout` bounds each group request
+  # within it. `0s` disables the bound. Default: 1h.
+  timeout: 1h
+  # Which blobs to pull: `none` disables prefetch; `ondemand` (default)
+  # prefetches only the "ondemand" redirect blob, warming the access-ordered
+  # hot set without pulling the whole image; `all` prefetches every blob, so
+  # the entire image ends up in the local cache.
+  scope: ondemand

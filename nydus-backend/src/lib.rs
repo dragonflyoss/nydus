@@ -1,27 +1,13 @@
-//! Data-plane blob backends for nydus: local directory, OCI registry, and
-//! proxied reads.
+//! Data-plane blob backends for nydus: local directory and OCI registry, with
+//! optional Dragonfly SDK P2P reads.
 //!
 //! Every API here returns `io::Result` so the OS errno survives to the
 //! service edges; this crate must not depend on the control-plane error
-//! type. Backend-private errors (registry auth, proxy classification) are
+//! type. Backend-private errors (registry auth, Dragonfly classification) are
 //! matched for retry decisions internally and fold into `io::Error` at the
 //! trait boundary.
 
-pub mod config;
-
 mod local;
-
-// Shared HTTP transport stack, reusable by any HTTP-based backend.
-#[cfg(feature = "backend-registry")]
-mod dns;
-#[cfg(feature = "backend-dragonfly-proxy")]
-mod dragonfly_sdk;
-#[cfg(feature = "backend-registry")]
-mod http;
-#[cfg(feature = "backend-registry")]
-mod proxy;
-#[cfg(feature = "backend-registry")]
-mod request;
 
 #[cfg(feature = "backend-registry")]
 mod registry;
@@ -30,7 +16,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use config::BackendConfig;
+use nydus_config::BackendConfig;
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -40,8 +26,9 @@ pub use local::Local;
 pub(crate) use registry::Registry;
 
 /// What kind of backend read this is, shared with the metrics layer. Policy
-/// (retry, throttling, proxy priority) keys off it here; its definition lives
-/// in [`nydus_telemetry::metrics`] so that crate stays a dependency leaf.
+/// (retry, throttling, Dragonfly priority) keys off it here; its definition
+/// lives in [`nydus_telemetry::metrics`] so that crate stays a dependency
+/// leaf.
 pub use nydus_telemetry::metrics::ReadKind;
 
 /// The uncompressed span a backend read decodes to, when it maps to
@@ -109,7 +96,7 @@ pub trait BlobBackend: Send + Sync {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         dst: &mut [u8],
-        ctx: ReadContext,
+        context: ReadContext,
     ) -> io::Result<()>;
 }
 
@@ -130,7 +117,7 @@ struct MeteredBackend {
 impl MeteredBackend {
     fn record<T>(
         &self,
-        ctx: ReadContext,
+        context: ReadContext,
         bytes: u64,
         read: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
@@ -138,7 +125,7 @@ impl MeteredBackend {
         let result = read();
         nydus_telemetry::metrics::record_backend_read(
             self.inner.backend_target(),
-            ctx.kind,
+            context.kind,
             bytes,
             start.elapsed(),
             result.is_err(),
@@ -172,30 +159,67 @@ impl BlobBackend for MeteredBackend {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         dst: &mut [u8],
-        ctx: ReadContext,
+        context: ReadContext,
     ) -> io::Result<()> {
         if dst.is_empty() {
             return Ok(());
         }
         let bytes = dst.len() as u64;
-        self.record(ctx, bytes, || {
-            self.inner.read_range_into(blob_id, offset, dst, ctx)
+        self.record(context, bytes, || {
+            self.inner.read_range_into(blob_id, offset, dst, context)
         })
     }
 }
 
 /// Construct a blob backend from its configuration.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
-    let backend: Arc<dyn BlobBackend> = match config.kind.as_str() {
-        "local" => Arc::new(Local::from_value(&config.options)?),
+    let backend: Arc<dyn BlobBackend> = match config {
+        BackendConfig::Local(local) => Arc::new(Local::new(local.dir.clone())),
         #[cfg(feature = "backend-registry")]
-        "registry" => Arc::new(Registry::from_value(&config.options)?),
-        other => {
+        BackendConfig::Registry(registry) => Arc::new(Registry::new(registry.clone())?),
+        #[cfg(not(feature = "backend-registry"))]
+        BackendConfig::Registry(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unsupported backend type: {other}"),
+                "registry backend requires the `backend-registry` feature",
             ))
         }
     };
     Ok(metered(backend))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_backend_builds_a_local_backend() {
+        let config: BackendConfig =
+            serde_yaml::from_str("type: local\nconfig:\n  dir: /blobs\n").unwrap();
+        assert!(build_backend(&config).is_ok());
+    }
+
+    #[cfg(feature = "backend-registry")]
+    #[test]
+    fn build_backend_builds_a_registry_backend() {
+        let config: BackendConfig = serde_yaml::from_str(
+            "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
+        )
+        .unwrap();
+        assert!(build_backend(&config).is_ok());
+    }
+
+    #[cfg(not(feature = "backend-registry"))]
+    #[test]
+    fn build_backend_rejects_registry_without_the_feature() {
+        let config: BackendConfig = serde_yaml::from_str(
+            "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
+        )
+        .unwrap();
+        let err = build_backend(&config)
+            .err()
+            .expect("registry config must be rejected without the feature");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("backend-registry"));
+    }
 }

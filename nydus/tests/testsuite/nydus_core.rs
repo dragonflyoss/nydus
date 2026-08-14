@@ -132,7 +132,7 @@ fn build_test_image_with_layout(
     fs::write(&bootstrap, &bootstrap_bytes).unwrap();
 
     let config = Config::from_yaml(&format!(
-        "backend:\n  type: local\n  config:\n    dir: {}\ncache:\n  type: local\n  config:\n    dir: {}\nprefetch:\n  enable: false\n",
+        "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         blob_dir.display(),
         root.join("cache").display(),
     ))

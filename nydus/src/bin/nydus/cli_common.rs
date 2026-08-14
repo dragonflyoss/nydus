@@ -122,7 +122,7 @@ pub struct ImageSourceArgs {
 
 /// Load the YAML storage config from `path` with the shared error context.
 pub fn load_storage_config(path: &Path) -> Result<Config> {
-    Config::from_file(path).context("failed to load storage config")
+    Config::load(path).context("failed to load storage config")
 }
 
 /// Default worker parallelism: the available CPU count clamped to

@@ -58,7 +58,7 @@ type coreMountOption struct {
 	fullPrefetch bool
 }
 
-// writePrefetchConfig renders the storage config needed to turn on full
+// writePrefetchConfig renders the storage config needed to turn on all-blob
 // prefetch, which has no command line flag of its own.
 func writePrefetchConfig(t *testing.T, path, blobDir, cacheDir string) {
 	t.Helper()
@@ -66,14 +66,11 @@ func writePrefetchConfig(t *testing.T, path, blobDir, cacheDir string) {
   type: local
   config:
     dir: %s
-cache:
-  type: local
-  config:
-    dir: %s
+storage:
+  dir: %s
 prefetch:
-  enable: true
-  full: true
-  threads: 4
+  scope: all
+  concurrent_blob_count: 4
 `, blobDir, cacheDir)
 	require.NoError(t, os.WriteFile(path, []byte(config), 0644))
 }

@@ -250,26 +250,25 @@ func (e *fanotifyEnv) convertAndExport(t *testing.T) {
 
 func (e *fanotifyEnv) writeConfig(t *testing.T) {
 	t.Helper()
-	insecure, skip := "false", "false"
+	scheme, skip := "https", "false"
 	if e.registryIsLoopback() {
-		insecure, skip = "true", "true"
+		scheme, skip = "http", "true"
 	}
 	config := fmt.Sprintf(`backend:
   type: registry
   config:
-    host: %s
-    repo: %s
-    insecure: %s
-    skip_verify: %s
-cache:
-  type: local
-  config:
-    dir: %s
+    addr: %s://%s
+    repository: %s
+    http:
+      tls:
+        skip_verify: %s
+storage:
+  dir: %s
 prefetch:
-  enable: false
-`, e.registry, e.repo, insecure, skip, e.cacheDir)
+  scope: none
+`, scheme, e.registry, e.repo, skip, e.cacheDir)
 	require.NoError(t, os.WriteFile(e.configPath, []byte(config), 0644))
-	t.Logf("  wrote %s (insecure=%s)", e.configPath, insecure)
+	t.Logf("  wrote %s (scheme=%s)", e.configPath, scheme)
 }
 
 // ----------------------------------------------------------------- daemon ----

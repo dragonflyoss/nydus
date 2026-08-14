@@ -288,9 +288,15 @@ impl ErofsReader {
     /// Prefetch every group of the blob identified by `blob_index`. An
     /// "ondemand" redirect blob is dispatched group by group into the source
     /// blobs' caches instead of building its own cache file, fetching its
-    /// segments concurrently with up to `threads` workers.
-    pub fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()> {
-        self.blobs.prefetch_blob(blob_index, threads)
+    /// segments concurrently with up to `threads` workers. A non-zero
+    /// `timeout` bounds the whole blob's prefetch.
+    pub fn prefetch_blob(
+        &self,
+        blob_index: u16,
+        threads: usize,
+        timeout: std::time::Duration,
+    ) -> io::Result<()> {
+        self.blobs.prefetch_blob(blob_index, threads, timeout)
     }
 
     /// Build the blob prefetch plan: blobs listed in the root prefetch xattr (in

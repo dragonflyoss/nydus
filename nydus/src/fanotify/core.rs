@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_core::{BlobId, NydusCore};
 use nydus_error::{Context, Error, Result};
 
@@ -394,25 +394,20 @@ pub(crate) fn align_fetch_range(
 
 /// The daemon's only fetch deadline is the backend's HTTP timeout plus its
 /// bounded retry count — there is no per-event deadline. A registry
-/// `timeout: 0` disables the HTTP timeout entirely and would let a stalled
+/// `timeout: 0s` disables the HTTP timeout entirely and would let a stalled
 /// registry block readers indefinitely, so this mode rejects it up front.
 /// Other consumers of the registry backend keep the historical
 /// "0 = no timeout" behavior.
 fn validate_bounded_backend_timeout(config: &Config) -> Result<()> {
-    if config.backend.kind == "registry"
-        && config
-            .backend
-            .options
-            .get("timeout")
-            .and_then(|v| v.as_u64())
-            == Some(0)
-    {
-        return Err(Error::InvalidConfig(
-            "fanotify mode requires a bounded registry `timeout`: `0` disables HTTP \
-             timeouts and lets a stalled registry block readers indefinitely — set a \
-             large value (e.g. 600) instead"
-                .to_string(),
-        ));
+    if let BackendConfig::Registry(registry) = &config.backend {
+        if registry.http.timeout.is_zero() {
+            return Err(Error::InvalidConfig(
+                "fanotify mode requires a bounded registry `timeout`: `0s` disables HTTP \
+                 timeouts and lets a stalled registry block readers indefinitely — set a \
+                 large value (e.g. 600s) instead"
+                    .to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -592,14 +587,14 @@ mod tests {
 
     #[test]
     fn zero_registry_timeout_is_rejected_for_fanotify() {
-        let registry_yaml = |timeout_line: &str| {
+        let registry_yaml = |http_block: &str| {
             format!(
-                "backend:\n  type: registry\n  config:\n    host: 127.0.0.1:5000\n    \
-                 repo: a/b\n{timeout_line}cache:\n  type: local\n  config:\n    dir: /cache\n"
+                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    \
+                 repository: a/b\n{http_block}storage:\n  dir: /cache\n"
             )
         };
 
-        let zero = Config::from_yaml(&registry_yaml("    timeout: 0\n")).unwrap();
+        let zero = Config::from_yaml(&registry_yaml("    http:\n      timeout: 0s\n")).unwrap();
         assert!(validate_bounded_backend_timeout(&zero).is_err());
 
         // Omitted timeout falls back to the registry backend's positive default.
@@ -608,7 +603,7 @@ mod tests {
 
         let local = Config::from_yaml(
             "backend:\n  type: local\n  config:\n    dir: /blobs\n\
-             cache:\n  type: local\n  config:\n    dir: /cache\n",
+             storage:\n  dir: /cache\n",
         )
         .unwrap();
         assert!(validate_bounded_backend_timeout(&local).is_ok());

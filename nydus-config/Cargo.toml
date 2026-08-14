@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
-description = "YAML storage configuration for nydus: schema, loading and validation, converting into the pure config structs owned by the data-plane crates."
+description = "YAML storage configuration for nydus: the typed schema, loading and validation."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [dependencies]
-nydus-backend = { version = "0.1.0", path = "../nydus-backend" }
+humantime-serde = "1"
 nydus-error = { version = "0.1.0", path = "../nydus-error" }
+rustls-pki-types = { version = "1", features = ["std"] }
 serde = { workspace = true }
 serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile = { workspace = true }

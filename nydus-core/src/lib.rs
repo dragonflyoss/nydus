@@ -48,6 +48,7 @@ use nydus_error::{Context, Error, Result};
 use entry::ImageFs;
 use extent::{clamped_range_end, mapped_range_offset, BlobRangeSpec, ExtentResolver};
 use nydus_backend::build_backend;
+use nydus_config::PrefetchScope;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -79,7 +80,7 @@ impl NydusCore {
     /// provide both the backend serving the blobs and a persistent local cache
     /// directory.
     ///
-    /// When `config.prefetch.enable` is set, a background prefetch worker is
+    /// Unless `config.prefetch.scope` is `none`, a background prefetch worker is
     /// spawned before returning: for an optimized image it streams the
     /// "ondemand" redirect blob first (priority) to warm the source blobs'
     /// caches in recorded access order, then prefetches the remaining blobs.
@@ -107,13 +108,18 @@ impl NydusCore {
             .metadata()
             .with_context(|| format!("failed to stat bootstrap: {}", bootstrap.display()))?
             .len();
-        let prefetch_enable = config.prefetch.enable;
-        let prefetch_threads = config.prefetch.threads;
-        let prefetch_full = config.prefetch.full;
+        let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
+        let prefetch_scope = config.prefetch.scope;
+        let prefetch_timeout = config.prefetch.timeout;
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
-        let cache_dir = config
-            .cache_dir()
-            .context("failed to resolve cache directory from config")?;
+        // The multi-device model hands each blob's cache file to the kernel
+        // (as an EROFS device or fill target), so diskless mode cannot apply.
+        let Some(cache_dir) = config.storage.dir.clone() else {
+            return Err(Error::InvalidConfig(
+                "storage.dir is required: the blob cache files back the kernel-served devices"
+                    .to_string(),
+            ));
+        };
         std::fs::create_dir_all(&cache_dir).with_context(|| {
             format!("failed to create cache directory: {}", cache_dir.display())
         })?;
@@ -166,17 +172,18 @@ impl NydusCore {
         // of the returned core. The handle is detached: prefetch is
         // best-effort warmup and must never block core construction or
         // teardown.
-        if prefetch_enable {
+        if prefetch_scope != PrefetchScope::None {
             let prefetcher = BlobPrefetcher::new(
                 reader.blob_caches(),
                 reader.prefetch_plan(),
-                prefetch_threads,
-                prefetch_full,
+                prefetch_concurrent_blob_count,
+                prefetch_scope,
+                prefetch_timeout,
             );
             match prefetcher.spawn() {
                 Ok(_handle) => {
                     tracing::info!(
-                        "nydus core: background prefetch started (full={prefetch_full})"
+                        "nydus core: background prefetch started (scope={prefetch_scope:?})"
                     );
                 }
                 Err(err) => {

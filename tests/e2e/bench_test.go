@@ -263,7 +263,7 @@ func (e *benchEnv) buildModes(t *testing.T) []*benchMode {
 func (e *benchEnv) writeConfig(t *testing.T, name, cacheDir string) {
 	t.Helper()
 	config := fmt.Sprintf(
-		"backend:\n  type: local\n  config:\n    dir: %s\ncache:\n  type: local\n  config:\n    dir: %s\nprefetch:\n  enable: false\n",
+		"backend:\n  type: local\n  config:\n    dir: %s\nstorage:\n  dir: %s\nprefetch:\n  scope: none\n",
 		e.blobDir, cacheDir,
 	)
 	require.NoError(t, os.WriteFile(e.configPath(name), []byte(config), 0644))

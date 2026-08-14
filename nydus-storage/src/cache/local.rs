@@ -7,7 +7,7 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
@@ -453,7 +453,7 @@ impl Drop for LocalBlobCache {
 }
 
 impl BlobCache for LocalBlobCache {
-    fn prefetch_all(&self) -> io::Result<()> {
+    fn prefetch_all(&self, deadline: Option<Instant>) -> io::Result<()> {
         let groups = self.blob_metadata.groups();
         if groups.is_empty() {
             return Ok(());
@@ -476,6 +476,7 @@ impl BlobCache for LocalBlobCache {
         let mut window = Vec::new();
 
         for batch in plan_prefetch_batches(groups, BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64) {
+            super::check_prefetch_deadline(deadline)?;
             if batch
                 .clone()
                 .map(|index| self.group_map.is_ready(index))
@@ -660,6 +661,7 @@ impl BlobCache for LocalBlobCache {
     fn for_each_redirect_group(
         &self,
         threads: usize,
+        deadline: Option<Instant>,
         skip: &(dyn Fn(&BlobMetadataGroup) -> bool + Sync),
         cb: &(dyn Fn(&BlobMetadataGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
@@ -689,6 +691,7 @@ impl BlobCache for LocalBlobCache {
             let mut window = Vec::new();
             let mut decoded = Vec::new();
             for batch in plan_prefetch_batches(groups, super::REDIRECT_PREFETCH_BATCH_SIZE) {
+                super::check_prefetch_deadline(deadline)?;
                 if batch_done(&batch) {
                     continue;
                 }
@@ -717,6 +720,10 @@ impl BlobCache for LocalBlobCache {
                     let mut decoded = Vec::new();
                     loop {
                         if first_err.lock().unwrap().is_some() {
+                            break;
+                        }
+                        if let Err(err) = super::check_prefetch_deadline(deadline) {
+                            *first_err.lock().unwrap() = Some(err);
                             break;
                         }
                         let idx = next.fetch_add(1, Ordering::Relaxed);
@@ -1108,7 +1115,7 @@ mod tests {
 
         // The "owner" instance prefetches everything from the backend.
         let guard = first.prefetch_lock();
-        first.prefetch_all().unwrap();
+        first.prefetch_all(None).unwrap();
         let after_owner = backend.reads();
         assert!(after_owner > 0, "owner must stream from the backend");
 
@@ -1120,7 +1127,7 @@ mod tests {
 
         // Repeating the prefetch afterwards issues zero backend reads: every
         // group is already ready in the shared cache.
-        second.prefetch_all().unwrap();
+        second.prefetch_all(None).unwrap();
         assert_eq!(backend.reads(), after_owner, "waiter must not re-download");
 
         // Cross-handle on-demand reads are also served from the shared cache.
@@ -1162,7 +1169,7 @@ mod tests {
             let baseline = backend.reads();
             let delivered = AtomicUsize::new(0);
             cache
-                .for_each_redirect_group(1, &|_group| skip_all, &|group, decoded| {
+                .for_each_redirect_group(1, None, &|_group| skip_all, &|group, decoded| {
                     assert!(group.is_redirect());
                     assert_eq!(decoded, payload);
                     delivered.fetch_add(1, Ordering::SeqCst);

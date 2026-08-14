@@ -5,7 +5,9 @@ use crate::cli_common;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{build_backend, BlobBackend, Local};
-use nydus_config::DEFAULT_PREFETCH_THREADS;
+use nydus_config::{
+    default_prefetch_concurrent_blob_count, default_prefetch_timeout, PrefetchScope,
+};
 use nydus_core::ErofsReader;
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
@@ -29,7 +31,7 @@ pub struct FuseArgs {
     pub config: Option<PathBuf>,
 
     /// Enable background blob prefetch after mounting. Off by default; when
-    /// --config is provided, the config's `prefetch.enable` also turns it on.
+    /// --config is provided, the config's `prefetch.scope` also turns it on.
     #[arg(long, default_value_t = false)]
     pub prefetch: bool,
 
@@ -99,24 +101,37 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
 
     let cache_dir = if let Some(dir) = args.cache_dir.clone() {
         Some(dir)
-    } else if let Some(config) = storage_config.as_ref() {
-        Some(
-            config
-                .cache_dir()
-                .context("failed to resolve cache directory from config")?,
-        )
     } else {
-        None
+        storage_config
+            .as_ref()
+            .and_then(|config| config.storage.dir.clone())
     };
 
-    let (prefetch_enable, prefetch_threads, prefetch_full) = match storage_config.as_ref() {
-        Some(config) => (
-            config.prefetch.enable || args.prefetch,
-            config.prefetch.threads,
-            config.prefetch.full,
-        ),
-        None => (args.prefetch, DEFAULT_PREFETCH_THREADS, false),
-    };
+    let (prefetch_scope, prefetch_concurrent_blob_count, prefetch_timeout) =
+        match storage_config.as_ref() {
+            Some(config) => {
+                // `--prefetch` forces prefetch on when the config disables it.
+                let scope = if config.prefetch.scope == PrefetchScope::None && args.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    config.prefetch.scope
+                };
+                (
+                    scope,
+                    config.prefetch.concurrent_blob_count,
+                    config.prefetch.timeout,
+                )
+            }
+            None => (
+                if args.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    PrefetchScope::None
+                },
+                default_prefetch_concurrent_blob_count(),
+                default_prefetch_timeout(),
+            ),
+        };
 
     // Build the blob backend. A direct `--blob <path>` is self-contained and
     // needs no backend. Otherwise a `--bootstrap` is served by either an
@@ -180,22 +195,25 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
 
     let session = FuseService::mount(fs, mountpoint, &config)?;
 
-    if prefetch_enable {
+    if prefetch_scope == PrefetchScope::None {
+        info!("blob prefetch disabled (enable with --prefetch or the config's prefetch.scope)");
+    } else if cache_dir.is_none() {
+        info!("blob prefetch disabled: diskless reads have no cache to warm (set --cache-dir or storage.dir)");
+    } else {
         let prefetcher = BlobPrefetcher::new(
             reader.blob_caches(),
             reader.prefetch_plan(),
-            prefetch_threads,
-            prefetch_full,
+            prefetch_concurrent_blob_count,
+            prefetch_scope,
+            prefetch_timeout,
         );
         match prefetcher.spawn() {
             Ok(_handle) => info!(
-                "started blob prefetch with {} worker threads (full={})",
-                prefetch_threads, prefetch_full
+                "started blob prefetch (concurrent_blob_count={}, scope={:?})",
+                prefetch_concurrent_blob_count, prefetch_scope
             ),
             Err(err) => warn!("failed to start blob prefetch: {}", err),
         }
-    } else {
-        info!("blob prefetch disabled (enable with --prefetch or the config's prefetch.enable)");
     }
 
     // Optionally expose Prometheus metrics over a Unix socket. A failure here is

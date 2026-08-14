@@ -169,7 +169,7 @@ func (e *nbdEnv) buildImage(t *testing.T) {
 func (e *nbdEnv) writeConfig(t *testing.T) {
 	t.Helper()
 	config := fmt.Sprintf(
-		"backend:\n  type: local\n  config:\n    dir: %s\ncache:\n  type: local\n  config:\n    dir: %s\nprefetch:\n  enable: false\n",
+		"backend:\n  type: local\n  config:\n    dir: %s\nstorage:\n  dir: %s\nprefetch:\n  scope: none\n",
 		e.blobDir,
 		e.cacheDir,
 	)

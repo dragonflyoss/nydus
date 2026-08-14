@@ -9,9 +9,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tempfile::TempDir;
 use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
@@ -19,7 +18,7 @@ use nydus_backend::BlobBackend;
 use nydus_format::blob::BlobMetadataGroup;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-use super::{BlobCache, LocalBlobCache};
+use super::{BlobCache, LocalBlobCache, RemoteBlobCache};
 
 /// A blob referenced by the bootstrap device table. The blob cache is opened
 /// lazily on first read or prefetch so mounting does not pay a blob.meta
@@ -27,7 +26,9 @@ use super::{BlobCache, LocalBlobCache};
 struct BlobSlot {
     blob_id: [u8; SHA256_DIGEST_SIZE],
     blob_index: u16,
-    cache_dir: PathBuf,
+    /// The local cache directory; `None` selects the diskless
+    /// [`RemoteBlobCache`], which serves every read from the backend.
+    cache_dir: Option<PathBuf>,
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     /// Double-checked lazy init: reads take the read lock (hot path), a cold
@@ -45,13 +46,16 @@ impl BlobSlot {
         if let Some(cache) = guard.as_ref() {
             return Ok(cache.clone());
         }
-        let cache: Arc<dyn BlobCache> = Arc::new(LocalBlobCache::open_with_trace(
-            self.blob_id,
-            self.blob_index as u32,
-            &self.cache_dir,
-            self.backend.clone(),
-            self.trace_recorder.clone(),
-        )?);
+        let cache: Arc<dyn BlobCache> = match &self.cache_dir {
+            Some(cache_dir) => Arc::new(LocalBlobCache::open_with_trace(
+                self.blob_id,
+                self.blob_index as u32,
+                cache_dir,
+                self.backend.clone(),
+                self.trace_recorder.clone(),
+            )?),
+            None => Arc::new(RemoteBlobCache::open(self.blob_id, self.backend.clone())?),
+        };
         *guard = Some(cache.clone());
         Ok(cache)
     }
@@ -60,9 +64,6 @@ impl BlobSlot {
 /// The set of per-blob lazy caches backing an opened image.
 pub struct BlobCaches {
     slots: HashMap<u16, BlobSlot>,
-    /// Keeps an anonymous cache directory alive when the caller did not
-    /// provide one.
-    _temporary_cache_dir: Option<TempDir>,
 }
 
 impl BlobCaches {
@@ -71,26 +72,18 @@ impl BlobCaches {
     pub fn empty() -> Self {
         Self {
             slots: HashMap::new(),
-            _temporary_cache_dir: None,
         }
     }
 
     /// Build the set from `(blob_index, blob_id)` pairs. When `cache_dir` is
-    /// `None` a temporary directory is created and kept alive by the set.
+    /// `None` the blobs run diskless: every read fetches from the backend
+    /// directly and nothing is written to disk.
     pub fn new(
         entries: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
         backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<Self> {
-        let temporary_cache_dir = if cache_dir.is_none() {
-            Some(tempfile::Builder::new().prefix("nydus-cache-").tempdir()?)
-        } else {
-            None
-        };
-        let cache_dir = cache_dir
-            .or_else(|| temporary_cache_dir.as_ref().map(|dir| dir.path()))
-            .ok_or_else(|| io::Error::other("failed to create cache directory"))?;
         let slots = entries
             .into_iter()
             .map(|(blob_index, blob_id)| {
@@ -99,7 +92,7 @@ impl BlobCaches {
                     BlobSlot {
                         blob_id,
                         blob_index,
-                        cache_dir: cache_dir.to_path_buf(),
+                        cache_dir: cache_dir.map(Path::to_path_buf),
                         backend: backend.clone(),
                         trace_recorder: trace_recorder.clone(),
                         cache: RwLock::new(None),
@@ -107,10 +100,7 @@ impl BlobCaches {
                 )
             })
             .collect();
-        Ok(Self {
-            slots,
-            _temporary_cache_dir: temporary_cache_dir,
-        })
+        Ok(Self { slots })
     }
 
     /// Whether the set contains the blob identified by `blob_index`.
@@ -151,8 +141,16 @@ impl BlobCaches {
     /// Prefetch every group of the blob identified by `blob_index`. An
     /// "ondemand" redirect blob is dispatched group by group into the source
     /// blobs' caches instead of building its own cache file, fetching its
-    /// segments concurrently with up to `threads` workers.
-    pub fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()> {
+    /// segments concurrently with up to `threads` workers. A non-zero
+    /// `timeout` bounds the whole blob's prefetch; on expiry the prefetch
+    /// aborts with [`io::ErrorKind::TimedOut`].
+    pub fn prefetch_blob(
+        &self,
+        blob_index: u16,
+        threads: usize,
+        timeout: Duration,
+    ) -> io::Result<()> {
+        let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
         let cache = self.cache(blob_index)?;
         // Serialize prefetch of the same blob across processes sharing the
         // cache directory: with many identical instances cold-starting on one
@@ -170,7 +168,7 @@ impl BlobCaches {
             let skip_before = nydus_telemetry::metrics::cache_redirect_skip_group_total();
             let bytes_before = nydus_telemetry::metrics::backend_redirect_read_bytes_total();
             let start = Instant::now();
-            let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), threads);
+            let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), threads, deadline);
             let elapsed = start.elapsed();
             info!(
                 "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} groups, skipped {} groups, fetched {} bytes",
@@ -183,7 +181,7 @@ impl BlobCaches {
             );
             result
         } else {
-            cache.prefetch_all()
+            cache.prefetch_all(deadline)
         }
     }
 
@@ -197,6 +195,7 @@ impl BlobCaches {
         blob_index: u16,
         cache: &dyn BlobCache,
         threads: usize,
+        deadline: Option<Instant>,
     ) -> io::Result<()> {
         // A redirect group is already done when its bytes are resident in the
         // source blob's cache (readiness is shared across processes through
@@ -214,7 +213,7 @@ impl BlobCaches {
                 _ => false,
             }
         };
-        cache.for_each_redirect_group(threads, &skip, &|group, decoded| {
+        cache.for_each_redirect_group(threads, deadline, &skip, &|group, decoded| {
             if !group.is_redirect() {
                 nydus_telemetry::metrics::inc_cache_redirect_skip_group();
                 warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");

@@ -1,0 +1,27 @@
+# A full-featured nydus storage configuration exercising every field, loaded
+# verbatim by the `load_config_file_correctly` unit test.
+
+backend:
+  type: registry
+  config:
+    addr: http://127.0.0.1:5000
+    repository: library/nydus-demo
+    auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
+    http:
+      timeout: 30s
+      max_retries: 5
+      proxy:
+        addr: http://127.0.0.1:65001
+      tls:
+        skip_verify: true
+        ca_cert: /etc/nydus/certs/registry-ca.pem
+    dragonfly:
+      scheduler_endpoint: http://127.0.0.1:65000
+
+storage:
+  dir: /var/lib/nydus/cache
+
+prefetch:
+  concurrent_blob_count: 4
+  timeout: 2m
+  scope: all

@@ -489,7 +489,7 @@ func writeLocalStorageConfig(t *testing.T, path, blobDir, cacheDir string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(cacheDir, 0755))
 	config := fmt.Sprintf(
-		"backend:\n  type: local\n  config:\n    dir: %s\ncache:\n  type: local\n  config:\n    dir: %s\nprefetch:\n  enable: false\n",
+		"backend:\n  type: local\n  config:\n    dir: %s\nstorage:\n  dir: %s\nprefetch:\n  scope: none\n",
 		blobDir,
 		cacheDir,
 	)

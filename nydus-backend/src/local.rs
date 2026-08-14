@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{BlobBackend, ReadContext};
-use crate::config::LocalDirConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata, BLOB_METADATA_SUFFIX};
 use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 
@@ -90,18 +89,6 @@ impl Local {
         let backend = Self::new(root);
         backend.insert_source(blob_id, source);
         Ok(backend)
-    }
-
-    /// Build a `Local` from its YAML configuration, which only carries
-    /// the `dir` field pointing at the blob source directory.
-    pub fn from_value(config: &serde_yaml::Value) -> io::Result<Self> {
-        let cfg: LocalDirConfig = serde_yaml::from_value(config.clone()).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid local backend config: {err}"),
-            )
-        })?;
-        Ok(Self::new(cfg.dir))
     }
 
     fn blob_metadata_path_for_source(&self, source: &Path) -> io::Result<PathBuf> {
@@ -227,7 +214,7 @@ impl BlobBackend for Local {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         dst: &mut [u8],
-        _ctx: ReadContext,
+        _context: ReadContext,
     ) -> io::Result<()> {
         // One lock round-trip resolves both the source metadata and the file.
         let entry = self.source_entry(blob_id)?;

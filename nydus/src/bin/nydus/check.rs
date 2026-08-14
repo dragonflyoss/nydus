@@ -1,6 +1,7 @@
 use clap::Args;
 use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
 use nydus::error::{Error, Result};
+use nydus_config::BackendConfig;
 use nydus_format::erofs::{
     ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
     EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
@@ -40,24 +41,14 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
         None => match &args.config {
             Some(path) => {
                 let config = cli_common::load_storage_config(path)?;
-                if config.backend.kind == "local" {
-                    let dir = config
-                        .backend
-                        .options
-                        .get("dir")
-                        .and_then(|value| value.as_str())
-                        .map(PathBuf::from)
-                        .ok_or_else(|| {
-                            Error::InvalidConfig(
-                                "local backend config is missing 'dir'".to_string(),
-                            )
-                        })?;
-                    Some(dir)
-                } else {
-                    return Err(Error::InvalidConfig(format!(
-                        "check only supports a local backend, but config backend is '{}'",
-                        config.backend.kind
-                    )));
+                match &config.backend {
+                    BackendConfig::Local(local) => Some(local.dir.clone()),
+                    other => {
+                        return Err(Error::InvalidConfig(format!(
+                            "check only supports a local backend, but config backend is '{}'",
+                            other.kind()
+                        )));
+                    }
                 }
             }
             None => None,

@@ -339,7 +339,7 @@ Current implementation notes:
 	`<digest>.blob.meta` sidecar; the digest is printed as `ondemand_blob_digest:`.
 - `--config` is the same storage config as `nydus fuse --config`: source group
 	bytes are pulled through the regular blob cache, so groups already decoded in
-	`cache.config.dir` are served from disk and cold groups are fetched from the
+	`storage.dir` are served from disk and cold groups are fetched from the
 	backend (with CRC validation on every path).
 - The ondemand artifact layout is `[group data][blob meta][footer]` with
 	`bootstrap_blocks = 0` (no embedded bootstrap) and an empty chunk table. Each
@@ -416,7 +416,7 @@ Options:
 	--config <CONFIG>
 		File path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-dir and --cache-dir can be omitted
 	--prefetch
-		Enable background blob prefetch after mounting. Off by default; when --config is provided, the config's `prefetch.enable` also turns it on
+		Enable background blob prefetch after mounting. Off by default; when --config is provided, the config's `prefetch.scope` also turns it on
 	--bootstrap <BOOTSTRAP>
 		File path to nydus bootstrap
 	--blob <BLOB>
@@ -443,7 +443,7 @@ The fuse command rejects mixed or partial combinations outside these forms.
 `--cache-dir` is optional; without it (and without a cache directory from
 `--config`), runtime fetches and validates requested blob_meta groups using a
 temporary cache directory that is removed on exit. When `--config` is provided,
-`backend.config.dir` supplies the blob directory and `cache.config.dir` supplies
+`backend.config.dir` supplies the blob directory and `storage.dir` supplies
 the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
 `--blob-dir`/`--cache-dir` flags take precedence over the config. See
 [Storage config](#storage-config).
@@ -588,7 +588,7 @@ Options:
   (default `max(ncpu, 64)`). A busy pool queues tasks — backpressure —
   rather than denying reads. Admission is unbounded; there is no per-event
   byte cap or timeout (bounded fetch time comes from the backend's HTTP
-  timeout + retries; a registry `timeout: 0` is rejected for this mode).
+  timeout + retries; a registry `timeout: 0s` is rejected for this mode).
 - `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
 
 The service marks every blob device and runs an event coordinator whose fetch
@@ -667,14 +667,11 @@ backend:
   type: local
   config:
     dir: /var/lib/nydus/blobs
-cache:
-  type: local
-  config:
-    dir: /var/lib/nydus/cache
+storage:
+  dir: /var/lib/nydus/cache
 prefetch:
-  enable: true
-  threads: 10
-  full: false
+  concurrent_blob_count: 10
+  scope: ondemand
 ```
 
 Fields:
@@ -685,24 +682,32 @@ Fields:
 	- `registry`: serves blobs on demand from an OCI registry. See
 		[Registry backend](#registry-backend) for the full field list. `nydus
 		check` only supports the `local` backend.
-- `cache.type` selects the chunk cache. Only `local` is supported; its
-	`config.dir` is the persistent cache directory (equivalent to `--cache-dir`).
-- `prefetch.enable` (default `true`) toggles background blob prefetch after
-	mount.
-- `prefetch.threads` (default `10`) sets the number of concurrent prefetch
-	worker threads.
-- `prefetch.full` (default `false`) also prefetches every remaining blob in
-	full after the priority blobs. When `false`, only the "ondemand" redirect
-	blob (if any) is prefetched, warming the access-ordered hot set while
-	leaving backend bandwidth to on-demand reads; non-redirect priority blobs
-	and the remaining blobs are skipped. See [Blob prefetch](#blob-prefetch).
+- `storage.dir` is the persistent directory storing each blob's decoded chunk
+	cache file (equivalent to `--cache-dir`). When unset (or the whole
+	`storage` section is omitted), reads run diskless: every read fetches,
+	decodes, and validates its groups from the backend directly, and nothing is
+	written to disk — the kernel page cache above the mount is the only reuse
+	layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
+	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`)
+	and `nydus optimize` require a directory and reject its absence at startup.
+- `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
+	prefetched concurrently.
+- `prefetch.timeout` (default `1h`) bounds how long prefetching one whole
+	blob may take, while `http.timeout` bounds each group request within it;
+	`0s` disables the bound. A blob that exceeds it is aborted with a warning
+	and prefetch moves on.
+- `prefetch.scope` (default `ondemand`) selects which blobs to pull. `none`
+	disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
+	(if any), warming the access-ordered hot set while leaving backend
+	bandwidth to on-demand reads; `all` prefetches every blob — priority blobs
+	first, then the rest. See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
 override the corresponding config directories. Runtime prefetch applies to
 `nydus fuse`, `nydus uffd`, `nydus nbd`, and `nydus ublk`; static `nydus check`
 does not start it.
-Unknown `backend.type`/`cache.type` values are rejected at load time.
+Unknown `backend.type` values and unknown fields are rejected at load time.
 
 Example invocations:
 
@@ -716,62 +721,69 @@ nydus check --bootstrap layer.bootstrap --config storage.yaml
 
 The `registry` backend serves blobs on demand from an OCI registry instead of a
 local directory. A blob id is the full-blob SHA256 digest, fetched via
-`GET /v2/<repo>/blobs/sha256:<hex>` with HTTP range requests. A ready-to-edit
+`GET /v2/<repository>/blobs/sha256:<hex>` with HTTP range requests. A ready-to-edit
 example lives at [`config/registry.example.yaml`](../config/registry.example.yaml).
 
 ```yaml
 backend:
   type: registry
   config:
-    host: 127.0.0.1:5000
-    repo: library/nydus-demo
-    insecure: true
-    skip_verify: false
-    timeout: 5
-    retry_limit: 3
+    addr: http://127.0.0.1:5000
+    repository: library/nydus-demo
     # base64-encoded `username:password`
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
-    ca_cert_files: []
-    # proxy:
-    #   url: http://127.0.0.1:65001
-    #   dragonfly_scheduler_endpoint: http://127.0.0.1:65000
+    http:
+      timeout: 5s
+      max_retries: 3
+      tls:
+        skip_verify: false
+        ca_cert: /etc/nydus/certs/registry-ca.pem
+    # dragonfly:
+    #   scheduler_endpoint: http://127.0.0.1:65000
 ```
 
 Fields under `backend.config`:
 
-- `host` (required): registry host`[:port]`, e.g. `registry-1.docker.io` or
-	`127.0.0.1:5000`.
-- `repo` (required): image repository without tag/digest, e.g. `library/ubuntu`.
-- `insecure` (default `false`): use the `http` scheme instead of `https`.
-- `skip_verify` (default `false`): skip TLS certificate verification.
-- `timeout` (default `5`): per-request timeout in seconds. Kept short because a
-	read holds the group's cross-process fetch claim for its whole duration, and
-	what queues up behind that claim are reader threads in the other instances
-	sharing the cache directory.
-- `retry_limit` (default `3`): retries for on-demand reads (prefetch is tried
-	once).
+- `addr` (required): registry address including the scheme, e.g.
+	`https://registry-1.docker.io` or `http://127.0.0.1:5000`. The scheme
+	selects between TLS and plain HTTP.
+- `repository` (required): image repository without tag/digest, e.g.
+	`library/ubuntu`.
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
 	Omit for anonymous / token-only registries.
-- `ca_cert_files` (default `[]`): extra CA certificate PEM files to trust.
-- `proxy` (optional): routes blob requests through a Dragonfly P2P transport
-	instead of hitting the origin registry directly. Two transports are
-	configured under the same block:
-	- `url`: an HTTP **forward proxy** URL (e.g. a Dragonfly `dfdaemon` agent).
-		Unlike a mirror — which rewrites the request host and must tell the proxy
-		the upstream out of band — a forward proxy preserves the original upstream
-		URL, so the proxy already knows which registry to back-source from.
-		Requests carry Dragonfly hint headers: `X-Dragonfly-Priority` (`6` for
-		on-demand reads, `3` for prefetch) and `X-Dragonfly-Use-P2P`.
-	- `dragonfly_scheduler_endpoint`: routes blob `GET`s through the Dragonfly
-		client SDK (crate `dragonfly-client-request`) talking directly to a
-		scheduler, bypassing plain HTTP. Only available when the binary is built
-		with the `backend-dragonfly-proxy` feature; takes precedence over `url`
-		for `GET`s when both are set. The same priority hint is passed through
-		the SDK request.
-
-	Omit the whole `proxy` block to talk to the origin registry directly.
+- `http` (optional): the HTTP client settings — timeouts, retries, and TLS
+	trust. The timeout and retry limits also apply to Dragonfly SDK requests.
+	- `timeout` (default `5s`): per-request timeout in humantime format (e.g.
+		`5s`, `1m`); `0s` disables it. Kept short because a read holds the
+		group's cross-process fetch claim for its whole duration, and what
+		queues up behind that claim are reader threads in the other instances
+		sharing the cache directory.
+	- `max_retries` (default `3`): maximum number of retry attempts per
+		request, applied with exponential backoff by the HTTP client's retry
+		middleware and by the Dragonfly SDK.
+	- `proxy` (optional): routes every registry request through an HTTP
+		forward proxy. Requests keep their original upstream URL, so a proxy
+		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
+		directly to the origin.
+		- `addr` (required): the proxy address including the scheme, e.g.
+			`http://127.0.0.1:65001`.
+	- `tls` (optional): the TLS settings for connections to the registry.
+		- `skip_verify` (default `false`): skip TLS certificate verification.
+		- `ca_cert` (optional): a CA certificate path with PEM format to trust
+			in addition to the system roots; the file may bundle multiple
+			certificates.
+- `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
+	(crate `dragonfly-client-request`) for P2P distribution, carrying a
+	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
+	configured `timeout` and `max_retries`; every other request (`HEAD`, auth
+	token fetches) goes directly to the origin registry. When a Dragonfly
+	request still fails after the SDK's retries, the read falls back to the
+	origin. Only available when the binary is built with the
+	`backend-dragonfly-proxy` feature. Omit to talk to the origin directly.
 	Metrics attribute each read to the origin or proxy side (see
 	[Metrics](#metrics)).
+	- `scheduler_endpoint` (required): the Dragonfly scheduler endpoint (gRPC),
+		e.g. `http://127.0.0.1:65000`.
 
 
 ## Metrics
@@ -1504,7 +1516,7 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
 After a successful mount, `nydus fuse` spawns a background prefetcher that warms
 the local cache so later on-demand reads hit decoded data instead of fetching and
 decoding groups synchronously. Prefetch is **off by default**: enable it with the
-`--prefetch` flag, or through the storage config `prefetch.enable` (either one
+`--prefetch` flag, or through the storage config `prefetch.scope` (either one
 turns it on); the config's `prefetch` block also sizes the worker pool. See
 [Storage config](#storage-config).
 
@@ -1530,12 +1542,12 @@ Prefetch scheduling across blobs has two phases:
 1. Priority blobs are prefetched first, sequentially, in the order listed by the
 	root inode's `trusted.nydus.prefetch.blobs` xattr (a comma-separated list of
 	device ids). The list is deduplicated and filtered to existing devices. When
-	`prefetch.full` is `false` (the default), only redirect ("ondemand") priority
+	`prefetch.scope` is `ondemand` (the default), only redirect ("ondemand") priority
 	blobs are warmed; non-redirect priority blobs are skipped so backend
 	bandwidth is not spent pulling whole source blobs.
-2. Only when `prefetch.full` is set, the remaining blob devices are then
+2. Only when `prefetch.scope` is `all`, the remaining blob devices are then
 	prefetched concurrently by a worker pool sized to
-	`min(prefetch.threads, remaining)` (default `10` threads).
+	`min(prefetch.concurrent_blob_count, remaining)` (default `10`).
 
 When a priority blob is an "ondemand" redirect blob (produced by `nydus
 optimize`, listed first in the xattr), its prefetch is dispatched differently:
@@ -1695,9 +1707,9 @@ through `ublk_drv` over `io_uring`; see
 	loaded `nydus_config::Config` (same structure as `nydus fuse --config`) lazily;
 	per-blob work (blob meta download/validation, sparse cache file creation)
 	happens on first touch through `blobs.prepare_all()` or `blobs.fetch`.
-- When `config.prefetch.enable` is set, `new` spawns a background prefetch
+- Unless `config.prefetch.scope` is `none`, `new` spawns a background prefetch
 	worker before returning — the same two-phase workflow as `nydus fuse`
-	(redirect blob first, then the rest only under `prefetch.full`). The worker
+	(redirect blob first, then the rest only under `prefetch.scope: all`). The worker
 	thread inherits the network namespace active at construction time, so
 	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.

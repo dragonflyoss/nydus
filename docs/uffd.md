@@ -354,15 +354,12 @@ Example registry configuration:
 backend:
   type: registry
   config:
-    host: 127.0.0.1:5000
-    repo: nydus/example
-    insecure: true
-cache:
-  type: local
-  config:
-    dir: /var/lib/nydus/cache
+    addr: http://127.0.0.1:5000
+    repository: nydus/example
+storage:
+  dir: /var/lib/nydus/cache
 prefetch:
-  enable: false
+  scope: none
 ```
 
 The UFFD feature is optional and does not affect default library or builtin

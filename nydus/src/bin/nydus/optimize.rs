@@ -77,16 +77,20 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
         ));
     }
 
-    let storage_config =
-        Config::from_file(&args.config).context("failed to load storage config")?;
+    let storage_config = Config::load(&args.config).context("failed to load storage config")?;
     let backend = build_backend(&storage_config.backend).context("failed to build blob backend")?;
-    let cache_dir = storage_config
-        .cache_dir()
-        .context("failed to resolve cache directory from config")?;
-    fs::create_dir_all(&cache_dir)
+    // Source groups are pulled through the local blob cache, so diskless mode
+    // cannot apply.
+    let Some(cache_dir) = &storage_config.storage.dir else {
+        return Err(Error::InvalidConfig(
+            "optimize requires storage.dir: source groups are pulled through the local blob cache"
+                .to_string(),
+        ));
+    };
+    fs::create_dir_all(cache_dir)
         .with_context(|| format!("failed to create cache directory: {}", cache_dir.display()))?;
 
-    let ondemand = build_ondemand_blob(&args.parent_bootstrap, &patterns, backend, &cache_dir)?;
+    let ondemand = build_ondemand_blob(&args.parent_bootstrap, &patterns, backend, cache_dir)?;
     let digest_hex = hex_string(&ondemand.full_blob_digest);
 
     fs::create_dir_all(&args.blob_dir).with_context(|| {

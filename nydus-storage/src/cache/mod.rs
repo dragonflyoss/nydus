@@ -1,6 +1,7 @@
 mod caches;
 mod group_lock;
 pub mod local;
+pub mod remote;
 
 use std::io;
 use std::io::Cursor;
@@ -8,13 +9,28 @@ use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor, BlobMetadataGroup};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
+/// Fail with [`io::ErrorKind::TimedOut`] once a blob-level prefetch deadline
+/// has passed. Checked between batches, so the overshoot is bounded by one
+/// backend request (itself bounded by the HTTP timeout).
+pub(crate) fn check_prefetch_deadline(deadline: Option<Instant>) -> io::Result<()> {
+    match deadline {
+        Some(deadline) if Instant::now() >= deadline => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "blob prefetch timed out",
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub use caches::BlobCaches;
 pub use local::LocalBlobCache;
+pub use remote::RemoteBlobCache;
 
 pub trait BlobCache: Send + Sync {
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()>;
@@ -30,8 +46,9 @@ pub trait BlobCache: Send + Sync {
     }
 
     /// Fetch, decode, validate, cache, and mark ready every group of this blob.
-    /// Used by blob-level prefetch after a filesystem is mounted.
-    fn prefetch_all(&self) -> io::Result<()>;
+    /// Used by blob-level prefetch after a filesystem is mounted. Aborts with
+    /// [`io::ErrorKind::TimedOut`] when `deadline` passes between batches.
+    fn prefetch_all(&self, deadline: Option<Instant>) -> io::Result<()>;
 
     /// Create (or open) this blob's cache data file sized to the dense
     /// uncompressed address space and return its path. The file mirrors the
@@ -110,10 +127,12 @@ pub trait BlobCache: Send + Sync {
     /// distinct source-blob caches, which is safe); groups that fail decode
     /// or CRC validation are skipped with a warning so a single bad group
     /// cannot poison the whole redirect prefetch, and the first `cb` or
-    /// backend error aborts the stream.
+    /// backend error aborts the stream. Aborts with
+    /// [`io::ErrorKind::TimedOut`] when `deadline` passes between batches.
     fn for_each_redirect_group(
         &self,
         _threads: usize,
+        _deadline: Option<Instant>,
         _skip: &(dyn Fn(&BlobMetadataGroup) -> bool + Sync),
         _cb: &(dyn Fn(&BlobMetadataGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {

@@ -204,7 +204,7 @@ Options:
 
 ## Prefetch
 
-`prefetch.enable` in the storage config works as it does for the other
+`prefetch.scope` in the storage config works as it does for the other
 targets, but it is not a default win for this one. The prefetch worker
 competes with on-demand reads for the same disk and CPU, and on a
 storage-bound host a full-image cold read was measured slower with prefetch
