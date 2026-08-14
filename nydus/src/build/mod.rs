@@ -49,10 +49,6 @@ pub struct DirImageOptions<'a> {
     /// Also render a standalone bootstrap whose device slot references the
     /// full blob digest, returned in [`DirImage::standalone_bootstrap`].
     pub standalone_bootstrap: bool,
-    /// Split file data at content-defined (FastCDC) cut points and
-    /// deduplicate equal pieces so only unique bytes are stored. Marks the
-    /// blob meta with the `CHUNK_CDC` incompat flag.
-    pub cdc: bool,
 }
 
 /// The result of [`build_dir_image`]: the digests, blob meta and footer of
@@ -65,9 +61,9 @@ pub struct DirImage {
     pub blob_metadata: BlobMetadata,
     pub footer: BlobFooter,
     pub standalone_bootstrap: Option<Vec<u8>>,
-    /// `(logical_bytes, unique_bytes)` seen by the CDC splitter when CDC was
-    /// enabled; the difference is the data removed by deduplication.
-    pub cdc_dedup_stats: Option<(u64, u64)>,
+    /// `(logical_bytes, unique_bytes)` seen by the CDC splitter; the
+    /// difference is the data removed by deduplication.
+    pub cdc_dedup_stats: (u64, u64),
 }
 
 impl DirImageOptions<'_> {
@@ -127,9 +123,6 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
         options.compress_size,
         options.compressor,
     )?;
-    if options.cdc {
-        blob_writer = blob_writer.with_cdc();
-    }
     let mut inodes = build_tree(
         options.source,
         &mut blob_writer,
@@ -157,7 +150,7 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
 
     let compressed_data_size = blob_writer.data_size();
     let blob_metadata = blob_writer.blob_metadata(blob_id, 0)?;
-    let cdc_dedup_stats = options.cdc.then(|| blob_writer.cdc_dedup_stats());
+    let cdc_dedup_stats = blob_writer.cdc_dedup_stats();
     let (blob_file, full_blob_hasher) = blob_writer.into_file_and_data_hasher();
     let mut blob_writer_stream = HashingWriter::new(BufWriter::new(blob_file), full_blob_hasher);
 

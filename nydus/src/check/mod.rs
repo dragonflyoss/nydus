@@ -563,7 +563,6 @@ mod tests {
             [0u8; EROFS_BLOB_ID_SIZE],
             BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
             Vec::new(),
-            Vec::new(),
         )
         .unwrap();
         let mut blob_metadata_bytes = Vec::new();

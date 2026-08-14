@@ -39,8 +39,8 @@ fn build_test_image(
     build_test_image_with_layout(root, false)
 }
 
-/// Like [`build_test_image`] but with CDC dedup enabled on the blob writer,
-/// and with extra duplicate-content files so the dedup path is exercised.
+/// Like [`build_test_image`] but with extra duplicate-content files so the
+/// (always-on) CDC dedup path is exercised.
 fn build_cdc_test_image(
     root: &Path,
 ) -> (
@@ -78,7 +78,7 @@ fn build_test_image_with_layout(
 fn build_test_image_full(
     root: &Path,
     flattened: bool,
-    cdc: bool,
+    dedup_corpus: bool,
 ) -> (
     PathBuf,
     Config,
@@ -111,7 +111,7 @@ fn build_test_image_full(
     corpus.insert("empty.txt".to_string(), Vec::new());
     symlink("file1", corpus_dir.join("link_to_file1")).unwrap();
 
-    if cdc {
+    if dedup_corpus {
         // Duplicate content at shifted offsets: file1's bytes prefixed by a
         // small header, so fixed chunking would find nothing while CDC
         // re-synchronizes and dedups the shared tail. Plus an exact copy.
@@ -139,9 +139,6 @@ fn build_test_image_full(
         BlobMetadataCompressor::Zstd,
     )
     .unwrap();
-    if cdc {
-        writer = writer.with_cdc();
-    }
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
@@ -150,7 +147,7 @@ fn build_test_image_full(
     )
     .unwrap();
     writer.finish().unwrap();
-    if cdc {
+    if dedup_corpus {
         // The duplicate/shifted corpus must actually dedup.
         let (logical, unique) = writer.cdc_dedup_stats();
         assert!(
@@ -280,13 +277,17 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     core.blobs.fetch(&blob_id, offset, len).unwrap();
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
+    // The fetched logical range maps to CDC records whose unique bytes
+    // straddle the 1 MiB group boundary, so both covering unique-stream
+    // groups are traced in access order.
     let trace = core.trace_snapshot();
-    assert_eq!(trace.entries.len(), 1);
-    assert_eq!(trace.entries[0].blob_index, 1);
-    assert_eq!(trace.entries[0].group_index, 1);
+    assert_eq!(trace.entries.len(), 2);
+    assert!(trace.entries.iter().all(|entry| entry.blob_index == 1));
+    assert_eq!(trace.entries[0].group_index, 0);
+    assert_eq!(trace.entries[1].group_index, 1);
     assert_eq!(
         core.trace_json(),
-        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"group_index\":1}]}"
+        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"group_index\":0},{\"blob_index\":1,\"group_index\":1}]}"
     );
 
     // Unaligned ranges and unknown blobs are rejected.

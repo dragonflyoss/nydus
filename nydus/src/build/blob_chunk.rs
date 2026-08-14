@@ -1,8 +1,8 @@
 use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataCdcChunk, BlobMetadataChunk, BlobMetadataCompressor,
-    BlobMetadataGroup, BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+    BlobMetadata, BlobMetadataCdcChunk, BlobMetadataCompressor, BlobMetadataGroup,
+    BLOB_METADATA_DEFAULT_CHUNK_SIZE,
 };
 use nydus_format::erofs::{ErofsChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
 use nydus_format::utils::round_up;
@@ -20,7 +20,9 @@ pub const CDC_MIN_CHUNK_SIZE: u32 = 4096;
 pub const CDC_AVG_CHUNK_SIZE: u32 = 16384;
 pub const CDC_MAX_CHUNK_SIZE: u32 = 65536;
 
-/// Manages writing chunk data to a separate blob device.
+/// Manages writing chunk data to a separate blob device. File data is always
+/// split at content-defined (FastCDC) cut points and deduplicated by blake3
+/// digest, so only unique bytes enter the group data stream.
 pub struct BlobWriter {
     file: File,
     file_chunk_size: u32,
@@ -32,8 +34,6 @@ pub struct BlobWriter {
     group_block_offset: u64,
     group_buffer: Vec<u8>,
     blob_metadata_groups: Vec<BlobMetadataGroup>,
-    blob_metadata_chunks: Vec<BlobMetadataChunk>,
-    cdc: bool,
     cdc_chunks: Vec<BlobMetadataCdcChunk>,
     // blake3 digest -> byte offset in the unique data stream. Sizes need not
     // be stored: FastCDC cut points are content-defined, so equal content
@@ -119,25 +119,11 @@ impl BlobWriter {
             group_block_offset: 0,
             group_buffer: Vec::with_capacity(group_size as usize),
             blob_metadata_groups: Vec::new(),
-            blob_metadata_chunks: Vec::new(),
-            cdc: false,
             cdc_chunks: Vec::new(),
             cdc_dedup: HashMap::new(),
             cdc_unique_len: 0,
             cdc_logical_len: 0,
         })
-    }
-
-    /// Enable content-defined chunking: file data is split at FastCDC cut
-    /// points, deduplicated by blake3 digest, and only unique bytes enter the
-    /// group data stream. Must be called before any data is written.
-    pub fn with_cdc(mut self) -> Self {
-        self.cdc = true;
-        self
-    }
-
-    pub fn is_cdc(&self) -> bool {
-        self.cdc
     }
 
     /// `(logical_bytes, unique_bytes)` fed through the CDC splitter so far;
@@ -164,10 +150,6 @@ impl BlobWriter {
         (self.file, self.data_hasher)
     }
 
-    pub fn blob_metadata_chunks(&self) -> &[BlobMetadataChunk] {
-        &self.blob_metadata_chunks
-    }
-
     pub fn blob_metadata_groups(&self) -> &[BlobMetadataGroup] {
         &self.blob_metadata_groups
     }
@@ -177,24 +159,14 @@ impl BlobWriter {
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         source_offset_bias: u64,
     ) -> Result<BlobMetadata> {
-        let blob_metadata = if self.cdc {
-            BlobMetadata::from_cdc_parts(
-                blob_id,
-                self.file_chunk_size / EROFS_BLOCK_SIZE,
-                self.compressor,
-                self.blob_metadata_groups.clone(),
-                self.cdc_chunks.clone(),
-                self.next_blkaddr,
-            )?
-        } else {
-            BlobMetadata::from_parts_with_options(
-                blob_id,
-                self.file_chunk_size / EROFS_BLOCK_SIZE,
-                self.compressor,
-                self.blob_metadata_groups.clone(),
-                self.blob_metadata_chunks.clone(),
-            )?
-        };
+        let blob_metadata = BlobMetadata::from_cdc_parts(
+            blob_id,
+            self.file_chunk_size / EROFS_BLOCK_SIZE,
+            self.compressor,
+            self.blob_metadata_groups.clone(),
+            self.cdc_chunks.clone(),
+            self.next_blkaddr,
+        )?;
         Ok(blob_metadata.with_compressed_offset_bias(source_offset_bias)?)
     }
 
@@ -211,10 +183,10 @@ impl BlobWriter {
     }
 
     pub fn finish(&mut self) -> Result<()> {
-        // In CDC mode the unique data stream is byte granular, so the tail
-        // group must be zero padded to a whole block before it is flushed
-        // (groups always describe whole uncompressed blocks).
-        if self.cdc && !self.group_buffer.is_empty() {
+        // The unique data stream is byte granular, so the tail group must be
+        // zero padded to a whole block before it is flushed (groups always
+        // describe whole uncompressed blocks).
+        if !self.group_buffer.is_empty() {
             let padded = round_up(self.group_buffer.len(), EROFS_BLOCK_SIZE as usize);
             self.group_buffer.resize(padded, 0);
         }
@@ -223,8 +195,9 @@ impl BlobWriter {
     }
 
     /// Process a regular file: read it in chunk-sized pieces and append every
-    /// chunk to the blob device. Chunk-level digests are recorded in blob meta;
-    /// deduplication is intentionally disabled for now.
+    /// chunk to the blob device. Each chunk's real bytes are split at
+    /// content-defined cut points and deduplicated; only unique pieces are
+    /// stored, recorded as CDC records in blob meta.
     pub fn write_file_chunks(
         &mut self,
         path: &Path,
@@ -285,33 +258,13 @@ impl BlobWriter {
             Error::Overflow(format!("blob meta chunk block count exceeds u32: {err}"))
         })?;
 
-        if self.cdc {
-            // CDC mode: the chunk still occupies `block_count` logical blocks
-            // (EROFS chunk indexes are untouched), but its real bytes are
-            // split at content-defined cut points and deduplicated; only
-            // unique pieces enter the group stream. The tail-block padding is
-            // never stored: uncovered logical bytes read back as zeros.
-            self.next_blkaddr += block_count as u64;
-            self.append_cdc_pieces(data, addr * EROFS_BLOCK_SIZE as u64)?;
-            return Ok(addr);
-        }
-
-        // Block-aligned chunk payload: real bytes followed by zero padding only
-        // in its final block.
-        let mut uncompressed = vec![0u8; write_len];
-        uncompressed[..data.len()].copy_from_slice(data);
+        // The chunk occupies `block_count` logical blocks (EROFS chunk indexes
+        // address the dense logical space), but its real bytes are split at
+        // content-defined cut points and deduplicated; only unique pieces
+        // enter the group stream. The tail-block padding is never stored:
+        // uncovered logical bytes read back as zeros.
         self.next_blkaddr += block_count as u64;
-
-        // Record the chunk by its absolute block position; chunks are tracked
-        // independently of groups as a digest index only.
-        let digest = *blake3::hash(&uncompressed).as_bytes();
-        let chunk = BlobMetadataChunk::new(digest, addr, block_count)?;
-        self.blob_metadata_chunks.push(chunk);
-
-        // Feed the bytes into the group stream, which packs whole blocks up to
-        // the group size regardless of chunk boundaries.
-        self.append_to_group_stream(&uncompressed)?;
-
+        self.append_cdc_pieces(data, addr * EROFS_BLOCK_SIZE as u64)?;
         Ok(addr)
     }
 
@@ -455,9 +408,7 @@ mod tests {
         shifted.extend_from_slice(&body);
         fs::write(&file_c, &shifted).unwrap();
 
-        let mut writer = BlobWriter::new(&blob_path, BLOB_METADATA_DEFAULT_CHUNK_SIZE)
-            .unwrap()
-            .with_cdc();
+        let mut writer = BlobWriter::new(&blob_path, BLOB_METADATA_DEFAULT_CHUNK_SIZE).unwrap();
         writer
             .write_file_chunks(&file_a, body.len() as u64)
             .unwrap();
@@ -481,7 +432,6 @@ mod tests {
         // The recorded metadata must pass CDC validation end to end.
         let blob_metadata = writer.blob_metadata([0x11; EROFS_BLOB_ID_SIZE], 0).unwrap();
         assert!(blob_metadata.is_cdc());
-        assert_eq!(blob_metadata.chunks().len(), 0);
         assert!(!blob_metadata.cdc_chunks().is_empty());
         // Unique stream (plus final block padding) is what the groups store.
         assert_eq!(
@@ -511,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_writer_tracks_unique_blob_metadata_chunks() {
+    fn blob_writer_packs_logical_chunks_densely_and_dedups_unique_stream() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
         let file_a = dir.path().join("a.bin");
@@ -539,50 +489,29 @@ mod tests {
         assert_eq!(indexes_b.len(), 1);
         assert_eq!(indexes_a[0].blkaddr, 0);
         assert_eq!(indexes_a[1].blkaddr, 256);
-        // Dense packing: file_a's 4KiB tail chunk occupies a single block, so
-        // file_b starts right after it instead of being padded to a full chunk.
+        // Dense logical packing: file_a's 4KiB tail chunk occupies a single
+        // block, so file_b starts right after it instead of being padded to a
+        // full chunk.
         assert_eq!(indexes_b[0].blkaddr, 257);
         assert_eq!(writer.total_blocks(), 513);
 
-        let entries = writer.blob_metadata_chunks();
-        let groups = writer.blob_metadata_groups();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(groups.len(), 3);
-        // Chunks record absolute block offsets, independent of groups.
-        assert_eq!(entries[0].uncompressed_block_offset(), 0);
-        assert_eq!(entries[0].uncompressed_block_count(), 256);
-        assert_eq!(entries[1].uncompressed_block_offset(), 256);
-        assert_eq!(entries[1].uncompressed_block_count(), 1);
-        assert_eq!(entries[2].uncompressed_block_offset(), 257);
-        assert_eq!(entries[2].uncompressed_block_count(), 256);
-        // Groups pack whole blocks up to the group size (256 blocks) regardless
-        // of chunk boundaries: file_a's tail block and file_b's leading blocks
-        // share group 1, and the remainder spills into group 2.
-        assert_eq!(groups[0].uncompressed_block_offset(), 0);
-        assert_eq!(groups[0].uncompressed_block_count(), 256);
-        assert_eq!(groups[0].compressed_byte_offset(), 0);
+        // The repeated content dedups: file_b contributes no unique bytes and
+        // file_a's constant body collapses to a handful of unique pieces.
+        let (logical, unique) = writer.cdc_dedup_stats();
+        assert_eq!(logical, (content_a.len() + BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize) as u64);
+        assert!(unique < logical, "logical {logical}, unique {unique}");
+
+        // Groups describe the (block padded) unique data stream, not the
+        // logical space.
+        let blob_metadata = writer.blob_metadata([0x22; EROFS_BLOB_ID_SIZE], 0).unwrap();
         assert_eq!(
-            groups[0].compressed_size(),
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE
-        );
-        assert_eq!(groups[1].uncompressed_block_offset(), 256);
-        assert_eq!(groups[1].uncompressed_block_count(), 256);
-        assert_eq!(
-            groups[1].compressed_byte_offset(),
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
+            blob_metadata.total_uncompressed_size(),
+            round_up(unique as usize, EROFS_BLOCK_SIZE as usize) as u64
         );
         assert_eq!(
-            groups[1].compressed_size(),
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE
+            blob_metadata.logical_uncompressed_size(),
+            513 * EROFS_BLOCK_SIZE as u64
         );
-        assert_eq!(groups[2].uncompressed_block_offset(), 512);
-        assert_eq!(groups[2].uncompressed_block_count(), 1);
-        // Groups pack back-to-back in the data region with no inter-group padding.
-        assert_eq!(
-            groups[2].compressed_byte_offset(),
-            2 * BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
-        );
-        assert_eq!(groups[2].compressed_size(), EROFS_BLOCK_SIZE);
     }
 
     #[test]
@@ -605,11 +534,12 @@ mod tests {
         assert_eq!(indexes[0].blkaddr, 0);
         assert_eq!(indexes[1].blkaddr, 1);
         assert_eq!(blob_metadata.header().chunk_size(), EROFS_BLOCK_SIZE);
-        assert_eq!(blob_metadata.chunks().len(), 2);
         assert_eq!(blob_metadata.groups().len(), 1);
-        assert_eq!(blob_metadata.chunks()[0].uncompressed_block_count(), 1);
-        assert_eq!(blob_metadata.chunks()[0].uncompressed_byte_size(), 4096);
-        assert_eq!(blob_metadata.chunks()[1].uncompressed_block_offset(), 1);
+        // Two distinct 4 KiB pieces, mapped by CDC records at their logical
+        // offsets.
+        assert_eq!(blob_metadata.cdc_chunks().len(), 2);
+        assert_eq!(blob_metadata.cdc_chunks()[0].logical_byte_offset(), 0);
+        assert_eq!(blob_metadata.cdc_chunks()[1].logical_byte_offset(), 4096);
         assert_eq!(blob_metadata.groups()[0].uncompressed_byte_size(), 8192);
     }
 
@@ -637,8 +567,13 @@ mod tests {
         assert_eq!(indexes[0].blkaddr, 0);
         assert_eq!(indexes[1].blkaddr, EROFS_NULL_ADDR);
         assert_eq!(indexes[2].blkaddr, 1);
-        assert_eq!(blob_metadata.chunks().len(), 2);
-        assert_eq!(blob_metadata.chunks()[1].uncompressed_block_offset(), 1);
+        // Only the two data chunks produce CDC records; the hole has none.
+        assert_eq!(blob_metadata.cdc_chunks().len(), 2);
+        assert_eq!(blob_metadata.cdc_chunks()[0].logical_byte_offset(), 0);
+        assert_eq!(blob_metadata.cdc_chunks()[1].logical_byte_offset(), 4096);
+        // The tail chunk's 100 real bytes are stored unpadded in the unique
+        // stream; the rest of its logical block reads back as zeros.
+        assert_eq!(blob_metadata.cdc_chunks()[1].size(), 100);
         assert_eq!(writer.total_blocks(), 2);
         let data = fs::read(&blob_path).unwrap();
         assert_eq!(data.len(), 2 * EROFS_BLOCK_SIZE as usize);
@@ -667,7 +602,7 @@ mod tests {
         // Every chunk is a hole: nothing lands in the blob at all.
         assert_eq!(indexes.len(), 2);
         assert!(indexes.iter().all(|ci| ci.blkaddr == EROFS_NULL_ADDR));
-        assert!(writer.blob_metadata_chunks().is_empty());
+        assert_eq!(writer.cdc_dedup_stats(), (0, 0));
         assert!(writer.blob_metadata_groups().is_empty());
         assert_eq!(writer.total_blocks(), 0);
         assert_eq!(fs::read(&blob_path).unwrap().len(), 0);
@@ -693,7 +628,6 @@ mod tests {
         writer.finish().unwrap();
 
         let groups = writer.blob_metadata_groups();
-        assert_eq!(writer.blob_metadata_chunks().len(), 1);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].uncompressed_block_count(), 256);
         assert_eq!(
@@ -723,16 +657,17 @@ mod tests {
             .unwrap();
 
         let raw = fs::read(&blob_metadata_path).unwrap();
-        // 4 KiB header block + one chunk + one group, padded to a block.
+        // 4 KiB header block + one CDC record + one group, padded to a block.
         assert_eq!(raw.len(), 8192);
 
         let blob_metadata = BlobMetadata::load(&blob_metadata_path).unwrap();
+        assert!(blob_metadata.is_cdc());
         assert_eq!(blob_metadata.header().chunk_count(), 1);
         assert_eq!(blob_metadata.header().group_count(), 1);
-        assert_eq!(blob_metadata.header().chunk_bytes(), 48);
+        assert_eq!(blob_metadata.header().chunk_bytes(), 56);
         assert_eq!(blob_metadata.header().group_bytes(), 40);
         assert_eq!(blob_metadata.header().metadata_size(), 8192);
-        assert_eq!(blob_metadata.chunks()[0].uncompressed_block_offset(), 0);
+        assert_eq!(blob_metadata.cdc_chunks()[0].logical_byte_offset(), 0);
         assert_eq!(blob_metadata.groups()[0].compressed_byte_offset(), 8192);
     }
 

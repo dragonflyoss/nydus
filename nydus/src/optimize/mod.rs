@@ -33,7 +33,7 @@ use nydus_format::blob::{
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
-use nydus_storage::cache::{BlobCache, LocalBlobCache};
+use nydus_storage::cache::LocalBlobCache;
 
 /// The result of [`build_ondemand_blob`]: the assembled ondemand artifact and
 /// the rewritten bootstrap, ready to be written out by the caller.
@@ -90,7 +90,6 @@ pub fn build_ondemand_blob(
     let mut ondemand_data = Vec::new();
     let mut ondemand_groups = Vec::new();
     let mut next_block_offset = 0u64;
-    let mut decoded = Vec::new();
 
     for GroupRef {
         blob_index,
@@ -107,12 +106,9 @@ pub fn build_ondemand_blob(
                     .with_context(|| format!("failed to open source blob {blob_index}"))?,
             ),
         };
-        if cache.blob_metadata().is_cdc() {
-            // A CDC blob's groups describe the deduplicated unique byte
-            // stream, not the logical space `read_at` addresses, so its group
-            // bytes cannot be re-sliced into an ondemand artifact this way.
-            return Err(Error::Unsupported(format!(
-                "source blob {blob_index} uses CDC chunk dedup; optimize does not support CDC blobs yet"
+        if cache.blob_metadata().is_redirect_blob() {
+            return Err(Error::InvalidImage(format!(
+                "source blob {blob_index} is already an ondemand blob; refusing to optimize"
             )));
         }
 
@@ -124,21 +120,14 @@ pub fn build_ondemand_blob(
                     "pattern references group {group_index} out of range for blob {blob_index}"
                 ))
             })?;
-        if group.is_redirect() {
-            return Err(Error::InvalidImage(format!(
-                "source blob {blob_index} is already an ondemand blob; refusing to optimize"
-            )));
-        }
 
-        let decoded_len = usize::try_from(group.uncompressed_byte_size()).map_err(|err| {
-            Error::Overflow(format!("group uncompressed size exceeds usize: {err}"))
+        // Read the group's decoded bytes straight from the backend at group
+        // granularity: a CDC blob's groups describe the deduplicated unique
+        // byte stream (not the logical space `read_at` addresses), and the
+        // redirect fill on the runtime side works per source group either way.
+        let decoded = cache.read_group(*group_index as usize).with_context(|| {
+            format!("failed to read blob {blob_index} group {group_index} bytes")
         })?;
-        decoded.resize(decoded_len, 0);
-        cache
-            .read_at(group.uncompressed_byte_offset(), &mut decoded)
-            .with_context(|| {
-                format!("failed to read blob {blob_index} group {group_index} bytes")
-            })?;
 
         // Recompress the decoded bytes for the ondemand artifact, storing them
         // plain when compression is not worthwhile (same policy as build).
@@ -176,7 +165,6 @@ pub fn build_ondemand_blob(
         BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
         BlobMetadataCompressor::Zstd,
         ondemand_groups,
-        Vec::new(),
     )
     .context("failed to assemble ondemand blob meta")?;
 

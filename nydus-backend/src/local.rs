@@ -270,7 +270,7 @@ fn probe_full_blob_source(
 mod tests {
     use super::*;
     use crate::ReadKind;
-    use nydus_format::blob::{BlobMetadataChunk, BlobMetadataGroup};
+    use nydus_format::blob::BlobMetadataGroup;
     use nydus_format::utils::sha256_bytes;
     use tempfile::tempdir;
 
@@ -279,7 +279,6 @@ mod tests {
             blob_id,
             1,
             vec![BlobMetadataGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
-            vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
         )
         .unwrap()
     }
@@ -310,7 +309,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(blob_metadata.header().chunk_count(), 1);
+        assert_eq!(blob_metadata.header().chunk_count(), 0);
+        assert_eq!(blob_metadata.groups().len(), 1);
         assert_eq!(data, payload);
     }
 
@@ -338,7 +338,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(blob_metadata.header().chunk_count(), 1);
+        assert_eq!(blob_metadata.header().chunk_count(), 0);
+        assert_eq!(blob_metadata.groups().len(), 1);
         assert_eq!(data, payload);
         assert!(backend.blob_metadata(&data_blob_id).is_err());
     }

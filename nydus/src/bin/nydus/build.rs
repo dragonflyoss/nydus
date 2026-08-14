@@ -79,13 +79,6 @@ pub struct BuildArgs {
     #[arg(long, value_enum, default_value_t = Compressor::Zstd)]
     pub compressor: Compressor,
 
-    /// Enable content-defined chunking (FastCDC) deduplication: file data is
-    /// split at content-defined cut points and duplicate pieces are stored
-    /// only once, within and across files/layers. Produces blobs with the
-    /// `CHUNK_CDC` incompat blob meta flag.
-    #[arg(long)]
-    pub cdc: bool,
-
     #[command(flatten)]
     pub log: cli_common::CommandLogArgs,
 
@@ -201,7 +194,6 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         compressor: args.compressor.into(),
         exclude: &exclude,
         standalone_bootstrap: args.bootstrap.is_some(),
-        cdc: args.cdc,
     };
     // Fail on invalid chunk/compress geometry before creating output files.
     options.validate()?;
@@ -238,17 +230,16 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         blob_metadata_path: &blob_metadata_path,
         bootstrap_path: args.bootstrap.as_deref(),
     });
-    if let Some((logical, unique)) = image.cdc_dedup_stats {
-        let saved = logical.saturating_sub(unique);
-        let percent = if logical > 0 {
-            saved as f64 * 100.0 / logical as f64
-        } else {
-            0.0
-        };
-        println!(
-            "    cdc_dedup: logical {logical} bytes, unique {unique} bytes, saved {saved} bytes ({percent:.1}%)"
-        );
-    }
+    let (logical, unique) = image.cdc_dedup_stats;
+    let saved = logical.saturating_sub(unique);
+    let percent = if logical > 0 {
+        saved as f64 * 100.0 / logical as f64
+    } else {
+        0.0
+    };
+    println!(
+        "    cdc_dedup: logical {logical} bytes, unique {unique} bytes, saved {saved} bytes ({percent:.1}%)"
+    );
     Ok(())
 }
 

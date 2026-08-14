@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -97,6 +97,9 @@ pub struct LocalBlobCache {
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     inflight_groups: Mutex<HashMap<usize, Arc<GroupFlight>>>,
+    /// CDC record indexes sorted by unique byte offset, built lazily. Maps a
+    /// unique-stream group's byte range to the records it can satisfy.
+    cdc_unique_order: OnceLock<Vec<u32>>,
     /// Keeps the processes sharing this cache from each fetching the same
     /// cold group.
     group_locks: GroupLocks,
@@ -189,6 +192,7 @@ impl LocalBlobCache {
             backend,
             trace_recorder,
             inflight_groups: Mutex::new(HashMap::new()),
+            cdc_unique_order: OnceLock::new(),
             group_locks,
         })
     }
@@ -196,6 +200,94 @@ impl LocalBlobCache {
     /// The blob meta backing this cache (groups, chunks, compressor).
     pub fn blob_metadata(&self) -> &BlobMetadata {
         &self.blob_metadata
+    }
+
+    /// Fetch, decode and validate one group's bytes directly from the
+    /// backend, without touching the cache data file or readiness map. This
+    /// is the group-granular read used by `nydus optimize` to re-encode
+    /// accessed groups into an ondemand artifact; for CDC blobs the returned
+    /// bytes belong to the deduplicated unique data stream.
+    pub fn read_group(&self, group_index: usize) -> io::Result<Vec<u8>> {
+        let group = *self.blob_metadata.group_at(group_index).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "group index out of range")
+        })?;
+        let mut buffers = GroupBuffers::default();
+        let decoded = fetch_decode_validate_group_into(
+            &self.blob_id,
+            &self.blob_metadata,
+            &self.backend,
+            &group,
+            &mut buffers,
+            ReadKind::OnDemand,
+        )?;
+        Ok(decoded.to_vec())
+    }
+
+    /// CDC record indexes sorted by unique byte offset (lazily built once).
+    fn cdc_unique_order(&self) -> &[u32] {
+        self.cdc_unique_order.get_or_init(|| {
+            let chunks = self.blob_metadata.cdc_chunks();
+            let mut order: Vec<u32> = (0..chunks.len() as u32).collect();
+            order.sort_by_key(|&index| chunks[index as usize].unique_byte_offset());
+            order
+        })
+    }
+
+    /// Indexes of the CDC records whose unique byte range is fully contained
+    /// in `[unique_start, unique_end)` — the records one decoded group of the
+    /// unique stream can satisfy on its own. Records straddling a group
+    /// boundary are not returned.
+    fn cdc_records_contained_in(&self, unique_start: u64, unique_end: u64) -> Vec<usize> {
+        let chunks = self.blob_metadata.cdc_chunks();
+        let order = self.cdc_unique_order();
+        let first =
+            order.partition_point(|&i| chunks[i as usize].unique_byte_offset() < unique_start);
+        let mut contained = Vec::new();
+        for &index in &order[first..] {
+            let chunk = &chunks[index as usize];
+            if chunk.unique_byte_offset() >= unique_end {
+                break;
+            }
+            if chunk.unique_byte_end() <= unique_end {
+                contained.push(index as usize);
+            }
+        }
+        contained
+    }
+
+    /// The CDC counterpart of a redirect fill: `decoded` holds one validated
+    /// group of the unique data stream, so copy every record fully contained
+    /// in the group's unique byte range to its logical cache offset and mark
+    /// those records ready. Records straddling a group boundary are left to
+    /// the on-demand path.
+    fn fill_cdc_records_from_group(
+        &self,
+        group: &BlobMetadataGroup,
+        decoded: &[u8],
+    ) -> io::Result<()> {
+        let chunks = self.blob_metadata.cdc_chunks();
+        let group_offset = group.uncompressed_byte_offset();
+        let cache_file = self.cache_file()?;
+        let mut filled = false;
+        for index in
+            self.cdc_records_contained_in(group_offset, group.uncompressed_byte_end())
+        {
+            if self.group_map.is_ready(index)? {
+                continue;
+            }
+            let chunk = &chunks[index];
+            let start = (chunk.unique_byte_offset() - group_offset) as usize;
+            let bytes = &decoded[start..start + chunk.size() as usize];
+            write_all_at(cache_file.as_ref(), chunk.logical_byte_offset(), bytes)?;
+            self.group_map.set_ready(index)?;
+            filled = true;
+        }
+        if filled {
+            nydus_telemetry::metrics::inc_cache_redirect_fill_group();
+        } else {
+            nydus_telemetry::metrics::inc_cache_hit_group();
+        }
+        Ok(())
     }
 
     fn cache_file(&self) -> io::Result<Arc<File>> {
@@ -492,6 +584,12 @@ impl LocalBlobCache {
         // overlapping the logical range; logical gaps between records are
         // padding/holes that read back as zeros from the sparse cache file.
         if self.blob_metadata.is_cdc() {
+            if end > self.blob_metadata.logical_uncompressed_size() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "blob read range beyond logical uncompressed size",
+                ));
+            }
             let records = self.blob_metadata.cdc_chunks_overlapping(offset, end);
             return self.ensure_cdc_records(records, cache_file);
         }
@@ -857,6 +955,21 @@ impl BlobCache for LocalBlobCache {
     }
 
     fn is_group_ready(&self, group_index: usize) -> bool {
+        // For a CDC blob readiness is tracked per record: a unique-stream
+        // group is "done" once every record it can satisfy on its own is
+        // filled into the logical cache.
+        if self.blob_metadata.is_cdc() {
+            let Some(group) = self.blob_metadata.group_at(group_index) else {
+                return false;
+            };
+            return self
+                .cdc_records_contained_in(
+                    group.uncompressed_byte_offset(),
+                    group.uncompressed_byte_end(),
+                )
+                .into_iter()
+                .all(|index| self.group_map.is_ready(index).unwrap_or(false));
+        }
         self.group_map.is_ready(group_index).unwrap_or(false)
     }
 
@@ -963,14 +1076,22 @@ impl BlobCache for LocalBlobCache {
                 "redirect fill group index out of range",
             )
         })?;
-        if self.group_map.is_ready(group_index)? {
-            nydus_telemetry::metrics::inc_cache_hit_group();
-            return Ok(());
-        }
         // Cross-check against this blob's own group metadata: the redirect
         // group's crc32 was copied from this source group at optimize time, so
         // any divergence (stale optimize artifact, corrupted transfer) is
         // caught here before it can poison the cache.
+        if self.blob_metadata.is_cdc() {
+            // A CDC source blob's groups describe the unique data stream while
+            // its cache file holds the logical space: fan the group's bytes out
+            // to the CDC records it fully covers, at their logical offsets.
+            let group = *group;
+            super::validate_group_with_metrics(&self.backend, &group, decoded)?;
+            return self.fill_cdc_records_from_group(&group, decoded);
+        }
+        if self.group_map.is_ready(group_index)? {
+            nydus_telemetry::metrics::inc_cache_hit_group();
+            return Ok(());
+        }
         super::validate_group_with_metrics(&self.backend, group, decoded)?;
         let cache_file = self.cache_file()?;
         write_all_at(
@@ -1055,25 +1176,20 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataChunk, BlobMetadataGroup};
+    use nydus_format::blob::BlobMetadataGroup;
     use nydus_format::utils::sha256_bytes;
     use std::path::Path;
     use tempfile::tempdir;
 
     fn blob_metadata(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMetadata {
-        blob_metadata_with_crc32(blob_id, payload, crc32c::crc32c(payload))
+        blob_metadata_with_crc32(blob_id, crc32c::crc32c(payload))
     }
 
-    fn blob_metadata_with_crc32(
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        payload: &[u8],
-        crc32: u32,
-    ) -> BlobMetadata {
+    fn blob_metadata_with_crc32(blob_id: [u8; SHA256_DIGEST_SIZE], crc32: u32) -> BlobMetadata {
         BlobMetadata::from_parts(
             blob_id,
             1,
             vec![BlobMetadataGroup::new(0, 1, 0, 4096, crc32).unwrap()],
-            vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
         )
         .unwrap()
     }
@@ -1214,6 +1330,47 @@ mod tests {
         cached.read_at(0, &mut all).unwrap();
         assert_eq!(all, logical);
         assert_eq!(cached.ready_ranges(0, 4 * 4096).unwrap(), vec![0..4 * 4096]);
+    }
+
+    #[test]
+    fn cdc_redirect_fill_populates_logical_records_from_unique_group_bytes() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let (full_blob_id, logical) = cdc_fixture(backend_dir.path());
+        let backend = CountingBackend::new(backend_dir.path());
+
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone() as Arc<dyn BlobBackend>,
+        )
+        .unwrap();
+
+        // `read_group` hands optimize the group's decoded unique-stream bytes.
+        let unique = cached.read_group(0).unwrap();
+        assert_eq!(unique.len(), 8192);
+
+        // Corrupted redirect bytes are rejected before touching the cache.
+        let mut corrupted = unique.clone();
+        corrupted[0] ^= 0xff;
+        assert!(cached.fill_group_from_redirect(0, &corrupted).is_err());
+        assert!(!cached.is_group_ready(0));
+
+        // A valid redirect fill writes every record fully contained in the
+        // group's unique range at its logical offset and marks it ready.
+        cached.fill_group_from_redirect(0, &unique).unwrap();
+        assert!(cached.is_group_ready(0));
+        for record in 0..3 {
+            assert!(cached.group_map.is_ready(record).unwrap());
+        }
+
+        // The logical space is now complete without extra backend traffic.
+        let reads_after_fill = backend.reads();
+        let mut all = vec![0u8; logical.len()];
+        cached.read_at(0, &mut all).unwrap();
+        assert_eq!(all, logical);
+        assert_eq!(backend.reads(), reads_after_fill);
     }
 
     #[test]
@@ -1458,7 +1615,6 @@ mod tests {
             sha256_bytes(&payload),
             1,
             vec![BlobMetadataGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
-            Vec::new(),
         )
         .unwrap();
         assert!(redirect_meta.is_redirect_blob());
@@ -1536,11 +1692,8 @@ mod tests {
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xacu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata_with_crc32(
-            data_blob_id,
-            &payload,
-            crc32c::crc32c(&payload).wrapping_add(1),
-        );
+        let meta =
+            blob_metadata_with_crc32(data_blob_id, crc32c::crc32c(&payload).wrapping_add(1));
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
