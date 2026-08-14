@@ -134,45 +134,46 @@ Current CLI help:
 
 ```bash
 nydus build -h
-Create an nydus filesystem image (chunk-based)
+Build a nydus filesystem image
 
 Usage: nydus build [OPTIONS] <SOURCE>
 
 Arguments:
-	<SOURCE>  Source to build from: a directory for `dir-nydus`, a nydus full blob for `nydus-tar`
+	<SOURCE>  Specify the source to build from: a directory for `dir-nydus`, a nydus full blob for `nydus-tar`
 
 Options:
 	--type <CONVERSION_TYPE>
-		Conversion type [default: dir-nydus] [possible values: dir-nydus, nydus-tar]
+		Specify the conversion type [env: NYDUS_BUILD_TYPE=] [default: dir-nydus] [possible values: dir-nydus, nydus-tar]
 	--blob <BLOB>
-		File path to save the generated nydus full blob
+		Specify the file path to save the generated nydus full blob [env: NYDUS_BUILD_BLOB=]
 	--blob-dir <BLOB_DIR>
-		Directory path to save the generated nydus full blob with its SHA256 file name
+		Specify the directory path to save the generated nydus full blob with its SHA256 file name [env: NYDUS_BUILD_BLOB_DIR=]
 	--bootstrap <BOOTSTRAP>
-		File path to save the generated nydus bootstrap
+		Specify the file path to save the generated nydus bootstrap [env: NYDUS_BUILD_BOOTSTRAP=]
 	--output <OUTPUT>
-		`nydus-tar` only: file path to save the generated tar stream, or `-` for stdout [default: -]
+		Specify the file path to save the generated tar stream for `--type nydus-tar`, or `-` for stdout [env: NYDUS_BUILD_OUTPUT=] [default: -]
 	--chunk-size <CHUNK_SIZE>
-		File chunk size in bytes (must be a power of two, >= 4KiB, and 4KiB-aligned) [default: 1048576]
+		Specify the file chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned). The value needs to be set with human readable format, for example: 4kib, 1mib [env: NYDUS_BUILD_CHUNK_SIZE=] [default: 1MiB]
 	--compress-size <COMPRESS_SIZE>
-		Group uncompressed size in bytes (must be a power of two, >= 1MiB, and >= the chunk size). Controls the uncompressed size of each blob meta group used for compression [default: 4194304]
+		Specify the group uncompressed size (must be a power of two, >= 1MiB, and >= the chunk size). Controls the uncompressed size of each blob meta group used for compression. The value needs to be set with human readable format, for example: 4mib, 16mib [env: NYDUS_BUILD_COMPRESS_SIZE=] [default: 4MiB]
 	--compressor <COMPRESSOR>
-		Algorithm to compress data chunks [default: zstd] [possible values: none, zstd]
-	-l, --log-level <LOG_LEVEL>
-		Specify the logging level [trace, debug, info, warn, error] [default: info]
+		Specify the algorithm to compress data chunks [env: NYDUS_BUILD_COMPRESSOR=] [default: zstd] [possible values: none, zstd]
 	--exclude <EXCLUDE>
-		Absolute or current-working-directory-relative paths to exclude. May be specified multiple times. Entries inside the source tree are omitted from the blob and the resulting filesystem tree entirely
+		Specify the absolute or current-working-directory-relative paths to exclude. May be specified multiple times. Entries inside the source tree are omitted from the blob and the resulting filesystem tree entirely
+	-l, --log-level <LOG_LEVEL>
+		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_BUILD_LOG_LEVEL=] [default: info]
 ```
 
 Current implementation notes:
 
 - Either `--blob` or `--blob-dir` is required for `--type dir-nydus`.
 - `--bootstrap` is optional and emits a standalone metadata-only artifact.
-- `--chunk-size` defaults to `1048576` (1 MiB) and controls EROFS file chunk
+- `--chunk-size` defaults to `1MiB`, accepts human readable sizes (e.g. `4kib`,
+	`1mib`) or plain byte counts, and controls EROFS file chunk
 	indexes (the unit of file splitting and per-chunk BLAKE3 digests). Chunks are
 	independent of compression groups and may straddle group boundaries, so a
 	smaller chunk size does not fragment blob_meta into tiny compression units.
-- `--compress-size` defaults to `4194304` (4 MiB) and sets the uncompressed size
+- `--compress-size` defaults to `4MiB` (same size formats) and sets the uncompressed size
 	of each blob_meta group (the unit of compression and of a single backend
 	read). Groups are formed by packing whole decoded blocks up to this size
 	regardless of chunk boundaries, so every group but the last is exactly this
@@ -264,15 +265,15 @@ Merge multiple nydus layers into an overlaid bootstrap
 Usage: nydus merge [OPTIONS] --bootstrap <BOOTSTRAP> <SOURCES>...
 
 Arguments:
-	<SOURCES>...  Nydus layer blob paths named by their SHA256
+	<SOURCES>...  Specify the nydus layer blob paths named by their SHA256
 
 Options:
 	--bootstrap <BOOTSTRAP>
-		File path to save the generated overlaid nydus bootstrap
+		Specify the file path to save the generated overlaid nydus bootstrap [env: NYDUS_MERGE_BOOTSTRAP=]
 	--whiteout-spec <WHITEOUT_SPEC>
-		Whiteout specification to apply while merging layers [default: oci] [possible values: oci]
+		Specify the whiteout specification to apply while merging layers [env: NYDUS_MERGE_WHITEOUT_SPEC=] [default: oci] [possible values: oci]
 	-l, --log-level <LOG_LEVEL>
-		Specify the logging level [trace, debug, info, warn, error] [default: info]
+		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_MERGE_LOG_LEVEL=] [default: info]
 ```
 
 Current implementation notes:
@@ -404,33 +405,33 @@ Current CLI help:
 
 ```bash
 nydus fuse -h
-Mount an nydus image through FUSE
+Mount a nydus image through FUSE
 
 Usage: nydus fuse [OPTIONS] --mountpoint <MOUNTPOINT>
 
 Options:
 	--blob-dir <BLOB_DIR>
-		Directory path including nydus data blob
+		Specify the directory path including nydus data blob [env: NYDUS_FUSE_BLOB_DIR=]
 	--cache-dir <CACHE_DIR>
-		Directory path for persistent chunk cache files
+		Specify the directory path for persistent chunk cache files [env: NYDUS_FUSE_CACHE_DIR=]
 	--config <CONFIG>
-		File path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-dir and --cache-dir can be omitted
+		Specify the file path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-dir and --cache-dir can be omitted [env: NYDUS_FUSE_CONFIG=]
 	--prefetch
-		Enable background blob prefetch after mounting. Off by default; when --config is provided, the config's `prefetch.scope` also turns it on
+		Specify whether to enable background blob prefetch after mounting. Off by default; when --config is provided, the config's `prefetch.scope` also turns it on [env: NYDUS_FUSE_PREFETCH=]
 	--bootstrap <BOOTSTRAP>
-		File path to nydus bootstrap
+		Specify the file path to nydus bootstrap [env: NYDUS_FUSE_BOOTSTRAP=]
 	--blob <BLOB>
-		File path to nydus blob
+		Specify the file path to nydus blob [env: NYDUS_FUSE_BLOB=]
 	--mountpoint <MOUNTPOINT>
-		Directory path to mount nydus filesystem
+		Specify the directory path to mount nydus filesystem [env: NYDUS_FUSE_MOUNTPOINT=]
 	--apiserver <APISERVER>
-		Serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics`
+		Specify the address to serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics` [env: NYDUS_FUSE_APISERVER=]
 	-l, --log-level <LOG_LEVEL>
-		Specify the logging level [trace, debug, info, warn, error] [default: info]
+		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_FUSE_LOG_LEVEL=] [default: info]
 	--log-dir <LOG_DIR>
-		Specify the log directory [default: /var/log/nydus/]
+		Specify the log directory [env: NYDUS_FUSE_LOG_DIR=] [default: /var/log/nydus/]
 	--log-max-files <LOG_MAX_FILES>
-		Specify the max number of log files [default: 6]
+		Specify the max number of log files [env: NYDUS_FUSE_LOG_MAX_FILES=] [default: 6]
 ```
 
 Supported forms:

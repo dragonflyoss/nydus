@@ -1,34 +1,35 @@
-use crate::cli_common;
-use clap::{Args, ValueEnum};
+use bytesize::ByteSize;
+use clap::{Parser, ValueEnum};
 use nydus::build::{build_dir_image, DirImageOptions};
 use nydus::error::{Context, Error, Result};
 use nydus::unpack::unpack_to_tar;
 use nydus_core::ErofsReader;
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BLOB_METADATA_SUFFIX};
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
-use nydus_format::utils::{hex_string, MIB};
+use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::{init_command_tracing, init_command_tracing_stderr};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use tracing::Level;
 
-const DEFAULT_CHUNK_SIZE: u32 = MIB;
-const DEFAULT_COMPRESS_SIZE: u32 = 4 * MIB;
-
+/// The conversion type of the build sub command.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ConversionType {
     DirNydus,
     NydusTar,
 }
 
+/// The algorithm to compress data chunks.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Compressor {
     None,
     Zstd,
 }
 
+/// Implement the conversion from Compressor to BlobMetadataCompressor.
 impl From<Compressor> for BlobMetadataCompressor {
     fn from(value: Compressor) -> Self {
         match value {
@@ -38,199 +39,258 @@ impl From<Compressor> for BlobMetadataCompressor {
     }
 }
 
-#[derive(Args)]
-pub struct BuildArgs {
-    /// Source to build from: a directory for `dir-nydus`, a nydus full blob
-    /// for `nydus-tar`.
-    pub source: PathBuf,
+/// The subcommand of build.
+#[derive(Debug, Clone, Parser)]
+pub struct BuildCommand {
+    #[arg(
+        help = "Specify the source to build from: a directory for `dir-nydus`, a nydus full blob for `nydus-tar`"
+    )]
+    source: PathBuf,
 
-    /// Conversion type.
-    #[arg(long = "type", value_enum, default_value_t = ConversionType::DirNydus)]
-    pub conversion_type: ConversionType,
+    #[arg(
+        long = "type",
+        value_enum,
+        default_value_t = ConversionType::DirNydus,
+        env = "NYDUS_BUILD_TYPE",
+        help = "Specify the conversion type"
+    )]
+    conversion_type: ConversionType,
 
-    /// File path to save the generated nydus full blob.
-    #[arg(long, conflicts_with = "blob_dir")]
-    pub blob: Option<PathBuf>,
+    #[arg(
+        long,
+        conflicts_with = "blob_dir",
+        env = "NYDUS_BUILD_BLOB",
+        help = "Specify the file path to save the generated nydus full blob"
+    )]
+    blob: Option<PathBuf>,
 
-    /// Directory path to save the generated nydus full blob with its SHA256 file name.
-    #[arg(long, conflicts_with = "blob")]
-    pub blob_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        conflicts_with = "blob",
+        env = "NYDUS_BUILD_BLOB_DIR",
+        help = "Specify the directory path to save the generated nydus full blob with its SHA256 file name"
+    )]
+    blob_dir: Option<PathBuf>,
 
-    /// File path to save the generated nydus bootstrap.
-    #[arg(long)]
-    pub bootstrap: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "NYDUS_BUILD_BOOTSTRAP",
+        help = "Specify the file path to save the generated nydus bootstrap"
+    )]
+    bootstrap: Option<PathBuf>,
 
-    /// `nydus-tar` only: file path to save the generated tar stream, or `-`
-    /// for stdout.
-    #[arg(long, default_value = "-")]
-    pub output: PathBuf,
+    #[arg(
+        long,
+        default_value = "-",
+        env = "NYDUS_BUILD_OUTPUT",
+        help = "Specify the file path to save the generated tar stream for `--type nydus-tar`, or `-` for stdout"
+    )]
+    output: PathBuf,
 
-    /// File chunk size in bytes (must be a power of two, >= 4KiB, and 4KiB-aligned).
-    #[arg(long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
-    pub chunk_size: u32,
+    #[arg(
+        long = "chunk-size",
+        default_value = "1MiB",
+        env = "NYDUS_BUILD_CHUNK_SIZE",
+        help = "Specify the file chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned). The value needs to be set with human readable format, for example: 4kib, 1mib"
+    )]
+    chunk_size: ByteSize,
 
-    /// Group uncompressed size in bytes (must be a power of two, >= 1MiB,
-    /// and >= the chunk size). Controls the uncompressed size of each blob
-    /// meta group used for compression.
-    #[arg(long = "compress-size", default_value_t = DEFAULT_COMPRESS_SIZE)]
-    pub compress_size: u32,
+    #[arg(
+        long = "compress-size",
+        default_value = "4MiB",
+        env = "NYDUS_BUILD_COMPRESS_SIZE",
+        help = "Specify the group uncompressed size (must be a power of two, >= 1MiB, and >= the chunk size). Controls the uncompressed size of each blob meta group used for compression. The value needs to be set with human readable format, for example: 4mib, 16mib"
+    )]
+    compress_size: ByteSize,
 
-    /// Algorithm to compress data chunks.
-    #[arg(long, value_enum, default_value_t = Compressor::Zstd)]
-    pub compressor: Compressor,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = Compressor::Zstd,
+        env = "NYDUS_BUILD_COMPRESSOR",
+        help = "Specify the algorithm to compress data chunks"
+    )]
+    compressor: Compressor,
 
-    #[command(flatten)]
-    pub log: cli_common::CommandLogArgs,
+    #[arg(
+        long = "exclude",
+        help = "Specify the absolute or current-working-directory-relative paths to exclude. May be specified multiple times. Entries inside the source tree are omitted from the blob and the resulting filesystem tree entirely"
+    )]
+    exclude: Vec<String>,
 
-    /// Absolute or current-working-directory-relative paths to exclude.
-    /// May be specified multiple times. Entries inside the source tree are
-    /// omitted from the blob and the resulting filesystem tree entirely.
-    #[arg(long = "exclude")]
-    pub exclude: Vec<String>,
+    #[arg(
+        short = 'l',
+        long,
+        default_value = "info",
+        env = "NYDUS_BUILD_LOG_LEVEL",
+        help = "Specify the logging level [trace, debug, info, warn, error]"
+    )]
+    log_level: Level,
+
+    #[arg(
+        long,
+        hide = true,
+        default_value_t = true,
+        env = "NYDUS_BUILD_CONSOLE",
+        help = "Specify whether to print log"
+    )]
+    console: bool,
 }
 
-/// Run the requested conversion.
-pub fn run_build(args: BuildArgs) -> Result<()> {
-    let tar_to_stdout =
-        args.conversion_type == ConversionType::NydusTar && args.output == Path::new("-");
-    // Logging to stdout would corrupt a tar stream written to stdout.
-    let _guards = if tar_to_stdout {
-        init_command_tracing_stderr(args.log.log_level, args.log.console)
-    } else {
-        init_command_tracing(args.log.log_level, args.log.console)
-    };
+/// Implement the execute for BuildCommand.
+impl BuildCommand {
+    /// Executes the build sub command, running the requested conversion.
+    pub fn execute(&self) -> Result<()> {
+        let tar_to_stdout =
+            self.conversion_type == ConversionType::NydusTar && self.output == Path::new("-");
+        // Logging to stdout would corrupt a tar stream written to stdout.
+        let _guards = if tar_to_stdout {
+            init_command_tracing_stderr(self.log_level, self.console)
+        } else {
+            init_command_tracing(self.log_level, self.console)
+        };
 
-    match args.conversion_type {
-        ConversionType::DirNydus => run_dir_to_nydus(args),
-        ConversionType::NydusTar => run_nydus_to_tar(args),
+        match self.conversion_type {
+            ConversionType::DirNydus => self.run_dir_to_nydus(),
+            ConversionType::NydusTar => self.run_nydus_to_tar(),
+        }
     }
-}
 
-/// Unpack a nydus full blob back into an uncompressed OCI layer tar stream.
-fn run_nydus_to_tar(args: BuildArgs) -> Result<()> {
-    for (name, set) in [
-        ("--blob", args.blob.is_some()),
-        ("--blob-dir", args.blob_dir.is_some()),
-        ("--bootstrap", args.bootstrap.is_some()),
-        ("--exclude", !args.exclude.is_empty()),
-    ] {
-        if set {
+    /// Unpack a nydus full blob back into an uncompressed OCI layer tar stream.
+    fn run_nydus_to_tar(&self) -> Result<()> {
+        for (name, set) in [
+            ("--blob", self.blob.is_some()),
+            ("--blob-dir", self.blob_dir.is_some()),
+            ("--bootstrap", self.bootstrap.is_some()),
+            ("--exclude", !self.exclude.is_empty()),
+        ] {
+            if set {
+                return Err(Error::InvalidParameter(format!(
+                    "{name} is not supported with --type nydus-tar"
+                )));
+            }
+        }
+        if !self.source.is_file() {
             return Err(Error::InvalidParameter(format!(
-                "{name} is not supported with --type nydus-tar"
+                "source {} is not a nydus blob file",
+                self.source.display()
             )));
         }
-    }
-    if !args.source.is_file() {
-        return Err(Error::InvalidParameter(format!(
-            "source {} is not a nydus blob file",
-            args.source.display()
-        )));
-    }
 
-    let reader = ErofsReader::open_blob(&args.source)
-        .with_context(|| format!("failed to open nydus blob: {}", args.source.display()))?;
+        let reader = ErofsReader::open_blob(&self.source)
+            .with_context(|| format!("failed to open nydus blob: {}", self.source.display()))?;
 
-    if args.output == Path::new("-") {
-        let stdout = io::stdout();
-        unpack_to_tar(&reader, BufWriter::new(stdout.lock()))?;
-    } else {
-        let file = File::create(&args.output)
-            .with_context(|| format!("failed to create output: {}", args.output.display()))?;
-        unpack_to_tar(&reader, BufWriter::new(file))?;
-    }
-    Ok(())
-}
-
-/// Create an nydus image from the source directory.
-fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
-    let requested_blob_path = args.blob.clone();
-    if let (Some(bootstrap), Some(blob)) = (&args.bootstrap, requested_blob_path.as_ref()) {
-        if *bootstrap == *blob {
-            return Err(Error::InvalidParameter(
-                "--bootstrap and --blob must point to different files".to_string(),
-            ));
+        if self.output == Path::new("-") {
+            let stdout = io::stdout();
+            unpack_to_tar(&reader, BufWriter::new(stdout.lock()))?;
+        } else {
+            let file = File::create(&self.output)
+                .with_context(|| format!("failed to create output: {}", self.output.display()))?;
+            unpack_to_tar(&reader, BufWriter::new(file))?;
         }
+        Ok(())
     }
 
-    // Validate source is a directory and canonicalize it so that all paths
-    // produced by the recursive directory walk are absolute and match
-    // correctly against the exclude set.
-    if !args.source.is_dir() {
-        return Err(Error::InvalidParameter(format!(
-            "source {} is not a directory",
-            args.source.display()
-        )));
-    }
-    let source = args.source.canonicalize().with_context(|| {
-        format!(
-            "failed to canonicalize source directory: {}",
-            args.source.display()
-        )
-    })?;
-
-    // Build the exclude set from --exclude flags. Each value is interpreted as
-    // either an absolute path or a path relative to the current working
-    // directory, canonicalized, then checked against the canonicalized source.
-    // Non-existent paths are ignored.
-    let mut exclude: HashSet<PathBuf> = HashSet::new();
-    for raw in &args.exclude {
-        let abs = match Path::new(raw).canonicalize() {
-            Ok(p) => p,
-            Err(err) => {
-                tracing::warn!("--exclude {}: canonicalize failed ({})", raw, err);
-                continue;
+    /// Create an nydus image from the source directory.
+    fn run_dir_to_nydus(&self) -> Result<()> {
+        let requested_blob_path = self.blob.clone();
+        if let (Some(bootstrap), Some(blob)) = (&self.bootstrap, requested_blob_path.as_ref()) {
+            if *bootstrap == *blob {
+                return Err(Error::InvalidParameter(
+                    "--bootstrap and --blob must point to different files".to_string(),
+                ));
             }
-        };
-        // Only exclude if the path is inside the source tree.
-        if abs.starts_with(&source) {
-            exclude.insert(abs);
         }
+
+        // Validate source is a directory and canonicalize it so that all paths
+        // produced by the recursive directory walk are absolute and match
+        // correctly against the exclude set.
+        if !self.source.is_dir() {
+            return Err(Error::InvalidParameter(format!(
+                "source {} is not a directory",
+                self.source.display()
+            )));
+        }
+        let source = self.source.canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize source directory: {}",
+                self.source.display()
+            )
+        })?;
+
+        // Build the exclude set from --exclude flags. Each value is interpreted as
+        // either an absolute path or a path relative to the current working
+        // directory, canonicalized, then checked against the canonicalized source.
+        // Non-existent paths are ignored.
+        let mut exclude: HashSet<PathBuf> = HashSet::new();
+        for raw in &self.exclude {
+            let abs = match Path::new(raw).canonicalize() {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!("--exclude {}: canonicalize failed ({})", raw, err);
+                    continue;
+                }
+            };
+            // Only exclude if the path is inside the source tree.
+            if abs.starts_with(&source) {
+                exclude.insert(abs);
+            }
+        }
+
+        let chunk_size = u32::try_from(self.chunk_size.as_u64()).map_err(|_| {
+            Error::InvalidParameter(format!("chunk size {} is too large", self.chunk_size))
+        })?;
+        let compress_size = u32::try_from(self.compress_size.as_u64()).map_err(|_| {
+            Error::InvalidParameter(format!("compress size {} is too large", self.compress_size))
+        })?;
+
+        let options = DirImageOptions {
+            source: &source,
+            chunk_size,
+            compress_size,
+            compressor: self.compressor.into(),
+            exclude: &exclude,
+            standalone_bootstrap: self.bootstrap.is_some(),
+        };
+        // Fail on invalid chunk/compress geometry before creating output files.
+        options.validate()?;
+
+        let blob_output =
+            prepare_blob_output(requested_blob_path.as_deref(), self.blob_dir.as_deref())?;
+        let blob_file = open_blob_output(&blob_output)?;
+        let image = build_dir_image(&options, blob_file).with_context(|| {
+            format!(
+                "failed to build nydus blob: {}",
+                blob_output.write_path.display()
+            )
+        })?;
+
+        let final_blob_path = finalize_blob_output(&blob_output, &image.full_blob_digest)?;
+        let blob_metadata_path = blob_metadata_output_path(&final_blob_path)?;
+        image
+            .blob_metadata
+            .save(&blob_metadata_path)
+            .with_context(|| {
+                format!("failed to save blob meta: {}", blob_metadata_path.display())
+            })?;
+
+        if let (Some(bootstrap), Some(bytes)) = (&self.bootstrap, &image.standalone_bootstrap) {
+            fs::write(bootstrap, bytes)
+                .with_context(|| format!("failed to write bootstrap: {}", bootstrap.display()))?;
+        }
+
+        print_blob_summary(BlobBuildReport {
+            index: 0,
+            data_blob_digest: &image.data_digest,
+            full_blob_digest: &image.full_blob_digest,
+            blob_metadata: &image.blob_metadata,
+            footer: &image.footer,
+            full_blob_path: &final_blob_path,
+            blob_metadata_path: &blob_metadata_path,
+            bootstrap_path: self.bootstrap.as_deref(),
+        });
+        Ok(())
     }
-
-    let options = DirImageOptions {
-        source: &source,
-        chunk_size: args.chunk_size,
-        compress_size: args.compress_size,
-        compressor: args.compressor.into(),
-        exclude: &exclude,
-        standalone_bootstrap: args.bootstrap.is_some(),
-    };
-    // Fail on invalid chunk/compress geometry before creating output files.
-    options.validate()?;
-
-    let blob_output =
-        prepare_blob_output(requested_blob_path.as_deref(), args.blob_dir.as_deref())?;
-    let blob_file = open_blob_output(&blob_output)?;
-    let image = build_dir_image(&options, blob_file).with_context(|| {
-        format!(
-            "failed to build nydus blob: {}",
-            blob_output.write_path.display()
-        )
-    })?;
-
-    let final_blob_path = finalize_blob_output(&blob_output, &image.full_blob_digest)?;
-    let blob_metadata_path = blob_metadata_output_path(&final_blob_path)?;
-    image
-        .blob_metadata
-        .save(&blob_metadata_path)
-        .with_context(|| format!("failed to save blob meta: {}", blob_metadata_path.display()))?;
-
-    if let (Some(bootstrap), Some(bytes)) = (&args.bootstrap, &image.standalone_bootstrap) {
-        fs::write(bootstrap, bytes)
-            .with_context(|| format!("failed to write bootstrap: {}", bootstrap.display()))?;
-    }
-
-    print_blob_summary(BlobBuildReport {
-        index: 0,
-        data_blob_digest: &image.data_digest,
-        full_blob_digest: &image.full_blob_digest,
-        blob_metadata: &image.blob_metadata,
-        footer: &image.footer,
-        full_blob_path: &final_blob_path,
-        blob_metadata_path: &blob_metadata_path,
-        bootstrap_path: args.bootstrap.as_deref(),
-    });
-    Ok(())
 }
 
 struct BlobBuildReport<'a> {
@@ -405,8 +465,10 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn default_chunk_size_is_one_megabyte() {
-        assert_eq!(DEFAULT_CHUNK_SIZE, 1_048_576);
+    fn build_uses_cli_defaults_when_options_are_omitted() {
+        let cmd = BuildCommand::try_parse_from(["build", "/tmp/source"]).unwrap();
+        assert_eq!(cmd.chunk_size, ByteSize::mib(1));
+        assert_eq!(cmd.compress_size, ByteSize::mib(4));
     }
 
     #[test]
@@ -432,22 +494,21 @@ mod tests {
         fs::create_dir(&blob_dir).unwrap();
         fs::write(source.join("hello.txt"), b"hello nydus").unwrap();
 
-        run_build(BuildArgs {
+        BuildCommand {
             source,
             conversion_type: ConversionType::DirNydus,
             blob: None,
             blob_dir: Some(blob_dir.clone()),
             bootstrap: Some(bootstrap.clone()),
             output: PathBuf::from("-"),
-            chunk_size: DEFAULT_CHUNK_SIZE,
-            compress_size: DEFAULT_COMPRESS_SIZE,
+            chunk_size: ByteSize::mib(1),
+            compress_size: ByteSize::mib(4),
             compressor: Compressor::Zstd,
-            log: crate::cli_common::CommandLogArgs {
-                log_level: tracing::Level::ERROR,
-                console: false,
-            },
             exclude: Vec::new(),
-        })
+            log_level: Level::ERROR,
+            console: false,
+        }
+        .execute()
         .unwrap();
 
         let full_blob_digest = fs::read_dir(&blob_dir)
@@ -580,62 +641,59 @@ mod tests {
         let blob = dir.path().join("layer.blob");
         fs::write(&blob, b"").unwrap();
 
-        let err = run_nydus_to_tar(BuildArgs {
+        let err = BuildCommand {
             source: blob.clone(),
             conversion_type: ConversionType::NydusTar,
             blob: Some(blob),
             blob_dir: None,
             bootstrap: None,
             output: dir.path().join("out.tar"),
-            chunk_size: DEFAULT_CHUNK_SIZE,
-            compress_size: DEFAULT_COMPRESS_SIZE,
+            chunk_size: ByteSize::mib(1),
+            compress_size: ByteSize::mib(4),
             compressor: Compressor::Zstd,
-            log: crate::cli_common::CommandLogArgs {
-                log_level: tracing::Level::ERROR,
-                console: false,
-            },
             exclude: Vec::new(),
-        })
+            log_level: Level::ERROR,
+            console: false,
+        }
+        .run_nydus_to_tar()
         .unwrap_err();
 
         assert!(err.to_string().contains("--blob is not supported"));
     }
 
     fn build_and_unpack(source: &Path, blob: &Path, tar_path: &Path) {
-        run_dir_to_nydus(BuildArgs {
+        BuildCommand {
             source: source.to_path_buf(),
             conversion_type: ConversionType::DirNydus,
             blob: Some(blob.to_path_buf()),
             blob_dir: None,
             bootstrap: None,
             output: PathBuf::from("-"),
-            chunk_size: EROFS_BLOCK_SIZE,
-            compress_size: MIB,
+            chunk_size: ByteSize::b(EROFS_BLOCK_SIZE as u64),
+            compress_size: ByteSize::mib(1),
             compressor: Compressor::Zstd,
-            log: crate::cli_common::CommandLogArgs {
-                log_level: tracing::Level::ERROR,
-                console: false,
-            },
             exclude: Vec::new(),
-        })
+            log_level: Level::ERROR,
+            console: false,
+        }
+        .run_dir_to_nydus()
         .unwrap();
 
-        run_nydus_to_tar(BuildArgs {
+        BuildCommand {
             source: blob.to_path_buf(),
             conversion_type: ConversionType::NydusTar,
             blob: None,
             blob_dir: None,
             bootstrap: None,
             output: tar_path.to_path_buf(),
-            chunk_size: DEFAULT_CHUNK_SIZE,
-            compress_size: DEFAULT_COMPRESS_SIZE,
+            chunk_size: ByteSize::mib(1),
+            compress_size: ByteSize::mib(4),
             compressor: Compressor::Zstd,
-            log: crate::cli_common::CommandLogArgs {
-                log_level: tracing::Level::ERROR,
-                console: false,
-            },
             exclude: Vec::new(),
-        })
+            log_level: Level::ERROR,
+            console: false,
+        }
+        .run_nydus_to_tar()
         .unwrap();
     }
 
