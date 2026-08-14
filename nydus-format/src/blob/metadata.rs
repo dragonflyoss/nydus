@@ -1696,6 +1696,106 @@ mod tests {
     }
 
     #[test]
+    fn cdc_blob_metadata_round_trips_through_mmap() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob.meta");
+        let blob_id = [0x6bu8; SHA256_DIGEST_SIZE];
+        let piece_a = vec![0x11; 5000];
+        let piece_b = vec![0x22; 2000];
+        // One group holding 8192 unique bytes; three records over a 4-block
+        // (16 KiB) logical space, two of them sharing the same unique bytes.
+        let groups = vec![group(0, 2, 0, 8192, &vec![0u8; 8192])];
+        let cdc_chunks = vec![
+            BlobMetadataCdcChunk::new(digest(&piece_a), 0, 0, 5000).unwrap(),
+            BlobMetadataCdcChunk::new(digest(&piece_a), 8192, 0, 5000).unwrap(),
+            BlobMetadataCdcChunk::new(digest(&piece_b), 13500, 5000, 2000).unwrap(),
+        ];
+        let blob_metadata = BlobMetadata::from_cdc_parts(
+            blob_id,
+            256,
+            BlobMetadataCompressor::None,
+            groups,
+            cdc_chunks,
+            4,
+        )
+        .unwrap();
+
+        blob_metadata.save(&path).unwrap();
+        let loaded = BlobMetadata::load(&path).unwrap();
+
+        assert!(loaded.is_cdc());
+        assert_eq!(loaded.header().chunk_count(), 3);
+        assert_eq!(loaded.header().logical_block_count(), 4);
+        assert_eq!(loaded.header().chunk_record_size(), 56);
+        assert_eq!(
+            loaded.logical_uncompressed_size(),
+            4 * EROFS_BLOCK_SIZE as u64
+        );
+        assert_eq!(loaded.total_uncompressed_size(), 8192);
+        // Fixed chunk records are absent in CDC mode.
+        assert!(loaded.chunks().is_empty());
+        let records = loaded.cdc_chunks();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].digest(), &digest(&piece_a));
+        assert_eq!(records[1].logical_byte_offset(), 8192);
+        assert_eq!(records[1].unique_byte_offset(), 0);
+        assert_eq!(records[2].size(), 2000);
+        assert_eq!(records[2].unique_byte_end(), 7000);
+        // Range lookup: [4000, 9000) overlaps records 0 and 1 (the gap
+        // between them is a hole); [5000, 8192) overlaps nothing.
+        assert_eq!(loaded.cdc_chunks_overlapping(4000, 9000), 0..2);
+        assert_eq!(loaded.cdc_chunks_overlapping(5000, 8192), 1..1);
+        assert_eq!(loaded.cdc_chunks_overlapping(0, u64::MAX), 0..3);
+
+        // Compressed offset bias preserves the CDC shape.
+        let biased = loaded.with_compressed_offset_bias(4096).unwrap();
+        assert!(biased.is_cdc());
+        assert_eq!(biased.groups()[0].compressed_byte_offset(), 4096);
+        assert_eq!(biased.cdc_chunks(), loaded.cdc_chunks());
+    }
+
+    #[test]
+    fn cdc_blob_metadata_rejects_bad_records() {
+        let groups = vec![group(0, 1, 0, 4096, &vec![0u8; 4096])];
+        // Overlapping logical ranges.
+        let overlapping = vec![
+            BlobMetadataCdcChunk::new([1u8; 32], 0, 0, 4096).unwrap(),
+            BlobMetadataCdcChunk::new([2u8; 32], 4095, 0, 1).unwrap(),
+        ];
+        assert!(BlobMetadata::from_cdc_parts(
+            [0u8; SHA256_DIGEST_SIZE],
+            256,
+            BlobMetadataCompressor::None,
+            groups.clone(),
+            overlapping,
+            2,
+        )
+        .is_err());
+        // Unique range past the group data.
+        let out_of_unique = vec![BlobMetadataCdcChunk::new([1u8; 32], 0, 4000, 200).unwrap()];
+        assert!(BlobMetadata::from_cdc_parts(
+            [0u8; SHA256_DIGEST_SIZE],
+            256,
+            BlobMetadataCompressor::None,
+            groups.clone(),
+            out_of_unique,
+            1,
+        )
+        .is_err());
+        // Logical range past the logical block count.
+        let out_of_logical = vec![BlobMetadataCdcChunk::new([1u8; 32], 4000, 0, 200).unwrap()];
+        assert!(BlobMetadata::from_cdc_parts(
+            [0u8; SHA256_DIGEST_SIZE],
+            256,
+            BlobMetadataCompressor::None,
+            groups,
+            out_of_logical,
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn blob_metadata_header_crc32_covers_full_metadata() {
         let payload = vec![0x33; EROFS_BLOCK_SIZE as usize];
         let blob_metadata = BlobMetadata::from_parts(

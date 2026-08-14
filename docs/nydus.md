@@ -158,6 +158,8 @@ Options:
 		Group uncompressed size in bytes (must be a power of two, >= 1MiB, and >= the chunk size). Controls the uncompressed size of each blob meta group used for compression [default: 4194304]
 	--compressor <COMPRESSOR>
 		Algorithm to compress data chunks [default: zstd] [possible values: none, zstd]
+	--cdc
+		Enable content-defined chunking (FastCDC) deduplication: file data is split at content-defined cut points and duplicate pieces are stored only once, within and across files/layers. Produces blobs with the `CHUNK_CDC` incompat blob meta flag
 	-l, --log-level <LOG_LEVEL>
 		Specify the logging level [trace, debug, info, warn, error] [default: info]
 	--exclude <EXCLUDE>
@@ -190,6 +192,18 @@ Current implementation notes:
 	the group is stored plain and its blob_meta group record has
 	`compressed_size == uncompressed_block_count * 4096`.
 - `--compressor none` writes every group plain.
+- `--cdc` enables content-defined chunking (CDC) deduplication. EROFS inode
+	chunk indexes and `--chunk-size` are unchanged (they still address the dense
+	logical uncompressed space), but beneath them each fixed chunk's bytes are
+	split at FastCDC v2020 cut points (min 4 KiB / avg 16 KiB / max 64 KiB) and
+	deduplicated by BLAKE3 digest: only never-seen-before pieces enter the group
+	data stream, so shared content is stored once even when files embed it at
+	different offsets. The blob meta chunk table then holds 56-byte CDC records
+	`(digest, logical_byte_offset, unique_byte_offset, size)` instead of fixed
+	chunk records, the header carries the `CHUNK_CDC` incompat flag plus the
+	logical block count, and the build summary prints a `cdc_dedup` line with
+	logical/unique byte counts and the dedup percentage. CDC blobs are read
+	through the same group cache; `nydus optimize` does not support them yet.
 - `--exclude <path>` omits paths inside the source tree from the blob and the
 	resulting filesystem tree entirely. It accepts absolute or
 	current-working-directory-relative paths and may be repeated.
@@ -1198,6 +1212,48 @@ The writer does not bias `compressed_byte_offset` by the bootstrap size, and
 does not bias `uncompressed_block_offset`. Only the data region as a whole is
 padded to a 4 KiB boundary (so the embedded bootstrap that follows starts on a
 block); groups themselves are not individually padded.
+
+### CDC (content-defined chunking) blob meta
+
+When a blob is built with `--cdc`, the header sets the `CHUNK_CDC` incompat
+flag (`1 << 2`) and the chunk table holds 56-byte CDC records instead of the
+48-byte fixed chunk records above:
+
+```text
+CDC chunk record (56 bytes)
+
+u8  digest[32]           BLAKE3 of the piece's bytes (the dedup key)
+u64 logical_byte_offset  byte position in the logical uncompressed space
+u64 unique_byte_offset   byte position in the deduplicated unique stream
+u32 size                 piece length in bytes (4 KiB..64 KiB FastCDC pieces)
+u32 reserved
+```
+
+Two address spaces are involved:
+
+- The **logical** space is unchanged: EROFS inode chunk indexes still point at
+	fixed power-of-two chunks in a dense uncompressed address space, and the
+	cache data file still mirrors it, so the kernel-visible format and the
+	read/`fetch`/`probe` APIs are untouched. Its size is
+	`logical_block_count * 4096`, from a new u64 header field at offset 56 (that
+	field must be zero for non-CDC blobs, keeping their on-disk bytes
+	identical).
+- The **unique** space is what the group records describe: each fixed chunk's
+	real bytes are split at FastCDC v2020 cut points (min 4 KiB / avg 16 KiB /
+	max 64 KiB) and only never-seen-before pieces (by BLAKE3 digest) are
+	appended, byte-granular, to the group stream, which is then grouped and
+	compressed exactly as before. Many CDC records may reference the same
+	unique bytes — that sharing is the deduplication.
+
+Records are sorted by `logical_byte_offset` and never overlap; logical ranges
+not covered by any record (tail-block padding, elided all-zero chunks) read
+back as zeros. The runtime looks a read up by binary-searching the records
+overlapping the logical range, maps each cold record's unique range to its
+group(s) with the same `>> group_block_bits` division, decodes those groups,
+and copies the record's bytes to its logical offset in the cache file;
+readiness is tracked per record in a `.chunk.map` sidecar (same format as the
+group map). `nydus optimize` rejects CDC blobs for now because its group
+re-slicing assumes the logical and group spaces coincide.
 
 ### Blocks, chunks and groups
 

@@ -39,6 +39,19 @@ fn build_test_image(
     build_test_image_with_layout(root, false)
 }
 
+/// Like [`build_test_image`] but with CDC dedup enabled on the blob writer,
+/// and with extra duplicate-content files so the dedup path is exercised.
+fn build_cdc_test_image(
+    root: &Path,
+) -> (
+    PathBuf,
+    Config,
+    [u8; EROFS_BLOB_ID_SIZE],
+    HashMap<String, Vec<u8>>,
+) {
+    build_test_image_full(root, false, true)
+}
+
 fn build_flattened_test_image(
     root: &Path,
 ) -> (
@@ -53,6 +66,19 @@ fn build_flattened_test_image(
 fn build_test_image_with_layout(
     root: &Path,
     flattened: bool,
+) -> (
+    PathBuf,
+    Config,
+    [u8; EROFS_BLOB_ID_SIZE],
+    HashMap<String, Vec<u8>>,
+) {
+    build_test_image_full(root, flattened, false)
+}
+
+fn build_test_image_full(
+    root: &Path,
+    flattened: bool,
+    cdc: bool,
 ) -> (
     PathBuf,
     Config,
@@ -85,6 +111,25 @@ fn build_test_image_with_layout(
     corpus.insert("empty.txt".to_string(), Vec::new());
     symlink("file1", corpus_dir.join("link_to_file1")).unwrap();
 
+    if cdc {
+        // Duplicate content at shifted offsets: file1's bytes prefixed by a
+        // small header, so fixed chunking would find nothing while CDC
+        // re-synchronizes and dedups the shared tail. Plus an exact copy.
+        let mut shifted = b"shifted-header:".to_vec();
+        shifted.extend_from_slice(&corpus["file1"]);
+        fs::write(corpus_dir.join("file1_shifted"), &shifted).unwrap();
+        corpus.insert("file1_shifted".to_string(), shifted);
+        fs::write(corpus_dir.join("file1_copy"), &corpus["file1"]).unwrap();
+        corpus.insert("file1_copy".to_string(), corpus["file1"].clone());
+        // A file with an all-zero middle chunk to exercise zero-chunk elision
+        // alongside CDC records.
+        let mut holey = vec![0u8; 3 << 20];
+        holey[..4096].copy_from_slice(&corpus["file2"][..4096]);
+        holey[(2 << 20) + 5..(2 << 20) + 4101].copy_from_slice(&corpus["file2"][..4096]);
+        fs::write(corpus_dir.join("holey"), &holey).unwrap();
+        corpus.insert("holey".to_string(), holey);
+    }
+
     let blob_dir = root.join("blobs");
     fs::create_dir_all(&blob_dir).unwrap();
     let staging = blob_dir.join("staging");
@@ -94,6 +139,9 @@ fn build_test_image_with_layout(
         BlobMetadataCompressor::Zstd,
     )
     .unwrap();
+    if cdc {
+        writer = writer.with_cdc();
+    }
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
@@ -102,6 +150,14 @@ fn build_test_image_with_layout(
     )
     .unwrap();
     writer.finish().unwrap();
+    if cdc {
+        // The duplicate/shifted corpus must actually dedup.
+        let (logical, unique) = writer.cdc_dedup_stats();
+        assert!(
+            unique < logical,
+            "CDC dedup found nothing: logical {logical}, unique {unique}"
+        );
+    }
 
     let data_blob_id = writer.data_digest();
     let blob_metadata = writer.blob_metadata(data_blob_id, 0).unwrap();
@@ -419,4 +475,40 @@ fn node_fetch_populates_blob_cache_without_reading_data() {
     assert!(after.iter().any(|byte| *byte != 0));
     file1_entry.fetch(0, 0).unwrap();
     core.fs.open("/").unwrap().fetch(0, 4096).unwrap_err();
+}
+
+#[test]
+fn core_reads_back_cdc_deduped_image() {
+    let dir = tempdir().unwrap();
+    let (bootstrap, config, _blob_id, corpus) = build_cdc_test_image(dir.path());
+
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+
+    // Every file — including the shifted/duplicated ones and the holey file —
+    // must read back byte-identical through the on-demand CDC cache path.
+    for (name, expected) in &corpus {
+        let entry = core.fs.open(name).unwrap();
+        let all = entry.read().unwrap();
+        assert_eq!(
+            &all[..expected.len()],
+            expected.as_slice(),
+            "content mismatch for {name}"
+        );
+        assert!(
+            all[expected.len()..].iter().all(|byte| *byte == 0),
+            "tail padding not zero for {name}"
+        );
+    }
+
+    // Unaligned partial reads cross CDC record boundaries.
+    let entry = core.fs.open("file1_shifted").unwrap();
+    let mut buf = vec![0u8; 100_000];
+    let read = entry.read_at(123_457, &mut buf).unwrap();
+    assert_eq!(read, buf.len());
+    assert_eq!(&buf, &corpus["file1_shifted"][123_457..123_457 + read]);
+
+    // probe/fetch flat ranges work per CDC record too.
+    let file1_entry = core.fs.open("file1").unwrap();
+    file1_entry.fetch(12345, 4097).unwrap();
+    assert!(!file1_entry.probe_ranges(12345, 4097).unwrap().is_empty());
 }

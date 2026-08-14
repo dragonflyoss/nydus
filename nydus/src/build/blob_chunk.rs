@@ -431,6 +431,70 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn cdc_blob_writer_dedups_duplicate_and_shifted_content() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("blob.data");
+        let file_a = dir.path().join("a.bin");
+        let file_b = dir.path().join("b.bin");
+        let file_c = dir.path().join("c.bin");
+
+        // Pseudo-random ~1.5 MiB body so FastCDC finds real cut points.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut body = vec![0u8; (1 << 20) + (1 << 19)];
+        for byte in body.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *byte = state as u8;
+        }
+        fs::write(&file_a, &body).unwrap();
+        // Exact duplicate and a shifted copy: fixed 1 MiB chunking would
+        // dedup neither, CDC must dedup (most of) both.
+        fs::write(&file_b, &body).unwrap();
+        let mut shifted = b"prefix that shifts every later offset".to_vec();
+        shifted.extend_from_slice(&body);
+        fs::write(&file_c, &shifted).unwrap();
+
+        let mut writer = BlobWriter::new(&blob_path, BLOB_METADATA_DEFAULT_CHUNK_SIZE)
+            .unwrap()
+            .with_cdc();
+        writer
+            .write_file_chunks(&file_a, body.len() as u64)
+            .unwrap();
+        writer
+            .write_file_chunks(&file_b, body.len() as u64)
+            .unwrap();
+        writer
+            .write_file_chunks(&file_c, shifted.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+
+        let (logical, unique) = writer.cdc_dedup_stats();
+        assert_eq!(logical, (2 * body.len() + shifted.len()) as u64);
+        // The duplicate file dedups fully and the shifted copy mostly: well
+        // over half of the logical bytes must be removed.
+        assert!(
+            unique * 2 < logical,
+            "expected >50% dedup, got logical {logical}, unique {unique}"
+        );
+
+        // The recorded metadata must pass CDC validation end to end.
+        let blob_metadata = writer.blob_metadata([0x11; EROFS_BLOB_ID_SIZE], 0).unwrap();
+        assert!(blob_metadata.is_cdc());
+        assert_eq!(blob_metadata.chunks().len(), 0);
+        assert!(!blob_metadata.cdc_chunks().is_empty());
+        // Unique stream (plus final block padding) is what the groups store.
+        assert_eq!(
+            blob_metadata.total_uncompressed_size(),
+            round_up(unique as usize, EROFS_BLOCK_SIZE as usize) as u64
+        );
+        assert_eq!(
+            blob_metadata.logical_uncompressed_size(),
+            writer.total_blocks() * EROFS_BLOCK_SIZE as u64
+        );
+    }
+
+    #[test]
     fn blob_metadata_group_round_trips_minimal_fields() {
         let payload = vec![0u8; 0x3000];
         // Compressed byte offset is a plain byte position (not block aligned).

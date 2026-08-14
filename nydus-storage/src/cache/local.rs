@@ -430,7 +430,7 @@ impl LocalBlobCache {
             let group = *self.blob_metadata.group_at(group_index).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
             })?;
-            if !memo.contains_key(&group_index) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = memo.entry(group_index) {
                 if let Some(recorder) = self.trace_recorder.as_ref() {
                     recorder.record_group_access(self.blob_index, group_index as u32);
                 } else {
@@ -445,7 +445,7 @@ impl LocalBlobCache {
                     &mut buffers,
                     kind,
                 )?;
-                memo.insert(group_index, decoded.to_vec());
+                entry.insert(decoded.to_vec());
             }
             let decoded = &memo[&group_index];
             let group_offset = group.uncompressed_byte_offset();
@@ -453,8 +453,8 @@ impl LocalBlobCache {
             let copy_end = unique_end.min(group.uncompressed_byte_end());
             bytes[(copy_start - unique_offset) as usize..(copy_end - unique_offset) as usize]
                 .copy_from_slice(
-                    &decoded[(copy_start - group_offset) as usize
-                        ..(copy_end - group_offset) as usize],
+                    &decoded
+                        [(copy_start - group_offset) as usize..(copy_end - group_offset) as usize],
                 );
         }
 
@@ -1132,6 +1132,113 @@ mod tests {
 
         assert_eq!(buf, payload[512..1536]);
         assert!(cached.group_map.is_ready(0).unwrap());
+    }
+
+    /// A CDC blob whose 8 KiB unique stream backs a 16 KiB logical space:
+    /// three records, two of which share the same unique bytes (the dedup),
+    /// with logical gaps (holes) that must read back as zeros.
+    fn cdc_fixture(backend_dir: &Path) -> ([u8; SHA256_DIGEST_SIZE], Vec<u8>) {
+        use nydus_format::blob::BlobMetadataCdcChunk;
+
+        let mut unique = vec![0u8; 8192];
+        for (index, byte) in unique.iter_mut().enumerate() {
+            *byte = (index % 251) as u8 + 1;
+        }
+        let data_blob_id = sha256_bytes(&unique);
+        let records = vec![
+            BlobMetadataCdcChunk::new(*blake3::hash(&unique[..5000]).as_bytes(), 0, 0, 5000)
+                .unwrap(),
+            BlobMetadataCdcChunk::new(*blake3::hash(&unique[..5000]).as_bytes(), 8192, 0, 5000)
+                .unwrap(),
+            BlobMetadataCdcChunk::new(
+                *blake3::hash(&unique[5000..7000]).as_bytes(),
+                13500,
+                5000,
+                2000,
+            )
+            .unwrap(),
+        ];
+        let meta = BlobMetadata::from_cdc_parts(
+            data_blob_id,
+            1,
+            nydus_format::blob::BlobMetadataCompressor::None,
+            vec![BlobMetadataGroup::new(0, 2, 0, 8192, crc32c::crc32c(&unique)).unwrap()],
+            records,
+            4,
+        )
+        .unwrap();
+        let full_blob_id = write_minimal_full_blob(backend_dir, &unique, &meta, true);
+
+        // The expected logical space: record bytes at their logical offsets,
+        // zeros everywhere else.
+        let mut logical = vec![0u8; 4 * 4096];
+        logical[..5000].copy_from_slice(&unique[..5000]);
+        logical[8192..13192].copy_from_slice(&unique[..5000]);
+        logical[13500..15500].copy_from_slice(&unique[5000..7000]);
+        (full_blob_id, logical)
+    }
+
+    #[test]
+    fn cdc_blob_cache_reads_dedup_records_and_holes() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let (full_blob_id, logical) = cdc_fixture(backend_dir.path());
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
+
+        let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        assert!(cached.blob_metadata().is_cdc());
+
+        // A read spanning a record tail, a hole, and a deduped record.
+        let mut buf = vec![0u8; 9000];
+        cached.read_at(4000, &mut buf).unwrap();
+        assert_eq!(buf, logical[4000..13000]);
+        // Records 0 and 1 were needed; record 2 stays cold.
+        assert!(cached.group_map.is_ready(0).unwrap());
+        assert!(cached.group_map.is_ready(1).unwrap());
+        assert!(!cached.group_map.is_ready(2).unwrap());
+
+        // A pure-hole read touches no record.
+        let mut hole = vec![0xffu8; 1000];
+        cached.read_at(5500, &mut hole).unwrap();
+        assert!(hole.iter().all(|byte| *byte == 0));
+
+        // ready_ranges: holes count as ready, cold records do not.
+        let ranges = cached.ready_ranges(0, 4 * 4096).unwrap();
+        assert_eq!(ranges, vec![0..13500, 15500..4 * 4096]);
+
+        // Whole logical space after warming everything.
+        let mut all = vec![0u8; logical.len()];
+        cached.read_at(0, &mut all).unwrap();
+        assert_eq!(all, logical);
+        assert_eq!(cached.ready_ranges(0, 4 * 4096).unwrap(), vec![0..4 * 4096]);
+    }
+
+    #[test]
+    fn cdc_blob_cache_prefetch_fills_everything() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let (full_blob_id, logical) = cdc_fixture(backend_dir.path());
+        let backend = CountingBackend::new(backend_dir.path());
+
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone() as Arc<dyn BlobBackend>,
+        )
+        .unwrap();
+        let reads_before_prefetch = backend.reads();
+        cached.prefetch_all().unwrap();
+        // Three records but a single group: the decode memo must keep it to
+        // one backend data read.
+        assert_eq!(backend.reads() - reads_before_prefetch, 1);
+        assert!(cached.group_map.is_all_ready());
+
+        let mut all = vec![0u8; logical.len()];
+        cached.read_at(0, &mut all).unwrap();
+        assert_eq!(all, logical);
+        // Fully prefetched: reading adds no backend traffic.
+        assert_eq!(backend.reads() - reads_before_prefetch, 1);
     }
 
     #[test]
