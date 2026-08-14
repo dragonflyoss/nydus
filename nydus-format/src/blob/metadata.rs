@@ -809,7 +809,12 @@ impl BlobMetadata {
         chunk_block_count: u32,
         groups: Vec<BlobMetadataGroup>,
     ) -> Result<Self> {
-        Self::from_parts_with_options(blob_id, chunk_block_count, BlobMetadataCompressor::None, groups)
+        Self::from_parts_with_options(
+            blob_id,
+            chunk_block_count,
+            BlobMetadataCompressor::None,
+            groups,
+        )
     }
 
     pub fn from_parts_with_options(
@@ -1466,12 +1471,9 @@ mod tests {
         let payload_a = vec![0x11; EROFS_BLOCK_SIZE as usize];
         let payload_b = vec![0x22; EROFS_BLOCK_SIZE as usize];
         let group_payload = [payload_a.as_slice(), payload_b.as_slice()].concat();
-        let blob_metadata = BlobMetadata::from_parts(
-            blob_id,
-            1,
-            vec![group(0, 2, 8192, 8192, &group_payload)],
-        )
-        .unwrap();
+        let blob_metadata =
+            BlobMetadata::from_parts(blob_id, 1, vec![group(0, 2, 8192, 8192, &group_payload)])
+                .unwrap();
 
         blob_metadata.save(&path).unwrap();
         let loaded = BlobMetadata::load(&path).unwrap();

@@ -498,7 +498,10 @@ mod tests {
         // The repeated content dedups: file_b contributes no unique bytes and
         // file_a's constant body collapses to a handful of unique pieces.
         let (logical, unique) = writer.cdc_dedup_stats();
-        assert_eq!(logical, (content_a.len() + BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize) as u64);
+        assert_eq!(
+            logical,
+            (content_a.len() + BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize) as u64
+        );
         assert!(unique < logical, "logical {logical}, unique {unique}");
 
         // Groups describe the (block padded) unique data stream, not the

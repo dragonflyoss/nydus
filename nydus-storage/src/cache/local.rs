@@ -267,11 +267,14 @@ impl LocalBlobCache {
     ) -> io::Result<()> {
         let chunks = self.blob_metadata.cdc_chunks();
         let group_offset = group.uncompressed_byte_offset();
+        let contained = self.cdc_records_contained_in(group_offset, group.uncompressed_byte_end());
+        if contained.is_empty() {
+            // Only straddling records touch this group; nothing to fill here.
+            return Ok(());
+        }
         let cache_file = self.cache_file()?;
         let mut filled = false;
-        for index in
-            self.cdc_records_contained_in(group_offset, group.uncompressed_byte_end())
-        {
+        for index in contained {
             if self.group_map.is_ready(index)? {
                 continue;
             }
@@ -1692,8 +1695,7 @@ mod tests {
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xacu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
-        let meta =
-            blob_metadata_with_crc32(data_blob_id, crc32c::crc32c(&payload).wrapping_add(1));
+        let meta = blob_metadata_with_crc32(data_blob_id, crc32c::crc32c(&payload).wrapping_add(1));
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
