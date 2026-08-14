@@ -10,9 +10,6 @@ use std::path::Path;
 use crate::blob::{BlobMetadata, BLOB_METADATA_SUFFIX};
 use crate::erofs::{ErofsSuperblock, EROFS_SUPER_OFFSET};
 
-/// One mebibyte (1 MiB) in bytes.
-pub const MIB: u32 = 1 << 20;
-
 pub use self::align::{align_up, round_up};
 pub use self::digest::{
     hex_string, parse_sha256_hex, sha256_bytes, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE,

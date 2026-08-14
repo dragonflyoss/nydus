@@ -28,7 +28,10 @@ use nydus_format::blob::{
     BlobFooter, BlobMetadata, BlobMetadataCompressor, NYDUS_BLOB_FOOTER_SIZE,
 };
 use nydus_format::erofs::{ErofsDeviceSlot, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
-use nydus_format::utils::{sha256_bytes, MIB};
+use nydus_format::utils::sha256_bytes;
+
+/// The minimum group uncompressed size.
+pub const MIN_COMPRESS_SIZE: u32 = 1024 * 1024;
 
 /// Options for [`build_dir_image`].
 pub struct DirImageOptions<'a> {
@@ -93,7 +96,7 @@ impl DirImageOptions<'_> {
         // blob meta header stores it as the log2 exponent `group_block_bits`),
         // at least 1MiB, and at least the file chunk size so a chunk always
         // fits in a group.
-        if !self.compress_size.is_power_of_two() || self.compress_size < MIB {
+        if !self.compress_size.is_power_of_two() || self.compress_size < MIN_COMPRESS_SIZE {
             return Err(Error::InvalidParameter(format!(
                 "compress size {} must be a power of two and at least 1MiB",
                 self.compress_size

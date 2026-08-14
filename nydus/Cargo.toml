@@ -19,6 +19,7 @@ fuse = ["dep:fuser", "dep:signal-hook"]
 # The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
 cli = [
   "fuse",
+  "dep:bytesize",
   "dep:clap",
   "dep:http-body-util",
   "dep:hyper",
@@ -51,7 +52,8 @@ ublk = ["dep:libublk"]
 
 [dependencies]
 blake3 = "1"
-clap = { version = "4", features = ["derive"], optional = true }
+bytesize = { version = "1", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
 crc32c = "0.6"
 fuser = { version = "0.17", optional = true }
 http-body-util = { version = "0.1", optional = true }

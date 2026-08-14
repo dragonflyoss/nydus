@@ -1,7 +1,7 @@
-use clap::Args;
+use clap::Parser;
 use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
-use nydus::error::{Error, Result};
-use nydus_config::BackendConfig;
+use nydus::error::{Context, Error, Result};
+use nydus_config::{BackendConfig, Config};
 use nydus_format::erofs::{
     ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
     EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
@@ -11,86 +11,100 @@ use nydus_format::utils::hex_string;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::cli_common;
+/// The subcommand of check.
+#[derive(Debug, Clone, Parser)]
+pub struct CheckCommand {
+    #[arg(
+        long,
+        env = "NYDUS_CHECK_BLOB",
+        help = "Specify the file path to an nydus blob"
+    )]
+    blob: Option<PathBuf>,
 
-#[derive(Args)]
-pub struct CheckArgs {
-    /// File path to an nydus blob.
-    #[arg(long)]
-    pub blob: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "NYDUS_CHECK_BOOTSTRAP",
+        help = "Specify the file path to an nydus bootstrap"
+    )]
+    bootstrap: Option<PathBuf>,
 
-    /// File path to an nydus bootstrap.
-    #[arg(long)]
-    pub bootstrap: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "NYDUS_CHECK_BLOB_DIR",
+        help = "Specify the optional directory containing external blob files referenced by bootstrap"
+    )]
+    blob_dir: Option<PathBuf>,
 
-    /// Optional directory containing external blob files referenced by bootstrap.
-    #[arg(long)]
-    pub blob_dir: Option<PathBuf>,
-
-    /// File path to a YAML storage config providing the backend directory.
-    /// When set, --blob-dir can be omitted.
-    #[arg(long)]
-    pub config: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "NYDUS_CHECK_CONFIG",
+        help = "Specify the file path to a YAML storage config providing the backend directory. When set, --blob-dir can be omitted"
+    )]
+    config: Option<PathBuf>,
 }
 
-pub fn run_check(args: CheckArgs) -> Result<()> {
-    // `check` verifies blobs from a local directory. --blob-dir takes precedence
-    // over the config; a config is only usable here when it has a local backend.
-    let blob_dir = match &args.blob_dir {
-        Some(dir) => Some(dir.clone()),
-        None => match &args.config {
-            Some(path) => {
-                let config = cli_common::load_storage_config(path)?;
-                match &config.backend {
-                    BackendConfig::Local(local) => Some(local.dir.clone()),
-                    other => {
-                        return Err(Error::InvalidConfig(format!(
-                            "check only supports a local backend, but config backend is '{}'",
-                            other.kind()
-                        )));
+/// Implement the execute for CheckCommand.
+impl CheckCommand {
+    /// Executes the check sub command, statically inspecting the image.
+    pub fn execute(&self) -> Result<()> {
+        // `check` verifies blobs from a local directory. --blob-dir takes precedence
+        // over the config; a config is only usable here when it has a local backend.
+        let blob_dir = match &self.blob_dir {
+            Some(dir) => Some(dir.clone()),
+            None => match &self.config {
+                Some(path) => {
+                    let config = Config::load(path).context("failed to load storage config")?;
+                    match &config.backend {
+                        BackendConfig::Local(local) => Some(local.dir.clone()),
+                        other => {
+                            return Err(Error::InvalidConfig(format!(
+                                "check only supports a local backend, but config backend is '{}'",
+                                other.kind()
+                            )));
+                        }
                     }
                 }
+                None => None,
+            },
+        };
+
+        let (kind, path) = match (&self.blob, &self.bootstrap, &blob_dir) {
+            (Some(blob), None, None) => (ImageKind::Blob, blob.as_path()),
+            (None, Some(bootstrap), None) => (ImageKind::Bootstrap, bootstrap.as_path()),
+            (None, Some(bootstrap), Some(blob_dir)) if blob_dir.is_dir() => {
+                (ImageKind::Bootstrap, bootstrap.as_path())
             }
-            None => None,
-        },
-    };
+            (None, Some(_), Some(blob_dir)) => {
+                return Err(Error::InvalidParameter(format!(
+                    "blob-dir {} is not a directory",
+                    blob_dir.display()
+                )))
+            }
+            _ => {
+                return Err(Error::InvalidParameter(
+                    "check expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config".to_string(),
+                ))
+            }
+        };
 
-    let (kind, path) = match (&args.blob, &args.bootstrap, &blob_dir) {
-        (Some(blob), None, None) => (ImageKind::Blob, blob.as_path()),
-        (None, Some(bootstrap), None) => (ImageKind::Bootstrap, bootstrap.as_path()),
-        (None, Some(bootstrap), Some(blob_dir)) if blob_dir.is_dir() => {
-            (ImageKind::Bootstrap, bootstrap.as_path())
+        let report = check_image(kind, path, blob_dir.as_deref())?;
+
+        print_header(kind, path, &report);
+        print_superblock(&report.superblock);
+        print_summary(&report.stats, &report.blobs);
+        print_blobs(&report.blobs);
+        print_inline_across_blocks(&report.stats);
+
+        if !report.stats.inline_overflows.is_empty() {
+            return Err(Error::InvalidImage(format!(
+                "{} inode(s) have inline data crossing a metadata block; \
+                 the kernel cannot read them",
+                report.stats.inline_overflows.len()
+            )));
         }
-        (None, Some(_), Some(blob_dir)) => {
-            return Err(Error::InvalidParameter(format!(
-                "blob-dir {} is not a directory",
-                blob_dir.display()
-            )))
-        }
-        _ => {
-            return Err(Error::InvalidParameter(
-                "check expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config".to_string(),
-            ))
-        }
-    };
 
-    let report = check_image(kind, path, blob_dir.as_deref())?;
-
-    print_header(kind, path, &report);
-    print_superblock(&report.superblock);
-    print_summary(&report.stats, &report.blobs);
-    print_blobs(&report.blobs);
-    print_inline_across_blocks(&report.stats);
-
-    if !report.stats.inline_overflows.is_empty() {
-        return Err(Error::InvalidImage(format!(
-            "{} inode(s) have inline data crossing a metadata block; \
-             the kernel cannot read them",
-            report.stats.inline_overflows.len()
-        )));
+        Ok(())
     }
-
-    Ok(())
 }
 
 fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) {

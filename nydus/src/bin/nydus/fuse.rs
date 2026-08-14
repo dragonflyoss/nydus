@@ -1,247 +1,316 @@
-use clap::Args;
-use nydus::error::{Context, Error, Result};
-
-use crate::cli_common;
+use clap::Parser;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
+use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{build_backend, BlobBackend, Local};
 use nydus_config::{
-    default_prefetch_concurrent_blob_count, default_prefetch_timeout, PrefetchScope,
+    default_prefetch_concurrent_blob_count, default_prefetch_timeout, Config, PrefetchScope,
 };
 use nydus_core::ErofsReader;
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Level};
 
-#[derive(Args)]
-pub struct FuseArgs {
-    /// Directory path including nydus data blob.
-    #[arg(long)]
-    pub blob_dir: Option<PathBuf>,
+use super::*;
 
-    /// Directory path for persistent chunk cache files.
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+/// The subcommand of fuse.
+#[derive(Debug, Clone, Parser)]
+pub struct FuseCommand {
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_BLOB_DIR",
+        help = "Specify the directory path including nydus data blob"
+    )]
+    blob_dir: Option<PathBuf>,
 
-    /// File path to a YAML storage config providing backend/cache directories
-    /// and prefetch options. When set, --blob-dir and --cache-dir can be omitted.
-    #[arg(long)]
-    pub config: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_CACHE_DIR",
+        help = "Specify the directory path for persistent chunk cache files"
+    )]
+    cache_dir: Option<PathBuf>,
 
-    /// Enable background blob prefetch after mounting. Off by default; when
-    /// --config is provided, the config's `prefetch.scope` also turns it on.
-    #[arg(long, default_value_t = false)]
-    pub prefetch: bool,
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_CONFIG",
+        help = "Specify the file path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-dir and --cache-dir can be omitted"
+    )]
+    config: Option<PathBuf>,
 
-    /// File path to nydus bootstrap.
-    #[arg(long)]
-    pub bootstrap: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value_t = false,
+        env = "NYDUS_FUSE_PREFETCH",
+        help = "Specify whether to enable background blob prefetch after mounting. Off by default; when --config is provided, the config's `prefetch.scope` also turns it on"
+    )]
+    prefetch: bool,
 
-    /// File path to nydus blob.
-    #[arg(long)]
-    pub blob: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_BOOTSTRAP",
+        help = "Specify the file path to nydus bootstrap"
+    )]
+    bootstrap: Option<PathBuf>,
 
-    /// Directory path to mount nydus filesystem.
-    #[arg(long)]
-    pub mountpoint: PathBuf,
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_BLOB",
+        help = "Specify the file path to nydus blob"
+    )]
+    blob: Option<PathBuf>,
 
-    /// Number of worker threads.
-    #[arg(long, hide = true, default_value_t = default_threads())]
-    pub threads: usize,
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_MOUNTPOINT",
+        help = "Specify the directory path to mount nydus filesystem"
+    )]
+    mountpoint: PathBuf,
 
-    /// Filesystem name shown in /proc/mounts SOURCE column.
-    #[arg(long, hide = true, default_value = "nydus")]
-    pub fsname: String,
+    #[arg(
+        long,
+        hide = true,
+        default_value_t = default_threads(),
+        env = "NYDUS_FUSE_THREADS",
+        help = "Specify the number of worker threads"
+    )]
+    threads: usize,
 
-    /// Serve Prometheus metrics over a Unix socket, e.g.
-    /// `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics`.
-    #[arg(long)]
-    pub apiserver: Option<String>,
+    #[arg(
+        long,
+        hide = true,
+        default_value = "nydus",
+        env = "NYDUS_FUSE_FSNAME",
+        help = "Specify the filesystem name shown in /proc/mounts SOURCE column"
+    )]
+    fsname: String,
 
-    #[command(flatten)]
-    pub log: cli_common::DaemonLogArgs,
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_APISERVER",
+        help = "Specify the address to serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics`"
+    )]
+    apiserver: Option<String>,
+
+    #[arg(
+        short = 'l',
+        long,
+        default_value = "info",
+        env = "NYDUS_FUSE_LOG_LEVEL",
+        help = "Specify the logging level [trace, debug, info, warn, error]"
+    )]
+    log_level: Level,
+
+    #[arg(
+        long,
+        default_value_os_t = default_log_dir(),
+        env = "NYDUS_FUSE_LOG_DIR",
+        help = "Specify the log directory"
+    )]
+    log_dir: PathBuf,
+
+    #[arg(
+        long,
+        default_value_t = 6,
+        env = "NYDUS_FUSE_LOG_MAX_FILES",
+        help = "Specify the max number of log files"
+    )]
+    log_max_files: usize,
+
+    #[arg(
+        long,
+        hide = true,
+        default_value_t = true,
+        env = "NYDUS_FUSE_CONSOLE",
+        help = "Specify whether to print log"
+    )]
+    console: bool,
 }
 
 /// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
 /// range.
 fn default_threads() -> usize {
-    cli_common::default_parallelism(4, 16)
+    default_parallelism(4, 16)
 }
 
-/// Run the FUSE mount command.
-pub fn run_fuse(args: FuseArgs) -> Result<()> {
-    // Block termination signals before starting any helper threads so later
-    // sigwait-based handling is the only path that consumes them.
-    let _blocked_signals = TermSignalMask::block()?;
+/// Implement the execute for FuseCommand.
+impl FuseCommand {
+    /// Executes the fuse sub command, mounting the nydus image through FUSE
+    /// and serving it until a termination signal arrives.
+    pub fn execute(&self) -> Result<()> {
+        // Block termination signals before starting any helper threads so later
+        // sigwait-based handling is the only path that consumes them.
+        let _blocked_signals = TermSignalMask::block()?;
 
-    let _guards = init_tracing(
-        "nydus",
-        args.log.log_dir.clone(),
-        args.log.log_level,
-        args.log.log_max_files,
-        args.log.console,
-    );
+        // Initialize tracing.
+        let _guards = init_tracing(
+            NAME,
+            self.log_dir.clone(),
+            self.log_level,
+            self.log_max_files,
+            self.console,
+        );
 
-    let mountpoint = &args.mountpoint;
-    if !mountpoint.is_dir() {
-        return Err(Error::InvalidParameter(format!(
-            "mountpoint {} is not a directory",
-            mountpoint.display()
-        )));
-    }
+        let mountpoint = &self.mountpoint;
+        if !mountpoint.is_dir() {
+            return Err(Error::InvalidParameter(format!(
+                "mountpoint {} is not a directory",
+                mountpoint.display()
+            )));
+        }
 
-    // Load the optional storage config. CLI flags take precedence over config
-    // values, so --blob-dir/--cache-dir override the backend/cache directories.
-    let storage_config = match &args.config {
-        Some(path) => Some(cli_common::load_storage_config(path)?),
-        None => None,
-    };
-
-    let cache_dir = if let Some(dir) = args.cache_dir.clone() {
-        Some(dir)
-    } else {
-        storage_config
-            .as_ref()
-            .and_then(|config| config.storage.dir.clone())
-    };
-
-    let (prefetch_scope, prefetch_concurrent_blob_count, prefetch_timeout) =
-        match storage_config.as_ref() {
-            Some(config) => {
-                // `--prefetch` forces prefetch on when the config disables it.
-                let scope = if config.prefetch.scope == PrefetchScope::None && args.prefetch {
-                    PrefetchScope::default()
-                } else {
-                    config.prefetch.scope
-                };
-                (
-                    scope,
-                    config.prefetch.concurrent_blob_count,
-                    config.prefetch.timeout,
-                )
-            }
-            None => (
-                if args.prefetch {
-                    PrefetchScope::default()
-                } else {
-                    PrefetchScope::None
-                },
-                default_prefetch_concurrent_blob_count(),
-                default_prefetch_timeout(),
-            ),
+        // Load the optional storage config. CLI flags take precedence over config
+        // values, so --blob-dir/--cache-dir override the backend/cache directories.
+        let storage_config = match &self.config {
+            Some(path) => Some(Config::load(path).context("failed to load storage config")?),
+            None => None,
         };
 
-    // Build the blob backend. A direct `--blob <path>` is self-contained and
-    // needs no backend. Otherwise a `--bootstrap` is served by either an
-    // explicit `--blob-dir` (local backend) or the backend from `--config`.
-    let backend: Option<Arc<dyn BlobBackend>> = if args.blob.is_some() {
-        None
-    } else if let Some(dir) = args.blob_dir.as_ref() {
-        if !dir.is_dir() {
-            return Err(Error::InvalidParameter(format!(
-                "blob-dir {} is not a directory",
-                dir.display()
-            )));
-        }
-        Some(nydus_backend::metered(Arc::new(Local::new(dir.clone()))))
-    } else if let Some(config) = storage_config.as_ref() {
-        Some(build_backend(&config.backend).context("failed to build blob backend")?)
-    } else {
-        None
-    };
+        let cache_dir = if let Some(dir) = self.cache_dir.clone() {
+            Some(dir)
+        } else {
+            storage_config
+                .as_ref()
+                .and_then(|config| config.storage.dir.clone())
+        };
 
-    if let Some(cache_dir) = &cache_dir {
-        if cache_dir.exists() && !cache_dir.is_dir() {
-            return Err(Error::InvalidParameter(format!(
-                "cache-dir {} is not a directory",
-                cache_dir.display()
-            )));
-        }
-    }
+        let (prefetch_scope, prefetch_concurrent_blob_count, prefetch_timeout) =
+            match storage_config.as_ref() {
+                Some(config) => {
+                    // `--prefetch` forces prefetch on when the config disables it.
+                    let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
+                        PrefetchScope::default()
+                    } else {
+                        config.prefetch.scope
+                    };
+                    (
+                        scope,
+                        config.prefetch.concurrent_blob_count,
+                        config.prefetch.timeout,
+                    )
+                }
+                None => (
+                    if self.prefetch {
+                        PrefetchScope::default()
+                    } else {
+                        PrefetchScope::None
+                    },
+                    default_prefetch_concurrent_blob_count(),
+                    default_prefetch_timeout(),
+                ),
+            };
 
-    let reader = match (&args.blob, &args.bootstrap, backend) {
-        (Some(blob), None, _) => ErofsReader::open_blob(blob),
-        (None, Some(bootstrap), Some(backend)) => {
-            ErofsReader::open_bootstrap(bootstrap, backend, cache_dir.as_deref(), None)
-        }
-        _ => {
-            return Err(Error::InvalidParameter(
-                "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config".to_string(),
-            ))
-        }
-    }
-    .context("failed to open EROFS image")?;
-
-    let reader = Arc::new(reader);
-    let fs = ErofsFs::new(reader.clone());
-    let mut config = FuseConfig::default();
-    // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
-    // other than the daemon's, setuid binaries in the image have to keep
-    // working, and nothing on a read-only image can record an access time.
-    // fuser's default ACL rejects every request from another uid in userspace,
-    // before the kernel's own permission check is ever reached.
-    config.acl = SessionACL::All;
-    config.mount_options = vec![
-        MountOption::RO,
-        MountOption::FSName(args.fsname.clone()),
-        MountOption::DefaultPermissions,
-        MountOption::Suid,
-        MountOption::NoAtime,
-    ];
-    config.n_threads = Some(args.threads);
-    config.clone_fd = true;
-
-    let session = FuseService::mount(fs, mountpoint, &config)?;
-
-    if prefetch_scope == PrefetchScope::None {
-        info!("blob prefetch disabled (enable with --prefetch or the config's prefetch.scope)");
-    } else if cache_dir.is_none() {
-        info!("blob prefetch disabled: diskless reads have no cache to warm (set --cache-dir or storage.dir)");
-    } else {
-        let prefetcher = BlobPrefetcher::new(
-            reader.blob_caches(),
-            reader.prefetch_plan(),
-            prefetch_concurrent_blob_count,
-            prefetch_scope,
-            prefetch_timeout,
-        );
-        match prefetcher.spawn() {
-            Ok(_handle) => info!(
-                "started blob prefetch (concurrent_blob_count={}, scope={:?})",
-                prefetch_concurrent_blob_count, prefetch_scope
-            ),
-            Err(err) => warn!("failed to start blob prefetch: {}", err),
-        }
-    }
-
-    // Optionally expose Prometheus metrics over a Unix socket. A failure here is
-    // non-fatal: the mount keeps serving without metrics.
-    let api_server = match args.apiserver.as_deref() {
-        Some(address) => match crate::api_server::ApiServer::start(address) {
-            Ok(server) => Some(server),
-            Err(err) => {
-                warn!("failed to start metrics apiserver: {}", err.report());
-                None
+        // Build the blob backend. A direct `--blob <path>` is self-contained and
+        // needs no backend. Otherwise a `--bootstrap` is served by either an
+        // explicit `--blob-dir` (local backend) or the backend from `--config`.
+        let backend: Option<Arc<dyn BlobBackend>> = if self.blob.is_some() {
+            None
+        } else if let Some(dir) = self.blob_dir.as_ref() {
+            if !dir.is_dir() {
+                return Err(Error::InvalidParameter(format!(
+                    "blob-dir {} is not a directory",
+                    dir.display()
+                )));
             }
-        },
-        None => None,
-    };
+            Some(nydus_backend::metered(Arc::new(Local::new(dir.clone()))))
+        } else if let Some(config) = storage_config.as_ref() {
+            Some(build_backend(&config.backend).context("failed to build blob backend")?)
+        } else {
+            None
+        };
 
-    let join_result = session.serve()?;
+        if let Some(cache_dir) = &cache_dir {
+            if cache_dir.exists() && !cache_dir.is_dir() {
+                return Err(Error::InvalidParameter(format!(
+                    "cache-dir {} is not a directory",
+                    cache_dir.display()
+                )));
+            }
+        }
 
-    // Tear down the metrics server before reporting the mount result.
-    if let Some(server) = api_server {
-        server.stop();
+        let reader = match (&self.blob, &self.bootstrap, backend) {
+            (Some(blob), None, _) => ErofsReader::open_blob(blob),
+            (None, Some(bootstrap), Some(backend)) => {
+                ErofsReader::open_bootstrap(bootstrap, backend, cache_dir.as_deref(), None)
+            }
+            _ => {
+                return Err(Error::InvalidParameter(
+                    "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config".to_string(),
+                ))
+            }
+        }
+        .context("failed to open EROFS image")?;
+
+        let reader = Arc::new(reader);
+        let fs = ErofsFs::new(reader.clone());
+        let mut config = FuseConfig::default();
+        // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
+        // other than the daemon's, setuid binaries in the image have to keep
+        // working, and nothing on a read-only image can record an access time.
+        // fuser's default ACL rejects every request from another uid in userspace,
+        // before the kernel's own permission check is ever reached.
+        config.acl = SessionACL::All;
+        config.mount_options = vec![
+            MountOption::RO,
+            MountOption::FSName(self.fsname.clone()),
+            MountOption::DefaultPermissions,
+            MountOption::Suid,
+            MountOption::NoAtime,
+        ];
+        config.n_threads = Some(self.threads);
+        config.clone_fd = true;
+
+        let session = FuseService::mount(fs, mountpoint, &config)?;
+
+        if prefetch_scope == PrefetchScope::None {
+            info!("blob prefetch disabled (enable with --prefetch or the config's prefetch.scope)");
+        } else if cache_dir.is_none() {
+            info!("blob prefetch disabled: diskless reads have no cache to warm (set --cache-dir or storage.dir)");
+        } else {
+            let prefetcher = BlobPrefetcher::new(
+                reader.blob_caches(),
+                reader.prefetch_plan(),
+                prefetch_concurrent_blob_count,
+                prefetch_scope,
+                prefetch_timeout,
+            );
+            match prefetcher.spawn() {
+                Ok(_handle) => info!(
+                    "started blob prefetch (concurrent_blob_count={}, scope={:?})",
+                    prefetch_concurrent_blob_count, prefetch_scope
+                ),
+                Err(err) => warn!("failed to start blob prefetch: {}", err),
+            }
+        }
+
+        // Optionally expose Prometheus metrics over a Unix socket. A failure here is
+        // non-fatal: the mount keeps serving without metrics.
+        let api_server = match self.apiserver.as_deref() {
+            Some(address) => match api_server::ApiServer::start(address) {
+                Ok(server) => Some(server),
+                Err(err) => {
+                    warn!("failed to start metrics apiserver: {}", err.report());
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let join_result = session.serve()?;
+
+        // Tear down the metrics server before reporting the mount result.
+        if let Some(server) = api_server {
+            server.stop();
+        }
+
+        match &join_result {
+            Ok(()) => {}
+            Err(err) => error!("background fuse session join returned error: {:?}", err),
+        }
+
+        join_result.context("join failed")?;
+
+        Ok(())
     }
-
-    match &join_result {
-        Ok(()) => {}
-        Err(err) => error!("background fuse session join returned error: {:?}", err),
-    }
-
-    join_result.context("join failed")?;
-
-    Ok(())
 }

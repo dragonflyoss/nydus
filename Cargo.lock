@@ -2848,6 +2848,7 @@ name = "nydus"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytesize",
  "clap",
  "crc32c",
  "fuser",
