@@ -12,9 +12,19 @@ NYDUSFS_MERGE_PAUSE_SECS ?= 0
 EROFS_C_FUSE ?=
 EROFS_MKFS ?=
 
-UFFD_TIMEOUT ?= 300s
+UFFD_TIMEOUT ?= 600s
 UFFD_COUNT ?= 1
 UFFD_GO_TEST_ARGS ?=
+# Set to 1 (CI does) to make missing userfaultfd runner capability a hard
+# failure instead of a skip, so the UFFD gate can never be silently skipped.
+UFFD_REQUIRE ?=
+# Directory for structured failure evidence (service logs, runner metadata);
+# empty disables evidence collection.
+UFFD_EVIDENCE_DIR ?=
+# Scheduled stability run parameters: UFFD_STABILITY_COUNT repetitions of the
+# three real-fault cases (3 * count core fault iterations per run).
+UFFD_STABILITY_COUNT ?= 34
+UFFD_STABILITY_TIMEOUT ?= 1500s
 
 UBLK_TIMEOUT ?= 300s
 UBLK_COUNT ?= 1
@@ -65,7 +75,7 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH
 TEST_SUPPORT_FILES = harness.go optimize.go diff.go
 E2E_TEST_FILES = roundtrip_test.go $(TEST_SUPPORT_FILES)
 TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
-UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
+UFFD_TEST_FILES = uffd_test.go uffd_fault_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
 CACHE_SHARING_TEST_FILES = cache_sharing_test.go $(TEST_SUPPORT_FILES)
 FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
@@ -78,7 +88,7 @@ FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 NBD_TEST_PKG = .
 BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -116,15 +126,34 @@ test-tooci: release nydusify
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestNydusifyToOCI$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
 
-# Run the UFFD service smoke test. This builds nydus with the optional uffd
-# feature and does not require root because it exercises stateless socket
-# requests rather than real userfaultfd faults.
+# Run the UFFD test suite: capability preflight, the stateless socket smoke,
+# real userfaultfd fault-completion integration (managed copy/zeropage and
+# zerocopy), protocol negative corpus, backend failure and lifecycle cases.
+# Builds nydus with the optional uffd feature. Real-fault cases need root (or
+# vm.unprivileged_userfaultfd=1); set UFFD_REQUIRE=1 to fail instead of skip
+# on runners without userfaultfd support.
 test-uffd: FEATURES=cli,uffd
 test-uffd: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestUffdServiceSmoke$$' -count $(UFFD_COUNT) -timeout $(UFFD_TIMEOUT) $(UFFD_GO_TEST_ARGS) $(UFFD_TEST_FILES)
+		NYDUSFS_UFFD_REQUIRE="$(UFFD_REQUIRE)" \
+		NYDUSFS_UFFD_EVIDENCE_DIR="$(UFFD_EVIDENCE_DIR)" \
+		$(GO_BIN) test -v -run '^TestUffd' -count $(UFFD_COUNT) -timeout $(UFFD_TIMEOUT) $(UFFD_GO_TEST_ARGS) $(UFFD_TEST_FILES)
+
+# Scheduled UFFD stability run: repeats the three real-fault integration
+# cases (managed copy, managed zeropage, zerocopy) UFFD_STABILITY_COUNT times
+# each, yielding 3*count core fault iterations per invocation. Any iteration
+# failure fails the target; there is no retry, so the first attempt is the
+# recorded result.
+test-uffd-stability: FEATURES=cli,uffd
+test-uffd-stability: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	cd tests/e2e && \
+		$(GO_TEST_ENV) \
+		NYDUSFS_UFFD_REQUIRE="$(UFFD_REQUIRE)" \
+		NYDUSFS_UFFD_EVIDENCE_DIR="$(UFFD_EVIDENCE_DIR)" \
+		$(GO_BIN) test -v -run '^TestUffdRealFault' -count $(UFFD_STABILITY_COUNT) -timeout $(UFFD_STABILITY_TIMEOUT) $(UFFD_GO_TEST_ARGS) $(UFFD_TEST_FILES)
 
 # Run the ublk block device test. Requires root and Linux 6.0+ with ublk_drv;
 # the test skips itself when either is missing.
