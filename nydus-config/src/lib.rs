@@ -5,6 +5,10 @@
 //! for `nydus-backend`, [`StorageConfig`] and [`PrefetchConfig`] for
 //! `nydus-storage` — so the data plane consumes these structs directly as
 //! constructor settings while the control plane loads and validates the file.
+//!
+//! It also owns the package identity — the name and the git commit constants
+//! baked in by its build script — the CLI version flag parser built on them,
+//! and the binary's default directories.
 
 use nydus_error::{Context, Error, Result};
 use rustls_pki_types::pem::PemObject;
@@ -13,6 +17,30 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// The name of the package.
+pub const NAME: &str = "nydus";
+
+/// The short git commit hash of the package.
+pub const GIT_COMMIT_SHORT_HASH: &str = {
+    match option_env!("GIT_COMMIT_SHORT_HASH") {
+        Some(hash) => hash,
+        None => "unknown",
+    }
+};
+
+/// The git commit date of the package.
+pub const GIT_COMMIT_DATE: &str = {
+    match option_env!("GIT_COMMIT_DATE") {
+        Some(hash) => hash,
+        None => "unknown",
+    }
+};
+
+/// Returns the default log directory for nydus.
+pub fn default_log_dir() -> PathBuf {
+    PathBuf::from("/var/log/nydus/")
+}
 
 /// Returns the default per-request timeout of the registry backend. Kept
 /// short because a read holds the group's fetch claim for its whole duration,
@@ -339,9 +367,41 @@ impl Config {
     }
 }
 
+/// A custom value parser for the version flag.
+#[derive(Debug, Clone)]
+pub struct VersionValueParser;
+
+/// Implement the TypedValueParser trait for VersionValueParser.
+impl clap::builder::TypedValueParser for VersionValueParser {
+    type Value = bool;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> std::result::Result<Self::Value, clap::Error> {
+        if value == std::ffi::OsStr::new("true") {
+            println!(
+                "{} {} ({}, {})",
+                cmd.get_name(),
+                cmd.get_version().unwrap_or("unknown"),
+                GIT_COMMIT_SHORT_HASH,
+                GIT_COMMIT_DATE,
+            );
+
+            std::process::exit(0);
+        }
+
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::builder::TypedValueParser;
+    use std::ffi::OsStr;
     use std::io::Write;
 
     #[test]
@@ -711,5 +771,15 @@ Y+f+/xlWpHEkSQ==
             .load_ca_cert_der()
             .unwrap_err();
         assert!(err.to_string().contains("contains no certificates"));
+    }
+
+    #[test]
+    fn version_value_parser_references_non_real_values() {
+        let parser = VersionValueParser;
+        let cmd = clap::Command::new("test_app");
+        let value = OsStr::new("false");
+        let result = parser.parse_ref(&cmd, None, value);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
     }
 }

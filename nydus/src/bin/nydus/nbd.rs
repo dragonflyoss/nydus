@@ -1,15 +1,14 @@
 use clap::Parser;
 use nydus::error::{Context, Error, Result};
-use nydus::mount::unmount;
+use nydus::mount::{umount2, unmount};
 use nydus::nbd::{mount_nbd, NbdCore, NbdService};
+use nydus::signal;
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, error, info, warn, Level};
 
 use super::*;
 
@@ -115,8 +114,7 @@ impl NbdCommand {
     /// device through the NBD protocol until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
-        let signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-            .context("failed to register termination signals")?;
+        let signals = signal::register_termination_signals()?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -171,13 +169,11 @@ impl NbdCommand {
         // A second signal forces immediate exit.
         let signal_service = service.clone();
         let signal_mountpoint = mountpoint.clone();
-        let signal_thread = spawn_signal_thread("nbd", "nydus nbd service", signals, move || {
+        let signal_thread = signal::spawn_signal_thread("nbd", signals, move || {
             if let Some(mp) = &signal_mountpoint {
-                unmount_with_retry(
-                    mp,
-                    || {},
-                    "the device will be detached anyway — unmount manually if needed",
-                );
+                if let Err(err) = unmount(mp, || {}) {
+                    error!("{}", err.report());
+                }
             }
             signal_service.stop();
         })?;
@@ -208,7 +204,7 @@ impl NbdCommand {
                     // The signal path already unmounted on a signal-driven
                     // shutdown; if the session self-exited the mount is still up
                     // over a dead device, so try a final best-effort umount.
-                    if let Err(err) = unmount(&mp) {
+                    if let Err(err) = umount2(&mp) {
                         debug!("post-join unmount of {}: {}", mp.display(), err.report());
                     }
                     joined

@@ -92,9 +92,9 @@ func NewOptimizer(opt OptimizeOption) (*Optimizer, error) {
 	return &Optimizer{opt: opt}, nil
 }
 
-// ondemandDigestPattern matches the `ondemand_blob_digest: <hex>` line printed
-// by `nydus optimize`.
-var ondemandDigestPattern = regexp.MustCompile(`ondemand_blob_digest:\s*([0-9a-f]{64})`)
+// ondemandDigestPattern matches the `ONDEMAND BLOB DIGEST  <hex>` table row
+// printed by `nydus optimize`.
+var ondemandDigestPattern = regexp.MustCompile(`ONDEMAND BLOB DIGEST\s+([0-9a-f]{64})`)
 
 // Optimize pulls the source nydus image, runs `nydus optimize` against its
 // bootstrap with the recorded access patterns, and pushes the optimized image

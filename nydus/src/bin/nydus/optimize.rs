@@ -9,6 +9,7 @@ use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
 use std::fs;
 use std::path::PathBuf;
+use tabled::{settings::Style, Table, Tabled};
 use tracing::{info, Level};
 
 /// The subcommand of optimize.
@@ -157,20 +158,42 @@ impl OptimizeCommand {
             patterns.len(),
             ondemand.source_blob_count
         );
-        println!("[ondemand blob]");
-        println!("    ondemand_blob_digest: {digest_hex}");
-        println!("    ondemand_blob_path: {}", blob_path.display());
-        println!("    blob_metadata_path: {}", blob_metadata_path.display());
-        println!("    bootstrap_path: {}", self.bootstrap.display());
-        println!("    group_count: {}", patterns.len());
-        println!(
-            "    compressed_data_size: {}",
-            ondemand.footer.compressed_data_size()
-        );
-        println!(
-            "    uncompressed_data_size: {}",
-            ondemand.uncompressed_blocks * EROFS_BLOCK_SIZE as u64
-        );
+
+        // Define the table struct for printing.
+        #[derive(Debug, Tabled)]
+        #[tabled(rename_all = "UPPERCASE")]
+        struct OndemandBlobRow {
+            #[tabled(rename = "ONDEMAND BLOB DIGEST")]
+            ondemand_blob_digest: String,
+            #[tabled(rename = "ONDEMAND BLOB PATH")]
+            ondemand_blob_path: String,
+            #[tabled(rename = "BLOB METADATA PATH")]
+            blob_metadata_path: String,
+            #[tabled(rename = "BOOTSTRAP PATH")]
+            bootstrap_path: String,
+            #[tabled(rename = "GROUP COUNT")]
+            group_count: String,
+            #[tabled(rename = "COMPRESSED DATA SIZE")]
+            compressed_data_size: String,
+            #[tabled(rename = "UNCOMPRESSED DATA SIZE")]
+            uncompressed_data_size: String,
+        }
+
+        let row = OndemandBlobRow {
+            ondemand_blob_digest: digest_hex,
+            ondemand_blob_path: blob_path.display().to_string(),
+            blob_metadata_path: blob_metadata_path.display().to_string(),
+            bootstrap_path: self.bootstrap.display().to_string(),
+            group_count: patterns.len().to_string(),
+            compressed_data_size: ondemand.footer.compressed_data_size().to_string(),
+            uncompressed_data_size: (ondemand.uncompressed_blocks * EROFS_BLOCK_SIZE as u64)
+                .to_string(),
+        };
+
+        // Create a table and print it.
+        let mut table = Table::kv(vec![row]);
+        table.with(Style::blank());
+        println!("{table}");
         Ok(())
     }
 }

@@ -337,7 +337,8 @@ Current implementation notes:
 	an appended ondemand device slot and the root `trusted.nydus.prefetch.blobs`
 	xattr updated to list the ondemand device id first.
 - `--blob-dir` receives the ondemand blob (named by its full SHA256) and its
-	`<digest>.blob.meta` sidecar; the digest is printed as `ondemand_blob_digest:`.
+	`<digest>.blob.meta` sidecar; the digest is printed in the summary table as
+	`ONDEMAND BLOB DIGEST`.
 - `--config` is the same storage config as `nydus fuse --config`: source group
 	bytes are pulled through the regular blob cache, so groups already decoded in
 	`storage.dir` are served from disk and cold groups are fetched from the
