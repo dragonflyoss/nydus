@@ -1,15 +1,15 @@
 use clap::Parser;
 use nydus::error::{Context, Error, Result};
 use nydus::fanotify::{deny_queued_events, mount_erofs, FanotifyCore, FanotifyService, FetchPool};
+use nydus::mount::unmount;
+use nydus::signal;
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 use super::*;
 
@@ -123,8 +123,7 @@ impl FanotifyCommand {
     /// through fanotify pre-content hooks until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
-        let signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-            .context("failed to register termination signals")?;
+        let signals = signal::register_termination_signals()?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -156,9 +155,7 @@ impl FanotifyCommand {
 
         let signal_thread = {
             let stop = stop.clone();
-            spawn_signal_thread("fanotify", "nydus fanotify service", signals, move || {
-                stop.stop()
-            })?
+            signal::spawn_signal_thread("fanotify", signals, move || stop.stop())?
         };
 
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -215,19 +212,21 @@ impl FanotifyCommand {
         // bounded window, deny-draining newly queued events in between — a reader
         // racing the shutdown gets EPERM (fail-closed) instead of blocking forever
         // and wedging the unmount.
-        unmount_with_retry(
-            &mountpoint,
-            || {
-                if let Err(err) = deny_queued_events(&fan_fd) {
-                    warn!(
-                        "deny-draining fanotify events between unmount retries failed: {}",
-                        err.report()
-                    );
-                }
-            },
-            "dropping the fanotify group fd will fail-open residual events and unfetched ranges on \
-             the still-live mount will read as zeros — stop remaining readers and unmount manually",
-        );
+        if let Err(err) = unmount(&mountpoint, || {
+            if let Err(err) = deny_queued_events(&fan_fd) {
+                warn!(
+                    "deny-draining fanotify events between unmount retries failed: {}",
+                    err.report()
+                );
+            }
+        }) {
+            error!(
+                "{}; dropping the fanotify group fd will fail-open residual events and \
+                 unfetched ranges on the still-live mount will read as zeros — stop remaining \
+                 readers and unmount manually",
+                err.report()
+            );
+        }
         drop(fan_fd);
 
         signal_thread.shutdown()?;

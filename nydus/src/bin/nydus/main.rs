@@ -1,31 +1,6 @@
 use clap::{Parser, Subcommand};
 use nydus::error::Result;
-#[cfg(any(
-    feature = "fanotify",
-    feature = "nbd",
-    feature = "ublk",
-    feature = "uffd"
-))]
-use nydus::error::{Context, Error};
-#[cfg(any(feature = "fanotify", feature = "nbd"))]
-use nydus::mount::unmount;
-#[cfg(any(
-    feature = "fanotify",
-    feature = "nbd",
-    feature = "ublk",
-    feature = "uffd"
-))]
-use signal_hook::iterator::{Handle, Signals};
-use std::path::PathBuf;
-#[cfg(any(feature = "fanotify", feature = "nbd"))]
-use tracing::{debug, error};
-#[cfg(any(
-    feature = "fanotify",
-    feature = "nbd",
-    feature = "ublk",
-    feature = "uffd"
-))]
-use tracing::{info, warn};
+use nydus_config::{default_log_dir, VersionValueParser, NAME};
 
 pub mod api_server;
 pub mod build;
@@ -41,55 +16,6 @@ pub mod optimize;
 pub mod ublk;
 #[cfg(feature = "uffd")]
 pub mod uffd;
-
-/// The name of the package.
-pub const NAME: &str = "nydus";
-
-/// The short git commit hash of the package.
-pub const GIT_COMMIT_SHORT_HASH: &str = {
-    match option_env!("GIT_COMMIT_SHORT_HASH") {
-        Some(hash) => hash,
-        None => "unknown",
-    }
-};
-
-/// The git commit date of the package.
-pub const GIT_COMMIT_DATE: &str = {
-    match option_env!("GIT_COMMIT_DATE") {
-        Some(hash) => hash,
-        None => "unknown",
-    }
-};
-
-/// A custom value parser for the version flag.
-#[derive(Debug, Clone)]
-pub struct VersionValueParser;
-
-/// Implement the TypedValueParser trait for VersionValueParser.
-impl clap::builder::TypedValueParser for VersionValueParser {
-    type Value = bool;
-
-    fn parse_ref(
-        &self,
-        cmd: &clap::Command,
-        _arg: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> std::result::Result<Self::Value, clap::Error> {
-        if value == std::ffi::OsStr::new("true") {
-            println!(
-                "{} {} ({}, {})",
-                cmd.get_name(),
-                cmd.get_version().unwrap_or("unknown"),
-                GIT_COMMIT_SHORT_HASH,
-                GIT_COMMIT_DATE,
-            );
-
-            std::process::exit(0);
-        }
-
-        Ok(false)
-    }
-}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -242,11 +168,6 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Returns the default log directory for nydus.
-pub fn default_log_dir() -> PathBuf {
-    PathBuf::from("/var/log/nydus/")
-}
-
 /// Returns the default worker parallelism: the available CPU count clamped to
 /// `[min, max]`.
 pub fn default_parallelism(min: usize, max: usize) -> usize {
@@ -254,145 +175,4 @@ pub fn default_parallelism(min: usize, max: usize) -> usize {
         .map(|n| n.get())
         .unwrap_or(min)
         .clamp(min, max)
-}
-
-/// Shutdown unmount retry window: EBUSY is expected while readers still hold
-/// files open, so keep trying for a bounded window (10 s) before giving up.
-#[cfg(any(feature = "fanotify", feature = "nbd"))]
-const UNMOUNT_RETRY_ATTEMPTS: u32 = 40;
-#[cfg(any(feature = "fanotify", feature = "nbd"))]
-const UNMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// True when an unmount error means "nothing is mounted there" (EINVAL: not a
-/// mount point; ENOENT: the path is gone), so retrying is pointless.
-#[cfg(any(feature = "fanotify", feature = "nbd"))]
-fn is_not_mounted(err: &Error) -> bool {
-    matches!(
-        err.io_error().and_then(|io| io.raw_os_error()),
-        Some(libc::EINVAL) | Some(libc::ENOENT)
-    )
-}
-
-/// Unmount `mountpoint` during a daemon shutdown, retrying for a bounded
-/// window: EBUSY is expected while readers still hold files open.
-/// `between_attempts` runs between two attempts (e.g. fanotify deny-drains
-/// newly queued events); `failure_hint` is appended to the error logged when
-/// the final attempt still fails.
-#[cfg(any(feature = "fanotify", feature = "nbd"))]
-pub fn unmount_with_retry(
-    mountpoint: &std::path::Path,
-    mut between_attempts: impl FnMut(),
-    failure_hint: &str,
-) {
-    for attempt in 1..=UNMOUNT_RETRY_ATTEMPTS {
-        match unmount(mountpoint) {
-            Ok(()) => {
-                info!("unmounted {}", mountpoint.display());
-                break;
-            }
-            // Nothing mounted (e.g. the signal arrived before the mount
-            // happened): retrying would only stall the shutdown for the
-            // whole retry window.
-            Err(err) if is_not_mounted(&err) => {
-                debug!(
-                    "nothing mounted at {}: {}",
-                    mountpoint.display(),
-                    err.report()
-                );
-                break;
-            }
-            Err(err) if attempt < UNMOUNT_RETRY_ATTEMPTS => {
-                debug!(
-                    "unmount attempt {attempt} failed: {}; retrying",
-                    err.report()
-                );
-                between_attempts();
-                std::thread::sleep(UNMOUNT_RETRY_DELAY);
-            }
-            Err(err) => {
-                error!(
-                    "failed to unmount {} after {UNMOUNT_RETRY_ATTEMPTS} attempts: {}; \
-                     {failure_hint}",
-                    mountpoint.display(),
-                    err.report()
-                );
-                break;
-            }
-        }
-    }
-}
-
-/// A running daemon signal thread, spawned by [`spawn_signal_thread`].
-#[cfg(any(
-    feature = "fanotify",
-    feature = "nbd",
-    feature = "ublk",
-    feature = "uffd"
-))]
-pub struct SignalThread {
-    name: String,
-    handle: Handle,
-    thread: std::thread::JoinHandle<()>,
-}
-
-/// Implement the shutdown for SignalThread.
-#[cfg(any(
-    feature = "fanotify",
-    feature = "nbd",
-    feature = "ublk",
-    feature = "uffd"
-))]
-impl SignalThread {
-    /// Stop listening for signals and join the thread.
-    pub fn shutdown(self) -> Result<()> {
-        self.handle.close();
-        self.thread
-            .join()
-            .map_err(|_| Error::Runtime(format!("{} signal thread panicked", self.name)))
-    }
-}
-
-/// Spawn the signal thread shared by the uffd/nbd/ublk/fanotify daemons: the
-/// first termination signal logs `stopping` and runs `on_first` (the daemon's
-/// graceful shutdown). A second signal while the graceful shutdown is in
-/// progress (e.g. a stuck backend keeping readers blocked) forces exit rather
-/// than requiring SIGKILL. `name` is the short daemon name used for the
-/// thread name and error contexts.
-#[cfg(any(
-    feature = "fanotify",
-    feature = "nbd",
-    feature = "ublk",
-    feature = "uffd"
-))]
-pub fn spawn_signal_thread(
-    name: &str,
-    stopping: &str,
-    mut signals: Signals,
-    on_first: impl FnOnce() + Send + 'static,
-) -> Result<SignalThread> {
-    let handle = signals.handle();
-    let stopping = stopping.to_string();
-    let thread = std::thread::Builder::new()
-        .name(format!("nydus_{name}_signal"))
-        .spawn(move || {
-            let mut on_first = Some(on_first);
-            for signal in signals.forever() {
-                match on_first.take() {
-                    Some(on_first) => {
-                        info!("received signal {signal}, stopping {stopping}");
-                        on_first();
-                    }
-                    None => {
-                        warn!("received second signal {signal}, forcing immediate exit");
-                        std::process::exit(130);
-                    }
-                }
-            }
-        })
-        .with_context(|| format!("failed to spawn {name} signal thread"))?;
-    Ok(SignalThread {
-        name: name.to_string(),
-        handle,
-        thread,
-    })
 }

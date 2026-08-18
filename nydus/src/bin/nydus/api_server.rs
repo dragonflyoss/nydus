@@ -7,7 +7,7 @@
 //! any cargo feature, and is shut down cleanly when the mount exits.
 
 use nydus::error::{Context, Result};
-use nydus::net::parse_unix_address;
+use nydus::parse_unix_address;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;

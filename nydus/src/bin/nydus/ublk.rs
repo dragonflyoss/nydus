@@ -1,12 +1,11 @@
 use clap::Parser;
 use nydus::error::{Context, Result};
+use nydus::signal;
 use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, Level};
@@ -117,8 +116,7 @@ impl UblkCommand {
     /// to a device that is no longer being served, and both sides deadlock.
     pub fn execute(&self) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
-        let signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-            .context("failed to register termination signals")?;
+        let signals = signal::register_termination_signals()?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -151,7 +149,7 @@ impl UblkCommand {
         println!("{}", service.dev_path());
 
         let handle = service.handle();
-        let signal_thread = spawn_signal_thread("ublk", "nydus ublk device", signals, move || {
+        let signal_thread = signal::spawn_signal_thread("ublk", signals, move || {
             handle.stop();
         })?;
 

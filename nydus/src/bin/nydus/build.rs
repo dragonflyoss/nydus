@@ -13,6 +13,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use tabled::{settings::Style, Table, Tabled};
 use tracing::Level;
 
 /// The conversion type of the build sub command.
@@ -305,58 +306,79 @@ struct BlobBuildReport<'a> {
 }
 
 fn print_blob_summary(summary: BlobBuildReport<'_>) {
-    let BlobBuildReport {
-        index,
-        data_blob_digest,
-        full_blob_digest,
-        blob_metadata,
-        footer,
-        full_blob_path,
-        blob_metadata_path,
-        bootstrap_path,
-    } = summary;
-
-    println!("Blobs");
-    println!("  Blob {index}");
-    println!("    blob_index: {index}");
-    println!("    data_blob_digest: {}", hex_string(data_blob_digest));
-    println!("    full_blob_digest: {}", hex_string(full_blob_digest));
-    println!("    chunk_size: {}", blob_metadata.chunk_size());
-    println!("    chunk_count: {}", blob_metadata.chunk_count());
-    println!("    group_count: {}", blob_metadata.group_count());
-    println!("    chunk_digester: {}", blob_metadata.digester());
-    println!("    chunk_compressor: {}", blob_metadata.compressor());
-    println!(
-        "    blob_compressed_size: {}",
-        blob_metadata.total_compressed_size()
-    );
-    println!(
-        "    blob_uncompressed_size: {}",
-        blob_metadata.total_uncompressed_size()
-    );
-    println!(
-        "    compressed_data_offset: {}",
-        footer.compressed_data_offset()
-    );
-    println!(
-        "    compressed_data_size: {}",
-        footer.compressed_data_size()
-    );
-    println!("    bootstrap_offset: {}", footer.bootstrap_offset());
-    println!("    bootstrap_blocks: {}", footer.bootstrap_blocks());
-    println!(
-        "    blob_metadata_offset: {}",
-        footer.blob_metadata_offset()
-    );
-    println!(
-        "    blob_metadata_blocks: {}",
-        footer.blob_metadata_blocks()
-    );
-    println!("    full_blob_path: {}", full_blob_path.display());
-    println!("    blob_metadata_path: {}", blob_metadata_path.display());
-    if let Some(bootstrap_path) = bootstrap_path {
-        println!("    bootstrap_path: {}", bootstrap_path.display());
+    // Define the table struct for printing.
+    #[derive(Debug, Tabled)]
+    #[tabled(rename_all = "UPPERCASE")]
+    struct BlobRow {
+        #[tabled(rename = "BLOB INDEX")]
+        blob_index: String,
+        #[tabled(rename = "DATA BLOB DIGEST")]
+        data_blob_digest: String,
+        #[tabled(rename = "FULL BLOB DIGEST")]
+        full_blob_digest: String,
+        #[tabled(rename = "CHUNK SIZE")]
+        chunk_size: String,
+        #[tabled(rename = "CHUNK COUNT")]
+        chunk_count: String,
+        #[tabled(rename = "GROUP COUNT")]
+        group_count: String,
+        #[tabled(rename = "CHUNK DIGESTER")]
+        chunk_digester: String,
+        #[tabled(rename = "CHUNK COMPRESSOR")]
+        chunk_compressor: String,
+        #[tabled(rename = "BLOB COMPRESSED SIZE")]
+        blob_compressed_size: String,
+        #[tabled(rename = "BLOB UNCOMPRESSED SIZE")]
+        blob_uncompressed_size: String,
+        #[tabled(rename = "COMPRESSED DATA OFFSET")]
+        compressed_data_offset: String,
+        #[tabled(rename = "COMPRESSED DATA SIZE")]
+        compressed_data_size: String,
+        #[tabled(rename = "BOOTSTRAP OFFSET")]
+        bootstrap_offset: String,
+        #[tabled(rename = "BOOTSTRAP BLOCKS")]
+        bootstrap_blocks: String,
+        #[tabled(rename = "BLOB METADATA OFFSET")]
+        blob_metadata_offset: String,
+        #[tabled(rename = "BLOB METADATA BLOCKS")]
+        blob_metadata_blocks: String,
+        #[tabled(rename = "FULL BLOB PATH")]
+        full_blob_path: String,
+        #[tabled(rename = "BLOB METADATA PATH")]
+        blob_metadata_path: String,
+        #[tabled(rename = "BOOTSTRAP PATH")]
+        bootstrap_path: String,
     }
+
+    let row = BlobRow {
+        blob_index: summary.index.to_string(),
+        data_blob_digest: hex_string(summary.data_blob_digest),
+        full_blob_digest: hex_string(summary.full_blob_digest),
+        chunk_size: summary.blob_metadata.chunk_size().to_string(),
+        chunk_count: summary.blob_metadata.chunk_count().to_string(),
+        group_count: summary.blob_metadata.group_count().to_string(),
+        chunk_digester: summary.blob_metadata.digester().to_string(),
+        chunk_compressor: summary.blob_metadata.compressor().to_string(),
+        blob_compressed_size: summary.blob_metadata.total_compressed_size().to_string(),
+        blob_uncompressed_size: summary.blob_metadata.total_uncompressed_size().to_string(),
+        compressed_data_offset: summary.footer.compressed_data_offset().to_string(),
+        compressed_data_size: summary.footer.compressed_data_size().to_string(),
+        bootstrap_offset: summary.footer.bootstrap_offset().to_string(),
+        bootstrap_blocks: summary.footer.bootstrap_blocks().to_string(),
+        blob_metadata_offset: summary.footer.blob_metadata_offset().to_string(),
+        blob_metadata_blocks: summary.footer.blob_metadata_blocks().to_string(),
+        full_blob_path: summary.full_blob_path.display().to_string(),
+        blob_metadata_path: summary.blob_metadata_path.display().to_string(),
+        bootstrap_path: summary
+            .bootstrap_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    };
+
+    // Create a table and print it.
+    let mut table = Table::kv(vec![row]);
+    table.with(Style::blank());
+    println!("{table}");
 }
 
 fn blob_metadata_output_path(blob_path: &Path) -> Result<PathBuf> {

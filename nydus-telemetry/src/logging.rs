@@ -10,9 +10,8 @@ use tracing_subscriber::{
     EnvFilter, Registry,
 };
 
-/// Initialize tracing initializes the tracing system for the service, which logs to both stdout
-/// and
-#[allow(clippy::too_many_arguments)]
+/// Initializes the tracing system for the service, which logs to both stdout
+/// and hourly-rolling files under `log_dir`.
 pub fn init_tracing(
     name: &str,
     log_dir: PathBuf,
@@ -28,7 +27,7 @@ pub fn init_tracing(
 
     // Initialize stdout layer.
     let stdout_filter = if console {
-        LevelFilter::DEBUG
+        LevelFilter::from_level(log_level)
     } else {
         LevelFilter::OFF
     };
@@ -86,9 +85,8 @@ pub fn init_tracing(
     guards
 }
 
-/// Initialize command tracing initializes the tracing system for command line tools, which only
-/// logs to stdout and does not log to files.
-#[allow(clippy::too_many_arguments)]
+/// Initializes the tracing system for command line tools, which only logs to
+/// stdout and does not log to files.
 pub fn init_command_tracing(log_level: Level, console: bool) -> Vec<WorkerGuard> {
     init_command_tracing_to(std::io::stdout(), log_level, console)
 }
@@ -111,7 +109,7 @@ where
 
     // Initialize console layer.
     let console_filter = if console {
-        LevelFilter::DEBUG
+        LevelFilter::from_level(log_level)
     } else {
         LevelFilter::OFF
     };

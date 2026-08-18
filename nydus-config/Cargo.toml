@@ -9,6 +9,7 @@ repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [dependencies]
+clap = { workspace = true }
 humantime-serde = "1"
 nydus-error = { version = "0.1.0", path = "../nydus-error" }
 rustls-pki-types = { version = "1", features = ["std"] }

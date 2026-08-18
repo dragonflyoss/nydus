@@ -155,22 +155,29 @@ impl Metrics {
         let registry = Registry::new();
 
         fn counter(registry: &Registry, name: &str, help: &str) -> IntCounter {
-            let c = IntCounter::with_opts(Opts::new(name, help)).expect("valid counter");
-            registry.register(Box::new(c.clone())).expect("register");
-            c
+            let counter = IntCounter::with_opts(Opts::new(name, help)).expect("valid counter");
+            registry
+                .register(Box::new(counter.clone()))
+                .expect("register");
+            counter
         }
 
         fn gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
-            let g = IntGauge::with_opts(Opts::new(name, help)).expect("valid gauge");
-            registry.register(Box::new(g.clone())).expect("register");
-            g
+            let gauge = IntGauge::with_opts(Opts::new(name, help)).expect("valid gauge");
+            registry
+                .register(Box::new(gauge.clone()))
+                .expect("register");
+            gauge
         }
 
         fn histogram(registry: &Registry, name: &str, help: &str) -> Histogram {
-            let h = Histogram::with_opts(HistogramOpts::new(name, help).buckets(latency_buckets()))
-                .expect("valid histogram");
-            registry.register(Box::new(h.clone())).expect("register");
-            h
+            let histogram =
+                Histogram::with_opts(HistogramOpts::new(name, help).buckets(latency_buckets()))
+                    .expect("valid histogram");
+            registry
+                .register(Box::new(histogram.clone()))
+                .expect("register");
+            histogram
         }
 
         let fs_op_count = IntCounterVec::new(
@@ -357,52 +364,52 @@ pub fn record_backend_read(
     duration: Duration,
     is_err: bool,
 ) {
-    let m = &*METRICS;
+    let metrics = &*METRICS;
     let secs = duration.as_secs_f64();
     let high_latency = duration >= HIGH_LATENCY_THRESHOLD;
 
     match target {
         BackendTarget::Origin => {
-            m.backend_origin_read_count.inc();
-            m.backend_origin_read_latency.observe(secs);
+            metrics.backend_origin_read_count.inc();
+            metrics.backend_origin_read_latency.observe(secs);
             if is_err {
-                m.backend_origin_read_errors.inc();
+                metrics.backend_origin_read_errors.inc();
             } else {
-                m.backend_origin_read_bytes.inc_by(bytes);
+                metrics.backend_origin_read_bytes.inc_by(bytes);
             }
         }
         BackendTarget::Proxy => {
-            m.backend_proxy_read_count.inc();
-            m.backend_proxy_read_latency.observe(secs);
+            metrics.backend_proxy_read_count.inc();
+            metrics.backend_proxy_read_latency.observe(secs);
             if is_err {
-                m.backend_proxy_read_errors.inc();
+                metrics.backend_proxy_read_errors.inc();
             } else {
-                m.backend_proxy_read_bytes.inc_by(bytes);
+                metrics.backend_proxy_read_bytes.inc_by(bytes);
             }
         }
     }
 
     match kind {
         ReadKind::OnDemand => {
-            m.backend_ondemand_read_count.inc();
+            metrics.backend_ondemand_read_count.inc();
             if is_err {
-                m.backend_ondemand_read_errors.inc();
+                metrics.backend_ondemand_read_errors.inc();
             } else {
-                m.backend_ondemand_read_bytes.inc_by(bytes);
+                metrics.backend_ondemand_read_bytes.inc_by(bytes);
             }
             if high_latency {
-                m.backend_ondemand_read_high_latency_count.inc();
+                metrics.backend_ondemand_read_high_latency_count.inc();
             }
         }
         ReadKind::Prefetch => {
-            m.backend_prefetch_read_count.inc();
+            metrics.backend_prefetch_read_count.inc();
             if is_err {
-                m.backend_prefetch_read_errors.inc();
+                metrics.backend_prefetch_read_errors.inc();
             } else {
-                m.backend_prefetch_read_bytes.inc_by(bytes);
+                metrics.backend_prefetch_read_bytes.inc_by(bytes);
             }
             if high_latency {
-                m.backend_prefetch_read_high_latency_count.inc();
+                metrics.backend_prefetch_read_high_latency_count.inc();
             }
         }
     }
@@ -410,23 +417,23 @@ pub fn record_backend_read(
 
 /// Record a CRC validation failure on data fetched from `target`.
 pub fn record_backend_crc_error(target: BackendTarget) {
-    let m = &*METRICS;
+    let metrics = &*METRICS;
     match target {
-        BackendTarget::Origin => m.backend_origin_crc_check_errors.inc(),
-        BackendTarget::Proxy => m.backend_proxy_crc_check_errors.inc(),
+        BackendTarget::Origin => metrics.backend_origin_crc_check_errors.inc(),
+        BackendTarget::Proxy => metrics.backend_proxy_crc_check_errors.inc(),
     }
 }
 
 /// Record the outcome of a FUSE operation, plus read latency for `read`.
 pub fn record_fs_op(op: FsOp, duration: Duration, is_err: bool) {
-    let m = &*METRICS;
+    let metrics = &*METRICS;
     if is_err {
-        m.fs_op_errors.with_label_values(&[op.as_str()]).inc();
+        metrics.fs_op_errors.with_label_values(&[op.as_str()]).inc();
     } else {
-        m.fs_op_count.with_label_values(&[op.as_str()]).inc();
+        metrics.fs_op_count.with_label_values(&[op.as_str()]).inc();
     }
     if op == FsOp::Read {
-        m.fs_read_latency.observe(duration.as_secs_f64());
+        metrics.fs_read_latency.observe(duration.as_secs_f64());
     }
 }
 
@@ -498,9 +505,9 @@ pub fn inc_cache_hit_group() {
 /// reads are a subset of the prefetch reads and identify the phase-0 redirect
 /// warmup traffic.
 pub fn record_backend_redirect_read(bytes: u64) {
-    let m = &*METRICS;
-    m.backend_redirect_read_count.inc();
-    m.backend_redirect_read_bytes.inc_by(bytes);
+    let metrics = &*METRICS;
+    metrics.backend_redirect_read_count.inc();
+    metrics.backend_redirect_read_bytes.inc_by(bytes);
 }
 
 /// Record a group decoded into a blob's own cache by regular blob prefetch.
@@ -577,7 +584,7 @@ impl Serialize for Snapshot {
                 } else {
                     let pairs: Vec<String> = labels
                         .iter()
-                        .map(|l| format!("{}=\"{}\"", l.get_name(), l.get_value()))
+                        .map(|label| format!("{}=\"{}\"", label.get_name(), label.get_value()))
                         .collect();
                     format!("{}{{{}}}", base, pairs.join(","))
                 };

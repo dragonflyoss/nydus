@@ -1,10 +1,9 @@
 use clap::Parser;
 use nydus::error::{Context, Result};
+use nydus::signal;
 use nydus::uffd::{UffdCore, UffdService};
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,8 +83,7 @@ impl UffdCommand {
     /// userfaultfd until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
-        let signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-            .context("failed to register termination signals")?;
+        let signals = signal::register_termination_signals()?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -103,10 +101,9 @@ impl UffdCommand {
         let core = Arc::new(UffdCore::new(&self.bootstrap, config)?);
         let service = Arc::new(UffdService::new(core, self.socket.clone()));
         let signal_service = service.clone();
-        let signal_thread =
-            spawn_signal_thread("uffd", "nydus uffd service", signals, move || {
-                signal_service.stop();
-            })?;
+        let signal_thread = signal::spawn_signal_thread("uffd", signals, move || {
+            signal_service.stop();
+        })?;
 
         let mut runtime = tokio::runtime::Builder::new_multi_thread();
         runtime.enable_all().thread_name("nydus_uffd");

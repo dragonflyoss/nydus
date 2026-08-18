@@ -3,6 +3,7 @@ resolver = "2"
 members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry"]
 
 [workspace.dependencies]
+clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
