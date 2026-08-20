@@ -27,7 +27,7 @@ pub struct OptimizeCommand {
         long,
         conflicts_with = "apiserver",
         env = "NYDUS_OPTIMIZE_TRACE_FILE",
-        help = "Specify the path to a JSON trace file containing access patterns: the versioned `{\"version\":1,\"patterns\":[{\"blob_index\":..,\"group_index\":..}]}` document, exactly as produced by the apiserver `/trace` endpoint. Mutually exclusive with `--apiserver`"
+        help = "Specify the path to a JSON trace file containing access patterns: the versioned `{\"version\":1,\"patterns\":[{\"blob_index\":..,\"block_group_index\":..}]}` document, exactly as produced by the apiserver `/trace` endpoint. Mutually exclusive with `--apiserver`"
     )]
     trace_file: Option<PathBuf>,
 
@@ -47,10 +47,10 @@ pub struct OptimizeCommand {
 
     #[arg(
         long,
-        env = "NYDUS_OPTIMIZE_BLOB_DIR",
-        help = "Specify the output directory for the ondemand blob (named by its SHA256 digest) and its `.blob.meta` sidecar"
+        env = "NYDUS_OPTIMIZE_BLOB_STORE",
+        help = "Specify the content-addressed store directory to save the ondemand blob into, named by its SHA256, next to its `.blob.meta` sidecar"
     )]
-    blob_dir: PathBuf,
+    blob_store: PathBuf,
 
     #[arg(
         long,
@@ -103,7 +103,7 @@ impl OptimizeCommand {
         };
         if patterns.is_empty() {
             return Err(Error::InvalidParameter(
-                "no group accesses found in the access trace; exercise the workload before optimizing"
+                "no block group accesses found in the access trace; exercise the workload before optimizing"
                     .to_string(),
             ));
         }
@@ -112,11 +112,11 @@ impl OptimizeCommand {
         let storage_config = Config::load(&self.config).context("failed to load storage config")?;
         let backend =
             build_backend(&storage_config.backend).context("failed to build blob backend")?;
-        // Source groups are pulled through the local blob cache, so diskless mode
+        // Source block groups are pulled through the local blob cache, so diskless mode
         // cannot apply.
         let Some(cache_dir) = &storage_config.storage.dir else {
             return Err(Error::InvalidConfig(
-                "optimize requires storage.dir: source groups are pulled through the local blob cache"
+                "optimize requires storage.dir: source block groups are pulled through the local blob cache"
                     .to_string(),
             ));
         };
@@ -127,24 +127,19 @@ impl OptimizeCommand {
         let ondemand = build_ondemand_blob(&self.parent_bootstrap, &patterns, backend, cache_dir)?;
         let digest_hex = hex_string(&ondemand.full_blob_digest);
 
-        fs::create_dir_all(&self.blob_dir).with_context(|| {
+        fs::create_dir_all(&self.blob_store).with_context(|| {
             format!(
                 "failed to create blob directory: {}",
-                self.blob_dir.display()
+                self.blob_store.display()
             )
         })?;
-        let blob_path = self.blob_dir.join(&digest_hex);
+        let blob_path = self.blob_store.join(&digest_hex);
         fs::write(&blob_path, &ondemand.artifact)
             .with_context(|| format!("failed to write ondemand blob: {}", blob_path.display()))?;
         let blob_metadata_path = self
-            .blob_dir
+            .blob_store
             .join(format!("{digest_hex}{BLOB_METADATA_SUFFIX}"));
-        ondemand
-            .blob_metadata
-            .save(&blob_metadata_path)
-            .with_context(|| {
-                format!("failed to save blob meta: {}", blob_metadata_path.display())
-            })?;
+        ondemand.blob_metadata.save(&blob_metadata_path)?;
 
         fs::write(&self.bootstrap, &ondemand.bootstrap).with_context(|| {
             format!(
@@ -154,7 +149,7 @@ impl OptimizeCommand {
         })?;
 
         info!(
-            "optimized {} groups from {} source blobs into ondemand blob",
+            "optimized {} block groups from {} source blobs into ondemand blob",
             patterns.len(),
             ondemand.source_blob_count
         );
@@ -171,8 +166,8 @@ impl OptimizeCommand {
             blob_metadata_path: String,
             #[tabled(rename = "BOOTSTRAP PATH")]
             bootstrap_path: String,
-            #[tabled(rename = "GROUP COUNT")]
-            group_count: String,
+            #[tabled(rename = "BLOCK GROUP COUNT")]
+            block_group_count: String,
             #[tabled(rename = "COMPRESSED DATA SIZE")]
             compressed_data_size: String,
             #[tabled(rename = "UNCOMPRESSED DATA SIZE")]
@@ -184,7 +179,7 @@ impl OptimizeCommand {
             ondemand_blob_path: blob_path.display().to_string(),
             blob_metadata_path: blob_metadata_path.display().to_string(),
             bootstrap_path: self.bootstrap.display().to_string(),
-            group_count: patterns.len().to_string(),
+            block_group_count: patterns.len().to_string(),
             compressed_data_size: ondemand.footer.compressed_data_size().to_string(),
             uncompressed_data_size: (ondemand.uncompressed_blocks * EROFS_BLOCK_SIZE as u64)
                 .to_string(),

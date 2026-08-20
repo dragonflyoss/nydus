@@ -27,9 +27,9 @@ type PackOption struct {
 	// ChunkSize is the nydus file chunk size in bytes. Defaults to
 	// DefaultChunkSize.
 	ChunkSize uint32
-	// CompressSize is the nydus group uncompressed size in bytes (a multiple of
-	// 1MiB). Defaults to DefaultCompressSize.
-	CompressSize uint32
+	// BlockGroupSize is the nydus block group uncompressed size in bytes (a
+	// multiple of 1MiB). Defaults to DefaultBlockGroupSize.
+	BlockGroupSize uint32
 	// Compressor is the chunk data compressor ("none" or "zstd"). Defaults to
 	// DefaultCompressor.
 	Compressor string
@@ -42,8 +42,8 @@ func (opt *PackOption) applyDefaults() {
 	if opt.ChunkSize == 0 {
 		opt.ChunkSize = DefaultChunkSize
 	}
-	if opt.CompressSize == 0 {
-		opt.CompressSize = DefaultCompressSize
+	if opt.BlockGroupSize == 0 {
+		opt.BlockGroupSize = DefaultBlockGroupSize
 	}
 	if opt.Compressor == "" {
 		opt.Compressor = DefaultCompressor
@@ -182,7 +182,7 @@ func BuildBlob(ctx context.Context, dest io.Writer, sourceDir string, opt PackOp
 			SourceDir:    sourceDir,
 			BlobPath:     fifoPath,
 			ChunkSize:    opt.ChunkSize,
-			CompressSize: opt.CompressSize,
+			BlockGroupSize: opt.BlockGroupSize,
 			Compressor:   opt.Compressor,
 			LogLevel:     opt.LogLevel,
 		})

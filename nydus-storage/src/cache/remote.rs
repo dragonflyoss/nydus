@@ -1,7 +1,7 @@
 //! Diskless blob access: every read fetches, decodes, and validates its
-//! groups from the backend directly, holding the bytes only in memory.
+//! block groups from the backend directly, holding the bytes only in memory.
 //! Selected when no storage directory is configured. Repeated reads of the
-//! same group fetch it again — the kernel page cache above the mount is the
+//! same block group fetch it again — the kernel page cache above the mount is the
 //! only reuse layer. Modes that hand a cache file to the kernel (fanotify,
 //! NBD, ublk, userfaultfd, virtio-pmem) cannot run diskless and reject this
 //! mode through the file-oriented [`BlobCache`] defaults.
@@ -13,7 +13,7 @@ use nydus_backend::{BlobBackend, ReadKind};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-use super::{fetch_decode_validate_group_into, BlobCache, GroupBuffers};
+use super::{fetch_decode_validate_block_group_into, BlobCache, BlockGroupBuffers};
 
 /// A diskless blob cache: reads are served straight from the backend with
 /// nothing written to disk.
@@ -47,7 +47,7 @@ impl BlobCache for RemoteBlobCache {
         if dst.is_empty() {
             return Ok(());
         }
-        // Redirect (ondemand) blobs have a non-uniform group layout and no
+        // Redirect (ondemand) blobs have a non-uniform block group layout and no
         // dense readable address space, exactly as in the local cache.
         if self.blob_metadata.is_redirect_blob() {
             return Err(io::Error::new(
@@ -61,33 +61,43 @@ impl BlobCache for RemoteBlobCache {
         })?;
         let first = self
             .blob_metadata
-            .group_index_for_byte_offset(offset)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+            .block_group_index_for_byte_offset(offset)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
+            })?;
         let last = self
             .blob_metadata
-            .group_index_for_byte_offset(end - 1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
-
-        let mut buffers = GroupBuffers::default();
-        for group_index in first..=last {
-            let group = *self.blob_metadata.group_at(group_index).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
+            .block_group_index_for_byte_offset(end - 1)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
             })?;
-            let decoded = fetch_decode_validate_group_into(
+
+        let mut buffers = BlockGroupBuffers::default();
+        for block_group_index in first..=last {
+            let block_group = *self
+                .blob_metadata
+                .block_group_at(block_group_index)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "blob meta block group not found",
+                    )
+                })?;
+            let decoded = fetch_decode_validate_block_group_into(
                 &self.blob_id,
                 &self.blob_metadata,
                 &self.backend,
-                &group,
+                &block_group,
                 &mut buffers,
                 ReadKind::OnDemand,
             )?;
 
-            // Copy the overlap between this group's span and the request.
-            let group_start = group.uncompressed_byte_offset();
-            let copy_start = offset.max(group_start);
-            let copy_end = end.min(group.uncompressed_byte_end());
-            let source =
-                &decoded[(copy_start - group_start) as usize..][..(copy_end - copy_start) as usize];
+            // Copy the overlap between this block group's span and the request.
+            let block_group_start = block_group.uncompressed_byte_offset();
+            let copy_start = offset.max(block_group_start);
+            let copy_end = end.min(block_group.uncompressed_byte_end());
+            let source = &decoded[(copy_start - block_group_start) as usize..]
+                [..(copy_end - copy_start) as usize];
             let dst_start = (copy_start - offset) as usize;
             dst[dst_start..dst_start + source.len()].copy_from_slice(source);
         }
@@ -110,7 +120,7 @@ impl BlobCache for RemoteBlobCache {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataChunk, BlobMetadataGroup};
+    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk};
     use nydus_format::utils::{sha256_bytes, write_minimal_full_blob};
     use tempfile::tempdir;
 
@@ -118,7 +128,7 @@ mod tests {
         BlobMetadata::from_parts(
             blob_id,
             1,
-            vec![BlobMetadataGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
         )
         .unwrap()

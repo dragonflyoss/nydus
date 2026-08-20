@@ -12,28 +12,28 @@ use memmap2::MmapRaw;
 /// as-is so a hexdump of the file starts with the readable string. Same magic
 /// style as the blob meta header (`LPBLMETA`); the format version is a
 /// separate field instead of being baked into the magic.
-const GROUP_MAP_MAGIC: [u8; 8] = *b"LPGRPMAP";
+const BLOCK_GROUP_MAP_MAGIC: [u8; 8] = *b"LPGRPMAP";
 /// On-disk format generation, informational only: readers do not gate on it.
-/// A group_map is local mutable state — its `flags` word carries runtime state
+/// A block_group_map is local mutable state — its `flags` word carries runtime state
 /// bits (not format features), and unknown state bits are simply ignored.
-const GROUP_MAP_VERSION: u32 = 1;
+const BLOCK_GROUP_MAP_VERSION: u32 = 1;
 /// Fixed header size: one block-sized page, matching the blob meta header
 /// (`BLOB_METADATA_HEADER_SIZE`) for a uniform sidecar format family. The bitmap
 /// starts on a page boundary and the unused header tail is reserved for
 /// future fields.
-const GROUP_MAP_HEADER_SIZE: usize = nydus_format::erofs::EROFS_BLOCK_SIZE as usize;
+const BLOCK_GROUP_MAP_HEADER_SIZE: usize = nydus_format::erofs::EROFS_BLOCK_SIZE as usize;
 
 /// Byte offsets of the header fields after magic and version. `flags` and
 /// `ready_count` are mutable at runtime, updated atomically through the
-/// shared mapping (unlike magic/version/group count, which are written once
+/// shared mapping (unlike magic/version/block group count, which are written once
 /// at creation). The `magic + version + flags` prefix matches the blob meta
 /// header layout.
-const GROUP_MAP_FLAGS_OFFSET: usize = 12;
-const GROUP_MAP_GROUP_COUNT_OFFSET: usize = 16;
-const GROUP_MAP_READY_COUNT_OFFSET: usize = 20;
-/// `flags` bit: every group of this blob is ready. Sticky — ready bits are
+const BLOCK_GROUP_MAP_FLAGS_OFFSET: usize = 12;
+const BLOCK_GROUP_MAP_BLOCK_GROUP_COUNT_OFFSET: usize = 16;
+const BLOCK_GROUP_MAP_READY_COUNT_OFFSET: usize = 20;
+/// `flags` bit: every block group of this blob is ready. Sticky — ready bits are
 /// never cleared, so once set it stays set for the lifetime of the file.
-const GROUP_MAP_FLAG_ALL_READY: u32 = 1;
+const BLOCK_GROUP_MAP_FLAG_ALL_READY: u32 = 1;
 
 /// Holds `flock(LOCK_EX)` on a file for the guard's lifetime.
 struct FileLock<'a> {
@@ -55,33 +55,33 @@ impl Drop for FileLock<'_> {
     }
 }
 
-/// Persistent per-blob group readiness bitmap, shared across processes.
+/// Persistent per-blob block group readiness bitmap, shared across processes.
 ///
-/// The on-disk layout is a 4096-byte header (magic, version, flags, group
-/// count, ready count) followed by one bit per group. The whole file is
+/// The on-disk layout is a 4096-byte header (magic, version, flags, block group
+/// count, ready count) followed by one bit per block group. The whole file is
 /// mapped `MAP_SHARED` and the bits are accessed with atomic operations, so
-/// every process (or thread) that opens the same group_map file observes
+/// every process (or thread) that opens the same block_group_map file observes
 /// `set_ready` updates from all the others through the shared page cache —
 /// this is what lets concurrent nydus instances on one node share a single
 /// warmed cache. Persistence across reboots is provided by regular kernel
 /// writeback of the dirty pages.
 ///
 /// The header additionally carries an `ALL_READY` flag: the moment the last
-/// group turns ready, the flag is set (also visible cross-process), and
+/// block group turns ready, the flag is set (also visible cross-process), and
 /// `is_all_ready` becomes a single atomic load. On-demand services (uffd,
-/// fanotify, FUSE) use it as a fast path to skip per-group readiness
+/// fanotify, FUSE) use it as a fast path to skip per-block group readiness
 /// bookkeeping entirely once a blob is fully cached.
-pub struct GroupMap {
+pub struct BlockGroupMap {
     map: MmapRaw,
-    group_count: usize,
+    block_group_count: usize,
     // Keep the backing file open for the lifetime of the mapping.
     _file: File,
 }
 
-impl GroupMap {
-    pub fn open(path: &Path, group_count: usize) -> io::Result<Self> {
-        let bytes_len = group_count.div_ceil(8);
-        let expected_len = (GROUP_MAP_HEADER_SIZE + bytes_len) as u64;
+impl BlockGroupMap {
+    pub fn open(path: &Path, block_group_count: usize) -> io::Result<Self> {
+        let bytes_len = block_group_count.div_ceil(8);
+        let expected_len = (BLOCK_GROUP_MAP_HEADER_SIZE + bytes_len) as u64;
 
         let file = OpenOptions::new()
             .read(true)
@@ -95,12 +95,12 @@ impl GroupMap {
             // First creation. Racing creators run the same idempotent
             // sequence: size the file, then write the identical header bytes.
             file.set_len(expected_len)?;
-            file.write_all_at(&header_bytes(group_count), 0)?;
+            file.write_all_at(&header_bytes(block_group_count), 0)?;
         } else if file_len != expected_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "group_map {} size mismatch: expected {}, got {}",
+                    "block_group_map {} size mismatch: expected {}, got {}",
                     path.display(),
                     expected_len,
                     file_len
@@ -112,7 +112,7 @@ impl GroupMap {
         if map.len() < expected_len as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("group_map {} mapping size mismatch", path.display()),
+                format!("block_group_map {} mapping size mismatch", path.display()),
             ));
         }
 
@@ -122,40 +122,42 @@ impl GroupMap {
         // header bytes; anything else is a corrupt or foreign file. The
         // mutable fields (flags, ready count) cannot have been touched in
         // that window: no process can update them before a successful open.
-        let header = unsafe { std::slice::from_raw_parts(map.as_ptr(), GROUP_MAP_HEADER_SIZE) };
-        if header[..GROUP_MAP_MAGIC.len()] != GROUP_MAP_MAGIC {
+        let header =
+            unsafe { std::slice::from_raw_parts(map.as_ptr(), BLOCK_GROUP_MAP_HEADER_SIZE) };
+        if header[..BLOCK_GROUP_MAP_MAGIC.len()] != BLOCK_GROUP_MAP_MAGIC {
             if header.iter().all(|byte| *byte == 0) {
-                file.write_all_at(&header_bytes(group_count), 0)?;
+                file.write_all_at(&header_bytes(block_group_count), 0)?;
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid group_map magic: {}", path.display()),
+                    format!("invalid block_group_map magic: {}", path.display()),
                 ));
             }
         } else {
             // `version` (offset 8) is informational and not gated on, matching
             // the other sidecar formats.
             let existing = u32::from_le_bytes(
-                header[GROUP_MAP_GROUP_COUNT_OFFSET..GROUP_MAP_GROUP_COUNT_OFFSET + 4]
+                header[BLOCK_GROUP_MAP_BLOCK_GROUP_COUNT_OFFSET
+                    ..BLOCK_GROUP_MAP_BLOCK_GROUP_COUNT_OFFSET + 4]
                     .try_into()
                     .unwrap(),
             ) as usize;
-            if existing != group_count {
+            if existing != block_group_count {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "group_map {} group count mismatch: expected {}, got {}",
+                        "block_group_map {} block_group count mismatch: expected {}, got {}",
                         path.display(),
-                        group_count,
+                        block_group_count,
                         existing
                     ),
                 ));
             }
         }
 
-        let group_map = Self {
+        let block_group_map = Self {
             map,
-            group_count,
+            block_group_count,
             _file: file,
         };
         // Reconcile the ALL_READY flag from the authoritative bitmap. This
@@ -163,24 +165,24 @@ impl GroupMap {
         // setting the last bit and bumping the ready count, and marks
         // fully-warmed blobs (including empty ones) at open time so readers
         // start on the fast path immediately.
-        if !group_map.is_all_ready() && group_map.scan_all_ready() {
-            group_map.mark_all_ready();
+        if !block_group_map.is_all_ready() && block_group_map.scan_all_ready() {
+            block_group_map.mark_all_ready();
         }
-        Ok(group_map)
+        Ok(block_group_map)
     }
 
     /// Atomic view of the byte holding the ready bit for `index`.
     fn bit_byte(&self, index: usize) -> &AtomicU8 {
-        let offset = GROUP_MAP_HEADER_SIZE + index / 8;
+        let offset = BLOCK_GROUP_MAP_HEADER_SIZE + index / 8;
         // Safety: `offset` is within the mapping (checked against the file
-        // size derived from `group_count` in `open`), and `AtomicU8` has the
+        // size derived from `block_group_count` in `open`), and `AtomicU8` has the
         // same layout as `u8` with no alignment requirement beyond 1.
         unsafe { &*(self.map.as_ptr().add(offset) as *const AtomicU8) }
     }
 
     /// Atomic view of a mutable u32 header field at `offset`.
     fn header_u32(&self, offset: usize) -> &AtomicU32 {
-        debug_assert!(offset % 4 == 0 && offset + 4 <= GROUP_MAP_HEADER_SIZE);
+        debug_assert!(offset % 4 == 0 && offset + 4 <= BLOCK_GROUP_MAP_HEADER_SIZE);
         // Safety: the mapping is page aligned and at least one header page
         // long, and `offset` is a 4-byte-aligned position inside the header,
         // satisfying AtomicU32's alignment and size requirements.
@@ -197,30 +199,34 @@ impl GroupMap {
     /// is what keeps concurrent processes together: they have this file
     /// mapped, so they observe the reset. Unlinking would leave the newcomer
     /// on a different inode, and from then on neither side could see the
-    /// other's readiness — the survivor would keep waiting for groups that,
+    /// other's readiness — the survivor would keep waiting for block groups that,
     /// from its map's point of view, never turn ready.
     pub fn reset(&self) -> io::Result<()> {
         // Serialize with other processes resetting the same map.
         let _guard = FileLock::exclusive(&self._file)?;
         // Stepping by 8 visits each bitmap byte exactly once.
-        for index in (0..self.group_count).step_by(8) {
+        for index in (0..self.block_group_count).step_by(8) {
             self.bit_byte(index).store(0, Ordering::Release);
         }
-        self.header_u32(GROUP_MAP_READY_COUNT_OFFSET)
+        self.header_u32(BLOCK_GROUP_MAP_READY_COUNT_OFFSET)
             .store(0, Ordering::Release);
-        self.header_u32(GROUP_MAP_FLAGS_OFFSET)
-            .fetch_and(!GROUP_MAP_FLAG_ALL_READY, Ordering::AcqRel);
+        self.header_u32(BLOCK_GROUP_MAP_FLAGS_OFFSET)
+            .fetch_and(!BLOCK_GROUP_MAP_FLAG_ALL_READY, Ordering::AcqRel);
         Ok(())
     }
 
     pub fn is_ready(&self, index: usize) -> io::Result<bool> {
-        validate_index(index, self.group_count)?;
+        validate_index(index, self.block_group_count)?;
         let mask = 1u8 << (index % 8);
         Ok(self.bit_byte(index).load(Ordering::Acquire) & mask != 0)
     }
 
-    pub fn ready_group_ranges(&self, first: usize, last: usize) -> io::Result<Vec<Range<usize>>> {
-        validate_range(first, last, self.group_count)?;
+    pub fn ready_block_group_ranges(
+        &self,
+        first: usize,
+        last: usize,
+    ) -> io::Result<Vec<Range<usize>>> {
+        validate_range(first, last, self.block_group_count)?;
 
         // Fast path: a fully-ready blob needs no bit scanning at all.
         if self.is_all_ready() {
@@ -248,18 +254,18 @@ impl GroupMap {
     }
 
     pub fn set_ready(&self, index: usize) -> io::Result<()> {
-        validate_index(index, self.group_count)?;
+        validate_index(index, self.block_group_count)?;
         let mask = 1u8 << (index % 8);
         let previous = self.bit_byte(index).fetch_or(mask, Ordering::AcqRel);
         if previous & mask == 0 {
             // This call made the 0→1 transition (exactly one process does,
-            // per group), so it owns bumping the shared ready count. When the
+            // per block group), so it owns bumping the shared ready count. When the
             // count reaches the total, latch the sticky ALL_READY flag.
             let count = self
-                .header_u32(GROUP_MAP_READY_COUNT_OFFSET)
+                .header_u32(BLOCK_GROUP_MAP_READY_COUNT_OFFSET)
                 .fetch_add(1, Ordering::AcqRel)
                 + 1;
-            if count as usize >= self.group_count {
+            if count as usize >= self.block_group_count {
                 self.mark_all_ready();
             }
         }
@@ -267,18 +273,18 @@ impl GroupMap {
     }
 
     /// O(1) fast-path check: true when the sticky ALL_READY header flag is
-    /// set, i.e. every group of this blob has been decoded into the cache.
+    /// set, i.e. every block group of this blob has been decoded into the cache.
     /// A single atomic load on the shared mapping — no bitmap scan — so
     /// per-fault handlers (uffd, fanotify, FUSE reads) can consult it on
     /// every event at effectively zero cost.
     pub fn is_all_ready(&self) -> bool {
-        self.header_u32(GROUP_MAP_FLAGS_OFFSET)
+        self.header_u32(BLOCK_GROUP_MAP_FLAGS_OFFSET)
             .load(Ordering::Acquire)
-            & GROUP_MAP_FLAG_ALL_READY
+            & BLOCK_GROUP_MAP_FLAG_ALL_READY
             != 0
     }
 
-    /// True when every group is marked ready. Checks the sticky header flag
+    /// True when every block group is marked ready. Checks the sticky header flag
     /// first; otherwise scans the shared bitmap and latches the flag when the
     /// scan proves completion (also healing any ready-count skew left by a
     /// crashed writer). The answer reflects updates from other processes.
@@ -295,9 +301,9 @@ impl GroupMap {
 
     /// Authoritative scan of the bitmap (masking the partial final byte).
     fn scan_all_ready(&self) -> bool {
-        for index in (0..self.group_count).step_by(8) {
+        for index in (0..self.block_group_count).step_by(8) {
             let bits = self.bit_byte(index).load(Ordering::Acquire);
-            let remaining = self.group_count - index;
+            let remaining = self.block_group_count - index;
             let mask = if remaining >= 8 {
                 0xFF
             } else {
@@ -315,49 +321,49 @@ impl GroupMap {
         // latched from a bitmap scan (heal path), the counter may still be
         // short from a crashed writer. Every bit is set at this point, so no
         // concurrent 0→1 increment can race with this store.
-        self.header_u32(GROUP_MAP_READY_COUNT_OFFSET)
-            .store(self.group_count as u32, Ordering::Release);
-        self.header_u32(GROUP_MAP_FLAGS_OFFSET)
-            .fetch_or(GROUP_MAP_FLAG_ALL_READY, Ordering::AcqRel);
+        self.header_u32(BLOCK_GROUP_MAP_READY_COUNT_OFFSET)
+            .store(self.block_group_count as u32, Ordering::Release);
+        self.header_u32(BLOCK_GROUP_MAP_FLAGS_OFFSET)
+            .fetch_or(BLOCK_GROUP_MAP_FLAG_ALL_READY, Ordering::AcqRel);
     }
 
-    /// Number of groups currently marked ready (advisory shared counter,
+    /// Number of block groups currently marked ready (advisory shared counter,
     /// exact once ALL_READY is latched).
     #[cfg(test)]
     fn ready_count(&self) -> usize {
-        self.header_u32(GROUP_MAP_READY_COUNT_OFFSET)
+        self.header_u32(BLOCK_GROUP_MAP_READY_COUNT_OFFSET)
             .load(Ordering::Acquire) as usize
     }
 }
 
-fn header_bytes(group_count: usize) -> [u8; GROUP_MAP_HEADER_SIZE] {
-    let mut header = [0u8; GROUP_MAP_HEADER_SIZE];
-    header[..8].copy_from_slice(&GROUP_MAP_MAGIC);
-    header[8..12].copy_from_slice(&GROUP_MAP_VERSION.to_le_bytes());
+fn header_bytes(block_group_count: usize) -> [u8; BLOCK_GROUP_MAP_HEADER_SIZE] {
+    let mut header = [0u8; BLOCK_GROUP_MAP_HEADER_SIZE];
+    header[..8].copy_from_slice(&BLOCK_GROUP_MAP_MAGIC);
+    header[8..12].copy_from_slice(&BLOCK_GROUP_MAP_VERSION.to_le_bytes());
     // flags (12..16) and ready count (20..24) start at zero; the remaining
     // header tail is reserved and stays zero.
-    header[GROUP_MAP_GROUP_COUNT_OFFSET..GROUP_MAP_GROUP_COUNT_OFFSET + 4]
-        .copy_from_slice(&(group_count as u32).to_le_bytes());
+    header[BLOCK_GROUP_MAP_BLOCK_GROUP_COUNT_OFFSET..BLOCK_GROUP_MAP_BLOCK_GROUP_COUNT_OFFSET + 4]
+        .copy_from_slice(&(block_group_count as u32).to_le_bytes());
     header
 }
 
-fn validate_index(index: usize, group_count: usize) -> io::Result<()> {
-    if index >= group_count {
+fn validate_index(index: usize, block_group_count: usize) -> io::Result<()> {
+    if index >= block_group_count {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("group index {index} out of range {group_count}"),
+            format!("block group index {index} out of range {block_group_count}"),
         ));
     }
     Ok(())
 }
 
-fn validate_range(first: usize, last: usize, group_count: usize) -> io::Result<()> {
-    validate_index(first, group_count)?;
-    validate_index(last, group_count)?;
+fn validate_range(first: usize, last: usize, block_group_count: usize) -> io::Result<()> {
+    validate_index(first, block_group_count)?;
+    validate_index(last, block_group_count)?;
     if first > last {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "invalid group range",
+            "invalid block group range",
         ));
     }
     Ok(())
@@ -369,32 +375,32 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn groupmap_persists_ready_bits() {
+    fn block_block_group_map_persists_ready_bits() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
-        let map = GroupMap::open(&path, 10).unwrap();
+        let map = BlockGroupMap::open(&path, 10).unwrap();
         assert!(!map.is_ready(3).unwrap());
         map.set_ready(3).unwrap();
         map.set_ready(9).unwrap();
         assert!(map.is_ready(3).unwrap());
         assert!(map.is_ready(9).unwrap());
 
-        let reopened = GroupMap::open(&path, 10).unwrap();
+        let reopened = BlockGroupMap::open(&path, 10).unwrap();
         assert!(reopened.is_ready(3).unwrap());
         assert!(reopened.is_ready(9).unwrap());
         assert!(!reopened.is_ready(2).unwrap());
     }
 
     #[test]
-    fn groupmap_updates_are_visible_across_handles() {
+    fn block_block_group_map_updates_are_visible_across_handles() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
         // Two live handles on the same file model two concurrent processes:
         // bits set through one must be observed by the other without reopen.
-        let writer = GroupMap::open(&path, 20).unwrap();
-        let observer = GroupMap::open(&path, 20).unwrap();
+        let writer = BlockGroupMap::open(&path, 20).unwrap();
+        let observer = BlockGroupMap::open(&path, 20).unwrap();
         assert!(!observer.is_ready(7).unwrap());
         writer.set_ready(7).unwrap();
         assert!(observer.is_ready(7).unwrap());
@@ -407,45 +413,45 @@ mod tests {
     }
 
     #[test]
-    fn groupmap_reports_merged_ready_ranges() {
+    fn block_block_group_map_reports_merged_ready_ranges() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
-        let map = GroupMap::open(&path, 10).unwrap();
+        let map = BlockGroupMap::open(&path, 10).unwrap();
         for index in [1, 2, 4, 7, 8, 9] {
             map.set_ready(index).unwrap();
         }
 
         assert_eq!(
-            map.ready_group_ranges(0, 9).unwrap(),
+            map.ready_block_group_ranges(0, 9).unwrap(),
             vec![1..3, 4..5, 7..10]
         );
-        assert_eq!(map.ready_group_ranges(7, 9).unwrap(), vec![7..10]);
+        assert_eq!(map.ready_block_group_ranges(7, 9).unwrap(), vec![7..10]);
         assert_eq!(
-            map.ready_group_ranges(0, 8).unwrap(),
+            map.ready_block_group_ranges(0, 8).unwrap(),
             vec![1..3, 4..5, 7..9]
         );
-        assert_eq!(map.ready_group_ranges(8, 9).unwrap(), vec![8..10]);
+        assert_eq!(map.ready_block_group_ranges(8, 9).unwrap(), vec![8..10]);
     }
 
     #[test]
-    fn groupmap_rejects_count_mismatch() {
+    fn block_block_group_map_rejects_count_mismatch() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
-        GroupMap::open(&path, 10).unwrap();
-        assert!(GroupMap::open(&path, 11).is_err());
+        BlockGroupMap::open(&path, 10).unwrap();
+        assert!(BlockGroupMap::open(&path, 11).is_err());
     }
 
     #[test]
-    fn groupmap_heals_all_zero_header_race() {
+    fn block_block_group_map_heals_all_zero_header_race() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
         // Model the concurrent-creation race window: another process ran
         // `set_len` but has not written the header yet, so we map a fully
         // sized, all-zero file. Open must heal the header and proceed.
-        let group_count = 10usize;
-        let expected_len = (GROUP_MAP_HEADER_SIZE + group_count.div_ceil(8)) as u64;
+        let block_group_count = 10usize;
+        let expected_len = (BLOCK_GROUP_MAP_HEADER_SIZE + block_group_count.div_ceil(8)) as u64;
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -455,39 +461,39 @@ mod tests {
         file.set_len(expected_len).unwrap();
         drop(file);
 
-        let map = GroupMap::open(&path, group_count).unwrap();
+        let map = BlockGroupMap::open(&path, block_group_count).unwrap();
         map.set_ready(4).unwrap();
         assert!(map.is_ready(4).unwrap());
 
         // The healed header persists: a reopen validates magic/count normally.
-        let reopened = GroupMap::open(&path, group_count).unwrap();
+        let reopened = BlockGroupMap::open(&path, block_group_count).unwrap();
         assert!(reopened.is_ready(4).unwrap());
     }
 
     #[test]
-    fn groupmap_rejects_corrupt_magic_and_size() {
+    fn block_block_group_map_rejects_corrupt_magic_and_size() {
         let dir = tempdir().unwrap();
 
         // Correctly sized file with non-zero garbage: not a race window,
         // must be rejected instead of silently reinitialized.
         let garbage = dir.path().join("garbage.group.map");
-        let expected_len = GROUP_MAP_HEADER_SIZE + 10usize.div_ceil(8);
+        let expected_len = BLOCK_GROUP_MAP_HEADER_SIZE + 10usize.div_ceil(8);
         std::fs::write(&garbage, vec![0xABu8; expected_len]).unwrap();
-        assert!(GroupMap::open(&garbage, 10).is_err());
+        assert!(BlockGroupMap::open(&garbage, 10).is_err());
 
         // Existing file whose size does not match the expected layout.
         let truncated = dir.path().join("truncated.group.map");
         std::fs::write(&truncated, vec![0u8; expected_len - 1]).unwrap();
-        assert!(GroupMap::open(&truncated, 10).is_err());
+        assert!(BlockGroupMap::open(&truncated, 10).is_err());
     }
 
     #[test]
-    fn groupmap_latches_all_ready_flag_on_last_bit() {
+    fn block_block_group_map_latches_all_ready_flag_on_last_bit() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
-        let writer = GroupMap::open(&path, 9).unwrap();
-        let observer = GroupMap::open(&path, 9).unwrap();
+        let writer = BlockGroupMap::open(&path, 9).unwrap();
+        let observer = BlockGroupMap::open(&path, 9).unwrap();
         assert!(!writer.is_all_ready());
 
         for index in 0..8 {
@@ -502,58 +508,58 @@ mod tests {
         assert!(observer.is_all_ready());
         assert!(observer.latch_all_ready());
 
-        // ready_group_ranges collapses to the whole span on the fast path.
-        assert_eq!(observer.ready_group_ranges(0, 8).unwrap(), vec![0..9]);
+        // ready_block_group_ranges collapses to the whole span on the fast path.
+        assert_eq!(observer.ready_block_group_ranges(0, 8).unwrap(), vec![0..9]);
 
         // And the flag persists on disk.
-        let reopened = GroupMap::open(&path, 9).unwrap();
+        let reopened = BlockGroupMap::open(&path, 9).unwrap();
         assert!(reopened.is_all_ready());
     }
 
     #[test]
-    fn groupmap_heals_ready_count_skew_from_bitmap() {
+    fn block_block_group_map_heals_ready_count_skew_from_bitmap() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
         // Model a writer that died between setting bits and bumping the ready
         // count: craft a file whose bitmap is fully set but whose flags and
         // ready count are still zero.
-        let group_count = 10usize;
+        let block_group_count = 10usize;
         {
-            let map = GroupMap::open(&path, group_count).unwrap();
+            let map = BlockGroupMap::open(&path, block_group_count).unwrap();
             drop(map);
         }
         let file = OpenOptions::new().write(true).open(&path).unwrap();
-        file.write_all_at(&[0xFF, 0x03], GROUP_MAP_HEADER_SIZE as u64)
+        file.write_all_at(&[0xFF, 0x03], BLOCK_GROUP_MAP_HEADER_SIZE as u64)
             .unwrap();
         drop(file);
 
         // Open reconciles the flag from the authoritative bitmap.
-        let map = GroupMap::open(&path, group_count).unwrap();
+        let map = BlockGroupMap::open(&path, block_group_count).unwrap();
         assert!(map.is_all_ready());
         assert!(map.latch_all_ready());
         // The heal path also corrects the advisory ready counter.
-        assert_eq!(map.ready_count(), group_count);
+        assert_eq!(map.ready_count(), block_group_count);
     }
 
     #[test]
-    fn groupmap_empty_blob_is_all_ready() {
+    fn block_block_group_map_empty_blob_is_all_ready() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
-        let map = GroupMap::open(&path, 0).unwrap();
+        let map = BlockGroupMap::open(&path, 0).unwrap();
         assert!(map.is_all_ready());
         assert!(map.latch_all_ready());
     }
 
     #[test]
-    fn groupmap_bit_boundaries_and_range_checks() {
+    fn block_block_group_map_bit_boundaries_and_range_checks() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
 
-        // 9 groups spill into a second bitmap byte; exercise both byte
+        // 9 block groups spill into a second bitmap byte; exercise both byte
         // boundaries and the partial final byte in latch_all_ready().
-        let map = GroupMap::open(&path, 9).unwrap();
+        let map = BlockGroupMap::open(&path, 9).unwrap();
         for index in [0usize, 7, 8] {
             assert!(!map.is_ready(index).unwrap());
             map.set_ready(index).unwrap();
@@ -580,51 +586,51 @@ mod tests {
     }
 
     #[test]
-    fn groupmap_concurrent_setters_lose_no_updates() {
+    fn block_block_group_map_concurrent_setters_lose_no_updates() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
-        let group_count = 4096usize;
+        let block_group_count = 4096usize;
 
         // Two handles (modeling two processes) hammer interleaved indexes so
         // nearly every fetch_or contends on a byte shared with the other
         // writer. Any non-atomic read-modify-write would lose bits here.
-        let even = GroupMap::open(&path, group_count).unwrap();
-        let odd = GroupMap::open(&path, group_count).unwrap();
+        let even = BlockGroupMap::open(&path, block_group_count).unwrap();
+        let odd = BlockGroupMap::open(&path, block_group_count).unwrap();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                for index in (0..group_count).step_by(2) {
+                for index in (0..block_group_count).step_by(2) {
                     even.set_ready(index).unwrap();
                 }
             });
             scope.spawn(|| {
-                for index in (1..group_count).step_by(2) {
+                for index in (1..block_group_count).step_by(2) {
                     odd.set_ready(index).unwrap();
                 }
             });
         });
 
-        let verify = GroupMap::open(&path, group_count).unwrap();
-        for index in 0..group_count {
+        let verify = BlockGroupMap::open(&path, block_group_count).unwrap();
+        for index in 0..block_group_count {
             assert!(verify.is_ready(index).unwrap(), "lost update at {index}");
         }
         assert!(verify.latch_all_ready());
     }
 
     #[test]
-    fn groupmap_scales_to_large_group_counts() {
+    fn block_block_group_map_scales_to_large_block_group_counts() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
-        // 1M groups ≈ a 4TiB blob at the default 4MiB group size — far above
+        // 1M block groups ≈ a 4TiB blob at the default 4MiB block group size — far above
         // anything real. The old implementation issued a write syscall per
         // set_ready; the mmap version must stay in-memory fast.
-        let group_count = 1_000_000usize;
+        let block_group_count = 1_000_000usize;
 
         let start = std::time::Instant::now();
-        let map = GroupMap::open(&path, group_count).unwrap();
-        for index in 0..group_count {
+        let map = BlockGroupMap::open(&path, block_group_count).unwrap();
+        for index in 0..block_group_count {
             map.set_ready(index).unwrap();
         }
-        for index in 0..group_count {
+        for index in 0..block_group_count {
             assert!(map.is_ready(index).unwrap());
         }
         assert!(map.latch_all_ready());
@@ -633,7 +639,7 @@ mod tests {
         // regressions such as reintroducing per-bit file I/O.
         assert!(
             elapsed < std::time::Duration::from_secs(5),
-            "group_map operations too slow: {elapsed:?}"
+            "block_group_map operations too slow: {elapsed:?}"
         );
     }
 }

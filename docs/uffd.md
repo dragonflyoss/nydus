@@ -259,7 +259,7 @@ return its complete FD mapping. It has no connection state and carries no FDs.
 | 0 | 8 | `u64` | `offset` | Block-aligned device byte offset |
 | 8 | 8 | `u64` | `len` | Nonzero, block-aligned byte length |
 
-Nydus downloads and decodes missing blob groups, then returns one or more
+Nydus downloads and decodes missing blob block groups, then returns one or more
 `RANGE_RESPONSE` frames. The returned ranges cover the complete requested
 interval without gaps; holes are represented by `/dev/zero` ranges. The client
 receives through the RANGE_RESPONSE with `NEXT=0`, then verifies that the

@@ -137,7 +137,7 @@ impl ErofsReader {
 
     /// Open a standalone bootstrap whose blob data is served by `backend`
     /// through per-blob caches under `cache_dir` (a temporary directory when
-    /// `None`). `trace_recorder`, when given, records on-demand group
+    /// `None`). `trace_recorder`, when given, records on-demand block group
     /// accesses for `nydus optimize`.
     pub fn open_bootstrap(
         bootstrap_path: &Path,
@@ -285,8 +285,8 @@ impl ErofsReader {
         self.blobs.is_redirect_blob(blob_index)
     }
 
-    /// Prefetch every group of the blob identified by `blob_index`. An
-    /// "ondemand" redirect blob is dispatched group by group into the source
+    /// Prefetch every block group of the blob identified by `blob_index`. An
+    /// "ondemand" redirect blob is dispatched block group by block group into the source
     /// blobs' caches instead of building its own cache file, fetching its
     /// segments concurrently with up to `threads` workers. A non-zero
     /// `timeout` bounds the whole blob's prefetch.

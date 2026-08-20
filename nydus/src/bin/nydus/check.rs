@@ -34,15 +34,15 @@ pub struct CheckCommand {
 
     #[arg(
         long,
-        env = "NYDUS_CHECK_BLOB_DIR",
-        help = "Specify the optional directory containing external blob files referenced by bootstrap"
+        env = "NYDUS_CHECK_BLOB_STORE",
+        help = "Specify the content-addressed store directory holding the blobs recorded in the bootstrap, named by their SHA256"
     )]
-    blob_dir: Option<PathBuf>,
+    blob_store: Option<PathBuf>,
 
     #[arg(
         long,
         env = "NYDUS_CHECK_CONFIG",
-        help = "Specify the file path to a YAML storage config providing the backend directory. When set, --blob-dir can be omitted"
+        help = "Specify the file path to a YAML storage config providing the backend directory. When set, --blob-store can be omitted"
     )]
     config: Option<PathBuf>,
 }
@@ -51,9 +51,9 @@ pub struct CheckCommand {
 impl CheckCommand {
     /// Executes the check sub command, statically inspecting the image.
     pub fn execute(&self) -> Result<()> {
-        // `check` verifies blobs from a local directory. --blob-dir takes precedence
+        // `check` verifies blobs from a local directory. --blob-store takes precedence
         // over the config; a config is only usable here when it has a local backend.
-        let blob_dir = match &self.blob_dir {
+        let blob_store = match &self.blob_store {
             Some(dir) => Some(dir.clone()),
             None => match &self.config {
                 Some(path) => {
@@ -72,26 +72,26 @@ impl CheckCommand {
             },
         };
 
-        let (kind, path) = match (&self.blob, &self.bootstrap, &blob_dir) {
+        let (kind, path) = match (&self.blob, &self.bootstrap, &blob_store) {
             (Some(blob), None, None) => (ImageKind::Blob, blob.as_path()),
             (None, Some(bootstrap), None) => (ImageKind::Bootstrap, bootstrap.as_path()),
-            (None, Some(bootstrap), Some(blob_dir)) if blob_dir.is_dir() => {
+            (None, Some(bootstrap), Some(blob_store)) if blob_store.is_dir() => {
                 (ImageKind::Bootstrap, bootstrap.as_path())
             }
-            (None, Some(_), Some(blob_dir)) => {
+            (None, Some(_), Some(blob_store)) => {
                 return Err(Error::InvalidParameter(format!(
-                    "blob-dir {} is not a directory",
-                    blob_dir.display()
+                    "blob-store {} is not a directory",
+                    blob_store.display()
                 )))
             }
             _ => {
                 return Err(Error::InvalidParameter(
-                    "check expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config".to_string(),
+                    "check expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-store or --config".to_string(),
                 ))
             }
         };
 
-        let report = check_image(kind, path, blob_dir.as_deref())?;
+        let report = check_image(kind, path, blob_store.as_deref())?;
 
         print_header(kind, path, &report);
         print_superblock(&report.superblock);
@@ -424,8 +424,8 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         chunk_size: String,
         #[tabled(rename = "CHUNK COUNT")]
         chunk_count: String,
-        #[tabled(rename = "GROUP COUNT")]
-        group_count: String,
+        #[tabled(rename = "BLOCK GROUP COUNT")]
+        block_group_count: String,
         #[tabled(rename = "CHUNK DIGESTER")]
         chunk_digester: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
@@ -458,7 +458,7 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             full_blob_digest: optional_digest(blob.blob_sha256),
             chunk_size: blob_metadata_field(blob, |meta| meta.chunk_size),
             chunk_count: blob_metadata_field(blob, |meta| meta.chunk_count),
-            group_count: blob_metadata_field(blob, |meta| meta.group_count),
+            block_group_count: blob_metadata_field(blob, |meta| meta.block_group_count),
             chunk_digester: blob_metadata_field(blob, |meta| meta.digester),
             chunk_compressor: blob_metadata_field(blob, |meta| meta.compressor),
             blob_compressed_size: blob_metadata_field_or(

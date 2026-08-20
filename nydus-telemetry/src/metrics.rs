@@ -142,12 +142,12 @@ struct Metrics {
     fs_read_latency: Histogram,
 
     cache_opened_files: IntGauge,
-    cache_hit_group: IntCounter,
-    cache_total_group: IntGauge,
-    cache_fill_group: IntCounter,
-    cache_ondemand_fill_group: IntCounter,
-    cache_redirect_fill_group: IntCounter,
-    cache_redirect_skip_group: IntCounter,
+    cache_hit_block_group: IntCounter,
+    cache_total_block_group: IntGauge,
+    cache_fill_block_group: IntCounter,
+    cache_ondemand_fill_block_group: IntCounter,
+    cache_redirect_fill_block_group: IntCounter,
+    cache_redirect_skip_block_group: IntCounter,
 }
 
 impl Metrics {
@@ -317,35 +317,35 @@ impl Metrics {
                 "cache_opened_files",
                 "Open blob data cache files (excluding .blob.meta and .group.map)",
             ),
-            cache_hit_group: counter(
+            cache_hit_block_group: counter(
                 &registry,
-                "cache_hit_group",
-                "Groups served from cache without a backend read",
+                "cache_hit_block_group",
+                "Block groups served from cache without a backend read",
             ),
-            cache_total_group: gauge(
+            cache_total_block_group: gauge(
                 &registry,
-                "cache_total_group",
-                "Total groups across loaded blob metas, counted once per blob",
+                "cache_total_block_group",
+                "Total block groups across loaded blob metas, counted once per blob",
             ),
-            cache_fill_group: counter(
+            cache_fill_block_group: counter(
                 &registry,
-                "cache_fill_group",
-                "Groups written into a blob's own cache by regular blob prefetch",
+                "cache_fill_block_group",
+                "Block groups written into a blob's own cache by regular blob prefetch",
             ),
-            cache_ondemand_fill_group: counter(
+            cache_ondemand_fill_block_group: counter(
                 &registry,
-                "cache_ondemand_fill_group",
-                "Groups written into a blob's own cache by an on-demand read",
+                "cache_ondemand_fill_block_group",
+                "Block groups written into a blob's own cache by an on-demand read",
             ),
-            cache_redirect_fill_group: counter(
+            cache_redirect_fill_block_group: counter(
                 &registry,
-                "cache_redirect_fill_group",
-                "Groups written into a source blob's cache from a redirect (ondemand) blob",
+                "cache_redirect_fill_block_group",
+                "Block groups written into a source blob's cache from a redirect (ondemand) blob",
             ),
-            cache_redirect_skip_group: counter(
+            cache_redirect_skip_block_group: counter(
                 &registry,
-                "cache_redirect_skip_group",
-                "Redirect groups skipped during ondemand prefetch (decode/CRC/unknown-device/fill failures)",
+                "cache_redirect_skip_block_group",
+                "Redirect block groups skipped during ondemand prefetch (decode/CRC/unknown-device/fill failures)",
             ),
             registry,
         }
@@ -447,21 +447,21 @@ pub fn dec_cache_opened_files() {
     METRICS.cache_opened_files.dec();
 }
 
-/// Blobs currently contributing to `cache_total_group`, with how many caches
+/// Blobs currently contributing to `cache_total_block_group`, with how many caches
 /// hold each one. Blobs are keyed by cache key, so several caches over the
 /// same blob — including ones reached through different images — only count
-/// its groups once.
+/// its block groups once.
 static TRACKED_BLOBS: LazyLock<Mutex<HashMap<[u8; SHA256_DIGEST_SIZE], TrackedBlob>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct TrackedBlob {
-    group_count: u64,
+    block_group_count: u64,
     holder_count: usize,
 }
 
-/// Count `groups` towards the total-groups gauge for the blob `cache_key`,
+/// Count `block_groups` towards the total-block groups gauge for the blob `cache_key`,
 /// unless another cache already counted it.
-pub fn track_blob_groups(cache_key: [u8; SHA256_DIGEST_SIZE], group_count: u64) {
+pub fn track_blob_block_groups(cache_key: [u8; SHA256_DIGEST_SIZE], block_group_count: u64) {
     // Telemetry is best-effort: recover from a poisoned lock instead of
     // propagating the panic (unlike the fail-fast `.unwrap()` policy used on
     // cache-state locks).
@@ -470,18 +470,20 @@ pub fn track_blob_groups(cache_key: [u8; SHA256_DIGEST_SIZE], group_count: u64) 
         Err(poisoned) => poisoned.into_inner(),
     };
     let entry = tracked.entry(cache_key).or_insert(TrackedBlob {
-        group_count,
+        block_group_count,
         holder_count: 0,
     });
     entry.holder_count += 1;
     if entry.holder_count == 1 {
-        METRICS.cache_total_group.add(entry.group_count as i64);
+        METRICS
+            .cache_total_block_group
+            .add(entry.block_group_count as i64);
     }
 }
 
-/// Drop one cache's claim on the blob `cache_key`, uncounting its groups once
+/// Drop one cache's claim on the blob `cache_key`, uncounting its block groups once
 /// the last cache over that blob is gone.
-pub fn untrack_blob_groups(cache_key: &[u8; SHA256_DIGEST_SIZE]) {
+pub fn untrack_blob_block_groups(cache_key: &[u8; SHA256_DIGEST_SIZE]) {
     let mut tracked = match TRACKED_BLOBS.lock() {
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),
@@ -491,14 +493,16 @@ pub fn untrack_blob_groups(cache_key: &[u8; SHA256_DIGEST_SIZE]) {
     };
     entry.holder_count -= 1;
     if entry.holder_count == 0 {
-        METRICS.cache_total_group.sub(entry.group_count as i64);
+        METRICS
+            .cache_total_block_group
+            .sub(entry.block_group_count as i64);
         tracked.remove(cache_key);
     }
 }
 
-/// Record a group served from cache without a backend read.
-pub fn inc_cache_hit_group() {
-    METRICS.cache_hit_group.inc();
+/// Record a block group served from cache without a backend read.
+pub fn inc_cache_hit_block_group() {
+    METRICS.cache_hit_block_group.inc();
 }
 
 /// Record a backend read that fetched ondemand (redirect) blob data. These
@@ -510,28 +514,28 @@ pub fn record_backend_redirect_read(bytes: u64) {
     metrics.backend_redirect_read_bytes.inc_by(bytes);
 }
 
-/// Record a group decoded into a blob's own cache by regular blob prefetch.
-pub fn inc_cache_fill_group() {
-    METRICS.cache_fill_group.inc();
+/// Record a block group decoded into a blob's own cache by regular blob prefetch.
+pub fn inc_cache_fill_block_group() {
+    METRICS.cache_fill_block_group.inc();
 }
 
-/// Record a group decoded into a blob's own cache to satisfy an on-demand
+/// Record a block group decoded into a blob's own cache to satisfy an on-demand
 /// read. Summing this across the processes sharing a cache directory shows how
 /// much duplicate fetching they do.
-pub fn inc_cache_ondemand_fill_group() {
-    METRICS.cache_ondemand_fill_group.inc();
+pub fn inc_cache_ondemand_fill_block_group() {
+    METRICS.cache_ondemand_fill_block_group.inc();
 }
 
-/// Record a group decoded from a redirect (ondemand) blob and written into its
+/// Record a block group decoded from a redirect (ondemand) blob and written into its
 /// source blob's cache.
-pub fn inc_cache_redirect_fill_group() {
-    METRICS.cache_redirect_fill_group.inc();
+pub fn inc_cache_redirect_fill_block_group() {
+    METRICS.cache_redirect_fill_block_group.inc();
 }
 
-/// Record a redirect group skipped during ondemand prefetch (decode or CRC
+/// Record a redirect block group skipped during ondemand prefetch (decode or CRC
 /// failure, unknown source device, or a failed source-cache fill).
-pub fn inc_cache_redirect_skip_group() {
-    METRICS.cache_redirect_skip_group.inc();
+pub fn inc_cache_redirect_skip_block_group() {
+    METRICS.cache_redirect_skip_block_group.inc();
 }
 
 /// How many caches currently claim the blob `cache_key`, for tests. The gauge
@@ -620,14 +624,14 @@ pub fn snapshot() -> Snapshot {
     }
 }
 
-/// Current count of groups filled into source blob caches from redirect blobs.
-pub fn cache_redirect_fill_group_total() -> u64 {
-    METRICS.cache_redirect_fill_group.get()
+/// Current count of block groups filled into source blob caches from redirect blobs.
+pub fn cache_redirect_fill_block_group_total() -> u64 {
+    METRICS.cache_redirect_fill_block_group.get()
 }
 
-/// Current count of redirect groups skipped during ondemand prefetch.
-pub fn cache_redirect_skip_group_total() -> u64 {
-    METRICS.cache_redirect_skip_group.get()
+/// Current count of redirect block groups skipped during ondemand prefetch.
+pub fn cache_redirect_skip_block_group_total() -> u64 {
+    METRICS.cache_redirect_skip_block_group.get()
 }
 
 /// Current total bytes of ondemand (redirect) blob data fetched from the backend.
@@ -660,8 +664,8 @@ mod tests {
             false,
         );
         record_fs_op(FsOp::Read, Duration::from_millis(2), false);
-        inc_cache_hit_group();
-        track_blob_groups([7u8; SHA256_DIGEST_SIZE], 3);
+        inc_cache_hit_block_group();
+        track_blob_block_groups([7u8; SHA256_DIGEST_SIZE], 3);
         inc_cache_opened_files();
 
         let text = encode_text();
@@ -669,8 +673,8 @@ mod tests {
         assert!(text.contains("backend_ondemand_read_bytes"));
         assert!(text.contains("fs_op_count"));
         assert!(text.contains("fs_read_latency"));
-        assert!(text.contains("cache_hit_group"));
-        assert!(text.contains("cache_total_group"));
+        assert!(text.contains("cache_hit_block_group"));
+        assert!(text.contains("cache_total_block_group"));
         assert!(text.contains("cache_opened_files"));
     }
 
@@ -705,7 +709,7 @@ mod tests {
         assert!(obj.contains_key("backend_ondemand_read_count"));
         assert!(json["backend_ondemand_read_count"].as_u64().unwrap() >= 1);
         // Gauges keyed by their bare name too.
-        assert!(obj.contains_key("cache_total_group"));
+        assert!(obj.contains_key("cache_total_block_group"));
         // Labeled series are disambiguated with a brace-suffixed key.
         assert!(obj.keys().any(|k| k.starts_with("fs_op_count{op=")));
         // Histograms expand to _sum / _count.
@@ -714,23 +718,23 @@ mod tests {
     }
 
     #[test]
-    fn blob_groups_are_counted_once_per_blob_and_released() {
+    fn blob_block_groups_are_counted_once_per_blob_and_released() {
         // The gauge moves with the refcount transitions asserted here, and is
         // itself process-global, so this pins the transitions instead.
         let key = [42u8; SHA256_DIGEST_SIZE];
         assert_eq!(tracked_blob_refs(&key), None);
 
         // A second cache over the same blob joins the existing entry rather
-        // than counting the blob's groups again.
-        track_blob_groups(key, 10);
+        // than counting the blob's block groups again.
+        track_blob_block_groups(key, 10);
         assert_eq!(tracked_blob_refs(&key), Some(1));
-        track_blob_groups(key, 10);
+        track_blob_block_groups(key, 10);
         assert_eq!(tracked_blob_refs(&key), Some(2));
 
-        // The groups stay counted until the last cache is gone.
-        untrack_blob_groups(&key);
+        // The block groups stay counted until the last cache is gone.
+        untrack_blob_block_groups(&key);
         assert_eq!(tracked_blob_refs(&key), Some(1));
-        untrack_blob_groups(&key);
+        untrack_blob_block_groups(&key);
         assert_eq!(tracked_blob_refs(&key), None);
     }
 }

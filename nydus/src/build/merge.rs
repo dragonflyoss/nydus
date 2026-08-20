@@ -746,7 +746,7 @@ mod tests {
     fn build_and_single_layer_merge_produce_identical_inodes() {
         use crate::build::blob_chunk::BlobWriter;
         use crate::build::inode::build_tree;
-        use crate::build::{build_dir_image, DirImageOptions};
+        use crate::build::{build_image, BuildImageOptions};
         use nydus_format::blob::BlobMetadataCompressor;
         use nydus_format::utils::hex_string;
         use std::collections::HashSet;
@@ -780,23 +780,24 @@ mod tests {
         }
 
         // Path A: build the tree straight from the host directory.
-        let exclude = HashSet::new();
+        let excludes = HashSet::new();
         let scratch_blob = dir.path().join("scratch.blob");
         let mut blob_writer = BlobWriter::new(&scratch_blob, EROFS_BLOCK_SIZE).unwrap();
-        let built = build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &exclude).unwrap();
+        let built = build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &excludes).unwrap();
 
         // Path B: build the same tree into a full blob, then load it back as
         // a single merge layer and flatten it.
         let blob_path = dir.path().join("layer.blob");
-        let image = build_dir_image(
-            &DirImageOptions {
-                source: &source,
-                chunk_size: EROFS_BLOCK_SIZE,
-                compress_size: 1 << 20,
-                compressor: BlobMetadataCompressor::None,
-                exclude: &exclude,
-                standalone_bootstrap: false,
-            },
+        let image = build_image(
+            &BuildImageOptions::new(
+                source.clone(),
+                EROFS_BLOCK_SIZE,
+                1 << 20,
+                BlobMetadataCompressor::None,
+                excludes.clone(),
+                false,
+            )
+            .unwrap(),
             fs::File::create(&blob_path).unwrap(),
         )
         .unwrap();

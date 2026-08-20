@@ -58,8 +58,8 @@ const (
 const (
 	// DefaultChunkSize is the default nydus file chunk size in bytes.
 	DefaultChunkSize = 1 << 20
-	// DefaultCompressSize is the default group uncompressed size in bytes.
-	DefaultCompressSize = 4 << 20
+	// DefaultBlockGroupSize is the default block group uncompressed size in bytes.
+	DefaultBlockGroupSize = 4 << 20
 	// DefaultCompressor is the default chunk data compressor.
 	DefaultCompressor = "zstd"
 )

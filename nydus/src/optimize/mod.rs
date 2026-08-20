@@ -1,4 +1,4 @@
-//! The `optimize` pipeline: turning a recorded group access trace into an
+//! The `optimize` pipeline: turning a recorded block group access trace into an
 //! "ondemand" redirect blob plus a rewritten bootstrap that prefetches it.
 //!
 //! This is a top-level pipeline composing the read stack ([`nydus_core::reader`],
@@ -6,7 +6,7 @@
 //! come from the apiserver `/trace` endpoint of a running `nydus fuse` mount
 //! ([`load_patterns_from_apiserver`]) or from a saved JSON trace document
 //! ([`load_patterns_from_file`]); [`build_ondemand_blob`] then pulls the
-//! accessed groups through the regular blob cache and assembles the ondemand
+//! accessed block groups through the regular blob cache and assembles the ondemand
 //! artifact and bootstrap in memory.
 
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataGroup,
+    BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor,
     BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
@@ -38,7 +38,7 @@ use nydus_storage::cache::{BlobCache, LocalBlobCache};
 /// The result of [`build_ondemand_blob`]: the assembled ondemand artifact and
 /// the rewritten bootstrap, ready to be written out by the caller.
 pub struct OndemandBlob {
-    /// The ondemand artifact bytes `[group data][blob.meta][footer]`.
+    /// The ondemand artifact bytes `[block_group data][blob.meta][footer]`.
     pub artifact: Vec<u8>,
     /// SHA256 of the whole artifact (the ondemand blob's name).
     pub full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
@@ -49,16 +49,16 @@ pub struct OndemandBlob {
     pub bootstrap: Vec<u8>,
     /// Total uncompressed size of the ondemand blob in blocks.
     pub uncompressed_blocks: u64,
-    /// Number of distinct source blobs the accessed groups were pulled from.
+    /// Number of distinct source blobs the accessed block groups were pulled from.
     pub source_blob_count: usize,
 }
 
-/// One validated group reference from the trace: a [`TraceEntry`] narrowed
+/// One validated block group reference from the trace: a [`TraceEntry`] narrowed
 /// to the device-table index width, deduplicated and order-preserving.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct GroupRef {
+pub struct BlockGroupRef {
     pub blob_index: u16,
-    pub group_index: u32,
+    pub block_group_index: u32,
 }
 
 /// Build an "ondemand" redirect blob from a `/trace` access pattern and rewrite
@@ -66,7 +66,7 @@ pub struct GroupRef {
 /// caches in recorded access order before on-demand reads arrive.
 pub fn build_ondemand_blob(
     parent_bootstrap: &Path,
-    patterns: &[GroupRef],
+    patterns: &[BlockGroupRef],
     backend: Arc<dyn BlobBackend>,
     cache_dir: &Path,
 ) -> Result<OndemandBlob> {
@@ -83,18 +83,18 @@ pub fn build_ondemand_blob(
         .collect();
     drop(reader);
 
-    // Pull each accessed group's decoded bytes through the regular blob cache:
-    // warm groups are served from the cache directory, cold groups are fetched
+    // Pull each accessed block group's decoded bytes through the regular blob cache:
+    // warm block groups are served from the cache directory, cold block groups are fetched
     // from the backend, and CRC validation happens on every path.
     let mut source_caches: HashMap<u16, LocalBlobCache> = HashMap::new();
     let mut ondemand_data = Vec::new();
-    let mut ondemand_groups = Vec::new();
+    let mut ondemand_block_groups = Vec::new();
     let mut next_block_offset = 0u64;
     let mut decoded = Vec::new();
 
-    for GroupRef {
+    for BlockGroupRef {
         blob_index,
-        group_index,
+        block_group_index,
     } in patterns
     {
         let info = infos_by_index.get(blob_index).ok_or_else(|| {
@@ -108,34 +108,36 @@ pub fn build_ondemand_blob(
             ),
         };
 
-        let group = *cache
+        let block_group = *cache
             .blob_metadata()
-            .group_at(*group_index as usize)
+            .block_group_at(*block_group_index as usize)
             .ok_or_else(|| {
                 Error::InvalidParameter(format!(
-                    "pattern references group {group_index} out of range for blob {blob_index}"
+                    "pattern references block group {block_group_index} out of range for blob {blob_index}"
                 ))
             })?;
-        if group.is_redirect() {
+        if block_group.is_redirect() {
             return Err(Error::InvalidImage(format!(
                 "source blob {blob_index} is already an ondemand blob; refusing to optimize"
             )));
         }
 
-        let decoded_len = usize::try_from(group.uncompressed_byte_size()).map_err(|err| {
-            Error::Overflow(format!("group uncompressed size exceeds usize: {err}"))
+        let decoded_len = usize::try_from(block_group.uncompressed_byte_size()).map_err(|err| {
+            Error::Overflow(format!(
+                "block group uncompressed size exceeds usize: {err}"
+            ))
         })?;
         decoded.resize(decoded_len, 0);
         cache
-            .read_at(group.uncompressed_byte_offset(), &mut decoded)
+            .read_at(block_group.uncompressed_byte_offset(), &mut decoded)
             .with_context(|| {
-                format!("failed to read blob {blob_index} group {group_index} bytes")
+                format!("failed to read blob {blob_index} block_group {block_group_index} bytes")
             })?;
 
         // Recompress the decoded bytes for the ondemand artifact, storing them
         // plain when compression is not worthwhile (same policy as build).
         let compressed = zstd::bulk::compress(&decoded, 0)
-            .context("failed to compress ondemand group with zstd")?;
+            .context("failed to compress ondemand block group with zstd")?;
         let encoded: &[u8] = if compression_is_worthwhile(compressed.len(), decoded.len()) {
             &compressed
         } else {
@@ -144,18 +146,20 @@ pub fn build_ondemand_blob(
 
         let compressed_offset = ondemand_data.len() as u64;
         ondemand_data.extend_from_slice(encoded);
-        ondemand_groups.push(BlobMetadataGroup::new_redirect(
+        ondemand_block_groups.push(BlobMetadataBlockGroup::new_redirect(
             next_block_offset,
-            group.uncompressed_block_count(),
+            block_group.uncompressed_block_count(),
             compressed_offset,
             u32::try_from(encoded.len()).map_err(|err| {
-                Error::Overflow(format!("ondemand group compressed size exceeds u32: {err}"))
+                Error::Overflow(format!(
+                    "ondemand block group compressed size exceeds u32: {err}"
+                ))
             })?,
-            group.crc32(),
+            block_group.crc32(),
             *blob_index,
-            *group_index,
+            *block_group_index,
         )?);
-        next_block_offset += group.uncompressed_block_count() as u64;
+        next_block_offset += block_group.uncompressed_block_count() as u64;
     }
 
     let mut data_hasher = Sha256::new();
@@ -167,7 +171,7 @@ pub fn build_ondemand_blob(
         data_digest,
         BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
         BlobMetadataCompressor::Zstd,
-        ondemand_groups,
+        ondemand_block_groups,
         Vec::new(),
     )
     .context("failed to assemble ondemand blob meta")?;
@@ -194,8 +198,8 @@ pub fn build_ondemand_blob(
 }
 
 /// Fetch the `/trace` JSON from a running mount's apiserver and return the
-/// deduplicated [`GroupRef`] list in first-access order.
-pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<GroupRef>> {
+/// deduplicated [`BlockGroupRef`] list in first-access order.
+pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<BlockGroupRef>> {
     let raw = fetch_trace(apiserver)
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
     parse_trace_document(&raw)
@@ -205,7 +209,7 @@ pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<GroupRef>> {
 /// Load access patterns from a versioned JSON trace document
 /// (`{"version":1,"patterns":[...]}`), exactly as produced by the
 /// apiserver `/trace` endpoint.
-pub fn load_patterns_from_file(path: &Path) -> Result<Vec<GroupRef>> {
+pub fn load_patterns_from_file(path: &Path) -> Result<Vec<BlockGroupRef>> {
     let raw =
         fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
     parse_trace_document(&raw)
@@ -213,7 +217,7 @@ pub fn load_patterns_from_file(path: &Path) -> Result<Vec<GroupRef>> {
 }
 
 /// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
-fn parse_trace_document(raw: &[u8]) -> Result<Vec<GroupRef>> {
+fn parse_trace_document(raw: &[u8]) -> Result<Vec<BlockGroupRef>> {
     let envelope: TraceDocument =
         serde_json::from_slice(raw).context("failed to parse trace document")?;
     if envelope.version != TRACE_DOCUMENT_VERSION {
@@ -225,9 +229,9 @@ fn parse_trace_document(raw: &[u8]) -> Result<Vec<GroupRef>> {
     dedup_patterns(envelope.entries)
 }
 
-/// Deduplicate `(blob_index, group_index)` pairs while preserving first-access
+/// Deduplicate `(blob_index, block_group_index)` pairs while preserving first-access
 /// order, validating that every blob index fits in a non-zero `u16`.
-fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<GroupRef>> {
+fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<BlockGroupRef>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for pattern in patterns {
@@ -242,12 +246,12 @@ fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<GroupRef>> {
                 "pattern blob index must be non-zero".to_string(),
             ));
         }
-        let group = GroupRef {
+        let block_group = BlockGroupRef {
             blob_index,
-            group_index: pattern.group_index,
+            block_group_index: pattern.block_group_index,
         };
-        if seen.insert(group) {
-            ordered.push(group);
+        if seen.insert(block_group) {
+            ordered.push(block_group);
         }
     }
     Ok(ordered)
@@ -297,20 +301,20 @@ mod tests {
     #[test]
     fn parse_trace_document_accepts_versioned_envelope_only() {
         let doc = br#"{"version":1,"patterns":[
-            {"blob_index":1,"group_index":4},
-            {"blob_index":1,"group_index":4},
-            {"blob_index":2,"group_index":7}]}"#;
+            {"blob_index":1,"block_group_index":4},
+            {"blob_index":1,"block_group_index":4},
+            {"blob_index":2,"block_group_index":7}]}"#;
         let patterns = parse_trace_document(doc).unwrap();
         assert_eq!(
             patterns,
             vec![
-                GroupRef {
+                BlockGroupRef {
                     blob_index: 1,
-                    group_index: 4
+                    block_group_index: 4
                 },
-                GroupRef {
+                BlockGroupRef {
                     blob_index: 2,
-                    group_index: 7
+                    block_group_index: 7
                 }
             ]
         );

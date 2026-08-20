@@ -31,7 +31,7 @@ backend:
     # Dragonfly SDK requests.
     http:
       # Per-request timeout (connect + read), e.g. `5s` or `1m`; `0s` disables
-      # it. Default: 5s. Kept short because a read holds the group's fetch
+      # it. Default: 5s. Kept short because a read holds the block group's fetch
       # claim for its whole duration, and the readers waiting behind that
       # claim are FUSE worker threads.
       timeout: 5s
@@ -84,7 +84,7 @@ prefetch:
   # Number of concurrently prefetched blobs.
   concurrent_blob_count: 10
   # Per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching one
-  # whole blob may take, while `http.timeout` bounds each group request
+  # whole blob may take, while `http.timeout` bounds each block group request
   # within it. `0s` disables the bound. Default: 1h.
   timeout: 1h
   # Which blobs to pull: `none` disables prefetch; `ondemand` (default)

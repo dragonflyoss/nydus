@@ -6,7 +6,7 @@ package e2e
 // disabled, separate cache dirs), so the comparison isolates the read
 // transport:
 //
-//	FUSE:      page-cache miss -> FUSE request -> daemon groupmap check +
+//	FUSE:      page-cache miss -> FUSE request -> daemon block group map check +
 //	           pread cache file -> FUSE reply. Every metadata call is a
 //	           userspace round trip.
 //	NBD:       page-cache miss -> EROFS -> block layer -> NBD socket ->
@@ -170,7 +170,7 @@ func (e *benchEnv) runMode(t *testing.T, m *benchMode) *benchModeResult {
 	res.firstReadSec = time.Since(readStart).Seconds()
 	t.Logf("  first 1MiB cold read: %.3fs", res.firstReadSec)
 
-	// Cold-read the whole fio target: fills the nydus cache and groupmap for
+	// Cold-read the whole fio target: fills the nydus cache and block group map for
 	// every byte fio will touch, and IS the end-to-end on-demand fetch path.
 	prewarmStart := time.Now()
 	n := readWhole(t, target)

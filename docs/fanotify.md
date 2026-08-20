@@ -44,7 +44,7 @@ kernel resumes the blocked read -> EROFS returns bytes
 The kernel EROFS driver is unmodified. The filled cache file *is* the file the
 kernel reads, so no separate copy step is needed. A marked file faults on
 **every** read (a pre-content mark also disables readahead on it), so repeat
-reads of a filled range still generate events — but the groupmap fast path
+reads of a filled range still generate events — but the block group map fast path
 answers them immediately with no backend I/O.
 
 ## Multi-Device Model
@@ -101,7 +101,7 @@ decides a response purely from the parsed event, then admits the fetch:
 3. **Align.** The RANGE is aligned outward to 4 KiB EROFS blocks and clamped to
    the device size (the core requires block-aligned arguments). The device
    size is the fetch bound; there is no per-event byte cap.
-4. **Fast path.** If the authoritative groupmap already covers the aligned range,
+4. **Fast path.** If the authoritative block group map already covers the aligned range,
    the event is allowed immediately with no backend I/O.
 5. **Coalesce or admit.** If an identical `(blob, aligned range)` fetch is
    already in flight, the event attaches to it and is answered by that one
@@ -110,7 +110,7 @@ decides a response purely from the parsed event, then admits the fetch:
    fetch thread pool (`--fetch-concurrency`), which queues tasks (backpressure)
    rather than denying.
 6. **Fetch.** `Blobs::fetch(id, offset, count)` runs on a fetch worker
-   thread; it decodes, CRC-validates, dedups (idempotent, group-granular) and
+   thread; it decodes, CRC-validates, dedups (idempotent, block-group-granular) and
    writes the blob's cache file in place. The work is wrapped in `catch_unwind`.
 7. **Respond.** On completion the event is answered `FAN_ALLOW` on success, or
    `FAN_DENY` on a backend/range failure or a worker panic. A fetch in flight
@@ -123,8 +123,8 @@ decides a response purely from the parsed event, then admits the fetch:
 Duplicate work is removed at two layers. The event loop coalesces events sharing
 an identical `(blob, aligned range)` key, so a burst of readers faulting the same
 range dispatches a single fetch. Below that, the core de-duplicates at
-blob-meta-group granularity (single-flight), so faults for different ranges in
-the same group also join one fetch. Distinct groups fetch concurrently up to the
+blob-meta block group granularity (single-flight), so faults for different ranges in
+the same block group also join one fetch. Distinct block groups fetch concurrently up to the
 fetch thread pool size (`max(ncpu, 64)`); a saturated pool queues tasks rather
 than denying reads.
 
@@ -271,19 +271,19 @@ core builds unless explicitly enabled.
 
 ## Constraints
 
-- The blob-meta group (build-time `--compress-size`, default 4 MiB) is the fetch and
-  cache-population unit, so one fault warms every chunk in the enclosing group.
-  There is no runtime read-ahead knob; the tuning dial is the build-time group
+- The blob-meta block group (build-time `--block-group-size`, default 4 MiB) is the fetch and
+  cache-population unit, so one fault warms every chunk in the enclosing block group.
+  There is no runtime read-ahead knob; the tuning dial is the build-time block group
   size.
 - A burst of concurrent faults is bounded by the fetch pool
   (`--fetch-concurrency`, default `max(ncpu, 64)`): a saturated pool queues
   fetches (the reader waits) rather than denying — no application-visible
   EPERM.
-- Fills persist in the on-disk cache file and its groupmap. A daemon restart
-  re-serves already-fetched groups with no backend traffic. A cold restart must
+- Fills persist in the on-disk cache file and its block group map. A daemon restart
+  re-serves already-fetched block groups with no backend traffic. A cold restart must
   remove all per-blob artifacts (`*.blob.data`, `*.blob.meta`, `*.group.map`,
   `*.prefetch.lock`, `*.flight.lock`) together. Removing the data file alone is
-  detected — the groupmap is reset in place so every process sharing it agrees
+  detected — the block group map is reset in place so every process sharing it agrees
   the blob is cold — but leaving a lock file behind while its blob is replaced
   drops the cross-process fetch coordination for that blob.
 

@@ -238,12 +238,12 @@ impl NydusCore {
         self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
 
-    /// Return a stable snapshot of this core's on-demand group trace.
+    /// Return a stable snapshot of this core's on-demand block group trace.
     pub fn trace_snapshot(&self) -> TraceDocument {
         self.trace_recorder.snapshot()
     }
 
-    /// Serialize this core's on-demand group trace as optimize-compatible JSON.
+    /// Serialize this core's on-demand block group trace as optimize-compatible JSON.
     pub fn trace_json(&self) -> String {
         self.trace_recorder.encode_json()
     }

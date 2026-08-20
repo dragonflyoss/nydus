@@ -37,8 +37,8 @@ type BuildOption struct {
 	BlobPath string
 	// ChunkSize is the file chunk size in bytes.
 	ChunkSize uint32
-	// CompressSize is the group uncompressed size in bytes (a multiple of 1MiB).
-	CompressSize uint32
+	// BlockGroupSize is the group uncompressed size in bytes (a multiple of 1MiB).
+	BlockGroupSize uint32
 	// Compressor is the chunk data compression algorithm ("none" or "zstd").
 	Compressor string
 	// LogLevel is the log level passed to `nydus build` (trace/debug/info/warn/
@@ -65,13 +65,13 @@ type MergeBuildOption struct {
 	LogLevel string
 }
 
-// UnpackOption describes a single `nydus build --type nydus-tar` invocation
-// that turns a nydus full blob back into an OCI layer tar stream.
-type UnpackOption struct {
+// ExportOption describes a single `nydus export` invocation that turns a
+// nydus full blob back into an OCI layer tar stream.
+type ExportOption struct {
 	// BuilderPath is the path (or PATH-resolvable name) of the nydus binary.
 	BuilderPath string
-	// BlobPath is the nydus full blob to unpack. Unlike the build direction it
-	// must be a regular file, because the unpacker memory-maps it.
+	// BlobPath is the nydus full blob to export. Unlike the build direction it
+	// must be a regular file, because the exporter memory-maps it.
 	BlobPath string
 	// LogLevel is the log level passed to the nydus binary (trace/debug/info/
 	// warn/error). Defaults to "info" when empty.
@@ -88,7 +88,7 @@ func RunNydusBuild(ctx context.Context, opt BuildOption) error {
 		opt.SourceDir,
 		"--blob", opt.BlobPath,
 		"--chunk-size", strconv.FormatUint(uint64(opt.ChunkSize), 10),
-		"--compress-size", strconv.FormatUint(uint64(opt.CompressSize), 10),
+		"--block-group-size", strconv.FormatUint(uint64(opt.BlockGroupSize), 10),
 		"--compressor", opt.Compressor,
 		"--log-level", cmp.Or(opt.LogLevel, DefaultLogLevel),
 	}
@@ -127,15 +127,14 @@ func RunNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 	return nil
 }
 
-// RunNydusToTar executes `nydus build --type nydus-tar` to unpack a nydus full
-// blob, streaming the uncompressed OCI layer tar into dest.
+// RunNydusExport executes `nydus export` to turn a nydus full blob back into
+// an OCI layer, streaming the uncompressed tar into dest.
 //
 // A full blob carries the filesystem tree and the chunk data of exactly one
 // layer, so no bootstrap, lower layer or storage backend is involved.
-func RunNydusToTar(ctx context.Context, opt UnpackOption, dest io.Writer) error {
+func RunNydusExport(ctx context.Context, opt ExportOption, dest io.Writer) error {
 	args := []string{
-		"build", opt.BlobPath,
-		"--type", "nydus-tar",
+		"export", opt.BlobPath,
 		"--output", "-",
 		"--log-level", cmp.Or(opt.LogLevel, DefaultLogLevel),
 	}
@@ -145,7 +144,7 @@ func RunNydusToTar(ctx context.Context, opt UnpackOption, dest io.Writer) error 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return errors.Wrapf(err, "nydus build --type nydus-tar: %s", stderr.String())
+		return errors.Wrapf(err, "nydus export: %s", stderr.String())
 	}
 
 	return nil

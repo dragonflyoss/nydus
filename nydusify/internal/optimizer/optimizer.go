@@ -64,7 +64,7 @@ type OptimizeOption struct {
 	PlatformMC platforms.MatchComparer
 }
 
-// Optimizer builds an "ondemand" blob from a recorded group access pattern and
+// Optimizer builds an "ondemand" blob from a recorded block group access pattern and
 // publishes an optimized copy of a nydus image: the original data layers are
 // reused as-is, an ondemand blob layer is appended, and the bootstrap layer is
 // rewritten so the runtime prefetches the ondemand blob first.
@@ -140,7 +140,7 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 
 	// Extract the parent bootstrap and the per-layer blob metas, and seed the
 	// cache dir with the metas so `nydus optimize` loads source metadata from
-	// disk and only fetches group data ranges from the registry.
+	// disk and only fetches block group data ranges from the registry.
 	bootDir := filepath.Join(stageDir, "bootstrap")
 	bootstrapPath, blobMetaPaths, err := nydusfs.ExtractBootstrapLayer(ctx, cs, *img.Bootstrap, bootDir)
 	if err != nil {
@@ -218,7 +218,7 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 		"optimize",
 		"--parent-bootstrap", parentBootstrap,
 		"--bootstrap", bootstrap,
-		"--blob-dir", blobDir,
+		"--blob-store", blobDir,
 		"--config", configPath,
 		"--log-level", cmp.Or(o.opt.LogLevel, nydus.DefaultLogLevel),
 		"--trace-file", o.opt.Pattern,

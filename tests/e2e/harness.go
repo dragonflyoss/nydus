@@ -311,7 +311,7 @@ func mountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup
 
 	args := []string{"fuse", "--mountpoint", mnt}
 	if imagePath != "" && blobdev != "" {
-		args = append(args, "--bootstrap", imagePath, "--blob-dir", filepath.Dir(blobdev))
+		args = append(args, "--bootstrap", imagePath, "--blob-store", filepath.Dir(blobdev))
 	} else if blobdev != "" {
 		args = append(args, "--blob", blobdev)
 	} else {
@@ -339,7 +339,7 @@ func mountNydusBootstrapWithCache(
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	args := []string{"fuse", "--bootstrap", bootstrapPath, "--blob-dir", blobDir, "--mountpoint", mnt}
+	args := []string{"fuse", "--bootstrap", bootstrapPath, "--blob-store", blobDir, "--mountpoint", mnt}
 	if cacheDir != "" {
 		require.NoError(t, os.MkdirAll(cacheDir, 0755))
 		args = append(args, "--cache-dir", cacheDir)
@@ -375,14 +375,14 @@ func buildNydusFSImageToDir(t *testing.T, nydusBin, imagePath, blobDir, srcDir s
 	require.NoError(t, os.MkdirAll(blobDir, 0755))
 	before := listFilesInDir(t, blobDir)
 
-	args := []string{"build", "--blob-dir", blobDir, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
+	args := []string{"build", "--blob-store", blobDir, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
 	if imagePath != "" {
 		args = append(args, "--bootstrap", imagePath)
 	}
 	args = append(args, srcDir)
 
 	out, err := exec.Command(nydusBin, args...).CombinedOutput()
-	require.NoError(t, err, "nydus build --blob-dir failed: %s", string(out))
+	require.NoError(t, err, "nydus build --blob-store failed: %s", string(out))
 
 	after := listFilesInDir(t, blobDir)
 	var blobs []string
@@ -403,9 +403,9 @@ func buildNydusFSImageToDir(t *testing.T, nydusBin, imagePath, blobDir, srcDir s
 			unexpected = append(unexpected, path)
 		}
 	}
-	require.Empty(t, unexpected, "unexpected files created in blob-dir: %v", unexpected)
-	require.Len(t, blobs, 1, "expected exactly one new blob in blob-dir")
-	require.Len(t, blobMetas, 1, "expected exactly one new blob_meta in blob-dir")
+	require.Empty(t, unexpected, "unexpected files created in blob-store: %v", unexpected)
+	require.Len(t, blobs, 1, "expected exactly one new blob in blob-store")
+	require.Len(t, blobMetas, 1, "expected exactly one new blob_meta in blob-store")
 	require.True(t, sha256FilenamePattern.MatchString(filepath.Base(blobs[0])), "blob file name must be sha256: %s", blobs[0])
 	if imagePath != "" {
 		fsckErofsImage(t, imagePath, blobDir)

@@ -19,7 +19,7 @@ type LocalDirOption struct {
 	BuilderPath       string
 	WorkDir           string
 	ChunkSize         uint32
-	CompressSize      uint32
+	BlockGroupSize      uint32
 	Compressor        string
 	LogLevel          string
 	SourceDir         string
@@ -42,7 +42,7 @@ func ConvertLocalDir(ctx context.Context, cs content.Store, opt LocalDirOption) 
 		BuilderPath:       opt.BuilderPath,
 		WorkDir:           opt.WorkDir,
 		ChunkSize:         opt.ChunkSize,
-		CompressSize:      opt.CompressSize,
+		BlockGroupSize:      opt.BlockGroupSize,
 		Compressor:        opt.Compressor,
 		LogLevel:          opt.LogLevel,
 		Platform:          platforms.DefaultSpec(),

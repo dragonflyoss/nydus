@@ -221,7 +221,7 @@ impl FanotifyCommand {
             }
         }) {
             error!(
-                "{}; dropping the fanotify group fd will fail-open residual events and \
+                "{}; dropping the fanotify block_group fd will fail-open residual events and \
                  unfetched ranges on the still-live mount will read as zeros — stop remaining \
                  readers and unmount manually",
                 err.report()

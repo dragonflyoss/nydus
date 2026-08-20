@@ -248,5 +248,5 @@ make test-ublk
 - One device per daemon process.
 - User recovery (`UBLK_F_USER_RECOVERY`) is not implemented: if the daemon
   dies, in-flight and subsequent I/O to the device fails.
-- No `dm-verity` integration; integrity comes from the per-group CRC32C
+- No `dm-verity` integration; integrity comes from the per-block-group CRC32C
   validation on the fetch path.

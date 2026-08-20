@@ -363,7 +363,7 @@ func (e *fanotifyEnv) casePartialRangeBounded(t *testing.T) { // C3 — decisive
 		assert.Equal(t, w, g, "large.bin[+%dMiB,1MiB] byte-exact", skip)
 	}
 	after := usedBytes(blob)
-	// 4 * 1MiB of logical reads; group rounding may amplify, but pulling the
+	// 4 * 1MiB of logical reads; block group rounding may amplify, but pulling the
 	// whole 64MiB blob per slice would blow way past this.
 	assert.Less(t, after-base, int64(24*1024*1024), "partial reads pull bounded ranges, not the whole blob")
 	assert.Less(t, after, int64(48*1024*1024), "cache still far below full blob after partial reads")

@@ -12,6 +12,7 @@ use nydus_format::erofs::{
 use nydus_format::utils::round_up;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -218,16 +219,16 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]
 /// (must be a power of two). Hardlinks share a single inode entry, and
 /// children are visited in sorted name order for deterministic output.
 /// Layout fields (`nid`, `meta_offset`, etc.) are left 0 for a later pass.
-pub fn build_tree(
+pub fn build_tree<W: Write>(
     source: &Path,
-    blob_writer: &mut BlobWriter,
+    blob_writer: &mut BlobWriter<W>,
     chunk_size: u32,
-    exclude: &HashSet<PathBuf>,
+    excludes: &HashSet<PathBuf>,
 ) -> Result<Vec<InodeInfo>> {
     let mut ctx = FsBuildContext {
         blob_writer,
         chunk_size,
-        exclude,
+        excludes,
     };
     let mut inodes = flatten_tree(FsTreeNode::new(source.to_path_buf())?, &mut ctx)?;
 
@@ -424,10 +425,10 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
 
 /// Traversal state for the host-filesystem walk: the blob writer receiving
 /// file contents, the file chunk size, and the exclusion set.
-struct FsBuildContext<'a> {
-    blob_writer: &'a mut BlobWriter,
+struct FsBuildContext<'a, W> {
+    blob_writer: &'a mut BlobWriter<W>,
     chunk_size: u32,
-    exclude: &'a HashSet<PathBuf>,
+    excludes: &'a HashSet<PathBuf>,
 }
 
 /// A host filesystem object: its path plus the (symlink-aware) metadata,
@@ -445,7 +446,7 @@ impl FsTreeNode {
     }
 }
 
-impl<'a> TreeNode<FsBuildContext<'a>> for FsTreeNode {
+impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
     type LinkKey = (u64, u64);
 
     fn attrs(&self) -> NodeAttrs {
@@ -466,7 +467,7 @@ impl<'a> TreeNode<FsBuildContext<'a>> for FsTreeNode {
             .then(|| (self.meta.dev(), self.meta.ino()))
     }
 
-    fn children(&self, ctx: &mut FsBuildContext<'a>) -> Result<Option<NamedChildren<Self>>> {
+    fn children(&self, ctx: &mut FsBuildContext<'a, W>) -> Result<Option<NamedChildren<Self>>> {
         if !self.meta.file_type().is_dir() {
             return Ok(None);
         }
@@ -480,7 +481,7 @@ impl<'a> TreeNode<FsBuildContext<'a>> for FsTreeNode {
             let child_path = entry.path();
 
             // Skip entries whose absolute path is in the exclude set.
-            if ctx.exclude.contains(&child_path) {
+            if ctx.excludes.contains(&child_path) {
                 continue;
             }
 
@@ -490,7 +491,7 @@ impl<'a> TreeNode<FsBuildContext<'a>> for FsTreeNode {
         Ok(Some(children))
     }
 
-    fn leaf_data(&self, ctx: &mut FsBuildContext<'a>) -> Result<InodeData> {
+    fn leaf_data(&self, ctx: &mut FsBuildContext<'a, W>) -> Result<InodeData> {
         let ft = self.meta.file_type();
         if ft.is_file() {
             let chunk_index_entries = ctx

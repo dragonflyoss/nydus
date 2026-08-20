@@ -48,7 +48,7 @@ func TestBlobMount(t *testing.T) {
 			nydusBin := mustLookupExecutable(t, "nydus")
 			blobPath := buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, chunkSize)
 			logNydusCheckOutput(t, nydusBin, "--blob", blobPath)
-			logNydusCheckOutput(t, nydusBin, "--bootstrap", bootstrapPath, "--blob-dir", blobDir)
+			logNydusCheckOutput(t, nydusBin, "--bootstrap", bootstrapPath, "--blob-store", blobDir)
 			func() {
 				unmount := mountNydus(t, nydusBin, "", blobPath, mntDir)
 				defer unmount()
@@ -95,7 +95,7 @@ func TestMergedMount(t *testing.T) {
 	layer1Blob := buildNydusFSImageToDir(t, nydusBin, layer1Bootstrap, blobDir, layer1Dir, 4096)
 	layer2Blob := buildNydusFSImageToDir(t, nydusBin, layer2Bootstrap, blobDir, layer2Dir, 4096)
 	layer3Blob := buildNydusFSImageToDir(t, nydusBin, layer3Bootstrap, blobDir, layer3Dir, 4096)
-	logNydusCheckOutput(t, nydusBin, "--bootstrap", layer1Bootstrap, "--blob-dir", blobDir)
+	logNydusCheckOutput(t, nydusBin, "--bootstrap", layer1Bootstrap, "--blob-store", blobDir)
 
 	mergeNydusBootstrap(
 		t,
@@ -105,7 +105,7 @@ func TestMergedMount(t *testing.T) {
 		layer2Blob,
 		layer3Blob,
 	)
-	logNydusCheckOutput(t, nydusBin, "--bootstrap", mergedBootstrap, "--blob-dir", blobDir)
+	logNydusCheckOutput(t, nydusBin, "--bootstrap", mergedBootstrap, "--blob-store", blobDir)
 
 	func() {
 		unmount := mountNydusBootstrap(t, nydusBin, mergedBootstrap, blobDir, mountpoint)
@@ -418,7 +418,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 	require.NoError(t, err)
 
 	var dataCount int
-	var groupmapCount int
+	var blockGroupMapCount int
 	var blobMetaCount int
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -430,7 +430,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 		case strings.HasSuffix(name, ".blob.data"):
 			dataCount++
 		case strings.HasSuffix(name, ".group.map"):
-			groupmapCount++
+			blockGroupMapCount++
 		case strings.HasSuffix(name, ".blob.meta"):
 			blobMetaCount++
 		}
@@ -438,7 +438,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 
 	blobCount := len(blobs)
 	assert.Equal(t, blobCount, dataCount, "unexpected cached blob.data count")
-	assert.Equal(t, blobCount, groupmapCount, "unexpected cached groupmap count")
+	assert.Equal(t, blobCount, blockGroupMapCount, "unexpected cached block group map count")
 	assert.Equal(t, blobCount, blobMetaCount, "unexpected cached blob_meta count")
 
 	for _, blob := range blobs {
@@ -462,8 +462,8 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 //  3. Mount the optimized image WITH prefetch on a cold cache, wait for
 //     prefetch to quiesce, replay the same workload, and verify:
 //     - the ondemand blob was fetched (backend_redirect_read_count > 0),
-//     - every traced group was filled into its source blob's cache through
-//     the redirect path (cache_redirect_fill_group == trace size, no skips),
+//     - every traced block group was filled into its source blob's cache through
+//     the redirect path (cache_redirect_fill_block_group == trace size, no skips),
 //     - the workload triggered zero on-demand backend reads
 //     (backend_ondemand_read_count == 0), proving the optimization works,
 //     - file contents are byte-identical to the corpus.
@@ -530,12 +530,12 @@ func TestNydusifyOptimize(t *testing.T) {
 		require.Greater(t, metricValue(metrics, "backend_ondemand_read_count"), 0.0,
 			"baseline workload must trigger on-demand backend reads")
 		require.Zero(t, metricValue(metrics, "backend_redirect_read_count"))
-		require.Zero(t, metricValue(metrics, "cache_redirect_fill_group"))
-		require.Zero(t, metricValue(metrics, "cache_fill_group"),
+		require.Zero(t, metricValue(metrics, "cache_redirect_fill_block_group"))
+		require.Zero(t, metricValue(metrics, "cache_fill_block_group"),
 			"baseline mount must not prefetch")
 		traceCount = saveTrace(t, socket, filepath.Join(tmpDir, "pattern.json"))
 		require.Greater(t, traceCount, 1, "trace must cover multiple groups")
-		t.Logf("baseline: ondemand_reads=%v trace_groups=%d",
+		t.Logf("baseline: ondemand_reads=%v trace_block_groups=%d",
 			metricValue(metrics, "backend_ondemand_read_count"), traceCount)
 
 		t.Log("Optimizing with the saved trace pattern...")
@@ -559,23 +559,23 @@ func TestNydusifyOptimize(t *testing.T) {
 		metrics := fetchMetrics(t, socket)
 		require.Greater(t, metricValue(metrics, "backend_redirect_read_count"), 0.0,
 			"prefetch must fetch the ondemand (redirect) blob from the backend")
-		require.Equal(t, float64(traceCount), metricValue(metrics, "cache_redirect_fill_group"),
+		require.Equal(t, float64(traceCount), metricValue(metrics, "cache_redirect_fill_block_group"),
 			"every traced group must be filled into its source cache via redirect")
-		require.Zero(t, metricValue(metrics, "cache_redirect_skip_group"),
+		require.Zero(t, metricValue(metrics, "cache_redirect_skip_block_group"),
 			"no redirect group may be skipped")
 		require.Zero(t, metricValue(metrics, "backend_ondemand_read_count"),
 			"prefetch warmup must not issue on-demand reads")
 		t.Logf("optimized after prefetch: redirect_reads=%v redirect_fills=%v regular_fills=%v",
 			metricValue(metrics, "backend_redirect_read_count"),
-			metricValue(metrics, "cache_redirect_fill_group"),
-			metricValue(metrics, "cache_fill_group"))
+			metricValue(metrics, "cache_redirect_fill_block_group"),
+			metricValue(metrics, "cache_fill_block_group"))
 
 		workload(optMnt)
 
 		metrics = fetchMetrics(t, socket)
 		require.Zero(t, metricValue(metrics, "backend_ondemand_read_count"),
 			"the traced workload must be served entirely from the warmed cache")
-		require.Greater(t, metricValue(metrics, "cache_hit_group"), 0.0)
+		require.Greater(t, metricValue(metrics, "cache_hit_block_group"), 0.0)
 
 		// Full content verification against the corpus.
 		for _, name := range corpusFiles {
