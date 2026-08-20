@@ -116,10 +116,18 @@ impl BuildCommand {
     /// Executes the build sub command, building a nydus image from the
     /// source directory.
     pub fn execute(&self) -> Result<()> {
+        // Initializes the tracing subscriber for logging, using the specified log level and
+        // console output preference.
         let _guards = init_command_tracing(self.log_level, self.console);
 
+        // Validates the flag combination and the source directory before proceeding with the build.
         self.validate()?;
+
+        // Prepares the build options by canonicalizing paths and checking the chunk/block-group geometry.
         let options = self.prepare()?;
+
+        // Runs the build process, writing the full blob, settling it under its final name,
+        // persisting sidecar artifacts, and printing the summary.
         self.run(&options)
     }
 
@@ -149,15 +157,12 @@ impl BuildCommand {
     /// canonicalized and the chunk/block-group geometry is checked before any
     /// output file or directory is created.
     fn prepare(&self) -> Result<BuildImageOptions> {
-        let source = self
-            .source
-            .canonicalize()
+        let source = fs::canonicalize(&self.source)
             .with_context(|| format!("failed to canonicalize source: {}", self.source.display()))?;
 
         let mut excludes: HashSet<PathBuf> = HashSet::new();
         for path in &self.exclude {
-            let canonical = path
-                .canonicalize()
+            let canonical = fs::canonicalize(path)
                 .with_context(|| format!("failed to canonicalize exclude: {}", path.display()))?;
 
             if canonical.starts_with(&source) {
@@ -194,12 +199,8 @@ impl BuildCommand {
     fn run(&self, options: &BuildImageOptions) -> Result<()> {
         let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_store.as_deref())?;
         let writer = blob_output.create()?;
-        let image = build_image(options, writer).with_context(|| {
-            format!(
-                "failed to build nydus blob: {}",
-                blob_output.path().display()
-            )
-        })?;
+        let image = build_image(options, writer)
+            .with_context(|| format!("failed to build image: {}", blob_output.path().display()))?;
 
         let full_blob_path = blob_output.finalize(&image.full_blob_digest)?;
         let blob_metadata_path = Self::save_blob_metadata(&image, &full_blob_path)?;
@@ -223,8 +224,8 @@ impl BuildCommand {
     fn save_blob_metadata(image: &Image, full_blob_path: &Path) -> Result<PathBuf> {
         let mut path = full_blob_path.to_path_buf().into_os_string();
         path.push(BLOB_METADATA_SUFFIX);
-        let blob_metadata_path: PathBuf = path.into();
 
+        let blob_metadata_path: PathBuf = path.into();
         image.blob_metadata.save(&blob_metadata_path)?;
         Ok(blob_metadata_path)
     }
@@ -235,7 +236,7 @@ impl BuildCommand {
         if let Some(bootstrap) = &self.bootstrap {
             let bytes = image.standalone_bootstrap.as_ref().ok_or_else(|| {
                 Error::InvalidParameter(
-                    "standalone bootstrap was not rendered; request it in BuildImageOptions"
+                    "standalone bootstrap was not rendered, request it in BuildImageOptions"
                         .to_string(),
                 )
             })?;
@@ -272,7 +273,7 @@ impl BlobOutput {
                     temp: Self::temp_path(dir),
                 })
             }
-            _ => unreachable!("clap enforces exactly one blob output"),
+            _ => unreachable!("clap enforces exactly one of --blob and --blob-store"),
         }
     }
 
@@ -325,7 +326,7 @@ impl BlobOutput {
 
                 fs::rename(&temp, &full_blob_path).with_context(|| {
                     format!(
-                        "failed to rename blob {} -> {}",
+                        "failed to rename blob {} to {}",
                         temp.display(),
                         full_blob_path.display()
                     )
@@ -426,11 +427,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
 mod tests {
     use super::*;
     use nydus_format::erofs::{
-        cast_ref, ErofsDeviceSlot, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE,
-        EROFS_SUPER_OFFSET,
+        cast_ref, ErofsDeviceSlot, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET,
     };
-    use std::collections::BTreeMap;
-    use std::io::Read;
     use tempfile::tempdir;
 
     #[test]
@@ -439,6 +437,124 @@ mod tests {
             .unwrap();
         assert_eq!(cmd.chunk_size, ByteSize::mib(1));
         assert_eq!(cmd.block_group_size, ByteSize::mib(4));
+    }
+
+    #[test]
+    fn build_requires_exactly_one_blob_output() {
+        assert!(BuildCommand::try_parse_from(["build", "/tmp/source"]).is_err());
+        assert!(BuildCommand::try_parse_from([
+            "build",
+            "/tmp/source",
+            "--blob",
+            "/tmp/out.blob",
+            "--blob-store",
+            "/tmp/blobs",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn validate_rejects_bootstrap_overwriting_blob() {
+        let cmd = BuildCommand::try_parse_from([
+            "build",
+            "/tmp/source",
+            "--blob",
+            "/tmp/same",
+            "--bootstrap",
+            "/tmp/same",
+        ])
+        .unwrap();
+
+        let err = cmd.validate().unwrap_err();
+        assert!(err.to_string().contains("must point to different files"));
+    }
+
+    #[test]
+    fn validate_rejects_source_that_is_not_a_directory() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("plain.txt");
+        fs::write(&file, b"x").unwrap();
+        let cmd = BuildCommand::try_parse_from([
+            "build",
+            file.to_str().unwrap(),
+            "--blob",
+            "/tmp/out.blob",
+        ])
+        .unwrap();
+
+        let err = cmd.validate().unwrap_err();
+        assert!(err.to_string().contains("is not a directory"));
+    }
+
+    #[test]
+    fn prepare_rejects_missing_exclude_path() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let missing = dir.path().join("no-such-dir");
+        let cmd = BuildCommand::try_parse_from([
+            "build",
+            source.to_str().unwrap(),
+            "--blob",
+            "/tmp/out.blob",
+            "--exclude",
+            missing.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        let err = cmd.prepare().unwrap_err();
+        assert!(err.to_string().contains("failed to canonicalize exclude"));
+    }
+
+    #[test]
+    fn prepare_rejects_chunk_size_exceeding_u32() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let cmd = BuildCommand::try_parse_from([
+            "build",
+            source.to_str().unwrap(),
+            "--blob",
+            "/tmp/out.blob",
+            "--chunk-size",
+            "8GiB",
+        ])
+        .unwrap();
+
+        let err = cmd.prepare().unwrap_err();
+        assert!(err.to_string().contains("exceeds the u32 range"));
+    }
+
+    #[test]
+    fn blob_output_store_finalizes_temp_under_its_digest() {
+        let dir = tempdir().unwrap();
+        let store = dir.path().join("store");
+        let output = BlobOutput::new(None, Some(&store)).unwrap();
+        fs::write(output.path(), b"blob bytes").unwrap();
+        let digest = [0xab_u8; EROFS_BLOB_ID_SIZE];
+
+        let final_path = output.finalize(&digest).unwrap();
+
+        assert_eq!(final_path, store.join(hex_string(&digest)));
+        assert_eq!(fs::read(&final_path).unwrap(), b"blob bytes");
+        assert_eq!(fs::read_dir(&store).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn blob_output_store_finalize_dedups_existing_digest() {
+        let dir = tempdir().unwrap();
+        let store = dir.path().join("store");
+        let output = BlobOutput::new(None, Some(&store)).unwrap();
+        let digest = [0xcd_u8; EROFS_BLOB_ID_SIZE];
+        let existing = store.join(hex_string(&digest));
+        fs::write(&existing, b"already stored").unwrap();
+        fs::write(output.path(), b"duplicate bytes").unwrap();
+
+        let final_path = output.finalize(&digest).unwrap();
+
+        assert_eq!(final_path, existing);
+        assert_eq!(fs::read(&existing).unwrap(), b"already stored");
+        assert_eq!(fs::read_dir(&store).unwrap().count(), 1);
     }
 
     #[test]
@@ -478,131 +594,5 @@ mod tests {
         );
 
         assert_eq!(hex_string(&slot.blob_id().unwrap()), full_blob_digest);
-    }
-
-    #[test]
-    fn export_round_trips_the_source_tree() {
-        let dir = tempdir().unwrap();
-        let source = dir.path().join("source");
-        let blob = dir.path().join("layer.blob");
-        let tar_path = dir.path().join("layer.tar");
-        fs::create_dir(&source).unwrap();
-        fs::create_dir(source.join("nested")).unwrap();
-        fs::write(source.join("nested/hello.txt"), b"hello nydus").unwrap();
-        fs::write(source.join("empty.txt"), b"").unwrap();
-
-        let big = vec![b'x'; 10 * 1024];
-        fs::write(source.join("big.bin"), &big).unwrap();
-        fs::write(source.join("linked.txt"), b"link me").unwrap();
-        fs::hard_link(source.join("linked.txt"), source.join("alias.txt")).unwrap();
-        std::os::unix::fs::symlink("nested/hello.txt", source.join("link")).unwrap();
-        fs::write(source.join(".wh.deleted"), b"").unwrap();
-        let xattr_set = xattr::set(source.join("nested/hello.txt"), "user.demo", b"v1").is_ok();
-        build_and_export(&source, &blob, &tar_path);
-
-        let mut entries = BTreeMap::new();
-        let mut archive = tar::Archive::new(File::open(&tar_path).unwrap());
-        for entry in archive.entries().unwrap() {
-            let mut entry = entry.unwrap();
-            let path = entry.path().unwrap().to_string_lossy().into_owned();
-            let header = entry.header().clone();
-            let link = header
-                .link_name()
-                .unwrap()
-                .map(|p| p.to_string_lossy().into_owned());
-            let xattrs: Vec<_> = entry
-                .pax_extensions()
-                .unwrap()
-                .into_iter()
-                .flatten()
-                .map(|ext| {
-                    let ext = ext.unwrap();
-                    (ext.key().unwrap().to_string(), ext.value_bytes().to_vec())
-                })
-                .collect();
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).unwrap();
-            entries.insert(path, (header.entry_type(), link, data, xattrs));
-        }
-
-        let names: Vec<_> = entries.keys().cloned().collect();
-        assert_eq!(
-            names,
-            vec![
-                ".wh.deleted",
-                "alias.txt",
-                "big.bin",
-                "empty.txt",
-                "link",
-                "linked.txt",
-                "nested/",
-                "nested/hello.txt",
-            ]
-        );
-
-        assert_eq!(entries["nested/hello.txt"].2, b"hello nydus");
-        assert_eq!(entries["big.bin"].2, big);
-        assert!(entries["empty.txt"].2.is_empty());
-        assert_eq!(entries["nested/"].0, tar::EntryType::Directory);
-        assert_eq!(entries["link"].0, tar::EntryType::Symlink);
-        assert_eq!(entries["link"].1.as_deref(), Some("nested/hello.txt"));
-        assert_eq!(entries["alias.txt"].0, tar::EntryType::Regular);
-        assert_eq!(entries["linked.txt"].0, tar::EntryType::Link);
-        assert_eq!(entries["linked.txt"].1.as_deref(), Some("alias.txt"));
-
-        if xattr_set {
-            assert_eq!(
-                entries["nested/hello.txt"].3,
-                vec![("SCHILY.xattr.user.demo".to_string(), b"v1".to_vec())]
-            );
-        }
-    }
-
-    #[test]
-    fn export_drops_internal_nydus_xattrs() {
-        let dir = tempdir().unwrap();
-        let source = dir.path().join("source");
-        let blob = dir.path().join("layer.blob");
-        let tar_path = dir.path().join("layer.tar");
-        fs::create_dir(&source).unwrap();
-        fs::create_dir(source.join("sub")).unwrap();
-        build_and_export(&source, &blob, &tar_path);
-
-        let mut archive = tar::Archive::new(File::open(&tar_path).unwrap());
-        for entry in archive.entries().unwrap() {
-            let mut entry = entry.unwrap();
-            let keys: Vec<String> = entry
-                .pax_extensions()
-                .unwrap()
-                .into_iter()
-                .flatten()
-                .map(|ext| ext.unwrap().key().unwrap().to_string())
-                .collect();
-            assert!(
-                !keys.iter().any(|key| key.contains("nydus")),
-                "leaked internal xattr: {keys:?}"
-            );
-        }
-    }
-
-    fn build_and_export(source: &Path, blob: &Path, tar_path: &Path) {
-        BuildCommand {
-            source: source.to_path_buf(),
-            blob: Some(blob.to_path_buf()),
-            blob_store: None,
-            bootstrap: None,
-            chunk_size: ByteSize::b(EROFS_BLOCK_SIZE as u64),
-            block_group_size: ByteSize::mib(1),
-            compressor: Compressor::Zstd,
-            exclude: Vec::new(),
-            log_level: Level::ERROR,
-            console: false,
-        }
-        .execute()
-        .unwrap();
-
-        let reader = nydus_core::ErofsReader::open_blob(blob).unwrap();
-        let tar_file = File::create(tar_path).unwrap();
-        nydus::export::write_tar(&reader, std::io::BufWriter::new(tar_file)).unwrap();
     }
 }

@@ -68,12 +68,14 @@ impl UffdService {
     pub async fn run(&self) -> Result<()> {
         let mut shutdown = self.shutdown.subscribe();
         if let Some(parent) = self.socket_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create socket directory: {}", parent.display())
+            })?;
         }
         let _ = fs::remove_file(&self.socket_path);
-        let listener = UnixListener::bind(&self.socket_path)
-            .with_context(|| format!("failed to bind {}", self.socket_path.display()))?;
+        let listener = UnixListener::bind(&self.socket_path).with_context(|| {
+            format!("failed to bind uffd socket: {}", self.socket_path.display())
+        })?;
         info!(
             "nydus uffd service listening on {}",
             self.socket_path.display()
@@ -91,7 +93,7 @@ impl UffdService {
                     let (stream, _) = accepted.context("failed to accept uffd connection")?;
                     let core = self.core.clone();
                     let conn_shutdown = self.shutdown.subscribe();
-                    let stream = stream.into_std().context("failed to convert unix stream")?;
+                    let stream = stream.into_std().context("failed to convert uffd stream to std")?;
                     connections.spawn(async move {
                         match UffdConn::new(core, stream, conn_shutdown) {
                             Ok(connection) => connection.run().await,
@@ -211,7 +213,7 @@ impl UffdConn {
                 uffd,
             } => {
                 if self.state.is_some() {
-                    return Err(Error::Protocol("duplicate UFFD handshake".to_string()));
+                    return Err(Error::Protocol("duplicate uffd handshake".to_string()));
                 }
                 self.state = Some(
                     self.handle_handshake(policy, prefault, regions, uffd)
@@ -230,7 +232,7 @@ impl UffdConn {
                 })
                 .await
                 .map_err(|err| {
-                    Error::Runtime(format!("UFFD FETCH blocking task failed: {err}"))
+                    Error::Runtime(format!("uffd FETCH blocking task failed: {err}"))
                 })??;
                 self.send_ranges(None, &ranges).await?;
             }
@@ -287,7 +289,7 @@ impl UffdConn {
         let state = self
             .state
             .as_ref()
-            .ok_or_else(|| Error::Protocol("received UFFD event before handshake".to_string()))?;
+            .ok_or_else(|| Error::Protocol("received uffd event before handshake".to_string()))?;
         let uffd_fd = state.uffd.get_ref().as_raw_fd();
         let policy = state.policy;
         let regions = state.regions.clone();
@@ -300,7 +302,7 @@ impl UffdConn {
             core.resolve_page_fault(uffd_fd, &regions, policy, &msg)
         })
         .await
-        .map_err(|err| Error::Runtime(format!("UFFD page-fault blocking task failed: {err}")))??;
+        .map_err(|err| Error::Runtime(format!("uffd page-fault blocking task failed: {err}")))??;
         debug!(
             "nydus uffd resolved fault: policy={:?} ranges={}",
             policy,

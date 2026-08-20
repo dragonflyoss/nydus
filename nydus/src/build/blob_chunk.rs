@@ -174,8 +174,8 @@ impl<W: Write> BlobWriter<W> {
             return Ok(Vec::new());
         }
 
-        let mut f =
-            File::open(path).with_context(|| format!("failed to open file: {}", path.display()))?;
+        let mut f = File::open(path)
+            .with_context(|| format!("failed to open source file: {}", path.display()))?;
 
         let chunk_size = self.file_chunk_size as u64;
         let chunk_count = file_size.div_ceil(chunk_size);
@@ -186,7 +186,7 @@ impl<W: Write> BlobWriter<W> {
             let to_read = remaining.min(chunk_size) as usize;
 
             f.read_exact(&mut chunk_buf[..to_read])
-                .with_context(|| format!("failed to read file: {}", path.display()))?;
+                .with_context(|| format!("failed to read source file: {}", path.display()))?;
 
             // A fully-zero chunk (a real filesystem hole reads back as zeros,
             // and so does zero-filled data) is not stored at all: it gets a
@@ -273,7 +273,7 @@ impl<W: Write> BlobWriter<W> {
             BlobMetadataCompressor::None => None,
             BlobMetadataCompressor::Zstd => {
                 let compressed = zstd::bulk::compress(&uncompressed, 0)
-                    .context("failed to compress blob meta block_group with zstd")?;
+                    .context("failed to compress blob meta block group with zstd")?;
                 if compression_is_worthwhile(compressed.len(), uncompressed.len()) {
                     Some(compressed)
                 } else {
@@ -297,7 +297,7 @@ impl<W: Write> BlobWriter<W> {
         let block_count =
             u32::try_from(uncompressed.len() / EROFS_BLOCK_SIZE as usize).map_err(|err| {
                 Error::Overflow(format!(
-                    "blob meta block_group uncompressed block count exceeds u32: {err}"
+                    "blob meta block group uncompressed block count exceeds u32: {err}"
                 ))
             })?;
         let entry = BlobMetadataBlockGroup::new(

@@ -153,13 +153,14 @@ impl NbdService {
             .read(true)
             .write(true)
             .open(nbd_path)
-            .with_context(|| format!("failed to open NBD device {nbd_path}"))?;
+            .with_context(|| format!("failed to open nbd device: {nbd_path}"))?;
         let fd = nbd_dev.as_raw_fd();
 
         // A nonzero capacity means another client is already serving this
         // device; the NBD_CLEAR_SOCK below would shut that session's sockets
         // down and kill it, so refuse instead of hijacking.
-        let size = query_block_device_size(fd).context("BLKGETSIZE64 failed")?;
+        let size = query_block_device_size(fd)
+            .context("failed to query nbd device size (BLKGETSIZE64)")?;
         if size != 0 {
             return Err(Error::InvalidParameter(format!(
                 "NBD device {nbd_path} is busy (reports {size} bytes); \
@@ -169,15 +170,18 @@ impl NbdService {
 
         // Clear any previous session so a fresh socket/flags set applies.
         let _ = nbd_ioctl(fd, NBD_CLEAR_SOCK, 0);
-        nbd_ioctl(fd, NBD_SET_BLOCK_SIZE, NBD_BLOCK_SIZE).context("NBD_SET_BLOCK_SIZE failed")?;
-        nbd_ioctl(fd, NBD_SET_BLOCKS, core.block_count()).context("NBD_SET_BLOCKS failed")?;
-        nbd_ioctl(fd, NBD_SET_TIMEOUT, timeout_secs).context("NBD_SET_TIMEOUT failed")?;
+        nbd_ioctl(fd, NBD_SET_BLOCK_SIZE, NBD_BLOCK_SIZE)
+            .context("failed to set nbd block size (NBD_SET_BLOCK_SIZE)")?;
+        nbd_ioctl(fd, NBD_SET_BLOCKS, core.block_count())
+            .context("failed to set nbd device blocks (NBD_SET_BLOCKS)")?;
+        nbd_ioctl(fd, NBD_SET_TIMEOUT, timeout_secs)
+            .context("failed to set nbd timeout (NBD_SET_TIMEOUT)")?;
         nbd_ioctl(
             fd,
             NBD_SET_FLAGS,
             (NBD_FLAG_HAS_FLAGS | NBD_FLAG_READ_ONLY | NBD_FLAG_CAN_MULTI_CONN) as u64,
         )
-        .context("NBD_SET_FLAGS failed")?;
+        .context("failed to set nbd flags (NBD_SET_FLAGS)")?;
 
         Ok(Self {
             core,
@@ -191,13 +195,13 @@ impl NbdService {
     /// ([`Self::run`]); it blocks until the session ends.
     pub fn create_worker(&self) -> Result<NbdWorker> {
         let (sock_kern, sock_user) =
-            UnixStream::pair().context("failed to create NBD socket pair")?;
+            UnixStream::pair().context("failed to create nbd socket pair")?;
         nbd_ioctl(
             self.nbd_dev.as_raw_fd(),
             NBD_SET_SOCK,
             sock_kern.as_raw_fd() as u64,
         )
-        .context("NBD_SET_SOCK failed")?;
+        .context("failed to set nbd socket (NBD_SET_SOCK)")?;
         Ok(NbdWorker {
             core: self.core.clone(),
             active: self.active.clone(),
@@ -216,7 +220,7 @@ impl NbdService {
         // An error is expected on a clean shutdown: `stop()` clears the sock
         // first, so DO_IT may return EBADR/EINVAL.
         if let Err(err) = nbd_ioctl(fd, NBD_DO_IT, 0) {
-            debug!("NBD_DO_IT returned {err}; clearing socket");
+            debug!("NBD_DO_IT returned {err} (clearing socket)");
         }
         self.active.store(false, Ordering::Release);
         let _ = nbd_ioctl(fd, NBD_CLEAR_SOCK, 0);
@@ -235,7 +239,8 @@ impl NbdService {
         let deadline = Instant::now() + timeout;
         let fd = self.nbd_dev.as_raw_fd();
         loop {
-            let size = query_block_device_size(fd).context("BLKGETSIZE64 failed")?;
+            let size = query_block_device_size(fd)
+                .context("failed to query nbd device size (BLKGETSIZE64)")?;
             if size == bytes {
                 debug!("nbd device capacity committed: {size} bytes");
                 return Ok(());

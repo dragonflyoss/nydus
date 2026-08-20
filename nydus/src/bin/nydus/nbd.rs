@@ -127,7 +127,7 @@ impl NbdCommand {
         );
 
         // Load the storage config.
-        let config = Config::load(&self.config).context("failed to load storage config")?;
+        let config = Config::load(&self.config)?;
 
         let core =
             Arc::new(NbdCore::new(&self.bootstrap, config).context("failed to build nbd core")?);

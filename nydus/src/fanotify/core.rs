@@ -150,8 +150,7 @@ impl FanotifyCore {
     /// descriptor.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
         validate_bounded_backend_timeout(&config)?;
-        let core =
-            Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
+        let core = Arc::new(NydusCore::new(bootstrap, config)?);
         let entries = core
             .blobs
             .prepare_all()
@@ -424,7 +423,7 @@ pub fn fd_identity(fd: RawFd) -> Result<FileId> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
     let ret = unsafe { libc::fstat(fd, st.as_mut_ptr()) };
     if ret < 0 {
-        return Err(std::io::Error::last_os_error()).context("fstat event fd");
+        return Err(std::io::Error::last_os_error()).context("failed to stat event fd");
     }
     let st = unsafe { st.assume_init() };
     // st_dev/st_ino widths vary by platform (glibc/musl, 32/64-bit), so the cast
@@ -461,7 +460,7 @@ fn cache_identity(path: &Path, expected_size: u64) -> Result<FileId> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
     let ret = unsafe { libc::fstat(owned.as_raw_fd(), st.as_mut_ptr()) };
     if ret < 0 {
-        return Err(std::io::Error::last_os_error()).context("fstat blob cache file");
+        return Err(std::io::Error::last_os_error()).context("failed to stat blob cache file");
     }
     let st = unsafe { st.assume_init() };
     if st.st_mode & libc::S_IFMT != libc::S_IFREG {

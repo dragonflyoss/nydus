@@ -129,7 +129,7 @@ impl UblkCommand {
         );
 
         // Load the storage config.
-        let config = Config::load(&self.config).context("failed to load storage config")?;
+        let config = Config::load(&self.config)?;
 
         let core = Arc::new(UblkCore::new(&self.bootstrap, config)?);
         info!(

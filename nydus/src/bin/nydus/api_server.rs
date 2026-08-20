@@ -61,7 +61,7 @@ impl ApiServer {
         let listener = {
             let _guard = runtime.enter();
             UnixListener::bind(&socket_path)
-                .with_context(|| format!("failed to bind api socket {}", socket_path.display()))?
+                .with_context(|| format!("failed to bind api socket: {}", socket_path.display()))?
         };
 
         let shutdown = Arc::new(Notify::new());

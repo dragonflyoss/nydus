@@ -61,7 +61,7 @@ fn mount_options(devices: &[BlobDevice]) -> Result<Vec<u8>> {
     for device in devices {
         if device.index != expected_index {
             return Err(Error::InvalidParameter(format!(
-                "device slot {} is out of order; expected {}",
+                "device slot {} is out of order (expected {})",
                 device.index, expected_index
             )));
         }

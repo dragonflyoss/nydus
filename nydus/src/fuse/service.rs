@@ -91,8 +91,9 @@ pub struct FuseService {
 impl FuseService {
     /// Mounts `fs` at `mountpoint` and starts serving it in the background.
     pub fn mount(fs: ErofsFs, mountpoint: &Path, config: &fuser::Config) -> Result<Self> {
-        let session = fuser::Session::new(fs, mountpoint, config).context("mount failed")?;
-        let session = session.spawn().context("spawn failed")?;
+        let session = fuser::Session::new(fs, mountpoint, config)
+            .with_context(|| format!("failed to mount fuse session: {}", mountpoint.display()))?;
+        let session = session.spawn().context("failed to spawn fuse session")?;
         Ok(Self {
             session,
             mountpoint: mountpoint.to_path_buf(),

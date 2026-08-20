@@ -163,7 +163,7 @@ impl FuseCommand {
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-store/--cache-dir override the backend/cache directories.
         let storage_config = match &self.config {
-            Some(path) => Some(Config::load(path).context("failed to load storage config")?),
+            Some(path) => Some(Config::load(path)?),
             None => None,
         };
 
@@ -309,7 +309,7 @@ impl FuseCommand {
             Err(err) => error!("background fuse session join returned error: {:?}", err),
         }
 
-        join_result.context("join failed")?;
+        join_result.context("failed to join fuse session thread")?;
 
         Ok(())
     }

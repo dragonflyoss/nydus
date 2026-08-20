@@ -1,6 +1,6 @@
 use clap::Parser;
 use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
-use nydus::error::{Context, Error, Result};
+use nydus::error::{Error, Result};
 use nydus_config::{BackendConfig, Config};
 use nydus_format::erofs::{
     ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
@@ -57,7 +57,7 @@ impl CheckCommand {
             Some(dir) => Some(dir.clone()),
             None => match &self.config {
                 Some(path) => {
-                    let config = Config::load(path).context("failed to load storage config")?;
+                    let config = Config::load(path)?;
                     match &config.backend {
                         BackendConfig::Local(local) => Some(local.dir.clone()),
                         other => {

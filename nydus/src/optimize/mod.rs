@@ -104,7 +104,7 @@ pub fn build_ondemand_blob(
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
                 LocalBlobCache::open(info.blob_id, *blob_index as u32, cache_dir, backend.clone())
-                    .with_context(|| format!("failed to open source blob {blob_index}"))?,
+                    .with_context(|| format!("failed to open source blob: {blob_index}"))?,
             ),
         };
 
@@ -118,7 +118,7 @@ pub fn build_ondemand_blob(
             })?;
         if block_group.is_redirect() {
             return Err(Error::InvalidImage(format!(
-                "source blob {blob_index} is already an ondemand blob; refusing to optimize"
+                "source blob {blob_index} is already an ondemand blob (refusing to optimize)"
             )));
         }
 
@@ -131,7 +131,7 @@ pub fn build_ondemand_blob(
         cache
             .read_at(block_group.uncompressed_byte_offset(), &mut decoded)
             .with_context(|| {
-                format!("failed to read blob {blob_index} block_group {block_group_index} bytes")
+                format!("failed to read block group {block_group_index} of blob {blob_index}")
             })?;
 
         // Recompress the decoded bytes for the ondemand artifact, storing them
@@ -218,8 +218,7 @@ pub fn load_patterns_from_file(path: &Path) -> Result<Vec<BlockGroupRef>> {
 
 /// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
 fn parse_trace_document(raw: &[u8]) -> Result<Vec<BlockGroupRef>> {
-    let envelope: TraceDocument =
-        serde_json::from_slice(raw).context("failed to parse trace document")?;
+    let envelope: TraceDocument = serde_json::from_slice(raw)?;
     if envelope.version != TRACE_DOCUMENT_VERSION {
         return Err(Error::Unsupported(format!(
             "unsupported trace document version: {}",

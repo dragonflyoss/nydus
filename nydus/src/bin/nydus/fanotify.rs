@@ -136,7 +136,7 @@ impl FanotifyCommand {
         );
 
         // Load the storage config.
-        let config = Config::load(&self.config).context("failed to load storage config")?;
+        let config = Config::load(&self.config)?;
 
         raise_nofile_limit();
         let core = std::sync::Arc::new(

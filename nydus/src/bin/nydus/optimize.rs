@@ -109,7 +109,7 @@ impl OptimizeCommand {
         }
 
         // Load the storage config.
-        let storage_config = Config::load(&self.config).context("failed to load storage config")?;
+        let storage_config = Config::load(&self.config)?;
         let backend =
             build_backend(&storage_config.backend).context("failed to build blob backend")?;
         // Source block groups are pulled through the local blob cache, so diskless mode

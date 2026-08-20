@@ -66,11 +66,11 @@ impl Unpacker<'_> {
         let inode = self
             .reader
             .inode(nid)
-            .with_context(|| format!("failed to read inode {nid}"))?;
+            .with_context(|| format!("failed to read inode: {nid}"))?;
         let entries = self
             .reader
             .read_dir(nid, &inode)
-            .with_context(|| format!("failed to read directory inode {nid}"))?;
+            .with_context(|| format!("failed to read directory inode: {nid}"))?;
 
         for entry in entries {
             if entry.name == b"." || entry.name == b".." {
@@ -82,7 +82,7 @@ impl Unpacker<'_> {
 
             let is_dir = self
                 .append_entry(builder, entry.nid, &path)
-                .with_context(|| format!("failed to pack {display}"))?;
+                .with_context(|| format!("failed to pack entry: {display}"))?;
             if is_dir {
                 path.push(b'/');
                 self.walk_dir(builder, entry.nid, &path, depth + 1)?;

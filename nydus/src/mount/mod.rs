@@ -27,7 +27,7 @@ pub fn umount2(mountpoint: &Path) -> Result<()> {
     let ret = unsafe { libc::umount2(target.as_ptr(), 0) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("failed to unmount {}", mountpoint.display()));
+            .with_context(|| format!("failed to unmount: {}", mountpoint.display()));
     }
     Ok(())
 }
@@ -75,7 +75,7 @@ pub fn unmount(mountpoint: &Path, mut on_retry: impl FnMut()) -> Result<()> {
             }
             Err(err) if is_busy(&err) && attempt < UNMOUNT_RETRY_ATTEMPTS => {
                 debug!(
-                    "unmount attempt {attempt} failed: {}; retrying",
+                    "unmount attempt {attempt} failed: {} (retrying)",
                     err.report()
                 );
                 on_retry();
