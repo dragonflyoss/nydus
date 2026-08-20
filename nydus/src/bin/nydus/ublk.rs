@@ -1,5 +1,5 @@
 use clap::Parser;
-use nydus::error::{Context, Result};
+use nydus::error::Result;
 use nydus::signal;
 use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,

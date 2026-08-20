@@ -56,12 +56,12 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 	}
 
 	layerFn := LayerConvertFunc(nydus.PackOption{
-		BuilderPath:  opt.BuilderPath,
-		WorkDir:      opt.WorkDir,
-		ChunkSize:    opt.ChunkSize,
+		BuilderPath:    opt.BuilderPath,
+		WorkDir:        opt.WorkDir,
+		ChunkSize:      opt.ChunkSize,
 		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:   opt.Compressor,
-		LogLevel:     opt.LogLevel,
+		Compressor:     opt.Compressor,
+		LogLevel:       opt.LogLevel,
 	})
 	hookFn := ConvertHookFunc(nydus.MergeOption{
 		BuilderPath: opt.BuilderPath,

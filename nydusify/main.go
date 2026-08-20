@@ -271,7 +271,7 @@ func runConvert(c *cli.Context) error {
 			BuilderPath:       c.String("builder"),
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
-			BlockGroupSize:      uint32(c.Uint("block-group-size")),
+			BlockGroupSize:    uint32(c.Uint("block-group-size")),
 			Compressor:        compressor,
 			LogLevel:          c.String("log-level"),
 			Platform:          platform,
@@ -287,7 +287,7 @@ func runConvert(c *cli.Context) error {
 			BuilderPath:       c.String("builder"),
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
-			BlockGroupSize:      uint32(c.Uint("block-group-size")),
+			BlockGroupSize:    uint32(c.Uint("block-group-size")),
 			Compressor:        compressor,
 			LogLevel:          c.String("log-level"),
 			SourceDir:         source,
@@ -305,13 +305,13 @@ func runConvert(c *cli.Context) error {
 
 		logrus.Infof("converting image to nydus format")
 		newDesc, err = pipeline.Convert(ctx, provider.ContentStore(), srcDesc, pipeline.Option{
-			BuilderPath:  c.String("builder"),
-			WorkDir:      scratchDir,
-			ChunkSize:    uint32(c.Uint("chunk-size")),
+			BuilderPath:    c.String("builder"),
+			WorkDir:        scratchDir,
+			ChunkSize:      uint32(c.Uint("chunk-size")),
 			BlockGroupSize: uint32(c.Uint("block-group-size")),
-			Compressor:   c.String("compressor"),
-			LogLevel:     c.String("log-level"),
-			PlatformMC:   platformMC,
+			Compressor:     c.String("compressor"),
+			LogLevel:       c.String("log-level"),
+			PlatformMC:     platformMC,
 		})
 		if err != nil {
 			return errors.Wrap(err, "convert")
