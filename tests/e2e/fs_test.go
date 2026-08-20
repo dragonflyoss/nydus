@@ -97,10 +97,10 @@ const readOnlyCorpusSeed = 20260806
 // that only --blob-store produces, so a bootstrap-backed mount has no other
 // option.
 type fsBuildConfig struct {
-	ID           string
-	ChunkSize    int
-	CompressSize int // 0 keeps the nydus default
-	Compressor   string
+	ID             string
+	ChunkSize      int
+	BlockGroupSize int // 0 keeps the nydus default
+	Compressor     string
 }
 
 // fsBuildConfigs deliberately picks the extremes of each dimension: the
@@ -123,10 +123,10 @@ var fsBuildConfigs = []fsBuildConfig{
 		Compressor: "zstd",
 	},
 	{
-		ID:           "chunk4m-none-tightgroup",
-		ChunkSize:    4 << 20,
-		CompressSize: 4 << 20,
-		Compressor:   "none",
+		ID:             "chunk4m-none-tightgroup",
+		ChunkSize:      4 << 20,
+		BlockGroupSize: 4 << 20,
+		Compressor:     "none",
 	},
 }
 
@@ -149,8 +149,8 @@ func fsBuildImage(t *testing.T, nydusBin string, cfg fsBuildConfig, cfgRoot, nam
 		"--bootstrap", bootstrap,
 		"--blob-store", blobDir,
 	}
-	if cfg.CompressSize > 0 {
-		args = append(args, "--compress-size", strconv.Itoa(cfg.CompressSize))
+	if cfg.BlockGroupSize > 0 {
+		args = append(args, "--block-group-size", strconv.Itoa(cfg.BlockGroupSize))
 	}
 	args = append(args, corpus)
 
