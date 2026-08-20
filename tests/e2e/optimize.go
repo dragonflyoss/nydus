@@ -221,7 +221,7 @@ func saveTrace(t *testing.T, socketPath, path string) int {
 	var doc struct {
 		Version  uint32 `json:"version"`
 		Patterns []struct {
-			BlobIndex  uint32 `json:"blob_index"`
+			BlobIndex       uint32 `json:"blob_index"`
 			BlockGroupIndex uint32 `json:"block_group_index"`
 		} `json:"patterns"`
 	}

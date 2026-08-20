@@ -178,13 +178,13 @@ func BuildBlob(ctx context.Context, dest io.Writer, sourceDir string, opt PackOp
 	var closeOnce sync.Once
 	go func() {
 		berr := RunNydusBuild(ctx, BuildOption{
-			BuilderPath:  opt.BuilderPath,
-			SourceDir:    sourceDir,
-			BlobPath:     fifoPath,
-			ChunkSize:    opt.ChunkSize,
+			BuilderPath:    opt.BuilderPath,
+			SourceDir:      sourceDir,
+			BlobPath:       fifoPath,
+			ChunkSize:      opt.ChunkSize,
 			BlockGroupSize: opt.BlockGroupSize,
-			Compressor:   opt.Compressor,
-			LogLevel:     opt.LogLevel,
+			Compressor:     opt.Compressor,
+			LogLevel:       opt.LogLevel,
 		})
 		// Closing the keep-alive write end lets the reader drain to EOF.
 		closeOnce.Do(func() { _ = keepAlive.Close() })

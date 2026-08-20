@@ -258,14 +258,14 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 	// Rust side resolves each path against the source directory and
 	// canonicalizes it, so files outside the source are simply ignored.
 	if err := nydus.RunNydusBuild(ctx, nydus.BuildOption{
-		BuilderPath:  opt.BuilderPath,
-		SourceDir:    dir,
-		BlobPath:     blobPath,
-		ChunkSize:    opt.ChunkSize,
+		BuilderPath:    opt.BuilderPath,
+		SourceDir:      dir,
+		BlobPath:       blobPath,
+		ChunkSize:      opt.ChunkSize,
 		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:   opt.Compressor,
-		LogLevel:     opt.LogLevel,
-		Excludes:     opt.AppendInBootstrap,
+		Compressor:     opt.Compressor,
+		LogLevel:       opt.LogLevel,
+		Excludes:       opt.AppendInBootstrap,
 	}); err != nil {
 		return ocispec.Descriptor{}, err
 	}
@@ -285,12 +285,12 @@ func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	platformMC := platforms.Only(opt.Platform)
 
 	layerFn := LayerConvertFunc(nydus.PackOption{
-		BuilderPath:  opt.BuilderPath,
-		WorkDir:      opt.WorkDir,
-		ChunkSize:    opt.ChunkSize,
+		BuilderPath:    opt.BuilderPath,
+		WorkDir:        opt.WorkDir,
+		ChunkSize:      opt.ChunkSize,
 		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:   opt.Compressor,
-		LogLevel:     opt.LogLevel,
+		Compressor:     opt.Compressor,
+		LogLevel:       opt.LogLevel,
 	})
 	// Convert layers only: no post-convert hook, so no per-image bootstrap
 	// merge happens here. The caller merges the blobs of all sources at once.
