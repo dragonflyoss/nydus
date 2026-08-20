@@ -271,7 +271,7 @@ impl BlobMetadataHeader {
         self.block_groups_offset = self
             .chunks_offset
             .checked_add(chunk_count as u64 * size_of::<BlobMetadataChunk>() as u64)
-            .ok_or_else(|| Error::Overflow("blob meta block_group offset overflow".to_string()))?;
+            .ok_or_else(|| Error::Overflow("blob meta block group offset overflow".to_string()))?;
         Ok(())
     }
 
@@ -303,7 +303,7 @@ impl BlobMetadataHeader {
         }
         if self.block_group_block_bits > BLOB_METADATA_MAX_BLOCK_BITS {
             return Err(Error::InvalidImage(format!(
-                "blob meta block_group block bits too large: {}",
+                "blob meta block group block bits too large: {}",
                 self.block_group_block_bits
             )));
         }
@@ -317,10 +317,10 @@ impl BlobMetadataHeader {
         let expected_block_groups_offset = self
             .chunks_offset
             .checked_add(self.chunk_bytes())
-            .ok_or_else(|| Error::Overflow("blob meta block_group offset overflow".to_string()))?;
+            .ok_or_else(|| Error::Overflow("blob meta block group offset overflow".to_string()))?;
         if self.block_groups_offset != expected_block_groups_offset {
             return Err(Error::InvalidImage(format!(
-                "invalid blob meta block_groups offset: {}",
+                "invalid blob meta block groups offset: {}",
                 self.block_groups_offset
             )));
         }
@@ -604,7 +604,7 @@ impl BlobMetadataBlockGroup {
         self.compressed_byte_offset
             .checked_add(self.compressed_size as u64)
             .ok_or_else(|| {
-                Error::Overflow("blob meta block_group compressed byte range overflow".to_string())
+                Error::Overflow("blob meta block group compressed byte range overflow".to_string())
             })?;
         if self.source_blob_index == 0 && self.source_block_group_index != 0 {
             return Err(Error::InvalidImage(
@@ -1167,7 +1167,7 @@ fn validate_block_groups(
             .with_context(|| format!("invalid blob meta block_group {index}"))?;
         if block_group.uncompressed_block_offset() != previous_uncompressed_block_end {
             return Err(Error::InvalidImage(format!(
-                "blob meta block_groups must be dense at index {index}"
+                "blob meta block groups must be dense at index {index}"
             )));
         }
         // Block groups pack whole blocks up to the compress size regardless of chunk
@@ -1177,13 +1177,13 @@ fn validate_block_groups(
             if index < last_index {
                 if block_group.uncompressed_block_count() != block_group_block_count {
                     return Err(Error::InvalidImage(format!(
-                        "blob meta block_group {index} must be exactly {block_group_block_count} blocks, got {}",
+                        "blob meta block group {index} must be exactly {block_group_block_count} blocks, got {}",
                         block_group.uncompressed_block_count()
                     )));
                 }
             } else if block_group.uncompressed_block_count() > block_group_block_count {
                 return Err(Error::InvalidImage(format!(
-                    "blob meta final block_group {index} exceeds {block_group_block_count} blocks, got {}",
+                    "blob meta final block group {index} exceeds {block_group_block_count} blocks, got {}",
                     block_group.uncompressed_block_count()
                 )));
             }
@@ -1193,7 +1193,7 @@ fn validate_block_groups(
         // alignment is required between compressed block groups.
         if index > 0 && block_group.compressed_byte_offset() < previous_compressed_byte_end {
             return Err(Error::InvalidImage(format!(
-                "blob meta block_groups overlap compressed ranges at index {index}"
+                "blob meta block groups overlap compressed ranges at index {index}"
             )));
         }
         previous_uncompressed_block_end = block_group

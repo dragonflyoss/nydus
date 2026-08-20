@@ -96,7 +96,7 @@ impl UffdCommand {
         );
 
         // Load the storage config.
-        let config = Config::load(&self.config).context("failed to load storage config")?;
+        let config = Config::load(&self.config)?;
 
         let core = Arc::new(UffdCore::new(&self.bootstrap, config)?);
         let service = Arc::new(UffdService::new(core, self.socket.clone()));

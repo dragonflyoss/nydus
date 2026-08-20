@@ -49,8 +49,7 @@ impl NbdCore {
     /// No blob meta is downloaded and no cache file is created until a read
     /// first touches a blob, so this returns quickly even for large images.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let core =
-            Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
+        let core = Arc::new(NydusCore::new(bootstrap, config)?);
 
         let flat_size = core.flat_size();
         if flat_size == 0 {

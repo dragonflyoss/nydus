@@ -150,7 +150,12 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
         reader.superblock().epoch(),
         &identity,
     )
-    .context("failed to load bootstrap inode tree")?;
+    .with_context(|| {
+        format!(
+            "failed to load bootstrap inode tree: {}",
+            parent_bootstrap.display()
+        )
+    })?;
 
     // `flatten_tree` always yields at least the root inode.
     let mut inodes = flatten_tree(&root, &mut ())?;
@@ -278,7 +283,7 @@ fn load_node(
 ) -> Result<MergeNode> {
     let inode = reader
         .inode(nid)
-        .with_context(|| format!("failed to read inode {nid}"))?;
+        .with_context(|| format!("failed to read inode: {nid}"))?;
     let mode = inode.mode();
     let mut xattrs: Vec<XattrEntry> = reader
         .read_xattrs(nid, &inode)?
@@ -306,7 +311,7 @@ fn load_node(
                         load_node(reader, layer_id, entry.nid, epoch, local_to_global)
                             .with_context(|| {
                                 format!(
-                                    "failed to load child {}",
+                                    "failed to load child: {}",
                                     String::from_utf8_lossy(&entry.name)
                                 )
                             })?,

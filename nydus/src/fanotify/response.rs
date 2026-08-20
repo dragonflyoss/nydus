@@ -173,7 +173,7 @@ impl Drop for PendingPermission {
 
         let response = self.response.unwrap_or(Response::Deny);
         error!(
-            "fanotify permission fd={event_fd} dropped before response submission; attempting {response:?}"
+            "fanotify permission fd={event_fd} dropped before response submission (attempting {response:?})"
         );
         loop {
             match self.writer.write_response(event_fd, response) {

@@ -33,6 +33,7 @@ use nydus_format::utils::sha256_bytes;
 pub const MIN_BLOCK_GROUP_SIZE: u32 = 1024 * 1024;
 
 /// Options for [`build_image`].
+#[derive(Debug)]
 pub struct BuildImageOptions {
     /// Source directory to convert. Should be canonicalized so entries match
     /// against `exclude`.
@@ -251,5 +252,30 @@ impl<W: Write> Write for HashingWriter<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_image_options_rejects_invalid_geometry() {
+        let new = |chunk_size: u32, block_group_size: u32| {
+            BuildImageOptions::new(
+                PathBuf::from("/tmp/source"),
+                chunk_size,
+                block_group_size,
+                BlobMetadataCompressor::None,
+                HashSet::new(),
+                false,
+            )
+        };
+
+        assert!(new(EROFS_BLOCK_SIZE / 2, MIN_BLOCK_GROUP_SIZE).is_err());
+        assert!(new(EROFS_BLOCK_SIZE * 3, MIN_BLOCK_GROUP_SIZE).is_err());
+        assert!(new(EROFS_BLOCK_SIZE, MIN_BLOCK_GROUP_SIZE / 2).is_err());
+        assert!(new(MIN_BLOCK_GROUP_SIZE * 2, MIN_BLOCK_GROUP_SIZE).is_err());
+        assert!(new(EROFS_BLOCK_SIZE, MIN_BLOCK_GROUP_SIZE).is_ok());
     }
 }

@@ -63,8 +63,7 @@ pub struct UffdCore {
 
 impl UffdCore {
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let core =
-            Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
+        let core = Arc::new(NydusCore::new(bootstrap, config)?);
         let device_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)
             .ok_or_else(|| Error::Overflow("alignment overflow".to_string()))?;
 
@@ -218,11 +217,11 @@ fn resolve_fault_range<'a>(
     let start = region
         .offset
         .checked_add(aligned_region_offset)
-        .ok_or_else(|| Error::Overflow("UFFD fault device offset overflow".to_string()))?;
+        .ok_or_else(|| Error::Overflow("uffd fault device offset overflow".to_string()))?;
     let region_end = region
         .offset
         .checked_add(region.size)
-        .ok_or_else(|| Error::Overflow("UFFD region end overflow".to_string()))?;
+        .ok_or_else(|| Error::Overflow("uffd region end overflow".to_string()))?;
     let end = start.saturating_add(fault_size).min(region_end);
     if end <= start {
         return Ok(None);
@@ -269,7 +268,7 @@ fn uffdio_copy_from_fd(
     let mut buf = vec![0u8; usize::try_from(len).map_err(|err| Error::Overflow(err.to_string()))?];
     let source_offset = libc::off_t::try_from(offset).map_err(|err| {
         Error::Overflow(format!(
-            "UFFD backing file offset exceeds the platform off_t range: {err}"
+            "uffd backing file offset exceeds the platform off_t range: {err}"
         ))
     })?;
     let read = unsafe {
@@ -285,7 +284,7 @@ fn uffdio_copy_from_fd(
     }
     if read as usize != buf.len() {
         return Err(Error::Runtime(format!(
-            "short read from UFFD backing file: expected {}, got {}",
+            "short read from uffd backing file: expected {}, got {}",
             buf.len(),
             read
         )));
@@ -300,7 +299,8 @@ fn uffdio_copy_from_fd(
     };
     let ret = unsafe { libc::ioctl(uffd_fd, UFFDIO_COPY as IoctlRequest, &mut arg) };
     if ret < 0 {
-        return Err(io::Error::last_os_error()).context("UFFDIO_COPY failed");
+        return Err(io::Error::last_os_error())
+            .context("failed to copy pages into faulting range (UFFDIO_COPY)");
     }
     Ok(())
 }
@@ -321,7 +321,7 @@ fn uffdio_zeropage(uffd_fd: RawFd, start: u64, len: u64) -> Result<()> {
         if err.raw_os_error() == Some(libc::EEXIST) {
             return Ok(());
         }
-        return Err(err).context("UFFDIO_ZEROPAGE failed");
+        return Err(err).context("failed to zero-fill faulting range (UFFDIO_ZEROPAGE)");
     }
     Ok(())
 }

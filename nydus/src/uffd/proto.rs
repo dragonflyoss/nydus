@@ -149,7 +149,7 @@ impl Connection {
         Ok(Self {
             stream: Arc::new(
                 AsyncFd::new(stream)
-                    .context("failed to register UFFD protocol socket with tokio")?,
+                    .context("failed to register uffd protocol socket with tokio")?,
             ),
         })
     }
@@ -165,7 +165,7 @@ impl Connection {
                         .ok_or_else(|| Error::Protocol("invalid HANDSHAKE payload".to_string()))?;
                     if handshake.version != UFFD_PROTOCOL_VERSION {
                         return Err(Error::Unsupported(format!(
-                            "unsupported UFFD protocol version {}",
+                            "unsupported uffd protocol version {}",
                             handshake.version
                         )));
                     }
@@ -226,15 +226,15 @@ impl Connection {
         let header = Header::from_bytes(&header_buf);
         if header.magic != UFFD_MAGIC {
             return Err(Error::Protocol(format!(
-                "invalid UFFD magic 0x{:08x}",
+                "invalid uffd magic 0x{:08x}",
                 header.magic
             )));
         }
         let payload_len = usize::try_from(header.len)
-            .map_err(|err| Error::Protocol(format!("invalid UFFD payload length: {err}")))?;
+            .map_err(|err| Error::Protocol(format!("invalid uffd payload length: {err}")))?;
         if payload_len > MAX_PAYLOAD_SIZE {
             return Err(Error::Protocol(format!(
-                "UFFD payload length {payload_len} exceeds limit {MAX_PAYLOAD_SIZE}"
+                "uffd payload length {payload_len} exceeds limit {MAX_PAYLOAD_SIZE}"
             )));
         }
         let mut payload = vec![0u8; payload_len];
@@ -482,10 +482,10 @@ async fn recv_with_fd(
         let mut guard = stream
             .readable()
             .await
-            .context("failed to wait for UFFD protocol socket readability")?;
+            .context("failed to wait for uffd protocol socket readability")?;
         match stream.get_ref().recv_with_fd(buf, fds) {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => guard.clear_ready(),
-            result => return result.context("recv_with_fd failed"),
+            result => return result.context("failed to receive fd from uffd socket"),
         }
     }
 }
@@ -497,7 +497,7 @@ async fn recv_exact(stream: &AsyncFd<UnixStream>, buf: &mut [u8]) -> Result<()> 
         let mut guard = stream
             .readable()
             .await
-            .context("failed to wait for UFFD protocol socket readability")?;
+            .context("failed to wait for uffd protocol socket readability")?;
         let read = unsafe {
             libc::recv(
                 fd,
@@ -512,7 +512,7 @@ async fn recv_exact(stream: &AsyncFd<UnixStream>, buf: &mut [u8]) -> Result<()> 
                 guard.clear_ready();
                 continue;
             }
-            return Err(err).context("recv failed");
+            return Err(err).context("failed to receive from uffd socket");
         }
         if read == 0 {
             return Err(Error::Runtime(
@@ -530,7 +530,7 @@ async fn send_with_fd(stream: &AsyncFd<UnixStream>, data: &[u8], fds: &[RawFd]) 
         let mut guard = stream
             .writable()
             .await
-            .context("failed to wait for UFFD protocol socket writability")?;
+            .context("failed to wait for uffd protocol socket writability")?;
         let result = if sent == 0 {
             stream.get_ref().send_with_fd(data, fds)
         } else {
@@ -538,10 +538,10 @@ async fn send_with_fd(stream: &AsyncFd<UnixStream>, data: &[u8], fds: &[RawFd]) 
             socket.write(&data[sent..])
         };
         match result {
-            Ok(0) => return Err(Error::Runtime("short send_with_fd".to_string())),
+            Ok(0) => return Err(Error::Runtime("truncated send on uffd socket".to_string())),
             Ok(written) => sent += written,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => guard.clear_ready(),
-            Err(err) => return Err(err).context("send_with_fd failed"),
+            Err(err) => return Err(err).context("failed to send fd over uffd socket"),
         }
     }
     Ok(())

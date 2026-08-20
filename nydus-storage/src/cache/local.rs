@@ -647,7 +647,7 @@ impl BlobCache for LocalBlobCache {
             Ok(file) => file,
             Err(err) => {
                 warn!(
-                    "failed to open prefetch lock {}: {err}; prefetching without cross-process lock",
+                    "failed to open prefetch lock {}: {err} (prefetching without cross-process lock)",
                     self.prefetch_lock_path.display()
                 );
                 return None;
@@ -666,7 +666,7 @@ impl BlobCache for LocalBlobCache {
             let err = io::Error::last_os_error();
             if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
                 warn!(
-                    "failed to acquire prefetch lock for blob {}: {err}; prefetching without cross-process lock",
+                    "failed to acquire prefetch lock for blob {}: {err} (prefetching without cross-process lock)",
                     self.blob_index
                 );
                 return None;

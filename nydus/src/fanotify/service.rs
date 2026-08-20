@@ -342,7 +342,7 @@ impl FanotifyService {
         let mut pipe_fds = [-1i32; 2];
         let ret = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
         if ret != 0 {
-            return Err(std::io::Error::last_os_error()).context("pipe2 failed");
+            return Err(std::io::Error::last_os_error()).context("failed to create stop pipe");
         }
         // Each pipe end is wrapped into exactly one OwnedFd here; wrapping
         // either raw fd into a second OwnedFd would double-close it.
@@ -393,23 +393,24 @@ fn serve(
 ) -> Result<()> {
     let fan_raw = fan_fd.as_raw_fd();
     let fan_weak = Arc::downgrade(fan_fd);
-    let epfd = epoll_create().context("epoll_create1")?;
+    let epfd = epoll_create().context("failed to create epoll instance")?;
 
     let writer: Arc<dyn ResponseWriter> = Arc::new(FdResponseWriter::new(fan_fd.clone()));
 
     // Register fanotify fd for readability.
-    epoll_add(epfd.as_raw_fd(), fan_raw, EPOLLIN, fan_raw as u64).context("epoll add fan_fd")?;
+    epoll_add(epfd.as_raw_fd(), fan_raw, EPOLLIN, fan_raw as u64)
+        .context("failed to add fanotify fd to epoll")?;
 
     // Register stop pipe for readability.
     let stop_raw = stop_fd.as_raw_fd();
     epoll_add(epfd.as_raw_fd(), stop_raw, EPOLLIN, stop_raw as u64)
-        .context("epoll add stop pipe")?;
+        .context("failed to add stop pipe to epoll")?;
 
     let (completion_tx, completion_rx) = mpsc::channel();
-    let wake = create_eventfd().context("create completion eventfd")?;
+    let wake = create_eventfd().context("failed to create completion eventfd")?;
     let wake_raw = wake.as_raw_fd();
     epoll_add(epfd.as_raw_fd(), wake_raw, EPOLLIN, wake_raw as u64)
-        .context("epoll add completion eventfd")?;
+        .context("failed to add completion eventfd to epoll")?;
     let sink = Arc::new(CompletionSink {
         tx: completion_tx,
         wake,
@@ -508,14 +509,14 @@ impl Coordinator<'_> {
                 if err.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                return Err(err).context("epoll_wait");
+                return Err(err).context("failed to wait for epoll events");
             }
 
             for ev in events.iter().take(nfds as usize) {
                 let fd = ev.u64 as RawFd;
 
                 if fd == self.stop_fd {
-                    debug!("fanotify: stop signal received; entering shutdown");
+                    debug!("fanotify: stop signal received, entering shutdown");
                     return Ok(());
                 }
 
@@ -618,11 +619,11 @@ impl Coordinator<'_> {
                     // Structural corruption: the remaining bytes cannot be trusted
                     // as event boundaries, so stop fail-closed.
                     warn!(
-                        "fanotify: batch corruption at offset {}: {:?}; stopping fail-closed",
+                        "fanotify: batch corruption at offset {}: {:?} (stopping fail-closed)",
                         err.offset, err.kind
                     );
                     return Err(Error::Protocol(format!(
-                        "fanotify batch parse error at offset {}: {:?}; stopping fail-closed",
+                        "fanotify batch parse error at offset {}: {:?} (stopping fail-closed)",
                         err.offset, err.kind
                     )));
                 }

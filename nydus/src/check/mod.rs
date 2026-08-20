@@ -274,7 +274,7 @@ fn walk_inode(
 
     let inode = reader
         .inode(nid)
-        .with_context(|| format!("failed to read inode {nid}"))?;
+        .with_context(|| format!("failed to read inode: {nid}"))?;
     let file_type = mode_to_erofs_file_type(inode.mode());
 
     stats.visited_inodes += 1;
@@ -395,7 +395,8 @@ fn resolve_blobs(
     for entry in fs::read_dir(blob_dir)
         .with_context(|| format!("failed to read blob-dir: {}", blob_dir.display()))?
     {
-        let entry = entry?;
+        let entry = entry
+            .with_context(|| format!("failed to read blob-dir entry: {}", blob_dir.display()))?;
         let path = entry.path();
         if !path.is_file() {
             continue;

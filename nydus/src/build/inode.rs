@@ -441,7 +441,7 @@ struct FsTreeNode {
 impl FsTreeNode {
     fn new(path: PathBuf) -> Result<Self> {
         let meta = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to stat: {}", path.display()))?;
+            .with_context(|| format!("failed to stat source entry: {}", path.display()))?;
         Ok(Self { path, meta })
     }
 }
@@ -474,7 +474,8 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
 
         let entries = fs::read_dir(&self.path)
             .with_context(|| format!("failed to read directory: {}", self.path.display()))?
-            .collect::<std::io::Result<Vec<_>>>()?;
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("failed to read directory entry: {}", self.path.display()))?;
 
         let mut children = Vec::with_capacity(entries.len());
         for entry in entries {

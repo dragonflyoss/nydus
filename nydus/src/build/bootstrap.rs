@@ -201,7 +201,7 @@ fn render_bootstrap_inner(
     for index in long_symlinks {
         let target = match &inodes[index].data {
             InodeData::Symlink { target, .. } => target.clone(),
-            _ => unreachable!(),
+            _ => unreachable!("long_symlinks only collects symlink inodes"),
         };
         let (data_offset, startblk) = layout.alloc_dir_data(target.len());
         layout.write_at(data_offset, &target);
@@ -222,7 +222,7 @@ fn render_bootstrap_inner(
 
     let root_nid = inodes[0].nid;
     if root_nid > u16::MAX as u64 {
-        return Err(Error::Overflow("root NID exceeds 16-bit range".to_string()));
+        return Err(Error::Overflow("root nid exceeds 16-bit range".to_string()));
     }
 
     let mut bootstrap = Vec::new();
