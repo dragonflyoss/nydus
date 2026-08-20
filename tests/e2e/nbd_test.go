@@ -3,7 +3,7 @@ package e2e
 // NBD END-TO-END test (local backend, no docker/registry).
 //
 // Boots the real `nydus nbd` daemon against a LOCAL backend (an on-disk blob
-// directory produced by `nydus build --blob-dir`, no OCI registry, no docker),
+// directory produced by `nydus build --blob-store`, no OCI registry, no docker),
 // attaches a free /dev/nbdX, mounts it as EROFS on demand, and asserts — with
 // byte-exact hashes, cache-growth measurements and daemon logs — that cold
 // reads through the NBD socket are correct and demand-paged.
@@ -258,10 +258,10 @@ func (e *nbdEnv) caseReadiness(t *testing.T) { // C0
 	// expected before any file read: the core validates each blob's
 	// footer (at the blob's tail) on its first flat-range resolve, and the
 	// kernel's block-device open scans the device tail too — every such read
-	// rounds outward to whole blob-meta groups. Bound the cache well below a
+	// rounds outward to whole blob-meta block groups. Bound the cache well below a
 	// whole-blob pull rather than at ~zero.
 	for _, m := range e.cacheBlobs() {
-		assert.Less(t, usedBytes(m), int64(8<<20), "cache %s holds only tail-group fill before any file read", filepath.Base(m))
+		assert.Less(t, usedBytes(m), int64(8<<20), "cache %s holds only tail block group fill before any file read", filepath.Base(m))
 	}
 }
 
@@ -402,7 +402,7 @@ func (e *nbdEnv) casePersistence(t *testing.T) { // C9 — warm cache survives a
 	assert.Equal(t, want, got, "large.bin still byte-exact after restart")
 	after := e.cacheUsed()
 	// Warm cache: re-reading the same data should not grow the cache (the
-	// core's persisted groupmap short-circuits the fetch).
+	// core's persisted block group map short-circuits the fetch).
 	assert.Less(t, after-before, int64(1<<20), "warm cache re-serves with no new cache allocation after restart")
 }
 

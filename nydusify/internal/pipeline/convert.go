@@ -25,9 +25,9 @@ type Option struct {
 	WorkDir string
 	// ChunkSize is the nydus file chunk size in bytes.
 	ChunkSize uint32
-	// CompressSize is the nydus group uncompressed size in bytes (a multiple of
-	// 1MiB). Controls the uncompressed size of each blob meta group.
-	CompressSize uint32
+	// BlockGroupSize is the nydus block group uncompressed size in bytes (a multiple of
+	// 1MiB). Controls the uncompressed size of each blob meta block group.
+	BlockGroupSize uint32
 	// Compressor is the chunk data compressor ("none" or "zstd").
 	Compressor string
 	// LogLevel is the log level forwarded to the `nydus` subprocesses
@@ -47,8 +47,8 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 	if opt.ChunkSize == 0 {
 		opt.ChunkSize = nydus.DefaultChunkSize
 	}
-	if opt.CompressSize == 0 {
-		opt.CompressSize = nydus.DefaultCompressSize
+	if opt.BlockGroupSize == 0 {
+		opt.BlockGroupSize = nydus.DefaultBlockGroupSize
 	}
 	platformMC := opt.PlatformMC
 	if platformMC == nil {
@@ -59,7 +59,7 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		BuilderPath:  opt.BuilderPath,
 		WorkDir:      opt.WorkDir,
 		ChunkSize:    opt.ChunkSize,
-		CompressSize: opt.CompressSize,
+		BlockGroupSize: opt.BlockGroupSize,
 		Compressor:   opt.Compressor,
 		LogLevel:     opt.LogLevel,
 	})

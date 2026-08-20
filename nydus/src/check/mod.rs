@@ -141,7 +141,7 @@ struct BlobInspection {
 #[derive(Clone)]
 pub struct BlobMetadataSummary {
     pub chunk_count: usize,
-    pub group_count: usize,
+    pub block_group_count: usize,
     pub chunk_size: u32,
     pub digester: BlobMetadataDigester,
     pub compressor: BlobMetadataCompressor,
@@ -474,7 +474,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
     let blob_metadata = BlobMetadata::loader().from_bytes(data)?;
     Ok(BlobMetadataSummary {
         chunk_count: blob_metadata.chunk_count(),
-        group_count: blob_metadata.group_count(),
+        block_group_count: blob_metadata.block_group_count(),
         chunk_size: blob_metadata.chunk_size(),
         digester: blob_metadata.digester(),
         compressor: blob_metadata.compressor(),

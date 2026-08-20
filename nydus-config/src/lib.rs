@@ -43,7 +43,7 @@ pub fn default_log_dir() -> PathBuf {
 }
 
 /// Returns the default per-request timeout of the registry backend. Kept
-/// short because a read holds the group's fetch claim for its whole duration,
+/// short because a read holds the block group's fetch claim for its whole duration,
 /// and the readers waiting behind that claim are FUSE worker threads.
 #[inline]
 fn default_registry_http_timeout() -> Duration {
@@ -64,7 +64,7 @@ pub fn default_prefetch_concurrent_blob_count() -> usize {
 }
 
 /// Returns the default per-blob prefetch timeout. Generous, because a blob
-/// prefetch downloads every group of the blob in the background; the bound
+/// prefetch downloads every block group of the blob in the background; the bound
 /// only exists to unwedge a stalled blob.
 #[inline]
 pub fn default_prefetch_timeout() -> Duration {
@@ -147,8 +147,8 @@ pub struct RegistryConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     /// The per-request timeout (connect + read), e.g. `5s` or `1m`; `0s`
-    /// disables the timeout. A request fetches one chunk group, so this
-    /// bounds a single group download.
+    /// disables the timeout. A request fetches one chunk block group, so this
+    /// bounds a single block group download.
     #[serde(default = "default_registry_http_timeout", with = "humantime_serde")]
     pub timeout: Duration,
 
@@ -268,7 +268,7 @@ pub struct PrefetchConfig {
     pub concurrent_blob_count: usize,
 
     /// The per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching
-    /// one whole blob may take, while `http.timeout` bounds each group
+    /// one whole blob may take, while `http.timeout` bounds each block group
     /// request within it; `0s` disables the bound.
     #[serde(default = "default_prefetch_timeout", with = "humantime_serde")]
     pub timeout: Duration,

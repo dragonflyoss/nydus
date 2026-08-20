@@ -196,7 +196,7 @@ func waitPrefetchQuiesce(t *testing.T, socketPath string) {
 
 // saveTrace GETs the /trace endpoint from the mount's apiserver socket, saves
 // the raw JSON access-pattern document to path, and returns the number of
-// recorded (blob, group) access patterns.
+// recorded (blob, block group) access patterns.
 func saveTrace(t *testing.T, socketPath, path string) int {
 	t.Helper()
 
@@ -222,7 +222,7 @@ func saveTrace(t *testing.T, socketPath, path string) int {
 		Version  uint32 `json:"version"`
 		Patterns []struct {
 			BlobIndex  uint32 `json:"blob_index"`
-			GroupIndex uint32 `json:"group_index"`
+			BlockGroupIndex uint32 `json:"block_group_index"`
 		} `json:"patterns"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &doc))

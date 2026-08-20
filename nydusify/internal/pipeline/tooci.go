@@ -221,15 +221,15 @@ func unpackLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor,
 			if err != nil {
 				return errors.Wrap(err, "open compressor")
 			}
-			unpackErr := nydus.RunNydusToTar(ctx, nydus.UnpackOption{
+			exportErr := nydus.RunNydusExport(ctx, nydus.ExportOption{
 				BuilderPath: opt.BuilderPath,
 				BlobPath:    blobPath,
 				LogLevel:    opt.LogLevel,
 			}, io.MultiWriter(compressor, diffIDer.Hash()))
-			if closeErr := compressor.Close(); unpackErr == nil {
-				unpackErr = closeErr
+			if closeErr := compressor.Close(); exportErr == nil {
+				exportErr = closeErr
 			}
-			return unpackErr
+			return exportErr
 		},
 	)
 	if err != nil {

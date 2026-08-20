@@ -41,7 +41,7 @@ const (
 
 // NydusBlobFooterMagic is the 8 raw ASCII bytes at the start of the footer,
 // written as-is (same style as the "LPBLMETA" blob meta and "LPGRPMAP"
-// groupmap sidecars).
+// block group map sidecars).
 const NydusBlobFooterMagic = "LPFOOTER"
 
 // BlobMetaFile is a per-layer blob meta artifact packed into the bootstrap layer

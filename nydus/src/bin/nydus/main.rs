@@ -5,6 +5,7 @@ use nydus_config::{default_log_dir, VersionValueParser, NAME};
 pub mod api_server;
 pub mod build;
 pub mod check;
+pub mod export;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
 pub mod fuse;
@@ -52,9 +53,18 @@ pub enum Command {
         author,
         version,
         about = "Build a nydus filesystem image",
-        long_about = "Build a chunk-based nydus filesystem image from a directory, producing a full blob and an optional standalone bootstrap. With --type nydus-tar, unpack a nydus full blob back into an uncompressed OCI layer tar stream."
+        long_about = "Build a chunk-based nydus filesystem image from a directory, producing a full blob and an optional standalone bootstrap."
     )]
     Build(build::BuildCommand),
+
+    #[command(
+        name = "export",
+        author,
+        version,
+        about = "Export a nydus image as an OCI layer tar stream",
+        long_about = "Export a nydus full blob back into an uncompressed OCI layer tar stream, written to a file or stdout."
+    )]
+    Export(export::ExportCommand),
 
     #[command(
         name = "check",
@@ -138,6 +148,7 @@ impl Command {
     pub fn execute(self) -> Result<()> {
         match self {
             Self::Build(cmd) => cmd.execute(),
+            Self::Export(cmd) => cmd.execute(),
             Self::Check(cmd) => cmd.execute(),
             Self::Merge(cmd) => cmd.execute(),
             Self::Optimize(cmd) => cmd.execute(),
@@ -162,8 +173,36 @@ fn main() -> std::process::ExitCode {
     match args.command.execute() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("Error: {}", err.report());
+            print_error(&err);
             std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Prints the error and its cause chain in the cargo style — a colored
+/// `error:` line matching clap's own output, then the causes indented under
+/// `Caused by:` — instead of one run-on `a: b: c` line.
+fn print_error(err: &nydus::Error) {
+    let red = anstyle::Style::new()
+        .bold()
+        .fg_color(Some(anstyle::AnsiColor::Red.into()));
+    let bold = anstyle::Style::new().bold();
+    anstream::eprintln!("{red}error:{red:#} {err}");
+
+    let mut causes = Vec::new();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+    match causes.as_slice() {
+        [] => {}
+        [only] => anstream::eprintln!("\n{bold}Caused by:{bold:#}\n    {only}"),
+        causes => {
+            anstream::eprintln!("\n{bold}Caused by:{bold:#}");
+            for (index, cause) in causes.iter().enumerate() {
+                anstream::eprintln!("    {index}: {cause}");
+            }
         }
     }
 }

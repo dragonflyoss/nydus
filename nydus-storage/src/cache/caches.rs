@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
 use nydus_backend::BlobBackend;
-use nydus_format::blob::BlobMetadataGroup;
+use nydus_format::blob::BlobMetadataBlockGroup;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use super::{BlobCache, LocalBlobCache, RemoteBlobCache};
@@ -138,8 +138,8 @@ impl BlobCaches {
         Ok(self.cache(blob_index)?.is_redirect_blob())
     }
 
-    /// Prefetch every group of the blob identified by `blob_index`. An
-    /// "ondemand" redirect blob is dispatched group by group into the source
+    /// Prefetch every block group of the blob identified by `blob_index`. An
+    /// "ondemand" redirect blob is dispatched block group by block group into the source
     /// blobs' caches instead of building its own cache file, fetching its
     /// segments concurrently with up to `threads` workers. A non-zero
     /// `timeout` bounds the whole blob's prefetch; on expiry the prefetch
@@ -156,27 +156,27 @@ impl BlobCaches {
         // cache directory: with many identical instances cold-starting on one
         // node, only the lock owner streams from the backend while the others
         // wait and then find the work already done through the shared
-        // group_map. On-demand reads never pass through here, so they are
+        // block_group_map. On-demand reads never pass through here, so they are
         // never delayed by the lock. Held (via the guard's file descriptor)
         // until this function returns.
         let _prefetch_lock = cache.prefetch_lock();
         if cache.is_redirect_blob() {
             // Time the ondemand (redirect) blob prefetch and report how many
-            // source groups it warmed vs skipped, so operators can tell
+            // source block groups it warmed vs skipped, so operators can tell
             // whether the streaming warmup outran the workload.
-            let fill_before = nydus_telemetry::metrics::cache_redirect_fill_group_total();
-            let skip_before = nydus_telemetry::metrics::cache_redirect_skip_group_total();
+            let fill_before = nydus_telemetry::metrics::cache_redirect_fill_block_group_total();
+            let skip_before = nydus_telemetry::metrics::cache_redirect_skip_block_group_total();
             let bytes_before = nydus_telemetry::metrics::backend_redirect_read_bytes_total();
             let start = Instant::now();
             let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), threads, deadline);
             let elapsed = start.elapsed();
             info!(
-                "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} groups, skipped {} groups, fetched {} bytes",
+                "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} block groups, skipped {} block groups, fetched {} bytes",
                 blob_index,
                 elapsed,
                 threads.max(1),
-                nydus_telemetry::metrics::cache_redirect_fill_group_total() - fill_before,
-                nydus_telemetry::metrics::cache_redirect_skip_group_total() - skip_before,
+                nydus_telemetry::metrics::cache_redirect_fill_block_group_total() - fill_before,
+                nydus_telemetry::metrics::cache_redirect_skip_block_group_total() - skip_before,
                 nydus_telemetry::metrics::backend_redirect_read_bytes_total() - bytes_before,
             );
             result
@@ -185,11 +185,11 @@ impl BlobCaches {
         }
     }
 
-    /// Phase-0 prefetch for a redirect blob: stream its groups in optimized
+    /// Phase-0 prefetch for a redirect blob: stream its block groups in optimized
     /// order and fill the decoded bytes into the source blobs' caches so early
     /// on-demand reads hit cache. Segments are fetched concurrently with up to
-    /// `threads` workers. Per-group failures are logged and skipped so a bad
-    /// group can never poison the source caches or abort the warmup.
+    /// `threads` workers. Per-block group failures are logged and skipped so a bad
+    /// block group can never poison the source caches or abort the warmup.
     fn prefetch_redirect_blob(
         &self,
         blob_index: u16,
@@ -197,47 +197,46 @@ impl BlobCaches {
         threads: usize,
         deadline: Option<Instant>,
     ) -> io::Result<()> {
-        // A redirect group is already done when its bytes are resident in the
+        // A redirect block group is already done when its bytes are resident in the
         // source blob's cache (readiness is shared across processes through
-        // the source group_map). Segments made entirely of done groups are not
+        // the source block_group_map). Segments made entirely of done block groups are not
         // fetched, so re-running the warmup behind another process's progress
         // does close to zero backend work.
-        let skip = |group: &BlobMetadataGroup| -> bool {
-            if !group.is_redirect() {
+        let skip = |block_group: &BlobMetadataBlockGroup| -> bool {
+            if !block_group.is_redirect() {
                 return false;
             }
-            match self.try_cache(group.source_blob_index()) {
-                Some(Ok(source_cache)) => {
-                    source_cache.is_group_ready(group.source_group_index() as usize)
-                }
+            match self.try_cache(block_group.source_blob_index()) {
+                Some(Ok(source_cache)) => source_cache
+                    .is_block_group_ready(block_group.source_block_group_index() as usize),
                 _ => false,
             }
         };
-        cache.for_each_redirect_group(threads, deadline, &skip, &|group, decoded| {
-            if !group.is_redirect() {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_group();
-                warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");
+        cache.for_each_redirect_block_group(threads, deadline, &skip, &|block_group, decoded| {
+            if !block_group.is_redirect() {
+                nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                warn!("ondemand blob {blob_index} contains a non-redirect block group; skipping");
                 return Ok(());
             }
-            let source_blob_index = group.source_blob_index();
-            let source_index = group.source_group_index() as usize;
+            let source_blob_index = block_group.source_blob_index();
+            let source_index = block_group.source_block_group_index() as usize;
             let source_cache = match self.try_cache(source_blob_index) {
                 Some(Ok(cache)) => cache,
                 Some(Err(err)) => {
-                    nydus_telemetry::metrics::inc_cache_redirect_skip_group();
+                    nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
                     warn!("failed to open source blob {source_blob_index} for redirect: {err}");
                     return Ok(());
                 }
                 None => {
-                    nydus_telemetry::metrics::inc_cache_redirect_skip_group();
-                    warn!("ondemand blob {blob_index} redirects to unknown blob {source_blob_index}; skipping group");
+                    nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                    warn!("ondemand blob {blob_index} redirects to unknown blob {source_blob_index}; skipping block group");
                     return Ok(());
                 }
             };
-            if let Err(err) = source_cache.fill_group_from_redirect(source_index, decoded) {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_group();
+            if let Err(err) = source_cache.fill_block_group_from_redirect(source_index, decoded) {
+                nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
                 warn!(
-                    "failed to fill blob {source_blob_index} group {source_index} from ondemand blob {blob_index}: {err}"
+                    "failed to fill blob {source_blob_index} block group {source_index} from ondemand blob {blob_index}: {err}"
                 );
             }
             Ok(())

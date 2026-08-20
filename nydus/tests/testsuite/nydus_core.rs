@@ -62,7 +62,7 @@ fn build_test_image_with_layout(
     let corpus_dir = root.join("corpus");
     fs::create_dir_all(&corpus_dir).unwrap();
     // Two ~1.1 MiB incompressible-ish files so the blob spans multiple
-    // 1 MiB groups.
+    // 1 MiB block groups.
     let mut corpus = HashMap::new();
     for seed in 1u64..=2 {
         let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -227,10 +227,10 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     let trace = core.trace_snapshot();
     assert_eq!(trace.entries.len(), 1);
     assert_eq!(trace.entries[0].blob_index, 1);
-    assert_eq!(trace.entries[0].group_index, 1);
+    assert_eq!(trace.entries[0].block_group_index, 1);
     assert_eq!(
         core.trace_json(),
-        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"group_index\":1}]}"
+        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"block_group_index\":1}]}"
     );
 
     // Unaligned ranges and unknown blobs are rejected.

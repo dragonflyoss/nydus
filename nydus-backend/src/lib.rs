@@ -32,7 +32,7 @@ pub(crate) use registry::Registry;
 pub use nydus_telemetry::metrics::ReadKind;
 
 /// The uncompressed span a backend read decodes to, when it maps to
-/// blob-metadata groups.
+/// blob-metadata block groups.
 #[derive(Debug, Clone, Copy)]
 pub struct UncompressedSpan {
     pub offset: u64,
@@ -40,7 +40,7 @@ pub struct UncompressedSpan {
 }
 
 /// Diagnostic context for a backend read: its kind plus the uncompressed
-/// span it decodes to, when the read maps to blob-meta groups. Raw reads
+/// span it decodes to, when the read maps to blob-meta block groups. Raw reads
 /// (e.g. the blob footer or blob meta region) carry `None`.
 #[derive(Debug, Clone, Copy)]
 pub struct ReadContext {
@@ -49,8 +49,8 @@ pub struct ReadContext {
 }
 
 impl ReadContext {
-    /// Context for a read that decodes to a known uncompressed group span.
-    pub fn group(kind: ReadKind, uncompressed_offset: u64, uncompressed_size: u64) -> Self {
+    /// Context for a read that decodes to a known uncompressed block group span.
+    pub fn block_group(kind: ReadKind, uncompressed_offset: u64, uncompressed_size: u64) -> Self {
         Self {
             kind,
             uncompressed: Some(UncompressedSpan {
@@ -60,7 +60,7 @@ impl ReadContext {
         }
     }
 
-    /// Context for a raw read with no associated uncompressed group span.
+    /// Context for a raw read with no associated uncompressed block group span.
     pub fn raw(kind: ReadKind) -> Self {
         Self {
             kind,

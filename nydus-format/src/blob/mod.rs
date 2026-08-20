@@ -11,9 +11,10 @@ pub mod validate;
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
-    BlobMetadata, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataDigester,
-    BlobMetadataGroup, BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT, BLOB_METADATA_DEFAULT_CHUNK_SIZE,
-    BLOB_METADATA_SUFFIX,
+    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
+    BlobMetadataDigester, BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT,
+    BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE, BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
+    BLOB_METADATA_DEFAULT_CHUNK_SIZE, BLOB_METADATA_SUFFIX,
 };
 
 use std::io::Write;

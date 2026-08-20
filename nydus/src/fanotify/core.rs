@@ -219,7 +219,7 @@ impl FanotifyCore {
             .map(|&idx| &self.devices[idx])
     }
 
-    /// Return true when the authoritative group_map already covers the complete
+    /// Return true when the authoritative block_group_map already covers the complete
     /// aligned range. This never triggers backend I/O.
     pub fn is_range_ready(&self, id: &BlobId, offset: u64, len: u64) -> Result<bool> {
         let end = offset
@@ -261,7 +261,7 @@ impl FanotifyCore {
         }
     }
 
-    /// Remove the fanotify mark on a blob whose group_map is fully ready.
+    /// Remove the fanotify mark on a blob whose block_group_map is fully ready.
     ///
     /// Called from fetch worker threads after a successful fetch. The per-slot
     /// [`AtomicBool`] ensures the readiness probe and the `FAN_MARK_REMOVE`
@@ -285,7 +285,7 @@ impl FanotifyCore {
         if self.unmarked[slot].load(Ordering::Acquire) {
             return false;
         }
-        // O(1) probe: single atomic load on the group_map's shared ALL_READY flag.
+        // O(1) probe: single atomic load on the block_group_map's shared ALL_READY flag.
         if !self.core.blobs.is_all_ready(id).unwrap_or(false) {
             return false;
         }

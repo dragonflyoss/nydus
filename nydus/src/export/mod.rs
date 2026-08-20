@@ -29,7 +29,7 @@ use nydus_format::erofs::{
 const MAX_DEPTH: u32 = 1024;
 
 /// Write the whole filesystem tree of `reader` as an uncompressed tar stream.
-pub fn unpack_to_tar<W: Write>(reader: &ErofsReader, writer: W) -> Result<()> {
+pub fn write_tar<W: Write>(reader: &ErofsReader, writer: W) -> Result<()> {
     let sb = reader.superblock();
     let mut ctx = Unpacker {
         reader,

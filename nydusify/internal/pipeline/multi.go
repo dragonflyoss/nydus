@@ -52,8 +52,8 @@ type MultiSourceOption struct {
 	WorkDir string
 	// ChunkSize is the nydus file chunk size in bytes.
 	ChunkSize uint32
-	// CompressSize is the nydus group uncompressed size in bytes.
-	CompressSize uint32
+	// BlockGroupSize is the nydus block group uncompressed size in bytes.
+	BlockGroupSize uint32
 	// Compressor is the chunk data compressor ("none" or "zstd").
 	Compressor string
 	// LogLevel is forwarded to the `nydus` subprocesses.
@@ -84,8 +84,8 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	if opt.ChunkSize == 0 {
 		opt.ChunkSize = nydus.DefaultChunkSize
 	}
-	if opt.CompressSize == 0 {
-		opt.CompressSize = nydus.DefaultCompressSize
+	if opt.BlockGroupSize == 0 {
+		opt.BlockGroupSize = nydus.DefaultBlockGroupSize
 	}
 	if opt.Platform.OS == "" {
 		opt.Platform = platforms.DefaultSpec()
@@ -262,7 +262,7 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 		SourceDir:    dir,
 		BlobPath:     blobPath,
 		ChunkSize:    opt.ChunkSize,
-		CompressSize: opt.CompressSize,
+		BlockGroupSize: opt.BlockGroupSize,
 		Compressor:   opt.Compressor,
 		LogLevel:     opt.LogLevel,
 		Excludes:     opt.AppendInBootstrap,
@@ -288,7 +288,7 @@ func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 		BuilderPath:  opt.BuilderPath,
 		WorkDir:      opt.WorkDir,
 		ChunkSize:    opt.ChunkSize,
-		CompressSize: opt.CompressSize,
+		BlockGroupSize: opt.BlockGroupSize,
 		Compressor:   opt.Compressor,
 		LogLevel:     opt.LogLevel,
 	})

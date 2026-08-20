@@ -2,7 +2,7 @@
 //! ([`blob_chunk`]), constructing the inode tree ([`inode`], [`dir`]), and
 //! rendering EROFS bootstraps ([`bootstrap`], [`image`]).
 //!
-//! [`build_dir_image`] is the high-level entry point that converts a
+//! [`build_image`] is the high-level entry point that converts a
 //! directory tree into a nydus full blob.
 
 pub mod blob_chunk;
@@ -14,9 +14,8 @@ pub mod layout;
 pub mod merge;
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
@@ -30,104 +29,118 @@ use nydus_format::blob::{
 use nydus_format::erofs::{ErofsDeviceSlot, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_format::utils::sha256_bytes;
 
-/// The minimum group uncompressed size.
-pub const MIN_COMPRESS_SIZE: u32 = 1024 * 1024;
+/// The minimum block group uncompressed size.
+pub const MIN_BLOCK_GROUP_SIZE: u32 = 1024 * 1024;
 
-/// Options for [`build_dir_image`].
-pub struct DirImageOptions<'a> {
+/// Options for [`build_image`].
+pub struct BuildImageOptions {
     /// Source directory to convert. Should be canonicalized so entries match
     /// against `exclude`.
-    pub source: &'a Path,
+    source: PathBuf,
     /// File chunk size in bytes (a power of two, >= the block size, and
     /// block-aligned).
-    pub chunk_size: u32,
-    /// Group uncompressed size in bytes (a power of two, >= 1MiB, and >= the
-    /// chunk size). Controls the uncompressed size of each blob meta group
-    /// used for compression.
-    pub compress_size: u32,
+    chunk_size: u32,
+    /// Block group uncompressed size in bytes (a power of two, >= 1MiB, and >= the
+    /// chunk size): the unit of compression and of a single backend read.
+    block_group_size: u32,
     /// Algorithm to compress data chunks.
-    pub compressor: BlobMetadataCompressor,
+    compressor: BlobMetadataCompressor,
     /// Canonicalized paths inside `source` to omit from the image.
-    pub exclude: &'a HashSet<PathBuf>,
-    /// Also render a standalone bootstrap whose device slot references the
-    /// full blob digest, returned in [`DirImage::standalone_bootstrap`].
-    pub standalone_bootstrap: bool,
+    excludes: HashSet<PathBuf>,
+    /// Also render the standalone bootstrap — its device slot references the
+    /// full blob digest — for the caller to persist.
+    render_standalone_bootstrap: bool,
 }
 
-/// The result of [`build_dir_image`]: the digests, blob meta and footer of
-/// the written full blob, plus the standalone bootstrap when requested.
-pub struct DirImage {
+/// The built image as the caller sees it: the digests, blob meta and footer
+/// of the full blob whose bytes went into the writer.
+pub struct Image {
     /// SHA256 of the compressed data region (the data blob digest).
-    pub data_digest: [u8; EROFS_BLOB_ID_SIZE],
+    pub data_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
     /// SHA256 of the whole full blob file.
     pub full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
     pub blob_metadata: BlobMetadata,
-    pub footer: BlobFooter,
+    pub blob_footer: BlobFooter,
+    /// Rendered when requested, for the caller to persist.
     pub standalone_bootstrap: Option<Vec<u8>>,
 }
 
-impl DirImageOptions<'_> {
-    /// Validate the chunk/compress geometry without touching the filesystem,
-    /// so callers can fail fast before creating output files.
-    pub fn validate(&self) -> Result<()> {
-        // Validate EROFS file chunk size. BlobMetadata groups are formed
+/// Implement BuildImageOptions.
+impl BuildImageOptions {
+    /// Creates validated build options: the chunk/block-group geometry is
+    /// checked here, so a constructed `BuildImageOptions` is valid by definition
+    /// and callers fail fast before creating output files.
+    pub fn new(
+        source: PathBuf,
+        chunk_size: u32,
+        block_group_size: u32,
+        compressor: BlobMetadataCompressor,
+        excludes: HashSet<PathBuf>,
+        render_standalone_bootstrap: bool,
+    ) -> Result<Self> {
+        // Validate EROFS file chunk size. BlobMetadata block groups are formed
         // separately and are at least 1MiB even when file chunk indexes are
         // smaller.
-        if self.chunk_size < EROFS_BLOCK_SIZE {
+        if chunk_size < EROFS_BLOCK_SIZE {
             return Err(Error::InvalidParameter(format!(
-                "chunk size {} must be >= block size {}",
-                self.chunk_size, EROFS_BLOCK_SIZE
-            )));
-        }
-        if !self.chunk_size.is_power_of_two() {
-            return Err(Error::InvalidParameter(format!(
-                "chunk size {} must be a power of two",
-                self.chunk_size
-            )));
-        }
-        if self.chunk_size % EROFS_BLOCK_SIZE != 0 {
-            return Err(Error::InvalidParameter(format!(
-                "chunk size {} must be block aligned",
-                self.chunk_size
+                "chunk size {chunk_size} must be >= block size {EROFS_BLOCK_SIZE}"
             )));
         }
 
-        // Validate compress (group uncompressed) size: a power of two (the
-        // blob meta header stores it as the log2 exponent `group_block_bits`),
+        if !chunk_size.is_power_of_two() {
+            return Err(Error::InvalidParameter(format!(
+                "chunk size {chunk_size} must be a power of two"
+            )));
+        }
+
+        if chunk_size % EROFS_BLOCK_SIZE != 0 {
+            return Err(Error::InvalidParameter(format!(
+                "chunk size {chunk_size} must be block aligned"
+            )));
+        }
+
+        // Validate the block group uncompressed size: a power of two (the
+        // blob meta header stores it as the log2 exponent `block_group_block_bits`),
         // at least 1MiB, and at least the file chunk size so a chunk always
-        // fits in a group.
-        if !self.compress_size.is_power_of_two() || self.compress_size < MIN_COMPRESS_SIZE {
+        // fits in a block group.
+        if !block_group_size.is_power_of_two() || block_group_size < MIN_BLOCK_GROUP_SIZE {
             return Err(Error::InvalidParameter(format!(
-                "compress size {} must be a power of two and at least 1MiB",
-                self.compress_size
+                "block group size {block_group_size} must be a power of two and at least 1MiB"
             )));
         }
-        if self.compress_size < self.chunk_size {
+
+        if block_group_size < chunk_size {
             return Err(Error::InvalidParameter(format!(
-                "compress size {} must be >= chunk size {}",
-                self.compress_size, self.chunk_size
+                "block group size {block_group_size} must be >= chunk size {chunk_size}"
             )));
         }
-        Ok(())
+
+        Ok(Self {
+            source,
+            chunk_size,
+            block_group_size,
+            compressor,
+            excludes,
+            render_standalone_bootstrap,
+        })
     }
 }
 
-/// Convert the source directory into a nydus full blob written to `blob_out`
-/// (`[compressed data][bootstrap][blob meta][footer]`).
-pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<DirImage> {
-    options.validate()?;
-
-    let mut blob_writer = BlobWriter::from_file(
-        blob_out,
+/// Builds the nydus image described by `options`, streaming the full blob
+/// (`[compressed data][bootstrap][blob meta][footer]`) into `writer` strictly
+/// in order, and returns the built [`Image`].
+pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Image> {
+    let mut blob_writer = BlobWriter::from_writer(
+        writer,
         options.chunk_size,
-        options.compress_size,
+        options.block_group_size,
         options.compressor,
     )?;
     let mut inodes = build_tree(
-        options.source,
+        &options.source,
         &mut blob_writer,
         options.chunk_size,
-        options.exclude,
+        &options.excludes,
     )?;
     blob_writer.finish()?;
     // The root's mtime is dropped to keep builds reproducible, so it would drag
@@ -150,8 +163,8 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
 
     let compressed_data_size = blob_writer.data_size();
     let blob_metadata = blob_writer.blob_metadata(blob_id, 0)?;
-    let (blob_file, full_blob_hasher) = blob_writer.into_file_and_data_hasher();
-    let mut blob_writer_stream = HashingWriter::new(BufWriter::new(blob_file), full_blob_hasher);
+    let (writer, full_blob_hasher) = blob_writer.into_parts();
+    let mut blob_writer_stream = HashingWriter::new(BufWriter::new(writer), full_blob_hasher);
 
     let footer = nydus_format::blob::assemble_full_blob(
         &mut blob_writer_stream,
@@ -163,7 +176,7 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
         .finish()
         .context("failed to flush blob")?;
 
-    let standalone_bootstrap = if options.standalone_bootstrap {
+    let standalone_bootstrap = if options.render_standalone_bootstrap {
         let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
             blob_blocks,
             &full_blob_digest,
@@ -178,16 +191,16 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
         None
     };
 
-    Ok(DirImage {
-        data_digest: blob_id,
+    Ok(Image {
+        data_blob_digest: blob_id,
         full_blob_digest,
         blob_metadata,
-        footer,
+        blob_footer: footer,
         standalone_bootstrap,
     })
 }
 
-/// Assemble an ondemand artifact `[group data][blob.meta][footer]` (no
+/// Assemble an ondemand artifact `[block_group data][blob.meta][footer]` (no
 /// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
 pub(crate) fn assemble_ondemand_artifact(
     data: &[u8],

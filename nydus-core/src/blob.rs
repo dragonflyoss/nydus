@@ -177,9 +177,9 @@ impl Blobs {
 
     /// Ensure `[offset, offset + len)` of the blob's dense uncompressed
     /// address space is decoded, CRC-validated, and written to its cache data
-    /// file, fetching missing groups through the backend. Both `offset` and
+    /// file, fetching missing block groups through the backend. Both `offset` and
     /// `len` must be 4 KiB block aligned; the fetch rounds outward to whole
-    /// blob meta groups. Idempotent and safe to call concurrently.
+    /// blob meta block groups. Idempotent and safe to call concurrently.
     pub fn fetch(&self, id: &BlobId, offset: u64, len: u64) -> Result<()> {
         let block_size = EROFS_BLOCK_SIZE as u64;
         if offset % block_size != 0 || len % block_size != 0 {
@@ -198,7 +198,7 @@ impl Blobs {
     }
 
     /// Return cache-ready byte intervals overlapping `[offset, offset + len)`
-    /// without triggering a backend fetch. The group_map remains authoritative.
+    /// without triggering a backend fetch. The block_group_map remains authoritative.
     pub fn ready_ranges(
         &self,
         id: &BlobId,
@@ -214,7 +214,7 @@ impl Blobs {
         })
     }
 
-    /// O(1) fast-path probe: true when every group of the blob is already
+    /// O(1) fast-path probe: true when every block group of the blob is already
     /// decoded into its local cache (a single shared-flag load, no bitmap
     /// scan). On-demand services (uffd, fanotify, FUSE) can consult this per
     /// event — or once per blob, since the answer is sticky — to bypass range

@@ -20,10 +20,10 @@ use super::*;
 pub struct FuseCommand {
     #[arg(
         long,
-        env = "NYDUS_FUSE_BLOB_DIR",
-        help = "Specify the directory path including nydus data blob"
+        env = "NYDUS_FUSE_BLOB_STORE",
+        help = "Specify the content-addressed store directory holding the blobs recorded in the bootstrap, named by their SHA256"
     )]
-    blob_dir: Option<PathBuf>,
+    blob_store: Option<PathBuf>,
 
     #[arg(
         long,
@@ -35,7 +35,7 @@ pub struct FuseCommand {
     #[arg(
         long,
         env = "NYDUS_FUSE_CONFIG",
-        help = "Specify the file path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-dir and --cache-dir can be omitted"
+        help = "Specify the file path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-store and --cache-dir can be omitted"
     )]
     config: Option<PathBuf>,
 
@@ -161,7 +161,7 @@ impl FuseCommand {
         }
 
         // Load the optional storage config. CLI flags take precedence over config
-        // values, so --blob-dir/--cache-dir override the backend/cache directories.
+        // values, so --blob-store/--cache-dir override the backend/cache directories.
         let storage_config = match &self.config {
             Some(path) => Some(Config::load(path).context("failed to load storage config")?),
             None => None,
@@ -203,13 +203,13 @@ impl FuseCommand {
 
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
-        // explicit `--blob-dir` (local backend) or the backend from `--config`.
+        // explicit `--blob-store` (local backend) or the backend from `--config`.
         let backend: Option<Arc<dyn BlobBackend>> = if self.blob.is_some() {
             None
-        } else if let Some(dir) = self.blob_dir.as_ref() {
+        } else if let Some(dir) = self.blob_store.as_ref() {
             if !dir.is_dir() {
                 return Err(Error::InvalidParameter(format!(
-                    "blob-dir {} is not a directory",
+                    "blob-store {} is not a directory",
                     dir.display()
                 )));
             }
@@ -236,7 +236,7 @@ impl FuseCommand {
             }
             _ => {
                 return Err(Error::InvalidParameter(
-                    "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config".to_string(),
+                    "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-store or --config".to_string(),
                 ))
             }
         }

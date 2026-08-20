@@ -740,8 +740,8 @@ impl Coordinator<'_> {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 core.fetch(&id, cache_size, offset, count)
             }));
-            // After a successful fetch, check whether this was the last group of
-            // the blob. If the group_map's sticky ALL_READY flag is now set, remove
+            // After a successful fetch, check whether this was the last block group of
+            // the blob. If the block_group_map's sticky ALL_READY flag is now set, remove
             // the fanotify mark so the kernel stops generating events for this
             // file entirely — subsequent reads hit the page cache without any
             // daemon involvement.

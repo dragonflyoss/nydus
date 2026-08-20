@@ -1,5 +1,5 @@
 //! EROFS-oriented image tooling on top of [`nydus_core`]: image inspection
-//! and unpack, plus optional FUSE / NBD / ublk / fanotify / userfaultfd
+//! and export, plus optional FUSE / NBD / ublk / fanotify / userfaultfd
 //! frontends.
 
 #![warn(unreachable_pub)]
@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 pub mod build;
 pub mod check;
+pub mod export;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
 #[cfg(feature = "fuse")]
@@ -28,7 +29,6 @@ pub mod signal;
 pub mod ublk;
 #[cfg(feature = "uffd")]
 pub mod uffd;
-pub mod unpack;
 
 #[cfg(feature = "fuse")]
 pub use fuse::ErofsFs;

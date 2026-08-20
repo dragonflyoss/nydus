@@ -9,7 +9,7 @@ use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 
 /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
 /// footer starts with the readable string. Same style and `magic + version +
-/// flags` header prefix as the blob meta (`LPBLMETA`) and group_map
+/// flags` header prefix as the blob meta (`LPBLMETA`) and block_group_map
 /// (`LPGRPMAP`) sidecars.
 pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"LPFOOTER";
 /// On-disk format generation, informational only: readers do not gate on it.
@@ -247,7 +247,7 @@ impl BlobFooter {
         // `reserved0` is a future compat-field slot and deliberately not
         // enforced to zero; corruption is caught by the footer crc32c.
         // `bootstrap_blocks` may be zero: an "ondemand" redirect blob carries
-        // only group data plus blob meta and embeds no bootstrap image.
+        // only block group data plus blob meta and embeds no bootstrap image.
         if self.blob_metadata_blocks == 0 {
             return Err(Error::InvalidImage(
                 "nydus footer blob meta block count must be non-zero".to_string(),

@@ -11,21 +11,22 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
-use crate::group_map::GroupMap;
+use crate::block_group_map::BlockGroupMap;
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataGroup, BLOB_METADATA_DEFAULT_CHUNK_SIZE, BLOB_METADATA_SUFFIX,
+    BlobMetadata, BlobMetadataBlockGroup, BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE,
+    BLOB_METADATA_SUFFIX,
 };
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
-use super::group_lock::GroupLocks;
+use super::block_group_lock::BlockGroupLocks;
 use super::{
-    decode_group_from_window, fetch_decode_validate_group_into, plan_prefetch_batches, BlobCache,
-    GroupBuffers,
+    decode_block_group_from_window, fetch_decode_validate_block_group_into, plan_prefetch_batches,
+    BlobCache, BlockGroupBuffers,
 };
 
 #[derive(Clone)]
-enum GroupFlightResult {
+enum BlockGroupFlightResult {
     Success,
     Failure {
         kind: io::ErrorKind,
@@ -33,12 +34,12 @@ enum GroupFlightResult {
     },
 }
 
-struct GroupFlight {
-    result: Mutex<Option<GroupFlightResult>>,
+struct BlockGroupFlight {
+    result: Mutex<Option<BlockGroupFlightResult>>,
     done: Condvar,
 }
 
-impl GroupFlight {
+impl BlockGroupFlight {
     fn new() -> Self {
         Self {
             result: Mutex::new(None),
@@ -54,8 +55,8 @@ impl GroupFlight {
             return;
         }
         let result = match result {
-            Ok(()) => GroupFlightResult::Success,
-            Err(err) => GroupFlightResult::Failure {
+            Ok(()) => BlockGroupFlightResult::Success,
+            Err(err) => BlockGroupFlightResult::Failure {
                 kind: err.kind(),
                 message: Arc::from(err.to_string()),
             },
@@ -70,8 +71,8 @@ impl GroupFlight {
             result = self.done.wait(result).unwrap();
         }
         match result.as_ref().unwrap() {
-            GroupFlightResult::Success => Ok(()),
-            GroupFlightResult::Failure { kind, message } => {
+            BlockGroupFlightResult::Success => Ok(()),
+            BlockGroupFlightResult::Failure { kind, message } => {
                 Err(io::Error::new(*kind, message.to_string()))
             }
         }
@@ -83,10 +84,10 @@ pub struct LocalBlobCache {
     /// Digest naming this blob's cache files, shared by every image that
     /// references the same blob.
     cache_key: [u8; SHA256_DIGEST_SIZE],
-    /// Device/blob index in the merged image, used to attribute on-demand group
+    /// Device/blob index in the merged image, used to attribute on-demand block group
     /// accesses in the access trace.
     blob_index: u32,
-    group_map: GroupMap,
+    block_group_map: BlockGroupMap,
     blob_metadata: BlobMetadata,
     cache_data_path: PathBuf,
     prefetch_lock_path: PathBuf,
@@ -96,10 +97,10 @@ pub struct LocalBlobCache {
     cache_file: RwLock<Option<Arc<File>>>,
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
-    inflight_groups: Mutex<HashMap<usize, Arc<GroupFlight>>>,
+    inflight_block_groups: Mutex<HashMap<usize, Arc<BlockGroupFlight>>>,
     /// Keeps the processes sharing this cache from each fetching the same
-    /// cold group.
-    group_locks: GroupLocks,
+    /// cold block group.
+    block_group_locks: BlockGroupLocks,
 }
 
 impl LocalBlobCache {
@@ -126,22 +127,26 @@ impl LocalBlobCache {
         let blob_metadata_path = cache_dir.join(format!("{cache_key_hex}{BLOB_METADATA_SUFFIX}"));
         let blob_metadata =
             load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
-        nydus_telemetry::metrics::track_blob_groups(cache_key, blob_metadata.group_count() as u64);
+        nydus_telemetry::metrics::track_blob_block_groups(
+            cache_key,
+            blob_metadata.block_group_count() as u64,
+        );
 
         let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
-        let groupmap_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
-        // The group_map is only meaningful together with the cache data file it
-        // describes: a leftover group_map whose data file has been removed
-        // would claim groups are ready while reads hit sparse zeros. Note this
+        let block_block_group_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
+        // The block_group_map is only meaningful together with the cache data file it
+        // describes: a leftover block_group_map whose data file has been removed
+        // would claim block groups are ready while reads hit sparse zeros. Note this
         // before creating the data file below, which would otherwise mask it.
         // (Removing the map while keeping the data is the safe direction and
         // needs no handling.)
-        let stale_groupmap = groupmap_path.exists() && !cache_data_path.exists();
+        let stale_block_block_group_map =
+            block_block_group_map_path.exists() && !cache_data_path.exists();
 
-        // Create the cache data file eagerly, before the group_map, so that
-        // "group_map file exists => data file exists" holds and the check above
-        // can only fire for a genuinely orphaned group_map.
+        // Create the cache data file eagerly, before the block_group_map, so that
+        // "block_group_map file exists => data file exists" holds and the check above
+        // can only fire for a genuinely orphaned block_group_map.
         let data_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -151,38 +156,42 @@ impl LocalBlobCache {
         data_file.set_len(blob_metadata.total_uncompressed_size())?;
         drop(data_file);
 
-        let group_map = GroupMap::open(&groupmap_path, blob_metadata.group_count())?;
-        if stale_groupmap {
+        let block_group_map = BlockGroupMap::open(
+            &block_block_group_map_path,
+            blob_metadata.block_group_count(),
+        )?;
+        if stale_block_block_group_map {
             // Reset in place rather than unlinking: handles already mapping
             // this file observe the reset, whereas a replacement inode would
             // split them off with their readiness invisible to each other.
-            group_map.reset()?;
+            block_group_map.reset()?;
             warn!(
-                "stale group_map without cache data file, reset: {}",
-                groupmap_path.display()
+                "stale block_group_map without cache data file, reset: {}",
+                block_block_group_map_path.display()
             );
         }
 
         let prefetch_lock_path = cache_dir.join(format!("{cache_key_hex}.prefetch.lock"));
-        let group_locks = GroupLocks::new(cache_dir.join(format!("{cache_key_hex}.flight.lock")));
+        let block_group_locks =
+            BlockGroupLocks::new(cache_dir.join(format!("{cache_key_hex}.flight.lock")));
 
         Ok(Self {
             blob_id,
             cache_key,
             blob_index,
-            group_map,
+            block_group_map,
             blob_metadata,
             cache_data_path,
             prefetch_lock_path,
             cache_file: RwLock::new(None),
             backend,
             trace_recorder,
-            inflight_groups: Mutex::new(HashMap::new()),
-            group_locks,
+            inflight_block_groups: Mutex::new(HashMap::new()),
+            block_group_locks,
         })
     }
 
-    /// The blob meta backing this cache (groups, chunks, compressor).
+    /// The blob meta backing this cache (block groups, chunks, compressor).
     pub fn blob_metadata(&self) -> &BlobMetadata {
         &self.blob_metadata
     }
@@ -215,7 +224,7 @@ impl LocalBlobCache {
     ///
     /// The descriptor keeps an unlinked inode alive, so writes through it
     /// still succeed — but they land somewhere nobody else can reach, while
-    /// the shared group_map goes on advertising those groups as ready. Better
+    /// the shared block_group_map goes on advertising those block groups as ready. Better
     /// to stop than to publish readiness for bytes other processes cannot see.
     fn ensure_data_file_linked(&self, cache_file: &File) -> io::Result<()> {
         if cache_file.metadata()?.nlink() == 0 {
@@ -230,24 +239,24 @@ impl LocalBlobCache {
         Ok(())
     }
 
-    fn ensure_group(
+    fn ensure_block_group(
         &self,
-        group_index: usize,
-        group: &BlobMetadataGroup,
+        block_group_index: usize,
+        block_group: &BlobMetadataBlockGroup,
         cache_file: &File,
     ) -> io::Result<()> {
-        if self.group_map.is_ready(group_index)? {
-            nydus_telemetry::metrics::inc_cache_hit_group();
+        if self.block_group_map.is_ready(block_group_index)? {
+            nydus_telemetry::metrics::inc_cache_hit_block_group();
             return Ok(());
         }
 
         let (flight, leader) = {
-            let mut inflight = self.inflight_groups.lock().unwrap();
-            match inflight.get(&group_index) {
+            let mut inflight = self.inflight_block_groups.lock().unwrap();
+            match inflight.get(&block_group_index) {
                 Some(flight) => (flight.clone(), false),
                 None => {
-                    let flight = Arc::new(GroupFlight::new());
-                    inflight.insert(group_index, flight.clone());
+                    let flight = Arc::new(BlockGroupFlight::new());
+                    inflight.insert(block_group_index, flight.clone());
                     (flight, true)
                 }
             }
@@ -256,58 +265,61 @@ impl LocalBlobCache {
             return flight.wait();
         }
 
-        // The leader owns job-local decode buffers. Different cold groups can be
-        // fetched concurrently while callers of this group join the same flight.
+        // The leader owns job-local decode buffers. Different cold block groups can be
+        // fetched concurrently while callers of this block group join the same flight.
         //
         // LeaderGuard ensures that even when the closure panics, every follower
-        // waiting on this group is unblocked with an error and the inflight slot
-        // is freed. Without this, a panic in fetch_decode_validate_group_into
+        // waiting on this block group is unblocked with an error and the inflight slot
+        // is freed. Without this, a panic in fetch_decode_validate_block_group_into
         // (or any helper it calls) would leave followers permanently stuck in
         // flight.wait().
         let _guard = LeaderGuard {
             flight: flight.clone(),
-            group_index,
-            inflight: &self.inflight_groups,
+            block_group_index,
+            inflight: &self.inflight_block_groups,
         };
 
         let result = (|| {
-            if self.group_map.is_ready(group_index)? {
-                nydus_telemetry::metrics::inc_cache_hit_group();
+            if self.block_group_map.is_ready(block_group_index)? {
+                nydus_telemetry::metrics::inc_cache_hit_block_group();
                 return Ok(());
             }
             // Per-core isolation: a cache created through NydusCore records into
             // that core's recorder only, while FUSE-path caches (no recorder) feed
             // the process-global trace behind the apiserver /trace endpoint.
             if let Some(recorder) = self.trace_recorder.as_ref() {
-                recorder.record_group_access(self.blob_index, group_index as u32);
+                recorder.record_block_group_access(self.blob_index, block_group_index as u32);
             } else {
-                crate::access_trace::record_group_access(self.blob_index, group_index as u32);
+                crate::access_trace::record_block_group_access(
+                    self.blob_index,
+                    block_group_index as u32,
+                );
             }
 
-            // Claim the group across the processes sharing this cache. The
-            // in-process flight above already left a single leader per group,
+            // Claim the block group across the processes sharing this cache. The
+            // in-process flight above already left a single leader per block group,
             // which is what makes the descriptor-owned lock meaningful here.
-            // Whoever waited usually finds the group published on the way out,
+            // Whoever waited usually finds the block group published on the way out,
             // so the re-check below is what actually removes the duplicate
             // backend traffic.
-            let _claim = self.group_locks.acquire(group_index);
-            if self.group_map.is_ready(group_index)? {
-                nydus_telemetry::metrics::inc_cache_hit_group();
+            let _claim = self.block_group_locks.acquire(block_group_index);
+            if self.block_group_map.is_ready(block_group_index)? {
+                nydus_telemetry::metrics::inc_cache_hit_block_group();
                 return Ok(());
             }
 
-            let mut buffers = GroupBuffers::default();
-            let decoded = fetch_decode_validate_group_into(
+            let mut buffers = BlockGroupBuffers::default();
+            let decoded = fetch_decode_validate_block_group_into(
                 &self.blob_id,
                 &self.blob_metadata,
                 &self.backend,
-                group,
+                block_group,
                 &mut buffers,
                 ReadKind::OnDemand,
             )?;
-            write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
-            self.group_map.set_ready(group_index)?;
-            nydus_telemetry::metrics::inc_cache_ondemand_fill_group();
+            write_all_at(cache_file, block_group.uncompressed_byte_offset(), decoded)?;
+            self.block_group_map.set_ready(block_group_index)?;
+            nydus_telemetry::metrics::inc_cache_ondemand_fill_block_group();
             Ok(())
         })();
 
@@ -318,11 +330,11 @@ impl LocalBlobCache {
         result
     }
 
-    /// Ensure every group overlapping `[offset, offset + len)` is decoded and
+    /// Ensure every block group overlapping `[offset, offset + len)` is decoded and
     /// written to the cache file. Shared by `read_at` and `ensure_range`.
     fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
-        // Redirect (ondemand) blobs have a non-uniform group layout, so the
-        // O(1) division-based group lookup below does not apply; they are
+        // Redirect (ondemand) blobs have a non-uniform block group layout, so the
+        // O(1) division-based block group lookup below does not apply; they are
         // consumed exclusively through `stream_redirect`.
         if self.blob_metadata.is_redirect_blob() {
             return Err(io::Error::new(
@@ -335,100 +347,116 @@ impl LocalBlobCache {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
 
-        // Fast path: the sticky all-ready flag says every group is already
-        // decoded into the cache file, so skip the per-group walk entirely.
-        if self.group_map.is_all_ready() {
-            nydus_telemetry::metrics::inc_cache_hit_group();
+        // Fast path: the sticky all-ready flag says every block group is already
+        // decoded into the cache file, so skip the per-block group walk entirely.
+        if self.block_group_map.is_all_ready() {
+            nydus_telemetry::metrics::inc_cache_hit_block_group();
             return Ok(());
         }
 
-        let groups = self.group_span(offset, end)?;
-        let (first_group, last_group) = groups.into_inner();
+        let block_groups = self.block_group_span(offset, end)?;
+        let (first_block_group, last_block_group) = block_groups.into_inner();
 
-        for group_index in first_group..=last_group {
-            let group = *self.blob_metadata.group_at(group_index).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
-            })?;
-            self.ensure_group(group_index, &group, cache_file)?;
+        for block_group_index in first_block_group..=last_block_group {
+            let block_group = *self
+                .blob_metadata
+                .block_group_at(block_group_index)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "blob meta block_group not found",
+                    )
+                })?;
+            self.ensure_block_group(block_group_index, &block_group, cache_file)?;
         }
         Ok(())
     }
 
     /// Map the byte range `[offset, end)` of the dense uncompressed address
-    /// space to the inclusive span of group indexes covering it: an O(1)
-    /// group lookup at both ends. Groups are dense and contiguous, so every
-    /// group between the first and last also overlaps the range.
-    fn group_span(&self, offset: u64, end: u64) -> io::Result<std::ops::RangeInclusive<usize>> {
+    /// space to the inclusive span of block group indexes covering it: an O(1)
+    /// block group lookup at both ends. Block groups are dense and contiguous, so every
+    /// block group between the first and last also overlaps the range.
+    fn block_group_span(
+        &self,
+        offset: u64,
+        end: u64,
+    ) -> io::Result<std::ops::RangeInclusive<usize>> {
         let first = self
             .blob_metadata
-            .group_index_for_byte_offset(offset)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+            .block_group_index_for_byte_offset(offset)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "blob meta block_group not found")
+            })?;
         let last = self
             .blob_metadata
-            .group_index_for_byte_offset(end - 1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+            .block_group_index_for_byte_offset(end - 1)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "blob meta block_group not found")
+            })?;
         Ok(first..=last)
     }
 
-    /// Fetch the contiguous compressed window covering `groups[batch]` from
+    /// Fetch the contiguous compressed window covering `block_groups[batch]` from
     /// the backend into `window` (resized to fit), returning the window's base
     /// offset within the blob. One backend request covers the whole window (a
-    /// contiguous batch of groups); its uncompressed span is reported for
+    /// contiguous batch of block groups); its uncompressed span is reported for
     /// diagnostics.
     fn fetch_window(
         &self,
-        groups: &[BlobMetadataGroup],
+        block_groups: &[BlobMetadataBlockGroup],
         batch: &Range<usize>,
         window: &mut Vec<u8>,
     ) -> io::Result<u64> {
-        let window_base = groups[batch.start].compressed_byte_offset();
-        let window_end = groups[batch.end - 1].compressed_byte_end();
+        let window_base = block_groups[batch.start].compressed_byte_offset();
+        let window_end = block_groups[batch.end - 1].compressed_byte_end();
         let window_len = usize::try_from(window_end - window_base).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "blob group window size exceeds usize",
+                "blob block_group window size exceeds usize",
             )
         })?;
         window.resize(window_len, 0);
-        let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
-        let uncompressed_size = groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
-        let ctx = ReadContext::group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
+        let uncompressed_offset = block_groups[batch.start].uncompressed_byte_offset();
+        let uncompressed_size =
+            block_groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
+        let ctx =
+            ReadContext::block_group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
         self.backend
             .read_range_into(&self.blob_id, window_base, window, ctx)?;
         Ok(window_base)
     }
 
-    /// Fetch one redirect-blob batch (a contiguous range of groups) in a
-    /// single backend read, then decode and hand each group to `cb`. `window`
+    /// Fetch one redirect-blob batch (a contiguous range of block groups) in a
+    /// single backend read, then decode and hand each block group to `cb`. `window`
     /// and `decoded` are caller-owned scratch buffers so a worker thread can
-    /// reuse them across batches. Per-group decode/CRC failures are skipped
+    /// reuse them across batches. Per-block group decode/CRC failures are skipped
     /// with a warning; `cb` errors propagate to abort the stream.
     fn stream_redirect_batch(
         &self,
-        groups: &[BlobMetadataGroup],
+        block_groups: &[BlobMetadataBlockGroup],
         batch: std::ops::Range<usize>,
         window: &mut Vec<u8>,
         decoded: &mut Vec<u8>,
-        cb: &(dyn Fn(&BlobMetadataGroup, &[u8]) -> io::Result<()> + Sync),
+        cb: &(dyn Fn(&BlobMetadataBlockGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
-        let window_base = self.fetch_window(groups, &batch, window)?;
+        let window_base = self.fetch_window(block_groups, &batch, window)?;
         nydus_telemetry::metrics::record_backend_redirect_read(window.len() as u64);
 
         for index in batch {
-            let group = &groups[index];
-            if let Err(err) = decode_group_from_window(
+            let block_group = &block_groups[index];
+            if let Err(err) = decode_block_group_from_window(
                 &self.blob_metadata,
                 &self.backend,
-                group,
+                block_group,
                 window_base,
                 window,
                 decoded,
             ) {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_group();
-                warn!("skipping redirect group {index}: {err}");
+                nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                warn!("skipping redirect block_group {index}: {err}");
                 continue;
             }
-            cb(group, decoded)?;
+            cb(block_group, decoded)?;
         }
         Ok(())
     }
@@ -448,19 +476,19 @@ impl Drop for LocalBlobCache {
         if opened {
             nydus_telemetry::metrics::dec_cache_opened_files();
         }
-        nydus_telemetry::metrics::untrack_blob_groups(&self.cache_key);
+        nydus_telemetry::metrics::untrack_blob_block_groups(&self.cache_key);
     }
 }
 
 impl BlobCache for LocalBlobCache {
     fn prefetch_all(&self, deadline: Option<Instant>) -> io::Result<()> {
-        let groups = self.blob_metadata.groups();
-        if groups.is_empty() {
+        let block_groups = self.blob_metadata.block_groups();
+        if block_groups.is_empty() {
             return Ok(());
         }
         // Fast path: another process (or an earlier run) already decoded every
-        // group; skip the batch planning and per-group readiness scan.
-        if !self.blob_metadata.is_redirect_blob() && self.group_map.is_all_ready() {
+        // block group; skip the batch planning and per-block group readiness scan.
+        if !self.blob_metadata.is_redirect_blob() && self.block_group_map.is_all_ready() {
             return Ok(());
         }
 
@@ -469,17 +497,19 @@ impl BlobCache for LocalBlobCache {
         // make sure the file it fills is still the one other processes read.
         self.ensure_data_file_linked(&cache_file)?;
         // Prefetch owns its decode buffers and does not take `fetch_lock`, so it
-        // never blocks on-demand FUSE reads. The group_map is internally locked
+        // never blocks on-demand FUSE reads. The block_group_map is internally locked
         // and `set_ready` is idempotent, so racing with a read at worst decodes
-        // the same group twice into identical bytes at the same cache offset.
+        // the same block group twice into identical bytes at the same cache offset.
         let mut decoded = Vec::new();
         let mut window = Vec::new();
 
-        for batch in plan_prefetch_batches(groups, BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64) {
+        for batch in
+            plan_prefetch_batches(block_groups, BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE as u64)
+        {
             super::check_prefetch_deadline(deadline)?;
             if batch
                 .clone()
-                .map(|index| self.group_map.is_ready(index))
+                .map(|index| self.block_group_map.is_ready(index))
                 .collect::<io::Result<Vec<_>>>()?
                 .into_iter()
                 .all(|ready| ready)
@@ -487,32 +517,32 @@ impl BlobCache for LocalBlobCache {
                 continue;
             }
 
-            let window_base = self.fetch_window(groups, &batch, &mut window)?;
+            let window_base = self.fetch_window(block_groups, &batch, &mut window)?;
 
             for index in batch {
-                if self.group_map.is_ready(index)? {
+                if self.block_group_map.is_ready(index)? {
                     continue;
                 }
-                let group = &groups[index];
-                decode_group_from_window(
+                let block_group = &block_groups[index];
+                decode_block_group_from_window(
                     &self.blob_metadata,
                     &self.backend,
-                    group,
+                    block_group,
                     window_base,
                     &window,
                     &mut decoded,
                 )?;
                 write_all_at(
                     cache_file.as_ref(),
-                    group.uncompressed_byte_offset(),
+                    block_group.uncompressed_byte_offset(),
                     &decoded,
                 )?;
-                self.group_map.set_ready(index)?;
-                nydus_telemetry::metrics::inc_cache_fill_group();
+                self.block_group_map.set_ready(index)?;
+                nydus_telemetry::metrics::inc_cache_fill_block_group();
             }
         }
 
-        // A successful full prefetch means every group is now ready (decoded
+        // A successful full prefetch means every block group is now ready (decoded
         // here or observed ready from another process), so guarantee the
         // sticky ALL_READY flag is latched before returning. set_ready
         // normally latches it through the shared ready counter, but a
@@ -520,7 +550,7 @@ impl BlobCache for LocalBlobCache {
         // the counter short forever; the authoritative bitmap scan inside
         // latch_all_ready() latches the flag regardless.
         if !self.blob_metadata.is_redirect_blob() {
-            self.group_map.latch_all_ready();
+            self.block_group_map.latch_all_ready();
         }
 
         Ok(())
@@ -535,7 +565,7 @@ impl BlobCache for LocalBlobCache {
         self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref())?;
 
         // The cache file mirrors the dense uncompressed address space, so once
-        // the covering groups are decoded the absolute offset indexes straight
+        // the covering block groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
         cache_file.as_ref().read_exact_at(dst, offset)
     }
@@ -566,20 +596,32 @@ impl BlobCache for LocalBlobCache {
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob probe range overflow")
         })?;
-        let (first, last) = self.group_span(offset, end)?.into_inner();
+        let (first, last) = self.block_group_span(offset, end)?.into_inner();
 
-        self.group_map
-            .ready_group_ranges(first, last)?
+        self.block_group_map
+            .ready_block_group_ranges(first, last)?
             .into_iter()
-            .map(|groups| {
-                let first_group = self.blob_metadata.group_at(groups.start).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
-                })?;
-                let last_group = self.blob_metadata.group_at(groups.end - 1).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
-                })?;
-                Ok(first_group.uncompressed_byte_offset().max(offset)
-                    ..last_group.uncompressed_byte_end().min(end))
+            .map(|block_groups| {
+                let first_block_group = self
+                    .blob_metadata
+                    .block_group_at(block_groups.start)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "blob meta block_group not found",
+                        )
+                    })?;
+                let last_block_group = self
+                    .blob_metadata
+                    .block_group_at(block_groups.end - 1)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "blob meta block_group not found",
+                        )
+                    })?;
+                Ok(first_block_group.uncompressed_byte_offset().max(offset)
+                    ..last_block_group.uncompressed_byte_end().min(end))
             })
             .collect()
     }
@@ -593,7 +635,7 @@ impl BlobCache for LocalBlobCache {
     /// prefetcher: locking failures degrade to prefetching without the lock
     /// rather than failing the prefetch, and the guard is released when the
     /// returned file is dropped — including on process death, so a crashed
-    /// owner's lock is taken over and the group_map-driven skip logic resumes
+    /// owner's lock is taken over and the block_group_map-driven skip logic resumes
     /// where it left off.
     fn prefetch_lock(&self) -> Option<File> {
         let file = match OpenOptions::new()
@@ -630,11 +672,11 @@ impl BlobCache for LocalBlobCache {
                 return None;
             }
             // Another process is prefetching this blob. For a regular blob the
-            // shared group_map tells us when the owner has finished everything,
+            // shared block_group_map tells us when the owner has finished everything,
             // so we can stop waiting; the caller's prefetch then reduces to a
             // cheap all-ready scan. A redirect blob never marks its own map,
             // so keep waiting for the lock and rely on batch skipping.
-            if !self.blob_metadata.is_redirect_blob() && self.group_map.latch_all_ready() {
+            if !self.blob_metadata.is_redirect_blob() && self.block_group_map.latch_all_ready() {
                 return None;
             }
             if !contention_logged {
@@ -648,67 +690,69 @@ impl BlobCache for LocalBlobCache {
         }
     }
 
-    fn is_group_ready(&self, group_index: usize) -> bool {
-        self.group_map.is_ready(group_index).unwrap_or(false)
+    fn is_block_group_ready(&self, block_group_index: usize) -> bool {
+        self.block_group_map
+            .is_ready(block_group_index)
+            .unwrap_or(false)
     }
 
     fn is_all_ready(&self) -> bool {
-        // A redirect blob never marks its own group_map (its groups fill other
+        // A redirect blob never marks its own block_group_map (its block groups fill other
         // blobs' caches), so the flag is meaningless there.
-        !self.blob_metadata.is_redirect_blob() && self.group_map.is_all_ready()
+        !self.blob_metadata.is_redirect_blob() && self.block_group_map.is_all_ready()
     }
 
-    fn for_each_redirect_group(
+    fn for_each_redirect_block_group(
         &self,
         threads: usize,
         deadline: Option<Instant>,
-        skip: &(dyn Fn(&BlobMetadataGroup) -> bool + Sync),
-        cb: &(dyn Fn(&BlobMetadataGroup, &[u8]) -> io::Result<()> + Sync),
+        skip: &(dyn Fn(&BlobMetadataBlockGroup) -> bool + Sync),
+        cb: &(dyn Fn(&BlobMetadataBlockGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
-        let groups = self.blob_metadata.groups();
-        if groups.is_empty() {
+        let block_groups = self.blob_metadata.block_groups();
+        if block_groups.is_empty() {
             return Ok(());
         }
 
-        // Segments whose groups are all already done (per `skip`, typically
-        // backed by the shared source groupmaps) are not fetched at all, so a
+        // Segments whose block groups are all already done (per `skip`, typically
+        // backed by the shared source block_block_group_maps) are not fetched at all, so a
         // process re-running the warmup behind another one does close to zero
         // backend work. Partially-done batches are still fetched whole to
         // keep the backend reads contiguous.
         let batch_done = |batch: &std::ops::Range<usize>| -> bool {
-            batch.clone().all(|index| skip(&groups[index]))
+            batch.clone().all(|index| skip(&block_groups[index]))
         };
 
         // A small ondemand blob (fits in one batch) or a single worker is
         // streamed sequentially with default-sized batches: batching and
         // extra registry connections would add overhead without overlapping any
         // work.
-        let total_uncompressed: u64 = groups
+        let total_uncompressed: u64 = block_groups
             .iter()
-            .map(|group| group.uncompressed_byte_size())
+            .map(|block_group| block_group.uncompressed_byte_size())
             .sum();
         if threads <= 1 || total_uncompressed <= super::REDIRECT_PREFETCH_BATCH_SIZE {
             let mut window = Vec::new();
             let mut decoded = Vec::new();
-            for batch in plan_prefetch_batches(groups, super::REDIRECT_PREFETCH_BATCH_SIZE) {
+            for batch in plan_prefetch_batches(block_groups, super::REDIRECT_PREFETCH_BATCH_SIZE) {
                 super::check_prefetch_deadline(deadline)?;
                 if batch_done(&batch) {
                     continue;
                 }
-                self.stream_redirect_batch(groups, batch, &mut window, &mut decoded, cb)?;
+                self.stream_redirect_batch(block_groups, batch, &mut window, &mut decoded, cb)?;
             }
             return Ok(());
         }
 
-        // Larger blob: fetch batches concurrently. The earliest groups are
+        // Larger blob: fetch batches concurrently. The earliest block groups are
         // emitted one per batch (a "ramp") so they land in the first wave of
         // workers within a single round trip, ahead of the workload's first
         // faults; the rest are bundled into REDIRECT_PREFETCH_BATCH_SIZE
         // batches for throughput.
         let batches = super::plan_redirect_batches(
-            groups,
+            block_groups,
             super::REDIRECT_PREFETCH_BATCH_SIZE,
-            super::REDIRECT_PREFETCH_RAMP_GROUPS,
+            super::REDIRECT_PREFETCH_RAMP_BLOCK_GROUPS,
         );
         let worker_count = threads.min(batches.len());
         let next = AtomicUsize::new(0);
@@ -734,7 +778,7 @@ impl BlobCache for LocalBlobCache {
                             continue;
                         }
                         if let Err(err) = self.stream_redirect_batch(
-                            groups,
+                            block_groups,
                             batch.clone(),
                             &mut window,
                             &mut decoded,
@@ -754,30 +798,37 @@ impl BlobCache for LocalBlobCache {
         }
     }
 
-    fn fill_group_from_redirect(&self, group_index: usize, decoded: &[u8]) -> io::Result<()> {
-        let group = self.blob_metadata.group_at(group_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "redirect fill group index out of range",
-            )
-        })?;
-        if self.group_map.is_ready(group_index)? {
-            nydus_telemetry::metrics::inc_cache_hit_group();
+    fn fill_block_group_from_redirect(
+        &self,
+        block_group_index: usize,
+        decoded: &[u8],
+    ) -> io::Result<()> {
+        let block_group = self
+            .blob_metadata
+            .block_group_at(block_group_index)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "redirect fill block_group index out of range",
+                )
+            })?;
+        if self.block_group_map.is_ready(block_group_index)? {
+            nydus_telemetry::metrics::inc_cache_hit_block_group();
             return Ok(());
         }
-        // Cross-check against this blob's own group metadata: the redirect
-        // group's crc32 was copied from this source group at optimize time, so
+        // Cross-check against this blob's own block group metadata: the redirect
+        // block group's crc32 was copied from this source block group at optimize time, so
         // any divergence (stale optimize artifact, corrupted transfer) is
         // caught here before it can poison the cache.
-        super::validate_group_with_metrics(&self.backend, group, decoded)?;
+        super::validate_block_group_with_metrics(&self.backend, block_group, decoded)?;
         let cache_file = self.cache_file()?;
         write_all_at(
             cache_file.as_ref(),
-            group.uncompressed_byte_offset(),
+            block_group.uncompressed_byte_offset(),
             decoded,
         )?;
-        self.group_map.set_ready(group_index)?;
-        nydus_telemetry::metrics::inc_cache_redirect_fill_group();
+        self.block_group_map.set_ready(block_group_index)?;
+        nydus_telemetry::metrics::inc_cache_redirect_fill_block_group();
         Ok(())
     }
 }
@@ -815,12 +866,12 @@ fn load_or_fetch_blob_metadata(
 
 /// Drop guard that ensures a leader always signals its flight and cleans up
 /// the inflight map, even when the fetch body panics. Without this, a panic in
-/// `fetch_decode_validate_group_into` (or any helper it calls) would leave
+/// `fetch_decode_validate_block_group_into` (or any helper it calls) would leave
 /// follower threads permanently blocked in `flight.wait()`.
 struct LeaderGuard<'a> {
-    flight: Arc<GroupFlight>,
-    group_index: usize,
-    inflight: &'a Mutex<HashMap<usize, Arc<GroupFlight>>>,
+    flight: Arc<BlockGroupFlight>,
+    block_group_index: usize,
+    inflight: &'a Mutex<HashMap<usize, Arc<BlockGroupFlight>>>,
 }
 
 impl<'a> Drop for LeaderGuard<'a> {
@@ -828,9 +879,12 @@ impl<'a> Drop for LeaderGuard<'a> {
         // complete is idempotent: if the leader called `flight.complete(...)`
         // normally before Drop runs, this is a no-op.
         self.flight.complete(&Err(io::Error::other(
-            "group leader panicked or was abandoned",
+            "block_group leader panicked or was abandoned",
         )));
-        self.inflight.lock().unwrap().remove(&self.group_index);
+        self.inflight
+            .lock()
+            .unwrap()
+            .remove(&self.block_group_index);
     }
 }
 
@@ -853,7 +907,7 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataChunk, BlobMetadataGroup};
+    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk};
     use nydus_format::utils::sha256_bytes;
     use std::path::Path;
     use tempfile::tempdir;
@@ -870,7 +924,7 @@ mod tests {
         BlobMetadata::from_parts(
             blob_id,
             1,
-            vec![BlobMetadataGroup::new(0, 1, 0, 4096, crc32).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32).unwrap()],
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
         )
         .unwrap()
@@ -879,7 +933,7 @@ mod tests {
     use nydus_format::utils::write_minimal_full_blob;
 
     /// Wraps a real backend and counts data-range reads, so tests can assert
-    /// that cross-process sharing (group_map + prefetch lock + batch skip)
+    /// that cross-process sharing (block_group_map + prefetch lock + batch skip)
     /// actually eliminates duplicate backend traffic.
     struct CountingBackend {
         inner: Local,
@@ -932,11 +986,11 @@ mod tests {
         cached.read_at(512, &mut buf).unwrap();
 
         assert_eq!(buf, payload[512..1536]);
-        assert!(cached.group_map.is_ready(0).unwrap());
+        assert!(cached.block_group_map.is_ready(0).unwrap());
     }
 
     #[test]
-    fn stale_groupmap_without_data_file_is_reset() {
+    fn stale_block_block_group_map_without_data_file_is_reset() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x3du8; 4096];
@@ -945,26 +999,26 @@ mod tests {
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
-        // Warm the cache: data file created, group marked ready, sticky
+        // Warm the cache: data file created, block group marked ready, sticky
         // all-ready flag latched.
         {
             let cached =
                 LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
             let mut buf = vec![0u8; 1024];
             cached.read_at(0, &mut buf).unwrap();
-            assert!(cached.group_map.is_all_ready());
+            assert!(cached.block_group_map.is_all_ready());
         }
 
         // Model the operational accident: the data file is removed while the
-        // group_map survives. Reopening must reset the group_map instead of
+        // block_group_map survives. Reopening must reset the block_group_map instead of
         // trusting ready bits that now point at sparse holes.
         let cache_key = backend.cache_key(&full_blob_id).unwrap();
         let prefix = hex_string(&cache_key);
         fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
 
         let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
-        assert!(!reopened.group_map.is_ready(0).unwrap());
-        assert!(!reopened.group_map.is_all_ready());
+        assert!(!reopened.block_group_map.is_ready(0).unwrap());
+        assert!(!reopened.block_group_map.is_all_ready());
 
         // The blob still reads correctly end-to-end after the reset.
         let mut buf = vec![0u8; 1024];
@@ -973,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_groupmap_reset_keeps_the_same_inode() {
+    fn stale_block_block_group_map_reset_keeps_the_same_inode() {
         use std::os::unix::fs::MetadataExt;
 
         let backend_dir = tempdir().unwrap();
@@ -984,32 +1038,32 @@ mod tests {
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
-        // A live handle keeps the group_map mapped throughout, standing in for
+        // A live handle keeps the block_group_map mapped throughout, standing in for
         // a process that is already running when the accident happens.
         let live =
             LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
         let mut buf = vec![0u8; 1024];
         live.read_at(0, &mut buf).unwrap();
-        assert!(live.group_map.is_ready(0).unwrap());
+        assert!(live.block_group_map.is_ready(0).unwrap());
 
         let cache_key = backend.cache_key(&full_blob_id).unwrap();
         let prefix = hex_string(&cache_key);
-        let groupmap_path = cache_dir.path().join(format!("{prefix}.group.map"));
-        let before = fs::metadata(&groupmap_path).unwrap().ino();
+        let block_block_group_map_path = cache_dir.path().join(format!("{prefix}.group.map"));
+        let before = fs::metadata(&block_block_group_map_path).unwrap().ino();
         fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
 
         let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
         assert_eq!(
-            fs::metadata(&groupmap_path).unwrap().ino(),
+            fs::metadata(&block_block_group_map_path).unwrap().ino(),
             before,
-            "the reset must not replace the group_map file"
+            "the reset must not replace the block_group_map file"
         );
 
         // Because the inode is unchanged, the reset is visible through the
         // mapping the live handle already holds; a replacement inode would
         // have left it advertising readiness nobody else can see.
-        assert!(!live.group_map.is_ready(0).unwrap());
-        assert!(!reopened.group_map.is_ready(0).unwrap());
+        assert!(!live.block_group_map.is_ready(0).unwrap());
+        assert!(!reopened.block_group_map.is_ready(0).unwrap());
     }
 
     #[test]
@@ -1031,12 +1085,12 @@ mod tests {
 
         let guard = owner.prefetch_lock().expect("first handle takes the lock");
 
-        // The owner finished all groups: the contender must give up on the
-        // lock (returning None) instead of waiting, since the shared group_map
+        // The owner finished all block groups: the contender must give up on the
+        // lock (returning None) instead of waiting, since the shared block_group_map
         // already reports everything ready.
-        owner.group_map.set_ready(0).unwrap();
+        owner.block_group_map.set_ready(0).unwrap();
         assert!(waiter.prefetch_lock().is_none());
-        assert!(waiter.is_group_ready(0));
+        assert!(waiter.is_block_group_ready(0));
 
         // Once the owner releases the lock, it is acquirable again.
         drop(guard);
@@ -1080,7 +1134,7 @@ mod tests {
         let reader = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
 
         // Another instance holds the prefetch lock; the on-demand read path
-        // must proceed immediately (fetch the cold group itself) rather than
+        // must proceed immediately (fetch the cold block group itself) rather than
         // queueing behind the lock.
         let _guard = owner.prefetch_lock().expect("owner takes the lock");
         let mut buf = vec![0u8; 1024];
@@ -1120,13 +1174,13 @@ mod tests {
         assert!(after_owner > 0, "owner must stream from the backend");
 
         // While the owner still holds the lock, a contending instance sees
-        // every group ready through the shared group_map and gives up on the
+        // every block group ready through the shared block_group_map and gives up on the
         // lock (None) instead of waiting.
         assert!(second.prefetch_lock().is_none());
         drop(guard);
 
         // Repeating the prefetch afterwards issues zero backend reads: every
-        // group is already ready in the shared cache.
+        // block group is already ready in the shared cache.
         second.prefetch_all(None).unwrap();
         assert_eq!(backend.reads(), after_owner, "waiter must not re-download");
 
@@ -1143,12 +1197,12 @@ mod tests {
         let payload = vec![0x9cu8; 4096];
         let crc32 = crc32c::crc32c(&payload);
 
-        // An ondemand (redirect) blob whose single group redirects to source
-        // blob 1 group 0; its data region carries a copy of the source bytes.
+        // An ondemand (redirect) blob whose single block group redirects to source
+        // blob 1 block group 0; its data region carries a copy of the source bytes.
         let redirect_meta = BlobMetadata::from_parts(
             sha256_bytes(&payload),
             1,
-            vec![BlobMetadataGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
+            vec![BlobMetadataBlockGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
             Vec::new(),
         )
         .unwrap();
@@ -1169,22 +1223,27 @@ mod tests {
             let baseline = backend.reads();
             let delivered = AtomicUsize::new(0);
             cache
-                .for_each_redirect_group(1, None, &|_group| skip_all, &|group, decoded| {
-                    assert!(group.is_redirect());
-                    assert_eq!(decoded, payload);
-                    delivered.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
+                .for_each_redirect_block_group(
+                    1,
+                    None,
+                    &|_block_group| skip_all,
+                    &|block_group, decoded| {
+                        assert!(block_group.is_redirect());
+                        assert_eq!(decoded, payload);
+                        delivered.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
                 .unwrap();
             (backend.reads() - baseline, delivered.load(Ordering::SeqCst))
         };
 
-        // Nothing done yet: the batch is fetched and the group delivered.
+        // Nothing done yet: the batch is fetched and the block group delivered.
         let (reads, delivered) = run(false);
         assert!(reads > 0);
         assert_eq!(delivered, 1);
 
-        // Every group reported done (e.g. resident in the source caches of a
+        // Every block group reported done (e.g. resident in the source caches of a
         // faster sibling instance): no backend fetch, no callback at all.
         let (reads, delivered) = run(true);
         assert_eq!(reads, 0, "fully-done batch must not be fetched");
@@ -1242,7 +1301,7 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("crc32"));
-        assert!(!cached.group_map.is_ready(0).unwrap());
+        assert!(!cached.block_group_map.is_ready(0).unwrap());
     }
 
     #[test]
@@ -1261,7 +1320,7 @@ mod tests {
         cached.read_at(256, &mut buf).unwrap();
 
         assert_eq!(buf, payload[256..768]);
-        assert!(cached.group_map.is_ready(0).unwrap());
+        assert!(cached.block_group_map.is_ready(0).unwrap());
         assert!(cache_dir
             .path()
             .join(format!("{}.blob.data", hex_string(&full_blob_id)))
@@ -1281,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_group_from_redirect_validates_then_caches() {
+    fn fill_block_group_from_redirect_validates_then_caches() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x6eu8; 4096];
@@ -1293,28 +1352,30 @@ mod tests {
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
         assert!(!cached.is_redirect_blob());
 
-        // Wrong length is rejected and the group stays not-ready.
+        // Wrong length is rejected and the block group stays not-ready.
         let err = cached
-            .fill_group_from_redirect(0, &payload[..1024])
+            .fill_block_group_from_redirect(0, &payload[..1024])
             .unwrap_err();
         assert!(err.to_string().contains("length mismatch"));
-        assert!(!cached.group_map.is_ready(0).unwrap());
+        assert!(!cached.block_group_map.is_ready(0).unwrap());
 
         // Corrupted bytes fail the CRC cross-check.
         let mut corrupted = payload.clone();
         corrupted[0] ^= 0xff;
-        let err = cached.fill_group_from_redirect(0, &corrupted).unwrap_err();
-        assert!(super::super::is_group_crc_mismatch(&err));
-        assert!(!cached.group_map.is_ready(0).unwrap());
+        let err = cached
+            .fill_block_group_from_redirect(0, &corrupted)
+            .unwrap_err();
+        assert!(super::super::is_block_group_crc_mismatch(&err));
+        assert!(!cached.block_group_map.is_ready(0).unwrap());
 
         // Valid bytes are cached, marked ready, and served without the backend.
-        cached.fill_group_from_redirect(0, &payload).unwrap();
-        assert!(cached.group_map.is_ready(0).unwrap());
+        cached.fill_block_group_from_redirect(0, &payload).unwrap();
+        assert!(cached.block_group_map.is_ready(0).unwrap());
         let mut buf = vec![0u8; 1024];
         cached.read_at(512, &mut buf).unwrap();
         assert_eq!(buf, payload[512..1536]);
 
         // Out-of-range index is rejected.
-        assert!(cached.fill_group_from_redirect(7, &payload).is_err());
+        assert!(cached.fill_block_group_from_redirect(7, &payload).is_err());
     }
 }
