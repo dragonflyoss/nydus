@@ -94,7 +94,7 @@ func startCoreMount(t *testing.T, nydusBin string, opt coreMountOption) *coreMou
 	args := []string{
 		"fuse",
 		"--bootstrap", opt.bootstrap,
-		"--blob-store", opt.blobDir,
+		"--blob-dir", opt.blobDir,
 		"--cache-dir", opt.cacheDir,
 		"--mountpoint", opt.mnt,
 		"--apiserver", "unix://" + sock,

@@ -3,7 +3,7 @@ package e2e
 // NBD END-TO-END test (local backend, no docker/registry).
 //
 // Boots the real `nydus nbd` daemon against a LOCAL backend (an on-disk blob
-// directory produced by `nydus build --blob-store`, no OCI registry, no docker),
+// directory produced by `nydus build --blob-dir`, no OCI registry, no docker),
 // attaches a free /dev/nbdX, mounts it as EROFS on demand, and asserts — with
 // byte-exact hashes, cache-growth measurements and daemon logs — that cold
 // reads through the NBD socket are correct and demand-paged.

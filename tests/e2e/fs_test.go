@@ -92,9 +92,9 @@ const readOnlyCorpusSeed = 20260806
 // what turns a builder bug into a runtime bug, so the same test list is run
 // against several encodings rather than a single canonical one.
 //
-// Blobs are always written with --blob-store. `nydus fuse` rejects --bootstrap
-// together with --blob, and resolves --blob-store entries by the sha256 name
-// that only --blob-store produces, so a bootstrap-backed mount has no other
+// Blobs are always written with --blob-dir. `nydus fuse` rejects --bootstrap
+// together with --blob, and resolves --blob-dir entries by the sha256 name
+// that only --blob-dir produces, so a bootstrap-backed mount has no other
 // option.
 type fsBuildConfig struct {
 	ID             string
@@ -147,7 +147,7 @@ func fsBuildImage(t *testing.T, nydusBin string, cfg fsBuildConfig, cfgRoot, nam
 		"--chunk-size", strconv.Itoa(cfg.ChunkSize),
 		"--compressor", cfg.Compressor,
 		"--bootstrap", bootstrap,
-		"--blob-store", blobDir,
+		"--blob-dir", blobDir,
 	}
 	if cfg.BlockGroupSize > 0 {
 		args = append(args, "--block-group-size", strconv.Itoa(cfg.BlockGroupSize))

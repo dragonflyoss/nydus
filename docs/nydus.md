@@ -26,7 +26,7 @@ encoded ranges in the stored data region.
 
 - Use one user-visible `blob` artifact as the primary layer output.
 - Allow an optional standalone `bootstrap` artifact for remote metadata-only use.
-- Make `fuse` support either a direct blob path or a bootstrap plus blob-store.
+- Make `fuse` support either a direct blob path or a bootstrap plus blob-dir.
 - Persist a stable blob identifier inside bootstrap metadata.
 - Keep EROFS file chunk indexes logical and map a block to its compression block group
 	in O(1) via constant-sized block groups.
@@ -113,13 +113,13 @@ them.
 ### Image layouts
 
 A nydus image exists in exactly two on-disk layouts, and the `--blob`,
-`--blob-store` and `--bootstrap` flags map onto them across every subcommand:
+`--blob-dir` and `--bootstrap` flags map onto them across every subcommand:
 
 - **Single-file image (`--blob`)** — one self-contained full blob:
 	`[data | bootstrap | blob meta | footer]`. Path-addressed: the consumer
 	opens the file you name. Used for transport, piping (the path may be a
 	FIFO), inspection (`nydus check --blob`) and export (`nydus export`).
-- **Store layout (`--bootstrap` + `--blob-store`)** — a standalone bootstrap
+- **Store layout (`--bootstrap` + `--blob-dir`)** — a standalone bootstrap
 	file plus a content-addressed store directory. Each blob in the store is a
 	full blob named by its own SHA256; the bootstrap is the entry point whose
 	EROFS device table records those SHA256s. Mounts resolve blobs as
@@ -131,11 +131,11 @@ A nydus image exists in exactly two on-disk layouts, and the `--blob`,
 
 ### Build
 
-`nydus build <--blob <BLOB>|--blob-store <BLOB_STORE>> [OPTIONS] <SOURCE>`
+`nydus build <--blob <BLOB>|--blob-dir <BLOB_DIR>> [OPTIONS] <SOURCE>`
 
 The `nydus build` command builds a source directory into the nydus EROFS
 format, in either image layout: `--blob` writes the single-file image,
-`--blob-store` deposits the full blob into a store (see Image layouts above),
+`--blob-dir` deposits the full blob into a store (see Image layouts above),
 and `--bootstrap` additionally emits the standalone metadata-only entry point.
 The reverse direction — turning a nydus full blob back into an OCI layer tar
 stream — is `nydus export` (see below).
@@ -146,7 +146,7 @@ Current CLI help:
 nydus build -h
 Build a nydus filesystem image
 
-Usage: nydus build [OPTIONS] <--blob <BLOB>|--blob-store <BLOB_STORE>> <SOURCE>
+Usage: nydus build [OPTIONS] <--blob <BLOB>|--blob-dir <BLOB_DIR>> <SOURCE>
 
 Arguments:
 	<SOURCE>  Specify the source directory to build the nydus image from
@@ -154,8 +154,8 @@ Arguments:
 Options:
 	--blob <BLOB>
 		Specify the file path to save the image as a single self-contained full blob; if the path is an existing FIFO the blob is streamed into it [env: NYDUS_BUILD_BLOB=]
-	--blob-store <BLOB_STORE>
-		Specify the content-addressed store directory to save the full blob into, named by its SHA256, so mounts resolve it through the bootstrap and images share the store [env: NYDUS_BUILD_BLOB_STORE=]
+	--blob-dir <BLOB_DIR>
+		Specify the content-addressed store directory to save the full blob into, named by its SHA256, so mounts resolve it through the bootstrap and images share the store [env: NYDUS_BUILD_BLOB_DIR=]
 	--bootstrap <BOOTSTRAP>
 		Specify the file path to save the standalone bootstrap: the store layout's entry point, whose device table records each blob's SHA256 [env: NYDUS_BUILD_BOOTSTRAP=]
 	--chunk-size <CHUNK_SIZE>
@@ -172,7 +172,7 @@ Options:
 
 Current implementation notes:
 
-- Exactly one of `--blob` or `--blob-store` is required (enforced at parse time).
+- Exactly one of `--blob` or `--blob-dir` is required (enforced at parse time).
 - `--bootstrap` is optional and emits a standalone metadata-only artifact.
 - `--chunk-size` defaults to `1MiB`, accepts human readable sizes (e.g. `4kib`,
 	`1mib`) or plain byte counts, and controls EROFS file chunk
@@ -190,8 +190,8 @@ Current implementation notes:
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
-- `--blob-store` stores the full blob under `<blob-store>/<full_blob_sha256>` and a
-	standalone blob meta copy under `<blob-store>/<full_blob_sha256>.blob.meta`.
+- `--blob-dir` stores the full blob under `<blob-dir>/<full_blob_sha256>` and a
+	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
 - `--compressor zstd` attempts to compress each blob_meta block group as one
 	unit. If the compressed bytes are larger than 70% of the uncompressed block group,
 	the block group is stored plain and its blob_meta block group record has
@@ -329,7 +329,7 @@ nydus optimize \
   --apiserver unix:///path/to/api.sock \
   --parent-bootstrap /path/to/parent-bootstrap \
   --bootstrap /path/to/bootstrap \
-  --blob-store /path/to/blobs \
+  --blob-dir /path/to/blobs \
   --config /path/to/config.yaml
 
 # Or load the trace from a previously saved JSON file.
@@ -337,7 +337,7 @@ nydus optimize \
   --trace-file /path/to/trace.json \
   --parent-bootstrap /path/to/parent-bootstrap \
   --bootstrap /path/to/bootstrap \
-  --blob-store /path/to/blobs \
+  --blob-dir /path/to/blobs \
   --config /path/to/config.yaml
 ```
 
@@ -358,7 +358,7 @@ Current implementation notes:
 - `--bootstrap` is the rewritten bootstrap output: the parent's inode tree with
 	an appended ondemand device slot and the root `trusted.nydus.prefetch.blobs`
 	xattr updated to list the ondemand device id first.
-- `--blob-store` receives the ondemand blob (named by its full SHA256) and its
+- `--blob-dir` receives the ondemand blob (named by its full SHA256) and its
 	`<digest>.blob.meta` sidecar; the digest is printed in the summary table as
 	`ONDEMAND BLOB DIGEST`.
 - `--config` is the same storage config as `nydus fuse --config`: source block group
@@ -382,7 +382,7 @@ Supported forms:
 
 - `nydus check --blob <blob>`
 - `nydus check --bootstrap <bootstrap>`
-- `nydus check --bootstrap <bootstrap> --blob-store <blob-store>`
+- `nydus check --bootstrap <bootstrap> --blob-dir <blob-dir>`
 - `nydus check --bootstrap <bootstrap> --config <config.yaml>`
 
 Current implementation notes:
@@ -391,18 +391,18 @@ Current implementation notes:
 	footer, and verifies the data-region SHA256 against the device-table blob id.
 - `--bootstrap` inspects metadata only and reports blob sizes from device-table
 	block counts.
-- `--blob-store` is optional for static inspection and is used only to resolve
+- `--blob-dir` is optional for static inspection and is used only to resolve
 	referenced blob files and verify their digests.
 - `--config` supplies the blob directory through the storage config's
-	`backend.config.dir`; an explicit `--blob-store` takes precedence when both are
+	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
 	`chunk_size`, `chunk_count`, `block_group_count`, `chunk_digester`,
 	`chunk_compressor`, and compressed/uncompressed totals when the referenced
 	blob can be resolved.
-- `--blob-store` resolves by scanning full blob candidates. Device slots normally
+- `--blob-dir` resolves by scanning full blob candidates. Device slots normally
 	store the data-region SHA256, while blob files are named by full blob SHA256
-	when produced by `--blob-store`.
+	when produced by `--blob-dir`.
 
 ### Fuse
 
@@ -413,7 +413,7 @@ mountpoint. It is the host filesystem mount entrypoint; microVM integrations
 can instead use [`nydus uffd`](#uffd), and block-device consumers
 [`nydus nbd`](#nbd) or [`nydus ublk`](#ublk). During read path resolution, runtime
 uses the blob id recorded in bootstrap metadata to locate the corresponding
-blob under `--blob-store` and then serves chunk data from that blob.
+blob under `--blob-dir` and then serves chunk data from that blob.
 
 Current implementation notes:
 
@@ -433,12 +433,12 @@ Mount a nydus image through FUSE
 Usage: nydus fuse [OPTIONS] --mountpoint <MOUNTPOINT>
 
 Options:
-	--blob-store <BLOB_STORE>
-		Specify the content-addressed store directory holding the blobs recorded in the bootstrap, named by their SHA256 [env: NYDUS_FUSE_BLOB_STORE=]
+	--blob-dir <BLOB_DIR>
+		Specify the content-addressed store directory holding the blobs recorded in the bootstrap, named by their SHA256 [env: NYDUS_FUSE_BLOB_DIR=]
 	--cache-dir <CACHE_DIR>
 		Specify the directory path for persistent chunk cache files [env: NYDUS_FUSE_CACHE_DIR=]
 	--config <CONFIG>
-		Specify the file path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-store and --cache-dir can be omitted [env: NYDUS_FUSE_CONFIG=]
+		Specify the file path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-dir and --cache-dir can be omitted [env: NYDUS_FUSE_CONFIG=]
 	--prefetch
 		Specify whether to enable background blob prefetch after mounting. Off by default; when --config is provided, the config's `prefetch.scope` also turns it on [env: NYDUS_FUSE_PREFETCH=]
 	--bootstrap <BOOTSTRAP>
@@ -460,7 +460,7 @@ Options:
 Supported forms:
 
 - `nydus fuse --blob <blob> --mountpoint <mountpoint>`
-- `nydus fuse --bootstrap <bootstrap> --blob-store <blob-store> --mountpoint <mountpoint>`
+- `nydus fuse --bootstrap <bootstrap> --blob-dir <blob-dir> --mountpoint <mountpoint>`
 - `nydus fuse --bootstrap <bootstrap> --config <config.yaml> --mountpoint <mountpoint>`
 
 The fuse command rejects mixed or partial combinations outside these forms.
@@ -468,8 +468,8 @@ The fuse command rejects mixed or partial combinations outside these forms.
 `--config`), runtime fetches and validates requested blob_meta block groups using a
 temporary cache directory that is removed on exit. When `--config` is provided,
 `backend.config.dir` supplies the blob directory and `storage.dir` supplies
-the cache directory, so `--blob-store` and `--cache-dir` can be omitted. Explicit
-`--blob-store`/`--cache-dir` flags take precedence over the config. See
+the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
+`--blob-dir`/`--cache-dir` flags take precedence over the config. See
 [Storage config](#storage-config).
 
 ### Ublk
@@ -702,7 +702,7 @@ Fields:
 
 - `backend.type` selects the blob backend, either `local` or `registry`.
 	- `local`: `config.dir` is the directory holding nydus blob files
-		(equivalent to `--blob-store`).
+		(equivalent to `--blob-dir`).
 	- `registry`: serves blobs on demand from an OCI registry. See
 		[Registry backend](#registry-backend) for the full field list. `nydus
 		check` only supports the `local` backend.
@@ -906,7 +906,7 @@ Redirect (ondemand blob) backend traffic:
 Current output shapes:
 
 - `--blob <path>` writes one full blob exactly at `<path>`.
-- `--blob-store <dir>` writes one full blob at `<dir>/<full_blob_sha256>`.
+- `--blob-dir <dir>` writes one full blob at `<dir>/<full_blob_sha256>`.
 - `--bootstrap <path>` additionally writes a standalone metadata-only bootstrap.
 
 ### Full blob byte layout
@@ -1082,7 +1082,7 @@ This avoids a self-reference problem:
 
 At the same time:
 
-- the full blob file name written by `--blob-store` is the SHA256 of the whole
+- the full blob file name written by `--blob-dir` is the SHA256 of the whole
 	full blob artifact;
 - the device slot blob id still refers to the data region SHA256.
 
@@ -1321,7 +1321,7 @@ Hash and validation summary:
 	and decode, on both the on-demand and prefetch paths.
 - **SHA256 over the data region** — written into the bootstrap device slot as
 	the blob id.
-- **SHA256 over the whole full blob** — the artifact file name (`--blob-store`)
+- **SHA256 over the whole full blob** — the artifact file name (`--blob-dir`)
 	and the OCI layer digest.
 - **CRC32C in the blob meta header and blob footer** — checked before either
 	structure is trusted; the bootstrap has its own EROFS superblock checksum.
@@ -1455,14 +1455,14 @@ When mounting with `--blob`:
 	chunk lookup, fetches encoded block groups from the data region, and validates each
 	decoded block group.
 
-### Bootstrap plus blob-store mount
+### Bootstrap plus blob-dir mount
 
-When mounting with `--bootstrap + --blob-store`:
+When mounting with `--bootstrap + --blob-dir`:
 
 1. Open the bootstrap.
 2. Read every external device slot.
 3. Extract the raw 32-byte blob id from each slot tag.
-4. Resolve the full blob from `blob-store` by scanning footer-bearing candidates
+4. Resolve the full blob from `blob-dir` by scanning footer-bearing candidates
 	and matching the SHA256 of each data region.
 5. `--cache-dir` selects the persistent local cache; otherwise runtime creates a
 	temporary local cache for the mount lifetime.
@@ -2134,7 +2134,7 @@ vs nydus from the layer annotations), and runs the following rules in order
    layers are blobs). When both images are present, it asserts their runtime
    configs are equivalent (env/cmd/entrypoint/working dir/os/architecture).
 2. **bootstrap** — for each nydus image, materializes its blobs and bootstrap
-   and runs `nydus check --bootstrap <b> --blob-store <d>` to statically validate
+   and runs `nydus check --bootstrap <b> --blob-dir <d>` to statically validate
    the metadata and verify blob digests.
 3. **filesystem** — materializes both images into real root filesystems and
    compares them entry by entry. The OCI side is produced by applying its layers
@@ -2233,7 +2233,7 @@ The current validation surface is:
 2. Unit coverage for blob_meta parsing, blob-id/device-slot helpers, local backend
 	lookup, cache validation, and build-time compression decisions.
 3. Integration tests for build full blob, build standalone bootstrap, direct
-	blob mount, bootstrap plus blob-store mount, cache artifact naming, merge, OCI
+	blob mount, bootstrap plus blob-dir mount, cache artifact naming, merge, OCI
 	whiteouts, and optional erofs-utils compatibility.
 4. Round-trip coverage for the reverse conversion: `nydus export`
 	against a freshly built blob at the unit level, and an image-level
