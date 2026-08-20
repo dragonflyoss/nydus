@@ -218,7 +218,7 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 		"optimize",
 		"--parent-bootstrap", parentBootstrap,
 		"--bootstrap", bootstrap,
-		"--blob-store", blobDir,
+		"--blob-dir", blobDir,
 		"--config", configPath,
 		"--log-level", cmp.Or(o.opt.LogLevel, nydus.DefaultLogLevel),
 		"--trace-file", o.opt.Pattern,

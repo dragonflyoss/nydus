@@ -47,10 +47,10 @@ pub struct OptimizeCommand {
 
     #[arg(
         long,
-        env = "NYDUS_OPTIMIZE_BLOB_STORE",
+        env = "NYDUS_OPTIMIZE_BLOB_DIR",
         help = "Specify the content-addressed store directory to save the ondemand blob into, named by its SHA256, next to its `.blob.meta` sidecar"
     )]
-    blob_store: PathBuf,
+    blob_dir: PathBuf,
 
     #[arg(
         long,
@@ -127,17 +127,17 @@ impl OptimizeCommand {
         let ondemand = build_ondemand_blob(&self.parent_bootstrap, &patterns, backend, cache_dir)?;
         let digest_hex = hex_string(&ondemand.full_blob_digest);
 
-        fs::create_dir_all(&self.blob_store).with_context(|| {
+        fs::create_dir_all(&self.blob_dir).with_context(|| {
             format!(
                 "failed to create blob directory: {}",
-                self.blob_store.display()
+                self.blob_dir.display()
             )
         })?;
-        let blob_path = self.blob_store.join(&digest_hex);
+        let blob_path = self.blob_dir.join(&digest_hex);
         fs::write(&blob_path, &ondemand.artifact)
             .with_context(|| format!("failed to write ondemand blob: {}", blob_path.display()))?;
         let blob_metadata_path = self
-            .blob_store
+            .blob_dir
             .join(format!("{digest_hex}{BLOB_METADATA_SUFFIX}"));
         ondemand.blob_metadata.save(&blob_metadata_path)?;
 

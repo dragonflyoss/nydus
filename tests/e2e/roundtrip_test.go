@@ -48,7 +48,7 @@ func TestBlobMount(t *testing.T) {
 			nydusBin := mustLookupExecutable(t, "nydus")
 			blobPath := buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, chunkSize)
 			logNydusCheckOutput(t, nydusBin, "--blob", blobPath)
-			logNydusCheckOutput(t, nydusBin, "--bootstrap", bootstrapPath, "--blob-store", blobDir)
+			logNydusCheckOutput(t, nydusBin, "--bootstrap", bootstrapPath, "--blob-dir", blobDir)
 			func() {
 				unmount := mountNydus(t, nydusBin, "", blobPath, mntDir)
 				defer unmount()
@@ -95,7 +95,7 @@ func TestMergedMount(t *testing.T) {
 	layer1Blob := buildNydusFSImageToDir(t, nydusBin, layer1Bootstrap, blobDir, layer1Dir, 4096)
 	layer2Blob := buildNydusFSImageToDir(t, nydusBin, layer2Bootstrap, blobDir, layer2Dir, 4096)
 	layer3Blob := buildNydusFSImageToDir(t, nydusBin, layer3Bootstrap, blobDir, layer3Dir, 4096)
-	logNydusCheckOutput(t, nydusBin, "--bootstrap", layer1Bootstrap, "--blob-store", blobDir)
+	logNydusCheckOutput(t, nydusBin, "--bootstrap", layer1Bootstrap, "--blob-dir", blobDir)
 
 	mergeNydusBootstrap(
 		t,
@@ -105,7 +105,7 @@ func TestMergedMount(t *testing.T) {
 		layer2Blob,
 		layer3Blob,
 	)
-	logNydusCheckOutput(t, nydusBin, "--bootstrap", mergedBootstrap, "--blob-store", blobDir)
+	logNydusCheckOutput(t, nydusBin, "--bootstrap", mergedBootstrap, "--blob-dir", blobDir)
 
 	func() {
 		unmount := mountNydusBootstrap(t, nydusBin, mergedBootstrap, blobDir, mountpoint)

@@ -17,7 +17,7 @@ use tracing::Level;
 #[command(group(
     clap::ArgGroup::new("blob_output")
         .required(true)
-        .args(["blob", "blob_store"]),
+        .args(["blob", "blob_dir"]),
 ))]
 pub struct BuildCommand {
     #[arg(help = "Specify the source directory to build the nydus image from")]
@@ -32,10 +32,10 @@ pub struct BuildCommand {
 
     #[arg(
         long,
-        env = "NYDUS_BUILD_BLOB_STORE",
+        env = "NYDUS_BUILD_BLOB_DIR",
         help = "Specify the content-addressed store directory to save the full blob into, named by its SHA256, so mounts resolve it through the bootstrap and images share the store"
     )]
-    blob_store: Option<PathBuf>,
+    blob_dir: Option<PathBuf>,
 
     #[arg(
         long,
@@ -197,7 +197,7 @@ impl BuildCommand {
     /// Runs the build: writes the full blob, settles it under its final name,
     /// persists the sidecar artifacts, and prints the summary.
     fn run(&self, options: &BuildImageOptions) -> Result<()> {
-        let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_store.as_deref())?;
+        let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
         let writer = blob_output.create()?;
         let image = build_image(options, writer)
             .with_context(|| format!("failed to build image: {}", blob_output.path().display()))?;
@@ -250,7 +250,7 @@ impl BuildCommand {
 }
 
 /// Where the built full blob lands: a caller-named file (`--blob`) or a
-/// content-addressed store where its SHA256 names it (`--blob-store`).
+/// content-addressed store where its SHA256 names it (`--blob-dir`).
 enum BlobOutput {
     /// The exact path to write; an existing FIFO is streamed into.
     File(PathBuf),
@@ -261,19 +261,19 @@ enum BlobOutput {
 
 /// Implement the blob output lifecycle for BlobOutput.
 impl BlobOutput {
-    fn new(blob: Option<&Path>, blob_store: Option<&Path>) -> Result<Self> {
-        match (blob, blob_store) {
+    fn new(blob: Option<&Path>, blob_dir: Option<&Path>) -> Result<Self> {
+        match (blob, blob_dir) {
             (Some(blob), None) => Ok(Self::File(blob.to_path_buf())),
             (None, Some(dir)) => {
                 fs::create_dir_all(dir)
-                    .with_context(|| format!("failed to create blob-store: {}", dir.display()))?;
+                    .with_context(|| format!("failed to create blob-dir: {}", dir.display()))?;
 
                 Ok(Self::Store {
                     dir: dir.to_path_buf(),
                     temp: Self::temp_path(dir),
                 })
             }
-            _ => unreachable!("clap enforces exactly one of --blob and --blob-store"),
+            _ => unreachable!("clap enforces exactly one of --blob and --blob-dir"),
         }
     }
 
@@ -447,7 +447,7 @@ mod tests {
             "/tmp/source",
             "--blob",
             "/tmp/out.blob",
-            "--blob-store",
+            "--blob-dir",
             "/tmp/blobs",
         ])
         .is_err());
@@ -561,16 +561,16 @@ mod tests {
     fn build_bootstrap_device_slot_uses_full_blob_digest() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("source");
-        let blob_store = dir.path().join("blobs");
+        let blob_dir = dir.path().join("blobs");
         let bootstrap = dir.path().join("nydus-bootstrap.boot");
         fs::create_dir(&source).unwrap();
-        fs::create_dir(&blob_store).unwrap();
+        fs::create_dir(&blob_dir).unwrap();
         fs::write(source.join("hello.txt"), b"hello nydus").unwrap();
 
         BuildCommand {
             source,
             blob: None,
-            blob_store: Some(blob_store.clone()),
+            blob_dir: Some(blob_dir.clone()),
             bootstrap: Some(bootstrap.clone()),
             chunk_size: ByteSize::mib(1),
             block_group_size: ByteSize::mib(4),
@@ -582,7 +582,7 @@ mod tests {
         .execute()
         .unwrap();
 
-        let full_blob_digest = fs::read_dir(&blob_store)
+        let full_blob_digest = fs::read_dir(&blob_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .find(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
