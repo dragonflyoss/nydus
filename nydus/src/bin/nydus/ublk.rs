@@ -131,6 +131,13 @@ impl UblkCommand {
         // Load the storage config.
         let config = Config::load(&self.config)?;
 
+        // Runs the ublk block device service until shutdown.
+        self.run(signals, config)
+    }
+
+    /// Runs the ublk service: builds the core, attaches the device, prints
+    /// its path, and serves I/O until a termination signal stops it.
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         let core = Arc::new(UblkCore::new(&self.bootstrap, config)?);
         info!(
             "serving {} as a {} byte block device",

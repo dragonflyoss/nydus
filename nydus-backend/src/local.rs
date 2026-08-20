@@ -237,7 +237,7 @@ fn probe_full_blob_source(
     path: &Path,
     cache_key: [u8; SHA256_DIGEST_SIZE],
 ) -> io::Result<Option<ResolvedSource>> {
-    let footer = match BlobFooter::read_from_path(path) {
+    let footer = match BlobFooter::from_blob_path(path) {
         Ok(footer) => footer,
         Err(_) => return Ok(None),
     };

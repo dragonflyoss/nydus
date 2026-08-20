@@ -85,26 +85,14 @@ pub fn init_tracing(
     guards
 }
 
-/// Initializes the tracing system for command line tools, which only logs to
-/// stdout and does not log to files.
+/// Initializes the tracing system for command line tools, which logs to
+/// stderr and does not log to files. Diagnostics stay off stdout so command
+/// payloads and reports (tar streams, tables) remain clean.
 pub fn init_command_tracing(log_level: Level, console: bool) -> Vec<WorkerGuard> {
-    init_command_tracing_to(std::io::stdout(), log_level, console)
-}
-
-/// Same as [`init_command_tracing`] but logs to stderr, for commands that
-/// write their payload to stdout.
-pub fn init_command_tracing_stderr(log_level: Level, console: bool) -> Vec<WorkerGuard> {
-    init_command_tracing_to(std::io::stderr(), log_level, console)
-}
-
-fn init_command_tracing_to<W>(writer: W, log_level: Level, console: bool) -> Vec<WorkerGuard>
-where
-    W: std::io::Write + Send + 'static,
-{
     let mut guards = vec![];
 
     // Setup console layer.
-    let (console_writer, console_guard) = tracing_appender::non_blocking(writer);
+    let (console_writer, console_guard) = tracing_appender::non_blocking(std::io::stderr());
     guards.push(console_guard);
 
     // Initialize console layer.

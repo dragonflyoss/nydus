@@ -1,15 +1,16 @@
-use crate::blob::validate::{crc32_with_zeroed_field, validate_incompat_flags};
+use crate::blob::validate::validate_incompat_flags;
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Context, Error, Result};
 use crate::utils::le::{read_u16_from, read_u32_from, read_u64_from};
 use crate::utils::SHA256_DIGEST_SIZE;
 use bitflags::bitflags;
-use crc32c::crc32c_append;
+use crc32c::{crc32c, crc32c_append};
 use memmap2::{Mmap, MmapOptions};
 use std::fmt;
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::mem::{align_of, size_of};
+use std::ops::Range;
 use std::path::Path;
 
 /// On-disk magic: 8 raw ASCII bytes ("LPBLMETA" = LePton BLob META),
@@ -41,7 +42,10 @@ pub const BLOB_METADATA_SUFFIX: &str = ".blob.meta";
 /// representable in a `u32` (2 GiB at most).
 const BLOB_METADATA_MAX_BLOCK_BITS: u8 = 19;
 
-const BLOB_METADATA_HEADER_CRC32_OFFSET: usize = 16;
+/// Range of the crc32 field in the header, for zeroing it when computing
+/// the crc32 over the serialized metadata.
+const BLOB_METADATA_HEADER_CRC32_FIELD: Range<usize> = 16..20;
+
 /// Bytes of the header actually carrying fields; the rest of the 4 KiB
 /// header block is a reserved compat area (writer-zeroed, reader-ignored).
 const BLOB_METADATA_HEADER_FIELD_BYTES: usize = 56;
@@ -341,7 +345,7 @@ impl BlobMetadataHeader {
         // EROFS-style feature gating: unknown incompat (low-half) bits mean
         // the file cannot be read correctly and must be rejected; unknown
         // compat (high-half) bits are ignored.
-        validate_incompat_flags(self.flags, BlobMetadataFlags::all().bits(), "blob meta")?;
+        validate_incompat_flags(self.flags, BlobMetadataFlags::all().bits())?;
         let flags = BlobMetadataFlags::from_bits_truncate(self.flags);
         BlobMetadataCompressor::try_from(flags)?;
         BlobMetadataDigester::try_from(flags)?;
@@ -358,8 +362,7 @@ impl BlobMetadataHeader {
         data[0..8].copy_from_slice(&self.magic);
         data[8..12].copy_from_slice(&self.version.to_le_bytes());
         data[12..16].copy_from_slice(&self.flags.to_le_bytes());
-        data[BLOB_METADATA_HEADER_CRC32_OFFSET..BLOB_METADATA_HEADER_CRC32_OFFSET + 4]
-            .copy_from_slice(&crc32.to_le_bytes());
+        data[BLOB_METADATA_HEADER_CRC32_FIELD].copy_from_slice(&crc32.to_le_bytes());
         data[20..24].copy_from_slice(&self.reserved0.to_le_bytes());
         data[24..32].copy_from_slice(&self.chunks_offset.to_le_bytes());
         data[32..40].copy_from_slice(&self.block_groups_offset.to_le_bytes());
@@ -766,7 +769,7 @@ impl BlobMetadata {
                 block_groups,
             },
         };
-        blob_metadata.header.crc32 = blob_metadata.compute_crc32();
+        blob_metadata.header.crc32 = blob_metadata.compute_crc32_from_parts();
         Ok(blob_metadata)
     }
 
@@ -879,21 +882,42 @@ impl BlobMetadata {
         self.header.metadata_size()
     }
 
-    fn compute_crc32(&self) -> u32 {
+    /// crc32c over the serialized metadata bytes with the crc32 field
+    /// treated as zero: the header (copied and zeroed) seeds the crc that
+    /// continues over the records and padding. The reader verifies the raw
+    /// incoming bytes against it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data` is shorter than the blob meta header.
+    fn compute_crc32(data: &[u8]) -> u32 {
+        let mut header: [u8; BLOB_METADATA_HEADER_SIZE as usize] = data
+            [..BLOB_METADATA_HEADER_SIZE as usize]
+            .try_into()
+            .expect("caller checked the header length");
+        header[BLOB_METADATA_HEADER_CRC32_FIELD].fill(0);
+        crc32c_append(crc32c(&header), &data[BLOB_METADATA_HEADER_SIZE as usize..])
+    }
+
+    fn compute_crc32_from_parts(&self) -> u32 {
         // Seal over the serialized metadata with the crc field zeroed; the
         // header bytes seed the running crc32c that continues over the
         // records and padding.
-        let mut crc32 = crc32_with_zeroed_field(
-            &self.header.to_bytes_with_crc32(0),
-            blob_metadata_crc32_field(),
-        );
+        let mut crc32 = crc32c(&self.header.to_bytes_with_crc32(0));
         for chunk in self.chunks() {
             crc32 = crc32c_append(crc32, &chunk.to_bytes());
         }
         for block_group in self.block_groups() {
             crc32 = crc32c_append(crc32, &block_group.to_bytes());
         }
-        crc32c_append(crc32, &vec![0u8; self.padding_size()])
+        const ZERO_BLOCK: [u8; EROFS_BLOCK_SIZE as usize] = [0u8; EROFS_BLOCK_SIZE as usize];
+        let mut remaining = self.padding_size();
+        while remaining > 0 {
+            let run = remaining.min(ZERO_BLOCK.len());
+            crc32 = crc32c_append(crc32, &ZERO_BLOCK[..run]);
+            remaining -= run;
+        }
+        crc32
     }
 
     fn padding_size(&self) -> usize {
@@ -902,7 +926,7 @@ impl BlobMetadata {
 
     pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
         self.header
-            .write_to_with_crc32(writer, self.compute_crc32())?;
+            .write_to_with_crc32(writer, self.compute_crc32_from_parts())?;
         for chunk in self.chunks() {
             chunk.write_to(writer)?;
         }
@@ -1093,7 +1117,7 @@ fn validate_padding(data: &[u8], header: &BlobMetadataHeader) -> Result<()> {
 }
 
 fn validate_blob_metadata_crc32(data: &[u8], header: &BlobMetadataHeader) -> Result<()> {
-    let computed = compute_blob_metadata_crc32(data);
+    let computed = BlobMetadata::compute_crc32(data);
     if computed != header.crc32() {
         return Err(Error::InvalidImage(format!(
             "blob meta header crc32 mismatch: stored {:#010x}, computed {:#010x}",
@@ -1102,14 +1126,6 @@ fn validate_blob_metadata_crc32(data: &[u8], header: &BlobMetadataHeader) -> Res
         )));
     }
     Ok(())
-}
-
-fn compute_blob_metadata_crc32(data: &[u8]) -> u32 {
-    crc32_with_zeroed_field(data, blob_metadata_crc32_field())
-}
-
-fn blob_metadata_crc32_field() -> std::ops::Range<usize> {
-    BLOB_METADATA_HEADER_CRC32_OFFSET..BLOB_METADATA_HEADER_CRC32_OFFSET + 4
 }
 
 fn validate_tables(
@@ -1385,12 +1401,9 @@ mod tests {
         let mut raw = Vec::new();
         blob_metadata.write_to(&mut raw).unwrap();
 
-        let stored_crc32 = u32::from_le_bytes(
-            raw[BLOB_METADATA_HEADER_CRC32_OFFSET..BLOB_METADATA_HEADER_CRC32_OFFSET + 4]
-                .try_into()
-                .unwrap(),
-        );
-        raw[BLOB_METADATA_HEADER_CRC32_OFFSET..BLOB_METADATA_HEADER_CRC32_OFFSET + 4].fill(0);
+        let stored_crc32 =
+            u32::from_le_bytes(raw[BLOB_METADATA_HEADER_CRC32_FIELD].try_into().unwrap());
+        raw[BLOB_METADATA_HEADER_CRC32_FIELD].fill(0);
 
         assert_eq!(stored_crc32, crc32c::crc32c(&raw));
     }
@@ -1407,12 +1420,9 @@ mod tests {
         .unwrap();
         let mut raw = Vec::new();
         blob_metadata.write_to(&mut raw).unwrap();
-        raw[BLOB_METADATA_HEADER_CRC32_OFFSET] ^= 0xff;
-        let corrupted_crc32 = u32::from_le_bytes(
-            raw[BLOB_METADATA_HEADER_CRC32_OFFSET..BLOB_METADATA_HEADER_CRC32_OFFSET + 4]
-                .try_into()
-                .unwrap(),
-        );
+        raw[BLOB_METADATA_HEADER_CRC32_FIELD.start] ^= 0xff;
+        let corrupted_crc32 =
+            u32::from_le_bytes(raw[BLOB_METADATA_HEADER_CRC32_FIELD].try_into().unwrap());
 
         let loaded = BlobMetadata::loader().from_bytes(&raw).unwrap();
 

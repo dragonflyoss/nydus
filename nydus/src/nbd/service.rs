@@ -319,7 +319,7 @@ impl NbdWorker {
                 // boundaries and there is no way to resync; a reply would
                 // carry a fabricated handle the kernel cannot match, killing
                 // the connection from its side anyway. Drop the session.
-                warn!("nbd: invalid request magic 0x{got:08x}; dropping connection");
+                warn!("nbd: invalid request magic 0x{got:08x} (dropping connection)");
                 return Ok(false);
             }
         };

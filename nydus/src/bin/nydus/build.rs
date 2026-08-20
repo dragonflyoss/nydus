@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use tabled::{settings::Style, Table, Tabled};
 use tracing::Level;
 
-/// The subcommand of build.
 #[derive(Debug, Clone, Parser)]
 #[command(group(
     clap::ArgGroup::new("blob_output")

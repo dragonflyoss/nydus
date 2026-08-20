@@ -1,14 +1,17 @@
 use clap::Parser;
 use nydus::error::{Context, Error, Result};
-use nydus::optimize::{build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file};
-use nydus_backend::build_backend;
+use nydus::optimize::{
+    build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, BlockGroupRef,
+};
+use nydus_backend::{build_backend, BlobBackend};
 use nydus_config::Config;
 use nydus_format::blob::BLOB_METADATA_SUFFIX;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
 use tracing::{info, Level};
 
@@ -83,27 +86,44 @@ impl OptimizeCommand {
     /// Executes the optimize sub command, running the optimize pipeline from
     /// [`nydus::optimize`] and writing out its artifacts.
     pub fn execute(&self) -> Result<()> {
-        // Initialize tracing.
+        // Initializes the tracing subscriber for logging, using the specified log level and
+        // console output preference.
         let _guards = init_command_tracing(self.log_level, self.console);
 
+        // Validates the flag combination before any expensive work.
+        self.validate()?;
+
+        // Prepares the access patterns, blob backend, and cache directory from the raw CLI flags.
+        let (patterns, backend, cache_dir) = self.prepare()?;
+
+        // Runs the optimize pipeline, persisting its artifacts and printing the summary.
+        self.run(&patterns, backend, &cache_dir)
+    }
+
+    /// Validates the flag combination before any expensive work: the
+    /// rewritten bootstrap must not overwrite its parent.
+    fn validate(&self) -> Result<()> {
         if self.parent_bootstrap == self.bootstrap {
             return Err(Error::InvalidParameter(
                 "--parent-bootstrap and --bootstrap must point to different files".to_string(),
             ));
         }
 
+        Ok(())
+    }
+
+    /// Lowers the raw CLI flags into the optimize inputs: the access patterns
+    /// from the trace source, the blob backend, and the local cache directory
+    /// the source block groups are pulled through.
+    fn prepare(&self) -> Result<(Vec<BlockGroupRef>, Arc<dyn BlobBackend>, PathBuf)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
             (Some(path), _) => load_patterns_from_file(path)?,
             (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
-            (None, None) => {
-                return Err(Error::InvalidParameter(
-                    "either --trace-file or --apiserver must be provided".to_string(),
-                ))
-            }
+            _ => unreachable!("clap enforces exactly one of --trace-file and --apiserver"),
         };
         if patterns.is_empty() {
             return Err(Error::InvalidParameter(
-                "no block group accesses found in the access trace; exercise the workload before optimizing"
+                "no block group accesses found in the access trace (exercise the workload before optimizing)"
                     .to_string(),
             ));
         }
@@ -114,17 +134,29 @@ impl OptimizeCommand {
             build_backend(&storage_config.backend).context("failed to build blob backend")?;
         // Source block groups are pulled through the local blob cache, so diskless mode
         // cannot apply.
-        let Some(cache_dir) = &storage_config.storage.dir else {
+        let Some(cache_dir) = storage_config.storage.dir else {
             return Err(Error::InvalidConfig(
                 "optimize requires storage.dir: source block groups are pulled through the local blob cache"
                     .to_string(),
             ));
         };
+
+        Ok((patterns, backend, cache_dir))
+    }
+
+    /// Runs the optimize pipeline: builds the ondemand blob, persists the
+    /// blob, its metadata, and the rewritten bootstrap, and prints the summary.
+    fn run(
+        &self,
+        patterns: &[BlockGroupRef],
+        backend: Arc<dyn BlobBackend>,
+        cache_dir: &Path,
+    ) -> Result<()> {
         fs::create_dir_all(cache_dir).with_context(|| {
             format!("failed to create cache directory: {}", cache_dir.display())
         })?;
 
-        let ondemand = build_ondemand_blob(&self.parent_bootstrap, &patterns, backend, cache_dir)?;
+        let ondemand = build_ondemand_blob(&self.parent_bootstrap, patterns, backend, cache_dir)?;
         let digest_hex = hex_string(&ondemand.full_blob_digest);
 
         fs::create_dir_all(&self.blob_dir).with_context(|| {

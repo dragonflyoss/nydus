@@ -2,25 +2,24 @@ use clap::Parser;
 use nydus::error::{Context, Error, Result};
 use nydus::export::write_tar;
 use nydus_core::ErofsReader;
-use nydus_telemetry::logging::{init_command_tracing, init_command_tracing_stderr};
+use nydus_telemetry::logging::init_command_tracing;
 use std::fs::File;
 use std::io::{self, BufWriter};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::Level;
 
-/// The subcommand of export.
 #[derive(Debug, Clone, Parser)]
 pub struct ExportCommand {
     #[arg(help = "Specify the nydus full blob to export the OCI layer tar stream from")]
     source: PathBuf,
 
     #[arg(
+        short = 'o',
         long,
-        default_value = "-",
         env = "NYDUS_EXPORT_OUTPUT",
-        help = "Specify the file path to save the exported tar stream, or `-` for stdout"
+        help = "Specify the file path to save the exported tar stream (defaults to stdout)"
     )]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     #[arg(
         short = 'l',
@@ -46,14 +45,19 @@ impl ExportCommand {
     /// Executes the export sub command, writing the source blob's OCI layer
     /// tar stream to the output.
     pub fn execute(&self) -> Result<()> {
-        let tar_to_stdout = self.output == Path::new("-");
-        // Logging to stdout would corrupt a tar stream written to stdout.
-        let _guards = if tar_to_stdout {
-            init_command_tracing_stderr(self.log_level, self.console)
-        } else {
-            init_command_tracing(self.log_level, self.console)
-        };
+        // Initializes the tracing subscriber for logging, using the specified log level and
+        // console output preference.
+        let _guards = init_command_tracing(self.log_level, self.console);
 
+        // Validates the source before opening it.
+        self.validate()?;
+
+        // Runs the export, writing the tar stream to the output.
+        self.run()
+    }
+
+    /// Validates that the source is an existing nydus blob file.
+    fn validate(&self) -> Result<()> {
         if !self.source.is_file() {
             return Err(Error::InvalidParameter(format!(
                 "source {} is not a nydus blob file",
@@ -61,17 +65,27 @@ impl ExportCommand {
             )));
         }
 
+        Ok(())
+    }
+
+    /// Runs the export: opens the source blob and streams its OCI layer tar
+    /// to the output file, or to stdout when no output is given.
+    fn run(&self) -> Result<()> {
         let reader = ErofsReader::open_blob(&self.source)
             .with_context(|| format!("failed to open nydus blob: {}", self.source.display()))?;
 
-        if tar_to_stdout {
-            let stdout = io::stdout();
-            write_tar(&reader, BufWriter::new(stdout.lock()))?;
-        } else {
-            let file = File::create(&self.output)
-                .with_context(|| format!("failed to create output: {}", self.output.display()))?;
-            write_tar(&reader, BufWriter::new(file))?;
+        match &self.output {
+            Some(path) => {
+                let file = File::create(path)
+                    .with_context(|| format!("failed to create output: {}", path.display()))?;
+                write_tar(&reader, BufWriter::new(file))?;
+            }
+            None => {
+                let stdout = io::stdout();
+                write_tar(&reader, BufWriter::new(stdout.lock()))?;
+            }
         }
+
         Ok(())
     }
 }
@@ -85,6 +99,7 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::fs;
     use std::io::Read;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn build_and_export(source: &Path, blob: &Path, tar_path: &Path) {
@@ -107,7 +122,7 @@ mod tests {
     #[test]
     fn export_writes_to_stdout_by_default() {
         let cmd = ExportCommand::try_parse_from(["export", "/tmp/layer.blob"]).unwrap();
-        assert_eq!(cmd.output, PathBuf::from("-"));
+        assert_eq!(cmd.output, None);
     }
 
     #[test]

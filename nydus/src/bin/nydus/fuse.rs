@@ -152,13 +152,8 @@ impl FuseCommand {
             self.console,
         );
 
-        let mountpoint = &self.mountpoint;
-        if !mountpoint.is_dir() {
-            return Err(Error::InvalidParameter(format!(
-                "mountpoint {} is not a directory",
-                mountpoint.display()
-            )));
-        }
+        // Validates the mountpoint before any expensive work.
+        self.validate()?;
 
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-dir/--cache-dir override the backend/cache directories.
@@ -166,6 +161,28 @@ impl FuseCommand {
             Some(path) => Some(Config::load(path)?),
             None => None,
         };
+
+        // Runs the FUSE service until shutdown.
+        self.run(storage_config)
+    }
+
+    /// Validates that the mountpoint is an existing directory.
+    fn validate(&self) -> Result<()> {
+        if !self.mountpoint.is_dir() {
+            return Err(Error::InvalidParameter(format!(
+                "mountpoint {} is not a directory",
+                self.mountpoint.display()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Runs the FUSE service: resolves the cache, prefetch, and backend
+    /// settings, opens the EROFS image, mounts it, and serves until a
+    /// termination signal stops it.
+    fn run(&self, storage_config: Option<Config>) -> Result<()> {
+        let mountpoint = &self.mountpoint;
 
         let cache_dir = if let Some(dir) = self.cache_dir.clone() {
             Some(dir)

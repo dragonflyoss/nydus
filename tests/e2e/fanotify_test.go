@@ -387,7 +387,7 @@ func (e *fanotifyEnv) caseEventDriven(t *testing.T) { // C6 — daemon health un
 	// observability artifact, not evidence the path was skipped. We keep only
 	// the ROBUST negative checks as hard assertions.
 	t.Logf("  [C6 info] job-dispatched log lines: %d (lossy)", e.countLogs(`job [0-9]+ dispatched`))
-	t.Logf("  [C6 info] fetch-allow  log lines: %d", e.countLogs(`fetch succeeded; allowing`))
+	t.Logf("  [C6 info] fetch-allow  log lines: %d", e.countLogs(`fetch succeeded`))
 	assert.Equal(t, 0, e.countLogs(`unknown event fd`), "no unknown-device denies for legit reads")
 	assert.Equal(t, 0, e.countLogs(`immediate deny: InvalidRange`), "no invalid-range denies for legit reads")
 	assert.Equal(t, 0, e.countLogs(`fetch backend failure`), "no backend failures against the registry")

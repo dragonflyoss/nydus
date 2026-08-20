@@ -51,6 +51,17 @@ pub struct CheckCommand {
 impl CheckCommand {
     /// Executes the check sub command, statically inspecting the image.
     pub fn execute(&self) -> Result<()> {
+        // Resolves the inspection target from the raw CLI flags.
+        let (kind, path, blob_dir) = self.prepare()?;
+
+        // Runs the inspection and prints the report.
+        self.run(kind, path, blob_dir.as_deref())
+    }
+
+    /// Lowers the raw CLI flags into the inspection target: the image kind,
+    /// its path, and the optional blob directory resolved from --blob-dir or
+    /// the config's local backend.
+    fn prepare(&self) -> Result<(ImageKind, &Path, Option<PathBuf>)> {
         // `check` verifies blobs from a local directory. --blob-dir takes precedence
         // over the config; a config is only usable here when it has a local backend.
         let blob_dir = match &self.blob_dir {
@@ -91,7 +102,13 @@ impl CheckCommand {
             }
         };
 
-        let report = check_image(kind, path, blob_dir.as_deref())?;
+        Ok((kind, path, blob_dir))
+    }
+
+    /// Runs the inspection: checks the image, prints the report, and fails
+    /// on inline data crossing a metadata block.
+    fn run(&self, kind: ImageKind, path: &Path, blob_dir: Option<&Path>) -> Result<()> {
+        let report = check_image(kind, path, blob_dir)?;
 
         print_header(kind, path, &report);
         print_superblock(&report.superblock);
@@ -101,8 +118,7 @@ impl CheckCommand {
 
         if !report.stats.inline_overflows.is_empty() {
             return Err(Error::InvalidImage(format!(
-                "{} inode(s) have inline data crossing a metadata block; \
-                 the kernel cannot read them",
+                "{} inode(s) have inline data crossing a metadata block (the kernel cannot read them)",
                 report.stats.inline_overflows.len()
             )));
         }
