@@ -622,21 +622,17 @@ impl Registry {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> RegistryResult<BlobMetadata> {
         let size = self.fetch_blob_size(blob_id)?;
-        if size < NYDUS_BLOB_FOOTER_SIZE as u64 {
-            return Err(RegistryError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "registry blob is too small for a nydus footer",
-            )));
-        }
+        let footer_offset = BlobFooter::offset_from_size(size)
+            .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
 
-        let mut footer_bytes = vec![0u8; NYDUS_BLOB_FOOTER_SIZE];
+        let mut footer_bytes = [0u8; NYDUS_BLOB_FOOTER_SIZE];
         self.try_read(
             blob_id,
-            size - NYDUS_BLOB_FOOTER_SIZE as u64,
+            footer_offset,
             &mut footer_bytes,
             ReadContext::raw(ReadKind::OnDemand),
         )?;
-        let footer = BlobFooter::parse(&footer_bytes, size)
+        let footer = BlobFooter::from_bytes(&footer_bytes)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
 
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {

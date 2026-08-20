@@ -62,9 +62,17 @@ impl MergeCommand {
     /// Executes the merge sub command, merging the layer blobs into an
     /// overlaid bootstrap.
     pub fn execute(&self) -> Result<()> {
-        // Initialize tracing.
+        // Initializes the tracing subscriber for logging, using the specified log level and
+        // console output preference.
         let _guards = init_command_tracing(self.log_level, self.console);
 
+        // Runs the merge, writing the overlaid bootstrap to the output.
+        self.run()
+    }
+
+    /// Runs the merge: overlays the source layers in order and persists the
+    /// merged bootstrap.
+    fn run(&self) -> Result<()> {
         let whiteout_spec = match self.whiteout_spec {
             WhiteoutSpec::Oci => MergeWhiteoutSpec::Oci,
         };

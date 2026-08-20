@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 use memmap2::Mmap;
 
 use nydus_backend::{BlobBackend, Local};
-use nydus_format::blob::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
+use nydus_format::blob::BlobFooter;
 use nydus_format::erofs::{
     cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOB_ID_SIZE,
     EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE,
@@ -72,7 +72,7 @@ pub struct ErofsReader {
 impl ErofsReader {
     /// Open a nydus blob / bootstrap file for metadata-only inspection.
     pub fn open_metadata_only(path: &Path) -> io::Result<Self> {
-        let mmap = Self::map_file(path)?;
+        let mmap = Self::mmap_file(path)?;
         let image_offset = Self::image_offset_from_footer(&mmap)?.unwrap_or(0);
         let sb_offset = image_offset
             .checked_add(EROFS_SUPER_OFFSET as usize)
@@ -95,7 +95,7 @@ impl ErofsReader {
     /// footer`): everything is served from the file itself, no backend or
     /// cache is involved.
     pub fn open_blob(blob_path: &Path) -> io::Result<Self> {
-        let mmap = Self::map_file(blob_path)?;
+        let mmap = Self::mmap_file(blob_path)?;
         let image_offset = Self::image_offset_from_footer(&mmap)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "nydus blob footer not found")
         })?;
@@ -145,7 +145,7 @@ impl ErofsReader {
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<Self> {
-        let mmap = Self::map_file(bootstrap_path)?;
+        let mmap = Self::mmap_file(bootstrap_path)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
         Self::validate_superblock(sb)?;
@@ -170,21 +170,16 @@ impl ErofsReader {
         })
     }
 
-    fn map_file(path: &Path) -> io::Result<Mmap> {
+    fn mmap_file(path: &Path) -> io::Result<Mmap> {
         let file = fs::File::open(path)?;
-        // SAFETY: file opened read-only, never modified while mapped.
         unsafe { Mmap::map(&file) }
     }
 
     fn image_offset_from_footer(mmap: &[u8]) -> io::Result<Option<usize>> {
-        if mmap.len() < NYDUS_BLOB_FOOTER_SIZE {
+        let Some(footer) = BlobFooter::from_blob_bytes(mmap).map_err(io::Error::other)? else {
             return Ok(None);
-        }
-        let footer_bytes = &mmap[mmap.len() - NYDUS_BLOB_FOOTER_SIZE..];
-        if !BlobFooter::has_magic(footer_bytes) {
-            return Ok(None);
-        }
-        let footer = BlobFooter::parse_from_tail(mmap).map_err(io::Error::other)?;
+        };
+
         usize::try_from(footer.bootstrap_offset())
             .map(Some)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large"))

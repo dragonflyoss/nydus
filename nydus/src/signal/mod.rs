@@ -5,7 +5,8 @@
 use nydus_error::{Context, Error, Result};
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use signal_hook::flag;
-use signal_hook::iterator::{Handle, Signals};
+use signal_hook::iterator::Handle;
+pub use signal_hook::iterator::Signals;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tracing::info;

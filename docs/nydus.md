@@ -207,7 +207,7 @@ Current implementation notes:
 
 ### Export
 
-`nydus export <BLOB> [--output <path>|-]`
+`nydus export <BLOB> [-o <path>]`
 
 A nydus full blob is self-describing: it carries the filesystem tree, the chunk
 data and the footer of exactly one layer. Exporting it back into an OCI layer
@@ -226,8 +226,8 @@ Arguments:
 	<SOURCE>  Specify the nydus full blob to export the OCI layer tar stream from
 
 Options:
-	--output <OUTPUT>
-		Specify the file path to save the exported tar stream, or `-` for stdout [env: NYDUS_EXPORT_OUTPUT=] [default: -]
+	-o, --output <OUTPUT>
+		Specify the file path to save the exported tar stream (defaults to stdout) [env: NYDUS_EXPORT_OUTPUT=]
 	-l, --log-level <LOG_LEVEL>
 		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_EXPORT_LOG_LEVEL=] [default: info]
 ```
@@ -249,7 +249,7 @@ tar entry per inode, streaming file data straight out of the blob:
 Current implementation notes:
 
 - `<SOURCE>` must be a regular file, because the blob is memory-mapped.
-- With `--output -` the tar goes to stdout and logging is redirected to stderr,
+- Without `--output` the tar goes to stdout; logging always goes to stderr,
 	so the stream stays clean for piping.
 - Entries follow EROFS directory order, which is sorted by name, so the output
 	is deterministic for a given blob.

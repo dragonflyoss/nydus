@@ -135,7 +135,6 @@ func RunNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 func RunNydusExport(ctx context.Context, opt ExportOption, dest io.Writer) error {
 	args := []string{
 		"export", opt.BlobPath,
-		"--output", "-",
 		"--log-level", cmp.Or(opt.LogLevel, DefaultLogLevel),
 	}
 

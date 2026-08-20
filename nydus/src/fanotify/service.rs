@@ -592,7 +592,7 @@ impl Coordinator<'_> {
             let event = match parsed {
                 Ok(event) if event.is_overflow() => {
                     return Err(Error::Runtime(
-                        "fanotify queue overflow; stopping fail-closed".to_string(),
+                        "fanotify queue overflow (stopping fail-closed)".to_string(),
                     ));
                 }
                 Ok(event) => event,
@@ -685,7 +685,7 @@ impl Coordinator<'_> {
         match self.core.is_range_ready(&device.id, offset, count) {
             Ok(true) => {
                 debug!(
-                    "fanotify: range [{}, +{}) already ready for blob {}; allowing immediately",
+                    "fanotify: range [{}, +{}) already ready for blob {} (allowing immediately)",
                     offset, count, device.id
                 );
                 respond(&mut permission, Response::Allow)?;
@@ -798,7 +798,7 @@ impl JobTable {
                 let response = match completion.result {
                     CompletionResult::Fetch(Ok(())) => {
                         debug!(
-                            "fanotify: job {} fetch succeeded; allowing",
+                            "fanotify: job {} fetch succeeded (allowing)",
                             completion.job_id
                         );
                         Response::Allow
@@ -820,7 +820,7 @@ impl JobTable {
             }
             CompletionAction::Late => {
                 debug!(
-                    "fanotify: late completion for job {}; response already denied",
+                    "fanotify: late completion for job {} (response already denied)",
                     completion.job_id
                 );
                 Ok(())

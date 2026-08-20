@@ -98,6 +98,14 @@ impl UffdCommand {
         // Load the storage config.
         let config = Config::load(&self.config)?;
 
+        // Runs the userfaultfd service until shutdown.
+        self.run(signals, config)
+    }
+
+    /// Runs the userfaultfd service: builds the core, spawns the signal
+    /// thread, and blocks on the tokio runtime until a termination signal or
+    /// a fatal error stops it.
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         let core = Arc::new(UffdCore::new(&self.bootstrap, config)?);
         let service = Arc::new(UffdService::new(core, self.socket.clone()));
         let signal_service = service.clone();

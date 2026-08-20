@@ -215,7 +215,7 @@ impl BlobCaches {
         cache.for_each_redirect_block_group(threads, deadline, &skip, &|block_group, decoded| {
             if !block_group.is_redirect() {
                 nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
-                warn!("ondemand blob {blob_index} contains a non-redirect block group; skipping");
+                warn!("ondemand blob {blob_index} contains a non-redirect block group (skipping)");
                 return Ok(());
             }
             let source_blob_index = block_group.source_blob_index();
@@ -229,7 +229,7 @@ impl BlobCaches {
                 }
                 None => {
                     nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
-                    warn!("ondemand blob {blob_index} redirects to unknown blob {source_blob_index}; skipping block group");
+                    warn!("ondemand blob {blob_index} redirects to unknown blob {source_blob_index} (skipping block group)");
                     return Ok(());
                 }
             };

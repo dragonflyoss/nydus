@@ -681,7 +681,7 @@ impl BlobCache for LocalBlobCache {
             }
             if !contention_logged {
                 info!(
-                    "prefetch lock for blob {} is held by another process; waiting",
+                    "prefetch lock for blob {} is held by another process (waiting)",
                     self.blob_index
                 );
                 contention_logged = true;

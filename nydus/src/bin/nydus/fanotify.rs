@@ -138,6 +138,14 @@ impl FanotifyCommand {
         // Load the storage config.
         let config = Config::load(&self.config)?;
 
+        // Runs the fanotify service until shutdown.
+        self.run(signals, config)
+    }
+
+    /// Runs the fanotify service: builds the core, spawns the event loop,
+    /// mounts the EROFS bootstrap once the loop is ready, and unmounts it
+    /// again on shutdown before releasing the fanotify group fd.
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         raise_nofile_limit();
         let core = std::sync::Arc::new(
             FanotifyCore::new(&self.bootstrap, config).context("failed to build fanotify core")?,

@@ -129,6 +129,14 @@ impl NbdCommand {
         // Load the storage config.
         let config = Config::load(&self.config)?;
 
+        // Runs the NBD service until shutdown.
+        self.run(signals, config)
+    }
+
+    /// Runs the NBD service: builds the core, attaches the device, spawns
+    /// the workers, optionally mounts the device, and serves until a
+    /// termination signal stops it.
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         let core =
             Arc::new(NbdCore::new(&self.bootstrap, config).context("failed to build nbd core")?);
         let service = Arc::new(NbdService::new(

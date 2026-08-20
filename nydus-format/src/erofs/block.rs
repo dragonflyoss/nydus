@@ -12,6 +12,7 @@ pub fn bytes_to_blocks(size: u64, name: &str) -> Result<u32> {
             "{name} size is not block aligned: {size}"
         )));
     }
+
     u32::try_from(size / EROFS_BLOCK_SIZE as u64)
         .map_err(|err| Error::Overflow(format!("{name} exceeds u32 block count: {err}")))
 }

@@ -7,9 +7,7 @@ use memmap2::Mmap;
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
-use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester, NYDUS_BLOB_FOOTER_SIZE,
-};
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{
     mode_to_erofs_file_type, ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
@@ -436,15 +434,9 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
         .with_context(|| format!("failed to open blob candidate: {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }
         .with_context(|| format!("failed to map blob candidate: {}", path.display()))?;
-    if mmap.len() < NYDUS_BLOB_FOOTER_SIZE {
+    let Some(footer) = BlobFooter::from_blob_bytes(&mmap)? else {
         return Ok(None);
-    }
-    let footer_bytes = &mmap[mmap.len() - NYDUS_BLOB_FOOTER_SIZE..];
-    if !BlobFooter::has_magic(footer_bytes) {
-        return Ok(None);
-    }
-
-    let footer = BlobFooter::parse_from_tail(&mmap)?;
+    };
     let data_start = usize::try_from(footer.compressed_data_offset())
         .map_err(|err| Error::Overflow(format!("compressed data offset too large: {err}")))?;
     let data_size = usize::try_from(footer.compressed_data_size())
