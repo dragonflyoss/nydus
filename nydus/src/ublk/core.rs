@@ -44,10 +44,10 @@ impl UblkCore {
         // block units, and the tail block of the last blob may be partial.
         let device_size = align_up(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
             .ok_or_else(|| Error::Overflow("flattened device size overflow".to_string()))?;
-        // Preparing a blob downloads and validates its meta and sizes its cache
-        // file, which takes seconds for a large image. Left to the first block
-        // read it stalls whoever gets there first — typically `mount`, which
-        // then appears to hang long after the device was announced as ready.
+        // Preparing a blob loads and validates its meta and sizes its cache
+        // file. Doing it up front keeps the first block read (typically
+        // `mount`) from paying for it, and surfaces preparation errors at
+        // startup instead of as I/O errors.
         core.blobs
             .flat_layout()
             .context("failed to prepare the blobs backing the device")?;
