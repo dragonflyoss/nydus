@@ -116,32 +116,34 @@ the page cache dropped before each job — warm nydus cache, cold page cache.
 
 | Benchmark | Unit | FUSE | NBD | ublk | fanotify |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Mount ready | s | | | | |
-| First 1 MiB cold read | s | | | | |
-| Prewarm (full-file cold fetch) | MiB/s | | | | |
-| Sequential read 128K | MiB/s | | | | |
-| Sequential read 4-job 128K | MiB/s | | | | |
-| Random read 128K | MiB/s | | | | |
-| Random read 4-job 128K | MiB/s | | | | |
-| Random read 4K | IOPS | | | | |
-| Random read 4K latency | µs | | | | |
-| Stat | IOPS | | | | |
-| Readdir | IOPS | | | | |
-| Listxattr | IOPS | | | | |
-| Getxattr | IOPS | | | | |
-| Readdir + stat (`ls -l`) | IOPS | | | | |
+| Mount ready | s | 0.23 | 0.23 | 0.23 | 0.22 |
+| First 1 MiB cold read | s | 0.024 | 0.006 | 0.006 | 0.025 |
+| Prewarm (full-file cold fetch) | MiB/s | 902 | 1,345 | 1,239 | 804 |
+| Sequential read 128K | MiB/s | 6,486 | 31,177 | 32,125 | 32,033 |
+| Sequential read 4-job 128K | MiB/s | 24,991 | 109,374 | 58,732 | 55,039 |
+| Random read 128K | MiB/s | 7,569 | 8,304 | 10,105 | 11,356 |
+| Random read 4-job 128K | MiB/s | 35,271 | 44,448 | 41,836 | 44,726 |
+| Random read 4K | IOPS | 1,225,676 | 1,269,728 | 1,318,339 | 1,283,015 |
+| Random read 4K latency | µs | 0.7 | 0.7 | 0.7 | 0.7 |
+| Stat | IOPS | 1,333,959 | 1,522,750 | 1,681,039 | 1,517,389 |
+| Readdir | IOPS | 10,250 | 61,218 | 61,878 | 61,182 |
+| Listxattr | IOPS | 15,449 | 2,216,639 | 2,248,846 | 2,246,635 |
+| Getxattr | IOPS | 15,014 | 2,115,001 | 2,109,951 | 2,158,214 |
+| Readdir + stat (`ls -l`) | IOPS | 93.1 | 95.1 | 126.0 | 118.5 |
 
+- Measured on Ubuntu 24.04 (arm64), Linux 7.0.0, ext4-backed blob store and
+  caches; corpus: 8 × 64 MiB + 256 × 1 MiB + 10,000 small files
+  (~850 MiB blob), 1 MiB chunk size. The erofsfuse column was not available
+  on this host.
 - The unified suite replaces the earlier "Fanotify vs FUSE" (registry
   backend) and "Block device vs FUSE" comparisons; their numbers were
-  produced by different setups and are not directly comparable, so the
-  table above will be filled from a fresh `make test-bench` run.
+  produced by different setups and are not directly comparable.
 - Cold-page `direct=0` fio jobs largely re-warm during each 20 s job (the
   target file is 64 MiB), so sequential rows partly reflect page-cache and
   readahead policy, not just protocol overhead.
-- Mount-ready and first-1MiB-read trade off against each other: `nydus ublk`
-  prepares every blob eagerly at startup so `mount` never stalls, while
-  FUSE/NBD pay the blob preparation on the first read instead — total
-  cold-start cost is roughly constant across modes.
+- The kernel EROFS modes (NBD/ublk/fanotify) serve all metadata in-kernel,
+  which shows up as the readdir/xattr gap over FUSE; warm fanotify reads
+  never leave the kernel at all.
 
 ## Components
 
