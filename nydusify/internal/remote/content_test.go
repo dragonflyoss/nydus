@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
 	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"github.com/containerd/errdefs"
@@ -54,7 +55,7 @@ func testPushRetriesDeferred(t *testing.T, mediaType string) {
 		pusher := &contentTestPusher{commitErr: syscall.ECONNRESET, failDigest: desc.Digest}
 		store := &contentTestStore{contents: contents}
 
-		err := push(context.Background(), store, contentTestResolver{pusher: pusher}, desc, "example.test/image:tag", platforms.All)
+		err := push(context.Background(), store, contentTestResolver{pusher: pusher}, desc, "example.test/image:tag", platforms.All, nil)
 		require.NoError(t, err)
 		attempts := 0
 		for _, writer := range pusher.writers {
@@ -77,13 +78,53 @@ func TestPushDoesNotRetrySourceOpenError(t *testing.T) {
 		pusher := &contentTestPusher{}
 		desc := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageLayer, Digest: digest.FromString("layer"), Size: 5}
 
-		err := push(ctx, store, contentTestResolver{pusher: pusher}, desc, "example.test/image:tag", platforms.All)
+		err := push(ctx, store, contentTestResolver{pusher: pusher}, desc, "example.test/image:tag", platforms.All, nil)
 		require.ErrorIs(t, err, sourceErr)
 		require.Equal(t, 1, store.opens)
 		require.Len(t, pusher.writers, 1)
 		require.Equal(t, 1, pusher.writers[0].closes)
 		require.NoError(t, ctx.Err())
 	})
+}
+
+func TestPushHonorsHandlerWrapper(t *testing.T) {
+	configData := []byte(`{}`)
+	config := contentTestDescriptor(ocispec.MediaTypeImageConfig, configData)
+	layer := contentTestDescriptor(ocispec.MediaTypeImageLayer, []byte("external layer"))
+	manifest := ocispec.Manifest{Config: config, Layers: []ocispec.Descriptor{layer}}
+	manifest.SchemaVersion = 2
+	manifestData, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	manifestDesc := contentTestDescriptor(ocispec.MediaTypeImageManifest, manifestData)
+	store := &contentTestStore{contents: map[digest.Digest][]byte{
+		config.Digest:       configData,
+		manifestDesc.Digest: manifestData,
+	}}
+	pusher := &contentTestPusher{}
+	wrapper := func(h images.Handler) images.Handler {
+		return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+			if desc.Digest == layer.Digest {
+				return nil, images.ErrSkipDesc
+			}
+			return h.Handle(ctx, desc)
+		})
+	}
+
+	err = push(
+		context.Background(),
+		store,
+		contentTestResolver{pusher: pusher},
+		manifestDesc,
+		"example.test/image:tag",
+		platforms.All,
+		wrapper,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, pusher.calls)
+	for _, writer := range pusher.writers {
+		require.NotEqual(t, layer.Digest, writer.desc.Digest)
+	}
+	assertContentTestClosed(t, pusher, store)
 }
 
 func TestPushRetriesRemoteFailures(t *testing.T) {
@@ -102,7 +143,7 @@ func TestPushRetriesRemoteFailures(t *testing.T) {
 				case "commit":
 					pusher.commitErr = remoteErr
 				}
-				err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All)
+				err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All, nil)
 				require.NoError(t, err)
 				require.Equal(t, 2, pusher.calls)
 				require.Equal(t, 1, store.opens)
@@ -137,7 +178,7 @@ func TestPushRetryLimit(t *testing.T) {
 				case "reset":
 					pusher.commitErr = content.ErrReset
 				}
-				err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All)
+				err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All, nil)
 				if phase == "reset" {
 					require.ErrorContains(t, err, "push reset retry limit exceeded")
 					require.NotErrorIs(t, err, content.ErrReset)
@@ -175,7 +216,7 @@ func TestPushDoesNotRetryPermanentErrors(t *testing.T) {
 			case "source-read":
 				store.readErr = permanentErr
 			}
-			err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All)
+			err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All, nil)
 			require.ErrorIs(t, err, permanentErr)
 			require.Equal(t, 1, pusher.calls)
 			assertContentTestClosed(t, pusher, store)
@@ -195,7 +236,7 @@ func TestPushDoesNotRetryNetworkLikeSourceErrors(t *testing.T) {
 			} else {
 				store.readErr = sourceErr
 			}
-			err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All)
+			err := push(context.Background(), store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All, nil)
 			require.ErrorIs(t, err, sourceErr)
 			require.Equal(t, 1, pusher.calls)
 			assertContentTestClosed(t, pusher, store)
@@ -230,7 +271,7 @@ func TestPushCancellation(t *testing.T) {
 				}
 				done := make(chan error, 1)
 				go func() {
-					done <- push(ctx, store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All)
+					done <- push(ctx, store, contentTestResolver{pusher: pusher}, contentTestDescriptor(ocispec.MediaTypeImageLayer, data), "example.test/image:tag", platforms.All, nil)
 				}()
 				synctest.Wait()
 				cancel()
