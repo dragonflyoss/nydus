@@ -158,52 +158,7 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 		return nil, errors.Wrap(err, "write bootstrap layer")
 	}
 
-	// Assemble the final layer list, diff ids and history.
-	layers := make([]ocispec.Descriptor, 0, len(blobDescs)+1)
-	layers = append(layers, blobDescs...)
-	layers = append(layers, *bootstrapDesc)
-
-	diffIDs := make([]digest.Digest, 0, len(layers))
-	history := make([]ocispec.History, 0, len(layers))
-	for _, l := range layers[:len(layers)-1] {
-		diffIDs = append(diffIDs, digest.Digest(l.Annotations[nydus.LayerAnnotationUncompressed]))
-		history = append(history, ocispec.History{
-			CreatedBy: "Nydus Build", Comment: "Nydus Data Layer",
-		})
-	}
-	diffIDs = append(diffIDs, digest.Digest(bootstrapDesc.Annotations[nydus.LayerAnnotationUncompressed]))
-	history = append(history, ocispec.History{
-		CreatedBy: "Nydus Converter", Comment: "Nydus Bootstrap Layer",
-	})
-
-	configJSON, err := buildImageConfig(baseConfig, opt.Platform, diffIDs, history)
-	if err != nil {
-		return nil, errors.Wrap(err, "build image config")
-	}
-	configDesc, err := oci.WriteJSON(ctx, cs, configJSON, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "write image config")
-	}
-	configDesc.MediaType = ocispec.MediaTypeImageConfig
-
-	labels := map[string]string{
-		"containerd.io/gc.ref.content.config": configDesc.Digest.String(),
-	}
-	for idx, l := range layers {
-		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", idx)] = l.Digest.String()
-	}
-
-	manifest := ocispec.Manifest{
-		Versioned: specs.Versioned{SchemaVersion: 2},
-		MediaType: ocispec.MediaTypeImageManifest,
-		Config:    *configDesc,
-		Layers:    layers,
-	}
-	manifestDesc, err := oci.WriteJSON(ctx, cs, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, labels)
-	if err != nil {
-		return nil, errors.Wrap(err, "write manifest")
-	}
-	return manifestDesc, nil
+	return writeNydusManifest(ctx, cs, blobDescs, *bootstrapDesc, baseConfig, opt.Platform, "Nydus Build")
 }
 
 // validateAndReadAppendFiles validates the list of file paths and reads their
@@ -347,6 +302,66 @@ func buildImageConfig(base json.RawMessage, platform ocispec.Platform, diffIDs [
 	return patchImageConfig(base, diffIDs, func(_ []ocispec.History, _ bool) ([]ocispec.History, bool) {
 		return history, true
 	})
+}
+
+func writeNydusManifest(
+	ctx context.Context,
+	cs content.Store,
+	blobDescs []ocispec.Descriptor,
+	bootstrapDesc ocispec.Descriptor,
+	baseConfig json.RawMessage,
+	platform ocispec.Platform,
+	dataCreatedBy string,
+) (*ocispec.Descriptor, error) {
+	layers := make([]ocispec.Descriptor, 0, len(blobDescs)+1)
+	layers = append(layers, blobDescs...)
+	layers = append(layers, bootstrapDesc)
+
+	diffIDs := make([]digest.Digest, 0, len(layers))
+	history := make([]ocispec.History, 0, len(layers))
+	for _, layer := range blobDescs {
+		diffID, err := layerDiffID(layer)
+		if err != nil {
+			return nil, err
+		}
+		diffIDs = append(diffIDs, diffID)
+		history = append(history, ocispec.History{CreatedBy: dataCreatedBy, Comment: "Nydus Data Layer"})
+	}
+	bootstrapDiffID, err := layerDiffID(bootstrapDesc)
+	if err != nil {
+		return nil, err
+	}
+	diffIDs = append(diffIDs, bootstrapDiffID)
+	history = append(history, ocispec.History{CreatedBy: "Nydus Converter", Comment: "Nydus Bootstrap Layer"})
+
+	configJSON, err := buildImageConfig(baseConfig, platform, diffIDs, history)
+	if err != nil {
+		return nil, errors.Wrap(err, "build image config")
+	}
+	configDesc, err := oci.WriteJSON(ctx, cs, configJSON, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "write image config")
+	}
+	configDesc.MediaType = ocispec.MediaTypeImageConfig
+
+	labels := map[string]string{"containerd.io/gc.ref.content.config": configDesc.Digest.String()}
+	for idx, layer := range layers {
+		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", idx)] = layer.Digest.String()
+	}
+	manifest := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    *configDesc,
+		Layers:    layers,
+	}
+	return oci.WriteJSON(ctx, cs, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, labels)
+}
+
+func layerDiffID(desc ocispec.Descriptor) (digest.Digest, error) {
+	if desc.Annotations == nil || desc.Annotations[nydus.LayerAnnotationUncompressed] == "" {
+		return "", errors.Errorf("layer %s missing %s annotation", desc.Digest, nydus.LayerAnnotationUncompressed)
+	}
+	return digest.Digest(desc.Annotations[nydus.LayerAnnotationUncompressed]), nil
 }
 
 // labelNydusBlobDiffIDs sets the containerd.io/uncompressed content-store
