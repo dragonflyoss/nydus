@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/platforms"
@@ -154,7 +155,52 @@ func (p *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref string
 	if err != nil {
 		return err
 	}
-	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC)
+	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC, nil)
+}
+
+// PushSkipping uploads desc while assuming the descriptors in skip already
+// exist in the target repository. It is used for artifact images that reference
+// parent nydus blobs without downloading those data blobs into the local
+// content store.
+func (p *Provider) PushSkipping(ctx context.Context, desc ocispec.Descriptor, ref string, skip map[digest.Digest]struct{}) error {
+	normalized, err := normalizeRef(ref)
+	if err != nil {
+		return err
+	}
+	if len(skip) == 0 {
+		return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC, nil)
+	}
+	wrapper := func(h images.Handler) images.Handler {
+		return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+			if _, ok := skip[desc.Digest]; ok {
+				return nil, images.ErrSkipDesc
+			}
+			return h.Handle(ctx, desc)
+		})
+	}
+	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC, wrapper)
+}
+
+// SameRepository reports whether two image references resolve to the same
+// registry repository after normalizing tags and Docker Hub shorthands.
+func SameRepository(a, b string) (bool, error) {
+	left, err := normalizeRef(a)
+	if err != nil {
+		return false, err
+	}
+	right, err := normalizeRef(b)
+	if err != nil {
+		return false, err
+	}
+	leftNamed, err := reference.ParseNormalizedNamed(left)
+	if err != nil {
+		return false, errors.Wrapf(err, "parse reference %q", left)
+	}
+	rightNamed, err := reference.ParseNormalizedNamed(right)
+	if err != nil {
+		return false, errors.Wrapf(err, "parse reference %q", right)
+	}
+	return reference.Domain(leftNamed) == reference.Domain(rightNamed) && reference.Path(leftNamed) == reference.Path(rightNamed), nil
 }
 
 // PushBlob uploads a single blob (no children walked) from the local store to
@@ -166,7 +212,7 @@ func (p *Provider) PushBlob(ctx context.Context, desc ocispec.Descriptor, ref st
 	if err != nil {
 		return err
 	}
-	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC)
+	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC, nil)
 }
 
 // normalizeRef expands shorthand image references to fully-qualified names so

@@ -583,6 +583,7 @@ mod tests {
     fn resolve_blobs_reports_incremental_blob_metadata_flag() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("incremental-blob");
+
         let (full_blob_digest, _) = write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
 
         let blob_info = RawBlobInfo {
@@ -638,6 +639,7 @@ mod tests {
 
     fn write_minimal_blob_with_kind(
         path: &Path,
+
         blob_kind: BlobKind,
     ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
