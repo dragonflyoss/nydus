@@ -90,14 +90,14 @@ fn build_test_image_with_layout(
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new_with_compressor(
         &staging,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+        nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+        nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
@@ -264,14 +264,14 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new_with_compressor(
         &staging,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+        nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+        nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();

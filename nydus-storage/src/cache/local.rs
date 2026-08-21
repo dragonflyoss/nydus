@@ -14,8 +14,8 @@ use crate::access_trace::TraceRecorder;
 use crate::block_group_map::BlockGroupMap;
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataBlockGroup, BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE,
-    BLOB_METADATA_SUFFIX,
+    BlobMetadata, BlobMetadataBlockGroup, NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE,
+    NYDUS_BLOB_METADATA_SUFFIX,
 };
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
@@ -124,7 +124,8 @@ impl LocalBlobCache {
 
         let cache_key = backend.cache_key(&blob_id)?;
         let cache_key_hex = hex_string(&cache_key);
-        let blob_metadata_path = cache_dir.join(format!("{cache_key_hex}{BLOB_METADATA_SUFFIX}"));
+        let blob_metadata_path =
+            cache_dir.join(format!("{cache_key_hex}{NYDUS_BLOB_METADATA_SUFFIX}"));
         let blob_metadata =
             load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
         nydus_telemetry::metrics::track_blob_block_groups(
@@ -317,7 +318,7 @@ impl LocalBlobCache {
                 &mut buffers,
                 ReadKind::OnDemand,
             )?;
-            write_all_at(cache_file, block_group.uncompressed_byte_offset(), decoded)?;
+            write_all_at(cache_file, block_group.uncompressed_offset(), decoded)?;
             self.block_group_map.set_ready(block_group_index)?;
             nydus_telemetry::metrics::inc_cache_ondemand_fill_block_group();
             Ok(())
@@ -383,13 +384,13 @@ impl LocalBlobCache {
     ) -> io::Result<std::ops::RangeInclusive<usize>> {
         let first = self
             .blob_metadata
-            .block_group_index_for_byte_offset(offset)
+            .block_group_index_for_offset(offset)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block_group not found")
             })?;
         let last = self
             .blob_metadata
-            .block_group_index_for_byte_offset(end - 1)
+            .block_group_index_for_offset(end - 1)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block_group not found")
             })?;
@@ -407,8 +408,10 @@ impl LocalBlobCache {
         batch: &Range<usize>,
         window: &mut Vec<u8>,
     ) -> io::Result<u64> {
-        let window_base = block_groups[batch.start].compressed_byte_offset();
-        let window_end = block_groups[batch.end - 1].compressed_byte_end();
+        let last_block_group = &block_groups[batch.end - 1];
+        let window_base = block_groups[batch.start].compressed_offset();
+        let window_end =
+            last_block_group.compressed_offset() + last_block_group.compressed_size() as u64;
         let window_len = usize::try_from(window_end - window_base).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -416,9 +419,10 @@ impl LocalBlobCache {
             )
         })?;
         window.resize(window_len, 0);
-        let uncompressed_offset = block_groups[batch.start].uncompressed_byte_offset();
-        let uncompressed_size =
-            block_groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
+        let uncompressed_offset = block_groups[batch.start].uncompressed_offset();
+        let uncompressed_size = last_block_group.uncompressed_offset()
+            + last_block_group.uncompressed_size()
+            - uncompressed_offset;
         let ctx =
             ReadContext::block_group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
         self.backend
@@ -503,9 +507,10 @@ impl BlobCache for LocalBlobCache {
         let mut decoded = Vec::new();
         let mut window = Vec::new();
 
-        for batch in
-            plan_prefetch_batches(block_groups, BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE as u64)
-        {
+        for batch in plan_prefetch_batches(
+            block_groups,
+            NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE as u64,
+        ) {
             super::check_prefetch_deadline(deadline)?;
             if batch
                 .clone()
@@ -534,7 +539,7 @@ impl BlobCache for LocalBlobCache {
                 )?;
                 write_all_at(
                     cache_file.as_ref(),
-                    block_group.uncompressed_byte_offset(),
+                    block_group.uncompressed_offset(),
                     &decoded,
                 )?;
                 self.block_group_map.set_ready(index)?;
@@ -620,8 +625,10 @@ impl BlobCache for LocalBlobCache {
                             "blob meta block_group not found",
                         )
                     })?;
-                Ok(first_block_group.uncompressed_byte_offset().max(offset)
-                    ..last_block_group.uncompressed_byte_end().min(end))
+                Ok(first_block_group.uncompressed_offset().max(offset)
+                    ..(last_block_group.uncompressed_offset()
+                        + last_block_group.uncompressed_size())
+                    .min(end))
             })
             .collect()
     }
@@ -729,7 +736,7 @@ impl BlobCache for LocalBlobCache {
         // work.
         let total_uncompressed: u64 = block_groups
             .iter()
-            .map(|block_group| block_group.uncompressed_byte_size())
+            .map(|block_group| block_group.uncompressed_size())
             .sum();
         if threads <= 1 || total_uncompressed <= super::REDIRECT_PREFETCH_BATCH_SIZE {
             let mut window = Vec::new();
@@ -824,7 +831,7 @@ impl BlobCache for LocalBlobCache {
         let cache_file = self.cache_file()?;
         write_all_at(
             cache_file.as_ref(),
-            block_group.uncompressed_byte_offset(),
+            block_group.uncompressed_offset(),
             decoded,
         )?;
         self.block_group_map.set_ready(block_group_index)?;

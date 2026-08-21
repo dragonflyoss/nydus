@@ -11,7 +11,6 @@ use crate::error::{Error, Result};
 pub const INCOMPAT_MASK: u32 = 0x0000_FFFF;
 
 /// Reject `flags` whose incompat half carries bits outside `supported`.
-/// `what` names the format in the error message.
 pub fn validate_incompat_flags(flags: u32, supported: u32) -> Result<()> {
     let unknown_incompat = flags & INCOMPAT_MASK & !supported;
     if unknown_incompat != 0 {

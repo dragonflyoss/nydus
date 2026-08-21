@@ -29,7 +29,7 @@ use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor,
-    BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
+    NYDUS_BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
@@ -122,14 +122,14 @@ pub fn build_ondemand_blob(
             )));
         }
 
-        let decoded_len = usize::try_from(block_group.uncompressed_byte_size()).map_err(|err| {
+        let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|err| {
             Error::Overflow(format!(
                 "block group uncompressed size exceeds usize: {err}"
             ))
         })?;
         decoded.resize(decoded_len, 0);
         cache
-            .read_at(block_group.uncompressed_byte_offset(), &mut decoded)
+            .read_at(block_group.uncompressed_offset(), &mut decoded)
             .with_context(|| {
                 format!("failed to read block group {block_group_index} of blob {blob_index}")
             })?;
@@ -169,7 +169,7 @@ pub fn build_ondemand_blob(
 
     let blob_metadata = BlobMetadata::from_parts_with_options(
         data_digest,
-        BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
+        NYDUS_BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
         BlobMetadataCompressor::Zstd,
         ondemand_block_groups,
         Vec::new(),

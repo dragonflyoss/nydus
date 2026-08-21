@@ -2,7 +2,9 @@ use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
 use nydus::build::{build_image, BuildImageOptions, Image};
 use nydus::error::{Context, Error, Result};
-use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BLOB_METADATA_SUFFIX};
+use nydus_format::blob::{
+    BlobFooter, BlobMetadata, BlobMetadataCompressor, NYDUS_BLOB_METADATA_SUFFIX,
+};
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
@@ -222,7 +224,7 @@ impl BuildCommand {
     /// (`<full_blob>.blob.meta`) and returns its path.
     fn save_blob_metadata(image: &Image, full_blob_path: &Path) -> Result<PathBuf> {
         let mut path = full_blob_path.to_path_buf().into_os_string();
-        path.push(BLOB_METADATA_SUFFIX);
+        path.push(NYDUS_BLOB_METADATA_SUFFIX);
 
         let blob_metadata_path: PathBuf = path.into();
         image.blob_metadata.save(&blob_metadata_path)?;

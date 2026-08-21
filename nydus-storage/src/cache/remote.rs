@@ -61,13 +61,13 @@ impl BlobCache for RemoteBlobCache {
         })?;
         let first = self
             .blob_metadata
-            .block_group_index_for_byte_offset(offset)
+            .block_group_index_for_offset(offset)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
             })?;
         let last = self
             .blob_metadata
-            .block_group_index_for_byte_offset(end - 1)
+            .block_group_index_for_offset(end - 1)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
             })?;
@@ -93,9 +93,9 @@ impl BlobCache for RemoteBlobCache {
             )?;
 
             // Copy the overlap between this block group's span and the request.
-            let block_group_start = block_group.uncompressed_byte_offset();
+            let block_group_start = block_group.uncompressed_offset();
             let copy_start = offset.max(block_group_start);
-            let copy_end = end.min(block_group.uncompressed_byte_end());
+            let copy_end = end.min(block_group_start + block_group.uncompressed_size());
             let source = &decoded[(copy_start - block_group_start) as usize..]
                 [..(copy_end - copy_start) as usize];
             let dst_start = (copy_start - offset) as usize;

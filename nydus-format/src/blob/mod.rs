@@ -9,33 +9,19 @@ use crate::error::{Context, Error, Result};
 use crate::utils::{align_up, write_zero_padding};
 use std::io::Write;
 
+pub mod algorithm;
+pub mod flag;
 pub mod footer;
 pub mod metadata;
-pub mod validate;
+pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
-    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-    BlobMetadataDigester, BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT,
-    BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE, BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
-    BLOB_METADATA_DEFAULT_CHUNK_SIZE, BLOB_METADATA_SUFFIX,
+    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk,
+    NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT,
+    NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
+    NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
 };
-
-/// The incompatible (reject-when-unknown) half of a format `flags` word.
-pub const INCOMPAT_MASK: u32 = 0x0000_FFFF;
-
-/// Reject `flags` whose incompat half carries bits outside `supported`.
-/// `what` names the format in the error message.
-pub fn validate_incompat_flags(flags: u32, supported: u32) -> Result<()> {
-    let unknown_incompat = flags & INCOMPAT_MASK & !supported;
-    if unknown_incompat != 0 {
-        return Err(Error::Unsupported(format!(
-            "unsupported incompat flags {unknown_incompat:#x} (image is newer than this reader)"
-        )));
-    }
-
-    Ok(())
-}
 
 /// Append the trailing regions of the full-blob layout
 /// `[data][pad][bootstrap][pad][blob meta][footer]` to `writer`, which must
