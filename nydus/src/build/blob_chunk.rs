@@ -2,7 +2,7 @@ use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-    BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE,
+    NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE,
 };
 use nydus_format::erofs::{ErofsChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
 use nydus_format::utils::round_up;
@@ -52,7 +52,7 @@ impl BlobWriter<File> {
 
         let file = File::create(path)
             .with_context(|| format!("failed to create blob device: {}", path.display()))?;
-        let block_group_size = file_chunk_size.max(BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE);
+        let block_group_size = file_chunk_size.max(NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE);
         Self::from_writer(file, file_chunk_size, block_group_size, compressor)
     }
 }
@@ -142,7 +142,7 @@ impl<W: Write> BlobWriter<W> {
             self.blob_metadata_block_groups.clone(),
             self.blob_metadata_chunks.clone(),
         )?
-        .with_compressed_offset_bias(source_offset_bias)?)
+        .checked_add_compressed_offset(source_offset_bias)?)
     }
 
     pub fn write_blob_metadata(
@@ -323,7 +323,7 @@ pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE;
+    use nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE;
     use std::fs;
     use tempfile::tempdir;
 
@@ -335,10 +335,9 @@ mod tests {
 
         assert_eq!(entry.uncompressed_block_offset(), 2);
         assert_eq!(entry.uncompressed_block_count(), 3);
-        assert_eq!(entry.uncompressed_byte_offset(), 0x2000);
-        assert_eq!(entry.uncompressed_byte_size(), 0x3000);
-        assert_eq!(entry.compressed_byte_offset(), 0x12345);
-        assert_eq!(entry.compressed_byte_end(), 0x12345 + 0x400);
+        assert_eq!(entry.uncompressed_offset(), 0x2000);
+        assert_eq!(entry.uncompressed_size(), 0x3000);
+        assert_eq!(entry.compressed_offset(), 0x12345);
         assert_eq!(entry.compressed_size(), 0x400);
         assert_eq!(entry.crc32(), crc32c(&payload));
     }
@@ -350,21 +349,22 @@ mod tests {
         let file_a = dir.path().join("a.bin");
         let file_b = dir.path().join("b.bin");
 
-        let mut content_a = vec![b'a'; BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize];
+        let mut content_a = vec![b'a'; NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize];
         content_a.extend(vec![b'b'; EROFS_BLOCK_SIZE as usize]);
         fs::write(&file_a, &content_a).unwrap();
         fs::write(
             &file_b,
-            vec![b'a'; BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize],
+            vec![b'a'; NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize],
         )
         .unwrap();
 
-        let mut writer = BlobWriter::new(&blob_path, BLOB_METADATA_DEFAULT_CHUNK_SIZE).unwrap();
+        let mut writer =
+            BlobWriter::new(&blob_path, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE).unwrap();
         let indexes_a = writer
             .write_file_chunks(&file_a, content_a.len() as u64)
             .unwrap();
         let indexes_b = writer
-            .write_file_chunks(&file_b, BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64)
+            .write_file_chunks(&file_b, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64)
             .unwrap();
         writer.finish().unwrap();
 
@@ -393,27 +393,27 @@ mod tests {
         // share block group 1, and the remainder spills into block group 2.
         assert_eq!(block_groups[0].uncompressed_block_offset(), 0);
         assert_eq!(block_groups[0].uncompressed_block_count(), 256);
-        assert_eq!(block_groups[0].compressed_byte_offset(), 0);
+        assert_eq!(block_groups[0].compressed_offset(), 0);
         assert_eq!(
             block_groups[0].compressed_size(),
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE
+            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE
         );
         assert_eq!(block_groups[1].uncompressed_block_offset(), 256);
         assert_eq!(block_groups[1].uncompressed_block_count(), 256);
         assert_eq!(
-            block_groups[1].compressed_byte_offset(),
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
+            block_groups[1].compressed_offset(),
+            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
         );
         assert_eq!(
             block_groups[1].compressed_size(),
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE
+            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE
         );
         assert_eq!(block_groups[2].uncompressed_block_offset(), 512);
         assert_eq!(block_groups[2].uncompressed_block_count(), 1);
         // Block groups pack back-to-back in the data region with no inter-block group padding.
         assert_eq!(
-            block_groups[2].compressed_byte_offset(),
-            2 * BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
+            block_groups[2].compressed_offset(),
+            2 * NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
         );
         assert_eq!(block_groups[2].compressed_size(), EROFS_BLOCK_SIZE);
     }
@@ -441,12 +441,9 @@ mod tests {
         assert_eq!(blob_metadata.chunks().len(), 2);
         assert_eq!(blob_metadata.block_groups().len(), 1);
         assert_eq!(blob_metadata.chunks()[0].uncompressed_block_count(), 1);
-        assert_eq!(blob_metadata.chunks()[0].uncompressed_byte_size(), 4096);
+        assert_eq!(blob_metadata.chunks()[0].uncompressed_size(), 4096);
         assert_eq!(blob_metadata.chunks()[1].uncompressed_block_offset(), 1);
-        assert_eq!(
-            blob_metadata.block_groups()[0].uncompressed_byte_size(),
-            8192
-        );
+        assert_eq!(blob_metadata.block_groups()[0].uncompressed_size(), 8192);
     }
 
     #[test]
@@ -514,12 +511,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
         let input_path = dir.path().join("input.bin");
-        let content = pseudo_random_bytes(BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize);
+        let content = pseudo_random_bytes(NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize);
         fs::write(&input_path, &content).unwrap();
 
         let mut writer = BlobWriter::new_with_compressor(
             &blob_path,
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE,
             BlobMetadataCompressor::Zstd,
         )
         .unwrap();
@@ -533,12 +530,12 @@ mod tests {
         assert_eq!(block_groups.len(), 1);
         assert_eq!(block_groups[0].uncompressed_block_count(), 256);
         assert_eq!(
-            block_groups[0].uncompressed_byte_size(),
-            BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
+            block_groups[0].uncompressed_size(),
+            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
         );
         assert_eq!(
             u64::from(block_groups[0].compressed_size()),
-            block_groups[0].uncompressed_byte_size()
+            block_groups[0].uncompressed_size()
         );
         assert_eq!(fs::read(&blob_path).unwrap(), content);
     }
@@ -552,7 +549,8 @@ mod tests {
         let blob_id = [7u8; EROFS_BLOB_ID_SIZE];
         fs::write(&input_path, vec![b'x'; 4096]).unwrap();
 
-        let mut writer = BlobWriter::new(&blob_path, BLOB_METADATA_DEFAULT_CHUNK_SIZE).unwrap();
+        let mut writer =
+            BlobWriter::new(&blob_path, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE).unwrap();
         writer.write_file_chunks(&input_path, 4096).unwrap();
         writer
             .write_blob_metadata(&blob_metadata_path, blob_id, 8192)
@@ -569,10 +567,7 @@ mod tests {
         assert_eq!(blob_metadata.header().block_group_bytes(), 40);
         assert_eq!(blob_metadata.header().metadata_size(), 8192);
         assert_eq!(blob_metadata.chunks()[0].uncompressed_block_offset(), 0);
-        assert_eq!(
-            blob_metadata.block_groups()[0].compressed_byte_offset(),
-            8192
-        );
+        assert_eq!(blob_metadata.block_groups()[0].compressed_offset(), 8192);
     }
 
     fn pseudo_random_bytes(len: usize) -> Vec<u8> {

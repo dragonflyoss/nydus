@@ -1,10 +1,7 @@
 //! Little-endian integer helpers for the on-disk formats.
 //!
-//! Three shapes for three call patterns: fixed-size byte-array struct fields
-//! (`read_u32`), offset-addressed buffers (`read_u32_at`), and sequential
-//! readers (`read_u32_from`).
-
-use std::io::{self, Read};
+//! Two shapes for two call patterns: fixed-size byte-array struct fields
+//! (`read_u32`) and offset-addressed buffers (`read_u32_at`).
 
 /// Read a little-endian integer from a byte array.
 #[inline(always)]
@@ -41,13 +38,33 @@ pub fn write_u64(b: &mut [u8; 8], v: u64) {
 ///
 /// Panics when `data` is too short — callers validate region sizes up front.
 #[inline]
+pub fn read_u8_at(data: &[u8], offset: usize) -> u8 {
+    data[offset]
+}
+
+#[inline]
+pub fn read_u16_at(data: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
+}
+
+#[inline]
 pub fn read_u32_at(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().expect("slice checked"))
+    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
 #[inline]
 pub fn read_u64_at(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(data[offset..offset + 8].try_into().expect("slice checked"))
+    u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+}
+
+#[inline]
+pub fn write_u8_at(data: &mut [u8], offset: usize, value: u8) {
+    data[offset] = value;
+}
+
+#[inline]
+pub fn write_u16_at(data: &mut [u8], offset: usize, value: u16) {
+    data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
 #[inline]
@@ -58,23 +75,4 @@ pub fn write_u32_at(data: &mut [u8], offset: usize, value: u32) {
 #[inline]
 pub fn write_u64_at(data: &mut [u8], offset: usize, value: u64) {
     data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-/// Read a little-endian integer from a sequential reader.
-pub fn read_u16_from(reader: &mut dyn Read) -> io::Result<u16> {
-    let mut buf = [0u8; 2];
-    reader.read_exact(&mut buf)?;
-    Ok(u16::from_le_bytes(buf))
-}
-
-pub fn read_u32_from(reader: &mut dyn Read) -> io::Result<u32> {
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
-}
-
-pub fn read_u64_from(reader: &mut dyn Read) -> io::Result<u64> {
-    let mut buf = [0u8; 8];
-    reader.read_exact(&mut buf)?;
-    Ok(u64::from_le_bytes(buf))
 }

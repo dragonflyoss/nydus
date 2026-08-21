@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{BlobBackend, ReadContext};
-use nydus_format::blob::{BlobFooter, BlobMetadata, BLOB_METADATA_SUFFIX};
+use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
 use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 
 #[derive(Clone)]
@@ -99,7 +99,10 @@ impl Local {
             )
         })?;
 
-        let blob_metadata_name = format!("{}{BLOB_METADATA_SUFFIX}", file_name.to_string_lossy());
+        let blob_metadata_name = format!(
+            "{}{NYDUS_BLOB_METADATA_SUFFIX}",
+            file_name.to_string_lossy()
+        );
         Ok(self.root.join(blob_metadata_name))
     }
 

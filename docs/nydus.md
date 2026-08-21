@@ -194,7 +194,7 @@ Current implementation notes:
 	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
 - `--compressor zstd` attempts to compress each blob_meta block group as one
 	unit. If the compressed bytes are larger than 70% of the uncompressed block group,
-	the block group is stored plain and its blob_meta block group record has
+	the block group is stored plain and its blob_meta block group entry has
 	`compressed_size == uncompressed_block_count * 4096`.
 - `--compressor none` writes every block group plain.
 - `--exclude <path>` omits paths inside the source tree from the blob and the
@@ -367,7 +367,7 @@ Current implementation notes:
 	backend (with CRC validation on every path).
 - The ondemand artifact layout is `[block group data][blob meta][footer]` with
 	`bootstrap_blocks = 0` (no embedded bootstrap) and an empty chunk table. Each
-	block group record is a redirect: it stores the source device id and source block group
+	block group entry is a redirect: it stores the source device id and source block group
 	index, and its `crc32c` equals the source block group's decoded CRC.
 
 ### Check
@@ -1062,8 +1062,8 @@ first logical external data block starts at offset 0
 
 blob_meta then maps that logical byte offset to a compressed range in the full
 blob's data region. The block is mapped to its block_group by
-`block_group_index = blkaddr >> block_group_block_bits`, and the block_group record gives the
-encoded `compressed_byte_offset` (for example 0 for the first encoded block_group).
+`block_group_index = blkaddr >> block_group_block_bits`, and the block_group entry gives the
+encoded `compressed_offset` (for example 0 for the first encoded block_group).
 ```
 
 Blob identity is therefore attached to the device slot, not to the chunk index
@@ -1090,7 +1090,7 @@ At the same time:
 
 Whenever build emits a full blob, it writes one blob meta region before the
 footer. Blob meta is the canonical catalog for the external data blob. A blob
-meta chunk is a content-addressed record (BLAKE3 digest + absolute block range)
+meta chunk is a content-addressed entry (BLAKE3 digest + absolute block range)
 used for inspection and future deduplication; chunks are independent of block groups.
 A blob meta block group is the compression unit and cache population unit. EROFS inode
 chunk indexes point into the logical uncompressed external-device address space;
@@ -1117,7 +1117,7 @@ embedded blob meta region
 | block_group_block_bits (u8 + pad)   |
 | reserved tail (compat area)   |
 +-------------------------------+
-| chunk records                 |
+| chunk entries                 |
 | 48 bytes each                 |
 |                               |
 | digest (BLAKE3)               |
@@ -1125,11 +1125,11 @@ embedded blob meta region
 | uncompressed_block_count      |
 | reserved                      |
 +-------------------------------+
-| block_group records                 |
+| block_group entries                 |
 | 40 bytes each                 |
 |                               |
 | uncompressed_block_offset     |
-| compressed_byte_offset        |
+| compressed_offset             |
 | uncompressed_block_count      |
 | compressed_size               |
 | crc32c                        |
@@ -1155,18 +1155,18 @@ Header details:
 	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`)
 	means zstd is the blob's default compressor; no compressor bit means
 	stored plain. `DIGESTER_BLAKE3` (`1 << 1`) is mandatory for chunk digests.
-	Record-layout evolution (wider chunk/block group records, new record kinds) is
+	Entry-layout evolution (wider chunk/block group entries, new entry kinds) is
 	expressed as a new incompat bit — the same way EROFS gates compact vs
 	extended inodes — while header growth uses the reserved tail plus a compat
 	bit. The `magic + version + flags` header prefix is shared with the
 	block_block_group_map sidecar.
 - `crc32c` covers the full blob meta region with this field zeroed: the fixed
-	header, all chunk records, all block group records, and trailing zero padding. The cache layer
+	header, all chunk entries, all block group entries, and trailing zero padding. The cache layer
 	verifies this crc32c before mmaping a cached blob meta file for chunk lookup.
 - `chunks_offset` is fixed at the header size. `block_groups_offset` follows the dense
 	chunk table.
-- `chunk_count` is the number of chunk records.
-- `block_group_count` is the number of compressed block group records.
+- `chunk_count` is the number of chunk entries.
+- `block_group_count` is the number of compressed block group entries.
 - `chunk_block_bits` is log2 of the EROFS chunk size in 4 KiB blocks:
 	`chunk_size = 4096 << chunk_block_bits`, so the default 1 MiB chunk stores
 	8. Storing the exponent EROFS-style (the same quantity as `chunk_format &
@@ -1183,10 +1183,10 @@ Header details:
 	of the header block is reserved for future compat fields — writers zero it,
 	readers ignore it (so a compat extension does not break old readers), and
 	corruption is caught by the region crc32c. Layout changes that old readers
-	cannot safely ignore (wider records, new tables, moved offsets) must use an
+	cannot safely ignore (wider entries, new tables, moved offsets) must use an
 	incompat flag bit instead. The header intentionally does not
 	store total compressed size or total uncompressed size — totals are computed
-	from the block group records — and the blob meta region is padded to a 4 KiB block
+	from the block group entries — and the blob meta region is padded to a 4 KiB block
 	boundary.
 
 Chunk details:
@@ -1209,14 +1209,14 @@ Block group details:
 	every block group but the last is exactly `1 << block_group_block_bits` blocks.
 - `uncompressed_block_offset` is the decoded cache 4 KiB block offset for the
 	block group. Block groups are dense and contiguous in the decoded address space.
-- `compressed_byte_offset` is the encoded payload's byte offset within the data
+- `compressed_offset` is the encoded payload's byte offset within the data
 	region (not inside the whole full blob file). Encoded block groups are packed
 	back-to-back with no inter-block group padding, so this is a plain byte position and
 	is not block-aligned for compressed block groups. Runtime backends add the
 	data-region base offset before issuing range reads.
 - `uncompressed_block_count` describes the decoded block group size in 4 KiB blocks.
 - `compressed_size` is the actual encoded byte length. The next block group starts at
-	exactly the previous block group's `compressed_byte_offset + compressed_size`.
+	exactly the previous block group's `compressed_offset + compressed_size`.
 - `crc32c` is computed over the decoded block group. If `compressed_size` equals
 	`uncompressed_block_count * 4096`, runtime treats the block group as stored plain and
 	skips decompression even when the header compressor is zstd.
@@ -1226,11 +1226,11 @@ Block group details:
 	`source_block_group_index`; phase-0 prefetch writes the decoded bytes into the
 	source blob's cache instead of this blob's own cache. A blob containing any
 	redirect block group is an "ondemand" blob: its block groups may be non-uniform in size
-	(the uniformity invariant is relaxed) and `block_group_index_for_byte_offset` is
+	(the uniformity invariant is relaxed) and `block_group_index_for_offset` is
 	never used on it. The redirect block group's `crc32c` equals the source block group's
 	decoded CRC so the fill is cross-checked before touching the source cache.
 
-The writer does not bias `compressed_byte_offset` by the bootstrap size, and
+The writer does not bias `compressed_offset` by the bootstrap size, and
 does not bias `uncompressed_block_offset`. Only the data region as a whole is
 padded to a 4 KiB boundary (so the embedded bootstrap that follows starts on a
 block); block groups themselves are not individually padded.
@@ -1261,7 +1261,7 @@ chunk:
 A fully-zero chunk — a real filesystem hole reads back as zeros, and so does
 zero-filled data — is never stored: the builder emits the standard EROFS null
 chunk index (all 48 address bits set on disk) instead. Hole chunks occupy no
-bytes in the data region, get no blob meta chunk record, and never touch the
+bytes in the data region, get no blob meta chunk entry, and never touch the
 blob cache at runtime: the core read paths satisfy them with zeros
 directly, and native EROFS mounts decode the null address in-kernel the same
 way.
@@ -1308,8 +1308,8 @@ encoded data region of the full blob:
 +---------------------------+------------------+---
 | block_group 0 compressed bytes  | block_group 1 bytes    | ...
 +---------------------------+------------------+---
-^ compressed_byte_offset(g0) = 0
-                            ^ compressed_byte_offset(g1)
+^ compressed_offset(g0) = 0
+                            ^ compressed_offset(g1)
                               = offset(g0) + compressed_size(g0)
 ```
 
@@ -1317,7 +1317,7 @@ Hash and validation summary:
 
 - **BLAKE3 per chunk** (blob meta chunk table) — the deduplication key over
 	the chunk's decoded, block-aligned bytes.
-- **CRC32C per block group** (blob meta block group record) — validated after every fetch
+- **CRC32C per block group** (blob meta block group entry) — validated after every fetch
 	and decode, on both the on-demand and prefetch paths.
 - **SHA256 over the data region** — written into the bootstrap device slot as
 	the blob id.
@@ -1346,26 +1346,26 @@ ondemand blob — named by SHA256(full blob), one new nydus layer
 | blob meta                      |
 |  header (crc32c)               |
 |  chunk table: empty            |
-|  block_group table: redirect records |
+|  block_group table: redirect entries |
 +--------------------------------+
 | footer (bootstrap_blocks = 0)  |
 +--------------------------------+
 ```
 
-Every block group record in the ondemand blob is a **redirect**: instead of
+Every block group entry in the ondemand blob is a **redirect**: instead of
 describing this blob's own decoded address space, it names the source block group
 it is a copy of. Block group sizes follow the source block groups, so the uniform-size
 invariant is relaxed and the O(1) `block >> block_group_block_bits` lookup is never
 used on an ondemand blob:
 
 ```text
-redirect block_group record (in the ondemand block_group table)
+redirect block_group entry (in the ondemand block_group table)
 
   source_blob_index  = 2 --+
   source_block_group_index = 7   +--> names source blob 2, block_group 7;
   crc32c ------------------+    crc32c equals that block_group's decoded CRC
 
-  compressed_byte_offset --+
+  compressed_offset -------+
   compressed_size ---------+--> locates the encoded copy inside
                                 the ondemand data region
 ```
@@ -1469,7 +1469,7 @@ When mounting with `--bootstrap + --blob-dir`:
 6. Before chunk lookup, check the cache directory for `<full_blob_digest>.blob.meta`.
 	If it is absent, download the standalone blob meta from the local backend into
 	the cache directory. The cache verifies the blob meta header crc32c before
-	mmaping the cached file and using its chunk records.
+	mmaping the cached file and using its chunk entries.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
 	layer maps an offset to its block group in O(1) with `block >> block_group_block_bits`,
 	ensures every block group covering the requested range is fetched and decoded from

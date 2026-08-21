@@ -280,8 +280,8 @@ fn print_inline_across_blocks(stats: &ImageStats) {
     #[tabled(rename_all = "UPPERCASE")]
     struct InlineOverflowRow {
         nid: u64,
-        #[tabled(rename = "BLOCK OFFSET")]
-        block_offset: u64,
+        #[tabled(rename = "OFFSET IN BLOCK")]
+        offset_in_block: u64,
         #[tabled(rename = "HEADER SIZE")]
         header_size: u64,
         #[tabled(rename = "XATTR SIZE")]
@@ -298,11 +298,11 @@ fn print_inline_across_blocks(stats: &ImageStats) {
         .take(MAX_LISTED)
         .map(|entry| InlineOverflowRow {
             nid: entry.nid,
-            block_offset: entry.block_offset,
+            offset_in_block: entry.offset_in_block,
             header_size: entry.header_size,
             xattr_size: entry.xattr_size,
             inline_size: entry.inline_size,
-            end: entry.block_offset + entry.header_size + entry.xattr_size + entry.inline_size,
+            end: entry.offset_in_block + entry.header_size + entry.xattr_size + entry.inline_size,
         })
         .collect();
 
