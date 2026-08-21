@@ -23,6 +23,7 @@ type LocalDirOption struct {
 	LogLevel          string
 	SourceDir         string
 	AppendInBootstrap []string
+	Annotations       map[string]string
 }
 
 // ConvertLocalDir converts a local directory into a single-layer nydus image
@@ -46,5 +47,6 @@ func ConvertLocalDir(ctx context.Context, cs content.Store, opt LocalDirOption) 
 		Platform:          platforms.DefaultSpec(),
 		Sources:           []Source{{Dir: opt.SourceDir}},
 		AppendInBootstrap: opt.AppendInBootstrap,
+		Annotations:       opt.Annotations,
 	})
 }

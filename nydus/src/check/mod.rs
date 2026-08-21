@@ -759,6 +759,7 @@ mod tests {
     fn resolve_blobs_reports_incremental_blob_metadata_flag() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("incremental-blob");
+
         let (full_blob_digest, _) = write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
         let blob_info = RawBlobInfo {
             blob_index: 1,

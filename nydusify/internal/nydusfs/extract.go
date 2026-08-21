@@ -38,36 +38,26 @@ func ExtractBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.D
 		return "", nil, errors.Wrap(err, "create bootstrap dir")
 	}
 
-	decompressed, err := oci.OpenDecompressedBlob(ctx, cs, desc)
-	if err != nil {
-		return "", nil, errors.Wrap(err, "open bootstrap layer")
-	}
-	defer func() { _ = decompressed.Close() }()
-
 	bootstrapPath := ""
 	var blobMetaPaths []string
-	tr := tar.NewReader(decompressed)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", nil, errors.Wrap(err, "read bootstrap tar")
-		}
+	err := oci.WalkBootstrapLayer(ctx, cs, desc, func(hdr *tar.Header, tr *tar.Reader) error {
 		switch {
 		case hdr.Name == nydus.BootstrapFileNameInLayer:
 			bootstrapPath = filepath.Join(destDir, "image.boot")
 			if err := WriteTarEntry(tr, bootstrapPath); err != nil {
-				return "", nil, errors.Wrap(err, "write bootstrap file")
+				return errors.Wrap(err, "write bootstrap file")
 			}
 		case strings.HasSuffix(hdr.Name, ".blob.meta"):
 			metaPath := filepath.Join(destDir, path.Base(hdr.Name))
 			if err := WriteTarEntry(tr, metaPath); err != nil {
-				return "", nil, errors.Wrapf(err, "write blob meta %s", hdr.Name)
+				return errors.Wrapf(err, "write blob meta %s", hdr.Name)
 			}
 			blobMetaPaths = append(blobMetaPaths, metaPath)
 		}
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
 	}
 	if bootstrapPath == "" {
 		return "", nil, errors.Errorf("bootstrap entry %q not found in layer", nydus.BootstrapFileNameInLayer)

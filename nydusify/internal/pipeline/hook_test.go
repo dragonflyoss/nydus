@@ -7,13 +7,88 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+func TestConvertHookAnnotatesUnchangedNydusManifest(t *testing.T) {
+	ctx := context.Background()
+	store, err := local.NewStore(filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := ocispec.Manifest{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Layers: []ocispec.Descriptor{
+			{
+				MediaType: nydus.MediaTypeNydusBlob,
+				Digest:    digest.FromString("blob"),
+				Annotations: map[string]string{
+					nydus.LayerAnnotationNydusBlob: "true",
+				},
+			},
+			{
+				MediaType: ocispec.MediaTypeImageLayerGzip,
+				Digest:    digest.FromString("bootstrap"),
+				Annotations: map[string]string{
+					nydus.LayerAnnotationNydusBootstrap: "true",
+				},
+			},
+		},
+		Annotations: map[string]string{"org.example.existing": "keep"},
+	}
+	desc, err := oci.WriteJSON(ctx, store, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc.Platform = &ocispec.Platform{OS: "linux", Architecture: "amd64"}
+
+	hook := ConvertHookFunc(nydus.MergeOption{}, map[string]string{
+		"org.example.existing": "override",
+		"org.example.added":    "value",
+	})
+	gotDesc, err := hook(ctx, store, *desc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDesc == nil || gotDesc.Digest == desc.Digest {
+		t.Fatalf("rewritten descriptor = %+v, original digest = %s", gotDesc, desc.Digest)
+	}
+	if !reflect.DeepEqual(gotDesc.Platform, desc.Platform) {
+		t.Fatalf("platform = %+v, want %+v", gotDesc.Platform, desc.Platform)
+	}
+
+	var got ocispec.Manifest
+	if err := oci.ReadJSON(ctx, store, *gotDesc, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations["org.example.existing"] != "override" || got.Annotations["org.example.added"] != "value" {
+		t.Fatalf("annotations = %v", got.Annotations)
+	}
+
+	manifest.Layers = []ocispec.Descriptor{{MediaType: ocispec.MediaTypeImageLayerGzip}}
+	ordinaryDesc, err := oci.WriteJSON(ctx, store, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := hook(ctx, store, *ordinaryDesc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged != nil {
+		t.Fatalf("ordinary manifest was unexpectedly rewritten: %+v", unchanged)
+	}
+}
 
 // TestRewriteBootstrapConfigPreservesRuntimeConfig verifies that rewriting the
 // image config for the bootstrap layer only changes the diff ids and history
