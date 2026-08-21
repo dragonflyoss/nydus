@@ -60,8 +60,8 @@ const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
 ///     32     8  bootstrap_offset
 ///     40     8  blob_metadata_offset
 ///     48     8  compressed_data_size    bytes
-///     56     4  bootstrap_blocks        4KiB blocks, zero for an ondemand
-///                                       redirect blob without a bootstrap
+///     56     4  bootstrap_blocks        4KiB blocks, zero when the blob
+///                                       embeds no bootstrap
 ///     60     4  blob_metadata_blocks    4KiB blocks, never zero
 ///     64     8  bootstrap_compressed_size  exact zstd frame bytes when the
 ///                                       BOOTSTRAP_ZSTD flag is set, else 0
@@ -242,8 +242,8 @@ impl BlobFooter {
     /// Deliberately not checked: `version` is informational (compatibility
     /// is governed by the magic and the incompat flag bits), `reserved0` and
     /// the reserved tail may carry a newer writer's compat fields (corruption
-    /// is caught by the crc32), and `bootstrap_blocks` may be zero (an
-    /// ondemand redirect blob embeds no bootstrap image).
+    /// is caught by the crc32), and `bootstrap_blocks` may be zero (redirect and
+    /// incremental blobs embed no bootstrap image).
     fn validate(&self) -> Result<()> {
         if self.magic != NYDUS_BLOB_FOOTER_MAGIC {
             return Err(Error::InvalidImage(
@@ -383,8 +383,8 @@ impl BlobFooter {
         self.compressed_data_size
     }
 
-    /// Size of the bootstrap region in 4KiB blocks, zero for an ondemand
-    /// redirect blob.
+    /// Size of the bootstrap region in 4KiB blocks, zero for blobs without
+    /// an embedded bootstrap.
     pub fn bootstrap_blocks(&self) -> u32 {
         self.bootstrap_blocks
     }

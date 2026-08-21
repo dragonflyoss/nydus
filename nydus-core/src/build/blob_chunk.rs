@@ -274,33 +274,45 @@ impl<W: Write> BlobWriter<W> {
         (self.writer, self.data_hasher)
     }
 
-    pub fn blob_metadata_chunks(&self) -> &[BlobMetadataChunk] {
-        &self.blob_metadata_chunks
-    }
-
-    pub fn blob_metadata_block_groups(&self) -> &[BlobMetadataBlockGroup] {
-        &self.blob_metadata_block_groups
-    }
-
     pub fn blob_metadata(&self, source_offset_bias: u64) -> Result<BlobMetadata> {
+        self.blob_metadata_with_kind(source_offset_bias, false)
+    }
+
+    pub(crate) fn incremental_blob_metadata(
+        &self,
+        source_offset_bias: u64,
+    ) -> Result<BlobMetadata> {
+        self.blob_metadata_with_kind(source_offset_bias, true)
+    }
+
+    fn blob_metadata_with_kind(
+        &self,
+        source_offset_bias: u64,
+        is_incremental: bool,
+    ) -> Result<BlobMetadata> {
         let mut block_groups = Vec::with_capacity(self.blob_metadata_block_groups.len());
         for block_group in &self.blob_metadata_block_groups {
             block_groups.push(block_group.checked_add_compressed_offset(source_offset_bias)?);
         }
 
-        Ok(BlobMetadata::new(
-            self.compressor,
-            BlobMetadataDigester::Blake3,
-            self.file_chunk_size / EROFS_BLOCK_SIZE,
-            self.blob_metadata_chunks.clone(),
-            block_groups,
-            false,
-        )?)
-    }
-
-    pub fn write_blob_metadata(&mut self, path: &Path, source_offset_bias: u64) -> Result<()> {
-        self.finish()?;
-        Ok(self.blob_metadata(source_offset_bias)?.save(path)?)
+        if is_incremental {
+            Ok(BlobMetadata::new_incremental(
+                self.compressor,
+                BlobMetadataDigester::Blake3,
+                self.file_chunk_size / EROFS_BLOCK_SIZE,
+                self.blob_metadata_chunks.clone(),
+                block_groups,
+            )?)
+        } else {
+            Ok(BlobMetadata::new(
+                self.compressor,
+                BlobMetadataDigester::Blake3,
+                self.file_chunk_size / EROFS_BLOCK_SIZE,
+                self.blob_metadata_chunks.clone(),
+                block_groups,
+                false,
+            )?)
+        }
     }
 
     pub fn finish(&mut self) -> Result<()> {
@@ -388,6 +400,23 @@ impl<W: Write> BlobWriter<W> {
         self.chunk_buf = chunk_buf;
 
         Ok(indexes)
+    }
+
+    /// Append one caller-provided file chunk as real blob data.
+    ///
+    /// This low-level method does not apply sparse/null chunk policy; callers
+    /// decide whether a logical chunk should be materialized before calling it.
+    pub fn write_data_chunk(&mut self, data: &[u8]) -> Result<u64> {
+        if data.len() > self.file_chunk_size as usize {
+            return Err(Error::InvalidParameter(format!(
+                "chunk payload {} exceeds file chunk size {}",
+                data.len(),
+                self.file_chunk_size
+            )));
+        }
+        let write_len = align_up_usize(data.len(), EROFS_BLOCK_SIZE as usize)
+            .ok_or_else(|| Error::Overflow("chunk padding overflow".to_string()))?;
+        self.append_chunk(data, write_len)
     }
 
     fn append_chunk(&mut self, data: &[u8], write_len: usize) -> Result<u64> {
@@ -526,7 +555,7 @@ impl<W: Write> BlobWriter<W> {
 /// Format-compatibility policy shared by build and `nydus optimize`: a block group
 /// is stored compressed only when it saves at least 30% — both paths must
 /// agree or an optimized blob would encode block groups differently from its source.
-pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
+pub fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
     (compressed_len as u128) * 100 <= (uncompressed_len as u128) * MAX_COMPRESSED_SIZE_PERCENT
 }
 
@@ -596,8 +625,9 @@ mod tests {
         assert_eq!(indexes_b[0].blkaddr, 257);
         assert_eq!(writer.total_blocks(), 513);
 
-        let entries = writer.blob_metadata_chunks();
-        let block_groups = writer.blob_metadata_block_groups();
+        let blob_metadata = writer.blob_metadata(0).unwrap();
+        let entries = blob_metadata.chunks();
+        let block_groups = blob_metadata.block_groups();
         assert_eq!(entries.len(), 3);
         assert_eq!(block_groups.len(), 3);
         // Chunks record absolute block offsets, independent of block groups.
@@ -712,7 +742,7 @@ mod tests {
         // Every chunk is a hole: nothing lands in the blob at all.
         assert_eq!(indexes.len(), 2);
         assert!(indexes.iter().all(|ci| ci.blkaddr == EROFS_NULL_ADDR));
-        assert!(writer.blob_metadata_block_groups().is_empty());
+        assert!(writer.blob_metadata(0).unwrap().block_groups().is_empty());
         assert_eq!(writer.total_blocks(), 0);
         assert_eq!(fs::read(&blob_path).unwrap().len(), 0);
     }
@@ -736,7 +766,8 @@ mod tests {
             .unwrap();
         writer.finish().unwrap();
 
-        let block_groups = writer.blob_metadata_block_groups();
+        let blob_metadata = writer.blob_metadata(0).unwrap();
+        let block_groups = blob_metadata.block_groups();
         assert_eq!(block_groups.len(), 1);
         assert_eq!(block_groups[0].uncompressed_block_count(), 256);
         assert_eq!(
@@ -761,8 +792,11 @@ mod tests {
         let mut writer =
             BlobWriter::new(&blob_path, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE).unwrap();
         writer.write_file_chunks(&input_path, 4096).unwrap();
+        writer.finish().unwrap();
         writer
-            .write_blob_metadata(&blob_metadata_path, 8192)
+            .blob_metadata(8192)
+            .unwrap()
+            .save(&blob_metadata_path)
             .unwrap();
 
         let raw = fs::read(&blob_metadata_path).unwrap();

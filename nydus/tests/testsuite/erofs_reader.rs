@@ -9,9 +9,9 @@ use std::io::Write;
 
 use tempfile::{tempdir, NamedTempFile};
 
-use nydus::build::blob_chunk::BlobWriter;
-use nydus::build::bootstrap::render_bootstrap;
-use nydus::build::inode::{build_tree, ChildRef, InodeData, InodeInfo};
+use nydus_core::build::blob_chunk::BlobWriter;
+use nydus_core::build::bootstrap::render_bootstrap;
+use nydus_core::build::inode::{build_tree, ChildRef, InodeData, InodeInfo};
 use nydus_core::ErofsReader;
 use nydus_format::erofs::{
     erofs_xattr_ibody_size, ErofsChunkAddr, ErofsDeviceSlot, XattrEntry, EROFS_BLKSZBITS,

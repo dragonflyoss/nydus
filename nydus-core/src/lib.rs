@@ -28,16 +28,19 @@
 #![warn(unreachable_pub)]
 
 pub mod blob;
+pub mod build;
 pub mod entry;
 pub mod extent;
 pub mod flat;
 pub mod reader;
+pub mod writer;
 
 pub use blob::{BlobId, BlobInfo, Blobs};
 pub use entry::FileType;
 pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
 pub use reader::ErofsReader;
+pub use writer::{IncrementalWriter, IncrementalWriterOptions};
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
@@ -67,6 +70,7 @@ pub struct NydusCore {
     pub blobs: Blobs,
     /// Static path-based filesystem APIs.
     pub fs: ImageFs,
+    reader: Arc<ErofsReader>,
     bootstrap: Arc<File>,
     zero_file: Arc<File>,
     flat_size: u64,
@@ -220,13 +224,26 @@ impl NydusCore {
                 flat_layout: OnceLock::new(),
                 flat_layout_init: Mutex::new(()),
             },
-            fs: ImageFs::new(reader, zero_file.clone()),
+            fs: ImageFs::new(reader.clone(), zero_file.clone()),
+            reader,
             bootstrap: bootstrap_file,
             zero_file,
             flat_size,
             trace_recorder,
             prefetch_stop,
         })
+    }
+
+    /// Create an incremental writer that reuses this core's parent reader, backend, and cache.
+    ///
+    /// Each call returns an independent writer with its own staged overlay and
+    /// output blob/bootstrap paths. The returned writer is a single-writer
+    /// builder; serialize access externally if it is shared across threads.
+    /// Reads through this `NydusCore` continue to expose the parent image and do
+    /// not include staged writer changes. Open the committed child bootstrap to
+    /// read the merged result.
+    pub fn writer(&self, options: IncrementalWriterOptions) -> Result<IncrementalWriter> {
+        IncrementalWriter::from_parent_reader(self.reader.clone(), options)
     }
 
     /// Return the bootstrap file backing this core.

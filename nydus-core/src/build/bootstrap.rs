@@ -1,8 +1,7 @@
 use super::layout::MetadataLayout;
 use crate::build::dir::{serialize_directory, DirChild};
-use crate::build::image::{
-    device_table_meta_blkaddr, fill_image_head, write_erofs_superblock_checksum,
-};
+use crate::build::image::write_erofs_superblock_checksum;
+use crate::build::image::{device_table_meta_blkaddr, fill_image_head};
 use crate::build::inode::{
     erofs_inode_size, serialize_inode, symlink_is_inline, InodeData, InodeInfo,
 };
@@ -202,7 +201,7 @@ fn write_zeros(writer: &mut impl Write, n: usize) -> Result<()> {
 /// addresses for the given slots and refresh the superblock checksum. The
 /// metadata region is device-slot independent, so a bootstrap rendered for
 /// one slot set can be retargeted in place instead of re-rendered.
-pub(crate) fn flatten_bootstrap_in_place(
+pub fn flatten_bootstrap_in_place(
     bootstrap: &mut [u8],
     device_slots: &[ErofsDeviceSlot],
 ) -> Result<()> {

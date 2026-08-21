@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use crate::build::bootstrap::{render_flattened_bootstrap, render_flattened_bootstrap_to};
-use crate::build::inode::{
+use nydus_core::build::bootstrap::{render_flattened_bootstrap, render_flattened_bootstrap_to};
+use nydus_core::build::inode::{
     flatten_tree, set_root_prefetch_blobs_xattr, InodeData, NamedChildren, NodeAttrs, TreeNode,
 };
 use nydus_core::reader::RawDirEntry;
@@ -561,8 +561,8 @@ mod tests {
 
     #[test]
     fn merge_accepts_full_blob_when_file_size_matches_primary_image() {
-        use crate::build::image::write_erofs_superblock_checksum;
         use crate::build::{build_image, BuildImageOptions};
+        use crc32c::crc32c_append;
         use nydus_format::blob::BlobMetadataCompressor;
         use std::collections::HashSet;
 
@@ -602,7 +602,14 @@ mod tests {
         let blob = loop {
             bootstrap[blocks_lo_offset..blocks_lo_offset + 4]
                 .copy_from_slice(&file_blocks.to_le_bytes());
-            write_erofs_superblock_checksum(&mut bootstrap).unwrap();
+            let checksum_offset = EROFS_SUPER_OFFSET as usize + 4;
+            bootstrap[checksum_offset..checksum_offset + 4].fill(0);
+            let checksum = !crc32c_append(
+                0u32,
+                &bootstrap[EROFS_SUPER_OFFSET as usize..EROFS_BLOCK_SIZE as usize],
+            );
+            bootstrap[checksum_offset..checksum_offset + 4]
+                .copy_from_slice(&checksum.to_le_bytes());
 
             let mut rebuilt = original_blob[..data_size].to_vec();
             nydus_format::blob::finish_full_blob(
@@ -918,9 +925,9 @@ mod tests {
     /// prefetch xattr aside, which is stamped on after flattening).
     #[test]
     fn build_and_single_layer_merge_produce_identical_inodes() {
-        use crate::build::blob_chunk::BlobWriter;
-        use crate::build::inode::build_tree;
         use crate::build::{build_image, BuildImageOptions};
+        use nydus_core::build::blob_chunk::BlobWriter;
+        use nydus_core::build::inode::build_tree;
         use nydus_format::blob::BlobMetadataCompressor;
         use nydus_format::utils::hex_string;
         use std::collections::HashSet;

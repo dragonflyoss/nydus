@@ -1,11 +1,11 @@
 use clap::Parser;
+use nydus::build::save_blob_metadata_sidecar;
 use nydus::error::{Context, Error, Result};
 use nydus::optimize::{
     build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, BlockGroupRef,
 };
 use nydus_backend::{build_backend, BlobBackend};
 use nydus_config::Config;
-use nydus_format::blob::NYDUS_BLOB_METADATA_SUFFIX;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
@@ -168,10 +168,7 @@ impl OptimizeCommand {
         let blob_path = self.blob_dir.join(&digest_hex);
         fs::write(&blob_path, &ondemand.artifact)
             .with_context(|| format!("failed to write ondemand blob: {}", blob_path.display()))?;
-        let blob_metadata_path = self
-            .blob_dir
-            .join(format!("{digest_hex}{NYDUS_BLOB_METADATA_SUFFIX}"));
-        ondemand.blob_metadata.save(&blob_metadata_path)?;
+        let blob_metadata_path = save_blob_metadata_sidecar(&ondemand.blob_metadata, &blob_path)?;
 
         fs::write(&self.bootstrap, &ondemand.bootstrap).with_context(|| {
             format!(
