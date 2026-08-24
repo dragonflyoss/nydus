@@ -826,56 +826,40 @@ impl BlobMetadata {
     }
 
     fn from_bytes(
-        data: &[u8],
+        bytes: &[u8],
         blob_id: [u8; SHA256_DIGEST_SIZE],
-        check_crc32: bool,
+        verify_crc32: bool,
     ) -> Result<Self> {
-        if data.len() < NYDUS_BLOB_METADATA_HEADER_SIZE {
+        let Some((header_bytes, _)) = bytes.split_first_chunk::<NYDUS_BLOB_METADATA_HEADER_SIZE>()
+        else {
             return Err(Error::InvalidImage("blob meta data too small".to_string()));
-        }
+        };
 
-        let header = BlobMetadataHeader::from_bytes(
-            data[..NYDUS_BLOB_METADATA_HEADER_SIZE]
-                .try_into()
-                .expect("length checked"),
-        )?;
-        if data.len() as u64 != header.padded_size() {
-            return Err(Error::InvalidImage(format!(
-                "blob meta data size mismatch: expected {}, got {}",
-                header.padded_size(),
-                data.len()
-            )));
-        }
-        validate_padding(data, &header)?;
-        if check_crc32 {
-            validate_blob_metadata_crc32(data, &header)?;
-        }
+        let header = BlobMetadataHeader::from_bytes(header_bytes)?;
+        Self::validate_bytes(bytes, &header, verify_crc32)?;
 
-        let chunks = (0..header.chunk_count() as usize)
-            .map(|index| {
-                let start =
-                    header.chunks_offset() as usize + index * size_of::<BlobMetadataChunk>();
-                BlobMetadataChunk::from_bytes(
-                    data[start..start + size_of::<BlobMetadataChunk>()]
-                        .try_into()
-                        .expect("length checked"),
-                )
-                .with_context(|| format!("failed to read blob meta chunk {index}"))
+        let chunk_table =
+            &bytes[header.chunks_offset() as usize..header.block_groups_offset() as usize];
+        let chunks = chunk_table
+            .chunks_exact(size_of::<BlobMetadataChunk>())
+            .enumerate()
+            .map(|(index, entry)| {
+                BlobMetadataChunk::from_bytes(entry.try_into().unwrap())
+                    .with_context(|| format!("failed to read blob meta chunk {index}"))
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let block_groups = (0..header.block_group_count() as usize)
-            .map(|index| {
-                let start = header.block_groups_offset() as usize
-                    + index * size_of::<BlobMetadataBlockGroup>();
-                BlobMetadataBlockGroup::from_bytes(
-                    data[start..start + size_of::<BlobMetadataBlockGroup>()]
-                        .try_into()
-                        .expect("length checked"),
-                )
-                .with_context(|| format!("failed to read blob meta block group {index}"))
+        let block_group_table =
+            &bytes[header.block_groups_offset() as usize..header.used_size() as usize];
+        let block_groups = block_group_table
+            .chunks_exact(size_of::<BlobMetadataBlockGroup>())
+            .enumerate()
+            .map(|(index, entry)| {
+                BlobMetadataBlockGroup::from_bytes(entry.try_into().unwrap())
+                    .with_context(|| format!("failed to read blob meta block group {index}"))
             })
             .collect::<Result<Vec<_>>>()?;
+
         let blob_metadata = Self {
             header,
             blob_id,
@@ -894,7 +878,7 @@ impl BlobMetadata {
         Self::load_inner(path, false)
     }
 
-    fn load_inner(path: &Path, check_crc32: bool) -> Result<Self> {
+    fn load_inner(path: &Path, verify_crc32: bool) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("failed to open blob meta: {}", path.display()))?;
         let file_len = file.metadata()?.len();
@@ -908,17 +892,7 @@ impl BlobMetadata {
                 .try_into()
                 .expect("length checked"),
         )?;
-        if file_len != header.padded_size() {
-            return Err(Error::InvalidImage(format!(
-                "blob meta file size mismatch: expected {}, got {}",
-                header.padded_size(),
-                file_len
-            )));
-        }
-        validate_padding(&mmap, &header)?;
-        if check_crc32 {
-            validate_blob_metadata_crc32(&mmap, &header)?;
-        }
+        Self::validate_bytes(&mmap, &header, verify_crc32)?;
         let blob_metadata = Self {
             header,
             blob_id: [0u8; SHA256_DIGEST_SIZE],
@@ -1027,6 +1001,36 @@ impl BlobMetadata {
                 return Err(Error::InvalidImage(format!(
                     "blob meta chunk {index} exceeds the blob block range: \
                      ends at block {chunk_block_end}, blob ends at block {uncompressed_block_end}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_bytes(bytes: &[u8], header: &BlobMetadataHeader, verify_crc32: bool) -> Result<()> {
+        if bytes.len() as u64 != header.padded_size() {
+            return Err(Error::InvalidImage(format!(
+                "blob meta size mismatch: expected {}, got {}",
+                header.padded_size(),
+                bytes.len()
+            )));
+        }
+
+        let padding = &bytes[header.used_size() as usize..];
+        if padding.iter().any(|byte| *byte != 0) {
+            return Err(Error::InvalidImage(
+                "blob meta padding must be zero".to_string(),
+            ));
+        }
+
+        if verify_crc32 {
+            let expected_crc32 = header.crc32();
+            let actual_crc32 = Self::compute_crc32(bytes);
+            if expected_crc32 != actual_crc32 {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta crc32 mismatch: expected {expected_crc32:#010x}, \
+                     got {actual_crc32:#010x}"
                 )));
             }
         }
@@ -1234,9 +1238,9 @@ impl BlobMetadataLoader {
     }
 
     /// Read blob metadata from an in-memory byte slice.
-    pub fn from_bytes(self, data: &[u8]) -> Result<BlobMetadata> {
+    pub fn from_bytes(self, bytes: &[u8]) -> Result<BlobMetadata> {
         BlobMetadata::from_bytes(
-            data,
+            bytes,
             self.blob_id.unwrap_or([0u8; SHA256_DIGEST_SIZE]),
             self.verify_crc32,
         )
@@ -1258,28 +1262,6 @@ fn block_count_to_bits(blocks: u32) -> Result<u8> {
     }
 
     Ok(bits)
-}
-
-fn validate_padding(data: &[u8], header: &BlobMetadataHeader) -> Result<()> {
-    let padding_start = header.used_size() as usize;
-    if data[padding_start..].iter().any(|byte| *byte != 0) {
-        return Err(Error::InvalidImage(
-            "blob meta padding must be zero".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_blob_metadata_crc32(data: &[u8], header: &BlobMetadataHeader) -> Result<()> {
-    let computed = BlobMetadata::compute_crc32(data);
-    if computed != header.crc32() {
-        return Err(Error::InvalidImage(format!(
-            "blob meta header crc32 mismatch: stored {:#010x}, computed {:#010x}",
-            header.crc32(),
-            computed
-        )));
-    }
-    Ok(())
 }
 
 fn mapped_chunks<'a>(data: &'a [u8], header: &BlobMetadataHeader) -> &'a [BlobMetadataChunk] {
