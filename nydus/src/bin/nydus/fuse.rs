@@ -4,7 +4,8 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{build_backend, BlobBackend, Local};
 use nydus_config::{
-    default_prefetch_concurrent_blob_count, default_prefetch_timeout, Config, PrefetchScope,
+    default_prefetch_concurrent_blob_count, default_prefetch_retry_delay_max,
+    default_prefetch_retry_delay_min, default_prefetch_timeout, Config, PrefetchScope,
 };
 use nydus_core::ErofsReader;
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -192,31 +193,40 @@ impl FuseCommand {
                 .and_then(|config| config.storage.dir.clone())
         };
 
-        let (prefetch_scope, prefetch_concurrent_blob_count, prefetch_timeout) =
-            match storage_config.as_ref() {
-                Some(config) => {
-                    // `--prefetch` forces prefetch on when the config disables it.
-                    let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        config.prefetch.scope
-                    };
-                    (
-                        scope,
-                        config.prefetch.concurrent_blob_count,
-                        config.prefetch.timeout,
-                    )
-                }
-                None => (
-                    if self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        PrefetchScope::None
-                    },
-                    default_prefetch_concurrent_blob_count(),
-                    default_prefetch_timeout(),
-                ),
-            };
+        let (
+            prefetch_scope,
+            prefetch_concurrent_blob_count,
+            prefetch_timeout,
+            prefetch_retry_delay_min,
+            prefetch_retry_delay_max,
+        ) = match storage_config.as_ref() {
+            Some(config) => {
+                // `--prefetch` forces prefetch on when the config disables it.
+                let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    config.prefetch.scope
+                };
+                (
+                    scope,
+                    config.prefetch.concurrent_blob_count,
+                    config.prefetch.timeout,
+                    config.prefetch.retry_delay_min,
+                    config.prefetch.retry_delay_max,
+                )
+            }
+            None => (
+                if self.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    PrefetchScope::None
+                },
+                default_prefetch_concurrent_blob_count(),
+                default_prefetch_timeout(),
+                default_prefetch_retry_delay_min(),
+                default_prefetch_retry_delay_max(),
+            ),
+        };
 
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
@@ -280,6 +290,7 @@ impl FuseCommand {
 
         let session = FuseService::mount(fs, mountpoint, &config)?;
 
+        let mut prefetch_stop = None;
         if prefetch_scope == PrefetchScope::None {
             info!("blob prefetch disabled (enable with --prefetch or the config's prefetch.scope)");
         } else if cache_dir.is_none() {
@@ -291,12 +302,18 @@ impl FuseCommand {
                 prefetch_concurrent_blob_count,
                 prefetch_scope,
                 prefetch_timeout,
+                prefetch_retry_delay_min,
+                prefetch_retry_delay_max,
             );
+            let stop = prefetcher.stop_flag();
             match prefetcher.spawn() {
-                Ok(_handle) => info!(
-                    "started blob prefetch (concurrent_blob_count={}, scope={:?})",
-                    prefetch_concurrent_blob_count, prefetch_scope
-                ),
+                Ok(_handle) => {
+                    prefetch_stop = Some(stop);
+                    info!(
+                        "started blob prefetch (concurrent_blob_count={}, scope={:?})",
+                        prefetch_concurrent_blob_count, prefetch_scope
+                    );
+                }
                 Err(err) => warn!("failed to start blob prefetch: {}", err),
             }
         }
@@ -315,6 +332,12 @@ impl FuseCommand {
         };
 
         let join_result = session.serve()?;
+
+        // The filesystem is unmounted: wind down the detached prefetch thread
+        // (it may be sleeping towards a rescheduled throttled-blob retry).
+        if let Some(stop) = prefetch_stop {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Tear down the metrics server before reporting the mount result.
         if let Some(server) = api_server {

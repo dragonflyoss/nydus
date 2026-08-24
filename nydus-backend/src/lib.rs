@@ -5,7 +5,9 @@
 //! service edges; this crate must not depend on the control-plane error
 //! type. Backend-private errors (registry auth, Dragonfly classification) are
 //! matched for retry decisions internally and fold into `io::Error` at the
-//! trait boundary.
+//! trait boundary. The one deliberately typed escape hatch is the
+//! backend-throttled marker ([`throttled_error`] / [`is_backend_throttled`]),
+//! which lets the storage layer reschedule throttled prefetches.
 
 mod local;
 
@@ -69,6 +71,53 @@ impl ReadContext {
     }
 }
 
+/// Marker error wrapped in an [`io::Error`] when the backend throttled a read
+/// (a prefetch rejected by a Dragonfly proxy `429` under the load-shedding
+/// policy), so the storage layer can distinguish "throttled — reschedule
+/// later" from an ordinary failure via [`is_backend_throttled`].
+#[derive(Debug)]
+struct BackendThrottled {
+    message: String,
+}
+
+impl std::fmt::Display for BackendThrottled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "backend throttled the read: {}", self.message)
+    }
+}
+
+impl std::error::Error for BackendThrottled {}
+
+/// Build the [`io::Error`] denoting a backend-throttled read. Public so tests
+/// in dependent crates can fabricate throttled failures.
+pub fn throttled_error(message: impl Into<String>) -> io::Error {
+    io::Error::other(BackendThrottled {
+        message: message.into(),
+    })
+}
+
+/// Whether an error denotes a read the backend throttled (Dragonfly `429`).
+pub fn is_backend_throttled(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|inner| inner.is::<BackendThrottled>())
+}
+
+thread_local! {
+    /// Set while a metered read is being served when part of it was diverted
+    /// to a different target than the backend's static one — e.g. a Dragonfly
+    /// read that fell back to the origin — so the read is attributed to the
+    /// side that actually served it. Reads run synchronously on the calling
+    /// thread, so a thread-local carries this without any cross-read leakage.
+    static READ_SERVED_BY: std::cell::Cell<Option<nydus_telemetry::metrics::BackendTarget>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Attribute the in-flight metered read to `target` instead of the backend's
+/// static [`BlobBackend::backend_target`].
+pub(crate) fn note_read_served_by(target: nydus_telemetry::metrics::BackendTarget) {
+    READ_SERVED_BY.with(|cell| cell.set(Some(target)));
+}
+
 /// A blob backend resolves blob data and metadata by content digest.
 pub trait BlobBackend: Send + Sync {
     /// Which side serves this backend's reads, used to attribute read and CRC
@@ -122,9 +171,13 @@ impl MeteredBackend {
         read: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
         let start = std::time::Instant::now();
+        READ_SERVED_BY.with(|cell| cell.set(None));
         let result = read();
+        let target = READ_SERVED_BY
+            .with(|cell| cell.take())
+            .unwrap_or_else(|| self.inner.backend_target());
         nydus_telemetry::metrics::record_backend_read(
-            self.inner.backend_target(),
+            target,
             context.kind,
             bytes,
             start.elapsed(),
@@ -197,6 +250,14 @@ mod tests {
         let config: BackendConfig =
             serde_yaml::from_str("type: local\nconfig:\n  dir: /blobs\n").unwrap();
         assert!(build_backend(&config).is_ok());
+    }
+
+    #[test]
+    fn throttled_marker_survives_io_error_round_trip() {
+        let err = throttled_error("proxy answered 429");
+        assert!(is_backend_throttled(&err));
+        assert!(err.to_string().contains("429"));
+        assert!(!is_backend_throttled(&io::Error::other("ordinary failure")));
     }
 
     #[cfg(feature = "backend-registry")]

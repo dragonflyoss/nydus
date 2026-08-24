@@ -50,6 +50,61 @@ pub enum ReadKind {
     Prefetch,
 }
 
+impl ReadKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReadKind::OnDemand => "ondemand",
+            ReadKind::Prefetch => "prefetch",
+        }
+    }
+
+    const ALL: [ReadKind; 2] = [ReadKind::OnDemand, ReadKind::Prefetch];
+}
+
+/// Classification of a failed Dragonfly SDK read, labelling the
+/// `backend_dragonfly_read_errors` counter. Mirrors the failure classes the
+/// registry backend's load-shedding policy distinguishes. Defined here so
+/// this crate stays a dependency leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragonflyErrorClass {
+    /// The Dragonfly proxy answered HTTP 429.
+    RateLimited,
+    /// The Dragonfly proxy answered HTTP 403.
+    Forbidden,
+    /// The request timed out.
+    Timeout,
+    /// The local dfdaemon could not be reached.
+    Connect,
+    /// The proxy or the backend behind it answered HTTP 5xx.
+    ServerError,
+    /// Any other SDK transport error.
+    Other,
+}
+
+impl DragonflyErrorClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            DragonflyErrorClass::RateLimited => "rate_limited",
+            DragonflyErrorClass::Forbidden => "forbidden",
+            DragonflyErrorClass::Timeout => "timeout",
+            DragonflyErrorClass::Connect => "connect",
+            DragonflyErrorClass::ServerError => "server_error",
+            DragonflyErrorClass::Other => "other",
+        }
+    }
+
+    /// All classes, used to pre-create label series so every class appears in
+    /// the exposition output even before it is first hit.
+    const ALL: [DragonflyErrorClass; 6] = [
+        DragonflyErrorClass::RateLimited,
+        DragonflyErrorClass::Forbidden,
+        DragonflyErrorClass::Timeout,
+        DragonflyErrorClass::Connect,
+        DragonflyErrorClass::ServerError,
+        DragonflyErrorClass::Other,
+    ];
+}
+
 /// A FUSE filesystem operation, mirroring nydus `StatsFop` for label parity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsOp {
@@ -137,6 +192,14 @@ struct Metrics {
     backend_redirect_read_count: IntCounter,
     backend_redirect_read_bytes: IntCounter,
 
+    backend_dragonfly_read_errors: IntCounterVec,
+    backend_fallback_read_count: IntCounter,
+    backend_fallback_read_errors: IntCounter,
+    backend_fallback_throttle_wait: Histogram,
+
+    prefetch_reschedule_count: IntCounter,
+    prefetch_reschedule_run_count: IntCounter,
+
     fs_op_count: IntCounterVec,
     fs_op_errors: IntCounterVec,
     fs_read_latency: Histogram,
@@ -202,6 +265,25 @@ impl Metrics {
         for op in FsOp::ALL {
             fs_op_count.with_label_values(&[op.as_str()]);
             fs_op_errors.with_label_values(&[op.as_str()]);
+        }
+
+        let backend_dragonfly_read_errors = IntCounterVec::new(
+            Opts::new(
+                "backend_dragonfly_read_errors",
+                "Failed Dragonfly SDK reads by error class and read kind",
+            ),
+            &["class", "kind"],
+        )
+        .expect("valid counter vec");
+        registry
+            .register(Box::new(backend_dragonfly_read_errors.clone()))
+            .expect("register");
+
+        // Pre-create every class/kind series so they appear at zero.
+        for class in DragonflyErrorClass::ALL {
+            for kind in ReadKind::ALL {
+                backend_dragonfly_read_errors.with_label_values(&[class.as_str(), kind.as_str()]);
+            }
         }
 
         Self {
@@ -304,6 +386,32 @@ impl Metrics {
                 &registry,
                 "backend_redirect_read_bytes",
                 "Bytes of ondemand (redirect) blob data fetched from the backend",
+            ),
+            backend_dragonfly_read_errors,
+            backend_fallback_read_count: counter(
+                &registry,
+                "backend_fallback_read_count",
+                "Origin requests issued as Dragonfly fallbacks",
+            ),
+            backend_fallback_read_errors: counter(
+                &registry,
+                "backend_fallback_read_errors",
+                "Failed origin requests issued as Dragonfly fallbacks",
+            ),
+            backend_fallback_throttle_wait: histogram(
+                &registry,
+                "backend_fallback_throttle_wait",
+                "Seconds a Dragonfly fallback waited on the origin throttle",
+            ),
+            prefetch_reschedule_count: counter(
+                &registry,
+                "prefetch_reschedule_count",
+                "Blob prefetches rescheduled after a throttled (429) backend failure",
+            ),
+            prefetch_reschedule_run_count: counter(
+                &registry,
+                "prefetch_reschedule_run_count",
+                "Re-attempts of previously rescheduled blob prefetches",
             ),
             fs_op_count,
             fs_op_errors,
@@ -538,6 +646,45 @@ pub fn inc_cache_redirect_skip_block_group() {
     METRICS.cache_redirect_skip_block_group.inc();
 }
 
+/// Record a failed Dragonfly SDK read, attributed to its error class and to
+/// the kind of read (on-demand or prefetch) that hit it.
+pub fn record_dragonfly_error(class: DragonflyErrorClass, kind: ReadKind) {
+    METRICS
+        .backend_dragonfly_read_errors
+        .with_label_values(&[class.as_str(), kind.as_str()])
+        .inc();
+}
+
+/// Record an origin request issued as a Dragonfly fallback. These reads also
+/// count towards the regular origin counters via [`record_backend_read`];
+/// this pair isolates the fallback volume operators watch during Dragonfly
+/// degradation.
+pub fn record_fallback_read(is_err: bool) {
+    METRICS.backend_fallback_read_count.inc();
+    if is_err {
+        METRICS.backend_fallback_read_errors.inc();
+    }
+}
+
+/// Record how long a Dragonfly fallback waited on the origin throttle before
+/// its request was allowed to start.
+pub fn record_fallback_throttle_wait(wait: Duration) {
+    METRICS
+        .backend_fallback_throttle_wait
+        .observe(wait.as_secs_f64());
+}
+
+/// Record a blob prefetch rescheduled for a delayed retry after a throttled
+/// (429) backend failure.
+pub fn inc_prefetch_reschedule() {
+    METRICS.prefetch_reschedule_count.inc();
+}
+
+/// Record the execution of a previously rescheduled blob prefetch.
+pub fn inc_prefetch_reschedule_run() {
+    METRICS.prefetch_reschedule_run_count.inc();
+}
+
 /// How many caches currently claim the blob `cache_key`, for tests. The gauge
 /// itself is process-global and other tests move it concurrently, so the
 /// refcount is what can be asserted deterministically.
@@ -639,6 +786,42 @@ pub fn backend_redirect_read_bytes_total() -> u64 {
     METRICS.backend_redirect_read_bytes.get()
 }
 
+/// Current count of failed Dragonfly reads for one error class and read kind.
+pub fn dragonfly_error_total(class: DragonflyErrorClass, kind: ReadKind) -> u64 {
+    METRICS
+        .backend_dragonfly_read_errors
+        .with_label_values(&[class.as_str(), kind.as_str()])
+        .get()
+}
+
+/// Current count of origin requests issued as Dragonfly fallbacks.
+pub fn backend_fallback_read_total() -> u64 {
+    METRICS.backend_fallback_read_count.get()
+}
+
+/// Current count of failed origin requests issued as Dragonfly fallbacks.
+pub fn backend_fallback_read_error_total() -> u64 {
+    METRICS.backend_fallback_read_errors.get()
+}
+
+/// Current count of backend reads attributed to `target`.
+pub fn backend_read_total(target: BackendTarget) -> u64 {
+    match target {
+        BackendTarget::Origin => METRICS.backend_origin_read_count.get(),
+        BackendTarget::Proxy => METRICS.backend_proxy_read_count.get(),
+    }
+}
+
+/// Current count of blob prefetches rescheduled after a throttled failure.
+pub fn prefetch_reschedule_total() -> u64 {
+    METRICS.prefetch_reschedule_count.get()
+}
+
+/// Current count of re-attempts of rescheduled blob prefetches.
+pub fn prefetch_reschedule_run_total() -> u64 {
+    METRICS.prefetch_reschedule_run_count.get()
+}
+
 /// Encode all metrics in the Prometheus text exposition format.
 pub fn encode_text() -> String {
     let metric_families = METRICS.registry.gather();
@@ -689,6 +872,49 @@ mod tests {
         );
         let text = encode_text();
         assert!(text.contains("backend_prefetch_read_high_latency_count"));
+    }
+
+    #[test]
+    fn dragonfly_policy_metrics_move_and_expose() {
+        let errors_before =
+            dragonfly_error_total(DragonflyErrorClass::RateLimited, ReadKind::Prefetch);
+        let fallbacks_before = backend_fallback_read_total();
+        let fallback_errors_before = backend_fallback_read_error_total();
+        let reschedules_before = prefetch_reschedule_total();
+        let reschedule_runs_before = prefetch_reschedule_run_total();
+
+        record_dragonfly_error(DragonflyErrorClass::RateLimited, ReadKind::Prefetch);
+        record_fallback_read(false);
+        record_fallback_read(true);
+        record_fallback_throttle_wait(Duration::from_millis(10));
+        inc_prefetch_reschedule();
+        inc_prefetch_reschedule_run();
+
+        assert_eq!(
+            dragonfly_error_total(DragonflyErrorClass::RateLimited, ReadKind::Prefetch),
+            errors_before + 1
+        );
+        assert_eq!(backend_fallback_read_total(), fallbacks_before + 2);
+        assert_eq!(
+            backend_fallback_read_error_total(),
+            fallback_errors_before + 1
+        );
+        assert_eq!(prefetch_reschedule_total(), reschedules_before + 1);
+        assert_eq!(prefetch_reschedule_run_total(), reschedule_runs_before + 1);
+
+        let text = encode_text();
+        assert!(
+            text.contains(r#"backend_dragonfly_read_errors{class="rate_limited",kind="prefetch"}"#)
+        );
+        // Series for classes never hit are pre-created at zero.
+        assert!(
+            text.contains(r#"backend_dragonfly_read_errors{class="forbidden",kind="ondemand"}"#)
+        );
+        assert!(text.contains("backend_fallback_read_count"));
+        assert!(text.contains("backend_fallback_read_errors"));
+        assert!(text.contains("backend_fallback_throttle_wait"));
+        assert!(text.contains("prefetch_reschedule_count"));
+        assert!(text.contains("prefetch_reschedule_run_count"));
     }
 
     #[test]
