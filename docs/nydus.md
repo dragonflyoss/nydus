@@ -720,6 +720,13 @@ Fields:
 	blob may take, while `http.timeout` bounds each block group request within it;
 	`0s` disables the bound. A blob that exceeds it is aborted with a warning
 	and prefetch moves on.
+- `prefetch.retry_delay_min` / `prefetch.retry_delay_max` (defaults `6h` /
+	`12h`) bound the random delay before a blob prefetch that the backend
+	throttled (a Dragonfly proxy `429`) is re-attempted; each throttled blob is
+	rescheduled with a fresh random deadline inside the window so retry load
+	spreads out instead of stampeding. `retry_delay_min` must not exceed
+	`retry_delay_max`. Only throttled failures are rescheduled; other prefetch
+	failures are logged and skipped.
 - `prefetch.scope` (default `ondemand`) selects which blobs to pull. `none`
 	disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
 	(if any), warming the access-ordered hot set while leaving backend
@@ -776,7 +783,8 @@ Fields under `backend.config`:
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
 	Omit for anonymous / token-only registries.
 - `http` (optional): the HTTP client settings — timeouts, retries, and TLS
-	trust. The timeout and retry limits also apply to Dragonfly SDK requests.
+	trust. The timeout also applies to Dragonfly SDK requests; retry counts
+	for Dragonfly reads are governed by the `dragonfly` policy knobs below.
 	- `timeout` (default `5s`): per-request timeout in humantime format (e.g.
 		`5s`, `1m`); `0s` disables it. Kept short because a read holds the
 		block group's cross-process fetch claim for its whole duration, and what
@@ -784,7 +792,11 @@ Fields under `backend.config`:
 		sharing the cache directory.
 	- `max_retries` (default `3`): maximum number of retry attempts per
 		request, applied with exponential backoff by the HTTP client's retry
-		middleware and by the Dragonfly SDK.
+		middleware on direct origin requests. Origin requests issued as
+		Dragonfly fallbacks share the same budget but pace each retry through
+		the fallback throttle instead of the middleware's backoff, so this
+		default is what bounds "origin failing 3 retries" before a fallback
+		read errors out.
 	- `proxy` (optional): routes every registry request through an HTTP
 		forward proxy. Requests keep their original upstream URL, so a proxy
 		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
@@ -799,15 +811,46 @@ Fields under `backend.config`:
 - `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
 	(crate `dragonfly-client-request`) for P2P distribution, carrying a
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
-	configured `timeout` and `max_retries`; every other request (`HEAD`, auth
-	token fetches) goes directly to the origin registry. When a Dragonfly
-	request still fails after the SDK's retries, the read falls back to the
-	origin. Only available when the binary is built with the
-	`backend-dragonfly-proxy` feature. Omit to talk to the origin directly.
-	Metrics attribute each read to the origin or proxy side (see
-	[Metrics](#metrics)).
+	configured `timeout`; every other request (`HEAD`, auth token fetches)
+	goes directly to the origin registry. Only available when the binary is
+	built with the `backend-dragonfly-proxy` feature. Omit to talk to the
+	origin directly. Metrics attribute each read to the origin or proxy side
+	(see [Metrics](#metrics)).
+
+	Failed Dragonfly reads are handled by a load-shedding policy keyed on the
+	failure class and the read kind. The SDK's internal retries are disabled;
+	the retry counts below are exact and observable:
+
+	| Failure class | Prefetch | On-demand |
+	|---|---|---|
+	| Proxy `429` | No retry, no origin fallback; the blob's prefetch fails and is rescheduled after a random `prefetch.retry_delay_min`–`prefetch.retry_delay_max` delay | No Dragonfly retry; fall back to the origin through the fallback throttle; the origin failing `http.max_retries` attempts → IO error |
+	| Proxy `403` | Fail immediately, no retry, no fallback | Fail immediately, no retry, no fallback |
+	| Timeout | `prefetch_max_retries` Dragonfly retries (each after a random 100ms–1s delay), then fail (no fallback) | `ondemand_max_retries` Dragonfly retries, then throttled origin fallback |
+	| Connect / `5xx` / other | `prefetch_max_retries` Dragonfly retries (each after a random 100ms–1s delay), then fail (no fallback) | `ondemand_max_retries` Dragonfly retries, then throttled origin fallback |
+
+	Prefetch reads never fall back to the origin, so a Dragonfly outage
+	degrades prefetch instead of flooding the registry, while on-demand reads
+	stay served through the shaped fallback path.
+
 	- `scheduler_endpoint` (required): the Dragonfly scheduler endpoint (gRPC),
 		e.g. `http://127.0.0.1:65000`.
+	- `ondemand_max_retries` (default `3`): Dragonfly retries for a retryable
+		(timeout / connect / `5xx`) on-demand read failure before falling back
+		to the origin.
+	- `prefetch_max_retries` (default `10`): Dragonfly retries for a retryable
+		prefetch read failure before the read fails. Each prefetch retry waits
+		a random 100ms–1s delay first so failing prefetch reads do not hammer
+		a struggling Dragonfly proxy in lockstep; on-demand retries are never
+		delayed.
+	- `fallback_interval` (default `1s`, i.e. 1 QPS per process): the minimum
+		interval between origin requests issued as Dragonfly fallbacks; `0s`
+		disables the throttle. Every fallback attempt — including each retry
+		of a transient origin failure — waits for its own throttle slot, so
+		actual origin requests never exceed one per interval. Only fallback
+		reads are shaped — the normal direct path and auth fetches are never
+		throttled. On-demand group singleflight already dedupes concurrent
+		readers per group, so the throttle queues at most one leader per cold
+		group.
 
 
 ## Metrics
@@ -858,6 +901,22 @@ Backend:
 	source. A read is "high latency" when it takes 250ms or more.
 - `backend_origin_crc_check_errors`, `backend_proxy_crc_check_errors` — CRC
 	validation failures on fetched data, attributed to the serving side.
+- `backend_dragonfly_read_errors{class,kind}` — Dragonfly read failures by
+	failure class (`rate_limited`, `forbidden`, `timeout`, `connect`,
+	`server_error`, `other`) and read kind (`ondemand`, `prefetch`).
+- `backend_fallback_read_count`, `backend_fallback_read_errors` — origin
+	requests issued as Dragonfly fallbacks and how many of them failed; these
+	reads also count into the `backend_origin_*` split above. Each logical
+	fallback read counts once, however many throttled retry attempts it made.
+	The error counter covers only HTTP transport errors (connect failures,
+	timeouts) surfaced once the retry budget is spent — an HTTP error status
+	from the origin or a failure while streaming the response body is not
+	counted here. Watch this rate to confirm origin load stays shaped by
+	`fallback_interval`.
+- `backend_fallback_throttle_wait` — histogram of how long fallback reads
+	waited in the throttle queue (seconds).
+- `prefetch_reschedule_count`, `prefetch_reschedule_run_count` — throttled
+	blob prefetches queued for a delayed retry, and delayed retries executed.
 
 Filesystem:
 

@@ -71,6 +71,43 @@ pub fn default_prefetch_timeout() -> Duration {
     Duration::from_secs(60 * 60)
 }
 
+/// Returns the default lower bound of the delay before a blob prefetch that
+/// was throttled by the backend (Dragonfly `429`) is re-attempted.
+#[inline]
+pub fn default_prefetch_retry_delay_min() -> Duration {
+    Duration::from_secs(6 * 60 * 60)
+}
+
+/// Returns the default upper bound of the delay before a blob prefetch that
+/// was throttled by the backend (Dragonfly `429`) is re-attempted.
+#[inline]
+pub fn default_prefetch_retry_delay_max() -> Duration {
+    Duration::from_secs(12 * 60 * 60)
+}
+
+/// Returns the default number of Dragonfly retry attempts for a retryable
+/// (timeout / connection / 5xx) on-demand read failure before falling back
+/// to the origin registry.
+#[inline]
+fn default_dragonfly_ondemand_max_retries() -> u32 {
+    3
+}
+
+/// Returns the default number of Dragonfly retry attempts for a retryable
+/// (timeout / connection / 5xx) prefetch read failure before the read fails.
+#[inline]
+fn default_dragonfly_prefetch_max_retries() -> u32 {
+    10
+}
+
+/// Returns the default minimum interval between origin requests issued as
+/// Dragonfly fallbacks: one second, i.e. the fallback path is shaped to
+/// 1 QPS per process.
+#[inline]
+fn default_dragonfly_fallback_interval() -> Duration {
+    Duration::from_secs(1)
+}
+
 /// The local backend configuration, serving blobs from a directory.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,7 +165,8 @@ pub struct RegistryConfig {
     pub auth: Option<String>,
 
     /// The HTTP client configuration: timeouts, retries, and TLS trust. The
-    /// timeout and retry limits also apply to Dragonfly SDK requests.
+    /// timeout also applies to Dragonfly SDK requests; retry counts for
+    /// Dragonfly reads are governed by the `dragonfly` policy knobs instead.
     #[serde(default)]
     pub http: HttpConfig,
 
@@ -153,7 +191,9 @@ pub struct HttpConfig {
     pub timeout: Duration,
 
     /// The maximum number of retry attempts per request, applied by the HTTP
-    /// client's retry middleware and by the Dragonfly SDK.
+    /// client's retry middleware on direct origin requests — including origin
+    /// requests issued as Dragonfly fallbacks, so the default of 3 is what
+    /// bounds "origin failing 3 attempts" before a fallback read errors out.
     #[serde(default = "default_registry_http_max_retries")]
     pub max_retries: u32,
 
@@ -243,6 +283,29 @@ impl TlsConfig {
 pub struct DragonflyConfig {
     /// The Dragonfly scheduler endpoint (gRPC), e.g. `http://127.0.0.1:65000`.
     pub scheduler_endpoint: String,
+
+    /// The number of Dragonfly retry attempts for a retryable (timeout,
+    /// connection, or 5xx) on-demand read failure before the read falls back
+    /// to the origin registry.
+    #[serde(default = "default_dragonfly_ondemand_max_retries")]
+    pub ondemand_max_retries: u32,
+
+    /// The number of Dragonfly retry attempts for a retryable (timeout,
+    /// connection, or 5xx) prefetch read failure before the read fails.
+    /// Prefetch reads never fall back to the origin, so a Dragonfly outage
+    /// degrades prefetch instead of flooding the registry.
+    #[serde(default = "default_dragonfly_prefetch_max_retries")]
+    pub prefetch_max_retries: u32,
+
+    /// The minimum interval between origin requests issued as Dragonfly
+    /// fallbacks, e.g. `1s` (the default, i.e. 1 QPS per process). `0s`
+    /// disables the throttle. Only fallback reads are shaped; direct reads
+    /// and auth token fetches are never throttled.
+    #[serde(
+        default = "default_dragonfly_fallback_interval",
+        with = "humantime_serde"
+    )]
+    pub fallback_interval: Duration,
 }
 
 /// The storage configuration: where downloaded blob data is kept.
@@ -277,6 +340,17 @@ pub struct PrefetchConfig {
     /// (the default), or all blobs.
     #[serde(default)]
     pub scope: PrefetchScope,
+
+    /// The lower bound of the random delay before a blob prefetch that was
+    /// throttled by the backend (Dragonfly `429`) is re-attempted, e.g. `6h`.
+    #[serde(default = "default_prefetch_retry_delay_min", with = "humantime_serde")]
+    pub retry_delay_min: Duration,
+
+    /// The upper bound of the random delay before a blob prefetch that was
+    /// throttled by the backend (Dragonfly `429`) is re-attempted, e.g. `12h`.
+    /// Must not be smaller than `retry_delay_min`.
+    #[serde(default = "default_prefetch_retry_delay_max", with = "humantime_serde")]
+    pub retry_delay_max: Duration,
 }
 
 /// The scope of blob prefetch: which blobs it pulls.
@@ -305,6 +379,8 @@ impl Default for PrefetchConfig {
             concurrent_blob_count: default_prefetch_concurrent_blob_count(),
             timeout: default_prefetch_timeout(),
             scope: PrefetchScope::default(),
+            retry_delay_min: default_prefetch_retry_delay_min(),
+            retry_delay_max: default_prefetch_retry_delay_max(),
         }
     }
 }
@@ -361,6 +437,11 @@ impl Config {
         if self.prefetch.concurrent_blob_count == 0 {
             return Err(Error::InvalidConfig(
                 "prefetch.concurrent_blob_count must be at least 1".to_string(),
+            ));
+        }
+        if self.prefetch.retry_delay_min > self.prefetch.retry_delay_max {
+            return Err(Error::InvalidConfig(
+                "prefetch.retry_delay_min must not exceed prefetch.retry_delay_max".to_string(),
             ));
         }
         Ok(())
@@ -500,6 +581,35 @@ config:
     }
 
     #[test]
+    fn dragonfly_policy_knobs_default_and_deserialize() {
+        let defaults: DragonflyConfig =
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:65000\n").unwrap();
+        assert_eq!(
+            defaults.ondemand_max_retries,
+            default_dragonfly_ondemand_max_retries()
+        );
+        assert_eq!(
+            defaults.prefetch_max_retries,
+            default_dragonfly_prefetch_max_retries()
+        );
+        assert_eq!(
+            defaults.fallback_interval,
+            default_dragonfly_fallback_interval()
+        );
+
+        let yaml = r#"
+scheduler_endpoint: http://127.0.0.1:65000
+ondemand_max_retries: 5
+prefetch_max_retries: 0
+fallback_interval: 250ms
+"#;
+        let dragonfly: DragonflyConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(dragonfly.ondemand_max_retries, 5);
+        assert_eq!(dragonfly.prefetch_max_retries, 0);
+        assert_eq!(dragonfly.fallback_interval, Duration::from_millis(250));
+    }
+
+    #[test]
     fn registry_backend_defaults() {
         let yaml = r#"
 type: registry
@@ -613,6 +723,36 @@ scope: all
         );
         assert_eq!(prefetch.timeout, default_prefetch_timeout());
         assert_eq!(prefetch.scope, PrefetchScope::Ondemand);
+        assert_eq!(prefetch.retry_delay_min, default_prefetch_retry_delay_min());
+        assert_eq!(prefetch.retry_delay_max, default_prefetch_retry_delay_max());
+    }
+
+    #[test]
+    fn prefetch_retry_delay_deserializes() {
+        let yaml = "retry_delay_min: 30s\nretry_delay_max: 2m\n";
+        let prefetch: PrefetchConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(prefetch.retry_delay_min, Duration::from_secs(30));
+        assert_eq!(prefetch.retry_delay_max, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn rejects_inverted_prefetch_retry_delay_window() {
+        let yaml = r#"
+backend:
+  type: local
+  config:
+    dir: /blobs
+storage:
+  dir: /cache
+prefetch:
+  retry_delay_min: 2h
+  retry_delay_max: 1h
+"#;
+
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("prefetch.retry_delay_min must not exceed prefetch.retry_delay_max"));
     }
 
     #[test]

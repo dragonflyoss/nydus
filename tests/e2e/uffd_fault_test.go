@@ -555,14 +555,37 @@ func (c *uffdFaultClient) ack(t *testing.T) {
 	require.Equal(t, c.deviceSize, size)
 }
 
-// touchAsync reads mem[off] on a separate goroutine (the read blocks in the
-// kernel until the fault is resolved) and delivers the byte on the channel.
-func (c *uffdFaultClient) touchAsync(off uint64) <-chan byte {
+// touchAsync faults mem[off] in on a separate goroutine and delivers the
+// resolved byte on the channel. The touch reads the byte through
+// process_vm_readv(2) on the own process instead of a direct load: the kernel
+// resolves the missing page through the same userfaultfd path, but the Go
+// runtime sees the goroutine blocked in a syscall, so a concurrent
+// stop-the-world (e.g. a GC triggered by an allocation elsewhere in the test)
+// completes while the fault is outstanding. A direct load would wedge the OS
+// thread at a non-preemptible page fault, and any stop-the-world would then
+// deadlock the tests that serve their own faults in-process (zerocopy): the
+// serving goroutine blocks in gcStart waiting for the faulting thread, which
+// only resumes once the fault it is waiting on gets served.
+func (c *uffdFaultClient) touchAsync(t *testing.T, off uint64) <-chan byte {
 	ch := make(chan byte, 1)
 	c.touchers.Add(1)
 	go func() {
 		defer c.touchers.Done()
-		ch <- c.mem[off]
+		var b [1]byte
+		local := []unix.Iovec{{Base: &b[0], Len: 1}}
+		remote := []unix.RemoteIovec{{Base: uintptr(unsafe.Pointer(&c.mem[off])), Len: 1}}
+		for {
+			n, err := unix.ProcessVMReadv(os.Getpid(), local, remote, 0)
+			if err == unix.EINTR {
+				continue
+			}
+			if err != nil || n != 1 {
+				t.Errorf("process_vm_readv touch at device offset %#x: n=%d err=%v", off, n, err)
+				return
+			}
+			break
+		}
+		ch <- b[0]
 	}()
 	return ch
 }
@@ -756,13 +779,13 @@ func TestUffdRealFaultCopy(t *testing.T) {
 
 	// Cold: the very first fault must complete within the single-fault
 	// deadline and return the right byte.
-	first := waitUffdTouch(t, c.touchAsync(0), uffdFaultDeadline, "cold fault at device offset 0")
+	first := waitUffdTouch(t, c.touchAsync(t, 0), uffdFaultDeadline, "cold fault at device offset 0")
 	require.Equal(t, expected[0], first, "cold fault returned a wrong byte")
 
 	// Touch every fault window under an explicit per-fault deadline, then
 	// snapshot the whole device.
 	for off := uint64(0); off < c.deviceSize; off += c.faultSize {
-		waitUffdTouch(t, c.touchAsync(off), uffdFaultDeadline, fmt.Sprintf("cold fault at device offset %#x", off))
+		waitUffdTouch(t, c.touchAsync(t, off), uffdFaultDeadline, fmt.Sprintf("cold fault at device offset %#x", off))
 	}
 	cold := c.snapshotWithDeadline(t, uffdCaseDeadline, "cold full-device read")
 	requireSameUffdBytes(t, expected, cold, "cold fault-populated memory vs device reference")
@@ -828,7 +851,7 @@ func TestUffdRealFaultZeropage(t *testing.T) {
 	target := c.deviceSize - uint64(c.blockSize)
 	require.GreaterOrEqual(t, target, last.deviceOffset, "tail block must be inside the zero hole")
 
-	b := waitUffdTouch(t, c.touchAsync(target), uffdFaultDeadline, "zero-page fault at device tail")
+	b := waitUffdTouch(t, c.touchAsync(t, target), uffdFaultDeadline, "zero-page fault at device tail")
 	require.Zero(t, b, "zero hole must fault in as zero")
 	page := c.mem[target : target+uint64(c.blockSize)]
 	require.Equal(t, make([]byte, c.blockSize), page, "the whole tail block must be zero after the fault")
@@ -849,7 +872,7 @@ func TestUffdRealFaultZerocopy(t *testing.T) {
 	expected := fetchUffdDeviceBytes(t, f.socketPath, 0, c.deviceSize)
 
 	// Fault 1: non-zero data at device offset 0 (EROFS metadata).
-	ch := c.touchAsync(0)
+	ch := c.touchAsync(t, 0)
 	ranges, _ := c.serveOneZerocopyFault(t)
 	require.NotEmpty(t, ranges)
 	b := waitUffdTouch(t, ch, uffdFaultDeadline, "zerocopy fault at device offset 0")
@@ -858,7 +881,7 @@ func TestUffdRealFaultZerocopy(t *testing.T) {
 
 	// Fault 2: the device tail hole must map as zero pages.
 	tailOff := c.deviceSize - faultSize
-	ch = c.touchAsync(tailOff)
+	ch = c.touchAsync(t, tailOff)
 	_, _ = c.serveOneZerocopyFault(t)
 	b = waitUffdTouch(t, ch, uffdFaultDeadline, "zerocopy fault at device tail")
 	require.Zero(t, b)
@@ -1416,7 +1439,7 @@ func TestUffdLifecycle(t *testing.T) {
 
 		c := newUffdFaultClient(t, f, uffdHandshakeFlagCopy, uint64(uffdSmokeRequestBlock), 0)
 		c.ack(t)
-		b := waitUffdTouch(t, c.touchAsync(0), uffdFaultDeadline, "cold fault after service restart")
+		b := waitUffdTouch(t, c.touchAsync(t, 0), uffdFaultDeadline, "cold fault after service restart")
 		expected := fetchUffdDeviceBytes(t, f.socketPath, 0, uint64(uffdSmokeRequestBlock))
 		require.Equal(t, expected[0], b, "restarted service must resolve faults for new sessions")
 	})
