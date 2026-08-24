@@ -1062,7 +1062,7 @@ first logical external data block starts at offset 0
 
 blob_meta then maps that logical byte offset to a compressed range in the full
 blob's data region. The block is mapped to its block_group by
-`block_group_index = blkaddr >> block_group_block_bits`, and the block_group entry gives the
+`block_group_index = blkaddr >> block_group_block_count_bits`, and the block_group entry gives the
 encoded `compressed_offset` (for example 0 for the first encoded block_group).
 ```
 
@@ -1113,8 +1113,8 @@ embedded blob meta region
 | block_groups_offset                 |
 | chunk_count                   |
 | block_group_count                   |
-| chunk_block_bits (u8)         |
-| block_group_block_bits (u8 + pad)   |
+| chunk_block_count_bits (u8)         |
+| block_group_block_count_bits (u8 + pad)   |
 | reserved tail (compat area)   |
 +-------------------------------+
 | chunk entries                 |
@@ -1167,16 +1167,16 @@ Header details:
 	chunk table.
 - `chunk_count` is the number of chunk entries.
 - `block_group_count` is the number of compressed block group entries.
-- `chunk_block_bits` is log2 of the EROFS chunk size in 4 KiB blocks:
-	`chunk_size = 4096 << chunk_block_bits`, so the default 1 MiB chunk stores
+- `chunk_block_count_bits` is log2 of the EROFS chunk size in 4 KiB blocks:
+	`chunk_size = 4096 << chunk_block_count_bits`, so the default 1 MiB chunk stores
 	8. Storing the exponent EROFS-style (the same quantity as `chunk_format &
 	EROFS_CHUNK_FORMAT_BLKBITS_MASK`) makes non-power-of-two chunk sizes
 	unrepresentable and feeds the shift-based offset math directly.
-- `block_group_block_bits` is log2 of the per-block group block count, same
-	representation as `chunk_block_bits` (the default 4 MiB block group stores 10).
-	Every block group except the last is exactly `1 << block_group_block_bits` blocks, so
+- `block_group_block_count_bits` is log2 of the per-block group block count, same
+	representation as `chunk_block_count_bits` (the default 4 MiB block group stores 10).
+	Every block group except the last is exactly `1 << block_group_block_count_bits` blocks, so
 	the read path maps a block to its block group with
-	`block_group_index = block_id >> block_group_block_bits` in O(1). The two exponents
+	`block_group_index = block_id >> block_group_block_count_bits` in O(1). The two exponents
 	are adjacent `u8`s at offset 48; the six bytes after them are reserved.
 - The header is one EROFS block (4096 bytes): the chunk table starts block
 	aligned by construction, and everything between the last field and the end
@@ -1206,7 +1206,7 @@ Block group details:
 
 - Block groups are formed by packing whole decoded blocks up to `--block-group-size`
 	regardless of chunk boundaries, then compressing the batch as one unit. So
-	every block group but the last is exactly `1 << block_group_block_bits` blocks.
+	every block group but the last is exactly `1 << block_group_block_count_bits` blocks.
 - `uncompressed_block_offset` is the decoded cache 4 KiB block offset for the
 	block group. Block groups are dense and contiguous in the decoded address space.
 - `compressed_offset` is the encoded payload's byte offset within the data
@@ -1355,7 +1355,7 @@ ondemand blob — named by SHA256(full blob), one new nydus layer
 Every block group entry in the ondemand blob is a **redirect**: instead of
 describing this blob's own decoded address space, it names the source block group
 it is a copy of. Block group sizes follow the source block groups, so the uniform-size
-invariant is relaxed and the O(1) `block >> block_group_block_bits` lookup is never
+invariant is relaxed and the O(1) `block >> block_group_block_count_bits` lookup is never
 used on an ondemand blob:
 
 ```text
@@ -1471,7 +1471,7 @@ When mounting with `--bootstrap + --blob-dir`:
 	the cache directory. The cache verifies the blob meta header crc32c before
 	mmaping the cached file and using its chunk entries.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
-	layer maps an offset to its block group in O(1) with `block >> block_group_block_bits`,
+	layer maps an offset to its block group in O(1) with `block >> block_group_block_count_bits`,
 	ensures every block group covering the requested range is fetched and decoded from
 	the data region (validating block group CRC32C), and then reads the bytes straight
 	out of the cache file. The cache file mirrors the dense decoded address space,
@@ -1548,7 +1548,7 @@ Per-blob prefetch streams block groups into the cache:
 
 - The blob meta block groups are the compression/cache unit. Prefetch reads the data
 	region in windows that accumulate consecutive block groups up to the default block group
-	uncompressed size (1 MiB), so each window decode covers one or more block groups.
+	uncompressed size (4 MiB), so each window decode covers one or more block groups.
 - For each window it issues a single contiguous backend range read, then decodes
 	each contained block group (plain copy or zstd), validates length and CRC32C, writes
 	the decoded bytes to the cache file at the block group's uncompressed offset, and

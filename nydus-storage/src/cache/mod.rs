@@ -393,7 +393,7 @@ pub fn is_block_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE;
+    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
 
     fn block_group(
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn plan_prefetch_batches_keeps_one_block_group_per_window_at_default_target() {
-        let blocks = NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE / EROFS_BLOCK_SIZE;
+        let blocks = DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE / EROFS_BLOCK_SIZE;
         let block_groups = vec![
             block_group(0, blocks),
             block_group(blocks as u64, blocks),
@@ -420,7 +420,7 @@ mod tests {
         ];
         let batches = plan_prefetch_batches(
             &block_groups,
-            NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE as u64,
+            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE as u64,
         );
         assert_eq!(batches, vec![0..1, 1..2, 2..3]);
     }

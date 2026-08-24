@@ -18,9 +18,9 @@ pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
     BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk,
-    NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT,
-    NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
-    NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
 };
 
 /// Append the trailing regions of the full-blob layout
@@ -46,7 +46,7 @@ pub fn assemble_full_blob(
         NYDUS_BLOB_FOOTER_ALIGNMENT,
     )
     .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
-    let blob_metadata_size = blob_metadata.metadata_size();
+    let blob_metadata_size = blob_metadata.padded_size();
     let blob_metadata_blocks = bytes_to_blocks(blob_metadata_size, "blob meta")?;
 
     let mut blob_metadata_bytes = Vec::with_capacity(

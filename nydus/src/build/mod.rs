@@ -101,9 +101,9 @@ impl BuildImageOptions {
         }
 
         // Validate the block group uncompressed size: a power of two (the
-        // blob meta header stores it as the log2 exponent `block_group_block_bits`),
-        // at least 1MiB, and at least the file chunk size so a chunk always
-        // fits in a block group.
+        // blob meta header stores its block count as the log2 exponent
+        // `block_group_block_count_bits`), at least 1MiB, and at least the
+        // file chunk size so a chunk always fits in a block group.
         if !block_group_size.is_power_of_two() || block_group_size < MIN_BLOCK_GROUP_SIZE {
             return Err(Error::InvalidParameter(format!(
                 "block group size {block_group_size} must be a power of two and at least 1MiB"
@@ -208,7 +208,7 @@ pub(crate) fn assemble_ondemand_artifact(
     blob_metadata: &BlobMetadata,
 ) -> Result<(Vec<u8>, [u8; EROFS_BLOB_ID_SIZE], BlobFooter)> {
     let mut artifact = Vec::with_capacity(
-        usize::try_from(data.len() as u64 + blob_metadata.metadata_size())
+        usize::try_from(data.len() as u64 + blob_metadata.padded_size())
             .map_err(|err| Error::Overflow(format!("artifact exceeds usize: {err}")))?
             + NYDUS_BLOB_FOOTER_SIZE,
     );
