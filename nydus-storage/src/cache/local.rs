@@ -14,7 +14,7 @@ use crate::access_trace::TraceRecorder;
 use crate::block_group_map::BlockGroupMap;
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataBlockGroup, NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE,
+    BlobMetadata, BlobMetadataBlockGroup, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
     NYDUS_BLOB_METADATA_SUFFIX,
 };
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
@@ -509,7 +509,7 @@ impl BlobCache for LocalBlobCache {
 
         for batch in plan_prefetch_batches(
             block_groups,
-            NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE as u64,
+            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE as u64,
         ) {
             super::check_prefetch_deadline(deadline)?;
             if batch
@@ -914,7 +914,7 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk};
+    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor};
     use nydus_format::utils::sha256_bytes;
     use std::path::Path;
     use tempfile::tempdir;
@@ -928,11 +928,12 @@ mod tests {
         payload: &[u8],
         crc32: u32,
     ) -> BlobMetadata {
-        BlobMetadata::from_parts(
+        BlobMetadata::new(
             blob_id,
+            BlobMetadataCompressor::None,
             1,
-            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32).unwrap()],
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32).unwrap()],
         )
         .unwrap()
     }
@@ -1206,11 +1207,12 @@ mod tests {
 
         // An ondemand (redirect) blob whose single block group redirects to source
         // blob 1 block group 0; its data region carries a copy of the source bytes.
-        let redirect_meta = BlobMetadata::from_parts(
+        let redirect_meta = BlobMetadata::new(
             sha256_bytes(&payload),
+            BlobMetadataCompressor::None,
             1,
-            vec![BlobMetadataBlockGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
             Vec::new(),
+            vec![BlobMetadataBlockGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
         )
         .unwrap();
         assert!(redirect_meta.is_redirect_blob());

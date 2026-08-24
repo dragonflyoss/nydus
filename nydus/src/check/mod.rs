@@ -479,7 +479,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT;
+    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT;
     use std::fs;
     use tempfile::tempdir;
 
@@ -552,9 +552,10 @@ mod tests {
     fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let data_digest = sha256_bytes(&data);
-        let blob_metadata = BlobMetadata::from_parts(
+        let blob_metadata = BlobMetadata::new(
             [0u8; EROFS_BLOB_ID_SIZE],
-            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
+            BlobMetadataCompressor::None,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),
             Vec::new(),
         )

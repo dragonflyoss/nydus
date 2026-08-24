@@ -2,7 +2,7 @@ use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-    NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE,
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
 };
 use nydus_format::erofs::{ErofsChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
 use nydus_format::utils::round_up;
@@ -52,7 +52,7 @@ impl BlobWriter<File> {
 
         let file = File::create(path)
             .with_context(|| format!("failed to create blob device: {}", path.display()))?;
-        let block_group_size = file_chunk_size.max(NYDUS_BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE);
+        let block_group_size = file_chunk_size.max(DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE);
         Self::from_writer(file, file_chunk_size, block_group_size, compressor)
     }
 }
@@ -79,10 +79,10 @@ impl<W: Write> BlobWriter<W> {
                 "blob writer block_group size must be at least the file chunk size".to_string(),
             ));
         }
-        // The blob meta header stores the block group size as a log2 exponent
-        // (`block_group_block_bits`), so it must be a power of two; being a power
-        // of two >= the (block-aligned) chunk size also makes it block
-        // aligned by construction.
+        // The blob meta header stores the block group's block count as a log2
+        // exponent (`block_group_block_count_bits`), so it must be a power of
+        // two; being a power of two >= the (block-aligned) chunk size also
+        // makes it block aligned by construction.
         if !block_group_size.is_power_of_two() {
             return Err(Error::InvalidParameter(
                 "blob writer block_group size must be a power of two".to_string(),
@@ -135,12 +135,12 @@ impl<W: Write> BlobWriter<W> {
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         source_offset_bias: u64,
     ) -> Result<BlobMetadata> {
-        Ok(BlobMetadata::from_parts_with_options(
+        Ok(BlobMetadata::new(
             blob_id,
-            self.file_chunk_size / EROFS_BLOCK_SIZE,
             self.compressor,
-            self.blob_metadata_block_groups.clone(),
+            self.file_chunk_size / EROFS_BLOCK_SIZE,
             self.blob_metadata_chunks.clone(),
+            self.blob_metadata_block_groups.clone(),
         )?
         .checked_add_compressed_offset(source_offset_bias)?)
     }
@@ -323,7 +323,7 @@ pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE;
+    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE;
     use std::fs;
     use tempfile::tempdir;
 
@@ -349,22 +349,29 @@ mod tests {
         let file_a = dir.path().join("a.bin");
         let file_b = dir.path().join("b.bin");
 
-        let mut content_a = vec![b'a'; NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize];
+        let mut content_a = vec![b'a'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
         content_a.extend(vec![b'b'; EROFS_BLOCK_SIZE as usize]);
         fs::write(&file_a, &content_a).unwrap();
         fs::write(
             &file_b,
-            vec![b'a'; NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize],
+            vec![b'a'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize],
         )
         .unwrap();
 
-        let mut writer =
-            BlobWriter::new(&blob_path, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE).unwrap();
+        // Pin the block group size to the chunk size so the 513-block layout
+        // below packs across several block groups.
+        let mut writer = BlobWriter::from_writer(
+            File::create(&blob_path).unwrap(),
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+        )
+        .unwrap();
         let indexes_a = writer
             .write_file_chunks(&file_a, content_a.len() as u64)
             .unwrap();
         let indexes_b = writer
-            .write_file_chunks(&file_b, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64)
+            .write_file_chunks(&file_b, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64)
             .unwrap();
         writer.finish().unwrap();
 
@@ -396,30 +403,30 @@ mod tests {
         assert_eq!(block_groups[0].compressed_offset(), 0);
         assert_eq!(
             block_groups[0].compressed_size(),
-            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE
         );
         assert_eq!(block_groups[1].uncompressed_block_offset(), 256);
         assert_eq!(block_groups[1].uncompressed_block_count(), 256);
         assert_eq!(
             block_groups[1].compressed_offset(),
-            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64
         );
         assert_eq!(
             block_groups[1].compressed_size(),
-            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE
         );
         assert_eq!(block_groups[2].uncompressed_block_offset(), 512);
         assert_eq!(block_groups[2].uncompressed_block_count(), 1);
         // Block groups pack back-to-back in the data region with no inter-block group padding.
         assert_eq!(
             block_groups[2].compressed_offset(),
-            2 * NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
+            2 * DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64
         );
         assert_eq!(block_groups[2].compressed_size(), EROFS_BLOCK_SIZE);
     }
 
     #[test]
-    fn blob_writer_allows_small_file_chunks_with_one_megabyte_blob_metadata_block_groups() {
+    fn blob_writer_allows_small_file_chunks_with_default_size_blob_metadata_block_groups() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
         let input_path = dir.path().join("input.bin");
@@ -511,12 +518,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
         let input_path = dir.path().join("input.bin");
-        let content = pseudo_random_bytes(NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as usize);
+        let content = pseudo_random_bytes(DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize);
         fs::write(&input_path, &content).unwrap();
 
         let mut writer = BlobWriter::new_with_compressor(
             &blob_path,
-            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
             BlobMetadataCompressor::Zstd,
         )
         .unwrap();
@@ -531,7 +538,7 @@ mod tests {
         assert_eq!(block_groups[0].uncompressed_block_count(), 256);
         assert_eq!(
             block_groups[0].uncompressed_size(),
-            NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE as u64
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64
         );
         assert_eq!(
             u64::from(block_groups[0].compressed_size()),
@@ -550,7 +557,7 @@ mod tests {
         fs::write(&input_path, vec![b'x'; 4096]).unwrap();
 
         let mut writer =
-            BlobWriter::new(&blob_path, NYDUS_BLOB_METADATA_DEFAULT_CHUNK_SIZE).unwrap();
+            BlobWriter::new(&blob_path, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE).unwrap();
         writer.write_file_chunks(&input_path, 4096).unwrap();
         writer
             .write_blob_metadata(&blob_metadata_path, blob_id, 8192)
@@ -563,9 +570,9 @@ mod tests {
         let blob_metadata = BlobMetadata::load(&blob_metadata_path).unwrap();
         assert_eq!(blob_metadata.header().chunk_count(), 1);
         assert_eq!(blob_metadata.header().block_group_count(), 1);
-        assert_eq!(blob_metadata.header().chunk_bytes(), 48);
-        assert_eq!(blob_metadata.header().block_group_bytes(), 40);
-        assert_eq!(blob_metadata.header().metadata_size(), 8192);
+        assert_eq!(blob_metadata.header().chunk_table_size(), 48);
+        assert_eq!(blob_metadata.header().block_group_table_size(), 40);
+        assert_eq!(blob_metadata.header().padded_size(), 8192);
         assert_eq!(blob_metadata.chunks()[0].uncompressed_block_offset(), 0);
         assert_eq!(blob_metadata.block_groups()[0].compressed_offset(), 8192);
     }
