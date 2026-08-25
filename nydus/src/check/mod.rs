@@ -464,15 +464,15 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 }
 
 fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> {
-    let blob_metadata = BlobMetadata::loader().from_bytes(data)?;
+    let blob_metadata = BlobMetadata::from_bytes(data, None, false)?;
     Ok(BlobMetadataSummary {
         chunk_count: blob_metadata.chunk_count(),
         block_group_count: blob_metadata.block_group_count(),
         chunk_size: blob_metadata.chunk_size(),
         digester: blob_metadata.digester(),
         compressor: blob_metadata.compressor(),
-        total_uncompressed_size: blob_metadata.total_uncompressed_size(),
-        total_compressed_size: blob_metadata.total_compressed_size(),
+        total_uncompressed_size: blob_metadata.uncompressed_size(),
+        total_compressed_size: blob_metadata.compressed_end(),
     })
 }
 
@@ -553,7 +553,7 @@ mod tests {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let data_digest = sha256_bytes(&data);
         let blob_metadata = BlobMetadata::new(
-            [0u8; EROFS_BLOB_ID_SIZE],
+            None,
             BlobMetadataCompressor::None,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),

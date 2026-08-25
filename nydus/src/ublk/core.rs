@@ -16,7 +16,7 @@ use nydus_core::extent::MmapCache;
 use nydus_core::NydusCore;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
-use nydus_format::utils::align_up;
+use nydus_format::utils::align_up_u64;
 use tracing::warn;
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
@@ -42,7 +42,7 @@ impl UblkCore {
         let zero_fd = core.zero_fd();
         // Round the device size up to a whole block: the kernel always reads in
         // block units, and the tail block of the last blob may be partial.
-        let device_size = align_up(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
+        let device_size = align_up_u64(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
             .ok_or_else(|| Error::Overflow("flattened device size overflow".to_string()))?;
         // Preparing a blob loads and validates its meta and sizes its cache
         // file. Doing it up front keeps the first block read (typically

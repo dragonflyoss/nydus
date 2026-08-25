@@ -10,15 +10,15 @@ use std::path::Path;
 use crate::blob::{BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
 use crate::erofs::{ErofsSuperblock, EROFS_SUPER_OFFSET};
 
-pub use self::align::{align_up, round_up};
+pub use self::align::{align_up_u64, align_up_usize};
 pub use self::digest::{
     hex_string, parse_sha256_hex, sha256_bytes, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE,
 };
-pub use self::io::{pread_exact, write_zero_padding};
+pub use self::io::{pread_exact, write_zeros};
 
 /// Assemble a minimal full blob (`payload + trivial bootstrap + blob
 /// meta + footer`, production layout via
-/// [`crate::blob::assemble_full_blob`]) into `dir`, named by its full
+/// [`crate::blob::finish_full_blob`]) into `dir`, named by its full
 /// SHA256, optionally with a `.blob.meta` sidecar. Returns the full
 /// blob id.
 pub fn write_minimal_full_blob(
@@ -35,7 +35,7 @@ pub fn write_minimal_full_blob(
 
     let mut full_blob = Vec::new();
     full_blob.write_all(payload).unwrap();
-    crate::blob::assemble_full_blob(
+    crate::blob::finish_full_blob(
         &mut full_blob,
         payload.len() as u64,
         &bootstrap,

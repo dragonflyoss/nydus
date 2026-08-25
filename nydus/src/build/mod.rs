@@ -167,7 +167,7 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
     let (writer, full_blob_hasher) = blob_writer.into_parts();
     let mut blob_writer_stream = HashingWriter::new(BufWriter::new(writer), full_blob_hasher);
 
-    let footer = nydus_format::blob::assemble_full_blob(
+    let footer = nydus_format::blob::finish_full_blob(
         &mut blob_writer_stream,
         compressed_data_size,
         &bootstrap_bytes,
@@ -213,12 +213,8 @@ pub(crate) fn assemble_ondemand_artifact(
             + NYDUS_BLOB_FOOTER_SIZE,
     );
     artifact.extend_from_slice(data);
-    let footer = nydus_format::blob::assemble_full_blob(
-        &mut artifact,
-        data.len() as u64,
-        &[],
-        blob_metadata,
-    )?;
+    let footer =
+        nydus_format::blob::finish_full_blob(&mut artifact, data.len() as u64, &[], blob_metadata)?;
 
     let digest = sha256_bytes(&artifact);
     Ok((artifact, digest, footer))

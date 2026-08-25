@@ -82,7 +82,7 @@ pub trait BlobCache: Send + Sync {
 
     /// True when this blob is an "ondemand" redirect blob whose block groups carry
     /// data belonging to other source blob devices.
-    fn is_redirect_blob(&self) -> bool {
+    fn is_redirect(&self) -> bool {
         false
     }
 
