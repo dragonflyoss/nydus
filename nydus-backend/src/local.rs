@@ -127,8 +127,8 @@ impl Local {
     }
 
     /// Look up (or resolve and memoise) the source entry for `blob_id`. The
-    /// hit path is a single read-lock round-trip; resolution (which hashes the
-    /// source file) runs without holding the lock, exactly as before.
+    /// hit path is a single read-lock round-trip; resolution runs without
+    /// holding the lock, exactly as before.
     fn source_entry(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<SourceEntry>> {
         if let Some(entry) = self.sources.read().unwrap().get(blob_id).cloned() {
             return Ok(entry);
@@ -136,14 +136,14 @@ impl Local {
 
         let exact = self.root.join(hex_string(blob_id));
         if exact.is_file() {
-            if sha256_file(&exact).map_err(io::Error::other)? != *blob_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("local source blob digest mismatch: {}", exact.display()),
-                ));
-            }
-            // The check above proves the whole file hashes to `blob_id`, so it
-            // doubles as the cache key.
+            // The store is content-addressed: the file name is the digest
+            // claim and doubles as the cache key. No full-file hash here —
+            // it costs an O(blob) cold read on every daemon start (the
+            // dominant part of ublk/fanotify mount-ready and FUSE/NBD
+            // first-read latency). The store is populated by digest-verified
+            // downloads, and runtime corruption is caught by the mandatory
+            // per-block-group CRC32C on every data read and the CRC32 over
+            // the blob meta.
             let source = probe_full_blob_source(&exact, *blob_id)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
