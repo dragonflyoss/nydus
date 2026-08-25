@@ -121,12 +121,11 @@ mod tests {
     use super::*;
     use nydus_backend::Local;
     use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor};
-    use nydus_format::utils::{sha256_bytes, write_minimal_full_blob};
+    use nydus_format::utils::write_minimal_full_blob;
     use tempfile::tempdir;
 
-    fn blob_metadata(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMetadata {
+    fn blob_metadata(payload: &[u8]) -> BlobMetadata {
         BlobMetadata::new(
-            Some(blob_id),
             BlobMetadataCompressor::None,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
@@ -139,8 +138,7 @@ mod tests {
     fn remote_blob_cache_reads_without_touching_disk() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -164,8 +162,7 @@ mod tests {
     fn remote_blob_cache_rejects_file_oriented_operations() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0x11u8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));

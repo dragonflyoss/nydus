@@ -23,25 +23,6 @@ pub use metadata::{
     DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
 };
 
-/// Encode a power-of-two 4KiB block count as the log2 stored in the blob
-/// meta header's `*_block_count_bits` fields.
-fn block_count_to_bits(blocks: u32) -> Result<u8> {
-    if !blocks.is_power_of_two() {
-        return Err(Error::InvalidImage(format!(
-            "blob meta block count must be a non-zero power of two: {blocks}"
-        )));
-    }
-
-    let bits = blocks.ilog2() as u8;
-    if bits > metadata::NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS {
-        return Err(Error::InvalidImage(format!(
-            "blob meta block count too large: {blocks}"
-        )));
-    }
-
-    Ok(bits)
-}
-
 /// Finish a full blob: append the trailing regions of the layout
 /// `[data][pad][bootstrap][pad][blob meta][footer]` to `writer`, which must
 /// already hold the `compressed_data_size` bytes of blob data. An empty

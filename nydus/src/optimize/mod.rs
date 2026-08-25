@@ -168,7 +168,6 @@ pub fn build_ondemand_blob(
     data_digest.copy_from_slice(&data_hasher.finalize());
 
     let blob_metadata = BlobMetadata::new(
-        Some(data_digest),
         BlobMetadataCompressor::Zstd,
         DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
         Vec::new(),

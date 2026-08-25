@@ -163,7 +163,7 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
     let bootstrap_bytes = render_bootstrap(&mut inodes, epoch, &device_slots, &uuid_bytes)?;
 
     let compressed_data_size = blob_writer.data_size();
-    let blob_metadata = blob_writer.blob_metadata(blob_id, 0)?;
+    let blob_metadata = blob_writer.blob_metadata(0)?;
     let (writer, full_blob_hasher) = blob_writer.into_parts();
     let mut blob_writer_stream = HashingWriter::new(BufWriter::new(writer), full_blob_hasher);
 

@@ -107,7 +107,7 @@ fn build_test_image_with_layout(
     writer.finish().unwrap();
 
     let data_blob_id = writer.data_digest();
-    let blob_metadata = writer.blob_metadata(data_blob_id, 0).unwrap();
+    let blob_metadata = writer.blob_metadata(0).unwrap();
     let blocks = writer.total_blocks();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
     let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id)];

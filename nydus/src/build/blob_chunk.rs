@@ -130,13 +130,8 @@ impl<W: Write> BlobWriter<W> {
         &self.blob_metadata_block_groups
     }
 
-    pub fn blob_metadata(
-        &self,
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
-        source_offset_bias: u64,
-    ) -> Result<BlobMetadata> {
+    pub fn blob_metadata(&self, source_offset_bias: u64) -> Result<BlobMetadata> {
         Ok(BlobMetadata::new(
-            Some(blob_id),
             self.compressor,
             self.file_chunk_size / EROFS_BLOCK_SIZE,
             self.blob_metadata_chunks.clone(),
@@ -145,16 +140,9 @@ impl<W: Write> BlobWriter<W> {
         .checked_add_compressed_offset(source_offset_bias)?)
     }
 
-    pub fn write_blob_metadata(
-        &mut self,
-        path: &Path,
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
-        source_offset_bias: u64,
-    ) -> Result<()> {
+    pub fn write_blob_metadata(&mut self, path: &Path, source_offset_bias: u64) -> Result<()> {
         self.finish()?;
-        Ok(self
-            .blob_metadata(blob_id, source_offset_bias)?
-            .save(path)?)
+        Ok(self.blob_metadata(source_offset_bias)?.save(path)?)
     }
 
     pub fn finish(&mut self) -> Result<()> {
@@ -440,7 +428,7 @@ mod tests {
             .write_file_chunks(&input_path, content.len() as u64)
             .unwrap();
         writer.finish().unwrap();
-        let blob_metadata = writer.blob_metadata([0u8; EROFS_BLOB_ID_SIZE], 0).unwrap();
+        let blob_metadata = writer.blob_metadata(0).unwrap();
 
         assert_eq!(indexes.len(), 2);
         assert_eq!(indexes[0].blkaddr, 0);
@@ -470,7 +458,7 @@ mod tests {
             .write_file_chunks(&input_path, content.len() as u64)
             .unwrap();
         writer.finish().unwrap();
-        let blob_metadata = writer.blob_metadata([0u8; EROFS_BLOB_ID_SIZE], 0).unwrap();
+        let blob_metadata = writer.blob_metadata(0).unwrap();
 
         // The all-zero chunk becomes a hole: a null chunk index with no blob
         // reference, no blob-meta chunk entry, and no bytes in the data region.
@@ -554,21 +542,20 @@ mod tests {
         let blob_path = dir.path().join("blob.data");
         let blob_metadata_path = dir.path().join("blob.blob.meta");
         let input_path = dir.path().join("input.bin");
-        let blob_id = [7u8; EROFS_BLOB_ID_SIZE];
         fs::write(&input_path, vec![b'x'; 4096]).unwrap();
 
         let mut writer =
             BlobWriter::new(&blob_path, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE).unwrap();
         writer.write_file_chunks(&input_path, 4096).unwrap();
         writer
-            .write_blob_metadata(&blob_metadata_path, blob_id, 8192)
+            .write_blob_metadata(&blob_metadata_path, 8192)
             .unwrap();
 
         let raw = fs::read(&blob_metadata_path).unwrap();
         // 4 KiB header block + one chunk + one block group, padded to a block.
         assert_eq!(raw.len(), 8192);
 
-        let blob_metadata = BlobMetadata::from_path(&blob_metadata_path, None, false).unwrap();
+        let blob_metadata = BlobMetadata::from_path(&blob_metadata_path, false).unwrap();
         assert_eq!(blob_metadata.header().chunk_count(), 1);
         assert_eq!(blob_metadata.header().block_group_count(), 1);
         assert_eq!(blob_metadata.header().chunk_table_size(), 48);
