@@ -24,6 +24,8 @@ impl BlobMetadataCompressor {
     }
 }
 
+/// The lowercase algorithm name, as surfaced in the `build` and `check`
+/// summaries.
 impl fmt::Display for BlobMetadataCompressor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -61,6 +63,8 @@ impl BlobMetadataDigester {
     }
 }
 
+/// The lowercase algorithm name, as surfaced in the `build` and `check`
+/// summaries.
 impl fmt::Display for BlobMetadataDigester {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
