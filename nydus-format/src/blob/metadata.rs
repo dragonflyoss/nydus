@@ -1,5 +1,4 @@
 use crate::blob::algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
-use crate::blob::block_count_to_bits;
 use crate::blob::flag::validate_incompat_flags;
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Context, Error, Result};
@@ -7,7 +6,6 @@ use crate::utils::le::{
     read_u16_at, read_u32_at, read_u64_at, read_u8_at, write_u16_at, write_u32_at, write_u64_at,
     write_u8_at,
 };
-use crate::utils::SHA256_DIGEST_SIZE;
 use bitflags::bitflags;
 use crc32c::{crc32c, crc32c_append};
 use memmap2::{Mmap, MmapOptions};
@@ -64,7 +62,7 @@ pub const NYDUS_BLOB_METADATA_SUFFIX: &str = ".blob.meta";
 /// Largest allowed block-count exponent (`chunk_block_count_bits` /
 /// `block_group_block_count_bits`): keeps the derived byte size
 /// (`4096 << bits`) within a `u32` (2 GiB at most).
-pub(super) const NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS: u8 = 19;
+const NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS: u8 = 19;
 
 /// Byte range of the crc32 field within the header.
 const NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD: Range<usize> = 16..20;
@@ -852,7 +850,6 @@ enum BlobMetadataStorage {
 #[derive(Debug)]
 pub struct BlobMetadata {
     header: BlobMetadataHeader,
-    blob_id: Option<[u8; SHA256_DIGEST_SIZE]>,
     storage: BlobMetadataStorage,
 }
 
@@ -862,7 +859,6 @@ impl BlobMetadata {
     /// metadata is valid by definition, then the crc32 is computed over the
     /// final bytes.
     pub fn new(
-        blob_id: Option<[u8; SHA256_DIGEST_SIZE]>,
         compressor: BlobMetadataCompressor,
         chunk_block_count: u32,
         chunks: Vec<BlobMetadataChunk>,
@@ -892,7 +888,6 @@ impl BlobMetadata {
 
         let mut blob_metadata = Self {
             header,
-            blob_id,
             storage: BlobMetadataStorage::Owned {
                 chunks,
                 block_groups,
@@ -903,14 +898,9 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
-    /// Read blob metadata from an in-memory byte slice, optionally attaching
-    /// the owning blob id and verifying the header crc32 over the full
-    /// metadata.
-    pub fn from_bytes(
-        bytes: &[u8],
-        blob_id: Option<[u8; SHA256_DIGEST_SIZE]>,
-        verify_crc32: bool,
-    ) -> Result<Self> {
+    /// Read blob metadata from an in-memory byte slice, optionally verifying
+    /// the header crc32 over the full metadata.
+    pub fn from_bytes(bytes: &[u8], verify_crc32: bool) -> Result<Self> {
         let Some((header_bytes, _)) = bytes.split_first_chunk::<NYDUS_BLOB_METADATA_HEADER_SIZE>()
         else {
             return Err(Error::InvalidImage("blob meta data too small".to_string()));
@@ -943,7 +933,6 @@ impl BlobMetadata {
 
         let blob_metadata = Self {
             header,
-            blob_id,
             storage: BlobMetadataStorage::Owned {
                 chunks,
                 block_groups,
@@ -953,14 +942,9 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
-    /// Read blob metadata from a file (mmap-backed), optionally attaching
-    /// the owning blob id and verifying the header crc32 over the full
-    /// metadata.
-    pub fn from_path(
-        path: &Path,
-        blob_id: Option<[u8; SHA256_DIGEST_SIZE]>,
-        verify_crc32: bool,
-    ) -> Result<Self> {
+    /// Read blob metadata from a file (mmap-backed), optionally verifying
+    /// the header crc32 over the full metadata.
+    pub fn from_path(path: &Path, verify_crc32: bool) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("failed to open blob meta: {}", path.display()))?;
         let mmap = unsafe { MmapOptions::new().map(&file) }
@@ -976,7 +960,6 @@ impl BlobMetadata {
 
         let blob_metadata = Self {
             header,
-            blob_id,
             storage: BlobMetadataStorage::Mapped(mmap),
         };
         blob_metadata.validate()?;
@@ -1151,7 +1134,6 @@ impl BlobMetadata {
         }
 
         Self::new(
-            self.blob_id,
             self.compressor(),
             self.chunk_block_count(),
             self.chunks().to_vec(),
@@ -1195,12 +1177,6 @@ impl BlobMetadata {
     /// The parsed header, exactly as stored on disk.
     pub fn header(&self) -> &BlobMetadataHeader {
         &self.header
-    }
-
-    /// The owning blob id, if one was attached at construction or on read.
-    /// An in-memory tag, never part of the serialized metadata.
-    pub fn blob_id(&self) -> Option<&[u8; SHA256_DIGEST_SIZE]> {
-        self.blob_id.as_ref()
     }
 
     /// Number of entries in the chunk table.
@@ -1359,6 +1335,25 @@ impl BlobMetadata {
     }
 }
 
+/// Encode a power-of-two 4KiB block count as the log2 stored in the
+/// header's `*_block_count_bits` fields.
+fn block_count_to_bits(blocks: u32) -> Result<u8> {
+    if !blocks.is_power_of_two() {
+        return Err(Error::InvalidImage(format!(
+            "blob meta block count must be a non-zero power of two: {blocks}"
+        )));
+    }
+
+    let bits = blocks.ilog2() as u8;
+    if bits > NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS {
+        return Err(Error::InvalidImage(format!(
+            "blob meta block count too large: {blocks}"
+        )));
+    }
+
+    Ok(bits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1393,13 +1388,12 @@ mod tests {
         chunks: Vec<BlobMetadataChunk>,
         block_groups: Vec<BlobMetadataBlockGroup>,
     ) -> Result<BlobMetadata> {
-        BlobMetadata::new(None, BlobMetadataCompressor::None, 1, chunks, block_groups)
+        BlobMetadata::new(BlobMetadataCompressor::None, 1, chunks, block_groups)
     }
 
     fn blob_metadata() -> BlobMetadata {
         let payload = vec![0x33; EROFS_BLOCK_SIZE as usize];
         BlobMetadata::new(
-            Some([0x7b; SHA256_DIGEST_SIZE]),
             BlobMetadataCompressor::None,
             1,
             vec![chunk(&payload, 0, 1)],
@@ -1433,7 +1427,6 @@ mod tests {
         assert_eq!(header.block_group_block_count(), 1);
         assert_ne!(header.crc32(), 0);
 
-        assert_eq!(blob_metadata.blob_id(), Some(&[0x7b; SHA256_DIGEST_SIZE]));
         assert_eq!(blob_metadata.chunk_count(), 1);
         assert_eq!(blob_metadata.block_group_count(), 1);
         assert_eq!(blob_metadata.chunk_block_count(), 1);
@@ -1466,12 +1459,10 @@ mod tests {
     fn round_trips_through_a_sidecar_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.meta");
-        let blob_id = [0x5a; SHA256_DIGEST_SIZE];
         let payload_a = vec![0x11; EROFS_BLOCK_SIZE as usize];
         let payload_b = vec![0x22; EROFS_BLOCK_SIZE as usize];
         let both = [payload_a.as_slice(), payload_b.as_slice()].concat();
         let blob_metadata = BlobMetadata::new(
-            Some(blob_id),
             BlobMetadataCompressor::None,
             1,
             vec![chunk(&payload_a, 0, 1), chunk(&payload_b, 1, 1)],
@@ -1480,8 +1471,7 @@ mod tests {
         .unwrap();
         blob_metadata.save(&path).unwrap();
 
-        let loaded = BlobMetadata::from_path(&path, None, false).unwrap();
-        assert!(loaded.blob_id().is_none());
+        let loaded = BlobMetadata::from_path(&path, false).unwrap();
         assert_eq!(loaded.chunk_count(), 2);
         assert_eq!(loaded.block_group_count(), 1);
         assert_eq!(loaded.header().block_group_block_count(), 2);
@@ -1494,8 +1484,7 @@ mod tests {
         );
         assert_eq!(loaded.uncompressed_size(), 8192);
 
-        let tagged = BlobMetadata::from_path(&path, Some(blob_id), true).unwrap();
-        assert_eq!(tagged.blob_id(), Some(&blob_id));
+        BlobMetadata::from_path(&path, true).unwrap();
     }
 
     #[test]
@@ -1523,10 +1512,10 @@ mod tests {
                 .unwrap(),
         );
 
-        let loaded = BlobMetadata::from_bytes(&raw, None, false).unwrap();
+        let loaded = BlobMetadata::from_bytes(&raw, false).unwrap();
         assert_eq!(loaded.header().crc32(), corrupted_crc32);
 
-        let err = BlobMetadata::from_bytes(&raw, None, true).unwrap_err();
+        let err = BlobMetadata::from_bytes(&raw, true).unwrap_err();
         assert!(err.to_string().contains("crc32"), "{err}");
     }
 
@@ -1535,8 +1524,8 @@ mod tests {
         let mut raw = sealed_metadata();
         raw[NYDUS_BLOB_METADATA_HEADER_SIZE - 1] = 0xff;
 
-        BlobMetadata::from_bytes(&raw, None, false).unwrap();
-        let err = BlobMetadata::from_bytes(&raw, None, true).unwrap_err();
+        BlobMetadata::from_bytes(&raw, false).unwrap();
+        let err = BlobMetadata::from_bytes(&raw, true).unwrap_err();
         assert!(err.to_string().contains("crc32"), "{err}");
     }
 
@@ -1574,7 +1563,7 @@ mod tests {
             let mut raw = sealed_metadata();
             raw[offset..offset + 4].copy_from_slice(&value);
 
-            let result = BlobMetadata::from_bytes(&raw, None, false);
+            let result = BlobMetadata::from_bytes(&raw, false);
             match expected_err {
                 None => {
                     result.unwrap_or_else(|err| panic!("{case}: {err}"));
@@ -1591,7 +1580,7 @@ mod tests {
 
         let mut future = sealed_metadata();
         future[8..12].copy_from_slice(&(NYDUS_BLOB_METADATA_VERSION + 1).to_le_bytes());
-        let loaded = BlobMetadata::from_bytes(&future, None, false).unwrap();
+        let loaded = BlobMetadata::from_bytes(&future, false).unwrap();
         assert_eq!(loaded.header().version(), NYDUS_BLOB_METADATA_VERSION + 1);
     }
 
@@ -1608,7 +1597,7 @@ mod tests {
             raw[..4].copy_from_slice(&magic.to_le_bytes());
             std::fs::write(&path, raw).unwrap();
 
-            let err = match BlobMetadata::from_path(&path, None, false) {
+            let err = match BlobMetadata::from_path(&path, false) {
                 Ok(_) => panic!("{name}: legacy magic should be rejected"),
                 Err(err) => err,
             };
@@ -1620,16 +1609,16 @@ mod tests {
     fn undersized_inputs_reject() {
         let raw = sealed_metadata();
 
-        let err = BlobMetadata::from_bytes(&raw[..10], None, false).unwrap_err();
+        let err = BlobMetadata::from_bytes(&raw[..10], false).unwrap_err();
         assert!(err.to_string().contains("too small"), "{err}");
 
-        let err = BlobMetadata::from_bytes(&raw[..raw.len() - 1], None, false).unwrap_err();
+        let err = BlobMetadata::from_bytes(&raw[..raw.len() - 1], false).unwrap_err();
         assert!(err.to_string().contains("size mismatch"), "{err}");
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("short.blob.meta");
         std::fs::write(&path, &raw[..10]).unwrap();
-        let err = BlobMetadata::from_path(&path, None, false).unwrap_err();
+        let err = BlobMetadata::from_path(&path, false).unwrap_err();
         assert!(err.to_string().contains("too small"), "{err}");
     }
 
@@ -1639,7 +1628,7 @@ mod tests {
         let used_size = blob_metadata().header().used_size() as usize;
         raw[used_size] = 0xff;
 
-        let err = BlobMetadata::from_bytes(&raw, None, false).unwrap_err();
+        let err = BlobMetadata::from_bytes(&raw, false).unwrap_err();
         assert!(err.to_string().contains("padding must be zero"), "{err}");
     }
 
@@ -1904,7 +1893,7 @@ mod tests {
 
         let mut raw = Vec::new();
         shifted.write_to(&mut raw).unwrap();
-        BlobMetadata::from_bytes(&raw, None, true).unwrap();
+        BlobMetadata::from_bytes(&raw, true).unwrap();
     }
 
     #[test]
@@ -1982,7 +1971,6 @@ mod tests {
         ];
 
         let blob_metadata = BlobMetadata::new(
-            Some([0x9d; SHA256_DIGEST_SIZE]),
             BlobMetadataCompressor::None,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),
@@ -1996,7 +1984,7 @@ mod tests {
         );
 
         blob_metadata.save(&path).unwrap();
-        let loaded = BlobMetadata::from_path(&path, None, false).unwrap();
+        let loaded = BlobMetadata::from_path(&path, false).unwrap();
         assert!(loaded.is_redirect());
         assert_eq!(loaded.block_groups(), block_groups.as_slice());
         assert_eq!(loaded.block_groups()[1].source_blob_index(), 2);

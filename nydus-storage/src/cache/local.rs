@@ -854,13 +854,13 @@ fn load_or_fetch_blob_metadata(
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
         backend.save_blob_metadata(&blob_id, tmp.path())?;
-        if let Err(err) = BlobMetadata::from_path(tmp.path(), Some(blob_id), true) {
+        if let Err(err) = BlobMetadata::from_path(tmp.path(), true) {
             return Err(io::Error::other(err));
         }
         tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
     }
 
-    BlobMetadata::from_path(blob_metadata_path, Some(blob_id), true).map_err(io::Error::other)
+    BlobMetadata::from_path(blob_metadata_path, true).map_err(io::Error::other)
 }
 
 /// Drop guard that ensures a leader always signals its flight and cleans up
@@ -911,17 +911,12 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
-    fn blob_metadata(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMetadata {
-        blob_metadata_with_crc32(blob_id, payload, crc32c::crc32c(payload))
+    fn blob_metadata(payload: &[u8]) -> BlobMetadata {
+        blob_metadata_with_crc32(payload, crc32c::crc32c(payload))
     }
 
-    fn blob_metadata_with_crc32(
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        payload: &[u8],
-        crc32: u32,
-    ) -> BlobMetadata {
+    fn blob_metadata_with_crc32(payload: &[u8], crc32: u32) -> BlobMetadata {
         BlobMetadata::new(
-            Some(blob_id),
             BlobMetadataCompressor::None,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
@@ -975,8 +970,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xceu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -994,8 +988,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x3du8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
@@ -1033,8 +1026,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x2eu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
@@ -1071,8 +1063,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x5au8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1102,8 +1093,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x21u8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1124,8 +1114,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x77u8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1147,8 +1136,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x42u8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend = CountingBackend::new(backend_dir.path());
@@ -1200,7 +1188,6 @@ mod tests {
         // An ondemand (redirect) blob whose single block group redirects to source
         // blob 1 block group 0; its data region carries a copy of the source bytes.
         let redirect_meta = BlobMetadata::new(
-            Some(sha256_bytes(&payload)),
             BlobMetadataCompressor::None,
             1,
             Vec::new(),
@@ -1256,8 +1243,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xbdu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let blob_metadata_path = backend_dir
             .path()
@@ -1286,12 +1272,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xacu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata_with_crc32(
-            data_blob_id,
-            &payload,
-            crc32c::crc32c(&payload).wrapping_add(1),
-        );
+        let meta = blob_metadata_with_crc32(&payload, crc32c::crc32c(&payload).wrapping_add(1));
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1311,7 +1292,7 @@ mod tests {
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x3du8; 4096];
         let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, false);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1345,8 +1326,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x6eu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));

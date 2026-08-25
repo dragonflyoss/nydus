@@ -198,7 +198,7 @@ impl BlobBackend for Local {
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let source = self.resolved_source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&source)?;
-        BlobMetadata::from_bytes(&data, Some(*blob_id), false).map_err(io::Error::other)
+        BlobMetadata::from_bytes(&data, false).map_err(io::Error::other)
     }
 
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
@@ -261,9 +261,8 @@ mod tests {
     use nydus_format::utils::sha256_bytes;
     use tempfile::tempdir;
 
-    fn blob_metadata(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMetadata {
+    fn blob_metadata(payload: &[u8]) -> BlobMetadata {
         BlobMetadata::new(
-            Some(blob_id),
             BlobMetadataCompressor::None,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
@@ -278,13 +277,8 @@ mod tests {
     fn local_backend_reads_full_blob_file_and_sidecar_meta() {
         let dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let full_blob_id = write_minimal_full_blob(
-            dir.path(),
-            &payload,
-            &blob_metadata(data_blob_id, &payload),
-            true,
-        );
+        let full_blob_id =
+            write_minimal_full_blob(dir.path(), &payload, &blob_metadata(&payload), true);
 
         let backend = Local::new(dir.path().to_path_buf());
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();
@@ -307,12 +301,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
-        let full_blob_id = write_minimal_full_blob(
-            dir.path(),
-            &payload,
-            &blob_metadata(data_blob_id, &payload),
-            false,
-        );
+        let full_blob_id =
+            write_minimal_full_blob(dir.path(), &payload, &blob_metadata(&payload), false);
         let backend = Local::new(dir.path().to_path_buf());
 
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();
