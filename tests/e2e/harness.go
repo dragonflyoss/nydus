@@ -85,6 +85,15 @@ func lookupExecutable(name string) (string, error) {
 	return "", fmt.Errorf("%s not found in target/{release,debug}/ or on PATH", name)
 }
 
+// envOr returns the value of the named environment variable, or def when it
+// is unset or empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 // mustLookupCErofsFuse is a test helper that wraps lookupCErofsFuseExecutable and fails the test if the erofsfuse executable is not found.
 func mustLookupCErofsFuse(t *testing.T) string {
 	p, err := lookupCErofsFuseExecutable()

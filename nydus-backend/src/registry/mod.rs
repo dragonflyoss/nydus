@@ -1513,6 +1513,36 @@ dragonfly:
     }
 
     #[test]
+    fn registry_error_to_io_error_preserves_dragonfly_messages() {
+        let too_many_requests: io::Error =
+            RegistryError::TooManyRequests("proxy answered 429".to_string()).into();
+        assert!(
+            too_many_requests.to_string().contains("too many requests"),
+            "unexpected error: {too_many_requests}"
+        );
+        assert!(
+            too_many_requests.to_string().contains("429"),
+            "unexpected error: {too_many_requests}"
+        );
+
+        let forbidden: io::Error =
+            RegistryError::Forbidden("proxy answered 403".to_string()).into();
+        assert!(
+            forbidden.to_string().contains("forbidden"),
+            "unexpected error: {forbidden}"
+        );
+        assert!(
+            forbidden.to_string().contains("403"),
+            "unexpected error: {forbidden}"
+        );
+
+        let inner = io::Error::new(io::ErrorKind::TimedOut, "timed out");
+        let passthrough: io::Error = RegistryError::Io(inner).into();
+        assert_eq!(passthrough.kind(), io::ErrorKind::TimedOut);
+        assert!(passthrough.to_string().contains("timed out"));
+    }
+
+    #[test]
     fn fallback_limiter_spaces_permits_by_the_interval() {
         let interval = Duration::from_millis(40);
         let limiter = FallbackLimiter::new(interval);

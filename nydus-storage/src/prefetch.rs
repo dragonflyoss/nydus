@@ -278,8 +278,10 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use nydus_backend::{throttled_error, BlobBackend, Local, ReadContext};
-    use nydus_format::blob::{BlobMetadata, BlobMetadataChunk, BlobMetadataGroup};
-    use nydus_format::utils::{sha256_bytes, write_minimal_full_blob, SHA256_DIGEST_SIZE};
+    use nydus_format::blob::{
+        BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
+    };
+    use nydus_format::utils::{write_minimal_full_blob, SHA256_DIGEST_SIZE};
     use tempfile::tempdir;
 
     /// Wraps a local backend and fails the first `failures` data reads with
@@ -355,12 +357,11 @@ mod tests {
 
     fn test_payload() -> (Vec<u8>, BlobMetadata) {
         let payload = vec![0xabu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = BlobMetadata::from_parts(
-            data_blob_id,
+        let meta = BlobMetadata::new(
+            BlobMetadataCompressor::None,
             1,
-            vec![BlobMetadataGroup::new(0, 1, 0, 4096, crc32c::crc32c(&payload)).unwrap()],
             vec![BlobMetadataChunk::new(*blake3::hash(&payload).as_bytes(), 0, 1).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(&payload)).unwrap()],
         )
         .unwrap();
         (payload, meta)
