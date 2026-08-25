@@ -757,13 +757,6 @@ func nonDigitTrim(s string) string {
 	return s
 }
 
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
 func findFile(root, name string) string {
 	var found string
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
