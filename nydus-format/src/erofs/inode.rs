@@ -1,8 +1,8 @@
 use std::mem;
 
 use super::*;
+use crate::utils::align_up_usize;
 use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
-use crate::utils::round_up;
 
 /// EROFS on-disk inode in compact format (32 bytes).
 #[repr(C, packed)]
@@ -435,7 +435,7 @@ pub fn erofs_xattr_ibody_size(xattrs: &[XattrEntry]) -> usize {
     let mut size = EROFS_XATTR_IBODY_HEADER_SIZE;
     for entry in xattrs {
         let entry_size = EROFS_XATTR_ENTRY_HEADER_SIZE + entry.suffix.len() + entry.value.len();
-        size += round_up(entry_size, 4);
+        size += align_up_usize(entry_size, 4).expect("alignment overflowed");
     }
 
     size
@@ -447,7 +447,7 @@ pub fn erofs_xattr_icount(xattr_ibody_size: usize) -> u16 {
     if xattr_ibody_size == 0 {
         0
     } else {
-        let aligned = round_up(xattr_ibody_size, 4);
+        let aligned = align_up_usize(xattr_ibody_size, 4).expect("alignment overflowed");
         ((aligned - 8) / 4) as u16
     }
 }

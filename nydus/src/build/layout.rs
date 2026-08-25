@@ -1,5 +1,5 @@
 use nydus_format::erofs::{EROFS_BLOCK_SIZE, EROFS_SLOTSIZE};
-use nydus_format::utils::round_up;
+use nydus_format::utils::align_up_usize;
 
 /// Metadata layout allocator.
 ///
@@ -58,10 +58,10 @@ impl MetadataLayout {
     pub(crate) fn alloc_inode(&mut self, size: usize, has_inline: bool) -> (usize, u64) {
         let block = EROFS_BLOCK_SIZE as usize;
         if has_inline && self.cursor % block + size > block {
-            self.cursor = round_up(self.cursor, block);
+            self.cursor = align_up_usize(self.cursor, block).expect("alignment overflowed");
         }
 
-        let aligned = round_up(size, EROFS_SLOTSIZE as usize);
+        let aligned = align_up_usize(size, EROFS_SLOTSIZE as usize).expect("alignment overflowed");
         let offset = self.cursor;
         self.cursor += aligned;
         if self.buf.len() < self.cursor {
@@ -74,7 +74,8 @@ impl MetadataLayout {
 
     /// Pad the metadata buffer to the next block boundary.
     pub(crate) fn pad_to_block(&mut self) -> usize {
-        let aligned = round_up(self.cursor, EROFS_BLOCK_SIZE as usize);
+        let aligned =
+            align_up_usize(self.cursor, EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
         self.cursor = aligned;
         if self.buf.len() < self.cursor {
             self.buf.resize(self.cursor, 0);
@@ -86,9 +87,11 @@ impl MetadataLayout {
     /// Allocate block-aligned space for directory data.
     /// Returns (offset_in_buf, start_block_address).
     pub(crate) fn alloc_dir_data(&mut self, size: usize) -> (usize, u64) {
-        self.cursor = round_up(self.cursor, EROFS_BLOCK_SIZE as usize);
+        self.cursor =
+            align_up_usize(self.cursor, EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
         let offset = self.cursor;
-        let aligned_size = round_up(size, EROFS_BLOCK_SIZE as usize);
+        let aligned_size =
+            align_up_usize(size, EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
         self.cursor += aligned_size;
         if self.buf.len() < self.cursor {
             self.buf.resize(self.cursor, 0);

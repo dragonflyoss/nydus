@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::RawFd;
 
 /// Read exactly `buf.len()` bytes from `fd` at `offset` without moving the
@@ -34,19 +34,9 @@ pub fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {
     Ok(())
 }
 
-/// Write `aligned - current` zero bytes to pad a region up to its aligned
-/// end. Errors when `aligned < current`.
-pub fn write_zero_padding(writer: &mut dyn Write, current: u64, aligned: u64) -> io::Result<()> {
-    if aligned < current {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid blob region alignment",
-        ));
-    }
-    let padding = (aligned - current) as usize;
-    if padding > 0 {
-        writer.write_all(&vec![0u8; padding])?;
-    }
+/// Write `count` zero bytes to `writer`.
+pub fn write_zeros(writer: &mut dyn Write, count: u64) -> io::Result<()> {
+    io::copy(&mut io::repeat(0).take(count), writer)?;
     Ok(())
 }
 

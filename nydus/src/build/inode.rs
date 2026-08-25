@@ -9,7 +9,7 @@ use nydus_format::erofs::{
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_ENTRY_HEADER_SIZE,
     EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
 };
-use nydus_format::utils::round_up;
+use nydus_format::utils::align_up_usize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
@@ -131,7 +131,8 @@ pub(crate) fn erofs_inode_size(inode: &InodeInfo) -> usize {
             if chunk_index_entries.is_empty() {
                 inode_isize + xattr_isize
             } else {
-                round_up(inode_isize + xattr_isize, EROFS_CHUNK_INDEX_SIZE)
+                align_up_usize(inode_isize + xattr_isize, EROFS_CHUNK_INDEX_SIZE)
+                    .expect("alignment overflowed")
                     + chunk_index_entries.len() * EROFS_CHUNK_INDEX_SIZE
             }
         }
@@ -582,7 +583,8 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             } else {
                 EROFS_INODE_COMPACT_SIZE
             };
-            let extent_offset = round_up(base + xattr_size, EROFS_CHUNK_INDEX_SIZE);
+            let extent_offset = align_up_usize(base + xattr_size, EROFS_CHUNK_INDEX_SIZE)
+                .expect("alignment overflowed");
             for (i, entry) in chunk_index_entries.iter().enumerate() {
                 let index = ErofsChunkIndex::new(entry.blkaddr, entry.device_id);
                 let off = extent_offset + i * EROFS_CHUNK_INDEX_SIZE;
@@ -802,7 +804,7 @@ fn write_erofs_xattr_ibody(buf: &mut [u8], offset: usize, xattrs: &[XattrEntry])
         ibody[value_start..][..value.len()].copy_from_slice(value);
 
         // Next entry begins at the next 4-byte boundary; padding is already zero.
-        entry_start = round_up(value_start + value.len(), 4);
+        entry_start = align_up_usize(value_start + value.len(), 4).expect("alignment overflowed");
     }
 
     ibody_size

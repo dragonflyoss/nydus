@@ -154,7 +154,7 @@ impl LocalBlobCache {
             .create(true)
             .truncate(false)
             .open(&cache_data_path)?;
-        data_file.set_len(blob_metadata.total_uncompressed_size())?;
+        data_file.set_len(blob_metadata.uncompressed_size())?;
         drop(data_file);
 
         let block_group_map = BlockGroupMap::open(
@@ -215,7 +215,7 @@ impl LocalBlobCache {
                 .truncate(false)
                 .open(&self.cache_data_path)?,
         );
-        file.set_len(self.blob_metadata.total_uncompressed_size())?;
+        file.set_len(self.blob_metadata.uncompressed_size())?;
         nydus_telemetry::metrics::inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
@@ -337,7 +337,7 @@ impl LocalBlobCache {
         // Redirect (ondemand) blobs have a non-uniform block group layout, so the
         // O(1) division-based block group lookup below does not apply; they are
         // consumed exclusively through `stream_redirect`.
-        if self.blob_metadata.is_redirect_blob() {
+        if self.blob_metadata.is_redirect() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "redirect blob has no dense readable address space",
@@ -361,7 +361,7 @@ impl LocalBlobCache {
         for block_group_index in first_block_group..=last_block_group {
             let block_group = *self
                 .blob_metadata
-                .block_group_at(block_group_index)
+                .block_group(block_group_index)
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -384,13 +384,13 @@ impl LocalBlobCache {
     ) -> io::Result<std::ops::RangeInclusive<usize>> {
         let first = self
             .blob_metadata
-            .block_group_index_for_offset(offset)
+            .block_group_index_from_uncompressed_offset(offset)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block_group not found")
             })?;
         let last = self
             .blob_metadata
-            .block_group_index_for_offset(end - 1)
+            .block_group_index_from_uncompressed_offset(end - 1)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block_group not found")
             })?;
@@ -492,7 +492,7 @@ impl BlobCache for LocalBlobCache {
         }
         // Fast path: another process (or an earlier run) already decoded every
         // block group; skip the batch planning and per-block group readiness scan.
-        if !self.blob_metadata.is_redirect_blob() && self.block_group_map.is_all_ready() {
+        if !self.blob_metadata.is_redirect() && self.block_group_map.is_all_ready() {
             return Ok(());
         }
 
@@ -554,7 +554,7 @@ impl BlobCache for LocalBlobCache {
         // historical writer crash between its bit and counter updates leaves
         // the counter short forever; the authoritative bitmap scan inside
         // latch_all_ready() latches the flag regardless.
-        if !self.blob_metadata.is_redirect_blob() {
+        if !self.blob_metadata.is_redirect() {
             self.block_group_map.latch_all_ready();
         }
 
@@ -595,7 +595,7 @@ impl BlobCache for LocalBlobCache {
     }
 
     fn ready_ranges(&self, offset: u64, len: u64) -> io::Result<Vec<Range<u64>>> {
-        if len == 0 || self.blob_metadata.is_redirect_blob() {
+        if len == 0 || self.blob_metadata.is_redirect() {
             return Ok(Vec::new());
         }
         let end = offset.checked_add(len).ok_or_else(|| {
@@ -609,7 +609,7 @@ impl BlobCache for LocalBlobCache {
             .map(|block_groups| {
                 let first_block_group = self
                     .blob_metadata
-                    .block_group_at(block_groups.start)
+                    .block_group(block_groups.start)
                     .ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -618,7 +618,7 @@ impl BlobCache for LocalBlobCache {
                     })?;
                 let last_block_group = self
                     .blob_metadata
-                    .block_group_at(block_groups.end - 1)
+                    .block_group(block_groups.end - 1)
                     .ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -633,8 +633,8 @@ impl BlobCache for LocalBlobCache {
             .collect()
     }
 
-    fn is_redirect_blob(&self) -> bool {
-        self.blob_metadata.is_redirect_blob()
+    fn is_redirect(&self) -> bool {
+        self.blob_metadata.is_redirect()
     }
 
     /// Acquire the per-blob cross-process prefetch lock, blocking (in 1s
@@ -683,7 +683,7 @@ impl BlobCache for LocalBlobCache {
             // so we can stop waiting; the caller's prefetch then reduces to a
             // cheap all-ready scan. A redirect blob never marks its own map,
             // so keep waiting for the lock and rely on batch skipping.
-            if !self.blob_metadata.is_redirect_blob() && self.block_group_map.latch_all_ready() {
+            if !self.blob_metadata.is_redirect() && self.block_group_map.latch_all_ready() {
                 return None;
             }
             if !contention_logged {
@@ -706,7 +706,7 @@ impl BlobCache for LocalBlobCache {
     fn is_all_ready(&self) -> bool {
         // A redirect blob never marks its own block_group_map (its block groups fill other
         // blobs' caches), so the flag is meaningless there.
-        !self.blob_metadata.is_redirect_blob() && self.block_group_map.is_all_ready()
+        !self.blob_metadata.is_redirect() && self.block_group_map.is_all_ready()
     }
 
     fn for_each_redirect_block_group(
@@ -812,7 +812,7 @@ impl BlobCache for LocalBlobCache {
     ) -> io::Result<()> {
         let block_group = self
             .blob_metadata
-            .block_group_at(block_group_index)
+            .block_group(block_group_index)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -854,21 +854,13 @@ fn load_or_fetch_blob_metadata(
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
         backend.save_blob_metadata(&blob_id, tmp.path())?;
-        if let Err(err) = BlobMetadata::loader()
-            .verify_crc32()
-            .blob_id(blob_id)
-            .load(tmp.path())
-        {
+        if let Err(err) = BlobMetadata::from_path(tmp.path(), Some(blob_id), true) {
             return Err(io::Error::other(err));
         }
         tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
     }
 
-    BlobMetadata::loader()
-        .verify_crc32()
-        .blob_id(blob_id)
-        .load(blob_metadata_path)
-        .map_err(io::Error::other)
+    BlobMetadata::from_path(blob_metadata_path, Some(blob_id), true).map_err(io::Error::other)
 }
 
 /// Drop guard that ensures a leader always signals its flight and cleans up
@@ -929,7 +921,7 @@ mod tests {
         crc32: u32,
     ) -> BlobMetadata {
         BlobMetadata::new(
-            blob_id,
+            Some(blob_id),
             BlobMetadataCompressor::None,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
@@ -1208,14 +1200,14 @@ mod tests {
         // An ondemand (redirect) blob whose single block group redirects to source
         // blob 1 block group 0; its data region carries a copy of the source bytes.
         let redirect_meta = BlobMetadata::new(
-            sha256_bytes(&payload),
+            Some(sha256_bytes(&payload)),
             BlobMetadataCompressor::None,
             1,
             Vec::new(),
             vec![BlobMetadataBlockGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
         )
         .unwrap();
-        assert!(redirect_meta.is_redirect_blob());
+        assert!(redirect_meta.is_redirect());
         let redirect_blob_id =
             write_minimal_full_blob(backend_dir.path(), &payload, &redirect_meta, true);
 
@@ -1359,7 +1351,7 @@ mod tests {
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
-        assert!(!cached.is_redirect_blob());
+        assert!(!cached.is_redirect());
 
         // Wrong length is rejected and the block group stays not-ready.
         let err = cached

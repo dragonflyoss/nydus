@@ -276,8 +276,8 @@ impl ErofsReader {
     /// Return whether the blob identified by `blob_index` is an "ondemand"
     /// redirect blob (produced by `nydus optimize`). Opens the blob cache,
     /// which reads the local blob meta but performs no data prefetch.
-    pub fn is_redirect_blob(&self, blob_index: u16) -> io::Result<bool> {
-        self.blobs.is_redirect_blob(blob_index)
+    pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
+        self.blobs.is_redirect(blob_index)
     }
 
     /// Prefetch every block group of the blob identified by `blob_index`. An

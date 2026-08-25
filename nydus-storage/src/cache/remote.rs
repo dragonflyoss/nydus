@@ -49,7 +49,7 @@ impl BlobCache for RemoteBlobCache {
         }
         // Redirect (ondemand) blobs have a non-uniform block group layout and no
         // dense readable address space, exactly as in the local cache.
-        if self.blob_metadata.is_redirect_blob() {
+        if self.blob_metadata.is_redirect() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "redirect blob has no dense readable address space",
@@ -61,13 +61,13 @@ impl BlobCache for RemoteBlobCache {
         })?;
         let first = self
             .blob_metadata
-            .block_group_index_for_offset(offset)
+            .block_group_index_from_uncompressed_offset(offset)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
             })?;
         let last = self
             .blob_metadata
-            .block_group_index_for_offset(end - 1)
+            .block_group_index_from_uncompressed_offset(end - 1)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
             })?;
@@ -76,7 +76,7 @@ impl BlobCache for RemoteBlobCache {
         for block_group_index in first..=last {
             let block_group = *self
                 .blob_metadata
-                .block_group_at(block_group_index)
+                .block_group(block_group_index)
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -111,8 +111,8 @@ impl BlobCache for RemoteBlobCache {
         ))
     }
 
-    fn is_redirect_blob(&self) -> bool {
-        self.blob_metadata.is_redirect_blob()
+    fn is_redirect(&self) -> bool {
+        self.blob_metadata.is_redirect()
     }
 }
 
@@ -126,7 +126,7 @@ mod tests {
 
     fn blob_metadata(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMetadata {
         BlobMetadata::new(
-            blob_id,
+            Some(blob_id),
             BlobMetadataCompressor::None,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],

@@ -6,7 +6,7 @@ use nydus_format::erofs::{
     EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
     EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
 };
-use nydus_format::utils::round_up;
+use nydus_format::utils::align_up_usize;
 
 use super::{ErofsReader, RawBlobInfo};
 
@@ -135,7 +135,8 @@ impl ErofsReader {
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
         let inode_offset = self.nid_to_offset(nid);
         let header_size = inode.header_size() + inode.xattr_size();
-        let index_offset = inode_offset + round_up(header_size, EROFS_CHUNK_INDEX_SIZE);
+        let index_offset = inode_offset
+            + align_up_usize(header_size, EROFS_CHUNK_INDEX_SIZE).expect("alignment overflowed");
         let index_total = nchunks * EROFS_CHUNK_INDEX_SIZE;
         self.mmap_slice(index_offset, index_total)
     }

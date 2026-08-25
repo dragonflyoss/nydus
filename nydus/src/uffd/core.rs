@@ -7,7 +7,7 @@ use nydus_config::Config;
 use nydus_core::{Extent, NydusCore, ResolveMode};
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
-use nydus_format::utils::align_up;
+use nydus_format::utils::align_up_u64;
 
 use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
 
@@ -64,7 +64,7 @@ pub struct UffdCore {
 impl UffdCore {
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
         let core = Arc::new(NydusCore::new(bootstrap, config)?);
-        let device_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)
+        let device_size = align_up_u64(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)
             .ok_or_else(|| Error::Overflow("alignment overflow".to_string()))?;
 
         Ok(Self { core, device_size })

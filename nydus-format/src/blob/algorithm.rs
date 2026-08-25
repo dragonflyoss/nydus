@@ -6,6 +6,8 @@ use crate::blob::metadata::BlobMetadataFlags;
 use crate::error::{Error, Result};
 use std::fmt;
 
+/// The block group payload compressor a blob meta declares. `None` is the
+/// absent-flag state: payloads are stored raw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobMetadataCompressor {
     None,
@@ -13,6 +15,7 @@ pub enum BlobMetadataCompressor {
 }
 
 impl BlobMetadataCompressor {
+    /// The flag bit encoding this compressor, empty for `None`.
     pub fn flag(self) -> BlobMetadataFlags {
         match self {
             Self::None => BlobMetadataFlags::empty(),
@@ -42,12 +45,15 @@ impl From<BlobMetadataFlags> for BlobMetadataCompressor {
     }
 }
 
+/// The chunk digest algorithm a blob meta declares, always explicit (see
+/// the `TryFrom` below).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobMetadataDigester {
     Blake3,
 }
 
 impl BlobMetadataDigester {
+    /// The flag bit encoding this digester.
     pub fn flag(self) -> BlobMetadataFlags {
         match self {
             Self::Blake3 => BlobMetadataFlags::DIGESTER_BLAKE3,

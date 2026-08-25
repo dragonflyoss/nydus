@@ -110,7 +110,7 @@ pub fn build_ondemand_blob(
 
         let block_group = *cache
             .blob_metadata()
-            .block_group_at(*block_group_index as usize)
+            .block_group(*block_group_index as usize)
             .ok_or_else(|| {
                 Error::InvalidParameter(format!(
                     "pattern references block group {block_group_index} out of range for blob {blob_index}"
@@ -168,7 +168,7 @@ pub fn build_ondemand_blob(
     data_digest.copy_from_slice(&data_hasher.finalize());
 
     let blob_metadata = BlobMetadata::new(
-        data_digest,
+        Some(data_digest),
         BlobMetadataCompressor::Zstd,
         DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
         Vec::new(),

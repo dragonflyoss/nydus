@@ -5,7 +5,7 @@ use nydus_format::blob::{
     DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
 };
 use nydus_format::erofs::{ErofsChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
-use nydus_format::utils::round_up;
+use nydus_format::utils::align_up_usize;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -136,7 +136,7 @@ impl<W: Write> BlobWriter<W> {
         source_offset_bias: u64,
     ) -> Result<BlobMetadata> {
         Ok(BlobMetadata::new(
-            blob_id,
+            Some(blob_id),
             self.compressor,
             self.file_chunk_size / EROFS_BLOCK_SIZE,
             self.blob_metadata_chunks.clone(),
@@ -207,7 +207,8 @@ impl<W: Write> BlobWriter<W> {
             // full file chunk size. A full chunk is already block-aligned, while
             // a partial (tail) chunk keeps zero padding confined to its final
             // block so block groups pack dense real blocks instead of large zero runs.
-            let write_len = round_up(to_read, EROFS_BLOCK_SIZE as usize);
+            let write_len =
+                align_up_usize(to_read, EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
             let blkaddr = self.append_chunk(&chunk_buf[..to_read], write_len)?;
 
             indexes.push(ErofsChunkAddr {
@@ -567,7 +568,7 @@ mod tests {
         // 4 KiB header block + one chunk + one block group, padded to a block.
         assert_eq!(raw.len(), 8192);
 
-        let blob_metadata = BlobMetadata::load(&blob_metadata_path).unwrap();
+        let blob_metadata = BlobMetadata::from_path(&blob_metadata_path, None, false).unwrap();
         assert_eq!(blob_metadata.header().chunk_count(), 1);
         assert_eq!(blob_metadata.header().block_group_count(), 1);
         assert_eq!(blob_metadata.header().chunk_table_size(), 48);
