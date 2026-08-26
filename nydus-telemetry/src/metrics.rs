@@ -77,6 +77,8 @@ pub enum DragonflyErrorClass {
     Connect,
     /// The proxy or the backend behind it answered HTTP 5xx.
     ServerError,
+    /// The response body failed mid-stream after a successful start.
+    Stream,
     /// Any other SDK transport error.
     Other,
 }
@@ -89,18 +91,20 @@ impl DragonflyErrorClass {
             DragonflyErrorClass::Timeout => "timeout",
             DragonflyErrorClass::Connect => "connect",
             DragonflyErrorClass::ServerError => "server_error",
+            DragonflyErrorClass::Stream => "stream",
             DragonflyErrorClass::Other => "other",
         }
     }
 
     /// All classes, used to pre-create label series so every class appears in
     /// the exposition output even before it is first hit.
-    const ALL: [DragonflyErrorClass; 6] = [
+    const ALL: [DragonflyErrorClass; 7] = [
         DragonflyErrorClass::RateLimited,
         DragonflyErrorClass::Forbidden,
         DragonflyErrorClass::Timeout,
         DragonflyErrorClass::Connect,
         DragonflyErrorClass::ServerError,
+        DragonflyErrorClass::Stream,
         DragonflyErrorClass::Other,
     ];
 }
@@ -809,6 +813,14 @@ pub fn backend_read_total(target: BackendTarget) -> u64 {
     match target {
         BackendTarget::Origin => METRICS.backend_origin_read_count.get(),
         BackendTarget::Proxy => METRICS.backend_proxy_read_count.get(),
+    }
+}
+
+/// Current count of CRC validation failures attributed to `target`.
+pub fn backend_crc_error_total(target: BackendTarget) -> u64 {
+    match target {
+        BackendTarget::Origin => METRICS.backend_origin_crc_check_errors.get(),
+        BackendTarget::Proxy => METRICS.backend_proxy_crc_check_errors.get(),
     }
 }
 

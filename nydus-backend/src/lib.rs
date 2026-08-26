@@ -107,15 +107,26 @@ thread_local! {
     /// to a different target than the backend's static one — e.g. a Dragonfly
     /// read that fell back to the origin — so the read is attributed to the
     /// side that actually served it. Reads run synchronously on the calling
-    /// thread, so a thread-local carries this without any cross-read leakage.
+    /// thread and the cell is reset when the next read starts, so it always
+    /// describes the most recent read; it deliberately outlives the read
+    /// itself so post-read validation (decode + CRC) can attribute failures
+    /// to the side that served the bytes via [`last_read_served_by`].
     static READ_SERVED_BY: std::cell::Cell<Option<nydus_telemetry::metrics::BackendTarget>> =
         const { std::cell::Cell::new(None) };
 }
 
 /// Attribute the in-flight metered read to `target` instead of the backend's
 /// static [`BlobBackend::backend_target`].
+#[cfg_attr(not(feature = "backend-registry"), allow(dead_code))]
 pub(crate) fn note_read_served_by(target: nydus_telemetry::metrics::BackendTarget) {
     READ_SERVED_BY.with(|cell| cell.set(Some(target)));
+}
+
+/// The side that actually served the most recent metered read on this thread,
+/// when it diverged from the backend's static target. Valid until the next
+/// read starts on this thread.
+pub fn last_read_served_by() -> Option<nydus_telemetry::metrics::BackendTarget> {
+    READ_SERVED_BY.with(|cell| cell.get())
 }
 
 /// A blob backend resolves blob data and metadata by content digest.
@@ -173,8 +184,10 @@ impl MeteredBackend {
         let start = std::time::Instant::now();
         READ_SERVED_BY.with(|cell| cell.set(None));
         let result = read();
+        // Peek rather than take: the override must survive until the caller's
+        // decode + CRC validation of these bytes (see `last_read_served_by`).
         let target = READ_SERVED_BY
-            .with(|cell| cell.take())
+            .with(|cell| cell.get())
             .unwrap_or_else(|| self.inner.backend_target());
         nydus_telemetry::metrics::record_backend_read(
             target,
@@ -258,6 +271,60 @@ mod tests {
         assert!(is_backend_throttled(&err));
         assert!(err.to_string().contains("429"));
         assert!(!is_backend_throttled(&io::Error::other("ordinary failure")));
+    }
+
+    /// A backend that optionally diverts each read's attribution to `serve_as`.
+    struct DivertingBackend {
+        serve_as: Option<nydus_telemetry::metrics::BackendTarget>,
+    }
+
+    impl BlobBackend for DivertingBackend {
+        fn backend_target(&self) -> nydus_telemetry::metrics::BackendTarget {
+            nydus_telemetry::metrics::BackendTarget::Proxy
+        }
+
+        fn blob_metadata(&self, _blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
+            Err(io::Error::other("unused"))
+        }
+
+        fn read_range_into(
+            &self,
+            _blob_id: &[u8; SHA256_DIGEST_SIZE],
+            _offset: u64,
+            dst: &mut [u8],
+            _context: ReadContext,
+        ) -> io::Result<()> {
+            if let Some(target) = self.serve_as {
+                note_read_served_by(target);
+            }
+            dst.fill(0);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn served_by_override_survives_until_the_next_read() {
+        use nydus_telemetry::metrics::BackendTarget;
+
+        let mut dst = [0u8; 4];
+        let context = ReadContext::raw(ReadKind::OnDemand);
+
+        // A diverted read leaves its target visible after the read returns,
+        // so decode + CRC validation can attribute failures to it.
+        let diverted = metered(Arc::new(DivertingBackend {
+            serve_as: Some(BackendTarget::Origin),
+        }));
+        diverted
+            .read_range_into(&[0u8; SHA256_DIGEST_SIZE], 0, &mut dst, context)
+            .unwrap();
+        assert_eq!(last_read_served_by(), Some(BackendTarget::Origin));
+
+        // The next read resets the override.
+        let undiverted = metered(Arc::new(DivertingBackend { serve_as: None }));
+        undiverted
+            .read_range_into(&[0u8; SHA256_DIGEST_SIZE], 0, &mut dst, context)
+            .unwrap();
+        assert_eq!(last_read_served_by(), None);
     }
 
     #[cfg(feature = "backend-registry")]

@@ -14,7 +14,7 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::StatusCode;
 
-use dragonfly_client_request::errors::Error;
+use dragonfly_client_request::errors::{BackendError, Error, ProxyError};
 use dragonfly_client_request::{Body, Builder, GetRequest, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
@@ -87,7 +87,7 @@ impl Dragonfly {
 }
 
 /// Classify an SDK error into the load-shedding policy's failure classes:
-/// a proxy `429` is `RateLimited`, a proxy `403` is `Forbidden`, and
+/// a proxy or backend `429` is `RateLimited`, a `403` is `Forbidden`, and
 /// everything else is `Retryable` tagged with its cause — request timeout,
 /// dfdaemon connectivity, a proxy/backend `5xx`, or any other transport
 /// error.
@@ -95,15 +95,10 @@ fn classify(err: &Error) -> DragonflyFailure {
     match err {
         Error::RequestTimeout(_) => DragonflyFailure::Retryable(RetryableCause::Timeout),
         Error::DfdaemonError(_) => DragonflyFailure::Retryable(RetryableCause::Connect),
-        Error::ProxyError(proxy) => match proxy.status_code {
+        Error::ProxyError(ProxyError { status_code, .. })
+        | Error::BackendError(BackendError { status_code, .. }) => match status_code {
             Some(StatusCode::TOO_MANY_REQUESTS) => DragonflyFailure::RateLimited,
             Some(StatusCode::FORBIDDEN) => DragonflyFailure::Forbidden,
-            Some(code) if code.is_server_error() => {
-                DragonflyFailure::Retryable(RetryableCause::ServerError)
-            }
-            _ => DragonflyFailure::Retryable(RetryableCause::Other),
-        },
-        Error::BackendError(backend) => match backend.status_code {
             Some(code) if code.is_server_error() => {
                 DragonflyFailure::Retryable(RetryableCause::ServerError)
             }
