@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - v[0-9]+.[0-9]+.[0-9]+*
-  # Manual dry run: builds and uploads workflow artifacts, but never
-  # publishes a GitHub release.
   workflow_dispatch:
 
 env:
@@ -39,7 +37,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          # Tags are needed for the dry-run tarball name fallback.
           fetch-depth: 0
 
       - name: Rust cache
@@ -77,8 +74,6 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          # docker/cli guards `cli/config/configfile` with `//go:build go1.25`,
-          # so the go.mod directive (1.24.2) is not enough to build nydusify.
           go-version: "1.25.5"
           cache-dependency-path: nydusify/go.sum
 
