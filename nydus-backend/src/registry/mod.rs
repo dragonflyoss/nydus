@@ -120,6 +120,8 @@ enum RetryableCause {
     Connect,
     /// The proxy or the backend behind it answered HTTP 5xx.
     ServerError,
+    /// The response body failed mid-stream after a successful start.
+    Stream,
     /// Any other SDK transport error.
     Other,
 }
@@ -130,6 +132,7 @@ impl RetryableCause {
             RetryableCause::Timeout => "timeout",
             RetryableCause::Connect => "connect",
             RetryableCause::ServerError => "server_error",
+            RetryableCause::Stream => "stream",
             RetryableCause::Other => "other",
         }
     }
@@ -169,6 +172,7 @@ impl DragonflyFailure {
             DragonflyFailure::Retryable(RetryableCause::ServerError) => {
                 DragonflyErrorClass::ServerError
             }
+            DragonflyFailure::Retryable(RetryableCause::Stream) => DragonflyErrorClass::Stream,
             DragonflyFailure::Retryable(RetryableCause::Other) => DragonflyErrorClass::Other,
         }
     }
@@ -395,6 +399,28 @@ impl Response {
             let mut body = String::new();
             self.reader.read_to_string(&mut body).await?;
             Ok(body)
+        })
+    }
+
+    /// Drain the streaming body into memory, returning an equivalent response
+    /// backed by the buffered bytes. Pre-sizes the buffer from
+    /// `content-length` when present.
+    fn buffered(mut self) -> io::Result<Response> {
+        let capacity = self
+            .headers
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let body = runtime().block_on(async {
+            let mut body = Vec::with_capacity(capacity);
+            self.reader.read_to_end(&mut body).await?;
+            io::Result::Ok(body)
+        })?;
+        Ok(Response {
+            status: self.status,
+            headers: self.headers,
+            reader: Box::new(std::io::Cursor::new(body)),
         })
     }
 }
@@ -852,7 +878,12 @@ impl Registry {
     }
 
     /// Send a single blob `GET` attempt through the Dragonfly transport and
-    /// log its completion.
+    /// log its completion. The body is drained into memory here, before the
+    /// attempt counts as a success: the caller consumes the response only
+    /// after the policy loop has returned, so a mid-stream dfdaemon/backend
+    /// failure surfaced later would bypass the Dragonfly error metrics,
+    /// retries, and fallback entirely. Buffering also means no bytes are ever
+    /// exposed from an attempt that is later retried.
     fn request_dragonfly(
         &self,
         dragonfly: &dyn DragonflyTransport,
@@ -861,7 +892,14 @@ impl Registry {
         context: ReadContext,
     ) -> Result<Response, DragonflyError> {
         let start = Instant::now();
-        let result = dragonfly.get(url, headers.clone(), context.kind);
+        let result = dragonfly
+            .get(url, headers.clone(), context.kind)
+            .and_then(|response| {
+                response.buffered().map_err(|err| DragonflyError {
+                    failure: DragonflyFailure::Retryable(RetryableCause::Stream),
+                    message: format!("response body failed mid-stream: {err}"),
+                })
+            });
         let duration = start.elapsed();
 
         match result {
@@ -1426,6 +1464,7 @@ dragonfly:
             RetryableCause::Timeout,
             RetryableCause::Connect,
             RetryableCause::ServerError,
+            RetryableCause::Stream,
             RetryableCause::Other,
         ] {
             assert_eq!(
@@ -1721,6 +1760,74 @@ dragonfly:
         }
     }
 
+    /// A body that serves `data` and then fails instead of reaching EOF.
+    struct MidStreamFailingBody {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl AsyncRead for MidStreamFailingBody {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            if self.pos < self.data.len() {
+                let n = buf.remaining().min(self.data.len() - self.pos);
+                let pos = self.pos;
+                buf.put_slice(&self.data[pos..pos + n]);
+                self.pos = pos + n;
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                std::task::Poll::Ready(Err(io::Error::other("connection reset mid-stream")))
+            }
+        }
+    }
+
+    /// A transport handing out pre-built responses in order, counting calls.
+    struct SequencedTransport {
+        responses: Mutex<std::collections::VecDeque<Response>>,
+        calls: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl SequencedTransport {
+        fn new(
+            responses: impl IntoIterator<Item = Response>,
+        ) -> (SequencedTransport, Arc<std::sync::atomic::AtomicU32>) {
+            let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let transport = SequencedTransport {
+                responses: Mutex::new(responses.into_iter().collect()),
+                calls: calls.clone(),
+            };
+            (transport, calls)
+        }
+    }
+
+    impl DragonflyTransport for SequencedTransport {
+        fn get(
+            &self,
+            _url: &str,
+            _headers: HeaderMap,
+            _kind: ReadKind,
+        ) -> Result<Response, DragonflyError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("transport called more times than scripted"))
+        }
+    }
+
+    fn ok_response(reader: Box<dyn AsyncRead + Send + Unpin>) -> Response {
+        Response {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            reader,
+        }
+    }
+
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
     fn retryable() -> DragonflyFailure {
@@ -1786,6 +1893,12 @@ dragonfly:
             nydus_telemetry::metrics::backend_read_total(
                 nydus_telemetry::metrics::BackendTarget::Origin,
             ) > origin_before
+        );
+        // The override outlives the read so a subsequent CRC validation of
+        // these bytes is attributed to the origin as well.
+        assert_eq!(
+            crate::last_read_served_by(),
+            Some(nydus_telemetry::metrics::BackendTarget::Origin)
         );
     }
 
@@ -2037,6 +2150,85 @@ dragonfly:
         );
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 2);
+    }
+
+    #[test]
+    fn mid_stream_body_failure_is_retried_by_the_policy() {
+        let body = b"whole body".to_vec();
+        let origin = OriginStub::serve(b"unused".to_vec());
+        // Attempt 1 starts streaming and dies mid-body; the policy must see
+        // it as a retryable failure and retry, never touching the origin.
+        let (transport, calls) = SequencedTransport::new(vec![
+            ok_response(Box::new(MidStreamFailingBody {
+                data: body[..4].to_vec(),
+                pos: 0,
+            })),
+            ok_response(Box::new(std::io::Cursor::new(body.clone()))),
+        ]);
+        let mut registry = scripted_registry(
+            &origin,
+            Arc::new(ScriptedTransport::new(vec![])),
+            Duration::ZERO,
+        );
+        registry.dragonfly = Some(Box::new(transport));
+
+        let stream_errors_before = nydus_telemetry::metrics::dragonfly_error_total(
+            nydus_telemetry::metrics::DragonflyErrorClass::Stream,
+            ReadKind::OnDemand,
+        );
+        let mut dst = vec![0u8; body.len()];
+        registry
+            .try_read(
+                &TEST_BLOB_ID,
+                0,
+                &mut dst,
+                ReadContext::raw(ReadKind::OnDemand),
+            )
+            .unwrap();
+
+        assert_eq!(dst, body);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(origin.hits(), 0);
+        assert!(
+            nydus_telemetry::metrics::dragonfly_error_total(
+                nydus_telemetry::metrics::DragonflyErrorClass::Stream,
+                ReadKind::OnDemand,
+            ) > stream_errors_before
+        );
+    }
+
+    #[test]
+    fn mid_stream_body_failure_exhausts_the_budget_then_falls_back() {
+        let body = b"0123456789".to_vec();
+        let origin = OriginStub::serve(body.clone());
+        // Every Dragonfly attempt dies mid-body; the on-demand budget
+        // (1 + 3 retries) drains, then the read falls back to the origin.
+        let (transport, calls) = SequencedTransport::new((0..4).map(|_| {
+            ok_response(Box::new(MidStreamFailingBody {
+                data: b"par".to_vec(),
+                pos: 0,
+            }))
+        }));
+        let mut registry = scripted_registry(
+            &origin,
+            Arc::new(ScriptedTransport::new(vec![])),
+            Duration::ZERO,
+        );
+        registry.dragonfly = Some(Box::new(transport));
+
+        let mut dst = vec![0u8; body.len()];
+        registry
+            .try_read(
+                &TEST_BLOB_ID,
+                0,
+                &mut dst,
+                ReadContext::raw(ReadKind::OnDemand),
+            )
+            .unwrap();
+
+        assert_eq!(dst, body);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(origin.hits(), 1);
     }
 
     #[test]

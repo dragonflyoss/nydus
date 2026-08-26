@@ -44,7 +44,12 @@ func loadDragonflyEnv(t *testing.T) dragonflyEnv {
 	}
 
 	return dragonflyEnv{
-		nydusBin:      envOr("NYDUS_BIN", mustLookupExecutable(t, "nydus")),
+		nydusBin: func() string {
+			if bin := os.Getenv("NYDUS_BIN"); bin != "" {
+				return bin
+			}
+			return mustLookupExecutable(t, "nydus")
+		}(),
 		configPath:    configPath,
 		bootstrap:     bootstrap,
 		mountpoint:    filepath.Join(workDir, "mnt"),
