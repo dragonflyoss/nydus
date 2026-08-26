@@ -309,7 +309,7 @@ pub struct DragonflyConfig {
 }
 
 /// The storage configuration: where downloaded blob data is kept.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     /// The directory storing each blob's decoded chunk cache file. When
@@ -320,6 +320,27 @@ pub struct StorageConfig {
     /// require a directory.
     #[serde(default)]
     pub dir: Option<PathBuf>,
+
+    /// Whether decoded block groups are validated against their stored
+    /// CRC32C before being served (the default). Disable only when the
+    /// transport is already trusted end to end and the CRC pass shows up in
+    /// the read-path profile.
+    #[serde(default = "default_verify_crc")]
+    pub verify_crc: bool,
+}
+
+fn default_verify_crc() -> bool {
+    true
+}
+
+/// CRC verification stays on when the `storage` section is omitted entirely.
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            verify_crc: default_verify_crc(),
+        }
+    }
 }
 
 /// The prefetch configuration, controlling background blob prefetch.
@@ -680,6 +701,11 @@ config:
             storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
+        assert!(storage.verify_crc);
+
+        let storage: StorageConfig =
+            serde_yaml::from_str("dir: /cache\nverify_crc: false\n").unwrap();
+        assert!(!storage.verify_crc);
     }
 
     #[test]

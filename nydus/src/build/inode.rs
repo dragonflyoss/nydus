@@ -278,20 +278,23 @@ pub(crate) trait TreeNode<C>: Sized {
     /// `(dev, ino)`.
     type LinkKey: Copy + Eq + std::hash::Hash;
 
-    /// Common inode attributes.
-    fn attrs(&self) -> NodeAttrs;
+    /// Common inode attributes. Takes `&mut self` so owned fields (xattrs)
+    /// can be moved out instead of cloned; called exactly once per node.
+    /// Fallible because lazily-expanded sources read them from disk.
+    fn attrs(&mut self) -> Result<NodeAttrs>;
 
     /// Hardlink-group key; `Some` only for non-directories that may share
-    /// their inode with other links.
-    fn link_key(&self) -> Option<Self::LinkKey>;
+    /// their inode with other links. Fallible for lazily-expanded sources.
+    fn link_key(&mut self) -> Result<Option<Self::LinkKey>>;
 
     /// `Some(children)` sorted by name when the node is a directory, `None`
-    /// otherwise.
-    fn children(&self, ctx: &mut C) -> Result<Option<NamedChildren<Self>>>;
+    /// otherwise. Owned children are moved out so each subtree can be freed
+    /// as soon as it has been flattened.
+    fn children(&mut self, ctx: &mut C) -> Result<Option<NamedChildren<Self>>>;
 
     /// Type-specific data for a non-directory node; called exactly once per
     /// inode (regular-file contents are chunked into the blob here).
-    fn leaf_data(&self, ctx: &mut C) -> Result<InodeData>;
+    fn leaf_data(&mut self, ctx: &mut C) -> Result<InodeData>;
 }
 
 /// Flatten a source tree into one [`InodeInfo`] per filesystem object, as a
@@ -309,28 +312,30 @@ pub(crate) fn flatten_tree<C, N: TreeNode<C>>(root: N, ctx: &mut C) -> Result<Ve
     let mut inodes = Vec::new();
     let mut ino_counter = 0u32;
     let mut hardlink_map = HashMap::new();
-    flatten_tree_node(&root, ctx, &mut inodes, &mut ino_counter, &mut hardlink_map)?;
+    flatten_tree_node(root, ctx, &mut inodes, &mut ino_counter, &mut hardlink_map)?;
     Ok(inodes)
 }
 
 /// Recursively flatten `node` and its descendants, appending to `inodes` in
 /// DFS pre-order and returning the index of `node`'s inode (the existing
 /// index when `node` is a later link of an already-flattened hardlink group).
+/// Nodes are consumed: each subtree is dropped right after flattening, so the
+/// source tree and the inode table are never both fully resident.
 fn flatten_tree_node<C, N: TreeNode<C>>(
-    node: &N,
+    mut node: N,
     ctx: &mut C,
     inodes: &mut Vec<InodeInfo>,
     ino_counter: &mut u32,
     hardlink_map: &mut HashMap<N::LinkKey, usize>,
 ) -> Result<usize> {
-    let link_key = node.link_key();
+    let link_key = node.link_key()?;
     if let Some(key) = link_key {
         if let Some(existing_index) = hardlink_map.get(&key) {
             return Ok(*existing_index);
         }
     }
 
-    let attrs = node.attrs();
+    let attrs = node.attrs()?;
     *ino_counter += 1;
     let ino = *ino_counter;
     let inode_index = inodes.len();
@@ -362,7 +367,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
         let mut child_entries = Vec::with_capacity(children.len());
         let mut subdir_count = 0u32;
         for (name, child) in children {
-            let child_index = flatten_tree_node(&child, ctx, inodes, ino_counter, hardlink_map)?;
+            let child_index = flatten_tree_node(child, ctx, inodes, ino_counter, hardlink_map)?;
             let file_type = mode_to_erofs_file_type(inodes[child_index].mode);
             if file_type == EROFS_FT_DIR {
                 subdir_count += 1;
@@ -450,8 +455,8 @@ impl FsTreeNode {
 impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
     type LinkKey = (u64, u64);
 
-    fn attrs(&self) -> NodeAttrs {
-        NodeAttrs {
+    fn attrs(&mut self) -> Result<NodeAttrs> {
+        Ok(NodeAttrs {
             mode: self.meta.mode() as u16,
             uid: self.meta.uid(),
             gid: self.meta.gid(),
@@ -460,15 +465,15 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
             mtime_nsec: self.meta.mtime_nsec() as u32,
             nlink: self.meta.nlink() as u32,
             xattrs: read_xattrs_from_path(&self.path),
-        }
+        })
     }
 
-    fn link_key(&self) -> Option<(u64, u64)> {
-        (!self.meta.file_type().is_dir() && self.meta.nlink() > 1)
-            .then(|| (self.meta.dev(), self.meta.ino()))
+    fn link_key(&mut self) -> Result<Option<(u64, u64)>> {
+        Ok((!self.meta.file_type().is_dir() && self.meta.nlink() > 1)
+            .then(|| (self.meta.dev(), self.meta.ino())))
     }
 
-    fn children(&self, ctx: &mut FsBuildContext<'a, W>) -> Result<Option<NamedChildren<Self>>> {
+    fn children(&mut self, ctx: &mut FsBuildContext<'a, W>) -> Result<Option<NamedChildren<Self>>> {
         if !self.meta.file_type().is_dir() {
             return Ok(None);
         }
@@ -493,7 +498,7 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
         Ok(Some(children))
     }
 
-    fn leaf_data(&self, ctx: &mut FsBuildContext<'a, W>) -> Result<InodeData> {
+    fn leaf_data(&mut self, ctx: &mut FsBuildContext<'a, W>) -> Result<InodeData> {
         let ft = self.meta.file_type();
         if ft.is_file() {
             let chunk_index_entries = ctx

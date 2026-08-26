@@ -9,6 +9,7 @@ repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [dependencies]
+zstd = "0.13"
 bitflags = "2"
 crc32c = "0.6"
 libc = { workspace = true }

@@ -12,6 +12,7 @@ use std::fmt;
 pub enum BlobMetadataCompressor {
     None,
     Zstd,
+    Lz4Block,
 }
 
 impl BlobMetadataCompressor {
@@ -20,6 +21,7 @@ impl BlobMetadataCompressor {
         match self {
             Self::None => BlobMetadataFlags::empty(),
             Self::Zstd => BlobMetadataFlags::COMPRESSOR_ZSTD,
+            Self::Lz4Block => BlobMetadataFlags::COMPRESSOR_LZ4,
         }
     }
 }
@@ -31,6 +33,7 @@ impl fmt::Display for BlobMetadataCompressor {
         f.write_str(match self {
             Self::None => "none",
             Self::Zstd => "zstd",
+            Self::Lz4Block => "lz4-block",
         })
     }
 }
@@ -39,7 +42,9 @@ impl fmt::Display for BlobMetadataCompressor {
 /// and `BlobMetadataFlags` can only hold defined bits.
 impl From<BlobMetadataFlags> for BlobMetadataCompressor {
     fn from(value: BlobMetadataFlags) -> Self {
-        if value.contains(BlobMetadataFlags::COMPRESSOR_ZSTD) {
+        if value.contains(BlobMetadataFlags::COMPRESSOR_LZ4) {
+            Self::Lz4Block
+        } else if value.contains(BlobMetadataFlags::COMPRESSOR_ZSTD) {
             Self::Zstd
         } else {
             Self::None

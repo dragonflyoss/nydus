@@ -1,6 +1,6 @@
 //! EROFS-oriented image tooling on top of [`nydus_core`]: image inspection
-//! and export, plus optional FUSE / NBD / ublk / fanotify / userfaultfd
-//! frontends.
+//! and export, plus optional FUSE / file-backed EROFS / NBD / ublk / fanotify
+//! / userfaultfd frontends.
 
 #![warn(unreachable_pub)]
 
@@ -11,15 +11,18 @@ pub mod check;
 pub mod export;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
+#[cfg(feature = "fileio")]
+pub mod fileio;
 #[cfg(feature = "fuse")]
 pub mod fuse;
-#[cfg(any(feature = "fanotify", feature = "nbd"))]
+#[cfg(any(feature = "fanotify", feature = "fileio", feature = "nbd"))]
 pub mod mount;
 #[cfg(feature = "nbd")]
 pub mod nbd;
 pub mod optimize;
 #[cfg(any(
     feature = "fanotify",
+    feature = "fileio",
     feature = "nbd",
     feature = "ublk",
     feature = "uffd"

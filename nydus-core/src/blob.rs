@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
@@ -95,6 +95,9 @@ pub struct Blobs {
     pub(crate) index_by_blob_id: HashMap<BlobId, u16>,
     /// Memoised result of [`Blobs::flat_layout`].
     pub(crate) flat_layout: OnceLock<Vec<BlobInfo>>,
+    /// Serialises the first [`Blobs::flat_layout`] computation so a
+    /// background warm-up and an early I/O do not both download blob meta.
+    pub(crate) flat_layout_init: Mutex<()>,
 }
 
 impl Blobs {
@@ -148,11 +151,19 @@ impl Blobs {
         if let Some(layout) = self.flat_layout.get() {
             return Ok(layout);
         }
+        // Single-flight: the winner prepares the blobs while latecomers block
+        // here and then read the memoised result. A failed attempt leaves the
+        // cell empty so the next caller retries.
+        let _init = self
+            .flat_layout_init
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(layout) = self.flat_layout.get() {
+            return Ok(layout);
+        }
         let mut blobs = self.prepare_all()?;
         blobs.retain(|blob| !blob.is_redirect);
         blobs.sort_by_key(|blob| blob.mapped_offset);
-        // A racing caller may have won the initialisation; either value is
-        // equally valid because the layout is deterministic.
         let _ = self.flat_layout.set(blobs);
         Ok(self
             .flat_layout

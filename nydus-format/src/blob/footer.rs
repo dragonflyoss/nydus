@@ -31,7 +31,14 @@ pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
 /// bits are incompatible features (unknown bits reject), the high 16 bits
 /// are compatible features (unknown bits are ignored). No bits are defined
 /// yet.
-const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = 0;
+/// Incompat flag: the embedded bootstrap region holds one zstd frame
+/// instead of raw EROFS bytes. `bootstrap_compressed_size` then carries the
+/// frame's exact byte length within the block-aligned region. The merged
+/// bootstrap and the blob meta sidecar the runtime mounts are unaffected;
+/// only merge, `check`, and single-blob mounts decode this region.
+pub const NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD: u32 = 1 << 0;
+
+const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD;
 
 /// Byte range of the crc32 field within the footer.
 const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
@@ -68,7 +75,9 @@ const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
 ///     56     4  bootstrap_blocks        4KiB blocks, zero for an ondemand
 ///                                       redirect blob without a bootstrap
 ///     60     4  blob_metadata_blocks    4KiB blocks, never zero
-///     64  4032  reserved                writers zero it, readers ignore it
+///     64     8  bootstrap_compressed_size  exact zstd frame bytes when the
+///                                       BOOTSTRAP_ZSTD flag is set, else 0
+///     72  4024  reserved                writers zero it, readers ignore it
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobFooter {
@@ -83,6 +92,7 @@ pub struct BlobFooter {
     compressed_data_size: u64,
     bootstrap_blocks: u32,
     blob_metadata_blocks: u32,
+    bootstrap_compressed_size: u64,
 }
 
 impl BlobFooter {
@@ -97,10 +107,38 @@ impl BlobFooter {
         blob_metadata_offset: u64,
         blob_metadata_blocks: u32,
     ) -> Result<Self> {
+        Self::new_with_compressed_bootstrap(
+            compressed_data_offset,
+            compressed_data_size,
+            bootstrap_offset,
+            bootstrap_blocks,
+            blob_metadata_offset,
+            blob_metadata_blocks,
+            0,
+        )
+    }
+
+    /// Like [`Self::new`], with the embedded bootstrap stored as one zstd
+    /// frame of exactly `bootstrap_compressed_size` bytes (zero keeps the
+    /// bootstrap raw).
+    pub fn new_with_compressed_bootstrap(
+        compressed_data_offset: u64,
+        compressed_data_size: u64,
+        bootstrap_offset: u64,
+        bootstrap_blocks: u32,
+        blob_metadata_offset: u64,
+        blob_metadata_blocks: u32,
+        bootstrap_compressed_size: u64,
+    ) -> Result<Self> {
+        let flags = if bootstrap_compressed_size != 0 {
+            NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD
+        } else {
+            0
+        };
         let mut footer = Self {
             magic: NYDUS_BLOB_FOOTER_MAGIC,
             version: NYDUS_BLOB_FOOTER_VERSION,
-            flags: 0,
+            flags,
             crc32: 0,
             reserved0: 0,
             compressed_data_offset,
@@ -109,6 +147,7 @@ impl BlobFooter {
             compressed_data_size,
             bootstrap_blocks,
             blob_metadata_blocks,
+            bootstrap_compressed_size,
         };
 
         footer.validate()?;
@@ -138,6 +177,7 @@ impl BlobFooter {
             compressed_data_size: read_u64_at(bytes, 48),
             bootstrap_blocks: read_u32_at(bytes, 56),
             blob_metadata_blocks: read_u32_at(bytes, 60),
+            bootstrap_compressed_size: read_u64_at(bytes, 64),
         };
         footer.validate()?;
 
@@ -170,6 +210,7 @@ impl BlobFooter {
         write_u64_at(&mut data, 48, self.compressed_data_size);
         write_u32_at(&mut data, 56, self.bootstrap_blocks);
         write_u32_at(&mut data, 60, self.blob_metadata_blocks);
+        write_u64_at(&mut data, 64, self.bootstrap_compressed_size);
         data
     }
 
@@ -241,6 +282,24 @@ impl BlobFooter {
         if self.blob_metadata_blocks == 0 {
             return Err(Error::InvalidImage(
                 "nydus footer blob meta block count must be non-zero".to_string(),
+            ));
+        }
+
+        let compressed = self.flags & NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD != 0;
+        if compressed
+            && (self.bootstrap_compressed_size == 0
+                || self.bootstrap_compressed_size > self.bootstrap_size())
+        {
+            return Err(Error::InvalidImage(format!(
+                "nydus footer compressed bootstrap size {} outside its region of {} bytes",
+                self.bootstrap_compressed_size,
+                self.bootstrap_size()
+            )));
+        }
+        if !compressed && self.bootstrap_compressed_size != 0 {
+            return Err(Error::InvalidImage(
+                "nydus footer compressed bootstrap size requires the BOOTSTRAP_ZSTD flag"
+                    .to_string(),
             ));
         }
 
@@ -363,6 +422,13 @@ impl BlobFooter {
     /// Size of the bootstrap region in bytes.
     pub fn bootstrap_size(&self) -> u64 {
         blocks_to_bytes(self.bootstrap_blocks)
+    }
+
+    /// Exact byte length of the zstd frame in the bootstrap region, or
+    /// `None` when the bootstrap is stored raw.
+    pub fn bootstrap_compressed_size(&self) -> Option<u64> {
+        (self.flags & NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD != 0)
+            .then_some(self.bootstrap_compressed_size)
     }
 
     /// Size of the blob meta region in bytes.

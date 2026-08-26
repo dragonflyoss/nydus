@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use blob_chunk::BlobWriter;
-use bootstrap::{render_bootstrap, render_flattened_bootstrap};
+use bootstrap::render_bootstrap;
 use inode::{build_tree, set_root_prefetch_blobs_xattr};
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
@@ -30,7 +30,7 @@ use nydus_format::erofs::{ErofsDeviceSlot, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE}
 use nydus_format::utils::sha256_bytes;
 
 /// The minimum block group uncompressed size.
-pub const MIN_BLOCK_GROUP_SIZE: u32 = 1024 * 1024;
+pub const MIN_BLOCK_GROUP_SIZE: u32 = 512 * 1024;
 
 /// Options for [`build_image`].
 #[derive(Debug)]
@@ -106,7 +106,7 @@ impl BuildImageOptions {
         // file chunk size so a chunk always fits in a block group.
         if !block_group_size.is_power_of_two() || block_group_size < MIN_BLOCK_GROUP_SIZE {
             return Err(Error::InvalidParameter(format!(
-                "block group size {block_group_size} must be a power of two and at least 1MiB"
+                "block group size {block_group_size} must be a power of two and at least 512KiB"
             )));
         }
 
@@ -161,6 +161,10 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
     let device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &blob_id)];
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1])?;
     let bootstrap_bytes = render_bootstrap(&mut inodes, epoch, &device_slots, &uuid_bytes)?;
+    // Nothing after rendering reads the inode tree (the standalone bootstrap
+    // is patched from the rendered bytes), so free its tens of MiB before
+    // final assembly.
+    drop(inodes);
 
     let compressed_data_size = blob_writer.data_size();
     let blob_metadata = blob_writer.blob_metadata(0)?;
@@ -177,18 +181,20 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
         .finish()
         .context("failed to flush blob")?;
 
+    // The standalone bootstrap differs from the embedded one only in its
+    // device table (full-blob id, flattened mapped addresses), so the
+    // rendered buffer is retargeted in place instead of rendering a second
+    // 30+ MiB copy from the inode tree.
     let standalone_bootstrap = if options.render_standalone_bootstrap {
+        let mut standalone = bootstrap_bytes;
         let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
             blob_blocks,
             &full_blob_digest,
         )];
-        Some(render_flattened_bootstrap(
-            &mut inodes,
-            epoch,
-            &standalone_device_slots,
-            &uuid_bytes,
-        )?)
+        bootstrap::flatten_bootstrap_in_place(&mut standalone, &standalone_device_slots)?;
+        Some(standalone)
     } else {
+        drop(bootstrap_bytes);
         None
     };
 

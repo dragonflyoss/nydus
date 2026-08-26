@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::io::Write;
 
 use crc32c::crc32c_append;
@@ -5,7 +6,8 @@ use crc32c::crc32c_append;
 use nydus_error::{Error, Result};
 use nydus_format::erofs::{
     ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
-    EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
+    EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR,
+    EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
     EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_SB_BASE_SIZE,
     EROFS_SUPER_OFFSET,
 };
@@ -23,6 +25,9 @@ use nydus_format::erofs::{
 /// regions never overlap. For images with up to 23 device slots the table fits
 /// in block 0 and `meta_blkaddr` stays 1, matching the previous layout.
 #[allow(clippy::too_many_arguments)]
+/// Streaming variant of [`fill_image_head`], kept for tests: writes the head
+/// region followed by the block-padded metadata area.
+#[cfg(test)]
 pub(crate) fn write_image(
     image: &mut impl Write,
     metadata_buf: &[u8],
@@ -31,14 +36,60 @@ pub(crate) fn write_image(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
+    has_xattrs: bool,
 ) -> Result<()> {
     let block_size = EROFS_BLOCK_SIZE as usize;
     let meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
     let head_size = meta_blkaddr as usize * block_size;
-    let meta_blocks = metadata_buf.len().div_ceil(block_size);
+
+    let mut head = vec![0u8; head_size];
+    fill_image_head(
+        &mut head,
+        metadata_buf.len(),
+        root_nid,
+        total_inodes,
+        epoch,
+        device_slots,
+        uuid,
+        has_xattrs,
+    )?;
+    image.write_all(&head)?;
+
+    // --- Metadata blocks ---
+    image.write_all(metadata_buf)?;
+
+    let remainder = metadata_buf.len() % block_size;
+    if remainder != 0 {
+        let pad = vec![0u8; block_size - remainder];
+        image.write_all(&pad)?;
+    }
+
+    Ok(())
+}
+
+/// Fill the image head region (superblock, device table, checksum) in place
+/// at the start of `image_buf`, which must hold at least the head region.
+/// `metadata_len` is the size of the metadata area that follows the head.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_image_head(
+    image_buf: &mut [u8],
+    metadata_len: usize,
+    root_nid: u16,
+    total_inodes: u64,
+    epoch: u64,
+    device_slots: &[ErofsDeviceSlot],
+    uuid: &[u8; 16],
+    has_xattrs: bool,
+) -> Result<()> {
+    let block_size = EROFS_BLOCK_SIZE as usize;
+    let meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
+    let meta_blocks = metadata_len.div_ceil(block_size);
     let total_blocks = meta_blkaddr as u64 + meta_blocks as u64;
 
-    let feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
+    let mut feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
+    if !has_xattrs {
+        feature_compat |= EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR;
+    }
     let mut feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
     // The `*_hi` halves of chunk index and device slot addresses are only
@@ -64,9 +115,6 @@ pub(crate) fn write_image(
         (EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE) as u16 / EROFS_DEVICESLOT_SIZE as u16
     };
 
-    // --- Head region (block 0 .. meta_blkaddr) ---
-    let mut head = vec![0u8; head_size];
-
     let sb = ErofsSuperblock::new(
         feature_compat,
         feature_incompat,
@@ -80,11 +128,11 @@ pub(crate) fn write_image(
         uuid,
     );
     let sb_offset = EROFS_SUPER_OFFSET as usize;
-    head[sb_offset..sb_offset + EROFS_SB_BASE_SIZE].copy_from_slice(sb.as_bytes());
+    image_buf[sb_offset..sb_offset + EROFS_SB_BASE_SIZE].copy_from_slice(sb.as_bytes());
 
     let devslot_offset = sb_offset + EROFS_SB_BASE_SIZE;
     let device_table_end = devslot_offset + device_slots.len() * EROFS_DEVICESLOT_SIZE;
-    if device_table_end > head.len() {
+    if device_table_end > meta_blkaddr as usize * block_size {
         return Err(Error::InvalidImage(
             "device table does not fit in the reserved metadata head region".to_string(),
         ));
@@ -93,23 +141,10 @@ pub(crate) fn write_image(
     for (index, devslot) in device_slots.iter().enumerate() {
         let start = devslot_offset + index * EROFS_DEVICESLOT_SIZE;
         let end = start + EROFS_DEVICESLOT_SIZE;
-        head[start..end].copy_from_slice(devslot.as_bytes());
+        image_buf[start..end].copy_from_slice(devslot.as_bytes());
     }
 
-    write_erofs_superblock_checksum(&mut head)?;
-
-    image.write_all(&head)?;
-
-    // --- Metadata blocks ---
-    image.write_all(metadata_buf)?;
-
-    let remainder = metadata_buf.len() % block_size;
-    if remainder != 0 {
-        let pad = vec![0u8; block_size - remainder];
-        image.write_all(&pad)?;
-    }
-
-    Ok(())
+    write_erofs_superblock_checksum(image_buf)
 }
 
 /// Compute the block address at which the inode metadata region starts.
@@ -166,7 +201,7 @@ mod tests {
     #[test]
     fn write_image_sets_erofs_superblock_checksum() {
         let mut image = Vec::new();
-        write_image(&mut image, &[], 0, 1, 0, &[], &[0u8; 16]).unwrap();
+        write_image(&mut image, &[], 0, 1, 0, &[], &[0u8; 16], false).unwrap();
 
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let feature_compat =
@@ -202,7 +237,17 @@ mod tests {
             .collect();
 
         let mut image = Vec::new();
-        write_image(&mut image, &[0u8; 64], 0, 1, 0, &device_slots, &[0u8; 16]).unwrap();
+        write_image(
+            &mut image,
+            &[0u8; 64],
+            0,
+            1,
+            0,
+            &device_slots,
+            &[0u8; 16],
+            false,
+        )
+        .unwrap();
 
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let meta_blkaddr =

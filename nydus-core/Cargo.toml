@@ -9,6 +9,7 @@ repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [dependencies]
+zstd = "0.13"
 libc = { workspace = true }
 memmap2 = { workspace = true }
 nydus-backend = { version = "0.1.0", path = "../nydus-backend" }
