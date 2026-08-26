@@ -86,7 +86,7 @@ impl BlobPrefetcher {
         // not spent pulling whole source blobs.
         for blob_index in self.priority {
             if self.scope != PrefetchScope::All {
-                match self.caches.is_redirect_blob(blob_index) {
+                match self.caches.is_redirect(blob_index) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(err) => {

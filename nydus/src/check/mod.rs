@@ -72,7 +72,7 @@ pub struct ImageStats {
 /// the kernel rejects with `-EFSCORRUPTED` when the inode is read.
 pub struct InlineOverflow {
     pub nid: u64,
-    pub block_offset: u64,
+    pub offset_in_block: u64,
     pub header_size: u64,
     pub xattr_size: u64,
     pub inline_size: u64,
@@ -241,13 +241,13 @@ fn check_inline_fit(
     file_size: u64,
 ) -> Option<InlineOverflow> {
     let block = EROFS_BLOCK_SIZE as u64;
-    let block_offset = (nid * EROFS_SLOTSIZE as u64) % block;
+    let offset_in_block = (nid * EROFS_SLOTSIZE as u64) % block;
     // Full blocks live in the data area; only the remainder is packed inline.
     let inline_size = file_size % block;
-    if block_offset + header_size + xattr_size + inline_size > block {
+    if offset_in_block + header_size + xattr_size + inline_size > block {
         Some(InlineOverflow {
             nid,
-            block_offset,
+            offset_in_block,
             header_size,
             xattr_size,
             inline_size,
@@ -464,22 +464,22 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 }
 
 fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> {
-    let blob_metadata = BlobMetadata::loader().from_bytes(data)?;
+    let blob_metadata = BlobMetadata::from_bytes(data, false)?;
     Ok(BlobMetadataSummary {
         chunk_count: blob_metadata.chunk_count(),
         block_group_count: blob_metadata.block_group_count(),
         chunk_size: blob_metadata.chunk_size(),
         digester: blob_metadata.digester(),
         compressor: blob_metadata.compressor(),
-        total_uncompressed_size: blob_metadata.total_uncompressed_size(),
-        total_compressed_size: blob_metadata.total_compressed_size(),
+        total_uncompressed_size: blob_metadata.uncompressed_size(),
+        total_compressed_size: blob_metadata.compressed_end(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT;
+    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT;
     use std::fs;
     use tempfile::tempdir;
 
@@ -488,7 +488,7 @@ mod tests {
         // nid 2557 sits 4000 bytes into its block; a 65-byte symlink target
         // behind a 32-byte header ends one byte past the block.
         let overflow = check_inline_fit(2557, 32, 0, 65).expect("should overflow");
-        assert_eq!(overflow.block_offset, 4000);
+        assert_eq!(overflow.offset_in_block, 4000);
         assert_eq!(overflow.inline_size, 65);
 
         // 64 bytes exactly fills the block tail.
@@ -552,9 +552,9 @@ mod tests {
     fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let data_digest = sha256_bytes(&data);
-        let blob_metadata = BlobMetadata::from_parts(
-            [0u8; EROFS_BLOB_ID_SIZE],
-            BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
+        let blob_metadata = BlobMetadata::new(
+            BlobMetadataCompressor::None,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),
             Vec::new(),
         )

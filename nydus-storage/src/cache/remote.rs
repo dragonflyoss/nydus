@@ -49,7 +49,7 @@ impl BlobCache for RemoteBlobCache {
         }
         // Redirect (ondemand) blobs have a non-uniform block group layout and no
         // dense readable address space, exactly as in the local cache.
-        if self.blob_metadata.is_redirect_blob() {
+        if self.blob_metadata.is_redirect() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "redirect blob has no dense readable address space",
@@ -61,13 +61,13 @@ impl BlobCache for RemoteBlobCache {
         })?;
         let first = self
             .blob_metadata
-            .block_group_index_for_byte_offset(offset)
+            .block_group_index_from_uncompressed_offset(offset)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
             })?;
         let last = self
             .blob_metadata
-            .block_group_index_for_byte_offset(end - 1)
+            .block_group_index_from_uncompressed_offset(end - 1)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
             })?;
@@ -76,7 +76,7 @@ impl BlobCache for RemoteBlobCache {
         for block_group_index in first..=last {
             let block_group = *self
                 .blob_metadata
-                .block_group_at(block_group_index)
+                .block_group(block_group_index)
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -93,9 +93,9 @@ impl BlobCache for RemoteBlobCache {
             )?;
 
             // Copy the overlap between this block group's span and the request.
-            let block_group_start = block_group.uncompressed_byte_offset();
+            let block_group_start = block_group.uncompressed_offset();
             let copy_start = offset.max(block_group_start);
-            let copy_end = end.min(block_group.uncompressed_byte_end());
+            let copy_end = end.min(block_group_start + block_group.uncompressed_size());
             let source = &decoded[(copy_start - block_group_start) as usize..]
                 [..(copy_end - copy_start) as usize];
             let dst_start = (copy_start - offset) as usize;
@@ -111,8 +111,8 @@ impl BlobCache for RemoteBlobCache {
         ))
     }
 
-    fn is_redirect_blob(&self) -> bool {
-        self.blob_metadata.is_redirect_blob()
+    fn is_redirect(&self) -> bool {
+        self.blob_metadata.is_redirect()
     }
 }
 
@@ -120,16 +120,16 @@ impl BlobCache for RemoteBlobCache {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk};
-    use nydus_format::utils::{sha256_bytes, write_minimal_full_blob};
+    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor};
+    use nydus_format::utils::write_minimal_full_blob;
     use tempfile::tempdir;
 
-    fn blob_metadata(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMetadata {
-        BlobMetadata::from_parts(
-            blob_id,
+    fn blob_metadata(payload: &[u8]) -> BlobMetadata {
+        BlobMetadata::new(
+            BlobMetadataCompressor::None,
             1,
-            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
         )
         .unwrap()
     }
@@ -138,8 +138,7 @@ mod tests {
     fn remote_blob_cache_reads_without_touching_disk() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -163,8 +162,7 @@ mod tests {
     fn remote_blob_cache_rejects_file_oriented_operations() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0x11u8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let meta = blob_metadata(data_blob_id, &payload);
+        let meta = blob_metadata(&payload);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));

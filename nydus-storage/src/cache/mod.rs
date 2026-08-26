@@ -82,7 +82,7 @@ pub trait BlobCache: Send + Sync {
 
     /// True when this blob is an "ondemand" redirect blob whose block groups carry
     /// data belonging to other source blob devices.
-    fn is_redirect_blob(&self) -> bool {
+    fn is_redirect(&self) -> bool {
         false
     }
 
@@ -182,9 +182,9 @@ pub fn plan_prefetch_batches(
     let mut start = 0usize;
     while start < block_groups.len() {
         let mut end = start + 1;
-        let mut accumulated = block_groups[start].uncompressed_byte_size();
+        let mut accumulated = block_groups[start].uncompressed_size();
         while end < block_groups.len() && accumulated < target_uncompressed {
-            accumulated = accumulated.saturating_add(block_groups[end].uncompressed_byte_size());
+            accumulated = accumulated.saturating_add(block_groups[end].uncompressed_size());
             end += 1;
         }
         batches.push(start..end);
@@ -225,7 +225,7 @@ pub fn decode_block_group_from_window(
     decoded: &mut Vec<u8>,
 ) -> io::Result<()> {
     let relative_start = block_group
-        .compressed_byte_offset()
+        .compressed_offset()
         .checked_sub(window_base_offset)
         .and_then(|start| usize::try_from(start).ok())
         .ok_or_else(|| {
@@ -244,7 +244,7 @@ pub fn decode_block_group_from_window(
             )
         })?;
 
-    let decoded_len = usize::try_from(block_group.uncompressed_byte_size()).map_err(|_| {
+    let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "blob meta block group uncompressed size exceeds usize",
@@ -279,10 +279,10 @@ pub fn fetch_decode_validate_block_group_into<'a>(
 ) -> io::Result<&'a [u8]> {
     let ctx = ReadContext::block_group(
         kind,
-        block_group.uncompressed_byte_offset(),
-        block_group.uncompressed_byte_size(),
+        block_group.uncompressed_offset(),
+        block_group.uncompressed_size(),
     );
-    let decoded_len = usize::try_from(block_group.uncompressed_byte_size()).map_err(|_| {
+    let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "blob meta block group uncompressed size exceeds usize",
@@ -292,7 +292,7 @@ pub fn fetch_decode_validate_block_group_into<'a>(
         buffers.decoded.resize(decoded_len, 0);
         backend.read_range_into(
             blob_id,
-            block_group.compressed_byte_offset(),
+            block_group.compressed_offset(),
             &mut buffers.decoded,
             ctx,
         )?;
@@ -305,7 +305,7 @@ pub fn fetch_decode_validate_block_group_into<'a>(
         .resize(block_group.compressed_size() as usize, 0);
     backend.read_range_into(
         blob_id,
-        block_group.compressed_byte_offset(),
+        block_group.compressed_offset(),
         &mut buffers.encoded,
         ctx,
     )?;
@@ -340,14 +340,14 @@ fn is_stored_plain_block_group(
     block_group: &BlobMetadataBlockGroup,
 ) -> bool {
     blob_metadata.compressor() == BlobMetadataCompressor::None
-        || u64::from(block_group.compressed_size()) == block_group.uncompressed_byte_size()
+        || u64::from(block_group.compressed_size()) == block_group.uncompressed_size()
 }
 
 pub fn validate_decoded_block_group(
     block_group: &BlobMetadataBlockGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
-    let expected = block_group.uncompressed_byte_size();
+    let expected = block_group.uncompressed_size();
     if decoded.len() as u64 != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -393,7 +393,7 @@ pub fn is_block_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE;
+    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
 
     fn block_group(
@@ -412,14 +412,16 @@ mod tests {
 
     #[test]
     fn plan_prefetch_batches_keeps_one_block_group_per_window_at_default_target() {
-        let blocks = BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE / EROFS_BLOCK_SIZE;
+        let blocks = DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE / EROFS_BLOCK_SIZE;
         let block_groups = vec![
             block_group(0, blocks),
             block_group(blocks as u64, blocks),
             block_group(2 * blocks as u64, blocks),
         ];
-        let batches =
-            plan_prefetch_batches(&block_groups, BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE as u64);
+        let batches = plan_prefetch_batches(
+            &block_groups,
+            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE as u64,
+        );
         assert_eq!(batches, vec![0..1, 1..2, 2..3]);
     }
 

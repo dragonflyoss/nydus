@@ -134,8 +134,8 @@ impl BlobCaches {
     /// Return whether the blob identified by `blob_index` is an "ondemand"
     /// redirect blob (produced by `nydus optimize`). Opens the blob cache,
     /// which reads the local blob meta but performs no data prefetch.
-    pub fn is_redirect_blob(&self, blob_index: u16) -> io::Result<bool> {
-        Ok(self.cache(blob_index)?.is_redirect_blob())
+    pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
+        Ok(self.cache(blob_index)?.is_redirect())
     }
 
     /// Prefetch every block group of the blob identified by `blob_index`. An
@@ -160,7 +160,7 @@ impl BlobCaches {
         // never delayed by the lock. Held (via the guard's file descriptor)
         // until this function returns.
         let _prefetch_lock = cache.prefetch_lock();
-        if cache.is_redirect_blob() {
+        if cache.is_redirect() {
             // Time the ondemand (redirect) blob prefetch and report how many
             // source block groups it warmed vs skipped, so operators can tell
             // whether the streaming warmup outran the workload.

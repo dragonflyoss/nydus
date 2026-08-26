@@ -18,7 +18,7 @@ const BLOCK_GROUP_MAP_MAGIC: [u8; 8] = *b"LPGRPMAP";
 /// bits (not format features), and unknown state bits are simply ignored.
 const BLOCK_GROUP_MAP_VERSION: u32 = 1;
 /// Fixed header size: one block-sized page, matching the blob meta header
-/// (`BLOB_METADATA_HEADER_SIZE`) for a uniform sidecar format family. The bitmap
+/// (`NYDUS_BLOB_METADATA_HEADER_SIZE`) for a uniform sidecar format family. The bitmap
 /// starts on a page boundary and the unused header tail is reserved for
 /// future fields.
 const BLOCK_GROUP_MAP_HEADER_SIZE: usize = nydus_format::erofs::EROFS_BLOCK_SIZE as usize;

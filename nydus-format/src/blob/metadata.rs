@@ -1,65 +1,86 @@
-use crate::blob::validate::validate_incompat_flags;
+use crate::blob::algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
+use crate::blob::flag::validate_incompat_flags;
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Context, Error, Result};
-use crate::utils::le::{read_u16_from, read_u32_from, read_u64_from};
-use crate::utils::SHA256_DIGEST_SIZE;
+use crate::utils::le::{
+    read_u16_at, read_u32_at, read_u64_at, read_u8_at, write_u16_at, write_u32_at, write_u64_at,
+    write_u8_at,
+};
 use bitflags::bitflags;
 use crc32c::{crc32c, crc32c_append};
 use memmap2::{Mmap, MmapOptions};
-use std::fmt;
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::Write;
 use std::mem::{align_of, size_of};
 use std::ops::Range;
 use std::path::Path;
 
-/// On-disk magic: 8 raw ASCII bytes ("LPBLMETA" = LePton BLob META),
-/// written as-is so a hexdump of the file starts with the readable string.
-pub const BLOB_METADATA_MAGIC: [u8; 8] = *b"LPBLMETA";
+/// On-disk magic: 8 raw ASCII bytes ("LPBLMETA" = LePton BLob META), written
+/// as-is so a hexdump of the file starts with the readable string. Same
+/// style and `magic + version + flags` header prefix as the blob footer
+/// (`LPFOOTER`) and block_group_map (`LPGRPMAP`) sidecars.
+pub const NYDUS_BLOB_METADATA_MAGIC: [u8; 8] = *b"LPBLMETA";
+
 /// On-disk format generation, informational only: readers do not gate on it.
-/// Compatibility is governed EROFS-style by the magic (a new format family
-/// gets a new magic) and by the incompat half of `flags` (unknown incompat
-/// bits reject the file).
-pub const BLOB_METADATA_VERSION: u32 = 1;
-/// Fixed header size: one EROFS block. The chunk table starts right after
-/// the header, so it is block aligned by construction, and the unused tail
-/// of the header block is reserved for future compat fields (writers zero
-/// it, readers ignore it; corruption is caught by the file crc32c).
-pub const BLOB_METADATA_HEADER_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
-pub const BLOB_METADATA_DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
-pub const BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT: u32 =
-    BLOB_METADATA_DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE;
-/// Default block group uncompressed size. Equal to the default chunk size, so
-/// a default-geometry chunk always fits in one block group.
-pub const BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE: u32 = BLOB_METADATA_DEFAULT_CHUNK_SIZE;
-pub const BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT: u32 =
-    BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE / EROFS_BLOCK_SIZE;
+/// Compatibility is governed EROFS-style by the magic and the incompat half
+/// of `flags` (unknown incompat bits reject the file).
+pub const NYDUS_BLOB_METADATA_VERSION: u32 = 1;
+
+/// The header's fixed on-disk size: one EROFS block, keeping the chunk
+/// table behind it block aligned by construction. The unused tail is
+/// reserved for future compat fields (writers zero it, readers ignore it,
+/// corruption is caught by the file crc32c).
+pub const NYDUS_BLOB_METADATA_HEADER_SIZE: usize = EROFS_BLOCK_SIZE as usize;
+
+/// On-disk size of one chunk entry, pinned to [`BlobMetadataChunk`]'s Rust
+/// layout by a const assert so mapped tables are readable in place.
+pub const NYDUS_BLOB_METADATA_CHUNK_ENTRY_SIZE: usize = 48;
+
+/// On-disk size of one block group entry, pinned to
+/// [`BlobMetadataBlockGroup`]'s Rust layout the same way.
+pub const NYDUS_BLOB_METADATA_BLOCK_GROUP_ENTRY_SIZE: usize = 40;
+
+/// Default chunk size: 1 MiB of the uncompressed address space per digest.
+pub const DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE: u32 = 1024 * 1024;
+
+/// The default chunk size in 4KiB blocks.
+pub const DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT: u32 =
+    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE / EROFS_BLOCK_SIZE;
+
+/// Default block group uncompressed size: the unit of compression and of a
+/// single backend read, a multiple of the default chunk size so a
+/// default-geometry chunk always fits in one block group.
+pub const DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE: u32 = 4 * 1024 * 1024;
+
+/// The default block group size in 4KiB blocks.
+pub const DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT: u32 =
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE / EROFS_BLOCK_SIZE;
+
 /// File-name suffix of a blob meta sidecar file (`<blob>.blob.meta`).
-pub const BLOB_METADATA_SUFFIX: &str = ".blob.meta";
+pub const NYDUS_BLOB_METADATA_SUFFIX: &str = ".blob.meta";
 
-/// Largest allowed block-count exponent (`chunk_block_bits` /
-/// `block_group_block_bits`): keeps the derived byte size (`4096 << bits`)
-/// representable in a `u32` (2 GiB at most).
-const BLOB_METADATA_MAX_BLOCK_BITS: u8 = 19;
+/// Largest allowed block-count exponent (`chunk_block_count_bits` /
+/// `block_group_block_count_bits`): keeps the derived byte size
+/// (`4096 << bits`) within a `u32` (2 GiB at most).
+const NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS: u8 = 19;
 
-/// Range of the crc32 field in the header, for zeroing it when computing
-/// the crc32 over the serialized metadata.
-const BLOB_METADATA_HEADER_CRC32_FIELD: Range<usize> = 16..20;
+/// Byte range of the crc32 field within the header.
+const NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD: Range<usize> = 16..20;
 
-/// Bytes of the header actually carrying fields; the rest of the 4 KiB
-/// header block is a reserved compat area (writer-zeroed, reader-ignored).
-const BLOB_METADATA_HEADER_FIELD_BYTES: usize = 56;
-const BLOB_METADATA_BLOCK_GROUP_RESERVED: [u8; 6] = [0u8; 6];
-const BLOB_METADATA_CHUNK_RESERVED: u32 = 0;
+/// Chunk entries' reserved field, held to zero: entry-layout evolution is
+/// signalled by an incompat flag bit, so writers zero it and readers reject
+/// anything else.
+const NYDUS_BLOB_METADATA_CHUNK_RESERVED: u32 = 0;
+
+/// Block group entries' reserved tail, held to zero the same way.
+const NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED: [u8; 6] = [0u8; 6];
 
 bitflags! {
-    /// Feature bits, split EROFS-style: the low 16 bits are **incompatible**
-    /// features — a reader that does not know a set bit cannot interpret the
-    /// file and must reject it (like `feature_incompat`). The high 16 bits
-    /// are **compatible** features — unknown bits are ignored so old readers
-    /// keep working (like `feature_compat`). Record-layout evolution (wider
-    /// chunk/block group records, new record kinds) is expressed as a new incompat
-    /// bit; header growth uses the reserved tail plus a compat bit.
+    /// Feature bits, split EROFS-style (see [`crate::blob::flag`]): the low
+    /// 16 bits are incompatible features (unknown bits reject the file), the
+    /// high 16 bits are compatible features (unknown bits are ignored).
+    /// Entry-layout changes take a new incompat bit, header growth uses the
+    /// reserved tail plus a compat bit.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct BlobMetadataFlags: u32 {
         const COMPRESSOR_ZSTD = 1 << 0;
@@ -67,88 +88,39 @@ bitflags! {
     }
 }
 
-const BLOB_METADATA_COMPRESSOR_MASK: u32 = BlobMetadataFlags::COMPRESSOR_ZSTD.bits();
-const BLOB_METADATA_DIGESTER_MASK: u32 = BlobMetadataFlags::DIGESTER_BLAKE3.bits();
+/// Every defined flag bit sits in the incompat half, so the full set doubles
+/// as the supported-incompat set (unknown incompat bits reject the file).
+const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = BlobMetadataFlags::all().bits();
 
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlobMetadataCompressor {
-    None = 0,
-    Zstd = 1,
-}
-
-impl BlobMetadataCompressor {
-    pub fn flag(self) -> BlobMetadataFlags {
-        match self {
-            Self::None => BlobMetadataFlags::empty(),
-            Self::Zstd => BlobMetadataFlags::COMPRESSOR_ZSTD,
-        }
-    }
-}
-
-impl fmt::Display for BlobMetadataCompressor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::None => f.write_str("none"),
-            Self::Zstd => f.write_str("zstd"),
-        }
-    }
-}
-
-impl TryFrom<BlobMetadataFlags> for BlobMetadataCompressor {
-    type Error = crate::error::Error;
-
-    fn try_from(value: BlobMetadataFlags) -> Result<Self> {
-        match value.bits() & BLOB_METADATA_COMPRESSOR_MASK {
-            0 => Ok(Self::None),
-            bits if bits == BlobMetadataFlags::COMPRESSOR_ZSTD.bits() => Ok(Self::Zstd),
-            bits => Err(crate::error::Error::Unsupported(format!(
-                "unsupported blob meta compressor flag set: {bits:#x}"
-            ))),
-        }
-    }
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlobMetadataDigester {
-    Blake3 = 1,
-}
-
-impl BlobMetadataDigester {
-    pub fn flag(self) -> BlobMetadataFlags {
-        match self {
-            Self::Blake3 => BlobMetadataFlags::DIGESTER_BLAKE3,
-        }
-    }
-}
-
-impl fmt::Display for BlobMetadataDigester {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Blake3 => f.write_str("blake3"),
-        }
-    }
-}
-
-impl TryFrom<BlobMetadataFlags> for BlobMetadataDigester {
-    type Error = crate::error::Error;
-
-    fn try_from(value: BlobMetadataFlags) -> Result<Self> {
-        match value.bits() & BLOB_METADATA_DIGESTER_MASK {
-            bits if bits == BlobMetadataFlags::DIGESTER_BLAKE3.bits() => Ok(Self::Blake3),
-            0 => Err(crate::error::Error::InvalidImage(
-                "blob meta digester flag is missing".to_string(),
-            )),
-            bits => Err(crate::error::Error::Unsupported(format!(
-                "unsupported blob meta digester flag set: {bits:#x}"
-            ))),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The fixed-size header leading the serialized metadata: the geometry and
+/// table map of the file, sealed with a crc32c over the whole file.
+///
+/// The header's own 4096 bytes (integers little-endian):
+///
+/// ```text
+/// offset  size  field
+///      0     8  magic                   b"LPBLMETA"
+///      8     4  version                 informational, never gated on
+///     12     4  flags                   low 16 incompat / high 16 compat
+///     16     4  crc32                   crc32c of the whole serialized
+///                                       metadata with this field treated
+///                                       as zero
+///     20     4  reserved0               future compat field slot
+///     24     8  chunks_offset           always 4096: the chunk table
+///                                       starts right after the header
+///     32     8  block_groups_offset     chunks_offset plus the chunk
+///                                       table's bytes
+///     40     4  chunk_count
+///     44     4  block_group_count
+///     48     1  chunk_block_count_bits  log2 of the per-chunk 4KiB
+///                                       block count
+///     49     1  block_group_block_count_bits
+///                                       log2 of the per-block group
+///                                       4KiB block count
+///     50     6  reserved1               writers zero it, readers ignore it
+///     56  4040  reserved                writers zero it, readers ignore it
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobMetadataHeader {
     magic: [u8; 8],
     version: u32,
@@ -159,473 +131,229 @@ pub struct BlobMetadataHeader {
     block_groups_offset: u64,
     chunk_count: u32,
     block_group_count: u32,
-    /// log2 of the chunk size in 4 KiB blocks, EROFS-style (the same quantity
-    /// as `chunk_format & EROFS_CHUNK_FORMAT_BLKBITS_MASK`, i.e. `chunkbits -
-    /// blkbits`). Storing the exponent makes non-power-of-two chunk sizes
-    /// unrepresentable and feeds shift-based offset math directly.
-    chunk_block_bits: u8,
-    /// log2 of the per-block group block count, same representation as
-    /// `chunk_block_bits`. The read path maps a block to its block group with
-    /// `block >> block_group_block_bits`.
-    block_group_block_bits: u8,
-}
-
-const _: () = assert!(size_of::<BlobMetadataHeader>() == BLOB_METADATA_HEADER_FIELD_BYTES);
-
-impl Default for BlobMetadataHeader {
-    fn default() -> Self {
-        Self {
-            magic: BLOB_METADATA_MAGIC,
-            version: BLOB_METADATA_VERSION,
-            flags: BlobMetadataDigester::Blake3.flag().bits(),
-            crc32: 0,
-            reserved0: 0,
-            chunks_offset: BLOB_METADATA_HEADER_SIZE,
-            block_groups_offset: BLOB_METADATA_HEADER_SIZE,
-            chunk_count: 0,
-            block_group_count: 0,
-            chunk_block_bits: BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT.trailing_zeros() as u8,
-            block_group_block_bits: BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT.trailing_zeros()
-                as u8,
-        }
-    }
+    chunk_block_count_bits: u8,
+    block_group_block_count_bits: u8,
 }
 
 impl BlobMetadataHeader {
-    pub fn version(&self) -> u32 {
-        self.version
+    /// Parse a header from exactly its `NYDUS_BLOB_METADATA_HEADER_SIZE`
+    /// bytes, verifying the intrinsic fields. The crc32 field seals the
+    /// whole serialized metadata, so the metadata read paths verify it,
+    /// not this parser.
+    fn from_bytes(bytes: &[u8; NYDUS_BLOB_METADATA_HEADER_SIZE]) -> Result<Self> {
+        let header = Self {
+            magic: bytes[0..8].try_into().unwrap(),
+            version: read_u32_at(bytes, 8),
+            flags: read_u32_at(bytes, 12),
+            crc32: read_u32_at(bytes, 16),
+            reserved0: read_u32_at(bytes, 20),
+            chunks_offset: read_u64_at(bytes, 24),
+            block_groups_offset: read_u64_at(bytes, 32),
+            chunk_count: read_u32_at(bytes, 40),
+            block_group_count: read_u32_at(bytes, 44),
+            chunk_block_count_bits: read_u8_at(bytes, 48),
+            block_group_block_count_bits: read_u8_at(bytes, 49),
+        };
+
+        header.validate()?;
+        Ok(header)
     }
 
-    pub fn chunk_count(&self) -> u32 {
-        self.chunk_count
+    /// Serialize the header into its on-disk bytes. The reserved regions
+    /// are zeroed, so this is only the writer's view: raw bytes read from
+    /// disk may carry newer compat fields there that this type does not
+    /// model.
+    fn to_bytes(self) -> [u8; NYDUS_BLOB_METADATA_HEADER_SIZE] {
+        let mut data = [0u8; NYDUS_BLOB_METADATA_HEADER_SIZE];
+        data[0..8].copy_from_slice(&self.magic);
+        write_u32_at(&mut data, 8, self.version);
+        write_u32_at(&mut data, 12, self.flags);
+        write_u32_at(&mut data, 16, self.crc32);
+        write_u32_at(&mut data, 20, self.reserved0);
+        write_u64_at(&mut data, 24, self.chunks_offset);
+        write_u64_at(&mut data, 32, self.block_groups_offset);
+        write_u32_at(&mut data, 40, self.chunk_count);
+        write_u32_at(&mut data, 44, self.block_group_count);
+        write_u8_at(&mut data, 48, self.chunk_block_count_bits);
+        write_u8_at(&mut data, 49, self.block_group_block_count_bits);
+        data
     }
 
-    pub fn block_group_count(&self) -> u32 {
-        self.block_group_count
-    }
-
-    /// Number of 4 KiB blocks per chunk, derived from the stored exponent.
-    pub fn chunk_block_count(&self) -> u32 {
-        1u32 << self.chunk_block_bits
-    }
-
-    /// log2 of the per-block group block count.
-    pub fn block_group_block_bits(&self) -> u8 {
-        self.block_group_block_bits
-    }
-
-    /// Number of uncompressed blocks per block group, derived from the stored
-    /// exponent. Every block group except the last is exactly this many blocks, so
-    /// the read path maps a block to its block group by `block >> block_group_block_bits`.
-    pub fn block_group_block_count(&self) -> u32 {
-        1u32 << self.block_group_block_bits
-    }
-
-    pub fn chunk_size(&self) -> u32 {
-        EROFS_BLOCK_SIZE << self.chunk_block_bits
-    }
-
-    pub fn flags(&self) -> BlobMetadataFlags {
-        self.validated_flags().expect("validated blob meta flags")
-    }
-
-    pub fn crc32(&self) -> u32 {
-        self.crc32
-    }
-
-    pub fn compressor(&self) -> BlobMetadataCompressor {
-        BlobMetadataCompressor::try_from(self.flags()).expect("validated blob meta compressor")
-    }
-
-    pub fn digester(&self) -> BlobMetadataDigester {
-        BlobMetadataDigester::try_from(self.flags()).expect("validated blob meta digester")
-    }
-
-    pub fn chunks_offset(&self) -> u64 {
-        self.chunks_offset
-    }
-
-    pub fn block_groups_offset(&self) -> u64 {
-        self.block_groups_offset
-    }
-
-    pub fn chunk_bytes(&self) -> u64 {
-        self.chunk_count as u64 * size_of::<BlobMetadataChunk>() as u64
-    }
-
-    pub fn block_group_bytes(&self) -> u64 {
-        self.block_group_count as u64 * size_of::<BlobMetadataBlockGroup>() as u64
-    }
-
-    /// End offset of the record region (header plus chunk and block group tables),
-    /// before padding to the block-aligned `metadata_size`.
-    pub fn records_end(&self) -> u64 {
-        self.block_groups_offset + self.block_group_bytes()
-    }
-
-    pub fn metadata_size(&self) -> u64 {
-        crate::utils::align_up(self.records_end(), EROFS_BLOCK_SIZE as u64)
-            .expect("blob meta size overflowed")
-    }
-
-    fn set_counts_and_offsets(&mut self, chunk_count: u32, block_group_count: u32) -> Result<()> {
-        self.chunk_count = chunk_count;
-        self.block_group_count = block_group_count;
-        self.chunks_offset = BLOB_METADATA_HEADER_SIZE;
-        self.block_groups_offset = self
-            .chunks_offset
-            .checked_add(chunk_count as u64 * size_of::<BlobMetadataChunk>() as u64)
-            .ok_or_else(|| Error::Overflow("blob meta block group offset overflow".to_string()))?;
-        Ok(())
-    }
-
-    fn set_chunk_block_count(&mut self, blocks: u32) -> Result<()> {
-        self.chunk_block_bits = block_count_to_bits(blocks, "chunk")?;
-        Ok(())
-    }
-
-    fn set_compressor(&mut self, compressor: BlobMetadataCompressor) {
-        let mut flags = self.flags();
-        flags.remove(BlobMetadataFlags::COMPRESSOR_ZSTD);
-        flags.insert(compressor.flag());
-        self.flags = flags.bits();
-    }
-
+    /// Validate the intrinsic field invariants, needing nothing beyond the
+    /// fields themselves. Run once per entry point: by [`Self::from_bytes`]
+    /// on the read side and by [`BlobMetadata::new`] on the write side.
+    ///
+    /// Deliberately not checked: `version` is informational (compatibility
+    /// is governed by the magic and the incompat flag bits), `reserved0` and
+    /// the reserved tail may carry a newer writer's compat fields (corruption
+    /// is caught by the crc32), and the entry counts are anchored against
+    /// the actual table bytes by [`BlobMetadata::validate_bytes`].
     fn validate(&self) -> Result<()> {
-        if self.magic != BLOB_METADATA_MAGIC {
+        if self.magic != NYDUS_BLOB_METADATA_MAGIC {
             return Err(Error::InvalidImage("invalid blob meta magic".to_string()));
         }
-        // `version` is informational and deliberately not gated on:
-        // compatibility is carried by the magic and the incompat flag bits.
-        // `reserved0` is likewise not enforced to zero: it is a future
-        // compat-field slot, and corruption is caught by the file crc32c.
-        if self.chunk_block_bits > BLOB_METADATA_MAX_BLOCK_BITS {
+
+        if self.chunk_block_count_bits > NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS {
             return Err(Error::InvalidImage(format!(
-                "blob meta chunk block bits too large: {}",
-                self.chunk_block_bits
+                "blob meta chunk block count bits too large: {}",
+                self.chunk_block_count_bits
             )));
         }
-        if self.block_group_block_bits > BLOB_METADATA_MAX_BLOCK_BITS {
+
+        if self.block_group_block_count_bits > NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS {
             return Err(Error::InvalidImage(format!(
-                "blob meta block group block bits too large: {}",
-                self.block_group_block_bits
+                "blob meta block group block count bits too large: {}",
+                self.block_group_block_count_bits
             )));
         }
-        self.validated_flags()?;
-        if self.chunks_offset != BLOB_METADATA_HEADER_SIZE {
+
+        if self.chunks_offset != NYDUS_BLOB_METADATA_HEADER_SIZE as u64 {
             return Err(Error::InvalidImage(format!(
                 "invalid blob meta chunks offset: {}",
                 self.chunks_offset
             )));
         }
+
         let expected_block_groups_offset = self
             .chunks_offset
-            .checked_add(self.chunk_bytes())
+            .checked_add(self.chunk_table_size())
             .ok_or_else(|| Error::Overflow("blob meta block group offset overflow".to_string()))?;
+
         if self.block_groups_offset != expected_block_groups_offset {
             return Err(Error::InvalidImage(format!(
                 "invalid blob meta block groups offset: {}",
                 self.block_groups_offset
             )));
         }
+
         if self.chunks_offset % align_of::<BlobMetadataChunk>() as u64 != 0 {
             return Err(Error::InvalidImage(
                 "blob meta chunks offset is not aligned".to_string(),
             ));
         }
+
         if self.block_groups_offset % align_of::<BlobMetadataBlockGroup>() as u64 != 0 {
             return Err(Error::InvalidImage(
-                "blob meta block_groups offset is not aligned".to_string(),
+                "blob meta block groups offset is not aligned".to_string(),
             ));
         }
-        Ok(())
-    }
 
-    fn validated_flags(&self) -> Result<BlobMetadataFlags> {
-        // EROFS-style feature gating: unknown incompat (low-half) bits mean
-        // the file cannot be read correctly and must be rejected; unknown
-        // compat (high-half) bits are ignored.
-        validate_incompat_flags(self.flags, BlobMetadataFlags::all().bits())?;
         let flags = BlobMetadataFlags::from_bits_truncate(self.flags);
-        BlobMetadataCompressor::try_from(flags)?;
         BlobMetadataDigester::try_from(flags)?;
-        Ok(flags)
-    }
-
-    fn write_to_with_crc32(&self, writer: &mut dyn Write, crc32: u32) -> Result<()> {
-        writer.write_all(&self.to_bytes_with_crc32(crc32))?;
+        validate_incompat_flags(self.flags, NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
         Ok(())
     }
 
-    fn to_bytes_with_crc32(self, crc32: u32) -> [u8; BLOB_METADATA_HEADER_SIZE as usize] {
-        let mut data = [0u8; BLOB_METADATA_HEADER_SIZE as usize];
-        data[0..8].copy_from_slice(&self.magic);
-        data[8..12].copy_from_slice(&self.version.to_le_bytes());
-        data[12..16].copy_from_slice(&self.flags.to_le_bytes());
-        data[BLOB_METADATA_HEADER_CRC32_FIELD].copy_from_slice(&crc32.to_le_bytes());
-        data[20..24].copy_from_slice(&self.reserved0.to_le_bytes());
-        data[24..32].copy_from_slice(&self.chunks_offset.to_le_bytes());
-        data[32..40].copy_from_slice(&self.block_groups_offset.to_le_bytes());
-        data[40..44].copy_from_slice(&self.chunk_count.to_le_bytes());
-        data[44..48].copy_from_slice(&self.block_group_count.to_le_bytes());
-        data[48] = self.chunk_block_bits;
-        data[49] = self.block_group_block_bits;
-        // data[50..56] stays zero: reserved after the two u8 exponents.
-        // data[56..4096] stays zero: reserved header tail.
-        data
+    /// On-disk format generation, informational only: readers never gate
+    /// on it.
+    pub fn version(&self) -> u32 {
+        self.version
     }
 
-    fn read_from(reader: &mut dyn Read) -> Result<Self> {
-        let header = Self {
-            magic: read_magic(reader)?,
-            version: read_u32_from(reader)?,
-            flags: read_u32_from(reader)?,
-            crc32: read_u32_from(reader)?,
-            reserved0: read_u32_from(reader)?,
-            chunks_offset: read_u64_from(reader)?,
-            block_groups_offset: read_u64_from(reader)?,
-            chunk_count: read_u32_from(reader)?,
-            block_group_count: read_u32_from(reader)?,
-            chunk_block_bits: read_u8(reader)?,
-            block_group_block_bits: {
-                let bits = read_u8(reader)?;
-                // Skip the 6 reserved bytes after the two u8 exponents.
-                let mut pad = [0u8; 6];
-                reader.read_exact(&mut pad)?;
-                bits
-            },
-        };
-        // The rest of the header block is reserved for future compat fields.
-        // Writers zero it, but readers deliberately do not enforce that
-        // (EROFS-style): a newer writer may have placed compat fields here
-        // that this reader ignores. Corruption is caught by the file crc32c.
-        let mut tail = [0u8; BLOB_METADATA_HEADER_SIZE as usize - BLOB_METADATA_HEADER_FIELD_BYTES];
-        reader.read_exact(&mut tail)?;
-        header.validate()?;
-        Ok(header)
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BlobMetadataBlockGroup {
-    uncompressed_block_offset: u64,
-    compressed_byte_offset: u64,
-    uncompressed_block_count: u32,
-    compressed_size: u32,
-    crc32: u32,
-    source_block_group_index: u32,
-    source_blob_index: u16,
-    reserved: [u8; 6],
-}
-
-const _: () = assert!(size_of::<BlobMetadataBlockGroup>() == 40);
-
-impl BlobMetadataBlockGroup {
-    pub fn new(
-        uncompressed_block_offset: u64,
-        uncompressed_block_count: u32,
-        compressed_byte_offset: u64,
-        compressed_size: u32,
-        crc32: u32,
-    ) -> Result<Self> {
-        let block_group = Self {
-            uncompressed_block_offset,
-            compressed_byte_offset,
-            uncompressed_block_count,
-            compressed_size,
-            crc32,
-            source_block_group_index: 0,
-            source_blob_index: 0,
-            reserved: BLOB_METADATA_BLOCK_GROUP_RESERVED,
-        };
-        block_group.validate()?;
-        Ok(block_group)
+    /// The known feature bits as a typed view. Unknown compat bits are
+    /// dropped here (unknown incompat bits were already rejected at
+    /// validation).
+    pub fn flags(&self) -> BlobMetadataFlags {
+        BlobMetadataFlags::from_bits_truncate(self.flags)
     }
 
-    /// A redirect block group carries data that belongs to another (source) blob.
-    /// At prefetch time the decoded bytes are written into the source blob's
-    /// cache instead of this blob's own cache. `source_blob_index` is the
-    /// 1-based blob index from the bootstrap device table and must be
-    /// non-zero; `crc32` must equal the source block group's crc32 so the redirect
-    /// can be cross-checked before filling the source cache.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_redirect(
-        uncompressed_block_offset: u64,
-        uncompressed_block_count: u32,
-        compressed_byte_offset: u64,
-        compressed_size: u32,
-        crc32: u32,
-        source_blob_index: u16,
-        source_block_group_index: u32,
-    ) -> Result<Self> {
-        if source_blob_index == 0 {
-            return Err(Error::InvalidImage(
-                "blob meta redirect block_group source blob index must be non-zero".to_string(),
-            ));
-        }
-        let block_group = Self {
-            uncompressed_block_offset,
-            compressed_byte_offset,
-            uncompressed_block_count,
-            compressed_size,
-            crc32,
-            source_block_group_index,
-            source_blob_index,
-            reserved: BLOB_METADATA_BLOCK_GROUP_RESERVED,
-        };
-        block_group.validate()?;
-        Ok(block_group)
-    }
-
-    pub fn is_redirect(&self) -> bool {
-        self.source_blob_index != 0
-    }
-
-    pub fn source_blob_index(&self) -> u16 {
-        self.source_blob_index
-    }
-
-    pub fn source_block_group_index(&self) -> u32 {
-        self.source_block_group_index
-    }
-
-    pub fn uncompressed_block_offset(&self) -> u64 {
-        self.uncompressed_block_offset
-    }
-
-    pub fn uncompressed_block_count(&self) -> u32 {
-        self.uncompressed_block_count
-    }
-
-    pub fn compressed_size(&self) -> u32 {
-        self.compressed_size
-    }
-
+    /// crc32c sealing the whole serialized metadata, exactly as stored on
+    /// disk.
     pub fn crc32(&self) -> u32 {
         self.crc32
     }
 
-    pub fn uncompressed_byte_offset(&self) -> u64 {
-        self.uncompressed_block_offset
-            .checked_mul(EROFS_BLOCK_SIZE as u64)
-            .expect("validated blob meta block_group byte offset")
+    /// The block group payload compressor, per the flags.
+    pub fn compressor(&self) -> BlobMetadataCompressor {
+        BlobMetadataCompressor::from(self.flags())
     }
 
-    pub fn uncompressed_byte_size(&self) -> u64 {
-        self.uncompressed_block_count as u64 * EROFS_BLOCK_SIZE as u64
+    /// The chunk digest algorithm, per the flags (vetted at validation, so
+    /// the conversion cannot fail).
+    pub fn digester(&self) -> BlobMetadataDigester {
+        BlobMetadataDigester::try_from(self.flags()).unwrap()
     }
 
-    pub fn uncompressed_byte_end(&self) -> u64 {
-        self.uncompressed_byte_offset() + self.uncompressed_byte_size()
+    /// Number of entries in the chunk table.
+    pub fn chunk_count(&self) -> u32 {
+        self.chunk_count
     }
 
-    /// Byte offset of this block group's encoded payload within the blob data region.
-    /// Block groups are packed back-to-back, so this is a plain byte position and is
-    /// not block-aligned for compressed block groups.
-    pub fn compressed_byte_offset(&self) -> u64 {
-        self.compressed_byte_offset
+    /// Uncompressed 4KiB blocks per chunk (`1 << chunk_block_count_bits`).
+    pub fn chunk_block_count(&self) -> u32 {
+        1u32 << self.chunk_block_count_bits
     }
 
-    pub fn compressed_byte_end(&self) -> u64 {
-        self.compressed_byte_offset + self.compressed_size as u64
+    /// Uncompressed bytes per chunk.
+    pub fn chunk_size(&self) -> u32 {
+        EROFS_BLOCK_SIZE << self.chunk_block_count_bits
     }
 
-    pub fn with_compressed_byte_offset_bias(&self, byte_bias: u64) -> Result<Self> {
-        let block_group = Self {
-            compressed_byte_offset: self
-                .compressed_byte_offset()
-                .checked_add(byte_bias)
-                .ok_or_else(|| {
-                    Error::Overflow("blob meta compressed byte offset overflow".to_string())
-                })?,
-            ..*self
-        };
-        block_group.validate()?;
-        Ok(block_group)
+    /// Byte offset of the chunk table, always right after the header.
+    pub fn chunks_offset(&self) -> u64 {
+        self.chunks_offset
     }
 
-    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
-        self.validate()?;
-        writer.write_all(&self.to_bytes())?;
-        Ok(())
+    /// Byte size of the chunk table.
+    pub fn chunk_table_size(&self) -> u64 {
+        self.chunk_count as u64 * size_of::<BlobMetadataChunk>() as u64
     }
 
-    fn to_bytes(self) -> [u8; 40] {
-        let mut data = [0u8; 40];
-        data[0..8].copy_from_slice(&self.uncompressed_block_offset.to_le_bytes());
-        data[8..16].copy_from_slice(&self.compressed_byte_offset.to_le_bytes());
-        data[16..20].copy_from_slice(&self.uncompressed_block_count.to_le_bytes());
-        data[20..24].copy_from_slice(&self.compressed_size.to_le_bytes());
-        data[24..28].copy_from_slice(&self.crc32.to_le_bytes());
-        data[28..32].copy_from_slice(&self.source_block_group_index.to_le_bytes());
-        data[32..34].copy_from_slice(&self.source_blob_index.to_le_bytes());
-        data[34..40].copy_from_slice(&self.reserved);
-        data
+    /// Number of entries in the block group table.
+    pub fn block_group_count(&self) -> u32 {
+        self.block_group_count
     }
 
-    pub fn read_from(reader: &mut dyn Read) -> Result<Self> {
-        let block_group = Self {
-            uncompressed_block_offset: read_u64_from(reader)?,
-            compressed_byte_offset: read_u64_from(reader)?,
-            uncompressed_block_count: read_u32_from(reader)?,
-            compressed_size: read_u32_from(reader)?,
-            crc32: read_u32_from(reader)?,
-            source_block_group_index: read_u32_from(reader)?,
-            source_blob_index: read_u16_from(reader)?,
-            reserved: read_block_group_reserved(reader)?,
-        };
-        block_group.validate()?;
-        Ok(block_group)
+    /// Uncompressed 4KiB blocks per block group
+    /// (`1 << block_group_block_count_bits`).
+    pub fn block_group_block_count(&self) -> u32 {
+        1u32 << self.block_group_block_count_bits
     }
 
-    fn validate(&self) -> Result<()> {
-        if self.uncompressed_block_count == 0 {
-            return Err(Error::InvalidImage(
-                "blob meta block_group uncompressed block count must be non-zero".to_string(),
-            ));
-        }
-        if self.compressed_size == 0 {
-            return Err(Error::InvalidImage(
-                "blob meta block_group compressed size must be non-zero".to_string(),
-            ));
-        }
-        self.uncompressed_block_offset
-            .checked_mul(EROFS_BLOCK_SIZE as u64)
-            .ok_or_else(|| {
-                Error::Overflow(
-                    "blob meta block_group uncompressed byte offset overflow".to_string(),
-                )
-            })?;
-        self.uncompressed_byte_offset()
-            .checked_add(self.uncompressed_byte_size())
-            .ok_or_else(|| {
-                Error::Overflow(
-                    "blob meta block_group uncompressed byte range overflow".to_string(),
-                )
-            })?;
-        self.compressed_byte_offset
-            .checked_add(self.compressed_size as u64)
-            .ok_or_else(|| {
-                Error::Overflow("blob meta block group compressed byte range overflow".to_string())
-            })?;
-        if self.source_blob_index == 0 && self.source_block_group_index != 0 {
-            return Err(Error::InvalidImage(
-                "blob meta block_group source block_group index requires a source blob index"
-                    .to_string(),
-            ));
-        }
-        if self.reserved != BLOB_METADATA_BLOCK_GROUP_RESERVED {
-            return Err(Error::InvalidImage(
-                "blob meta block_group reserved field must be zero".to_string(),
-            ));
-        }
-        Ok(())
+    /// Byte offset of the block group table, right after the chunk table.
+    pub fn block_groups_offset(&self) -> u64 {
+        self.block_groups_offset
+    }
+
+    /// Byte size of the block group table.
+    pub fn block_group_table_size(&self) -> u64 {
+        self.block_group_count as u64 * size_of::<BlobMetadataBlockGroup>() as u64
+    }
+
+    /// Bytes the header and the tables actually use, before the tail
+    /// padding.
+    pub fn used_size(&self) -> u64 {
+        self.block_groups_offset + self.block_group_table_size()
+    }
+
+    /// The full serialized size: [`Self::used_size`] aligned up to one
+    /// 4KiB block.
+    pub fn padded_size(&self) -> u64 {
+        crate::utils::align_up_u64(self.used_size(), EROFS_BLOCK_SIZE as u64)
+            .expect("blob meta size overflowed")
     }
 }
 
+/// One chunk entry: the digest of a fixed-size span of the blob's dense
+/// uncompressed address space. Chunk entries are packed back to back in the
+/// chunk table right after the header.
+///
+/// The entry's 48 bytes (integers little-endian):
+///
+/// ```text
+/// offset  size  field
+///      0    32  digest                     of the chunk's uncompressed
+///                                          bytes, algorithm per the
+///                                          digester flag
+///     32     8  uncompressed_block_offset  4KiB blocks
+///     40     4  uncompressed_block_count   4KiB blocks, never zero
+///     44     4  reserved                   must be zero
+/// ```
+///
+/// The Rust layout is pinned to the on-disk layout (`repr(C)` plus the const
+/// size assert) so a mapped chunk table is readable in place, zero-copy.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlobMetadataChunk {
     digest: [u8; 32],
     uncompressed_block_offset: u64,
@@ -633,9 +361,13 @@ pub struct BlobMetadataChunk {
     reserved: u32,
 }
 
-const _: () = assert!(size_of::<BlobMetadataChunk>() == 48);
+// Pins the Rust layout to the on-disk entry size: a drift would break the
+// in-place mapped tables, so it fails the build instead.
+const _: () = assert!(size_of::<BlobMetadataChunk>() == NYDUS_BLOB_METADATA_CHUNK_ENTRY_SIZE);
 
 impl BlobMetadataChunk {
+    /// Creates a validated chunk entry, so a constructed chunk is valid by
+    /// definition.
     pub fn new(
         digest: [u8; 32],
         uncompressed_block_offset: u64,
@@ -645,79 +377,449 @@ impl BlobMetadataChunk {
             digest,
             uncompressed_block_offset,
             uncompressed_block_count,
-            reserved: BLOB_METADATA_CHUNK_RESERVED,
+            reserved: NYDUS_BLOB_METADATA_CHUNK_RESERVED,
         };
+
         chunk.validate()?;
         Ok(chunk)
     }
 
-    pub fn digest(&self) -> &[u8; 32] {
-        &self.digest
+    /// Parse a chunk entry from exactly its 48 bytes, verifying the
+    /// intrinsic fields.
+    pub fn from_bytes(bytes: &[u8; NYDUS_BLOB_METADATA_CHUNK_ENTRY_SIZE]) -> Result<Self> {
+        let chunk = Self {
+            digest: bytes[0..32].try_into().unwrap(),
+            uncompressed_block_offset: read_u64_at(bytes, 32),
+            uncompressed_block_count: read_u32_at(bytes, 40),
+            reserved: read_u32_at(bytes, 44),
+        };
+
+        chunk.validate()?;
+        Ok(chunk)
     }
 
-    /// Absolute block offset of this chunk within the dense uncompressed address
-    /// space. Chunks are independent of block groups, so this is a plain block index
-    /// into the blob, not a block group-relative offset.
-    pub fn uncompressed_block_offset(&self) -> u64 {
-        self.uncompressed_block_offset
-    }
-
-    pub fn uncompressed_block_count(&self) -> u32 {
-        self.uncompressed_block_count
-    }
-
-    pub fn uncompressed_byte_offset(&self) -> u64 {
-        self.uncompressed_block_offset * EROFS_BLOCK_SIZE as u64
-    }
-
-    pub fn uncompressed_byte_size(&self) -> u64 {
-        self.uncompressed_block_count as u64 * EROFS_BLOCK_SIZE as u64
-    }
-
-    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
-        self.validate()?;
-        writer.write_all(&self.to_bytes())?;
-        Ok(())
-    }
-
-    fn to_bytes(self) -> [u8; 48] {
-        let mut data = [0u8; 48];
+    /// Serialize the chunk entry into its on-disk bytes.
+    fn to_bytes(self) -> [u8; NYDUS_BLOB_METADATA_CHUNK_ENTRY_SIZE] {
+        let mut data = [0u8; NYDUS_BLOB_METADATA_CHUNK_ENTRY_SIZE];
         data[0..32].copy_from_slice(&self.digest);
-        data[32..40].copy_from_slice(&self.uncompressed_block_offset.to_le_bytes());
-        data[40..44].copy_from_slice(&self.uncompressed_block_count.to_le_bytes());
-        data[44..48].copy_from_slice(&self.reserved.to_le_bytes());
+        write_u64_at(&mut data, 32, self.uncompressed_block_offset);
+        write_u32_at(&mut data, 40, self.uncompressed_block_count);
+        write_u32_at(&mut data, 44, self.reserved);
         data
     }
 
-    pub fn read_from(reader: &mut dyn Read) -> Result<Self> {
-        let chunk = Self {
-            digest: read_digest(reader)?,
-            uncompressed_block_offset: read_u64_from(reader)?,
-            uncompressed_block_count: read_u32_from(reader)?,
-            reserved: read_u32_from(reader)?,
-        };
-        chunk.validate()?;
-        Ok(chunk)
-    }
-
+    /// Validate the intrinsic field invariants. Run by every construction
+    /// path ([`Self::new`], [`Self::from_bytes`]), so a chunk in hand is
+    /// always valid. Mapped tables are validated entry by entry at load.
     fn validate(&self) -> Result<()> {
         if self.uncompressed_block_count == 0 {
             return Err(Error::InvalidImage(
                 "blob meta chunk uncompressed block count must be non-zero".to_string(),
             ));
         }
-        self.uncompressed_byte_offset()
-            .checked_add(self.uncompressed_byte_size())
-            .ok_or_else(|| Error::Overflow("blob meta chunk byte range overflow".to_string()))?;
-        if self.reserved != BLOB_METADATA_CHUNK_RESERVED {
+
+        if self.reserved != NYDUS_BLOB_METADATA_CHUNK_RESERVED {
             return Err(Error::InvalidImage(
                 "blob meta chunk reserved field must be zero".to_string(),
             ));
         }
+
+        self.uncompressed_block_offset
+            .checked_mul(EROFS_BLOCK_SIZE as u64)
+            .ok_or_else(|| {
+                Error::Overflow("blob meta chunk uncompressed byte offset overflow".to_string())
+            })?;
+
+        self.uncompressed_offset()
+            .checked_add(self.uncompressed_size())
+            .ok_or_else(|| Error::Overflow("blob meta chunk byte range overflow".to_string()))?;
+
         Ok(())
+    }
+
+    /// Write the chunk entry's on-disk bytes to `writer`.
+    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        writer.write_all(&self.to_bytes())?;
+        Ok(())
+    }
+
+    /// Digest of the chunk's uncompressed bytes, algorithm per the header's
+    /// digester flag.
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Start of the chunk's span, in 4KiB blocks of the uncompressed
+    /// address space.
+    pub fn uncompressed_block_offset(&self) -> u64 {
+        self.uncompressed_block_offset
+    }
+
+    /// Length of the chunk's span in 4KiB blocks, never zero.
+    pub fn uncompressed_block_count(&self) -> u32 {
+        self.uncompressed_block_count
+    }
+
+    /// Start of the chunk's span in bytes (validation vetted the
+    /// conversion, so it cannot overflow).
+    pub fn uncompressed_offset(&self) -> u64 {
+        self.uncompressed_block_offset
+            .checked_mul(EROFS_BLOCK_SIZE as u64)
+            .expect("validated blob meta chunk byte offset")
+    }
+
+    /// Length of the chunk's span in bytes.
+    pub fn uncompressed_size(&self) -> u64 {
+        self.uncompressed_block_count as u64 * EROFS_BLOCK_SIZE as u64
     }
 }
 
+/// One block group entry: how a span of the dense uncompressed address
+/// space maps onto the blob's encoded payload — the unit of decode, cache
+/// fill, and prefetch. Block group entries are packed back to back in the
+/// block group table right after the chunk table.
+///
+/// The two coordinate spaces the entry bridges:
+///
+/// ```text
+/// uncompressed address space: dense 4KiB blocks from 0, uniform span
+/// ┌───────────┬───────────┬──────┐
+/// │  group 0  │  group 1  │ gr 2 │        (final group may be short)
+/// └─────┬─────┴─────┬─────┴───┬──┘
+///       ▼           ▼         ▼           each group encoded on its own
+/// ┌─────────┬──┬──────┐
+/// │   p0    │p1│  p2  │                   compressed payloads: packed in
+/// └─────────┴──┴──────┘                   order, gaps allowed, byte-exact
+/// ```
+///
+/// The entry's 40 bytes (integers little-endian):
+///
+/// ```text
+/// offset  size  field
+///      0     8  uncompressed_block_offset  4KiB blocks
+///      8     8  compressed_offset          bytes: payloads pack back to
+///                                          back, no block alignment
+///     16     4  uncompressed_block_count   4KiB blocks, never zero
+///     20     4  compressed_size            bytes, never zero
+///     24     4  crc32                      crc32c of the uncompressed
+///                                          payload
+///     28     4  source_block_group_index   redirect only, else zero
+///     32     2  source_blob_index          non-zero marks a redirect
+///                                          (see [`Self::new_redirect`])
+///     34     6  reserved                   must be zero
+/// ```
+///
+/// The Rust layout is pinned to the on-disk layout (`repr(C)` plus the const
+/// size assert) so a mapped block group table is readable in place,
+/// zero-copy.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobMetadataBlockGroup {
+    uncompressed_block_offset: u64,
+    compressed_offset: u64,
+    uncompressed_block_count: u32,
+    compressed_size: u32,
+    crc32: u32,
+    source_block_group_index: u32,
+    source_blob_index: u16,
+    reserved: [u8; 6],
+}
+
+// The same layout pin for block group entries.
+const _: () =
+    assert!(size_of::<BlobMetadataBlockGroup>() == NYDUS_BLOB_METADATA_BLOCK_GROUP_ENTRY_SIZE);
+
+impl BlobMetadataBlockGroup {
+    /// Creates a validated entry for a payload stored in this blob itself.
+    pub fn new(
+        uncompressed_block_offset: u64,
+        uncompressed_block_count: u32,
+        compressed_offset: u64,
+        compressed_size: u32,
+        crc32: u32,
+    ) -> Result<Self> {
+        let block_group = Self {
+            uncompressed_block_offset,
+            compressed_offset,
+            uncompressed_block_count,
+            compressed_size,
+            crc32,
+            source_block_group_index: 0,
+            source_blob_index: 0,
+            reserved: NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED,
+        };
+
+        block_group.validate()?;
+        Ok(block_group)
+    }
+
+    /// Creates a validated redirect entry: the payload lives in a block
+    /// group of another source blob, and the non-zero `source_blob_index`
+    /// is what marks the entry as a redirect.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_redirect(
+        uncompressed_block_offset: u64,
+        uncompressed_block_count: u32,
+        compressed_offset: u64,
+        compressed_size: u32,
+        crc32: u32,
+        source_blob_index: u16,
+        source_block_group_index: u32,
+    ) -> Result<Self> {
+        let block_group = Self {
+            uncompressed_block_offset,
+            compressed_offset,
+            uncompressed_block_count,
+            compressed_size,
+            crc32,
+            source_block_group_index,
+            source_blob_index,
+            reserved: NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED,
+        };
+
+        block_group.validate_redirect()?;
+        Ok(block_group)
+    }
+
+    /// Parse a block group entry from exactly its 40 bytes, verifying the
+    /// intrinsic fields.
+    pub fn from_bytes(bytes: &[u8; NYDUS_BLOB_METADATA_BLOCK_GROUP_ENTRY_SIZE]) -> Result<Self> {
+        let block_group = Self {
+            uncompressed_block_offset: read_u64_at(bytes, 0),
+            compressed_offset: read_u64_at(bytes, 8),
+            uncompressed_block_count: read_u32_at(bytes, 16),
+            compressed_size: read_u32_at(bytes, 20),
+            crc32: read_u32_at(bytes, 24),
+            source_block_group_index: read_u32_at(bytes, 28),
+            source_blob_index: read_u16_at(bytes, 32),
+            reserved: bytes[34..40].try_into().unwrap(),
+        };
+
+        block_group.validate()?;
+        Ok(block_group)
+    }
+
+    /// Serialize the block group entry into its on-disk bytes.
+    fn to_bytes(self) -> [u8; NYDUS_BLOB_METADATA_BLOCK_GROUP_ENTRY_SIZE] {
+        let mut data = [0u8; NYDUS_BLOB_METADATA_BLOCK_GROUP_ENTRY_SIZE];
+        write_u64_at(&mut data, 0, self.uncompressed_block_offset);
+        write_u64_at(&mut data, 8, self.compressed_offset);
+        write_u32_at(&mut data, 16, self.uncompressed_block_count);
+        write_u32_at(&mut data, 20, self.compressed_size);
+        write_u32_at(&mut data, 24, self.crc32);
+        write_u32_at(&mut data, 28, self.source_block_group_index);
+        write_u16_at(&mut data, 32, self.source_blob_index);
+        data[34..40].copy_from_slice(&self.reserved);
+        data
+    }
+
+    /// Validate the intrinsic field invariants. Run by every construction
+    /// path, so a block group in hand is always valid. Cross-entry rules
+    /// (density, ordering) live in [`BlobMetadata::validate_block_groups`].
+    fn validate(&self) -> Result<()> {
+        if self.uncompressed_block_count == 0 {
+            return Err(Error::InvalidImage(
+                "blob meta block group uncompressed block count must be non-zero".to_string(),
+            ));
+        }
+
+        if self.compressed_size == 0 {
+            return Err(Error::InvalidImage(
+                "blob meta block group compressed size must be non-zero".to_string(),
+            ));
+        }
+
+        if self.source_blob_index == 0 && self.source_block_group_index != 0 {
+            return Err(Error::InvalidImage(
+                "blob meta block group source block group index requires a source blob index"
+                    .to_string(),
+            ));
+        }
+
+        if self.reserved != NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED {
+            return Err(Error::InvalidImage(
+                "blob meta block group reserved field must be zero".to_string(),
+            ));
+        }
+
+        self.uncompressed_block_offset
+            .checked_mul(EROFS_BLOCK_SIZE as u64)
+            .ok_or_else(|| {
+                Error::Overflow(
+                    "blob meta block group uncompressed byte offset overflow".to_string(),
+                )
+            })?;
+
+        self.uncompressed_offset()
+            .checked_add(self.uncompressed_size())
+            .ok_or_else(|| {
+                Error::Overflow(
+                    "blob meta block group uncompressed byte range overflow".to_string(),
+                )
+            })?;
+
+        self.compressed_offset
+            .checked_add(self.compressed_size as u64)
+            .ok_or_else(|| {
+                Error::Overflow("blob meta block group compressed byte range overflow".to_string())
+            })?;
+
+        Ok(())
+    }
+
+    /// The redirect variant of [`Self::validate`]: additionally requires
+    /// the non-zero `source_blob_index` that marks a redirect.
+    fn validate_redirect(&self) -> Result<()> {
+        if self.source_blob_index == 0 {
+            return Err(Error::InvalidImage(
+                "blob meta redirect block group source blob index must be non-zero".to_string(),
+            ));
+        }
+
+        if self.uncompressed_block_count == 0 {
+            return Err(Error::InvalidImage(
+                "blob meta block group uncompressed block count must be non-zero".to_string(),
+            ));
+        }
+
+        if self.compressed_size == 0 {
+            return Err(Error::InvalidImage(
+                "blob meta block group compressed size must be non-zero".to_string(),
+            ));
+        }
+
+        if self.reserved != NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED {
+            return Err(Error::InvalidImage(
+                "blob meta block group reserved field must be zero".to_string(),
+            ));
+        }
+
+        self.uncompressed_block_offset
+            .checked_mul(EROFS_BLOCK_SIZE as u64)
+            .ok_or_else(|| {
+                Error::Overflow(
+                    "blob meta block group uncompressed byte offset overflow".to_string(),
+                )
+            })?;
+
+        self.uncompressed_offset()
+            .checked_add(self.uncompressed_size())
+            .ok_or_else(|| {
+                Error::Overflow(
+                    "blob meta block group uncompressed byte range overflow".to_string(),
+                )
+            })?;
+
+        self.compressed_offset
+            .checked_add(self.compressed_size as u64)
+            .ok_or_else(|| {
+                Error::Overflow("blob meta block group compressed byte range overflow".to_string())
+            })?;
+
+        Ok(())
+    }
+
+    /// Write the block group entry's on-disk bytes to `writer`.
+    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        writer.write_all(&self.to_bytes())?;
+        Ok(())
+    }
+
+    /// A copy with the compressed offset shifted by `bias`, for payloads
+    /// embedded at an offset inside a full blob.
+    pub fn checked_add_compressed_offset(&self, bias: u64) -> Result<Self> {
+        let block_group = Self {
+            compressed_offset: self.compressed_offset().checked_add(bias).ok_or_else(|| {
+                Error::Overflow("blob meta compressed byte offset overflow".to_string())
+            })?,
+            ..*self
+        };
+
+        block_group.validate()?;
+        Ok(block_group)
+    }
+
+    /// Whether the payload lives in another source blob.
+    pub fn is_redirect(&self) -> bool {
+        self.source_blob_index != 0
+    }
+
+    /// The source blob holding the payload, zero when the payload is local.
+    pub fn source_blob_index(&self) -> u16 {
+        self.source_blob_index
+    }
+
+    /// The block group within the source blob, redirect only.
+    pub fn source_block_group_index(&self) -> u32 {
+        self.source_block_group_index
+    }
+
+    /// Start of the group's span, in 4KiB blocks of the uncompressed
+    /// address space.
+    pub fn uncompressed_block_offset(&self) -> u64 {
+        self.uncompressed_block_offset
+    }
+
+    /// Length of the group's span in 4KiB blocks, never zero.
+    pub fn uncompressed_block_count(&self) -> u32 {
+        self.uncompressed_block_count
+    }
+
+    /// Start of the group's span in bytes (validation vetted the
+    /// conversion, so it cannot overflow).
+    pub fn uncompressed_offset(&self) -> u64 {
+        self.uncompressed_block_offset
+            .checked_mul(EROFS_BLOCK_SIZE as u64)
+            .expect("validated blob meta block group byte offset")
+    }
+
+    /// Length of the group's span in bytes.
+    pub fn uncompressed_size(&self) -> u64 {
+        self.uncompressed_block_count as u64 * EROFS_BLOCK_SIZE as u64
+    }
+
+    /// Byte offset of the encoded payload (payloads pack back to back, no
+    /// block alignment).
+    pub fn compressed_offset(&self) -> u64 {
+        self.compressed_offset
+    }
+
+    /// Byte size of the encoded payload, never zero.
+    pub fn compressed_size(&self) -> u32 {
+        self.compressed_size
+    }
+
+    /// crc32c of the group's uncompressed payload, checked after decode.
+    pub fn crc32(&self) -> u32 {
+        self.crc32
+    }
+
+    /// True when any block group redirects to another source blob.
+    fn has_redirect(block_groups: &[Self]) -> bool {
+        block_groups.iter().any(Self::is_redirect)
+    }
+
+    /// Derive the header's `block_group_block_count_bits` from the groups
+    /// themselves: the first group carries the uniform span (validated
+    /// later), a lone group rounds up to a power of two, and empty or
+    /// redirect tables fall back to the default geometry.
+    fn infer_block_count_bits(block_groups: &[Self]) -> Result<u8> {
+        let default_bits = DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT.ilog2() as u8;
+        if Self::has_redirect(block_groups) {
+            return Ok(default_bits);
+        }
+
+        match block_groups {
+            [] => Ok(default_bits),
+            [only] => block_count_to_bits(only.uncompressed_block_count().next_power_of_two()),
+            [first, ..] => block_count_to_bits(first.uncompressed_block_count()),
+        }
+    }
+}
+
+/// In-memory backing of the tables: owned vectors on the write side, a
+/// shared file mapping read in place on the read side.
+#[derive(Debug)]
 enum BlobMetadataStorage {
     Owned {
         chunks: Vec<BlobMetadataChunk>,
@@ -726,127 +828,431 @@ enum BlobMetadataStorage {
     Mapped(Mmap),
 }
 
+/// A nydus blob's metadata: the chunk digest table and the block group table
+/// describing how the blob's dense uncompressed address space maps onto its
+/// encoded payload, sealed with a crc32c in the header.
+///
+/// Serialized, it is the `.blob.meta` sidecar file — and, embedded verbatim,
+/// the blob meta region of a full blob (see [`super::footer::BlobFooter`]):
+///
+/// ```text
+/// ┌────────┬─────────────┬───────────────────┬──────────────┐
+/// │ header │ chunk table │ block group table │ zero padding │
+/// └────────┴─────────────┴───────────────────┴──────────────┘
+/// 0        4096                              ▲              EOF
+///                            the entries end here, the padding
+///                            runs to the 4KiB-aligned padded_size
+/// ```
+///
+/// In memory the tables are either owned (the write side, built by
+/// [`Self::new`]) or a shared file mapping read in place
+/// ([`Self::from_path`]), zero-copy thanks to the entries' pinned layout.
+#[derive(Debug)]
 pub struct BlobMetadata {
     header: BlobMetadataHeader,
-    blob_id: [u8; SHA256_DIGEST_SIZE],
     storage: BlobMetadataStorage,
 }
 
 impl BlobMetadata {
-    pub fn from_parts(
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        chunk_block_count: u32,
-        block_groups: Vec<BlobMetadataBlockGroup>,
-        chunks: Vec<BlobMetadataChunk>,
-    ) -> Result<Self> {
-        Self::from_parts_with_options(
-            blob_id,
-            chunk_block_count,
-            BlobMetadataCompressor::None,
-            block_groups,
-            chunks,
-        )
-    }
-
-    pub fn from_parts_with_options(
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        chunk_block_count: u32,
+    /// Creates validated, sealed metadata from owned tables: the header is
+    /// derived from the tables and both are validated first, so constructed
+    /// metadata is valid by definition, then the crc32 is computed over the
+    /// final bytes.
+    pub fn new(
         compressor: BlobMetadataCompressor,
-        block_groups: Vec<BlobMetadataBlockGroup>,
+        chunk_block_count: u32,
         chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
     ) -> Result<Self> {
-        let mut header = BlobMetadataHeader::default();
-        header.set_chunk_block_count(chunk_block_count)?;
-        header.set_compressor(compressor);
-        header.set_counts_and_offsets(chunks.len() as u32, block_groups.len() as u32)?;
-        header.block_group_block_bits = infer_block_group_block_bits(&block_groups)?;
-        validate_tables(&block_groups, &chunks, header.block_group_block_count())?;
+        let chunks_offset = NYDUS_BLOB_METADATA_HEADER_SIZE as u64;
+        let header = BlobMetadataHeader {
+            magic: NYDUS_BLOB_METADATA_MAGIC,
+            version: NYDUS_BLOB_METADATA_VERSION,
+            flags: (BlobMetadataDigester::Blake3.flag() | compressor.flag()).bits(),
+            crc32: 0,
+            reserved0: 0,
+            chunks_offset,
+            block_groups_offset: chunks_offset
+                .checked_add(chunks.len() as u64 * size_of::<BlobMetadataChunk>() as u64)
+                .ok_or_else(|| {
+                    Error::Overflow("blob meta block group offset overflow".to_string())
+                })?,
+            chunk_count: chunks.len() as u32,
+            block_group_count: block_groups.len() as u32,
+            chunk_block_count_bits: block_count_to_bits(chunk_block_count)?,
+            block_group_block_count_bits: BlobMetadataBlockGroup::infer_block_count_bits(
+                &block_groups,
+            )?,
+        };
+        header.validate()?;
+
         let mut blob_metadata = Self {
             header,
-            blob_id,
             storage: BlobMetadataStorage::Owned {
                 chunks,
                 block_groups,
             },
         };
+        blob_metadata.validate()?;
         blob_metadata.header.crc32 = blob_metadata.compute_crc32_from_parts();
         Ok(blob_metadata)
     }
 
-    pub fn with_compressed_offset_bias(&self, bias: u64) -> Result<Self> {
+    /// Read blob metadata from an in-memory byte slice, optionally verifying
+    /// the header crc32 over the full metadata.
+    pub fn from_bytes(bytes: &[u8], verify_crc32: bool) -> Result<Self> {
+        let Some((header_bytes, _)) = bytes.split_first_chunk::<NYDUS_BLOB_METADATA_HEADER_SIZE>()
+        else {
+            return Err(Error::InvalidImage("blob meta data too small".to_string()));
+        };
+
+        let header = BlobMetadataHeader::from_bytes(header_bytes)?;
+        Self::validate_bytes(bytes, &header, verify_crc32)?;
+
+        let chunk_table =
+            &bytes[header.chunks_offset() as usize..header.block_groups_offset() as usize];
+        let chunks = chunk_table
+            .chunks_exact(size_of::<BlobMetadataChunk>())
+            .enumerate()
+            .map(|(index, entry)| {
+                BlobMetadataChunk::from_bytes(entry.try_into().unwrap())
+                    .with_context(|| format!("failed to read blob meta chunk {index}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let block_group_table =
+            &bytes[header.block_groups_offset() as usize..header.used_size() as usize];
+        let block_groups = block_group_table
+            .chunks_exact(size_of::<BlobMetadataBlockGroup>())
+            .enumerate()
+            .map(|(index, entry)| {
+                BlobMetadataBlockGroup::from_bytes(entry.try_into().unwrap())
+                    .with_context(|| format!("failed to read blob meta block group {index}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let blob_metadata = Self {
+            header,
+            storage: BlobMetadataStorage::Owned {
+                chunks,
+                block_groups,
+            },
+        };
+        blob_metadata.validate()?;
+        Ok(blob_metadata)
+    }
+
+    /// Read blob metadata from a file (mmap-backed), optionally verifying
+    /// the header crc32 over the full metadata.
+    pub fn from_path(path: &Path, verify_crc32: bool) -> Result<Self> {
+        let file = File::open(path)
+            .with_context(|| format!("failed to open blob meta: {}", path.display()))?;
+        let mmap = unsafe { MmapOptions::new().map(&file) }
+            .with_context(|| format!("failed to mmap blob meta: {}", path.display()))?;
+
+        let Some((header_bytes, _)) = mmap.split_first_chunk::<NYDUS_BLOB_METADATA_HEADER_SIZE>()
+        else {
+            return Err(Error::InvalidImage("blob meta file too small".to_string()));
+        };
+
+        let header = BlobMetadataHeader::from_bytes(header_bytes)?;
+        Self::validate_bytes(&mmap, &header, verify_crc32)?;
+
+        let blob_metadata = Self {
+            header,
+            storage: BlobMetadataStorage::Mapped(mmap),
+        };
+        blob_metadata.validate()?;
+        Ok(blob_metadata)
+    }
+
+    /// Validate the cross-entry table invariants. Run by every construction
+    /// path, so metadata in hand is always valid.
+    fn validate(&self) -> Result<()> {
+        self.validate_chunks()?;
+        self.validate_block_groups()
+    }
+
+    /// Every chunk must be intrinsically valid and end within the blocks
+    /// the block groups cover. Runs before the density checks, so the bound
+    /// is just the last group's end, not yet a total.
+    fn validate_chunks(&self) -> Result<()> {
+        let uncompressed_block_end = self
+            .block_groups()
+            .last()
+            .map(|block_group| {
+                block_group.uncompressed_block_offset()
+                    + block_group.uncompressed_block_count() as u64
+            })
+            .unwrap_or(0);
+
+        for (index, chunk) in self.chunks().iter().enumerate() {
+            chunk
+                .validate()
+                .with_context(|| format!("invalid blob meta chunk {index}"))?;
+
+            let chunk_block_end = chunk
+                .uncompressed_block_offset()
+                .checked_add(chunk.uncompressed_block_count() as u64)
+                .ok_or_else(|| {
+                    Error::Overflow(format!("blob meta chunk {index} block range overflow"))
+                })?;
+
+            if chunk_block_end > uncompressed_block_end {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta chunk {index} exceeds the blob block range: \
+                     ends at block {chunk_block_end}, blob ends at block {uncompressed_block_end}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The block groups must tile the uncompressed address space densely
+    /// from block 0 (making the last group's end the blob's total size),
+    /// keep the uniform span the header declares (the final group may be
+    /// short, redirect blobs are exempt), and keep their compressed ranges
+    /// ordered and non-overlapping (gaps allowed).
+    fn validate_block_groups(&self) -> Result<()> {
+        let block_groups = self.block_groups();
+        let block_group_block_count = self.header.block_group_block_count();
+        if block_group_block_count == 0 {
+            return Err(Error::InvalidImage(
+                "blob meta block group block count must be non-zero".to_string(),
+            ));
+        }
+
+        let is_redirect = BlobMetadataBlockGroup::has_redirect(block_groups);
+        let mut next_uncompressed_block_offset = 0u64;
+        let mut next_compressed_offset = 0u64;
+        for (index, block_group) in block_groups.iter().enumerate() {
+            block_group
+                .validate()
+                .with_context(|| format!("invalid blob meta block group {index}"))?;
+            if block_group.uncompressed_block_offset() != next_uncompressed_block_offset {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta block groups must be dense: block group {index} starts at block {}, \
+                     expected block {next_uncompressed_block_offset}",
+                    block_group.uncompressed_block_offset()
+                )));
+            }
+
+            if !is_redirect {
+                match (
+                    index + 1 == block_groups.len(),
+                    block_group.uncompressed_block_count(),
+                ) {
+                    (false, block_count) if block_count != block_group_block_count => {
+                        return Err(Error::InvalidImage(format!(
+                            "blob meta block group {index} must be exactly \
+                             {block_group_block_count} blocks, got {block_count}"
+                        )));
+                    }
+                    (true, block_count) if block_count > block_group_block_count => {
+                        return Err(Error::InvalidImage(format!(
+                            "blob meta final block group {index} exceeds \
+                             {block_group_block_count} blocks, got {block_count}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+
+            if block_group.compressed_offset() < next_compressed_offset {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta block group {index} overlaps the previous compressed range: \
+                     starts at byte {}, previous ends at byte {next_compressed_offset}",
+                    block_group.compressed_offset()
+                )));
+            }
+
+            next_uncompressed_block_offset = block_group
+                .uncompressed_block_offset()
+                .checked_add(block_group.uncompressed_block_count() as u64)
+                .ok_or_else(|| {
+                    Error::Overflow(format!(
+                        "blob meta block group {index} uncompressed block range overflow"
+                    ))
+                })?;
+
+            next_compressed_offset = block_group
+                .compressed_offset()
+                .checked_add(block_group.compressed_size() as u64)
+                .ok_or_else(|| {
+                    Error::Overflow(format!(
+                        "blob meta block group {index} compressed range overflow"
+                    ))
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Anchor a serialized buffer against its header: the buffer must be
+    /// exactly the declared padded size with a zeroed tail padding, and
+    /// with `verify_crc32` the stored seal must match the raw incoming
+    /// bytes — never a re-serialization, which would zero a newer writer's
+    /// compat fields and reject a valid image.
+    fn validate_bytes(bytes: &[u8], header: &BlobMetadataHeader, verify_crc32: bool) -> Result<()> {
+        if bytes.len() as u64 != header.padded_size() {
+            return Err(Error::InvalidImage(format!(
+                "blob meta size mismatch: expected {}, got {}",
+                header.padded_size(),
+                bytes.len()
+            )));
+        }
+
+        let padding = &bytes[header.used_size() as usize..];
+        if padding.iter().any(|byte| *byte != 0) {
+            return Err(Error::InvalidImage(
+                "blob meta padding must be zero".to_string(),
+            ));
+        }
+
+        if verify_crc32 {
+            let expected_crc32 = header.crc32();
+            let actual_crc32 = Self::compute_crc32(bytes);
+            if expected_crc32 != actual_crc32 {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta crc32 mismatch: expected {expected_crc32:#010x}, \
+                     got {actual_crc32:#010x}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rebuilt metadata with every compressed offset shifted by `bias`, for
+    /// compressed data embedded at `bias` inside a full blob (resealed via
+    /// [`Self::new`]).
+    pub fn checked_add_compressed_offset(&self, bias: u64) -> Result<Self> {
         let mut block_groups = Vec::with_capacity(self.block_group_count());
         for block_group in self.block_groups() {
-            block_groups.push(block_group.with_compressed_byte_offset_bias(bias)?);
+            block_groups.push(block_group.checked_add_compressed_offset(bias)?);
         }
-        Self::from_parts_with_options(
-            self.blob_id,
-            self.chunk_block_count(),
+
+        Self::new(
             self.compressor(),
-            block_groups,
+            self.chunk_block_count(),
             self.chunks().to_vec(),
+            block_groups,
         )
     }
 
+    /// Write the serialized metadata (header, tables, zero padding) to
+    /// `writer`, resealing the crc32 over the emitted bytes: metadata
+    /// mapped from a newer writer re-serializes with the reserved compat
+    /// fields zeroed, so the stored seal may not match what is written.
+    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        let mut header = self.header;
+        header.crc32 = self.compute_crc32_from_parts();
+
+        writer.write_all(&header.to_bytes())?;
+        for chunk in self.chunks() {
+            chunk.write_to(writer)?;
+        }
+
+        for block_group in self.block_groups() {
+            block_group.write_to(writer)?;
+        }
+
+        let padding_size = (self.padded_size() - self.header.used_size()) as usize;
+        writer.write_all(&[0u8; EROFS_BLOCK_SIZE as usize][..padding_size])?;
+        Ok(())
+    }
+
+    /// Write the serialized metadata to a new sidecar file at `path`.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let mut file = File::create(path)
+            .with_context(|| format!("failed to create blob meta: {}", path.display()))?;
+        self.write_to(&mut file)?;
+        file.flush()
+            .with_context(|| format!("failed to flush blob meta: {}", path.display()))?;
+
+        Ok(())
+    }
+
+    /// The parsed header, exactly as stored on disk.
     pub fn header(&self) -> &BlobMetadataHeader {
         &self.header
     }
 
-    pub fn blob_id(&self) -> &[u8; SHA256_DIGEST_SIZE] {
-        &self.blob_id
-    }
-
+    /// Number of entries in the chunk table.
     pub fn chunk_count(&self) -> usize {
         self.header.chunk_count() as usize
     }
 
+    /// Number of entries in the block group table.
     pub fn block_group_count(&self) -> usize {
         self.header.block_group_count() as usize
     }
 
+    /// Uncompressed 4KiB blocks per chunk.
     pub fn chunk_block_count(&self) -> u32 {
         self.header.chunk_block_count()
     }
 
+    /// Uncompressed bytes per chunk.
     pub fn chunk_size(&self) -> u32 {
         self.header.chunk_size()
     }
 
+    /// The block group payload compressor.
     pub fn compressor(&self) -> BlobMetadataCompressor {
         self.header.compressor()
     }
 
+    /// The chunk digest algorithm.
     pub fn digester(&self) -> BlobMetadataDigester {
         self.header.digester()
     }
 
+    /// The chunk table: the owned vector on the write side, the mapped file
+    /// region reinterpreted in place on the read side (sound because the
+    /// entry layout is pinned and the load path validated the table's
+    /// offset, alignment, and bounds).
     pub fn chunks(&self) -> &[BlobMetadataChunk] {
         match &self.storage {
             BlobMetadataStorage::Owned { chunks, .. } => chunks,
-            BlobMetadataStorage::Mapped(mmap) => mapped_chunks(mmap, &self.header),
+            BlobMetadataStorage::Mapped(mmap) => {
+                let offset = self.header.chunks_offset() as usize;
+                let count = self.header.chunk_count() as usize;
+                let bytes = &mmap[offset..offset + count * size_of::<BlobMetadataChunk>()];
+                unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast(), count) }
+            }
         }
     }
 
+    /// The block group table, backed the same two ways as [`Self::chunks`].
     pub fn block_groups(&self) -> &[BlobMetadataBlockGroup] {
         match &self.storage {
             BlobMetadataStorage::Owned { block_groups, .. } => block_groups,
-            BlobMetadataStorage::Mapped(mmap) => mapped_block_groups(mmap, &self.header),
+            BlobMetadataStorage::Mapped(mmap) => {
+                let offset = self.header.block_groups_offset() as usize;
+                let count = self.header.block_group_count() as usize;
+                let bytes = &mmap[offset..offset + count * size_of::<BlobMetadataBlockGroup>()];
+                unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast(), count) }
+            }
         }
     }
 
-    pub fn block_group_at(&self, index: usize) -> Option<&BlobMetadataBlockGroup> {
+    /// The block group at `index`, `None` past the table.
+    pub fn block_group(&self, index: usize) -> Option<&BlobMetadataBlockGroup> {
         self.block_groups().get(index)
     }
 
-    /// True when this blob is an "ondemand" redirect blob: its block groups carry
-    /// data belonging to other source blob devices.
-    pub fn is_redirect_blob(&self) -> bool {
-        self.block_groups()
-            .iter()
-            .any(BlobMetadataBlockGroup::is_redirect)
+    /// Whether any block group redirects to another source blob (an
+    /// ondemand redirect blob).
+    pub fn is_redirect(&self) -> bool {
+        BlobMetadataBlockGroup::has_redirect(self.block_groups())
     }
 
-    /// Total number of uncompressed blocks in the dense address space.
-    pub fn total_blocks(&self) -> u64 {
+    /// Total uncompressed size of the blob in 4KiB blocks: block groups are
+    /// validated dense from block 0, so the last group's end offset is the
+    /// block count.
+    pub fn uncompressed_block_count(&self) -> u64 {
         self.block_groups()
             .last()
             .map(|block_group| {
@@ -856,459 +1262,96 @@ impl BlobMetadata {
             .unwrap_or(0)
     }
 
-    /// O(1) mapping from an uncompressed byte offset in the dense address space
-    /// to the index of the block group that contains it, or `None` when the offset is
-    /// past the end of the blob. Block groups are formed by packing blocks up to the
-    /// compress size independent of chunk boundaries, so every block group except the
-    /// last is exactly `1 << block_group_block_bits` blocks and the block group index is a
-    /// single shift.
-    pub fn block_group_index_for_byte_offset(&self, offset: u64) -> Option<usize> {
-        let block = offset / EROFS_BLOCK_SIZE as u64;
-        if block >= self.total_blocks() {
+    /// The block group covering `uncompressed_offset`, `None` past the end
+    /// of the blob: dense fixed-size groups make this a single shift, no
+    /// search.
+    pub fn block_group_index_from_uncompressed_offset(
+        &self,
+        uncompressed_offset: u64,
+    ) -> Option<usize> {
+        let block = uncompressed_offset / EROFS_BLOCK_SIZE as u64;
+        if block >= self.uncompressed_block_count() {
             return None;
         }
-        usize::try_from(block >> self.header.block_group_block_bits()).ok()
+
+        usize::try_from(block >> self.header.block_group_block_count_bits).ok()
     }
 
-    pub fn total_uncompressed_size(&self) -> u64 {
-        block_groups_total_uncompressed_size(self.block_groups())
+    /// Total uncompressed byte size of the blob: block groups are validated
+    /// dense from offset 0, so the last group's end offset is the size.
+    pub fn uncompressed_size(&self) -> u64 {
+        self.block_groups()
+            .last()
+            .map(|block_group| block_group.uncompressed_offset() + block_group.uncompressed_size())
+            .unwrap_or(0)
     }
 
-    pub fn total_compressed_size(&self) -> u64 {
-        block_groups_total_compressed_size(self.block_groups())
+    /// End of the last block group's compressed range: the compressed data
+    /// region's byte size when payloads pack from offset 0 without gaps
+    /// (the standalone layout), otherwise just an end coordinate (gaps and
+    /// bias shifts are legal on the compressed side).
+    pub fn compressed_end(&self) -> u64 {
+        self.block_groups()
+            .last()
+            .map(|block_group| {
+                block_group.compressed_offset() + block_group.compressed_size() as u64
+            })
+            .unwrap_or(0)
     }
 
-    pub fn metadata_size(&self) -> u64 {
-        self.header.metadata_size()
+    /// The full serialized size, 4KiB aligned.
+    pub fn padded_size(&self) -> u64 {
+        self.header.padded_size()
     }
 
-    /// crc32c over the serialized metadata bytes with the crc32 field
-    /// treated as zero: the header (copied and zeroed) seeds the crc that
-    /// continues over the records and padding. The reader verifies the raw
-    /// incoming bytes against it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `data` is shorter than the blob meta header.
-    fn compute_crc32(data: &[u8]) -> u32 {
-        let mut header: [u8; BLOB_METADATA_HEADER_SIZE as usize] = data
-            [..BLOB_METADATA_HEADER_SIZE as usize]
-            .try_into()
-            .expect("caller checked the header length");
-        header[BLOB_METADATA_HEADER_CRC32_FIELD].fill(0);
-        crc32c_append(crc32c(&header), &data[BLOB_METADATA_HEADER_SIZE as usize..])
+    /// crc32c over a serialized buffer with the header's crc32 field
+    /// treated as zero: what the read side verifies raw incoming bytes
+    /// against.
+    fn compute_crc32(bytes: &[u8]) -> u32 {
+        let (header, tail) = bytes.split_at(NYDUS_BLOB_METADATA_HEADER_SIZE);
+        let mut zeroed: [u8; NYDUS_BLOB_METADATA_HEADER_SIZE] = header.try_into().unwrap();
+        zeroed[NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD].fill(0);
+        crc32c_append(crc32c(&zeroed), tail)
     }
 
+    /// The same seal computed from the in-memory parts exactly as
+    /// [`Self::write_to`] emits them (reserved regions zeroed): the write
+    /// side's view.
     fn compute_crc32_from_parts(&self) -> u32 {
-        // Seal over the serialized metadata with the crc field zeroed; the
-        // header bytes seed the running crc32c that continues over the
-        // records and padding.
-        let mut crc32 = crc32c(&self.header.to_bytes_with_crc32(0));
+        let mut zeroed = self.header.to_bytes();
+        zeroed[NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD].fill(0);
+
+        let mut crc32 = crc32c(&zeroed);
         for chunk in self.chunks() {
             crc32 = crc32c_append(crc32, &chunk.to_bytes());
         }
+
         for block_group in self.block_groups() {
             crc32 = crc32c_append(crc32, &block_group.to_bytes());
         }
-        const ZERO_BLOCK: [u8; EROFS_BLOCK_SIZE as usize] = [0u8; EROFS_BLOCK_SIZE as usize];
-        let mut remaining = self.padding_size();
-        while remaining > 0 {
-            let run = remaining.min(ZERO_BLOCK.len());
-            crc32 = crc32c_append(crc32, &ZERO_BLOCK[..run]);
-            remaining -= run;
-        }
-        crc32
-    }
 
-    fn padding_size(&self) -> usize {
-        (self.metadata_size() - self.header.records_end()) as usize
-    }
-
-    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
-        self.header
-            .write_to_with_crc32(writer, self.compute_crc32_from_parts())?;
-        for chunk in self.chunks() {
-            chunk.write_to(writer)?;
-        }
-        for block_group in self.block_groups() {
-            block_group.write_to(writer)?;
-        }
-        let padding_size = self.padding_size();
-        if padding_size > 0 {
-            writer.write_all(&vec![0u8; padding_size])?;
-        }
-        Ok(())
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let mut file = File::create(path)
-            .with_context(|| format!("failed to create blob meta: {}", path.display()))?;
-        self.write_to(&mut file)?;
-        file.flush()
-            .with_context(|| format!("failed to flush blob meta: {}", path.display()))?;
-        Ok(())
-    }
-
-    /// Start configuring a blob meta read; finish with
-    /// [`load`](BlobMetadataLoader::load) or [`from_bytes`](BlobMetadataLoader::from_bytes).
-    pub fn loader() -> BlobMetadataLoader {
-        BlobMetadataLoader::default()
-    }
-
-    fn from_bytes_inner(
-        data: &[u8],
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        check_crc32: bool,
-    ) -> Result<Self> {
-        if data.len() < BLOB_METADATA_HEADER_SIZE as usize {
-            return Err(Error::InvalidImage("blob meta data too small".to_string()));
-        }
-
-        let mut cursor = Cursor::new(data);
-        let header = BlobMetadataHeader::read_from(&mut cursor)?;
-        if data.len() as u64 != header.metadata_size() {
-            return Err(Error::InvalidImage(format!(
-                "blob meta data size mismatch: expected {}, got {}",
-                header.metadata_size(),
-                data.len()
-            )));
-        }
-        validate_padding(data, &header)?;
-        if check_crc32 {
-            validate_blob_metadata_crc32(data, &header)?;
-        }
-
-        let mut chunks = Vec::with_capacity(header.chunk_count() as usize);
-        cursor.set_position(header.chunks_offset());
-        for index in 0..header.chunk_count() as usize {
-            chunks.push(
-                BlobMetadataChunk::read_from(&mut cursor)
-                    .with_context(|| format!("failed to read blob meta chunk {index}"))?,
-            );
-        }
-
-        let mut block_groups = Vec::with_capacity(header.block_group_count() as usize);
-        cursor.set_position(header.block_groups_offset());
-        for index in 0..header.block_group_count() as usize {
-            block_groups.push(
-                BlobMetadataBlockGroup::read_from(&mut cursor)
-                    .with_context(|| format!("failed to read blob meta block_group {index}"))?,
-            );
-        }
-        validate_tables(&block_groups, &chunks, header.block_group_block_count())?;
-        Ok(Self {
-            header,
-            blob_id,
-            storage: BlobMetadataStorage::Owned {
-                chunks,
-                block_groups,
-            },
-        })
-    }
-
-    pub fn load(path: &Path) -> Result<Self> {
-        Self::load_inner(path, false)
-    }
-
-    fn load_inner(path: &Path, check_crc32: bool) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("failed to open blob meta: {}", path.display()))?;
-        let file_len = file.metadata()?.len();
-        if file_len < BLOB_METADATA_HEADER_SIZE {
-            return Err(Error::InvalidImage("blob meta file too small".to_string()));
-        }
-        let mmap = unsafe { MmapOptions::new().map(&file) }
-            .with_context(|| format!("failed to mmap blob meta: {}", path.display()))?;
-        let mut cursor = Cursor::new(&mmap[..BLOB_METADATA_HEADER_SIZE as usize]);
-        let header = BlobMetadataHeader::read_from(&mut cursor)?;
-        if file_len != header.metadata_size() {
-            return Err(Error::InvalidImage(format!(
-                "blob meta file size mismatch: expected {}, got {}",
-                header.metadata_size(),
-                file_len
-            )));
-        }
-        validate_padding(&mmap, &header)?;
-        if check_crc32 {
-            validate_blob_metadata_crc32(&mmap, &header)?;
-        }
-        validate_tables(
-            mapped_block_groups(&mmap, &header),
-            mapped_chunks(&mmap, &header),
-            header.block_group_block_count(),
-        )?;
-        Ok(Self {
-            header,
-            blob_id: [0u8; SHA256_DIGEST_SIZE],
-            storage: BlobMetadataStorage::Mapped(mmap),
-        })
+        let padding_size = (self.padded_size() - self.header.used_size()) as usize;
+        crc32c_append(crc32, &[0u8; EROFS_BLOCK_SIZE as usize][..padding_size])
     }
 }
 
-/// Options for reading a [`BlobMetadata`], created via [`BlobMetadata::loader`].
-/// The two orthogonal knobs (CRC32 verification, attached blob id) replace
-/// the previous per-combination constructors.
-#[derive(Default, Clone, Copy)]
-pub struct BlobMetadataLoader {
-    verify_crc32: bool,
-    blob_id: Option<[u8; SHA256_DIGEST_SIZE]>,
-}
-
-impl BlobMetadataLoader {
-    /// Verify the header CRC32 over the full metadata during the read.
-    pub fn verify_crc32(mut self) -> Self {
-        self.verify_crc32 = true;
-        self
-    }
-
-    /// Attach the owning blob id to the loaded metadata.
-    pub fn blob_id(mut self, blob_id: [u8; SHA256_DIGEST_SIZE]) -> Self {
-        self.blob_id = Some(blob_id);
-        self
-    }
-
-    /// Read blob metadata from a file (mmap-backed).
-    pub fn load(self, path: &Path) -> Result<BlobMetadata> {
-        let mut blob_metadata = BlobMetadata::load_inner(path, self.verify_crc32)?;
-        if let Some(blob_id) = self.blob_id {
-            blob_metadata.blob_id = blob_id;
-        }
-        Ok(blob_metadata)
-    }
-
-    /// Read blob metadata from an in-memory byte slice.
-    pub fn from_bytes(self, data: &[u8]) -> Result<BlobMetadata> {
-        BlobMetadata::from_bytes_inner(
-            data,
-            self.blob_id.unwrap_or([0u8; SHA256_DIGEST_SIZE]),
-            self.verify_crc32,
-        )
-    }
-}
-
-fn block_count_to_bits(blocks: u32, what: &str) -> Result<u8> {
-    if blocks == 0 {
-        return Err(Error::InvalidImage(format!(
-            "blob meta {what} block count must be non-zero"
-        )));
-    }
+/// Encode a power-of-two 4KiB block count as the log2 stored in the
+/// header's `*_block_count_bits` fields.
+fn block_count_to_bits(blocks: u32) -> Result<u8> {
     if !blocks.is_power_of_two() {
         return Err(Error::InvalidImage(format!(
-            "blob meta {what} block count must be a power of two"
+            "blob meta block count must be a non-zero power of two: {blocks}"
         )));
     }
-    let bits = blocks.trailing_zeros() as u8;
-    if bits > BLOB_METADATA_MAX_BLOCK_BITS {
+
+    let bits = blocks.ilog2() as u8;
+    if bits > NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS {
         return Err(Error::InvalidImage(format!(
-            "blob meta {what} block count too large: {blocks}"
+            "blob meta block count too large: {blocks}"
         )));
     }
+
     Ok(bits)
-}
-
-fn validate_padding(data: &[u8], header: &BlobMetadataHeader) -> Result<()> {
-    let padding_start = header.records_end() as usize;
-    if data[padding_start..].iter().any(|byte| *byte != 0) {
-        return Err(Error::InvalidImage(
-            "blob meta padding must be zero".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_blob_metadata_crc32(data: &[u8], header: &BlobMetadataHeader) -> Result<()> {
-    let computed = BlobMetadata::compute_crc32(data);
-    if computed != header.crc32() {
-        return Err(Error::InvalidImage(format!(
-            "blob meta header crc32 mismatch: stored {:#010x}, computed {:#010x}",
-            header.crc32(),
-            computed
-        )));
-    }
-    Ok(())
-}
-
-fn validate_tables(
-    block_groups: &[BlobMetadataBlockGroup],
-    chunks: &[BlobMetadataChunk],
-    block_group_block_count: u32,
-) -> Result<()> {
-    validate_block_groups(block_groups, block_group_block_count)?;
-    validate_chunks(block_groups, chunks)
-}
-
-/// Infer the per-block group block-count exponent from the block group table.
-///
-/// - A redirect (ondemand) blob copies block groups of arbitrary sizes from its
-///   source blobs and never uses the block-to-block group mapping, so it keeps the
-///   default exponent.
-/// - A single-block group blob's only block group is also its (possibly short) tail, so
-///   the exponent is the next power of two covering it: every block then
-///   shifts to block group index 0.
-/// - Otherwise the first block group is a full block group and must be a power of two.
-fn infer_block_group_block_bits(block_groups: &[BlobMetadataBlockGroup]) -> Result<u8> {
-    let default_bits = BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT.trailing_zeros() as u8;
-    if block_groups.is_empty() || block_groups.iter().any(BlobMetadataBlockGroup::is_redirect) {
-        return Ok(default_bits);
-    }
-    if block_groups.len() == 1 {
-        let covering = block_groups[0]
-            .uncompressed_block_count()
-            .next_power_of_two();
-        return block_count_to_bits(covering, "block_group");
-    }
-    block_count_to_bits(block_groups[0].uncompressed_block_count(), "block_group")
-}
-
-fn validate_block_groups(
-    block_groups: &[BlobMetadataBlockGroup],
-    block_group_block_count: u32,
-) -> Result<()> {
-    if block_group_block_count == 0 {
-        return Err(Error::InvalidImage(
-            "blob meta block_group block count must be non-zero".to_string(),
-        ));
-    }
-    // Redirect blobs copy block groups from arbitrary source blobs, so their block group
-    // sizes are inherently non-uniform and `block_group_index_for_byte_offset` is
-    // never used on them. Only the dense-layout and compressed-overlap
-    // invariants apply.
-    let allow_nonuniform = block_groups.iter().any(BlobMetadataBlockGroup::is_redirect);
-    let mut previous_uncompressed_block_end = 0u64;
-    let mut previous_compressed_byte_end = 0u64;
-    let last_index = block_groups.len().saturating_sub(1);
-    for (index, block_group) in block_groups.iter().enumerate() {
-        block_group
-            .validate()
-            .with_context(|| format!("invalid blob meta block_group {index}"))?;
-        if block_group.uncompressed_block_offset() != previous_uncompressed_block_end {
-            return Err(Error::InvalidImage(format!(
-                "blob meta block groups must be dense at index {index}"
-            )));
-        }
-        // Block groups pack whole blocks up to the compress size regardless of chunk
-        // boundaries, so every block group but the last holds exactly
-        // `block_group_block_count` blocks and the last holds at most that many.
-        if !allow_nonuniform {
-            if index < last_index {
-                if block_group.uncompressed_block_count() != block_group_block_count {
-                    return Err(Error::InvalidImage(format!(
-                        "blob meta block group {index} must be exactly {block_group_block_count} blocks, got {}",
-                        block_group.uncompressed_block_count()
-                    )));
-                }
-            } else if block_group.uncompressed_block_count() > block_group_block_count {
-                return Err(Error::InvalidImage(format!(
-                    "blob meta final block group {index} exceeds {block_group_block_count} blocks, got {}",
-                    block_group.uncompressed_block_count()
-                )));
-            }
-        }
-        // Encoded payloads are packed back-to-back in the data region, so each
-        // block group must start at or after the previous block group's byte end. No block
-        // alignment is required between compressed block groups.
-        if index > 0 && block_group.compressed_byte_offset() < previous_compressed_byte_end {
-            return Err(Error::InvalidImage(format!(
-                "blob meta block groups overlap compressed ranges at index {index}"
-            )));
-        }
-        previous_uncompressed_block_end = block_group
-            .uncompressed_block_offset()
-            .checked_add(block_group.uncompressed_block_count() as u64)
-            .ok_or_else(|| {
-                Error::Overflow(
-                    "blob meta block_group uncompressed block range overflow".to_string(),
-                )
-            })?;
-        previous_compressed_byte_end = block_group.compressed_byte_end();
-    }
-    Ok(())
-}
-
-fn validate_chunks(
-    block_groups: &[BlobMetadataBlockGroup],
-    chunks: &[BlobMetadataChunk],
-) -> Result<()> {
-    let total_blocks = block_groups
-        .last()
-        .map(|block_group| {
-            block_group.uncompressed_block_offset() + block_group.uncompressed_block_count() as u64
-        })
-        .unwrap_or(0);
-    for (index, chunk) in chunks.iter().enumerate() {
-        chunk
-            .validate()
-            .with_context(|| format!("invalid blob meta chunk {index}"))?;
-        // Chunks are independent of block groups; they only need to point at a valid
-        // block range inside the dense uncompressed address space.
-        let chunk_end = chunk
-            .uncompressed_block_offset()
-            .checked_add(chunk.uncompressed_block_count() as u64)
-            .ok_or_else(|| Error::Overflow("blob meta chunk block range overflow".to_string()))?;
-        if chunk_end > total_blocks {
-            return Err(Error::InvalidImage(format!(
-                "blob meta chunk {index} exceeds the blob block range"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn block_groups_total_uncompressed_size(block_groups: &[BlobMetadataBlockGroup]) -> u64 {
-    block_groups
-        .last()
-        .map(BlobMetadataBlockGroup::uncompressed_byte_end)
-        .unwrap_or(0)
-}
-
-fn block_groups_total_compressed_size(block_groups: &[BlobMetadataBlockGroup]) -> u64 {
-    block_groups
-        .last()
-        .map(BlobMetadataBlockGroup::compressed_byte_end)
-        .unwrap_or(0)
-}
-
-fn mapped_chunks<'a>(data: &'a [u8], header: &BlobMetadataHeader) -> &'a [BlobMetadataChunk] {
-    let offset = header.chunks_offset() as usize;
-    let byte_len = header.chunk_count() as usize * size_of::<BlobMetadataChunk>();
-    let bytes = &data[offset..offset + byte_len];
-    let ptr = bytes.as_ptr().cast::<BlobMetadataChunk>();
-    unsafe { std::slice::from_raw_parts(ptr, header.chunk_count() as usize) }
-}
-
-fn mapped_block_groups<'a>(
-    data: &'a [u8],
-    header: &BlobMetadataHeader,
-) -> &'a [BlobMetadataBlockGroup] {
-    let offset = header.block_groups_offset() as usize;
-    let byte_len = header.block_group_count() as usize * size_of::<BlobMetadataBlockGroup>();
-    let bytes = &data[offset..offset + byte_len];
-    let ptr = bytes.as_ptr().cast::<BlobMetadataBlockGroup>();
-    unsafe { std::slice::from_raw_parts(ptr, header.block_group_count() as usize) }
-}
-
-fn read_u8(reader: &mut dyn Read) -> Result<u8> {
-    let mut buf = [0u8; 1];
-    reader.read_exact(&mut buf)?;
-    Ok(buf[0])
-}
-
-fn read_magic(reader: &mut dyn Read) -> Result<[u8; 8]> {
-    let mut buf = [0u8; 8];
-    reader.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-fn read_block_group_reserved(reader: &mut dyn Read) -> Result<[u8; 6]> {
-    let mut buf = [0u8; 6];
-    reader.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-fn read_digest(reader: &mut dyn Read) -> Result<[u8; 32]> {
-    let mut digest = [0u8; 32];
-    reader.read_exact(&mut digest)?;
-    Ok(digest)
 }
 
 #[cfg(test)]
@@ -1320,137 +1363,241 @@ mod tests {
         *blake3::hash(bytes).as_bytes()
     }
 
+    fn chunk(payload: &[u8], block_offset: u64, block_count: u32) -> BlobMetadataChunk {
+        BlobMetadataChunk::new(digest(payload), block_offset, block_count).unwrap()
+    }
+
     fn block_group(
-        uncompressed_block_offset: u64,
-        uncompressed_block_count: u32,
-        compressed_byte_offset: u64,
+        block_offset: u64,
+        block_count: u32,
+        compressed_offset: u64,
         compressed_size: u32,
         payload: &[u8],
     ) -> BlobMetadataBlockGroup {
         BlobMetadataBlockGroup::new(
-            uncompressed_block_offset,
-            uncompressed_block_count,
-            compressed_byte_offset,
+            block_offset,
+            block_count,
+            compressed_offset,
             compressed_size,
             crc32c::crc32c(payload),
         )
         .unwrap()
     }
 
-    fn chunk(
-        payload: &[u8],
-        uncompressed_block_offset: u64,
-        uncompressed_block_count: u32,
-    ) -> BlobMetadataChunk {
-        BlobMetadataChunk::new(
-            digest(payload),
-            uncompressed_block_offset,
-            uncompressed_block_count,
+    fn build(
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+    ) -> Result<BlobMetadata> {
+        BlobMetadata::new(BlobMetadataCompressor::None, 1, chunks, block_groups)
+    }
+
+    fn blob_metadata() -> BlobMetadata {
+        let payload = vec![0x33; EROFS_BLOCK_SIZE as usize];
+        BlobMetadata::new(
+            BlobMetadataCompressor::None,
+            1,
+            vec![chunk(&payload, 0, 1)],
+            vec![block_group(0, 1, 0, EROFS_BLOCK_SIZE, &payload)],
         )
         .unwrap()
     }
 
+    fn sealed_metadata() -> Vec<u8> {
+        let mut raw = Vec::new();
+        blob_metadata().write_to(&mut raw).unwrap();
+        raw
+    }
+
     #[test]
-    fn blob_metadata_round_trips_through_mmap() {
+    fn accessors_expose_the_sealed_tables() {
+        let blob_metadata = blob_metadata();
+        let header = blob_metadata.header();
+
+        assert_eq!(header.version(), NYDUS_BLOB_METADATA_VERSION);
+        assert_eq!(header.compressor(), BlobMetadataCompressor::None);
+        assert_eq!(header.digester(), BlobMetadataDigester::Blake3);
+        assert_eq!(header.chunks_offset(), 4096);
+        assert_eq!(header.chunk_table_size(), 48);
+        assert_eq!(header.block_groups_offset(), 4144);
+        assert_eq!(header.block_group_table_size(), 40);
+        assert_eq!(header.used_size(), 4184);
+        assert_eq!(header.padded_size(), 8192);
+        assert_eq!(header.chunk_block_count(), 1);
+        assert_eq!(header.chunk_size(), EROFS_BLOCK_SIZE);
+        assert_eq!(header.block_group_block_count(), 1);
+        assert_ne!(header.crc32(), 0);
+
+        assert_eq!(blob_metadata.chunk_count(), 1);
+        assert_eq!(blob_metadata.block_group_count(), 1);
+        assert_eq!(blob_metadata.chunk_block_count(), 1);
+        assert_eq!(blob_metadata.chunk_size(), EROFS_BLOCK_SIZE);
+        assert_eq!(blob_metadata.compressor(), BlobMetadataCompressor::None);
+        assert_eq!(blob_metadata.digester(), BlobMetadataDigester::Blake3);
+        assert!(!blob_metadata.is_redirect());
+        assert_eq!(blob_metadata.uncompressed_block_count(), 1);
+        assert_eq!(blob_metadata.uncompressed_size(), 4096);
+        assert_eq!(blob_metadata.compressed_end(), 4096);
+        assert_eq!(blob_metadata.padded_size(), 8192);
+
+        let chunk = &blob_metadata.chunks()[0];
+        assert_eq!(chunk.uncompressed_block_offset(), 0);
+        assert_eq!(chunk.uncompressed_block_count(), 1);
+        assert_eq!(chunk.uncompressed_offset(), 0);
+        assert_eq!(chunk.uncompressed_size(), 4096);
+
+        let block_group = blob_metadata.block_group(0).unwrap();
+        assert_eq!(block_group.uncompressed_block_offset(), 0);
+        assert_eq!(block_group.uncompressed_block_count(), 1);
+        assert_eq!(block_group.uncompressed_offset(), 0);
+        assert_eq!(block_group.uncompressed_size(), 4096);
+        assert_eq!(block_group.compressed_offset(), 0);
+        assert_eq!(block_group.compressed_size(), EROFS_BLOCK_SIZE);
+        assert!(blob_metadata.block_group(1).is_none());
+    }
+
+    #[test]
+    fn round_trips_through_a_sidecar_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.meta");
-        let blob_id = [0x5au8; SHA256_DIGEST_SIZE];
         let payload_a = vec![0x11; EROFS_BLOCK_SIZE as usize];
         let payload_b = vec![0x22; EROFS_BLOCK_SIZE as usize];
-        let block_group_payload = [payload_a.as_slice(), payload_b.as_slice()].concat();
-        let blob_metadata = BlobMetadata::from_parts(
-            blob_id,
+        let both = [payload_a.as_slice(), payload_b.as_slice()].concat();
+        let blob_metadata = BlobMetadata::new(
+            BlobMetadataCompressor::None,
             1,
-            vec![block_group(0, 2, 8192, 8192, &block_group_payload)],
             vec![chunk(&payload_a, 0, 1), chunk(&payload_b, 1, 1)],
+            vec![block_group(0, 2, 8192, 8192, &both)],
         )
         .unwrap();
-
         blob_metadata.save(&path).unwrap();
-        let loaded = BlobMetadata::load(&path).unwrap();
 
-        assert_eq!(loaded.header().chunk_count(), 2);
-        assert_eq!(loaded.header().block_group_count(), 1);
-        assert_eq!(loaded.header().version(), BLOB_METADATA_VERSION);
-        assert_eq!(loaded.header().chunk_bytes(), 96);
-        assert_eq!(loaded.header().block_group_bytes(), 40);
-        assert_eq!(loaded.header().records_end(), 4096 + 96 + 40);
-        assert_eq!(loaded.header().metadata_size(), 8192);
-        assert_eq!(loaded.header().chunk_size(), EROFS_BLOCK_SIZE);
+        let loaded = BlobMetadata::from_path(&path, false).unwrap();
+        assert_eq!(loaded.chunk_count(), 2);
+        assert_eq!(loaded.block_group_count(), 1);
         assert_eq!(loaded.header().block_group_block_count(), 2);
-        assert_eq!(loaded.header().compressor(), BlobMetadataCompressor::None);
-        assert_eq!(loaded.header().digester(), BlobMetadataDigester::Blake3);
-        assert_ne!(loaded.header().crc32(), 0);
-        assert_eq!(loaded.block_groups()[0].compressed_byte_offset(), 8192);
         assert_eq!(loaded.chunks()[1].digest(), &digest(&payload_b));
         assert_eq!(loaded.chunks()[1].uncompressed_block_offset(), 1);
-        assert_eq!(loaded.block_group_index_for_byte_offset(4096), Some(0));
-        assert_eq!(loaded.total_uncompressed_size(), 8192);
+        assert_eq!(loaded.block_groups()[0].compressed_offset(), 8192);
+        assert_eq!(
+            loaded.block_group_index_from_uncompressed_offset(4096),
+            Some(0)
+        );
+        assert_eq!(loaded.uncompressed_size(), 8192);
+
+        BlobMetadata::from_path(&path, true).unwrap();
     }
 
     #[test]
-    fn blob_metadata_header_crc32_covers_full_metadata() {
-        let payload = vec![0x33; EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = BlobMetadata::from_parts(
-            [0x7bu8; SHA256_DIGEST_SIZE],
-            1,
-            vec![block_group(0, 1, 0, 4096, &payload)],
-            vec![chunk(&payload, 0, 1)],
-        )
-        .unwrap();
-        let mut raw = Vec::new();
-        blob_metadata.write_to(&mut raw).unwrap();
+    fn the_header_crc32_seals_the_full_serialized_metadata() {
+        let raw = sealed_metadata();
 
-        let stored_crc32 =
-            u32::from_le_bytes(raw[BLOB_METADATA_HEADER_CRC32_FIELD].try_into().unwrap());
-        raw[BLOB_METADATA_HEADER_CRC32_FIELD].fill(0);
+        let stored_crc32 = u32::from_le_bytes(
+            raw[NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD]
+                .try_into()
+                .unwrap(),
+        );
+        let mut zeroed = raw.clone();
+        zeroed[NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD].fill(0);
 
-        assert_eq!(stored_crc32, crc32c::crc32c(&raw));
+        assert_eq!(stored_crc32, crc32c::crc32c(&zeroed));
     }
 
     #[test]
-    fn blob_metadata_read_keeps_but_checked_read_rejects_bad_header_crc32() {
-        let payload = vec![0x55; EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = BlobMetadata::from_parts(
-            [0x8cu8; SHA256_DIGEST_SIZE],
-            1,
-            vec![block_group(0, 1, 0, 4096, &payload)],
-            vec![chunk(&payload, 0, 1)],
-        )
-        .unwrap();
-        let mut raw = Vec::new();
-        blob_metadata.write_to(&mut raw).unwrap();
-        raw[BLOB_METADATA_HEADER_CRC32_FIELD.start] ^= 0xff;
-        let corrupted_crc32 =
-            u32::from_le_bytes(raw[BLOB_METADATA_HEADER_CRC32_FIELD].try_into().unwrap());
+    fn an_unchecked_read_keeps_a_bad_crc32_and_a_checked_read_rejects_it() {
+        let mut raw = sealed_metadata();
+        raw[NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD.start] ^= 0xff;
+        let corrupted_crc32 = u32::from_le_bytes(
+            raw[NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD]
+                .try_into()
+                .unwrap(),
+        );
 
-        let loaded = BlobMetadata::loader().from_bytes(&raw).unwrap();
-
+        let loaded = BlobMetadata::from_bytes(&raw, false).unwrap();
         assert_eq!(loaded.header().crc32(), corrupted_crc32);
-        let err = match BlobMetadata::loader().verify_crc32().from_bytes(&raw) {
-            Ok(_) => panic!("corrupted blob meta crc32 should be rejected"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("crc32"));
+
+        let err = BlobMetadata::from_bytes(&raw, true).unwrap_err();
+        assert!(err.to_string().contains("crc32"), "{err}");
     }
 
     #[test]
-    fn blob_metadata_rejects_legacy_magics() {
+    fn the_reserved_tail_is_ignored_but_fails_the_crc32_check() {
+        let mut raw = sealed_metadata();
+        raw[NYDUS_BLOB_METADATA_HEADER_SIZE - 1] = 0xff;
+
+        BlobMetadata::from_bytes(&raw, false).unwrap();
+        let err = BlobMetadata::from_bytes(&raw, true).unwrap_err();
+        assert!(err.to_string().contains("crc32"), "{err}");
+    }
+
+    #[test]
+    fn header_mutations_follow_the_compat_rules() {
+        let base_flags = BlobMetadataDigester::Blake3.flag().bits();
+        let cases: [(&str, usize, [u8; 4], Option<&str>); 4] = [
+            (
+                "future version is readable",
+                8,
+                (NYDUS_BLOB_METADATA_VERSION + 1).to_le_bytes(),
+                None,
+            ),
+            (
+                "unknown compat flag is ignored",
+                12,
+                (base_flags | (1u32 << 31)).to_le_bytes(),
+                None,
+            ),
+            (
+                "unknown incompat flag rejects",
+                12,
+                (base_flags | (1u32 << 15)).to_le_bytes(),
+                Some("incompat"),
+            ),
+            (
+                "nonzero reserved tail is readable",
+                NYDUS_BLOB_METADATA_HEADER_SIZE - 4,
+                [0, 0, 0, 0xff],
+                None,
+            ),
+        ];
+
+        for (case, offset, value, expected_err) in cases {
+            let mut raw = sealed_metadata();
+            raw[offset..offset + 4].copy_from_slice(&value);
+
+            let result = BlobMetadata::from_bytes(&raw, false);
+            match expected_err {
+                None => {
+                    result.unwrap_or_else(|err| panic!("{case}: {err}"));
+                }
+                Some(expected) => {
+                    let err = match result {
+                        Ok(_) => panic!("{case}: should be rejected"),
+                        Err(err) => err,
+                    };
+                    assert!(err.to_string().contains(expected), "{case}: {err}");
+                }
+            }
+        }
+
+        let mut future = sealed_metadata();
+        future[8..12].copy_from_slice(&(NYDUS_BLOB_METADATA_VERSION + 1).to_le_bytes());
+        let loaded = BlobMetadata::from_bytes(&future, false).unwrap();
+        assert_eq!(loaded.header().version(), NYDUS_BLOB_METADATA_VERSION + 1);
+    }
+
+    #[test]
+    fn legacy_magics_reject() {
         let dir = tempdir().unwrap();
 
-        // Legacy magics from earlier format generations must all be rejected:
-        // the old nydus compression-context magic and the v0 u32 "LPBM" magic
-        // (which serialized as "MBPL" on disk).
         for (name, magic) in [
             ("nydus.blob.meta", 0xb10b_b10bu32),
             ("v0.blob.meta", 0x4c50_424du32),
         ] {
             let path = dir.path().join(name);
-            let mut raw = vec![0u8; BLOB_METADATA_HEADER_SIZE as usize];
+            let mut raw = vec![0u8; NYDUS_BLOB_METADATA_HEADER_SIZE];
             raw[..4].copy_from_slice(&magic.to_le_bytes());
             std::fs::write(&path, raw).unwrap();
 
-            let err = match BlobMetadata::load(&path) {
+            let err = match BlobMetadata::from_path(&path, false) {
                 Ok(_) => panic!("{name}: legacy magic should be rejected"),
                 Err(err) => err,
             };
@@ -1459,84 +1606,140 @@ mod tests {
     }
 
     #[test]
-    fn blob_metadata_version_is_informational_and_flags_split_compat_incompat() {
-        let payload = vec![0x66; EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = BlobMetadata::from_parts(
-            [0x1au8; SHA256_DIGEST_SIZE],
-            1,
-            vec![block_group(0, 1, 0, 4096, &payload)],
-            vec![chunk(&payload, 0, 1)],
-        )
-        .unwrap();
-        let mut raw = Vec::new();
-        blob_metadata.write_to(&mut raw).unwrap();
+    fn undersized_inputs_reject() {
+        let raw = sealed_metadata();
 
-        // A future format generation is readable: version is informational.
-        let mut future = raw.clone();
-        future[8..12].copy_from_slice(&(BLOB_METADATA_VERSION + 1).to_le_bytes());
-        let loaded = BlobMetadata::loader()
-            .from_bytes(&future)
-            .expect("future version must be readable");
-        assert_eq!(loaded.header().version(), BLOB_METADATA_VERSION + 1);
+        let err = BlobMetadata::from_bytes(&raw[..10], false).unwrap_err();
+        assert!(err.to_string().contains("too small"), "{err}");
 
-        // An unknown compat (high-half) flag bit is ignored.
-        let mut compat = raw.clone();
-        let flags = u32::from_le_bytes(compat[12..16].try_into().unwrap()) | (1 << 31);
-        compat[12..16].copy_from_slice(&flags.to_le_bytes());
-        BlobMetadata::loader()
-            .from_bytes(&compat)
-            .expect("unknown compat flag must be ignored");
+        let err = BlobMetadata::from_bytes(&raw[..raw.len() - 1], false).unwrap_err();
+        assert!(err.to_string().contains("size mismatch"), "{err}");
 
-        // An unknown incompat (low-half) flag bit rejects the file.
-        let mut incompat = raw;
-        let flags = u32::from_le_bytes(incompat[12..16].try_into().unwrap()) | (1 << 15);
-        incompat[12..16].copy_from_slice(&flags.to_le_bytes());
-        let err = match BlobMetadata::loader().from_bytes(&incompat) {
-            Ok(_) => panic!("unknown incompat flag should be rejected"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("incompat"), "{err}");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("short.blob.meta");
+        std::fs::write(&path, &raw[..10]).unwrap();
+        let err = BlobMetadata::from_path(&path, false).unwrap_err();
+        assert!(err.to_string().contains("too small"), "{err}");
     }
 
     #[test]
-    fn blob_metadata_ignores_reserved_tail_but_crc_check_catches_corruption() {
-        let payload = vec![0x77; EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = BlobMetadata::from_parts(
-            [0x2bu8; SHA256_DIGEST_SIZE],
-            1,
-            vec![block_group(0, 1, 0, 4096, &payload)],
-            vec![chunk(&payload, 0, 1)],
-        )
-        .unwrap();
-        let mut raw = Vec::new();
-        blob_metadata.write_to(&mut raw).unwrap();
-        // Poke a byte inside the reserved header tail (between the last field
-        // and the end of the 4 KiB header block): a future writer may place
-        // compat fields there, so the unchecked read must ignore it — while
-        // the crc-checked read still flags it, since this file's crc was
-        // sealed over a zero tail.
-        raw[BLOB_METADATA_HEADER_SIZE as usize - 1] = 0xff;
+    fn nonzero_tail_padding_rejects() {
+        let mut raw = sealed_metadata();
+        let used_size = blob_metadata().header().used_size() as usize;
+        raw[used_size] = 0xff;
 
-        BlobMetadata::loader()
-            .from_bytes(&raw)
-            .expect("nonzero reserved tail must be ignored");
-        let err = match BlobMetadata::loader().verify_crc32().from_bytes(&raw) {
-            Ok(_) => panic!("crc check should catch the unsealed tail change"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("crc32"), "{err}");
+        let err = BlobMetadata::from_bytes(&raw, false).unwrap_err();
+        assert!(err.to_string().contains("padding must be zero"), "{err}");
     }
 
     #[test]
-    fn block_group_index_for_byte_offset_maps_constant_sized_block_groups_by_division() {
-        // Block groups pack blocks up to the compress size, so every block group but the
-        // last holds exactly `block_group_block_count` blocks (2 here) and the index
-        // is a single division. Chunk boundaries are irrelevant to this mapping.
+    fn invalid_entries_reject() {
+        let cases = [
+            (
+                "zero uncompressed block count",
+                BlobMetadataBlockGroup::new(0, 0, 0, 4096, 0),
+                "must be non-zero",
+            ),
+            (
+                "zero compressed size",
+                BlobMetadataBlockGroup::new(0, 1, 0, 0, 0),
+                "must be non-zero",
+            ),
+            (
+                "uncompressed byte offset overflow",
+                BlobMetadataBlockGroup::new(u64::MAX, 1, 0, 4096, 0),
+                "overflow",
+            ),
+            (
+                "compressed byte range overflow",
+                BlobMetadataBlockGroup::new(0, 1, u64::MAX, 4096, 0),
+                "overflow",
+            ),
+        ];
+
+        for (case, result, expected) in cases {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains(expected), "{case}: {err}");
+        }
+
+        let err = BlobMetadataChunk::new([0u8; 32], 0, 0).unwrap_err();
+        assert!(err.to_string().contains("must be non-zero"), "{err}");
+
+        let err = BlobMetadataChunk::new([0u8; 32], u64::MAX, 1).unwrap_err();
+        assert!(err.to_string().contains("overflow"), "{err}");
+
+        let valid = BlobMetadataBlockGroup::new(0, 1, 0, 4096, 0)
+            .unwrap()
+            .to_bytes();
+
+        let mut orphan_source = valid;
+        write_u32_at(&mut orphan_source, 28, 7);
+        let err = BlobMetadataBlockGroup::from_bytes(&orphan_source).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a source blob index"),
+            "{err}"
+        );
+
+        let mut dirty_reserved = valid;
+        dirty_reserved[34] = 0xff;
+        let err = BlobMetadataBlockGroup::from_bytes(&dirty_reserved).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+
+        let mut dirty_chunk = chunk(&[0x11], 0, 1).to_bytes();
+        write_u32_at(&mut dirty_chunk, 44, 1);
+        let err = BlobMetadataChunk::from_bytes(&dirty_chunk).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn a_chunk_past_the_block_groups_rejects() {
+        let one = vec![0x11; EROFS_BLOCK_SIZE as usize];
+        let err = build(
+            vec![chunk(&one, 1, 1)],
+            vec![block_group(0, 1, 0, EROFS_BLOCK_SIZE, &one)],
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("exceeds the blob block range"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn block_groups_must_be_dense_from_block_zero() {
+        let one = vec![0x11; EROFS_BLOCK_SIZE as usize];
+        let err = build(
+            vec![chunk(&one, 0, 1)],
+            vec![block_group(1, 1, 0, EROFS_BLOCK_SIZE, &one)],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("dense"), "{err}");
+
+        let two = vec![0x22; 2 * EROFS_BLOCK_SIZE as usize];
+        let err = build(
+            vec![chunk(&two, 0, 2)],
+            vec![
+                block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
+                block_group(
+                    3,
+                    2,
+                    2 * EROFS_BLOCK_SIZE as u64,
+                    2 * EROFS_BLOCK_SIZE,
+                    &two,
+                ),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("dense"), "{err}");
+    }
+
+    #[test]
+    fn block_group_index_from_uncompressed_offset_maps_by_division() {
         let two = vec![0x11; 2 * EROFS_BLOCK_SIZE as usize];
         let one = vec![0x22; EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = BlobMetadata::from_parts(
-            [0u8; SHA256_DIGEST_SIZE],
-            1,
+        let blob_metadata = build(
+            vec![chunk(&two, 0, 2), chunk(&two, 2, 2), chunk(&one, 4, 1)],
             vec![
                 block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
                 block_group(
@@ -1548,51 +1751,37 @@ mod tests {
                 ),
                 block_group(4, 1, 4 * EROFS_BLOCK_SIZE as u64, EROFS_BLOCK_SIZE, &one),
             ],
-            vec![chunk(&two, 0, 2), chunk(&two, 2, 2), chunk(&one, 4, 1)],
         )
         .unwrap();
-
         assert_eq!(blob_metadata.header().block_group_block_count(), 2);
+
         let block = EROFS_BLOCK_SIZE as u64;
-        assert_eq!(blob_metadata.block_group_index_for_byte_offset(0), Some(0));
-        assert_eq!(
-            blob_metadata.block_group_index_for_byte_offset(2 * block - 1),
-            Some(0)
-        );
-        assert_eq!(
-            blob_metadata.block_group_index_for_byte_offset(2 * block),
-            Some(1)
-        );
-        assert_eq!(
-            blob_metadata.block_group_index_for_byte_offset(4 * block - 1),
-            Some(1)
-        );
-        // The short final block group still maps by division.
-        assert_eq!(
-            blob_metadata.block_group_index_for_byte_offset(4 * block),
-            Some(2)
-        );
-        assert_eq!(
-            blob_metadata.block_group_index_for_byte_offset(5 * block - 1),
-            Some(2)
-        );
-        // Past the end of the blob.
-        assert_eq!(
-            blob_metadata.block_group_index_for_byte_offset(5 * block),
-            None
-        );
+        let cases = [
+            (0, Some(0)),
+            (2 * block - 1, Some(0)),
+            (2 * block, Some(1)),
+            (4 * block - 1, Some(1)),
+            (4 * block, Some(2)),
+            (5 * block - 1, Some(2)),
+            (5 * block, None),
+        ];
+        for (offset, expected) in cases {
+            assert_eq!(
+                blob_metadata.block_group_index_from_uncompressed_offset(offset),
+                expected,
+                "offset {offset}"
+            );
+        }
     }
 
     #[test]
-    fn validate_block_groups_rejects_non_uniform_block_group_sizes() {
+    fn non_uniform_block_group_sizes_reject() {
         let two = vec![0x11; 2 * EROFS_BLOCK_SIZE as usize];
         let three = vec![0x22; 3 * EROFS_BLOCK_SIZE as usize];
         let one = vec![0x33; EROFS_BLOCK_SIZE as usize];
-        // The first block group fixes the block group block count (2). The middle block group is a
-        // non-final block group of 3 blocks, which must be rejected.
-        let err = match BlobMetadata::from_parts(
-            [0u8; SHA256_DIGEST_SIZE],
-            1,
+
+        let err = build(
+            vec![chunk(&two, 0, 2), chunk(&three, 2, 3), chunk(&one, 5, 1)],
             vec![
                 block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
                 block_group(
@@ -1604,111 +1793,111 @@ mod tests {
                 ),
                 block_group(5, 1, 5 * EROFS_BLOCK_SIZE as u64, EROFS_BLOCK_SIZE, &one),
             ],
-            vec![chunk(&two, 0, 2), chunk(&three, 2, 3), chunk(&one, 5, 1)],
-        ) {
-            Ok(_) => panic!("non-uniform block_group sizes should be rejected"),
-            Err(err) => err,
-        };
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be exactly"), "{err}");
 
-        assert!(err.to_string().contains("must be exactly"));
+        let err = build(
+            vec![chunk(&two, 0, 2), chunk(&three, 2, 3)],
+            vec![
+                block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
+                block_group(
+                    2,
+                    3,
+                    2 * EROFS_BLOCK_SIZE as u64,
+                    3 * EROFS_BLOCK_SIZE,
+                    &three,
+                ),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
     }
 
     #[test]
-    fn single_block_group_blob_uses_covering_power_of_two_exponent() {
-        // A lone block group is also the (possibly short) tail, so its block count
-        // may be any value — 3 here. The header stores the covering exponent
-        // (4 blocks -> bits 2) so every block still shifts to block group index 0.
+    fn a_single_block_group_uses_a_covering_power_of_two_exponent() {
         let three = vec![0x44; 3 * EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = BlobMetadata::from_parts(
-            [0u8; SHA256_DIGEST_SIZE],
-            1,
-            vec![block_group(0, 3, 0, 3 * EROFS_BLOCK_SIZE, &three)],
+        let blob_metadata = build(
             vec![chunk(&three, 0, 3)],
+            vec![block_group(0, 3, 0, 3 * EROFS_BLOCK_SIZE, &three)],
         )
         .unwrap();
 
-        assert_eq!(blob_metadata.header().block_group_block_bits(), 2);
         assert_eq!(blob_metadata.header().block_group_block_count(), 4);
         let block = EROFS_BLOCK_SIZE as u64;
         for index in 0..3u64 {
             assert_eq!(
-                blob_metadata.block_group_index_for_byte_offset(index * block),
+                blob_metadata.block_group_index_from_uncompressed_offset(index * block),
                 Some(0)
             );
         }
         assert_eq!(
-            blob_metadata.block_group_index_for_byte_offset(3 * block),
+            blob_metadata.block_group_index_from_uncompressed_offset(3 * block),
             None
         );
     }
 
     #[test]
-    fn multi_block_group_blob_requires_power_of_two_full_block_groups() {
-        // With more than one block group the first is a full block group and defines the
-        // exponent, so a non-power-of-two size (3 blocks) cannot be encoded.
+    fn multi_block_group_blobs_require_power_of_two_full_block_groups() {
         let three = vec![0x55; 3 * EROFS_BLOCK_SIZE as usize];
         let one = vec![0x66; EROFS_BLOCK_SIZE as usize];
-        let err = match BlobMetadata::from_parts(
-            [0u8; SHA256_DIGEST_SIZE],
-            1,
+        let err = build(
+            vec![chunk(&three, 0, 3), chunk(&one, 3, 1)],
             vec![
                 block_group(0, 3, 0, 3 * EROFS_BLOCK_SIZE, &three),
                 block_group(3, 1, 3 * EROFS_BLOCK_SIZE as u64, EROFS_BLOCK_SIZE, &one),
             ],
-            vec![chunk(&three, 0, 3), chunk(&one, 3, 1)],
-        ) {
-            Ok(_) => panic!("non-power-of-two full block_group should be rejected"),
-            Err(err) => err,
-        };
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("power of two"), "{err}");
     }
 
     #[test]
-    fn validate_block_groups_accepts_packed_non_block_aligned_compressed_offsets() {
+    fn packed_compressed_offsets_need_no_block_alignment() {
         let two = vec![0x11; 2 * EROFS_BLOCK_SIZE as usize];
-        // Block group 1 starts exactly at block group 0's compressed byte end (5000), which
-        // is deliberately not block aligned: compressed block groups pack back-to-back.
-        let blob_metadata = BlobMetadata::from_parts(
-            [0u8; SHA256_DIGEST_SIZE],
-            1,
+        let blob_metadata = build(
+            vec![chunk(&two, 0, 2), chunk(&two, 2, 2)],
             vec![
                 block_group(0, 2, 0, 5000, &two),
                 block_group(2, 2, 5000, 3000, &two),
             ],
-            vec![chunk(&two, 0, 2), chunk(&two, 2, 2)],
         )
         .unwrap();
 
-        assert_eq!(
-            blob_metadata.block_groups()[1].compressed_byte_offset(),
-            5000
-        );
-        assert_eq!(blob_metadata.total_compressed_size(), 8000);
+        assert_eq!(blob_metadata.block_groups()[1].compressed_offset(), 5000);
+        assert_eq!(blob_metadata.compressed_end(), 8000);
     }
 
     #[test]
-    fn validate_block_groups_rejects_overlapping_compressed_ranges() {
+    fn overlapping_compressed_ranges_reject() {
         let two = vec![0x22; 2 * EROFS_BLOCK_SIZE as usize];
-        // Block group 1 starts before block group 0's compressed byte end (5000) -> overlap.
-        let err = match BlobMetadata::from_parts(
-            [0u8; SHA256_DIGEST_SIZE],
-            1,
+        let err = build(
+            vec![chunk(&two, 0, 2), chunk(&two, 2, 2)],
             vec![
                 block_group(0, 2, 0, 5000, &two),
                 block_group(2, 2, 4999, 3000, &two),
             ],
-            vec![chunk(&two, 0, 2), chunk(&two, 2, 2)],
-        ) {
-            Ok(_) => panic!("overlapping compressed ranges should be rejected"),
-            Err(err) => err,
-        };
+        )
+        .unwrap_err();
 
-        assert!(err.to_string().contains("overlap"));
+        assert!(err.to_string().contains("overlap"), "{err}");
     }
 
     #[test]
-    fn redirect_block_group_round_trips_and_reports_source() {
+    fn checked_add_compressed_offset_shifts_and_reseals() {
+        let shifted = blob_metadata().checked_add_compressed_offset(8192).unwrap();
+
+        assert_eq!(shifted.block_groups()[0].compressed_offset(), 8192);
+        assert_eq!(shifted.uncompressed_size(), 4096);
+
+        let mut raw = Vec::new();
+        shifted.write_to(&mut raw).unwrap();
+        BlobMetadata::from_bytes(&raw, true).unwrap();
+    }
+
+    #[test]
+    fn redirect_block_groups_round_trip_and_report_their_source() {
         let payload = vec![0x44; 2 * EROFS_BLOCK_SIZE as usize];
         let crc32 = crc32c::crc32c(&payload);
         let redirect =
@@ -1719,33 +1908,30 @@ mod tests {
         assert_eq!(redirect.source_blob_index(), 3);
         assert_eq!(redirect.source_block_group_index(), 7);
 
-        let mut raw = Vec::new();
-        redirect.write_to(&mut raw).unwrap();
-        assert_eq!(raw.len(), 40);
-        let loaded = BlobMetadataBlockGroup::read_from(&mut Cursor::new(&raw)).unwrap();
-        assert_eq!(loaded, redirect);
+        let mut written = Vec::new();
+        redirect.write_to(&mut written).unwrap();
+        let bytes: [u8; 40] = written.as_slice().try_into().unwrap();
+        assert_eq!(
+            BlobMetadataBlockGroup::from_bytes(&bytes).unwrap(),
+            redirect
+        );
 
-        // Normal block groups stay non-redirect after a round trip.
         let normal = block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &payload);
         assert!(!normal.is_redirect());
-        let mut raw = Vec::new();
-        normal.write_to(&mut raw).unwrap();
-        let loaded = BlobMetadataBlockGroup::read_from(&mut Cursor::new(&raw)).unwrap();
+        let loaded = BlobMetadataBlockGroup::from_bytes(&normal.to_bytes()).unwrap();
         assert!(!loaded.is_redirect());
         assert_eq!(loaded.source_block_group_index(), 0);
     }
 
     #[test]
-    fn redirect_block_group_rejects_zero_source_blob_index() {
-        let err = match BlobMetadataBlockGroup::new_redirect(0, 1, 0, EROFS_BLOCK_SIZE, 0, 0, 1) {
-            Ok(_) => panic!("zero source blob index should be rejected"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("non-zero"));
+    fn a_redirect_with_a_zero_source_blob_index_rejects() {
+        let err =
+            BlobMetadataBlockGroup::new_redirect(0, 1, 0, EROFS_BLOCK_SIZE, 0, 0, 1).unwrap_err();
+        assert!(err.to_string().contains("non-zero"), "{err}");
     }
 
     #[test]
-    fn redirect_blob_metadata_allows_non_uniform_block_groups_and_round_trips() {
+    fn a_redirect_blob_allows_non_uniform_block_groups_and_round_trips() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("ondemand.blob.meta");
         let two = vec![0x55; 2 * EROFS_BLOCK_SIZE as usize];
@@ -1784,24 +1970,22 @@ mod tests {
             .unwrap(),
         ];
 
-        let blob_metadata = BlobMetadata::from_parts(
-            [0x9du8; SHA256_DIGEST_SIZE],
-            BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
-            block_groups.clone(),
+        let blob_metadata = BlobMetadata::new(
+            BlobMetadataCompressor::None,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),
+            block_groups.clone(),
         )
         .unwrap();
-        assert!(blob_metadata.is_redirect_blob());
-        // Redirect block groups are non-uniform and never use the block-to-block group
-        // mapping, so the header keeps the default exponent.
+        assert!(blob_metadata.is_redirect());
         assert_eq!(
-            blob_metadata.header().block_group_block_bits(),
-            BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT.trailing_zeros() as u8
+            blob_metadata.header().block_group_block_count(),
+            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT
         );
 
         blob_metadata.save(&path).unwrap();
-        let loaded = BlobMetadata::load(&path).unwrap();
-        assert!(loaded.is_redirect_blob());
+        let loaded = BlobMetadata::from_path(&path, false).unwrap();
+        assert!(loaded.is_redirect());
         assert_eq!(loaded.block_groups(), block_groups.as_slice());
         assert_eq!(loaded.block_groups()[1].source_blob_index(), 2);
         assert_eq!(loaded.block_groups()[2].source_block_group_index(), 9);

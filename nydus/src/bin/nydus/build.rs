@@ -2,7 +2,10 @@ use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
 use nydus::build::{build_image, BuildImageOptions, Image};
 use nydus::error::{Context, Error, Result};
-use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BLOB_METADATA_SUFFIX};
+use nydus_format::blob::{
+    BlobFooter, BlobMetadata, BlobMetadataCompressor, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
+    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+};
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
@@ -45,7 +48,10 @@ pub struct BuildCommand {
 
     #[arg(
         long,
-        default_value = "1MiB",
+        default_value = format!(
+            "{}MiB",
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64 / bytesize::MIB
+        ),
         env = "NYDUS_BUILD_CHUNK_SIZE",
         help = "Specify the file chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned). The value needs to be set with human readable format, for example: 4kib, 1mib"
     )]
@@ -53,7 +59,10 @@ pub struct BuildCommand {
 
     #[arg(
         long,
-        default_value = "4MiB",
+        default_value = format!(
+            "{}MiB",
+            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE as u64 / bytesize::MIB
+        ),
         env = "NYDUS_BUILD_BLOCK_GROUP_SIZE",
         help = "Specify the uncompressed size of each block group, the unit of compression and of a single backend read (must be a power of two, >= 1MiB, and >= the chunk size). The value needs to be set with human readable format, for example: 4mib, 16mib"
     )]
@@ -222,7 +231,7 @@ impl BuildCommand {
     /// (`<full_blob>.blob.meta`) and returns its path.
     fn save_blob_metadata(image: &Image, full_blob_path: &Path) -> Result<PathBuf> {
         let mut path = full_blob_path.to_path_buf().into_os_string();
-        path.push(BLOB_METADATA_SUFFIX);
+        path.push(NYDUS_BLOB_METADATA_SUFFIX);
 
         let blob_metadata_path: PathBuf = path.into();
         image.blob_metadata.save(&blob_metadata_path)?;
@@ -401,8 +410,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         block_group_count: summary.blob_metadata.block_group_count().to_string(),
         chunk_digester: summary.blob_metadata.digester().to_string(),
         chunk_compressor: summary.blob_metadata.compressor().to_string(),
-        blob_compressed_size: summary.blob_metadata.total_compressed_size().to_string(),
-        blob_uncompressed_size: summary.blob_metadata.total_uncompressed_size().to_string(),
+        blob_compressed_size: summary.blob_metadata.compressed_end().to_string(),
+        blob_uncompressed_size: summary.blob_metadata.uncompressed_size().to_string(),
         compressed_data_offset: summary.blob_footer.compressed_data_offset().to_string(),
         compressed_data_size: summary.blob_footer.compressed_data_size().to_string(),
         bootstrap_offset: summary.blob_footer.bootstrap_offset().to_string(),

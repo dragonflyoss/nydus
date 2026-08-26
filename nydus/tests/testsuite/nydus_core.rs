@@ -88,23 +88,26 @@ fn build_test_image_with_layout(
     let blob_dir = root.join("blobs");
     fs::create_dir_all(&blob_dir).unwrap();
     let staging = blob_dir.join("staging");
-    let mut writer = BlobWriter::new_with_compressor(
-        &staging,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+    // Block group size pinned to 1 MiB (the chunk size) so the corpus above
+    // actually spans several block groups.
+    let mut writer = BlobWriter::from_writer(
+        fs::File::create(&staging).unwrap(),
+        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
     writer.finish().unwrap();
 
     let data_blob_id = writer.data_digest();
-    let blob_metadata = writer.blob_metadata(data_blob_id, 0).unwrap();
+    let blob_metadata = writer.blob_metadata(0).unwrap();
     let blocks = writer.total_blocks();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
     let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id)];
@@ -262,16 +265,18 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let blob_dir = dir.path().join("second-blobs");
     fs::create_dir_all(&blob_dir).unwrap();
     let staging = blob_dir.join("staging");
-    let mut writer = BlobWriter::new_with_compressor(
-        &staging,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+    // Same pinned 1 MiB block group geometry as build_test_image_with_layout.
+    let mut writer = BlobWriter::from_writer(
+        fs::File::create(&staging).unwrap(),
+        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_format::blob::BLOB_METADATA_DEFAULT_CHUNK_SIZE,
+        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();

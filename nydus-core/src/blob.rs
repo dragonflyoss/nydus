@@ -130,7 +130,7 @@ impl Blobs {
                     blocks: info.blocks,
                     cache_size,
                     cache_path,
-                    is_redirect: cache.is_redirect_blob(),
+                    is_redirect: cache.is_redirect(),
                 })
             })
             .collect()

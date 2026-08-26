@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{BlobBackend, ReadContext};
-use nydus_format::blob::{BlobFooter, BlobMetadata, BLOB_METADATA_SUFFIX};
+use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
 use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 
 #[derive(Clone)]
@@ -99,7 +99,10 @@ impl Local {
             )
         })?;
 
-        let blob_metadata_name = format!("{}{BLOB_METADATA_SUFFIX}", file_name.to_string_lossy());
+        let blob_metadata_name = format!(
+            "{}{NYDUS_BLOB_METADATA_SUFFIX}",
+            file_name.to_string_lossy()
+        );
         Ok(self.root.join(blob_metadata_name))
     }
 
@@ -124,8 +127,8 @@ impl Local {
     }
 
     /// Look up (or resolve and memoise) the source entry for `blob_id`. The
-    /// hit path is a single read-lock round-trip; resolution (which hashes the
-    /// source file) runs without holding the lock, exactly as before.
+    /// hit path is a single read-lock round-trip; resolution runs without
+    /// holding the lock, exactly as before.
     fn source_entry(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<SourceEntry>> {
         if let Some(entry) = self.sources.read().unwrap().get(blob_id).cloned() {
             return Ok(entry);
@@ -133,14 +136,14 @@ impl Local {
 
         let exact = self.root.join(hex_string(blob_id));
         if exact.is_file() {
-            if sha256_file(&exact).map_err(io::Error::other)? != *blob_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("local source blob digest mismatch: {}", exact.display()),
-                ));
-            }
-            // The check above proves the whole file hashes to `blob_id`, so it
-            // doubles as the cache key.
+            // The store is content-addressed: the file name is the digest
+            // claim and doubles as the cache key. No full-file hash here —
+            // it costs an O(blob) cold read on every daemon start (the
+            // dominant part of ublk/fanotify mount-ready and FUSE/NBD
+            // first-read latency). The store is populated by digest-verified
+            // downloads, and runtime corruption is caught by the mandatory
+            // per-block-group CRC32C on every data read and the CRC32 over
+            // the blob meta.
             let source = probe_full_blob_source(&exact, *blob_id)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -195,10 +198,7 @@ impl BlobBackend for Local {
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let source = self.resolved_source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&source)?;
-        BlobMetadata::loader()
-            .blob_id(*blob_id)
-            .from_bytes(&data)
-            .map_err(io::Error::other)
+        BlobMetadata::from_bytes(&data, false).map_err(io::Error::other)
     }
 
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
@@ -257,16 +257,16 @@ fn probe_full_blob_source(
 mod tests {
     use super::*;
     use crate::ReadKind;
-    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk};
+    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor};
     use nydus_format::utils::sha256_bytes;
     use tempfile::tempdir;
 
-    fn blob_metadata(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMetadata {
-        BlobMetadata::from_parts(
-            blob_id,
+    fn blob_metadata(payload: &[u8]) -> BlobMetadata {
+        BlobMetadata::new(
+            BlobMetadataCompressor::None,
             1,
-            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
         )
         .unwrap()
     }
@@ -277,13 +277,8 @@ mod tests {
     fn local_backend_reads_full_blob_file_and_sidecar_meta() {
         let dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let full_blob_id = write_minimal_full_blob(
-            dir.path(),
-            &payload,
-            &blob_metadata(data_blob_id, &payload),
-            true,
-        );
+        let full_blob_id =
+            write_minimal_full_blob(dir.path(), &payload, &blob_metadata(&payload), true);
 
         let backend = Local::new(dir.path().to_path_buf());
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();
@@ -306,12 +301,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
-        let full_blob_id = write_minimal_full_blob(
-            dir.path(),
-            &payload,
-            &blob_metadata(data_blob_id, &payload),
-            false,
-        );
+        let full_blob_id =
+            write_minimal_full_blob(dir.path(), &payload, &blob_metadata(&payload), false);
         let backend = Local::new(dir.path().to_path_buf());
 
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();

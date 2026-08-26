@@ -463,7 +463,7 @@ func (e *benchEnv) startFanotify(t *testing.T) func() {
 		default:
 		}
 		return isMountpoint(mnt) && strings.Contains(logs(), "event loop ready")
-	}, 60*time.Second, time.Second, "fanotify daemon did not mount:\n%s", logs())
+	}, 60*time.Second, 200*time.Millisecond, "fanotify daemon did not mount:\n%s", logs())
 	return func() {
 		terminateDaemon(cmd, exited)
 		if isMountpoint(mnt) {

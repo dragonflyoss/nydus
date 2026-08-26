@@ -5,7 +5,7 @@ use nydus::optimize::{
 };
 use nydus_backend::{build_backend, BlobBackend};
 use nydus_config::Config;
-use nydus_format::blob::BLOB_METADATA_SUFFIX;
+use nydus_format::blob::NYDUS_BLOB_METADATA_SUFFIX;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
@@ -170,7 +170,7 @@ impl OptimizeCommand {
             .with_context(|| format!("failed to write ondemand blob: {}", blob_path.display()))?;
         let blob_metadata_path = self
             .blob_dir
-            .join(format!("{digest_hex}{BLOB_METADATA_SUFFIX}"));
+            .join(format!("{digest_hex}{NYDUS_BLOB_METADATA_SUFFIX}"));
         ondemand.blob_metadata.save(&blob_metadata_path)?;
 
         fs::write(&self.bootstrap, &ondemand.bootstrap).with_context(|| {

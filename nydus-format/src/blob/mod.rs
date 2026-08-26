@@ -6,101 +6,66 @@
 
 use crate::erofs::bytes_to_blocks;
 use crate::error::{Context, Error, Result};
-use crate::utils::{align_up, write_zero_padding};
+use crate::utils::{align_up_u64, write_zeros};
 use std::io::Write;
 
+pub mod algorithm;
+pub mod flag;
 pub mod footer;
 pub mod metadata;
-pub mod validate;
+pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
-    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-    BlobMetadataDigester, BLOB_METADATA_DEFAULT_BLOCK_GROUP_BLOCK_COUNT,
-    BLOB_METADATA_DEFAULT_BLOCK_GROUP_SIZE, BLOB_METADATA_DEFAULT_CHUNK_BLOCK_COUNT,
-    BLOB_METADATA_DEFAULT_CHUNK_SIZE, BLOB_METADATA_SUFFIX,
+    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk,
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
 };
 
-/// The incompatible (reject-when-unknown) half of a format `flags` word.
-pub const INCOMPAT_MASK: u32 = 0x0000_FFFF;
-
-/// Reject `flags` whose incompat half carries bits outside `supported`.
-/// `what` names the format in the error message.
-pub fn validate_incompat_flags(flags: u32, supported: u32) -> Result<()> {
-    let unknown_incompat = flags & INCOMPAT_MASK & !supported;
-    if unknown_incompat != 0 {
-        return Err(Error::Unsupported(format!(
-            "unsupported incompat flags {unknown_incompat:#x} (image is newer than this reader)"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Append the trailing regions of the full-blob layout
+/// Finish a full blob: append the trailing regions of the layout
 /// `[data][pad][bootstrap][pad][blob meta][footer]` to `writer`, which must
-/// already hold the `data_size` bytes of blob data. An empty `bootstrap`
-/// yields the ondemand layout (no bootstrap region, zero bootstrap blocks).
-/// Returns the footer describing the assembled blob.
-pub fn assemble_full_blob(
+/// already hold the `compressed_data_size` bytes of blob data. An empty
+/// `bootstrap` yields the ondemand layout (no bootstrap region, zero
+/// bootstrap blocks). Returns the footer describing the finished blob.
+pub fn finish_full_blob(
     writer: &mut dyn Write,
-    data_size: u64,
+    compressed_data_size: u64,
     bootstrap: &[u8],
     blob_metadata: &BlobMetadata,
 ) -> Result<BlobFooter> {
-    let bootstrap_size = u64::try_from(bootstrap.len())
-        .map_err(|err| Error::Overflow(format!("bootstrap exceeds u64: {err}")))?;
-    let bootstrap_blocks = bytes_to_blocks(bootstrap_size, "bootstrap")?;
-    let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
+    let bootstrap_size = bootstrap.len() as u64;
+    let bootstrap_offset = align_up_u64(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
         .ok_or_else(|| Error::Overflow("bootstrap offset overflow".to_string()))?;
-    let blob_metadata_offset = align_up(
-        bootstrap_offset
-            .checked_add(bootstrap_size)
-            .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?,
-        NYDUS_BLOB_FOOTER_ALIGNMENT,
-    )
-    .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
-    let blob_metadata_size = blob_metadata.metadata_size();
-    let blob_metadata_blocks = bytes_to_blocks(blob_metadata_size, "blob meta")?;
+    let blob_metadata_offset = bootstrap_offset
+        .checked_add(bootstrap_size)
+        .and_then(|bootstrap_end| align_up_u64(bootstrap_end, NYDUS_BLOB_FOOTER_ALIGNMENT))
+        .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
 
-    let mut blob_metadata_bytes = Vec::with_capacity(
-        usize::try_from(blob_metadata_size)
-            .map_err(|err| Error::Overflow(format!("blob meta size exceeds usize: {err}")))?,
-    );
-    blob_metadata
-        .write_to(&mut blob_metadata_bytes)
-        .context("failed to serialize blob meta")?;
-    if blob_metadata_bytes.len() as u64 != blob_metadata_size {
-        return Err(Error::InvalidImage(format!(
-            "serialized blob meta size mismatch: expected {}, got {}",
-            blob_metadata_size,
-            blob_metadata_bytes.len()
-        )));
-    }
-
-    let footer = BlobFooter::new(
-        0,
-        data_size,
-        bootstrap_offset,
-        bootstrap_blocks,
-        blob_metadata_offset,
-        blob_metadata_blocks,
-    )?;
-
-    write_zero_padding(writer, data_size, bootstrap_offset)?;
+    write_zeros(writer, bootstrap_offset - compressed_data_size)?;
     writer
         .write_all(bootstrap)
         .context("failed to write blob bootstrap")?;
-    write_zero_padding(
+
+    write_zeros(
         writer,
-        bootstrap_offset + bootstrap_size,
-        blob_metadata_offset,
+        blob_metadata_offset - bootstrap_offset - bootstrap_size,
     )?;
-    writer
-        .write_all(&blob_metadata_bytes)
+    blob_metadata
+        .write_to(writer)
         .context("failed to write blob meta")?;
+
+    let footer = BlobFooter::new(
+        0,
+        compressed_data_size,
+        bootstrap_offset,
+        bytes_to_blocks(bootstrap_size, "bootstrap")?,
+        blob_metadata_offset,
+        bytes_to_blocks(blob_metadata.padded_size(), "blob meta")?,
+    )?;
     footer
         .write_to(writer)
         .context("failed to write blob footer")?;
+
     Ok(footer)
 }

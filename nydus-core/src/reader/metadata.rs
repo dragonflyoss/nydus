@@ -5,7 +5,7 @@ use nydus_format::erofs::{
     EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
     EROFS_XATTR_ENTRY_HEADER_SIZE, EROFS_XATTR_IBODY_HEADER_SIZE,
 };
-use nydus_format::utils::round_up;
+use nydus_format::utils::align_up_usize;
 
 use super::{ErofsReader, RawDirEntry};
 
@@ -288,7 +288,7 @@ impl ErofsReader {
             result.push((full_name, value));
 
             // Advance to next entry (4-byte aligned)
-            pos = round_up(value_end, XATTR_ENTRY_ALIGN);
+            pos = align_up_usize(value_end, XATTR_ENTRY_ALIGN).expect("alignment overflowed");
         }
 
         Ok(result)

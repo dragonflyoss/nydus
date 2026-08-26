@@ -11,7 +11,7 @@ use nydus_format::erofs::{
     ErofsDeviceSlot, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_FT_DIR, EROFS_SB_BASE_SIZE,
     EROFS_SUPER_OFFSET,
 };
-use nydus_format::utils::round_up;
+use nydus_format::utils::align_up_usize;
 
 pub const FLATTENED_BLOB_ALIGNMENT: u64 = 0x8_0000;
 
@@ -63,7 +63,8 @@ fn set_flattened_mapped_blkaddrs(
                 "flattened blob alignment exceeds addressable size: {err}"
             ))
         })?;
-        let mapped_offset = round_up(next_offset_usize, alignment_usize) as u64;
+        let mapped_offset = align_up_usize(next_offset_usize, alignment_usize)
+            .expect("alignment overflowed") as u64;
         if mapped_offset % block_size != 0 {
             return Err(Error::InvalidImage(
                 "flattened blob offset must be block aligned".to_string(),

@@ -649,9 +649,7 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
         )?;
 
-        BlobMetadata::loader()
-            .blob_id(*blob_id)
-            .from_bytes(&blob_metadata_bytes)
+        BlobMetadata::from_bytes(&blob_metadata_bytes, false)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))
     }
 

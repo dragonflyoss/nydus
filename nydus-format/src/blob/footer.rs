@@ -1,4 +1,4 @@
-use crate::blob::validate::validate_incompat_flags;
+use crate::blob::flag::validate_incompat_flags;
 use crate::erofs::{blocks_to_bytes, EROFS_BLOCK_SIZE};
 use crate::error::{Context, Error, Result};
 use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
@@ -27,7 +27,7 @@ pub const NYDUS_BLOB_FOOTER_SIZE: usize = 4096;
 /// this boundary (the EROFS block size).
 pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
 
-/// `flags` is split EROFS-style (see [`crate::blob::validate`]): the low 16
+/// `flags` is split EROFS-style (see [`crate::blob::flag`]): the low 16
 /// bits are incompatible features (unknown bits reject), the high 16 bits
 /// are compatible features (unknown bits are ignored). No bits are defined
 /// yet.
@@ -111,7 +111,7 @@ impl BlobFooter {
             blob_metadata_blocks,
         };
 
-        footer.validate_fields()?;
+        footer.validate()?;
         footer.validate_layout(footer.offset()?)?;
         footer.crc32 = Self::compute_crc32(&footer.to_bytes());
         Ok(footer)
@@ -127,7 +127,7 @@ impl BlobFooter {
     /// offsets as untrusted hints whose reads are bounds-checked downstream.
     pub fn from_bytes(bytes: &[u8; NYDUS_BLOB_FOOTER_SIZE]) -> Result<Self> {
         let footer = Self {
-            magic: bytes[0..8].try_into().expect("slice checked"),
+            magic: bytes[0..8].try_into().unwrap(),
             version: read_u32_at(bytes, 8),
             flags: read_u32_at(bytes, 12),
             crc32: read_u32_at(bytes, 16),
@@ -139,7 +139,7 @@ impl BlobFooter {
             bootstrap_blocks: read_u32_at(bytes, 56),
             blob_metadata_blocks: read_u32_at(bytes, 60),
         };
-        footer.validate_fields()?;
+        footer.validate()?;
 
         // Verify over the raw incoming bytes, never over `to_bytes()`: a
         // re-serialization emits only the fields this reader knows, zeroing a
@@ -231,7 +231,7 @@ impl BlobFooter {
     /// the reserved tail may carry a newer writer's compat fields (corruption
     /// is caught by the crc32), and `bootstrap_blocks` may be zero (an
     /// ondemand redirect blob embeds no bootstrap image).
-    fn validate_fields(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         if self.magic != NYDUS_BLOB_FOOTER_MAGIC {
             return Err(Error::InvalidImage(
                 "invalid nydus footer magic".to_string(),

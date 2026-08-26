@@ -141,9 +141,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
         &[0u8; 16],
     )
     .expect("render embedded bootstrap");
-    let blob_metadata = blob_writer
-        .blob_metadata(data_blob_id, 0)
-        .expect("blob meta");
+    let blob_metadata = blob_writer.blob_metadata(0).expect("blob meta");
 
     let data = fs::read(&data_path).expect("read data blob");
     let full_blob_digest =
