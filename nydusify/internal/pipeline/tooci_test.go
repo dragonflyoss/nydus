@@ -9,9 +9,10 @@ package pipeline
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	"reflect"
 	"testing"
+
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	digest "github.com/opencontainers/go-digest"

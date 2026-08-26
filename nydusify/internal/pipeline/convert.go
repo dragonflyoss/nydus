@@ -8,6 +8,7 @@ package pipeline
 
 import (
 	"context"
+
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 
 	"github.com/containerd/containerd/v2/core/content"

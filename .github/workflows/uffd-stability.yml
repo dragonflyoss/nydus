@@ -1,9 +1,6 @@
 name: UFFD Stability
+run-name: "UFFD Stability (count=${{ inputs.count || '34' }})"
 
-# Daily stability run for the UFFD service: repeats the three real-fault
-# integration cases (managed copy, managed zeropage, zerocopy) 34 times each
-# by default — 102 core fault iterations per run. Any iteration failure fails
-# the run and there is no retry, so the first attempt is the recorded result.
 on:
   schedule:
     - cron: "30 2 * * *"
@@ -22,7 +19,7 @@ permissions:
 
 jobs:
   uffd-stability:
-    name: UFFD stability run (no retries)
+    name: Run UFFD stability suite
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -44,18 +41,12 @@ jobs:
         with:
           go-version: '1.25.5'
 
-      # The erofs module enables the loop-mounted whole-tree corpus diff in
-      # TestUffdRealFaultCopy; erofs-utils provides fsck.erofs for structural
-      # image validation.
       - name: Load erofs kernel module and install erofs-utils
         run: |
           sudo modprobe erofs || true
           sudo apt-get update -qq
           sudo apt-get install -y -qq erofs-utils
 
-      # UFFD_REQUIRE=1 turns missing userfaultfd runner capability into a hard
-      # unsupported-runner failure so the stability signal can never be
-      # silently skipped.
       - name: Run UFFD stability suite
         run: |
           make test-uffd-stability \

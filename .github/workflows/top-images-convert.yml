@@ -1,0 +1,104 @@
+name: Convert and Check Top Images
+run-name: "Convert and Check Top Images (concurrency=${{ inputs.concurrency }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: "Number of images converted/checked in parallel"
+        required: false
+        type: number
+        default: 5
+      registry:
+        description: "Target registry/namespace for the converted nydus images (default: ghcr.io/<repository>)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  top-images-convert:
+    name: Convert and validate top images
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    timeout-minutes: 150
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Free up disk space
+        run: |
+          echo "Disk usage before cleanup:"
+          df -h / /mnt
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            /usr/lib/jvm || true
+          sudo docker image prune --all --force || true
+          echo "Disk usage after cleanup:"
+          df -h / /mnt
+
+      - name: Install Docker
+        uses: docker/setup-docker-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Share registry credentials with root
+        run: |
+          sudo mkdir -p /root/.docker
+          sudo cp "$HOME/.docker/config.json" /root/.docker/config.json
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+
+      - name: Build nydusify
+        run: |
+          make -C nydusify build
+          sudo install -m 0755 nydusify/nydusify /usr/local/bin/nydusify
+
+      - name: Run top-images conversion test
+        env:
+          TOP_IMAGES_CONCURRENCY: ${{ inputs.concurrency }}
+          TOP_IMAGES_REGISTRY: ${{ inputs.registry || format('ghcr.io/{0}', github.repository) }}
+        run: |
+          sudo mkdir -p /mnt/nydusify-top-images
+          sudo chmod 0777 /mnt/nydusify-top-images
+          df -h / /mnt
+          make test-top-images \
+            TOP_IMAGES_TIMEOUT="140m" \
+            TOP_IMAGES_CONCURRENCY="$TOP_IMAGES_CONCURRENCY" \
+            TOP_IMAGES_REGISTRY="$TOP_IMAGES_REGISTRY" \
+            TOP_IMAGES_PLAIN_HTTP="false" \
+            TOP_IMAGES_PLATFORM="linux/amd64" \
+            TOP_IMAGES_WORKDIR="/mnt/nydusify-top-images"
