@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::build::bootstrap::render_flattened_bootstrap;
+use crate::build::bootstrap::{render_flattened_bootstrap, render_flattened_bootstrap_to};
 use crate::build::inode::{
     flatten_tree, set_root_prefetch_blobs_xattr, InodeData, NamedChildren, NodeAttrs, TreeNode,
 };
+use nydus_core::reader::RawDirEntry;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
@@ -19,86 +20,337 @@ use nydus_format::utils::parse_sha256_hex;
 const OCI_WHITEOUT_PREFIX: &[u8] = b".wh.";
 const OCI_OPAQUE_MARKER: &[u8] = b".wh..wh..opq";
 
+/// Return freed glibc heap pages to the OS. The consumed merge tree leaves
+/// ~100 MiB of freed small allocations that glibc keeps in its arenas; the
+/// buffers allocated afterwards (inode table growth, render buffer) are
+/// large mmap'd blocks that cannot reuse them, so without trimming the peak
+/// RSS stacks both.
+fn release_freed_heap() {
+    // malloc_trim is glibc-only; musl has no equivalent (and no arena bloat).
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WhiteoutSpec {
     Oci,
 }
 
-#[derive(Clone)]
-struct MergeNode {
-    link_id: Option<MergeLinkId>,
-    mode: u16,
-    uid: u32,
-    gid: u32,
-    size: u64,
-    mtime: u64,
-    mtime_nsec: u32,
-    nlink: u32,
-    xattrs: Vec<XattrEntry>,
-    data: MergeNodeData,
-}
-
+/// Identifies a hardlink group across layers: the inode's home layer and nid.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct MergeLinkId {
     layer_id: u32,
     nid: u64,
 }
 
-#[derive(Clone)]
-enum MergeNodeData {
-    RegularFile {
-        chunk_index_entries: Vec<ErofsChunkAddr>,
-        chunk_size_bits: u32,
-    },
-    Directory {
-        children: BTreeMap<Vec<u8>, MergeNode>,
-    },
-    Symlink {
-        target: Vec<u8>,
-    },
-    SpecialDev {
-        rdev: u32,
-    },
-    SpecialNoData,
+/// One source layer participating in the k-way merge: its metadata reader
+/// and the mapping from its local blob indexes to the merged device table.
+struct MergeLayer {
+    layer_id: u32,
+    reader: ErofsReader,
+    epoch: u64,
+    fixed_nsec: u32,
+    local_to_global: HashMap<u16, u16>,
+}
+
+/// The (layer, nid) variants of one merged path, in lower..upper order.
+/// Directories keep every stacked directory variant so their children merge;
+/// for any other kind only the topmost variant exists (upper shadows lower).
+struct KWayVariants {
+    /// Indexes into the layer slice paired with the nid in that layer.
+    variants: Vec<(usize, u64)>,
+    is_dir: bool,
+}
+
+/// A lazily expanded node of the merged tree: children are produced by
+/// k-way merging the variant directories' entries on demand, so no merged
+/// tree is ever materialised — peak memory is one directory's entry list
+/// plus the DFS path.
+struct KWayNode<'a> {
+    layers: &'a [MergeLayer],
+    whiteout_spec: WhiteoutSpec,
+    node: KWayVariants,
+}
+
+impl KWayVariants {
+    fn top(&self) -> (usize, u64) {
+        *self
+            .variants
+            .last()
+            .expect("a merged path always has at least one variant")
+    }
+}
+
+impl<'a> KWayNode<'a> {
+    fn top_layer_and_inode(&self) -> Result<(&'a MergeLayer, u64)> {
+        let (layer_index, nid) = self.node.top();
+        Ok((&self.layers[layer_index], nid))
+    }
+}
+
+impl TreeNode<()> for KWayNode<'_> {
+    type LinkKey = MergeLinkId;
+
+    fn attrs(&mut self) -> Result<NodeAttrs> {
+        let (layer, nid) = self.top_layer_and_inode()?;
+        let inode = layer
+            .reader
+            .inode(nid)
+            .with_context(|| format!("failed to read inode: {nid}"))?;
+        let mut xattrs: Vec<XattrEntry> = layer
+            .reader
+            .read_xattrs(nid, &inode)?
+            .into_iter()
+            .filter_map(|(name, value)| {
+                erofs_xattr_name_split(&name).map(|(index, suffix)| XattrEntry {
+                    name_index: index,
+                    suffix: suffix.to_vec(),
+                    value,
+                })
+            })
+            .collect();
+        xattrs.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
+        Ok(NodeAttrs {
+            mode: inode.mode(),
+            uid: inode.uid(),
+            gid: inode.gid(),
+            size: inode.size(),
+            mtime: inode.mtime(layer.epoch),
+            mtime_nsec: inode.effective_mtime_nsec(layer.fixed_nsec),
+            nlink: inode.nlink(),
+            xattrs,
+        })
+    }
+
+    fn link_key(&mut self) -> Result<Option<MergeLinkId>> {
+        if self.node.is_dir {
+            return Ok(None);
+        }
+        let (layer, nid) = self.top_layer_and_inode()?;
+        let inode = layer
+            .reader
+            .inode(nid)
+            .with_context(|| format!("failed to read inode: {nid}"))?;
+        Ok(
+            (mode_to_erofs_file_type(inode.mode()) == EROFS_FT_REG_FILE && inode.nlink() > 1)
+                .then_some(MergeLinkId {
+                    layer_id: layer.layer_id,
+                    nid,
+                }),
+        )
+    }
+
+    fn children(&mut self, _ctx: &mut ()) -> Result<Option<NamedChildren<Self>>> {
+        if !self.node.is_dir {
+            return Ok(None);
+        }
+        let mut merged: BTreeMap<Vec<u8>, KWayVariants> = BTreeMap::new();
+        for &(layer_index, nid) in &self.node.variants {
+            let layer = &self.layers[layer_index];
+            let inode = layer
+                .reader
+                .inode(nid)
+                .with_context(|| format!("failed to read inode: {nid}"))?;
+            let entries = layer.reader.read_dir(nid, &inode)?;
+            merge_layer_entries(&mut merged, entries, layer_index, self.whiteout_spec);
+        }
+        Ok(Some(
+            merged
+                .into_iter()
+                .map(|(name, node)| {
+                    (
+                        name,
+                        KWayNode {
+                            layers: self.layers,
+                            whiteout_spec: self.whiteout_spec,
+                            node,
+                        },
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    fn leaf_data(&mut self, _ctx: &mut ()) -> Result<InodeData> {
+        let (layer, nid) = self.top_layer_and_inode()?;
+        let inode = layer
+            .reader
+            .inode(nid)
+            .with_context(|| format!("failed to read inode: {nid}"))?;
+        Ok(match mode_to_erofs_file_type(inode.mode()) {
+            EROFS_FT_REG_FILE => {
+                if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
+                    return Err(Error::Unsupported(
+                        "merge currently only supports chunk-based regular files".to_string(),
+                    ));
+                }
+                let chunk_size_bits = layer.reader.chunk_bits(&inode);
+                let chunk_index_entries = layer
+                    .reader
+                    .read_chunk_index_entries(nid, &inode)?
+                    .into_iter()
+                    .map(|index| {
+                        // A hole chunk carries no blob reference at all (its
+                        // on-disk device_id bits are part of the null sentinel),
+                        // so it passes through unchanged instead of being device
+                        // remapped.
+                        if index.blkaddr == EROFS_NULL_ADDR || index.device_id == 0 {
+                            Ok(index)
+                        } else {
+                            let mapped = layer
+                                .local_to_global
+                                .get(&index.device_id)
+                                .copied()
+                                .ok_or_else(|| {
+                                    Error::InvalidImage(format!(
+                                        "missing global blob index mapping for source blob {}",
+                                        index.device_id
+                                    ))
+                                })?;
+                            Ok(ErofsChunkAddr {
+                                blkaddr: index.blkaddr,
+                                device_id: mapped,
+                            })
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                InodeData::RegularFile {
+                    chunk_index_entries,
+                    chunk_size_bits,
+                }
+            }
+            EROFS_FT_SYMLINK => InodeData::Symlink {
+                target: layer.reader.read_symlink(nid, &inode)?,
+                startblk: 0,
+            },
+            EROFS_FT_CHRDEV | EROFS_FT_BLKDEV => InodeData::Device { rdev: inode.rdev() },
+            EROFS_FT_FIFO | EROFS_FT_SOCK => InodeData::FifoOrSocket,
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "unsupported inode file type {other} while loading layer"
+                )))
+            }
+        })
+    }
+}
+
+/// Merge one layer's directory entries (upper) into the accumulated view,
+/// applying whiteout semantics: an opaque marker discards everything below,
+/// `.wh.<name>` removes `<name>` from below, upper non-directories shadow
+/// whatever is below, and stacked directories merge. Whiteout entries
+/// themselves never appear in the result.
+fn merge_layer_entries(
+    merged: &mut BTreeMap<Vec<u8>, KWayVariants>,
+    entries: Vec<RawDirEntry>,
+    layer_index: usize,
+    whiteout_spec: WhiteoutSpec,
+) {
+    if entries
+        .iter()
+        .any(|entry| is_opaque_marker(&entry.name, whiteout_spec))
+    {
+        merged.clear();
+    }
+    for entry in &entries {
+        if let Some(target) = whiteout_target(&entry.name, whiteout_spec) {
+            merged.remove(target);
+        }
+    }
+    for entry in entries {
+        if entry.name == b"."
+            || entry.name == b".."
+            || is_opaque_marker(&entry.name, whiteout_spec)
+            || whiteout_target(&entry.name, whiteout_spec).is_some()
+        {
+            continue;
+        }
+        let is_dir = entry.file_type == EROFS_FT_DIR;
+        match merged.get_mut(&entry.name) {
+            Some(existing) if is_dir && existing.is_dir => {
+                existing.variants.push((layer_index, entry.nid));
+            }
+            _ => {
+                merged.insert(
+                    entry.name,
+                    KWayVariants {
+                        variants: vec![(layer_index, entry.nid)],
+                        is_dir,
+                    },
+                );
+            }
+        }
+    }
 }
 
 pub fn merge_sources_to_bootstrap_bytes(
     sources: &[PathBuf],
     whiteout_spec: WhiteoutSpec,
 ) -> Result<Vec<u8>> {
+    let mut bootstrap = Vec::new();
+    merge_sources_to_bootstrap_writer(sources, whiteout_spec, &mut bootstrap)?;
+    Ok(bootstrap)
+}
+
+/// Merge the sources and stream the flattened bootstrap into `writer`. The
+/// merged tree is never materialised (children are k-way merged on demand
+/// during flattening) and the bootstrap is stream-rendered, so peak memory
+/// is the flat inode table plus one directory's entries.
+pub fn merge_sources_to_bootstrap_writer(
+    sources: &[PathBuf],
+    whiteout_spec: WhiteoutSpec,
+    writer: &mut impl std::io::Write,
+) -> Result<()> {
     if sources.is_empty() {
         return Err(Error::InvalidParameter(
             "merge requires at least one source".to_string(),
         ));
     }
 
-    let mut merged_root: Option<MergeNode> = None;
     let mut device_slots = Vec::new();
     let mut blob_indexes = HashMap::new();
+    let mut layers = Vec::with_capacity(sources.len());
 
     for (layer_id, source) in sources.iter().enumerate() {
         let source_blob_id = parse_source_blob_id(source)
             .with_context(|| format!("invalid merge source: {}", source.display()))?;
-        let layer = load_layer(
-            layer_id as u32,
-            source,
+        let reader = ErofsReader::open_metadata_only(source)
+            .with_context(|| format!("failed to load layer: {}", source.display()))?;
+        validate_single_layer_blob_source(source, &reader)?;
+        let local_to_global = register_blobs(
+            &reader,
             source_blob_id,
             &mut device_slots,
             &mut blob_indexes,
-        )
-        .with_context(|| format!("failed to load layer: {}", source.display()))?;
-        merged_root = Some(match merged_root {
-            Some(existing) => overlay_nodes(existing, layer, whiteout_spec)?,
-            None => layer,
+        )?;
+        layers.push(MergeLayer {
+            layer_id: layer_id as u32,
+            epoch: reader.superblock().epoch(),
+            fixed_nsec: reader.superblock().fixed_nsec(),
+            local_to_global,
+            reader,
         });
     }
 
-    let mut merged_root = merged_root
-        .ok_or_else(|| Error::InvalidImage("merge produced no root node".to_string()))?;
-    strip_whiteout_entries(&mut merged_root, whiteout_spec);
+    let root = KWayNode {
+        layers: &layers,
+        whiteout_spec,
+        node: KWayVariants {
+            variants: layers
+                .iter()
+                .enumerate()
+                .map(|(index, layer)| (index, layer.reader.superblock().root_nid()))
+                .collect(),
+            is_dir: true,
+        },
+    };
 
-    // `flatten_tree` always yields at least the root inode.
-    let mut inodes = flatten_tree(&merged_root, &mut ())?;
+    // `flatten_tree` always yields at least the root inode; children are
+    // k-way merged on demand while flattening.
+    let mut inodes = flatten_tree(root, &mut ())?;
+    drop(layers);
+    release_freed_heap();
 
     // `build_tree` zeroes the root mtime for reproducibility, so the minimum
     // inode mtime read back from any layer is always 0.
@@ -109,7 +361,8 @@ pub fn merge_sources_to_bootstrap_bytes(
     let prefetch_blob_indexes = (1..=blob_count).collect::<Vec<_>>();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_blob_indexes)?;
 
-    render_flattened_bootstrap(&mut inodes, epoch, &device_slots, &uuid)
+    render_flattened_bootstrap_to(writer, &mut inodes, epoch, &device_slots, &uuid)?;
+    Ok(())
 }
 
 /// Rewrite an existing merged bootstrap for the `optimize` flow: append an
@@ -123,7 +376,7 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
 ) -> Result<Vec<u8>> {
     let reader = ErofsReader::open_metadata_only(parent_bootstrap)
         .with_context(|| format!("failed to open bootstrap: {}", parent_bootstrap.display()))?;
-    let blob_infos = reader.blob_infos()?;
+    let blob_infos = reader.blob_infos()?.to_vec();
     if blob_infos.is_empty() {
         return Err(Error::InvalidImage(
             "parent bootstrap contains no blobs".to_string(),
@@ -143,22 +396,33 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
         .iter()
         .map(|info| (info.blob_index, info.blob_index))
         .collect();
-    let root = load_node(
-        &reader,
-        0,
-        reader.superblock().root_nid(),
-        reader.superblock().epoch(),
-        &identity,
-    )
-    .with_context(|| {
+    let layers = [MergeLayer {
+        layer_id: 0,
+        epoch: reader.superblock().epoch(),
+        fixed_nsec: reader.superblock().fixed_nsec(),
+        local_to_global: identity,
+        reader,
+    }];
+    let root = KWayNode {
+        layers: &layers,
+        // A merged bootstrap carries no whiteout entries; the spec is inert.
+        whiteout_spec: WhiteoutSpec::Oci,
+        node: KWayVariants {
+            variants: vec![(0, layers[0].reader.superblock().root_nid())],
+            is_dir: true,
+        },
+    };
+
+    // `flatten_tree` always yields at least the root inode; children are
+    // expanded lazily from the bootstrap.
+    let mut inodes = flatten_tree(root, &mut ()).with_context(|| {
         format!(
             "failed to load bootstrap inode tree: {}",
             parent_bootstrap.display()
         )
     })?;
-
-    // `flatten_tree` always yields at least the root inode.
-    let mut inodes = flatten_tree(&root, &mut ())?;
+    let [MergeLayer { reader, .. }] = layers;
+    release_freed_heap();
 
     let mut device_slots: Vec<ErofsDeviceSlot> = blob_infos
         .iter()
@@ -189,26 +453,6 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
     let epoch = 0;
     let uuid = [0u8; 16];
     render_flattened_bootstrap(&mut inodes, epoch, &device_slots, &uuid)
-}
-
-fn load_layer(
-    layer_id: u32,
-    source: &Path,
-    source_blob_id: [u8; EROFS_BLOB_ID_SIZE],
-    device_slots: &mut Vec<ErofsDeviceSlot>,
-    blob_indexes: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
-) -> Result<MergeNode> {
-    let reader = ErofsReader::open_metadata_only(source)?;
-    validate_single_layer_blob_source(source, &reader)?;
-    let layer_epoch = reader.superblock().epoch();
-    let local_to_global = register_blobs(&reader, source_blob_id, device_slots, blob_indexes)?;
-    load_node(
-        &reader,
-        layer_id,
-        reader.superblock().root_nid(),
-        layer_epoch,
-        &local_to_global,
-    )
 }
 
 fn register_blobs(
@@ -274,186 +518,6 @@ fn validate_single_layer_blob_source(path: &Path, reader: &ErofsReader) -> Resul
     Ok(())
 }
 
-fn load_node(
-    reader: &ErofsReader,
-    layer_id: u32,
-    nid: u64,
-    epoch: u64,
-    local_to_global: &HashMap<u16, u16>,
-) -> Result<MergeNode> {
-    let inode = reader
-        .inode(nid)
-        .with_context(|| format!("failed to read inode: {nid}"))?;
-    let mode = inode.mode();
-    let mut xattrs: Vec<XattrEntry> = reader
-        .read_xattrs(nid, &inode)?
-        .into_iter()
-        .filter_map(|(name, value)| {
-            erofs_xattr_name_split(&name).map(|(index, suffix)| XattrEntry {
-                name_index: index,
-                suffix: suffix.to_vec(),
-                value,
-            })
-        })
-        .collect();
-    xattrs.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
-
-    let data =
-        match mode_to_erofs_file_type(mode) {
-            EROFS_FT_DIR => {
-                let mut children = BTreeMap::new();
-                for entry in reader.read_dir(nid, &inode)? {
-                    if entry.name == b"." || entry.name == b".." {
-                        continue;
-                    }
-                    children.insert(
-                        entry.name.clone(),
-                        load_node(reader, layer_id, entry.nid, epoch, local_to_global)
-                            .with_context(|| {
-                                format!(
-                                    "failed to load child: {}",
-                                    String::from_utf8_lossy(&entry.name)
-                                )
-                            })?,
-                    );
-                }
-                MergeNodeData::Directory { children }
-            }
-            EROFS_FT_REG_FILE => {
-                if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
-                    return Err(Error::Unsupported(
-                        "merge currently only supports chunk-based regular files".to_string(),
-                    ));
-                }
-                let chunk_size_bits = reader.chunk_bits(&inode);
-                let chunk_index_entries = reader
-                    .read_chunk_index_entries(nid, &inode)?
-                    .into_iter()
-                    .map(|index| {
-                        // A hole chunk carries no blob reference at all (its
-                        // on-disk device_id bits are part of the null sentinel),
-                        // so it passes through unchanged instead of being device
-                        // remapped.
-                        if index.blkaddr == EROFS_NULL_ADDR || index.device_id == 0 {
-                            Ok(index)
-                        } else {
-                            let mapped = local_to_global
-                                .get(&index.device_id)
-                                .copied()
-                                .ok_or_else(|| {
-                                    Error::InvalidImage(format!(
-                                        "missing global blob index mapping for source blob {}",
-                                        index.device_id
-                                    ))
-                                })?;
-                            Ok(ErofsChunkAddr {
-                                blkaddr: index.blkaddr,
-                                device_id: mapped,
-                            })
-                        }
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                MergeNodeData::RegularFile {
-                    chunk_index_entries,
-                    chunk_size_bits,
-                }
-            }
-            EROFS_FT_SYMLINK => MergeNodeData::Symlink {
-                target: reader.read_symlink(nid, &inode)?,
-            },
-            EROFS_FT_CHRDEV | EROFS_FT_BLKDEV => MergeNodeData::SpecialDev { rdev: inode.rdev() },
-            EROFS_FT_FIFO | EROFS_FT_SOCK => MergeNodeData::SpecialNoData,
-            other => {
-                return Err(Error::Unsupported(format!(
-                    "unsupported inode file type {other} while loading layer"
-                )))
-            }
-        };
-
-    Ok(MergeNode {
-        link_id: if mode_to_erofs_file_type(mode) == EROFS_FT_REG_FILE && inode.nlink() > 1 {
-            Some(MergeLinkId { layer_id, nid })
-        } else {
-            None
-        },
-        mode,
-        uid: inode.uid(),
-        gid: inode.gid(),
-        size: inode.size(),
-        mtime: inode.mtime(epoch),
-        mtime_nsec: inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
-        nlink: inode.nlink(),
-        xattrs,
-        data,
-    })
-}
-
-fn overlay_nodes(
-    lower: MergeNode,
-    upper: MergeNode,
-    whiteout_spec: WhiteoutSpec,
-) -> Result<MergeNode> {
-    if let (
-        MergeNodeData::Directory {
-            children: lower_children,
-        },
-        MergeNodeData::Directory {
-            children: upper_children,
-        },
-    ) = (&lower.data, &upper.data)
-    {
-        let lower_children = lower_children.clone();
-        let upper_children = upper_children.clone();
-        return overlay_directories(lower_children, upper, upper_children, whiteout_spec);
-    }
-
-    Ok(upper)
-}
-
-fn overlay_directories(
-    lower_children: BTreeMap<Vec<u8>, MergeNode>,
-    upper_meta: MergeNode,
-    upper_children: BTreeMap<Vec<u8>, MergeNode>,
-    whiteout_spec: WhiteoutSpec,
-) -> Result<MergeNode> {
-    let mut merged_children = lower_children;
-    let opaque = upper_children
-        .keys()
-        .any(|name| is_opaque_marker(name, whiteout_spec));
-    if opaque {
-        merged_children.clear();
-    }
-
-    for name in upper_children.keys() {
-        if let Some(target) = whiteout_target(name, whiteout_spec) {
-            merged_children.remove(target);
-        }
-    }
-
-    for (name, child) in upper_children {
-        if is_opaque_marker(&name, whiteout_spec) || whiteout_target(&name, whiteout_spec).is_some()
-        {
-            continue;
-        }
-
-        match merged_children.remove(&name) {
-            Some(existing) => {
-                merged_children.insert(name, overlay_nodes(existing, child, whiteout_spec)?);
-            }
-            None => {
-                merged_children.insert(name, child);
-            }
-        }
-    }
-
-    Ok(MergeNode {
-        data: MergeNodeData::Directory {
-            children: merged_children,
-        },
-        ..upper_meta
-    })
-}
-
 fn is_opaque_marker(name: &[u8], whiteout_spec: WhiteoutSpec) -> bool {
     match whiteout_spec {
         WhiteoutSpec::Oci => name == OCI_OPAQUE_MARKER,
@@ -472,247 +536,166 @@ fn whiteout_target(name: &[u8], whiteout_spec: WhiteoutSpec) -> Option<&[u8]> {
     }
 }
 
-fn strip_whiteout_entries(node: &mut MergeNode, whiteout_spec: WhiteoutSpec) {
-    let MergeNodeData::Directory { children } = &mut node.data else {
-        return;
-    };
-
-    children.retain(|name, _| {
-        !is_opaque_marker(name, whiteout_spec) && whiteout_target(name, whiteout_spec).is_none()
-    });
-    for child in children.values_mut() {
-        strip_whiteout_entries(child, whiteout_spec);
-    }
-}
-
-/// [`TreeNode`] over the in-memory merge tree, so [`flatten_tree`] produces
-/// exactly the same inodes for a merged layer as for a directory build.
-impl<'a> TreeNode<()> for &'a MergeNode {
-    type LinkKey = MergeLinkId;
-
-    fn attrs(&self) -> NodeAttrs {
-        NodeAttrs {
-            mode: self.mode,
-            uid: self.uid,
-            gid: self.gid,
-            size: self.size,
-            mtime: self.mtime,
-            mtime_nsec: self.mtime_nsec,
-            nlink: self.nlink,
-            xattrs: self.xattrs.clone(),
-        }
-    }
-
-    fn link_key(&self) -> Option<MergeLinkId> {
-        self.link_id
-    }
-
-    fn children(&self, _ctx: &mut ()) -> Result<Option<NamedChildren<Self>>> {
-        let node: &'a MergeNode = self;
-        match &node.data {
-            MergeNodeData::Directory { children } => Ok(Some(
-                children
-                    .iter()
-                    .map(|(name, child)| (name.clone(), child))
-                    .collect(),
-            )),
-            _ => Ok(None),
-        }
-    }
-
-    fn leaf_data(&self, _ctx: &mut ()) -> Result<InodeData> {
-        Ok(match &self.data {
-            MergeNodeData::RegularFile {
-                chunk_index_entries,
-                chunk_size_bits,
-            } => InodeData::RegularFile {
-                chunk_index_entries: chunk_index_entries.clone(),
-                chunk_size_bits: *chunk_size_bits,
-            },
-            MergeNodeData::Symlink { target } => InodeData::Symlink {
-                target: target.clone(),
-                startblk: 0,
-            },
-            MergeNodeData::SpecialDev { rdev } => InodeData::Device { rdev: *rdev },
-            MergeNodeData::SpecialNoData => InodeData::FifoOrSocket,
-            MergeNodeData::Directory { .. } => {
-                unreachable!("leaf_data is only called for non-directories")
-            }
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use nydus_format::erofs::{
-        needs_erofs_extended_inode, EROFS_BLKSZBITS, EROFS_XATTR_INDEX_TRUSTED,
-        NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
+        needs_erofs_extended_inode, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
     };
 
     const OPAQUE: &str = ".wh..wh..opq";
 
-    fn directory(entries: Vec<(&str, MergeNode)>) -> MergeNode {
-        let children = entries
-            .into_iter()
-            .map(|(name, node)| (name.as_bytes().to_vec(), node))
-            .collect();
-        merge_node(MergeNodeData::Directory { children })
+    fn entries(items: &[(&str, u8)]) -> Vec<RawDirEntry> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, (name, file_type))| RawDirEntry {
+                nid: i as u64 + 1,
+                file_type: *file_type,
+                name: name.as_bytes().to_vec(),
+            })
+            .collect()
     }
 
-    fn regular_file() -> MergeNode {
-        merge_node(MergeNodeData::RegularFile {
-            chunk_index_entries: Vec::new(),
-            chunk_size_bits: EROFS_BLKSZBITS as u32,
-        })
-    }
-
-    fn merge_node(data: MergeNodeData) -> MergeNode {
-        let mode = match data {
-            MergeNodeData::Directory { .. } => libc::S_IFDIR as u16 | 0o755,
-            MergeNodeData::RegularFile { .. } => libc::S_IFREG as u16 | 0o644,
-            _ => libc::S_IFREG as u16 | 0o644,
-        };
-        MergeNode {
-            link_id: None,
-            mode,
-            uid: 0,
-            gid: 0,
-            size: 0,
-            mtime: 0,
-            mtime_nsec: 0,
-            nlink: 1,
-            xattrs: Vec::new(),
-            data,
-        }
-    }
-
-    fn child_names(node: &MergeNode) -> Vec<String> {
-        let MergeNodeData::Directory { children } = &node.data else {
-            panic!("not a directory")
-        };
-        children
+    fn merged_names(merged: &BTreeMap<Vec<u8>, KWayVariants>) -> Vec<String> {
+        merged
             .keys()
             .map(|k| String::from_utf8_lossy(k).into_owned())
             .collect()
     }
 
     #[test]
-    fn strip_whiteout_entries_removes_opaque_marker_from_inserted_directory() {
-        let mut root = directory(vec![(
-            "opt",
-            directory(vec![(
-                "yarn-v1.22.19",
-                directory(vec![(OPAQUE, regular_file())]),
-            )]),
-        )]);
-
-        strip_whiteout_entries(&mut root, WhiteoutSpec::Oci);
-
-        let MergeNodeData::Directory { children } = &root.data else {
-            panic!("root should be a directory")
-        };
-        let opt = children.get(b"opt".as_slice()).unwrap();
-        let MergeNodeData::Directory { children } = &opt.data else {
-            panic!("opt should be a directory")
-        };
-        let yarn = children.get(b"yarn-v1.22.19".as_slice()).unwrap();
-        assert!(child_names(yarn).is_empty());
-    }
-
-    #[test]
-    fn strip_whiteout_entries_removes_plain_whiteout_marker() {
-        let mut root = directory(vec![
-            (".wh.removed", regular_file()),
-            ("kept", regular_file()),
-        ]);
-
-        strip_whiteout_entries(&mut root, WhiteoutSpec::Oci);
-
-        assert_eq!(child_names(&root), vec!["kept"]);
-    }
-
-    #[test]
-    fn overlay_opaque_directory_keeps_upper_entries_and_drops_marker() {
-        let lower = directory(vec![(
-            "opq",
-            directory(vec![
-                ("old.txt", regular_file()),
-                ("subdir", directory(Vec::new())),
-            ]),
-        )]);
-        let upper = directory(vec![(
-            "opq",
-            directory(vec![(OPAQUE, regular_file()), ("new.txt", regular_file())]),
-        )]);
-
-        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
-        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
-
-        let MergeNodeData::Directory { children } = &merged.data else {
-            panic!("root should be a directory")
-        };
-        assert_eq!(
-            child_names(children.get(b"opq".as_slice()).unwrap()),
-            vec!["new.txt"]
+    fn opaque_marker_clears_lower_entries_and_is_dropped() {
+        let mut merged = BTreeMap::new();
+        merge_layer_entries(
+            &mut merged,
+            entries(&[("old.txt", EROFS_FT_REG_FILE), ("subdir", EROFS_FT_DIR)]),
+            0,
+            WhiteoutSpec::Oci,
         );
-    }
-
-    #[test]
-    fn overlay_plain_whiteout_removes_lower_entry_and_marker() {
-        let lower = directory(vec![("kept", regular_file()), ("removed", regular_file())]);
-        let upper = directory(vec![(".wh.removed", regular_file())]);
-
-        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
-        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
-
-        assert_eq!(child_names(&merged), vec!["kept"]);
-    }
-
-    #[test]
-    fn strip_whiteout_entries_removes_marker_inside_inserted_directory() {
-        let mut root = directory(vec![(
-            "newdir",
-            directory(vec![
-                (".wh.lower-only", regular_file()),
-                ("fresh", regular_file()),
-            ]),
-        )]);
-
-        strip_whiteout_entries(&mut root, WhiteoutSpec::Oci);
-
-        let MergeNodeData::Directory { children } = &root.data else {
-            panic!("root should be a directory")
-        };
-        assert_eq!(
-            child_names(children.get(b"newdir".as_slice()).unwrap()),
-            vec!["fresh"]
+        merge_layer_entries(
+            &mut merged,
+            entries(&[(OPAQUE, EROFS_FT_REG_FILE), ("new.txt", EROFS_FT_REG_FILE)]),
+            1,
+            WhiteoutSpec::Oci,
         );
+        assert_eq!(merged_names(&merged), vec!["new.txt"]);
+    }
+
+    #[test]
+    fn plain_whiteout_removes_lower_entry_and_marker() {
+        let mut merged = BTreeMap::new();
+        merge_layer_entries(
+            &mut merged,
+            entries(&[("kept", EROFS_FT_REG_FILE), ("removed", EROFS_FT_REG_FILE)]),
+            0,
+            WhiteoutSpec::Oci,
+        );
+        merge_layer_entries(
+            &mut merged,
+            entries(&[(".wh.removed", EROFS_FT_REG_FILE)]),
+            1,
+            WhiteoutSpec::Oci,
+        );
+        assert_eq!(merged_names(&merged), vec!["kept"]);
+    }
+
+    #[test]
+    fn bottom_layer_whiteout_markers_are_never_emitted() {
+        let mut merged = BTreeMap::new();
+        merge_layer_entries(
+            &mut merged,
+            entries(&[
+                (".wh.lower-only", EROFS_FT_REG_FILE),
+                (OPAQUE, EROFS_FT_REG_FILE),
+                ("fresh", EROFS_FT_REG_FILE),
+            ]),
+            0,
+            WhiteoutSpec::Oci,
+        );
+        assert_eq!(merged_names(&merged), vec!["fresh"]);
     }
 
     #[test]
     fn lower_whiteout_marker_does_not_delete_later_upper_entry() {
-        let lower = directory(vec![(".wh.recreated", regular_file())]);
-        let upper = directory(vec![("recreated", regular_file())]);
-
-        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
-        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
-
-        assert_eq!(child_names(&merged), vec!["recreated"]);
+        let mut merged = BTreeMap::new();
+        merge_layer_entries(
+            &mut merged,
+            entries(&[(".wh.recreated", EROFS_FT_REG_FILE)]),
+            0,
+            WhiteoutSpec::Oci,
+        );
+        merge_layer_entries(
+            &mut merged,
+            entries(&[("recreated", EROFS_FT_REG_FILE)]),
+            1,
+            WhiteoutSpec::Oci,
+        );
+        assert_eq!(merged_names(&merged), vec!["recreated"]);
     }
 
     #[test]
     fn upper_whiteout_does_not_delete_same_layer_dotfile() {
-        let lower = directory(vec![(".dotfile", regular_file())]);
-        let upper = directory(vec![
-            (".dotfile", regular_file()),
-            (".wh..dotfile", regular_file()),
-        ]);
+        let mut merged = BTreeMap::new();
+        merge_layer_entries(
+            &mut merged,
+            entries(&[(".dotfile", EROFS_FT_REG_FILE)]),
+            0,
+            WhiteoutSpec::Oci,
+        );
+        merge_layer_entries(
+            &mut merged,
+            entries(&[
+                (".dotfile", EROFS_FT_REG_FILE),
+                (".wh..dotfile", EROFS_FT_REG_FILE),
+            ]),
+            1,
+            WhiteoutSpec::Oci,
+        );
+        assert_eq!(merged_names(&merged), vec![".dotfile"]);
+        assert_eq!(merged[b".dotfile".as_slice()].top(), (1, 1));
+    }
 
-        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
-        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
+    #[test]
+    fn directories_stack_variants_and_files_shadow() {
+        let mut merged = BTreeMap::new();
+        merge_layer_entries(
+            &mut merged,
+            entries(&[("dir", EROFS_FT_DIR), ("file", EROFS_FT_REG_FILE)]),
+            0,
+            WhiteoutSpec::Oci,
+        );
+        merge_layer_entries(
+            &mut merged,
+            entries(&[("dir", EROFS_FT_DIR), ("file", EROFS_FT_REG_FILE)]),
+            1,
+            WhiteoutSpec::Oci,
+        );
+        let dir = &merged[b"dir".as_slice()];
+        assert!(dir.is_dir);
+        assert_eq!(dir.variants, vec![(0, 1), (1, 1)]);
+        let file = &merged[b"file".as_slice()];
+        assert_eq!(file.variants, vec![(1, 2)]);
+    }
 
-        assert_eq!(child_names(&merged), vec![".dotfile"]);
+    #[test]
+    fn upper_file_replaces_lower_directory() {
+        let mut merged = BTreeMap::new();
+        merge_layer_entries(
+            &mut merged,
+            entries(&[("path", EROFS_FT_DIR)]),
+            0,
+            WhiteoutSpec::Oci,
+        );
+        merge_layer_entries(
+            &mut merged,
+            entries(&[("path", EROFS_FT_REG_FILE)]),
+            1,
+            WhiteoutSpec::Oci,
+        );
+        let node = &merged[b"path".as_slice()];
+        assert!(!node.is_dir);
+        assert_eq!(node.variants, vec![(1, 1)]);
     }
 
     /// Set a path's mtime to whole seconds (no nanoseconds), without
@@ -812,15 +795,33 @@ mod tests {
         let source_blob_id = parse_source_blob_id(&merge_source).unwrap();
         let mut device_slots = Vec::new();
         let mut blob_indexes = HashMap::new();
-        let root = load_layer(
-            0,
-            &merge_source,
+        let reader = ErofsReader::open_metadata_only(&merge_source).unwrap();
+        validate_single_layer_blob_source(&merge_source, &reader).unwrap();
+        let local_to_global = register_blobs(
+            &reader,
             source_blob_id,
             &mut device_slots,
             &mut blob_indexes,
         )
         .unwrap();
-        let mut merged = flatten_tree(&root, &mut ()).unwrap();
+        let epoch = reader.superblock().epoch();
+        let fixed_nsec = reader.superblock().fixed_nsec();
+        let layers = [MergeLayer {
+            layer_id: 0,
+            epoch,
+            fixed_nsec,
+            local_to_global,
+            reader,
+        }];
+        let root = KWayNode {
+            layers: &layers,
+            whiteout_spec: WhiteoutSpec::Oci,
+            node: KWayVariants {
+                variants: vec![(0, layers[0].reader.superblock().root_nid())],
+                is_dir: true,
+            },
+        };
+        let mut merged = flatten_tree(root, &mut ()).unwrap();
 
         // The layer bootstrap carries the prefetch xattr the build stamps on
         // its root after flattening; drop it so the roots compare equal.

@@ -35,6 +35,25 @@ pub use remote::RemoteBlobCache;
 pub trait BlobCache: Send + Sync {
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()>;
 
+    /// Stream `len` bytes at `offset` into `writer`. The default bounces
+    /// through a per-thread buffer; implementations that can serve reads from
+    /// a mapping should override it to skip the intermediate copy.
+    fn write_at_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Vec<u8>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        SCRATCH.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            if buf.len() < len {
+                buf.resize(len, 0);
+            }
+            let buf = &mut buf[..len];
+            self.read_at(offset, buf)?;
+            writer.write_all(buf)
+        })
+    }
+
     /// Return the raw fd of the cache data file for mmap use.
     ///
     /// The caller must not close the fd; it remains owned by this cache.
@@ -255,9 +274,7 @@ pub fn decode_block_group_from_window(
     if is_stored_plain_block_group(blob_metadata, block_group) {
         decoded.extend_from_slice(encoded);
     } else {
-        decoded.reserve(decoded_len);
-        zstd::stream::copy_decode(&mut Cursor::new(encoded), &mut *decoded)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        decode_block_group(blob_metadata, encoded, decoded_len, decoded)?;
     }
 
     validate_block_group_with_metrics(backend, block_group, decoded)
@@ -311,12 +328,50 @@ pub fn fetch_decode_validate_block_group_into<'a>(
     )?;
 
     buffers.decoded.clear();
-    buffers.decoded.reserve(decoded_len);
-    zstd::stream::copy_decode(&mut Cursor::new(&buffers.encoded), &mut buffers.decoded)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    decode_block_group(
+        blob_metadata,
+        &buffers.encoded,
+        decoded_len,
+        &mut buffers.decoded,
+    )?;
 
     validate_block_group_with_metrics(backend, block_group, &buffers.decoded)?;
     Ok(&buffers.decoded)
+}
+
+/// Decompress one encoded block group into `decoded` (cleared by the caller)
+/// according to the compressor the blob meta header declares.
+fn decode_block_group(
+    blob_metadata: &BlobMetadata,
+    encoded: &[u8],
+    decoded_len: usize,
+    decoded: &mut Vec<u8>,
+) -> io::Result<()> {
+    match blob_metadata.compressor() {
+        BlobMetadataCompressor::Zstd => {
+            decoded.reserve(decoded_len);
+            zstd::stream::copy_decode(&mut Cursor::new(encoded), &mut *decoded)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        }
+        BlobMetadataCompressor::Lz4Block => {
+            decoded.resize(decoded_len, 0);
+            let written = lz4_flex::block::decompress_into(encoded, decoded)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            if written != decoded_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lz4 block group decompressed to an unexpected size",
+                ));
+            }
+        }
+        BlobMetadataCompressor::None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "blob meta declares no compressor but the block group is stored compressed",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Validate a decoded block group and, on CRC failure, attribute a CRC error metric to
@@ -363,6 +418,9 @@ pub fn validate_decoded_block_group(
         ));
     }
 
+    if !crc_verification_enabled() {
+        return Ok(());
+    }
     let crc32 = crc32c::crc32c(decoded);
     if crc32 != block_group.crc32() {
         return Err(io::Error::new(
@@ -372,6 +430,20 @@ pub fn validate_decoded_block_group(
     }
 
     Ok(())
+}
+
+/// Process-wide CRC verification switch, set once at service startup from
+/// `storage.verify_crc`. A process serves one mount, so a per-cache flag
+/// would only thread the same value through every call site.
+static VERIFY_CRC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Disable or re-enable block group CRC validation for this process.
+pub fn set_crc_verification(enabled: bool) {
+    VERIFY_CRC.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn crc_verification_enabled() -> bool {
+    VERIFY_CRC.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Marker error wrapped in an [`io::Error`] when a decoded block group fails CRC

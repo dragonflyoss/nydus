@@ -33,7 +33,7 @@ use nydus_format::blob::{
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
-use nydus_storage::cache::{BlobCache, LocalBlobCache};
+use nydus_storage::cache::LocalBlobCache;
 
 /// The result of [`build_ondemand_blob`]: the assembled ondemand artifact and
 /// the rewritten bootstrap, ready to be written out by the caller.
@@ -90,7 +90,6 @@ pub fn build_ondemand_blob(
     let mut ondemand_data = Vec::new();
     let mut ondemand_block_groups = Vec::new();
     let mut next_block_offset = 0u64;
-    let mut decoded = Vec::new();
 
     for BlockGroupRef {
         blob_index,
@@ -107,6 +106,11 @@ pub fn build_ondemand_blob(
                     .with_context(|| format!("failed to open source blob: {blob_index}"))?,
             ),
         };
+        if cache.blob_metadata().is_redirect() {
+            return Err(Error::InvalidImage(format!(
+                "source blob {blob_index} is already an ondemand blob; refusing to optimize"
+            )));
+        }
 
         let block_group = *cache
             .blob_metadata()
@@ -116,22 +120,14 @@ pub fn build_ondemand_blob(
                     "pattern references block group {block_group_index} out of range for blob {blob_index}"
                 ))
             })?;
-        if block_group.is_redirect() {
-            return Err(Error::InvalidImage(format!(
-                "source blob {blob_index} is already an ondemand blob (refusing to optimize)"
-            )));
-        }
 
-        let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|err| {
-            Error::Overflow(format!(
-                "block group uncompressed size exceeds usize: {err}"
-            ))
-        })?;
-        decoded.resize(decoded_len, 0);
-        cache
-            .read_at(block_group.uncompressed_offset(), &mut decoded)
+        // Read the block_group's decoded bytes straight from the backend at block_group
+        // granularity: the redirect fill on the runtime side works per source
+        // block_group.
+        let decoded = cache
+            .read_block_group(*block_group_index as usize)
             .with_context(|| {
-                format!("failed to read block group {block_group_index} of blob {blob_index}")
+                format!("failed to read blob {blob_index} block_group {block_group_index} bytes")
             })?;
 
         // Recompress the decoded bytes for the ondemand artifact, storing them

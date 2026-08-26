@@ -85,6 +85,7 @@ bitflags! {
     pub struct BlobMetadataFlags: u32 {
         const COMPRESSOR_ZSTD = 1 << 0;
         const DIGESTER_BLAKE3 = 1 << 1;
+        const COMPRESSOR_LZ4 = 1 << 2;
     }
 }
 

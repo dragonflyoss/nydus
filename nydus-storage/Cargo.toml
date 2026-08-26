@@ -22,6 +22,7 @@ tempfile = { workspace = true }
 tracing = { workspace = true }
 xattr = { workspace = true }
 zstd = "0.13"
+lz4_flex = "0.11"
 
 [dev-dependencies]
 blake3 = "1"

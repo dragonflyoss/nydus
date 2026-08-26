@@ -13,7 +13,7 @@ pub mod algorithm;
 pub mod flag;
 pub mod footer;
 pub mod metadata;
-pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
+pub use algorithm::BlobMetadataCompressor;
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
@@ -34,34 +34,50 @@ pub fn finish_full_blob(
     bootstrap: &[u8],
     blob_metadata: &BlobMetadata,
 ) -> Result<BlobFooter> {
-    let bootstrap_size = bootstrap.len() as u64;
+    // The embedded bootstrap is only decoded by merge, `check`, and
+    // single-blob mounts (the runtime mounts the merged bootstrap and the
+    // blob meta sidecar), so storing it zstd-compressed costs no hot path
+    // and shrinks small-file-heavy layers dramatically.
+    let stored_bootstrap = if bootstrap.is_empty() {
+        Vec::new()
+    } else {
+        zstd::stream::encode_all(bootstrap, 3)
+            .map_err(|err| Error::InvalidImage(format!("failed to compress bootstrap: {err}")))?
+    };
+    let bootstrap_compressed_size = stored_bootstrap.len() as u64;
+    // The bootstrap region is block aligned; the zstd frame's exact length
+    // travels in the footer so readers can decode without trusting the
+    // zero tail.
+    let bootstrap_region_size =
+        align_up_u64(bootstrap_compressed_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
+            .ok_or_else(|| Error::Overflow("bootstrap region overflow".to_string()))?;
     let bootstrap_offset = align_up_u64(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
         .ok_or_else(|| Error::Overflow("bootstrap offset overflow".to_string()))?;
     let blob_metadata_offset = bootstrap_offset
-        .checked_add(bootstrap_size)
-        .and_then(|bootstrap_end| align_up_u64(bootstrap_end, NYDUS_BLOB_FOOTER_ALIGNMENT))
+        .checked_add(bootstrap_region_size)
         .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
 
     write_zeros(writer, bootstrap_offset - compressed_data_size)?;
     writer
-        .write_all(bootstrap)
+        .write_all(&stored_bootstrap)
         .context("failed to write blob bootstrap")?;
 
     write_zeros(
         writer,
-        blob_metadata_offset - bootstrap_offset - bootstrap_size,
+        blob_metadata_offset - bootstrap_offset - bootstrap_compressed_size,
     )?;
     blob_metadata
         .write_to(writer)
         .context("failed to write blob meta")?;
 
-    let footer = BlobFooter::new(
+    let footer = BlobFooter::new_with_compressed_bootstrap(
         0,
         compressed_data_size,
         bootstrap_offset,
-        bytes_to_blocks(bootstrap_size, "bootstrap")?,
+        bytes_to_blocks(bootstrap_region_size, "bootstrap")?,
         blob_metadata_offset,
         bytes_to_blocks(blob_metadata.padded_size(), "blob meta")?,
+        bootstrap_compressed_size,
     )?;
     footer
         .write_to(writer)

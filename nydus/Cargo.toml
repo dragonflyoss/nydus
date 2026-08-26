@@ -43,6 +43,10 @@ uffd = [
 fanotify = ["dep:signal-hook"]
 # Export a nydus image as a block device through the NBD protocol.
 nbd = ["dep:signal-hook"]
+# File-backed EROFS: export the flattened image as one file over FUSE and let
+# the kernel EROFS driver mount it. Requires Linux >= 6.12
+# (CONFIG_EROFS_FS_BACKED_BY_FILE).
+fileio = ["fuse", "dep:signal-hook"]
 # Container image registry backend (OCI distribution).
 backend-registry = ["nydus-backend/backend-registry"]
 # Dragonfly P2P SDK proxy support for the registry backend.
@@ -55,9 +59,9 @@ backend-dragonfly-proxy = [
 ublk = ["dep:libublk", "dep:signal-hook"]
 
 [dependencies]
-blake3 = "1"
 anstream = { version = "0.6", optional = true }
 anstyle = { version = "1", optional = true }
+blake3 = "1"
 bytesize = { version = "1", optional = true }
 clap = { workspace = true, optional = true }
 crc32c = "0.6"
@@ -85,6 +89,7 @@ signal-hook = { version = "0.3", optional = true }
 tar = "0.4"
 tabled = { version = "0.21.0", optional = true }
 zstd = "0.13"
+lz4_flex = "0.11"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "fs",

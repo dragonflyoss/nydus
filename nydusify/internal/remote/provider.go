@@ -157,6 +157,18 @@ func (p *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref string
 	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC)
 }
 
+// PushBlob uploads a single blob (no children walked) from the local store to
+// ref, using the target registry settings. Used to overlap per-layer blob
+// uploads with the remaining conversion work; the final Push then skips
+// already-uploaded blobs.
+func (p *Provider) PushBlob(ctx context.Context, desc ocispec.Descriptor, ref string) error {
+	normalized, err := normalizeRef(ref)
+	if err != nil {
+		return err
+	}
+	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC)
+}
+
 // normalizeRef expands shorthand image references to fully-qualified names so
 // that Docker Hub shortcuts ("mariadb") and untagged references ("repo/img")
 // resolve correctly. For example:

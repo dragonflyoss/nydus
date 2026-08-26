@@ -8,6 +8,8 @@ pub mod check;
 pub mod export;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
+#[cfg(feature = "fileio")]
+pub mod fileio;
 pub mod fuse;
 pub mod merge;
 #[cfg(feature = "nbd")]
@@ -141,6 +143,16 @@ pub enum Command {
         long_about = "Export a nydus image as a read-only block device through the NBD protocol, optionally mounting the device as EROFS once the session is live."
     )]
     Nbd(nbd::NbdCommand),
+
+    #[cfg(feature = "fileio")]
+    #[command(
+        name = "fileio",
+        author,
+        version,
+        about = "Serve a flattened nydus image as a file-backed EROFS mount",
+        long_about = "Export a flattened nydus image as a single file over FUSE and let the kernel EROFS driver mount that file directly (CONFIG_EROFS_FS_BACKED_BY_FILE, Linux >= 6.12). Lookup, readdir, stat and xattr are resolved in-kernel; only cold byte ranges reach the daemon."
+    )]
+    Fileio(fileio::FileioCommand),
 }
 
 /// Implement the execute for Command.
@@ -161,6 +173,8 @@ impl Command {
             Self::Fanotify(cmd) => cmd.execute(),
             #[cfg(feature = "nbd")]
             Self::Nbd(cmd) => cmd.execute(),
+            #[cfg(feature = "fileio")]
+            Self::Fileio(cmd) => cmd.execute(),
         }
     }
 }

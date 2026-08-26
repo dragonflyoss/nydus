@@ -43,6 +43,10 @@ pub const EROFS_SLOTSIZE: u32 = 1 << EROFS_ISLOTBITS;
 // Feature flags.
 pub const EROFS_FEATURE_COMPAT_SB_CHKSUM: u32 = 0x0000_0001;
 pub const EROFS_FEATURE_COMPAT_MTIME: u32 = 0x0000_0002;
+/// Nydus-private compat bit: no inode in this image carries any xattr, so a
+/// userspace server can answer xattr requests with ENOSYS (which makes the
+/// kernel stop sending them). Compat bits are ignored by kernel EROFS.
+pub const EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR: u32 = 0x2000_0000;
 /// RAFS v6 marker: RAFS v6 bootstraps embed a private extension superblock
 /// and always set this compat bit; pure-EROFS nydus (rafs v7) bootstraps
 /// never do. This crate does not read RAFS v6 images — the bit exists only

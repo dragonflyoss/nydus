@@ -24,6 +24,10 @@ type Option struct {
 	BuilderPath string
 	// WorkDir is a scratch directory for layer extraction, FIFOs and staging.
 	WorkDir string
+	// OnBlobConverted, when set, is called once per converted layer blob as
+	// soon as it is committed to the content store, so uploads can overlap
+	// with the remaining conversion work. Must be safe for concurrent calls.
+	OnBlobConverted func(desc ocispec.Descriptor)
 	// ChunkSize is the nydus file chunk size in bytes.
 	ChunkSize uint32
 	// BlockGroupSize is the nydus block group uncompressed size in bytes (a multiple of
@@ -64,6 +68,16 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		Compressor:     opt.Compressor,
 		LogLevel:       opt.LogLevel,
 	})
+	if opt.OnBlobConverted != nil {
+		inner := layerFn
+		layerFn = func(ctx context.Context, cs content.Store, desc ocispec.Descriptor) (*ocispec.Descriptor, error) {
+			newDesc, err := inner(ctx, cs, desc)
+			if err == nil && newDesc != nil && nydus.IsBlob(*newDesc) {
+				opt.OnBlobConverted(*newDesc)
+			}
+			return newDesc, err
+		}
+	}
 	hookFn := ConvertHookFunc(nydus.MergeOption{
 		BuilderPath: opt.BuilderPath,
 		WorkDir:     opt.WorkDir,
@@ -82,6 +96,14 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 	// so images.GetDiffID takes the fast path.
 	if err := labelNydusBlobDiffIDs(ctx, cs, srcDesc, platformMC); err != nil {
 		return nil, errors.Wrap(err, "label nydus blob diff ids")
+	}
+	// Label every source OCI layer with its diff id from the image config:
+	// the converter calls images.GetDiffID per layer BEFORE spawning the
+	// parallel layer conversions, and without the label that decompresses
+	// every gzip layer serially — for a large image several seconds on the
+	// critical path for digests the config already carries.
+	if err := labelSourceLayerDiffIDs(ctx, cs, srcDesc, platformMC); err != nil {
+		return nil, errors.Wrap(err, "label source layer diff ids")
 	}
 
 	newDesc, err := indexConvertFn(ctx, cs, srcDesc)

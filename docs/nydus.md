@@ -993,7 +993,8 @@ full blob file: <full_blob_sha256>
 +-------------------------------+  byte = footer.compressed_data_offset + footer.compressed_data_size
 | padding to 4 KiB alignment    |
 +-------------------------------+  byte = footer.bootstrap_offset
-| bootstrap                     |
+| bootstrap (zstd frame)        |
+|  decodes to the EROFS image:  |
 |  block 0                      |
 |  +-------------------------+  |
 |  | 0x0000..0x03ff zeros    |  |
@@ -1042,7 +1043,9 @@ u64 blob_meta_offset
 u64 compressed_data_size
 u32 bootstrap_blocks
 u32 blob_meta_blocks
-u8  reserved1[4032]    compat area: writers zero, readers ignore
+u64 bootstrap_compressed_size   exact zstd frame bytes when the
+                                BOOTSTRAP_ZSTD flag is set, else 0
+u8  reserved1[4024]    compat area: writers zero, readers ignore
 ```
 
 The `magic + version + flags` header prefix matches the blob meta
@@ -1060,9 +1063,13 @@ The inequalities allow alignment padding between regions. Offsets and the footer
 offset must be 4 KiB aligned. The bootstrap and blob meta region lengths are
 stored as 4 KiB block counts in the footer.
 
-The bootstrap region is a valid metadata-only EROFS image by itself. When
-`--bootstrap` is specified, the standalone bootstrap is byte-for-byte identical
-to this embedded region.
+The bootstrap region stores the metadata-only EROFS image as a single zstd
+frame (footer incompat flag `BOOTSTRAP_ZSTD = 1 << 0`), padded with zeros to
+the 4 KiB region boundary; `bootstrap_compressed_size` carries the exact frame
+length so readers decode without trusting the zero tail. An empty bootstrap
+(ondemand blobs) keeps the flag clear and the size zero. When `--bootstrap` is
+specified, the standalone bootstrap file is byte-for-byte identical to the
+decoded region.
 
 ### Bootstrap region details
 

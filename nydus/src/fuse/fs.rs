@@ -1,21 +1,23 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier, ReplyAttr, ReplyData,
-    ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyPoll, ReplyStatfs,
-    ReplyXattr, Request,
+    INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier,
+    ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyPoll, ReplyStatfs, ReplyXattr, Request,
 };
 
 use nydus_format::erofs::{
-    is_nydus_xattr, ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO,
-    EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
+    is_nydus_xattr, ErofsInode, EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR, EROFS_FT_BLKDEV,
+    EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK,
+    EROFS_FT_SYMLINK,
 };
 use nydus_telemetry::metrics;
 
@@ -35,18 +37,49 @@ pub struct ErofsFs {
     reader: Arc<ErofsReader>,
     dir_handles: Mutex<HashMap<u64, Arc<DirHandle>>>,
     next_dir_handle: AtomicU64,
+    /// Kernel accepts ENOSYS from open/opendir as "stop sending them": file
+    /// and directory opens then cost no FUSE round-trip at all and the dummy
+    /// handles keep the page cache (KEEP_CACHE, and CACHE_DIR for dirs).
+    no_open: AtomicBool,
+    no_opendir: AtomicBool,
+    /// Image-wide "no inode has xattrs" declaration from the builder: xattr
+    /// requests answer ENOSYS so the kernel stops sending them entirely.
+    no_xattr: bool,
 }
 
+/// An opened directory. Entries materialize on the first readdir; with
+/// FOPEN_CACHE_DIR the kernel usually serves repeat listings from the page
+/// cache and never sends that readdir, so opendir must not pay for one.
 struct DirHandle {
-    entries: Vec<RawDirEntry>,
+    ino: u64,
+    entries: Mutex<Option<Arc<Vec<RawDirEntry>>>>,
+}
+
+impl DirHandle {
+    fn entries(&self, fs: &ErofsFs) -> io::Result<Arc<Vec<RawDirEntry>>> {
+        let mut guard = self.entries.lock().unwrap();
+        if let Some(entries) = guard.as_ref() {
+            return Ok(entries.clone());
+        }
+        let nid = fs.ino_to_nid(self.ino);
+        let vi = fs.reader.inode(nid)?;
+        let entries = Arc::new(fs.reader.read_dir(nid, &vi)?);
+        *guard = Some(entries.clone());
+        Ok(entries)
+    }
 }
 
 impl ErofsFs {
     pub fn new(reader: Arc<ErofsReader>) -> Self {
+        let no_xattr =
+            reader.superblock().feature_compat() & EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR != 0;
         Self {
             reader,
             dir_handles: Mutex::new(HashMap::new()),
             next_dir_handle: AtomicU64::new(1),
+            no_open: AtomicBool::new(false),
+            no_opendir: AtomicBool::new(false),
+            no_xattr,
         }
     }
 
@@ -115,24 +148,12 @@ impl ErofsFs {
         }
     }
 
-    fn iterate_dir<F>(&self, ino: u64, mut cb: F) -> io::Result<()>
-    where
-        F: FnMut(u64, u8, &[u8]) -> io::Result<bool>,
-    {
-        let nid = self.ino_to_nid(ino);
-        let vi = self.reader.inode(nid)?;
-        self.reader
-            .for_each_dir_entry(nid, &vi, |entry_nid, file_type, name| {
-                cb(entry_nid, file_type, name)
-            })
-    }
-
     fn create_dir_handle(&self, ino: u64) -> io::Result<u64> {
-        let nid = self.ino_to_nid(ino);
-        let vi = self.reader.inode(nid)?;
-        let entries = self.reader.read_dir(nid, &vi)?;
         let handle = self.next_dir_handle.fetch_add(1, Ordering::Relaxed);
-        let dir_handle = Arc::new(DirHandle { entries });
+        let dir_handle = Arc::new(DirHandle {
+            ino,
+            entries: Mutex::new(None),
+        });
         self.dir_handles.lock().unwrap().insert(handle, dir_handle);
         Ok(handle)
     }
@@ -145,10 +166,44 @@ impl ErofsFs {
             .cloned()
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))
     }
+
+    /// Directory entries for a readdir(plus): through the handle when opendir
+    /// issued one, or straight from the inode for the kernel's no-opendir
+    /// dummy handle (fh 0).
+    fn dir_entries(&self, ino: INodeNo, fh: FileHandle) -> io::Result<Arc<Vec<RawDirEntry>>> {
+        if fh.0 != 0 {
+            return self.dir_handle(fh.0)?.entries(self);
+        }
+        let nid = self.ino_to_nid(ino.0);
+        let vi = self.reader.inode(nid)?;
+        Ok(Arc::new(self.reader.read_dir(nid, &vi)?))
+    }
 }
 
 fn io_errno(e: &io::Error) -> Errno {
     Errno::from_i32(e.raw_os_error().unwrap_or(libc::EIO))
+}
+
+/// The reply body for a cached negative lookup: ino 0 tells the kernel "no
+/// such entry, remember that for the ttl". Every other field is ignored.
+fn negative_attr() -> FileAttr {
+    FileAttr {
+        ino: INodeNo(0),
+        size: 0,
+        blocks: 0,
+        atime: UNIX_EPOCH,
+        mtime: UNIX_EPOCH,
+        ctime: UNIX_EPOCH,
+        crtime: UNIX_EPOCH,
+        kind: FileType::RegularFile,
+        perm: 0,
+        nlink: 0,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        blksize: 0,
+        flags: 0,
+    }
 }
 
 /// RAII guard that records a FUSE operation's outcome and latency on drop.
@@ -211,6 +266,34 @@ fn should_hide_xattr(ino: u64, name: &[u8]) -> bool {
 }
 
 impl Filesystem for ErofsFs {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
+        // fuser only requests ASYNC_READ|BIG_WRITES|MAX_PAGES by default, so
+        // without these the kernel never issues READDIRPLUS (leaving our
+        // readdirplus implementation dead code), serializes lookups within one
+        // directory, and drops cached symlink targets.
+        let _ = config.add_capabilities(InitFlags::FUSE_DO_READDIRPLUS);
+        // Deliberately NOT FUSE_READDIRPLUS_AUTO: under AUTO the kernel's
+        // heuristic falls back to plain READDIR for large directories, and a
+        // following stat of every entry becomes one LOOKUP round trip each.
+        let _ = config.add_capabilities(InitFlags::FUSE_PARALLEL_DIROPS);
+        let _ = config.add_capabilities(InitFlags::FUSE_CACHE_SYMLINKS);
+        if config
+            .add_capabilities(InitFlags::FUSE_NO_OPEN_SUPPORT)
+            .is_ok()
+        {
+            self.no_open.store(true, Ordering::Relaxed);
+        }
+        if config
+            .add_capabilities(InitFlags::FUSE_NO_OPENDIR_SUPPORT)
+            .is_ok()
+        {
+            self.no_opendir.store(true, Ordering::Relaxed);
+        }
+        // Default of 16 throttles the kernel's async readahead pipeline.
+        let _ = config.set_max_background(64);
+        Ok(())
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut m = FsOpMetric::new(metrics::FsOp::Lookup);
         let target = name.as_bytes();
@@ -219,19 +302,19 @@ impl Filesystem for ErofsFs {
             reply.error(Errno::ENAMETOOLONG);
             return;
         }
-        let mut found = None;
-        let res = self.iterate_dir(parent.0, |entry_nid, _file_type, entry_name| {
-            if entry_name == target {
-                found = Some(entry_nid);
-                return Ok(false);
+        let parent_nid = self.ino_to_nid(parent.0);
+        let found = match self
+            .reader
+            .inode(parent_nid)
+            .and_then(|vi| self.reader.lookup_dir_entry(parent_nid, &vi, target))
+        {
+            Ok(found) => found,
+            Err(err) => {
+                m.fail();
+                reply.error(io_errno(&err));
+                return;
             }
-            Ok(true)
-        });
-        if let Err(err) = res {
-            m.fail();
-            reply.error(io_errno(&err));
-            return;
-        }
+        };
 
         if let Some(child_nid) = found {
             match self.reader.inode(child_nid) {
@@ -247,8 +330,13 @@ impl Filesystem for ErofsFs {
             return;
         }
 
+        // Cache the miss: an entry with ino 0 is a negative dentry the kernel
+        // keeps for the ttl, so repeats resolve in the dcache instead of one
+        // FUSE round trip each. The image is immutable, so a miss holds
+        // forever — and module resolution (Node's require walk, Python's
+        // sys.path probing) retries the same missing names constantly.
         m.fail();
-        reply.error(Errno::ENOENT);
+        reply.entry(&EROFS_FUSE_TIMEOUT, &negative_attr(), Generation(0));
     }
 
     fn forget(&self, _req: &Request, _ino: INodeNo, _nlookup: u64) {
@@ -272,6 +360,13 @@ impl Filesystem for ErofsFs {
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let mut m = FsOpMetric::new(metrics::FsOp::Open);
+        // ENOSYS makes the kernel treat this and every later open as success
+        // without a handle, with KEEP_CACHE semantics; the read-only mount
+        // already rejects write opens before they reach us.
+        if self.no_open.load(Ordering::Relaxed) {
+            reply.error(Errno::ENOSYS);
+            return;
+        }
         if flags.0 & (libc::O_WRONLY | libc::O_RDWR) != 0 {
             m.fail();
             reply.error(Errno::EROFS);
@@ -346,18 +441,26 @@ impl Filesystem for ErofsFs {
             }
         };
 
-        // Use write_file_data_to to fill a Vec<u8> zero-copy from mmap.
-        let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
-        match self
-            .reader
-            .write_file_data_to(nid, &vi, offset, size, &mut buf)
-        {
-            Ok(_) => reply.data(&buf),
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-            }
+        // Reuse a per-worker buffer: a fresh Vec per request costs an mmap
+        // round-trip plus page faults for every large read.
+        thread_local! {
+            static READ_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
         }
+        READ_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+            buf.reserve(size as usize);
+            match self
+                .reader
+                .write_file_data_to(nid, &vi, offset, size, &mut *buf)
+            {
+                Ok(_) => reply.data(&buf),
+                Err(err) => {
+                    m.fail();
+                    reply.error(io_errno(&err));
+                }
+            }
+        });
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
@@ -382,6 +485,13 @@ impl Filesystem for ErofsFs {
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let mut m = FsOpMetric::new(metrics::FsOp::Opendir);
+        // See open(): dropping opendir/releasedir round-trips also gives the
+        // kernel-side dummy handle FOPEN_CACHE_DIR, so repeat listings are
+        // served from the page cache without any FUSE traffic.
+        if self.no_opendir.load(Ordering::Relaxed) {
+            reply.error(Errno::ENOSYS);
+            return;
+        }
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
@@ -412,14 +522,14 @@ impl Filesystem for ErofsFs {
     fn readdir(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdir);
-        let dir_handle = match self.dir_handle(fh.0) {
-            Ok(h) => h,
+        let entries = match self.dir_entries(ino, fh) {
+            Ok(entries) => entries,
             Err(err) => {
                 m.fail();
                 reply.error(io_errno(&err));
@@ -427,7 +537,7 @@ impl Filesystem for ErofsFs {
             }
         };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in dir_handle.entries.iter().enumerate().skip(start) {
+        for (index, entry) in entries.iter().enumerate().skip(start) {
             let ino = self.nid_to_ino(entry.nid);
             let kind = erofs_ft_to_kind(entry.file_type);
             let name = OsStr::from_bytes(&entry.name);
@@ -441,14 +551,14 @@ impl Filesystem for ErofsFs {
     fn readdirplus(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdirplus);
-        let dir_handle = match self.dir_handle(fh.0) {
-            Ok(h) => h,
+        let entries = match self.dir_entries(ino, fh) {
+            Ok(entries) => entries,
             Err(err) => {
                 m.fail();
                 reply.error(io_errno(&err));
@@ -456,7 +566,7 @@ impl Filesystem for ErofsFs {
             }
         };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in dir_handle.entries.iter().enumerate().skip(start) {
+        for (index, entry) in entries.iter().enumerate().skip(start) {
             let child_inode = match self.reader.inode(entry.nid) {
                 Ok(vi) => vi,
                 Err(err) => {
@@ -533,6 +643,10 @@ impl Filesystem for ErofsFs {
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
         let mut m = FsOpMetric::new(metrics::FsOp::Getxattr);
+        if self.no_xattr {
+            reply.error(Errno::ENOSYS);
+            return;
+        }
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
@@ -579,6 +693,10 @@ impl Filesystem for ErofsFs {
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
         let mut m = FsOpMetric::new(metrics::FsOp::Listxattr);
+        if self.no_xattr {
+            reply.error(Errno::ENOSYS);
+            return;
+        }
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,

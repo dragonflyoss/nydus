@@ -59,6 +59,7 @@ impl BlobCache for RemoteBlobCache {
         let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
+
         let first = self
             .blob_metadata
             .block_group_index_from_uncompressed_offset(offset)
