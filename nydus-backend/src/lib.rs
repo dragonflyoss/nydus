@@ -5,9 +5,9 @@
 //! service edges; this crate must not depend on the control-plane error
 //! type. Backend-private errors (registry auth, Dragonfly classification) are
 //! matched for retry decisions internally and fold into `io::Error` at the
-//! trait boundary. The one deliberately typed escape hatch is the
-//! backend-throttled marker ([`throttled_error`] / [`is_backend_throttled`]),
-//! which lets the storage layer reschedule throttled prefetches.
+//! trait boundary. A read the backend throttled (a Dragonfly proxy `429`)
+//! folds into [`io::ErrorKind::QuotaExceeded`], so the storage layer can
+//! reschedule throttled prefetches without a cross-crate error type.
 
 mod local;
 
@@ -69,37 +69,6 @@ impl ReadContext {
             uncompressed: None,
         }
     }
-}
-
-/// Marker error wrapped in an [`io::Error`] when the backend throttled a read
-/// (a prefetch rejected by a Dragonfly proxy `429` under the load-shedding
-/// policy), so the storage layer can distinguish "throttled — reschedule
-/// later" from an ordinary failure via [`is_backend_throttled`].
-#[derive(Debug)]
-struct BackendThrottled {
-    message: String,
-}
-
-impl std::fmt::Display for BackendThrottled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "backend throttled the read: {}", self.message)
-    }
-}
-
-impl std::error::Error for BackendThrottled {}
-
-/// Build the [`io::Error`] denoting a backend-throttled read. Public so tests
-/// in dependent crates can fabricate throttled failures.
-pub fn throttled_error(message: impl Into<String>) -> io::Error {
-    io::Error::other(BackendThrottled {
-        message: message.into(),
-    })
-}
-
-/// Whether an error denotes a read the backend throttled (Dragonfly `429`).
-pub fn is_backend_throttled(err: &io::Error) -> bool {
-    err.get_ref()
-        .is_some_and(|inner| inner.is::<BackendThrottled>())
 }
 
 thread_local! {
@@ -263,14 +232,6 @@ mod tests {
         let config: BackendConfig =
             serde_yaml::from_str("type: local\nconfig:\n  dir: /blobs\n").unwrap();
         assert!(build_backend(&config).is_ok());
-    }
-
-    #[test]
-    fn throttled_marker_survives_io_error_round_trip() {
-        let err = throttled_error("proxy answered 429");
-        assert!(is_backend_throttled(&err));
-        assert!(err.to_string().contains("429"));
-        assert!(!is_backend_throttled(&io::Error::other("ordinary failure")));
     }
 
     /// A backend that optionally diverts each read's attribution to `serve_as`.

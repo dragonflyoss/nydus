@@ -825,8 +825,7 @@ Fields under `backend.config`:
 	|---|---|---|
 	| Proxy `429` | No retry, no origin fallback; the blob's prefetch fails and is rescheduled after a random `prefetch.retry_delay_min`–`prefetch.retry_delay_max` delay | No Dragonfly retry; fall back to the origin through the fallback throttle; the origin failing `http.max_retries` attempts → IO error |
 	| Proxy `403` | Fail immediately, no retry, no fallback | Fail immediately, no retry, no fallback |
-	| Timeout | `prefetch_max_retries` Dragonfly retries (each after a random 100ms–1s delay), then fail (no fallback) | `ondemand_max_retries` Dragonfly retries, then throttled origin fallback |
-	| Connect / `5xx` / other | `prefetch_max_retries` Dragonfly retries (each after a random 100ms–1s delay), then fail (no fallback) | `ondemand_max_retries` Dragonfly retries, then throttled origin fallback |
+	| Anything else (timeout, connect, `5xx`, mid-stream) | `prefetch_max_retries` Dragonfly retries (each after a random 100ms–1s delay), then fail (no fallback) | `ondemand_max_retries` Dragonfly retries, then throttled origin fallback |
 
 	Prefetch reads never fall back to the origin, so a Dragonfly outage
 	degrades prefetch instead of flooding the registry, while on-demand reads
@@ -901,9 +900,8 @@ Backend:
 	source. A read is "high latency" when it takes 250ms or more.
 - `backend_origin_crc_check_errors`, `backend_proxy_crc_check_errors` — CRC
 	validation failures on fetched data, attributed to the serving side.
-- `backend_dragonfly_read_errors{class,kind}` — Dragonfly read failures by
-	failure class (`rate_limited`, `forbidden`, `timeout`, `connect`,
-	`server_error`, `other`) and read kind (`ondemand`, `prefetch`).
+- `backend_dragonfly_read_errors{kind}` — Dragonfly read failures by read
+	kind (`ondemand`, `prefetch`); the failure cause is in the logs.
 - `backend_fallback_read_count`, `backend_fallback_read_errors` — origin
 	requests issued as Dragonfly fallbacks and how many of them failed; these
 	reads also count into the `backend_origin_*` split above. Each logical

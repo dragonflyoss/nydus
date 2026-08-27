@@ -61,54 +61,6 @@ impl ReadKind {
     const ALL: [ReadKind; 2] = [ReadKind::OnDemand, ReadKind::Prefetch];
 }
 
-/// Classification of a failed Dragonfly SDK read, labelling the
-/// `backend_dragonfly_read_errors` counter. Mirrors the failure classes the
-/// registry backend's load-shedding policy distinguishes. Defined here so
-/// this crate stays a dependency leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DragonflyErrorClass {
-    /// The Dragonfly proxy answered HTTP 429.
-    RateLimited,
-    /// The Dragonfly proxy answered HTTP 403.
-    Forbidden,
-    /// The request timed out.
-    Timeout,
-    /// The local dfdaemon could not be reached.
-    Connect,
-    /// The proxy or the backend behind it answered HTTP 5xx.
-    ServerError,
-    /// The response body failed mid-stream after a successful start.
-    Stream,
-    /// Any other SDK transport error.
-    Other,
-}
-
-impl DragonflyErrorClass {
-    fn as_str(self) -> &'static str {
-        match self {
-            DragonflyErrorClass::RateLimited => "rate_limited",
-            DragonflyErrorClass::Forbidden => "forbidden",
-            DragonflyErrorClass::Timeout => "timeout",
-            DragonflyErrorClass::Connect => "connect",
-            DragonflyErrorClass::ServerError => "server_error",
-            DragonflyErrorClass::Stream => "stream",
-            DragonflyErrorClass::Other => "other",
-        }
-    }
-
-    /// All classes, used to pre-create label series so every class appears in
-    /// the exposition output even before it is first hit.
-    const ALL: [DragonflyErrorClass; 7] = [
-        DragonflyErrorClass::RateLimited,
-        DragonflyErrorClass::Forbidden,
-        DragonflyErrorClass::Timeout,
-        DragonflyErrorClass::Connect,
-        DragonflyErrorClass::ServerError,
-        DragonflyErrorClass::Stream,
-        DragonflyErrorClass::Other,
-    ];
-}
-
 /// A FUSE filesystem operation, mirroring nydus `StatsFop` for label parity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsOp {
@@ -274,20 +226,18 @@ impl Metrics {
         let backend_dragonfly_read_errors = IntCounterVec::new(
             Opts::new(
                 "backend_dragonfly_read_errors",
-                "Failed Dragonfly SDK reads by error class and read kind",
+                "Failed Dragonfly SDK reads by read kind",
             ),
-            &["class", "kind"],
+            &["kind"],
         )
         .expect("valid counter vec");
         registry
             .register(Box::new(backend_dragonfly_read_errors.clone()))
             .expect("register");
 
-        // Pre-create every class/kind series so they appear at zero.
-        for class in DragonflyErrorClass::ALL {
-            for kind in ReadKind::ALL {
-                backend_dragonfly_read_errors.with_label_values(&[class.as_str(), kind.as_str()]);
-            }
+        // Pre-create every kind series so they appear at zero.
+        for kind in ReadKind::ALL {
+            backend_dragonfly_read_errors.with_label_values(&[kind.as_str()]);
         }
 
         Self {
@@ -650,12 +600,12 @@ pub fn inc_cache_redirect_skip_block_group() {
     METRICS.cache_redirect_skip_block_group.inc();
 }
 
-/// Record a failed Dragonfly SDK read, attributed to its error class and to
-/// the kind of read (on-demand or prefetch) that hit it.
-pub fn record_dragonfly_error(class: DragonflyErrorClass, kind: ReadKind) {
+/// Record a failed Dragonfly SDK read, attributed to the kind of read
+/// (on-demand or prefetch) that hit it.
+pub fn record_dragonfly_error(kind: ReadKind) {
     METRICS
         .backend_dragonfly_read_errors
-        .with_label_values(&[class.as_str(), kind.as_str()])
+        .with_label_values(&[kind.as_str()])
         .inc();
 }
 
@@ -790,11 +740,11 @@ pub fn backend_redirect_read_bytes_total() -> u64 {
     METRICS.backend_redirect_read_bytes.get()
 }
 
-/// Current count of failed Dragonfly reads for one error class and read kind.
-pub fn dragonfly_error_total(class: DragonflyErrorClass, kind: ReadKind) -> u64 {
+/// Current count of failed Dragonfly reads for one read kind.
+pub fn dragonfly_error_total(kind: ReadKind) -> u64 {
     METRICS
         .backend_dragonfly_read_errors
-        .with_label_values(&[class.as_str(), kind.as_str()])
+        .with_label_values(&[kind.as_str()])
         .get()
 }
 
@@ -888,24 +838,20 @@ mod tests {
 
     #[test]
     fn dragonfly_policy_metrics_move_and_expose() {
-        let errors_before =
-            dragonfly_error_total(DragonflyErrorClass::RateLimited, ReadKind::Prefetch);
+        let errors_before = dragonfly_error_total(ReadKind::Prefetch);
         let fallbacks_before = backend_fallback_read_total();
         let fallback_errors_before = backend_fallback_read_error_total();
         let reschedules_before = prefetch_reschedule_total();
         let reschedule_runs_before = prefetch_reschedule_run_total();
 
-        record_dragonfly_error(DragonflyErrorClass::RateLimited, ReadKind::Prefetch);
+        record_dragonfly_error(ReadKind::Prefetch);
         record_fallback_read(false);
         record_fallback_read(true);
         record_fallback_throttle_wait(Duration::from_millis(10));
         inc_prefetch_reschedule();
         inc_prefetch_reschedule_run();
 
-        assert_eq!(
-            dragonfly_error_total(DragonflyErrorClass::RateLimited, ReadKind::Prefetch),
-            errors_before + 1
-        );
+        assert_eq!(dragonfly_error_total(ReadKind::Prefetch), errors_before + 1);
         assert_eq!(backend_fallback_read_total(), fallbacks_before + 2);
         assert_eq!(
             backend_fallback_read_error_total(),
@@ -915,13 +861,9 @@ mod tests {
         assert_eq!(prefetch_reschedule_run_total(), reschedule_runs_before + 1);
 
         let text = encode_text();
-        assert!(
-            text.contains(r#"backend_dragonfly_read_errors{class="rate_limited",kind="prefetch"}"#)
-        );
-        // Series for classes never hit are pre-created at zero.
-        assert!(
-            text.contains(r#"backend_dragonfly_read_errors{class="forbidden",kind="ondemand"}"#)
-        );
+        assert!(text.contains(r#"backend_dragonfly_read_errors{kind="prefetch"}"#));
+        // Series for kinds never hit are pre-created at zero.
+        assert!(text.contains(r#"backend_dragonfly_read_errors{kind="ondemand"}"#));
         assert!(text.contains("backend_fallback_read_count"));
         assert!(text.contains("backend_fallback_read_errors"));
         assert!(text.contains("backend_fallback_throttle_wait"));

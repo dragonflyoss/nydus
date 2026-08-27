@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
-use nydus_backend::is_backend_throttled;
 use nydus_config::PrefetchScope;
 use nydus_telemetry::metrics::{inc_prefetch_reschedule, inc_prefetch_reschedule_run};
 
@@ -19,6 +18,12 @@ use crate::cache::BlobCaches;
 /// How often the reschedule wait re-checks the stop flag while sleeping
 /// towards the next deadline.
 const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether the backend throttled this read (a Dragonfly proxy `429`, folded
+/// into [`io::ErrorKind::QuotaExceeded`] at the backend's trait boundary).
+fn is_throttled(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::QuotaExceeded
+}
 
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///
@@ -29,11 +34,11 @@ const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 ///    concurrently with a worker pool; otherwise stop after the priority blobs so the
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" redirect blob).
-/// 3. Blobs whose prefetch the backend throttled (Dragonfly `429`, detected
-///    via [`is_backend_throttled`]) are rescheduled after a random delay in
-///    the configured window and re-attempted until they stop being throttled
-///    or the [stop flag](Self::stop_flag) is raised. Other failures are
-///    logged and skipped.
+/// 3. Blobs whose prefetch the backend throttled (Dragonfly `429`, surfaced
+///    as [`io::ErrorKind::QuotaExceeded`]) are rescheduled after a random
+///    delay in the configured window and re-attempted until they stop being
+///    throttled or the [stop flag](Self::stop_flag) is raised. Other failures
+///    are logged and skipped.
 pub struct BlobPrefetcher {
     caches: Arc<BlobCaches>,
     priority: Vec<u16>,
@@ -145,7 +150,7 @@ impl BlobPrefetcher {
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
-                Err(err) if is_backend_throttled(&err) => {
+                Err(err) if is_throttled(&err) => {
                     inc_prefetch_reschedule();
                     warn!(
                         "backend throttled prefetch of priority blob {}, rescheduling: {}",
@@ -183,7 +188,7 @@ impl BlobPrefetcher {
                         match blob_index {
                             Some(blob_index) => match blobs.prefetch_blob(blob_index, 1, timeout) {
                                 Ok(()) => info!("prefetched blob {}", blob_index),
-                                Err(err) if is_backend_throttled(&err) => {
+                                Err(err) if is_throttled(&err) => {
                                     inc_prefetch_reschedule();
                                     warn!(
                                         "backend throttled prefetch of blob {}, rescheduling: {}",
@@ -237,7 +242,7 @@ impl BlobPrefetcher {
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched rescheduled blob {}", blob_index),
-                Err(err) if is_backend_throttled(&err) => {
+                Err(err) if is_throttled(&err) => {
                     inc_prefetch_reschedule();
                     warn!(
                         "backend throttled rescheduled prefetch of blob {}, rescheduling again: {}",
@@ -277,12 +282,16 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
-    use nydus_backend::{throttled_error, BlobBackend, Local, ReadContext};
+    use nydus_backend::{BlobBackend, Local, ReadContext};
     use nydus_format::blob::{
         BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
     };
     use nydus_format::utils::{write_minimal_full_blob, SHA256_DIGEST_SIZE};
     use tempfile::tempdir;
+
+    fn throttled_error() -> io::Error {
+        io::Error::new(io::ErrorKind::QuotaExceeded, "proxy answered 429")
+    }
 
     /// Wraps a local backend and fails the first `failures` data reads with
     /// the given error builder, then delegates, counting every read attempt.
@@ -373,9 +382,7 @@ mod tests {
         let cache_dir = tempdir().unwrap();
         let (payload, meta) = test_payload();
         // The first data read is throttled; the delayed retry succeeds.
-        let backend = FlakyBackend::new(backend_dir.path(), 1, || {
-            throttled_error("proxy answered 429")
-        });
+        let backend = FlakyBackend::new(backend_dir.path(), 1, throttled_error);
         let prefetcher = prefetcher_over(
             backend.clone(),
             backend_dir.path(),
@@ -428,9 +435,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (payload, meta) = test_payload();
-        let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, || {
-            throttled_error("proxy answered 429")
-        });
+        let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, throttled_error);
         let prefetcher = prefetcher_over(
             backend.clone(),
             backend_dir.path(),
