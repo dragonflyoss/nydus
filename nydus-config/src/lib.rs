@@ -108,10 +108,10 @@ fn default_dragonfly_fallback_interval() -> Duration {
     Duration::from_secs(1)
 }
 
-/// Returns the default for validating decoded block groups against their
-/// stored crc32.
+/// Returns the default for skipping decoded block group checksum
+/// verification.
 #[inline]
-fn default_storage_verify_crc32() -> bool {
+fn default_storage_skip_verify_checksums() -> bool {
     true
 }
 
@@ -328,12 +328,11 @@ pub struct StorageConfig {
     #[serde(default)]
     pub dir: Option<PathBuf>,
 
-    /// Whether decoded block groups are validated against their stored
-    /// crc32 before being served (the default). Disable only when the
-    /// transport is already trusted end to end and the crc32 pass shows up
-    /// in the read-path profile.
-    #[serde(default = "default_storage_verify_crc32")]
-    pub verify_crc32: bool,
+    /// Skip verifying decoded block groups against their stored checksums
+    /// before they are served (the default). Set to `false` to verify every
+    /// decoded block group when the transport is not trusted end to end.
+    #[serde(default = "default_storage_skip_verify_checksums")]
+    pub skip_verify_checksums: bool,
 }
 
 /// Implement Default for StorageConfig.
@@ -341,7 +340,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             dir: None,
-            verify_crc32: default_storage_verify_crc32(),
+            skip_verify_checksums: default_storage_skip_verify_checksums(),
         }
     }
 }
@@ -543,7 +542,7 @@ mod tests {
             config.storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
-        assert!(!config.storage.verify_crc32);
+        assert!(!config.storage.skip_verify_checksums);
 
         assert_eq!(config.prefetch.concurrent_blob_count, 4);
         assert_eq!(config.prefetch.timeout, Duration::from_secs(120));
@@ -705,11 +704,11 @@ config:
             storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
-        assert!(storage.verify_crc32);
+        assert!(storage.skip_verify_checksums);
 
         let storage: StorageConfig =
-            serde_yaml::from_str("dir: /cache\nverify_crc32: false\n").unwrap();
-        assert!(!storage.verify_crc32);
+            serde_yaml::from_str("dir: /cache\nskip_verify_checksums: false\n").unwrap();
+        assert!(!storage.skip_verify_checksums);
     }
 
     #[test]

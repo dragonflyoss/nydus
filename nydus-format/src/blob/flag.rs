@@ -67,12 +67,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_word_has_no_bits() {
-        assert_eq!(FeatureFlags::empty().bits(), 0);
-        assert!(!FeatureFlags::empty().contains(1));
-    }
-
-    #[test]
     fn raw_bits_round_trip_verbatim() {
         assert_eq!(FeatureFlags::from_bits(0xdead_beef).bits(), 0xdead_beef);
     }

@@ -39,8 +39,6 @@ fn build_test_image(
     build_test_image_with_layout(root, false)
 }
 
-/// Like [`build_test_image`] but with extra duplicate-content files (an
-/// exact copy, a shifted copy, and a holey file) stored verbatim.
 fn build_duplicate_corpus_test_image(
     root: &Path,
 ) -> (
@@ -112,16 +110,12 @@ fn build_test_image_full(
     symlink("file1", corpus_dir.join("link_to_file1")).unwrap();
 
     if dedup_corpus {
-        // Duplicate content at shifted offsets plus an exact copy: stored
-        // verbatim (no content dedup), read back byte-identical.
         let mut shifted = b"shifted-header:".to_vec();
         shifted.extend_from_slice(&corpus["file1"]);
         fs::write(corpus_dir.join("file1_shifted"), &shifted).unwrap();
         corpus.insert("file1_shifted".to_string(), shifted);
         fs::write(corpus_dir.join("file1_copy"), &corpus["file1"]).unwrap();
         corpus.insert("file1_copy".to_string(), corpus["file1"].clone());
-        // A file with an all-zero middle chunk to exercise zero-chunk
-        // elision.
         let mut holey = vec![0u8; 3 << 20];
         holey[..4096].copy_from_slice(&corpus["file2"][..4096]);
         holey[(2 << 20) + 5..(2 << 20) + 4101].copy_from_slice(&corpus["file2"][..4096]);
@@ -272,8 +266,6 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     core.blobs.fetch(&blob_id, offset, len).unwrap();
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
-    // The fetched logical range spans the first two block groups, so both
-    // are traced in access order.
     let trace = core.trace_snapshot();
     assert_eq!(trace.entries.len(), 2);
     assert!(trace.entries.iter().all(|entry| entry.blob_index == 1));
@@ -481,8 +473,6 @@ fn core_reads_back_duplicate_corpus_image() {
 
     let core = NydusCore::new(&bootstrap, config).unwrap();
 
-    // Every file of the duplicate/shifted/holey corpus must read back
-    // byte-identical through the block group read path.
     for (name, expected) in &corpus {
         let entry = core.fs.open(name).unwrap();
         let all = entry.read().unwrap();
@@ -497,14 +487,12 @@ fn core_reads_back_duplicate_corpus_image() {
         );
     }
 
-    // Unaligned partial reads cross block and group boundaries.
     let entry = core.fs.open("file1_shifted").unwrap();
     let mut buf = vec![0u8; 100_000];
     let read = entry.read_at(123_457, &mut buf).unwrap();
     assert_eq!(read, buf.len());
     assert_eq!(&buf, &corpus["file1_shifted"][123_457..123_457 + read]);
 
-    // probe/fetch flat ranges work through the group-readiness path too.
     let file1_entry = core.fs.open("file1").unwrap();
     file1_entry.fetch(12345, 4097).unwrap();
     assert!(!file1_entry.probe_ranges(12345, 4097).unwrap().is_empty());
