@@ -38,24 +38,19 @@ func loadDragonflyEnv(t *testing.T) dragonflyEnv {
 	require.NotEmpty(t, configPath, "NYDUS_CONFIG must be set")
 	require.NotEmpty(t, bootstrap, "BOOTSTRAP_PATH must be set")
 
-	cacheDir := os.Getenv("NYDUS_CACHE_DIR")
-	if cacheDir == "" {
-		cacheDir = filepath.Join(workDir, "cache")
+	nydusBin := os.Getenv("NYDUS_BIN")
+	if nydusBin == "" {
+		nydusBin = mustLookupExecutable(t, "nydus")
 	}
 
 	return dragonflyEnv{
-		nydusBin: func() string {
-			if bin := os.Getenv("NYDUS_BIN"); bin != "" {
-				return bin
-			}
-			return mustLookupExecutable(t, "nydus")
-		}(),
+		nydusBin:      nydusBin,
 		configPath:    configPath,
 		bootstrap:     bootstrap,
 		mountpoint:    filepath.Join(workDir, "mnt"),
 		workDir:       workDir,
-		cacheDir:      cacheDir,
-		dragonflyMode: envOr("DRAGONFLY_MODE", "sdk-proxy-fallback"),
+		cacheDir:      envOr("NYDUS_CACHE_DIR", filepath.Join(workDir, "cache")),
+		dragonflyMode: envOr("DRAGONFLY_MODE", "fallback"),
 	}
 }
 
@@ -77,6 +72,8 @@ func (e dragonflyEnv) startFuse(t *testing.T) func() {
 	return startFuseMount(t, cmd, e.mountpoint, "nydus fuse with dragonfly")
 }
 
+// readMountedFile reads one regular file from the mounted image, preferring a
+// small set of known paths and falling back to the first file found.
 func readMountedFile(t *testing.T, mountpoint string) (string, []byte, error) {
 	t.Helper()
 	candidates := []string{"etc/os-release", "etc/passwd", "etc/group", "usr/bin/env"}
@@ -112,11 +109,15 @@ func readMountedFile(t *testing.T, mountpoint string) (string, []byte, error) {
 	return "", nil, os.ErrNotExist
 }
 
-func killDfdaemon(t *testing.T) {
+// stopDragonfly takes the Dragonfly deployment down through the shell command
+// in DRAGONFLY_STOP_CMD (CI scales the scheduler and seed client statefulsets
+// to zero and waits for the pods to terminate).
+func stopDragonfly(t *testing.T) {
 	t.Helper()
-	_ = exec.Command("pkill", "-f", "dfdaemon").Run()
-	// give process supervisor-free background processes a moment to exit.
-	time.Sleep(2 * time.Second)
+	command := os.Getenv("DRAGONFLY_STOP_CMD")
+	require.NotEmpty(t, command, "DRAGONFLY_STOP_CMD must be set")
+	out, err := exec.Command("bash", "-c", command).CombinedOutput()
+	require.NoError(t, err, "stop dragonfly: %s", out)
 }
 
 func TestDragonflyE2E(t *testing.T) {
@@ -126,9 +127,9 @@ func TestDragonflyE2E(t *testing.T) {
 	// injectable proxy: it forwards to the local registry so the initial
 	// read (and Dragonfly back-to-source) succeeds, and later injects hard
 	// failures so origin fallback cannot succeed either.
-	strict := strings.Contains(env.dragonflyMode, "strict")
+	strict := env.dragonflyMode == "strict"
 	if strict {
-		_, stopProxy := newInjectableProxy(t, strings.TrimPrefix(proxyControlURL, "http://"))
+		_, stopProxy := newInjectableProxy(t)
 		defer stopProxy()
 	}
 
@@ -138,11 +139,9 @@ func TestDragonflyE2E(t *testing.T) {
 	require.NoError(t, err, "initial FUSE read must succeed")
 	require.NotEmpty(t, firstData, "initial read should return data")
 
-	killDfdaemon(t)
+	stopDragonfly(t)
 	wipeCacheDir(env.cacheDir)
 	if strict {
-		// Fail every origin blob fetch from now on: with Dragonfly down and
-		// the origin hard-failing, strict mode must surface a read error.
 		postInject(t, http.StatusServiceUnavailable, -1)
 	}
 
@@ -161,6 +160,9 @@ func TestDragonflyE2E(t *testing.T) {
 	require.NotEmpty(t, firstData)
 }
 
+// injectableProxy fronts the local registry and injects error responses on
+// blob GETs on demand, so tests can fail the origin for both Dragonfly
+// back-to-source and direct fallback reads.
 type injectableProxy struct {
 	targetURL *url.URL
 	proxy     *httputil.ReverseProxy
@@ -170,9 +172,13 @@ type injectableProxy struct {
 	remaining int
 }
 
+// proxyListenAddr binds all interfaces: the Dragonfly seed client reaches the
+// proxy from inside the kind cluster through the docker network gateway.
+const proxyListenAddr = ":18080"
+
 const proxyControlURL = "http://127.0.0.1:18080"
 
-func newInjectableProxy(t *testing.T, addr string) (*injectableProxy, func()) {
+func newInjectableProxy(t *testing.T) (*injectableProxy, func()) {
 	t.Helper()
 	targetURL, err := url.Parse(envOr("PROXY_TARGET_URL", "http://127.0.0.1:5000"))
 	require.NoError(t, err)
@@ -191,7 +197,7 @@ func newInjectableProxy(t *testing.T, addr string) (*injectableProxy, func()) {
 	mux.HandleFunc("/_test/clear", p.clear)
 	mux.HandleFunc("/", p.serve)
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", proxyListenAddr)
 	require.NoError(t, err)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
@@ -235,10 +241,10 @@ func (p *injectableProxy) clear(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// serve injects only blob GETs: HEAD blob-size probes stay healthy so the
+// tests exercise the data-read policy, not metadata recovery.
 func (p *injectableProxy) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
-	// Only blob GETs are injected: HEAD blob-size probes stay healthy so the
-	// tests exercise the data-read policy, not metadata recovery.
 	inject := p.status > 0 && p.remaining != 0 && r.Method == http.MethodGet &&
 		strings.Contains(r.URL.Path, "/blobs/")
 	if inject {
@@ -277,16 +283,13 @@ func clearInject(t *testing.T) {
 
 func TestProxyErrorSimulation(t *testing.T) {
 	env := loadDragonflyEnv(t)
-	configPath := os.Getenv("NYDUS_PROXY_ERROR_CONFIG")
-	require.NotEmpty(t, configPath, "NYDUS_PROXY_ERROR_CONFIG must be set")
-	env.configPath = configPath
 
-	_, stopProxy := newInjectableProxy(t, strings.TrimPrefix(proxyControlURL, "http://"))
+	_, stopProxy := newInjectableProxy(t)
 	defer stopProxy()
 
-	// The 403 case runs first while dfdaemon's piece cache is still cold, so
-	// its back-to-source fetches are guaranteed to see the injected failure.
-	// It injects with no budget: every origin blob GET (Dragonfly
+	// The 403 case runs first while the seed client's piece cache is still
+	// cold, so its back-to-source fetches are guaranteed to see the injected
+	// failure. It injects with no budget: every origin blob GET (Dragonfly
 	// back-to-source and the direct fallback path alike) is denied, so the
 	// read must surface an error no matter which path serves it.
 	t.Run("status_403_terminal", func(t *testing.T) {
