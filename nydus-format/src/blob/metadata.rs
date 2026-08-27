@@ -1,5 +1,5 @@
 use crate::blob::algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
-use crate::blob::flag::validate_incompat_flags;
+use crate::blob::flag::FeatureFlags;
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Context, Error, Result};
 use crate::utils::le::{
@@ -241,7 +241,8 @@ impl BlobMetadataHeader {
 
         let flags = BlobMetadataFlags::from_bits_truncate(self.flags);
         BlobMetadataDigester::try_from(flags)?;
-        validate_incompat_flags(self.flags, NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
+        FeatureFlags::from_bits(self.flags)
+            .validate_incompat(NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
         Ok(())
     }
 

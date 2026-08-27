@@ -138,6 +138,7 @@ impl FlatImage {
             .core
             .fetch_flat_ranges(offset, len)
             .context("failed to fetch flat ranges")?;
+
         // The shared copy is gap-tolerant, so a drifted fetch contract would
         // show up as silently misplaced bytes rather than an error.
         self.validate_contiguous_ranges(&ranges, offset, len)?;

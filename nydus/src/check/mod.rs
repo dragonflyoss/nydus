@@ -566,6 +566,7 @@ mod tests {
             0,
             data.len() as u64,
             1,
+            None,
         )
         .unwrap();
         let mut blob = Vec::new();
