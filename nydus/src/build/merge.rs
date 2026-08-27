@@ -565,73 +565,51 @@ mod tests {
     }
 
     #[test]
-    fn opaque_marker_clears_lower_entries_and_is_dropped() {
-        let mut merged = BTreeMap::new();
-        merge_layer_entries(
-            &mut merged,
-            entries(&[("old.txt", EROFS_FT_REG_FILE), ("subdir", EROFS_FT_DIR)]),
-            0,
-            WhiteoutSpec::Oci,
-        );
-        merge_layer_entries(
-            &mut merged,
-            entries(&[(OPAQUE, EROFS_FT_REG_FILE), ("new.txt", EROFS_FT_REG_FILE)]),
-            1,
-            WhiteoutSpec::Oci,
-        );
-        assert_eq!(merged_names(&merged), vec!["new.txt"]);
-    }
+    fn whiteout_semantics_follow_the_oci_rules() {
+        type Layers = &'static [&'static [(&'static str, u8)]];
+        let cases: [(&str, Layers, &[&str]); 4] = [
+            (
+                "opaque marker clears lower entries and is dropped",
+                &[
+                    &[("old.txt", EROFS_FT_REG_FILE), ("subdir", EROFS_FT_DIR)],
+                    &[(OPAQUE, EROFS_FT_REG_FILE), ("new.txt", EROFS_FT_REG_FILE)],
+                ],
+                &["new.txt"],
+            ),
+            (
+                "plain whiteout removes the lower entry and the marker",
+                &[
+                    &[("kept", EROFS_FT_REG_FILE), ("removed", EROFS_FT_REG_FILE)],
+                    &[(".wh.removed", EROFS_FT_REG_FILE)],
+                ],
+                &["kept"],
+            ),
+            (
+                "bottom layer whiteout markers are never emitted",
+                &[&[
+                    (".wh.lower-only", EROFS_FT_REG_FILE),
+                    (OPAQUE, EROFS_FT_REG_FILE),
+                    ("fresh", EROFS_FT_REG_FILE),
+                ]],
+                &["fresh"],
+            ),
+            (
+                "lower whiteout marker does not delete a later upper entry",
+                &[
+                    &[(".wh.recreated", EROFS_FT_REG_FILE)],
+                    &[("recreated", EROFS_FT_REG_FILE)],
+                ],
+                &["recreated"],
+            ),
+        ];
 
-    #[test]
-    fn plain_whiteout_removes_lower_entry_and_marker() {
-        let mut merged = BTreeMap::new();
-        merge_layer_entries(
-            &mut merged,
-            entries(&[("kept", EROFS_FT_REG_FILE), ("removed", EROFS_FT_REG_FILE)]),
-            0,
-            WhiteoutSpec::Oci,
-        );
-        merge_layer_entries(
-            &mut merged,
-            entries(&[(".wh.removed", EROFS_FT_REG_FILE)]),
-            1,
-            WhiteoutSpec::Oci,
-        );
-        assert_eq!(merged_names(&merged), vec!["kept"]);
-    }
-
-    #[test]
-    fn bottom_layer_whiteout_markers_are_never_emitted() {
-        let mut merged = BTreeMap::new();
-        merge_layer_entries(
-            &mut merged,
-            entries(&[
-                (".wh.lower-only", EROFS_FT_REG_FILE),
-                (OPAQUE, EROFS_FT_REG_FILE),
-                ("fresh", EROFS_FT_REG_FILE),
-            ]),
-            0,
-            WhiteoutSpec::Oci,
-        );
-        assert_eq!(merged_names(&merged), vec!["fresh"]);
-    }
-
-    #[test]
-    fn lower_whiteout_marker_does_not_delete_later_upper_entry() {
-        let mut merged = BTreeMap::new();
-        merge_layer_entries(
-            &mut merged,
-            entries(&[(".wh.recreated", EROFS_FT_REG_FILE)]),
-            0,
-            WhiteoutSpec::Oci,
-        );
-        merge_layer_entries(
-            &mut merged,
-            entries(&[("recreated", EROFS_FT_REG_FILE)]),
-            1,
-            WhiteoutSpec::Oci,
-        );
-        assert_eq!(merged_names(&merged), vec!["recreated"]);
+        for (case, layers, expected) in cases {
+            let mut merged = BTreeMap::new();
+            for (layer_index, layer) in layers.iter().enumerate() {
+                merge_layer_entries(&mut merged, entries(layer), layer_index, WhiteoutSpec::Oci);
+            }
+            assert_eq!(merged_names(&merged), expected, "{case}");
+        }
     }
 
     #[test]

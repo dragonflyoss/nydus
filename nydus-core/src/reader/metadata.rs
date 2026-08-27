@@ -83,10 +83,10 @@ impl ErofsReader {
             return Ok(None);
         }
         match self.read_flat_data(nid, inode, 0, dir_size) {
-            Ok(data) => Ok(Self::search_dir_entries(data, dir_size, name)),
+            Ok(data) => Ok(Self::find_dir_entry(data, dir_size, name)),
             Err(_) => {
                 let data = self.read_flat_data_vec(nid, inode, 0, dir_size)?;
-                Ok(Self::search_dir_entries(&data, dir_size, name))
+                Ok(Self::find_dir_entry(&data, dir_size, name))
             }
         }
     }
@@ -136,7 +136,7 @@ impl ErofsReader {
         Some((block_data, count))
     }
 
-    fn search_dir_entries(data: &[u8], dir_size: usize, target: &[u8]) -> Option<u64> {
+    fn find_dir_entry(data: &[u8], dir_size: usize, target: &[u8]) -> Option<u64> {
         let block_size = EROFS_BLOCK_SIZE as usize;
         let nblocks = dir_size.div_ceil(block_size);
 

@@ -62,61 +62,46 @@ pub fn render_flattened_bootstrap_to(
     let mut layout = MetadataLayout::size_only(meta_blkaddr);
 
     // --- Sizing pass: identical allocation order to the buffered renderer ---
-    for inode in inodes.iter_mut() {
-        if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
-            inode.is_extended = true;
-        }
-        if inode.mtime.wrapping_sub(epoch) > u32::MAX as u64 {
-            inode.is_extended = true;
-        }
-        let inode_size = erofs_inode_size(inode);
-        let has_inline = symlink_is_inline(inode);
-        let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
-        inode.meta_offset = offset;
-        inode.nid = nid;
-    }
-
+    alloc_inodes(&mut layout, inodes, epoch);
     set_parent_nids(inodes);
     layout.pad_to_block();
 
-    // Data-region entries in allocation (= write) order: directory data and
-    // long symlink targets, identified by inode index.
-    let mut data_entries: Vec<(usize, usize)> = Vec::new(); // (inode index, offset)
+    // Data-region entries in allocation (= write) order, identified by inode
+    // index: every directory's data, then every long symlink's target.
+    let mut data_entries: Vec<(usize, usize)> = Vec::new();
     for index in 0..inodes.len() {
-        match inodes[index].data {
-            InodeData::Directory { .. } => {
-                let dir_data = serialize_dir_of(inodes, index);
-                let (data_offset, startblk) = layout.alloc_dir_data(dir_data.len());
-                let dir_data_len = dir_data.len();
-                if let InodeData::Directory {
-                    startblk: ref mut sb,
-                    data_size: ref mut dds,
-                    ..
-                } = inodes[index].data
-                {
-                    *sb = startblk;
-                    *dds = dir_data_len;
-                }
-                inodes[index].size = dir_data_len as u64;
-                data_entries.push((index, data_offset));
-            }
-            InodeData::Symlink { .. } if !symlink_is_inline(&inodes[index]) => {
-                let target_len = match &inodes[index].data {
-                    InodeData::Symlink { target, .. } => target.len(),
-                    _ => unreachable!(),
-                };
-                let (data_offset, startblk) = layout.alloc_dir_data(target_len);
-                if let InodeData::Symlink {
-                    startblk: ref mut sb,
-                    ..
-                } = inodes[index].data
-                {
-                    *sb = startblk;
-                }
-                data_entries.push((index, data_offset));
-            }
-            _ => {}
+        if !matches!(inodes[index].data, InodeData::Directory { .. }) {
+            continue;
         }
+        let dir_data_len = serialize_dir_data(inodes, index).len();
+        let (data_offset, data_startblk) = layout.alloc_dir_data(dir_data_len);
+        if let InodeData::Directory {
+            ref mut startblk,
+            ref mut data_size,
+            ..
+        } = inodes[index].data
+        {
+            *startblk = data_startblk;
+            *data_size = dir_data_len;
+        }
+        inodes[index].size = dir_data_len as u64;
+        data_entries.push((index, data_offset));
+    }
+    for (index, inode) in inodes.iter_mut().enumerate() {
+        if symlink_is_inline(inode) {
+            continue;
+        }
+        let InodeData::Symlink { ref target, .. } = inode.data else {
+            continue;
+        };
+        let (data_offset, data_startblk) = layout.alloc_dir_data(target.len());
+        if let InodeData::Symlink {
+            ref mut startblk, ..
+        } = inode.data
+        {
+            *startblk = data_startblk;
+        }
+        data_entries.push((index, data_offset));
     }
 
     let metadata_len = layout.pad_to_block();
@@ -135,11 +120,6 @@ pub fn render_flattened_bootstrap_to(
     if root_nid > u16::MAX as u64 {
         return Err(Error::Overflow("root nid exceeds 16-bit range".to_string()));
     }
-    let has_xattrs = inodes.iter().any(|inode| {
-        inode.xattrs.iter().any(|entry| {
-            !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED && entry.suffix.starts_with(b"nydus."))
-        })
-    });
     let mut head = vec![0u8; head_size];
     fill_image_head(
         &mut head,
@@ -149,7 +129,7 @@ pub fn render_flattened_bootstrap_to(
         epoch,
         &flattened_slots,
         uuid,
-        has_xattrs,
+        has_visible_xattrs(inodes),
     )?;
     writer
         .write_all(&head)
@@ -172,7 +152,7 @@ pub fn render_flattened_bootstrap_to(
         write_zeros(writer, data_offset - cursor)?;
         match &inodes[index].data {
             InodeData::Directory { .. } => {
-                let dir_data = serialize_dir_of(inodes, index);
+                let dir_data = serialize_dir_data(inodes, index);
                 writer
                     .write_all(&dir_data)
                     .context("failed to write bootstrap directory data")?;
@@ -193,16 +173,16 @@ pub fn render_flattened_bootstrap_to(
     Ok(bootstrap_size)
 }
 
-/// Serialize the directory data of `inodes[index]` from its child refs;
-/// children resolve their nids through the shared inode table.
-fn serialize_dir_of(inodes: &[InodeInfo], index: usize) -> Vec<u8> {
+/// Serialize the directory data of `inodes[index]` from its child refs,
+/// resolving child nids through the shared inode table.
+fn serialize_dir_data(inodes: &[InodeInfo], index: usize) -> Vec<u8> {
     let InodeData::Directory {
         ref children,
         parent_nid,
         ..
     } = inodes[index].data
     else {
-        unreachable!("serialize_dir_of is only called for directories");
+        unreachable!("serialize_dir_data is only called for directories");
     };
     let dir_children: Vec<DirChild> = children
         .iter()
@@ -215,16 +195,8 @@ fn serialize_dir_of(inodes: &[InodeInfo], index: usize) -> Vec<u8> {
     serialize_directory(&dir_children, inodes[index].nid, parent_nid)
 }
 
-fn write_zeros(writer: &mut impl Write, mut n: usize) -> Result<()> {
-    const ZEROS: [u8; 4096] = [0u8; 4096];
-    while n > 0 {
-        let take = n.min(ZEROS.len());
-        writer
-            .write_all(&ZEROS[..take])
-            .context("failed to write bootstrap padding")?;
-        n -= take;
-    }
-    Ok(())
+fn write_zeros(writer: &mut impl Write, n: usize) -> Result<()> {
+    nydus_format::utils::write_zeros(writer, n as u64).context("failed to write bootstrap padding")
 }
 
 /// Rewrite a rendered bootstrap's device table with flattened mapped block
@@ -325,23 +297,7 @@ fn render_bootstrap_inner(
     let mut layout =
         MetadataLayout::with_meta_blkaddr(device_table_meta_blkaddr(device_slots.len())?);
 
-    for inode in inodes.iter_mut() {
-        if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
-            inode.is_extended = true;
-        }
-        // A compact inode stores mtime as a 32-bit delta from the epoch, so a
-        // timestamp further out than that has to move to the extended layout
-        // rather than wrap.
-        if inode.mtime.wrapping_sub(epoch) > u32::MAX as u64 {
-            inode.is_extended = true;
-        }
-        let inode_size = erofs_inode_size(inode);
-        let has_inline = symlink_is_inline(inode);
-        let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
-        inode.meta_offset = offset;
-        inode.nid = nid;
-    }
-
+    alloc_inodes(&mut layout, inodes, epoch);
     set_parent_nids(inodes);
     layout.pad_to_block();
     // The directory-data region that follows is in the same order of
@@ -385,13 +341,13 @@ fn render_bootstrap_inner(
         layout.write_at(data_offset, &dir_data);
 
         if let InodeData::Directory {
-            startblk: ref mut sb,
-            data_size: ref mut dds,
+            startblk: ref mut slot_startblk,
+            data_size: ref mut slot_data_size,
             ..
         } = inodes[index].data
         {
-            *sb = startblk;
-            *dds = dir_data_len;
+            *slot_startblk = startblk;
+            *slot_data_size = dir_data_len;
         }
         inodes[index].size = dir_data_len as u64;
     }
@@ -415,11 +371,11 @@ fn render_bootstrap_inner(
         let (data_offset, startblk) = layout.alloc_dir_data(target.len());
         layout.write_at(data_offset, &target);
         if let InodeData::Symlink {
-            startblk: ref mut sb,
+            startblk: ref mut slot_startblk,
             ..
         } = inodes[index].data
         {
-            *sb = startblk;
+            *slot_startblk = startblk;
         }
     }
 
@@ -434,13 +390,6 @@ fn render_bootstrap_inner(
         return Err(Error::Overflow("root nid exceeds 16-bit range".to_string()));
     }
 
-    // Nydus-internal xattrs (trusted.nydus.*) are hidden from readers, so
-    // only user-visible xattrs disqualify the image-wide no-xattr shortcut.
-    let has_xattrs = inodes.iter().any(|inode| {
-        inode.xattrs.iter().any(|entry| {
-            !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED && entry.suffix.starts_with(b"nydus."))
-        })
-    });
     // The layout buffer already holds the head region followed by the padded
     // metadata area; fill the head in place so the buffer IS the bootstrap
     // and the tens-of-MiB metadata copy of the old write_image path is gone.
@@ -456,10 +405,43 @@ fn render_bootstrap_inner(
         epoch,
         device_slots,
         uuid,
-        has_xattrs,
+        has_visible_xattrs(inodes),
     )?;
 
     Ok(bootstrap)
+}
+
+/// Assign every inode's on-disk slot in table order: promote inodes that
+/// cannot stay compact to the extended layout, then allocate and stamp each
+/// one's metadata offset and nid.
+fn alloc_inodes(layout: &mut MetadataLayout, inodes: &mut [InodeInfo], epoch: u64) {
+    for inode in inodes.iter_mut() {
+        if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
+            inode.is_extended = true;
+        }
+        // A compact inode stores mtime as a 32-bit delta from the epoch, so a
+        // timestamp further out than that has to move to the extended layout
+        // rather than wrap.
+        if inode.mtime.wrapping_sub(epoch) > u32::MAX as u64 {
+            inode.is_extended = true;
+        }
+        let inode_size = erofs_inode_size(inode);
+        let has_inline = symlink_is_inline(inode);
+        let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
+        inode.meta_offset = offset;
+        inode.nid = nid;
+    }
+}
+
+/// Whether any inode carries a user-visible xattr. Nydus-internal xattrs
+/// (trusted.nydus.*) are hidden from readers, so they alone do not
+/// disqualify the image-wide no-xattr shortcut.
+fn has_visible_xattrs(inodes: &[InodeInfo]) -> bool {
+    inodes.iter().any(|inode| {
+        inode.xattrs.iter().any(|entry| {
+            !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED && entry.suffix.starts_with(b"nydus."))
+        })
+    })
 }
 
 pub(crate) fn set_parent_nids(inodes: &mut [InodeInfo]) {

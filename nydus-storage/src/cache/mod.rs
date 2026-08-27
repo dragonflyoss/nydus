@@ -39,19 +39,7 @@ pub trait BlobCache: Send + Sync {
     /// through a per-thread buffer; implementations that can serve reads from
     /// a mapping should override it to skip the intermediate copy.
     fn write_data_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
-        thread_local! {
-            static SCRATCH: std::cell::RefCell<Vec<u8>> =
-                const { std::cell::RefCell::new(Vec::new()) };
-        }
-        SCRATCH.with(|cell| {
-            let mut buf = cell.borrow_mut();
-            if buf.len() < len {
-                buf.resize(len, 0);
-            }
-            let buf = &mut buf[..len];
-            self.read_at(offset, buf)?;
-            writer.write_all(buf)
-        })
+        write_data_via_scratch(self, offset, len, writer)
     }
 
     /// Return the raw fd of the cache data file for mmap use.
@@ -339,6 +327,30 @@ pub fn fetch_decode_validate_block_group_into<'a>(
     Ok(&buffers.decoded)
 }
 
+/// Read `[offset, offset + len)` through `cache.read_at` into a per-thread
+/// scratch buffer and copy it into `writer`: the fallback for caches that
+/// cannot serve reads from a mapping.
+fn write_data_via_scratch<C: BlobCache + ?Sized>(
+    cache: &C,
+    offset: u64,
+    len: usize,
+    writer: &mut dyn io::Write,
+) -> io::Result<()> {
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<Vec<u8>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < len {
+            buf.resize(len, 0);
+        }
+        let buf = &mut buf[..len];
+        cache.read_at(offset, buf)?;
+        writer.write_all(buf)
+    })
+}
+
 /// Decompress one encoded block group into `decoded` (cleared by the caller)
 /// according to the compressor the blob meta header declares.
 fn decode_block_group(
@@ -418,7 +430,7 @@ pub fn validate_decoded_block_group(
         ));
     }
 
-    if !verify_crc32_enabled() {
+    if skip_verify_checksums() {
         return Ok(());
     }
     let crc32 = crc32c::crc32c(decoded);
@@ -432,18 +444,20 @@ pub fn validate_decoded_block_group(
     Ok(())
 }
 
-/// Process-wide crc32 verification switch, set once at service startup from
-/// `storage.verify_crc32`. A process serves one mount, so a per-cache flag
-/// would only thread the same value through every call site.
-static VERIFY_CRC32: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Process-wide switch skipping block group checksum verification (the
+/// default), set at service startup from `storage.skip_verify_checksums`. A
+/// process serves one mount, so a per-cache flag would only thread the same
+/// value through every call site.
+static SKIP_VERIFY_CHECKSUMS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
-/// Disable or re-enable block group crc32 validation for this process.
-pub fn set_verify_crc32(enabled: bool) {
-    VERIFY_CRC32.store(enabled, std::sync::atomic::Ordering::Relaxed);
+/// Skip (or re-enable) block group checksum verification for this process.
+pub fn set_skip_verify_checksums(skip: bool) {
+    SKIP_VERIFY_CHECKSUMS.store(skip, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn verify_crc32_enabled() -> bool {
-    VERIFY_CRC32.load(std::sync::atomic::Ordering::Relaxed)
+fn skip_verify_checksums() -> bool {
+    SKIP_VERIFY_CHECKSUMS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Marker error wrapped in an [`io::Error`] when a decoded block group fails CRC
@@ -545,6 +559,7 @@ mod tests {
 
     #[test]
     fn crc_failure_is_attributed_to_the_static_target_without_an_override() {
+        set_skip_verify_checksums(false);
         use nydus_telemetry::metrics::BackendTarget;
 
         let backend: Arc<dyn BlobBackend> = Arc::new(StaticTargetBackend);

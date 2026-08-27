@@ -673,8 +673,6 @@ mod tests {
         assert_eq!(indexes[0].blkaddr, 0);
         assert_eq!(indexes[1].blkaddr, EROFS_NULL_ADDR);
         assert_eq!(indexes[2].blkaddr, 1);
-        // The tail chunk's 100 real bytes are stored padded to its logical
-        // block in the group stream.
         assert_eq!(writer.total_blocks(), 2);
         let data = fs::read(&blob_path).unwrap();
         assert_eq!(data.len(), 2 * EROFS_BLOCK_SIZE as usize);
@@ -775,8 +773,6 @@ mod tests {
         let blob_path = dir.path().join("blob.data");
         let file_a = dir.path().join("a.bin");
         let file_b = dir.path().join("b.bin");
-        // Two identical pseudo-random files with a partial tail block are
-        // stored twice: there is no content dedup.
         let body = pseudo_random_bytes((1 << 20) + 100);
         fs::write(&file_a, &body).unwrap();
         fs::write(&file_b, &body).unwrap();
@@ -795,19 +791,15 @@ mod tests {
             .unwrap();
         writer.finish().unwrap();
 
-        // Every padded logical byte is stored, duplicates included.
         let padded = align_up_usize(body.len(), EROFS_BLOCK_SIZE as usize)
             .expect("alignment overflowed") as u64;
         assert_eq!(writer.data_size(), 2 * padded);
         assert_eq!(writer.total_blocks() * EROFS_BLOCK_SIZE as u64, 2 * padded);
 
-        // Both copies get their own chunk entries (a full 1 MiB chunk plus a
-        // tail chunk each): there is no content dedup.
         let blob_metadata = writer.blob_metadata(0).unwrap();
         assert_eq!(blob_metadata.header().chunk_count(), 4);
         assert_eq!(blob_metadata.uncompressed_size(), 2 * padded);
 
-        // The stored bytes are the padded logical stream verbatim.
         let data = fs::read(&blob_path).unwrap();
         assert_eq!(data.len() as u64, 2 * padded);
         assert_eq!(&data[..body.len()], &body[..]);
@@ -823,7 +815,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
         let input_path = dir.path().join("input.bin");
-        // chunk 0: data, chunk 1: all zeros (elided), chunk 2: 100-byte tail.
         let mut content = vec![b'a'; EROFS_BLOCK_SIZE as usize];
         content.extend(vec![0u8; EROFS_BLOCK_SIZE as usize]);
         content.extend(vec![b'c'; 100]);
@@ -835,16 +826,12 @@ mod tests {
             .unwrap();
         writer.finish().unwrap();
 
-        // Zero-chunk elision: the hole gets the null index and neither
-        // logical blocks nor group bytes.
         assert_eq!(indexes.len(), 3);
         assert_eq!(indexes[0].blkaddr, 0);
         assert_eq!(indexes[1].blkaddr, EROFS_NULL_ADDR);
         assert_eq!(indexes[2].blkaddr, 1);
         assert_eq!(writer.total_blocks(), 2);
 
-        // The tail block's zero padding is stored physically so the group
-        // stream covers the whole logical space.
         let data = fs::read(&blob_path).unwrap();
         assert_eq!(data.len(), 2 * EROFS_BLOCK_SIZE as usize);
         assert!(data[..EROFS_BLOCK_SIZE as usize].iter().all(|b| *b == b'a'));

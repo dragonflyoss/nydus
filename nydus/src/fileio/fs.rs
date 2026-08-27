@@ -85,7 +85,7 @@ impl FlatImageFs {
     /// Read `[offset, offset + size)` of the flattened view into a fresh
     /// buffer, clamped at EOF.
     ///
-    /// [`NbdCore::read_at`] only accepts block-aligned windows, so an
+    /// [`FlatImage::read_at`] only accepts block-aligned windows, so an
     /// unaligned request is widened to block boundaries and the interesting
     /// slice is copied out. The kernel issues page-aligned reads in practice;
     /// this keeps a hand-rolled `read(2)` on the export correct as well.
@@ -108,7 +108,7 @@ impl FlatImageFs {
         let mut aligned = vec![0u8; (end - start) as usize];
         self.image
             .read_at(start, &mut aligned)
-            .map_err(|err| io::Error::from_raw_os_error(errno_of(&err)))?;
+            .map_err(|err| io::Error::from_raw_os_error(error_to_errno(&err)))?;
 
         let from = (offset - start) as usize;
         aligned.drain(..from);
@@ -121,7 +121,7 @@ impl FlatImageFs {
 /// not a plain I/O failure is still an I/O failure from the mount's point of
 /// view, so EROFS surfaces it as a read error rather than something a caller
 /// might retry differently.
-fn errno_of(err: &nydus_error::Error) -> i32 {
+fn error_to_errno(err: &nydus_error::Error) -> i32 {
     match err {
         nydus_error::Error::Io(err) => err.raw_os_error().unwrap_or(libc::EIO),
         _ => libc::EIO,

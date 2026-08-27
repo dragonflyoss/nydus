@@ -95,8 +95,9 @@ impl ErofsReader {
     }
 
     /// Open a self-contained full blob (`payload + bootstrap + blob meta +
-    /// footer`): everything is served from the file itself, no backend or
-    /// cache is involved.
+    /// footer`): everything is served from the file itself, no remote
+    /// backend is involved. `cache_dir`, when given, caches the decoded
+    /// block groups so repeat reads skip re-decoding from the blob.
     pub fn open_blob(blob_path: &Path, cache_dir: Option<&Path>) -> io::Result<Self> {
         let mmap = Self::mmap_file(blob_path, false)?;
         let (mmap, image_offset) = match Self::unpack_embedded_image(mmap)? {

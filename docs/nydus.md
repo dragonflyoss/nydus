@@ -714,10 +714,10 @@ Fields:
 	layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
 	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`)
 	and `nydus optimize` require a directory and reject its absence at startup.
-- `storage.verify_crc32` (default `true`) validates every decoded block group
-	against its stored crc32 before it is served. Disable only when the
-	transport is already trusted end to end and the crc32 pass shows up in the
-	read-path profile.
+- `storage.skip_verify_checksums` (default `true`) skips verifying decoded
+	block groups against their stored checksums before they are served. Set it
+	to `false` to verify every decoded block group when the transport is not
+	trusted end to end.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
 - `prefetch.timeout` (default `1h`) bounds how long prefetching one whole

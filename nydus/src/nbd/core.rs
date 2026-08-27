@@ -62,11 +62,6 @@ impl NbdCore {
         self.image.core()
     }
 
-    /// Borrow the flattened view this service serves.
-    pub fn image(&self) -> &FlatImage {
-        &self.image
-    }
-
     /// Fetch `[offset, offset + buf.len())` of the flattened device view and
     /// copy the resident bytes into `buf`, serving holes, redirect slots, and
     /// gaps as zeros. Both `offset` and `buf.len()` must be block-aligned (the

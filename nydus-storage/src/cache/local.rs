@@ -648,19 +648,7 @@ impl BlobCache for LocalBlobCache {
         if let Some(mapped) = self.all_ready_slice(offset, len)? {
             return writer.write_all(mapped);
         }
-        thread_local! {
-            static SCRATCH: std::cell::RefCell<Vec<u8>> =
-                const { std::cell::RefCell::new(Vec::new()) };
-        }
-        SCRATCH.with(|cell| {
-            let mut buf = cell.borrow_mut();
-            if buf.len() < len {
-                buf.resize(len, 0);
-            }
-            let buf = &mut buf[..len];
-            self.read_at(offset, buf)?;
-            writer.write_all(buf)
-        })
+        super::write_data_via_scratch(self, offset, len, writer)
     }
 
     fn prepare(&self) -> io::Result<PathBuf> {
@@ -1358,6 +1346,7 @@ mod tests {
 
     #[test]
     fn local_blob_cache_rejects_bad_crc32_before_marking_chunk_ready() {
+        super::super::set_skip_verify_checksums(false);
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xacu8; 4096];
@@ -1412,6 +1401,7 @@ mod tests {
 
     #[test]
     fn fill_block_group_from_redirect_validates_then_caches() {
+        super::super::set_skip_verify_checksums(false);
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x6eu8; 4096];
