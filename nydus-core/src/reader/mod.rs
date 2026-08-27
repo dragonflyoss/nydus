@@ -447,7 +447,7 @@ impl ErofsReader {
         let absolute_offset = blob_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
         })?;
-        cache.write_at_to(absolute_offset, len, writer)
+        cache.write_data_to(absolute_offset, len, writer)
     }
 
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {

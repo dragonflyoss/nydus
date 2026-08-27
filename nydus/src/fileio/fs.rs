@@ -36,9 +36,6 @@ pub const IMAGE_INO: u64 = 2;
 /// Name of the exported flattened image file inside the mount.
 pub const IMAGE_NAME: &str = "image";
 
-/// EROFS block size as u64 — read alignment for the underlying core.
-const BLOCK_SIZE_U64: u64 = BLOCK_SIZE;
-
 /// The export is immutable for the mount's lifetime, so the kernel can cache
 /// attributes and dentries indefinitely.
 const ENTRY_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);
@@ -102,10 +99,10 @@ impl FlatImageFs {
             return Ok(Vec::new());
         }
 
-        let start = offset - offset % BLOCK_SIZE_U64;
+        let start = offset - offset % BLOCK_SIZE;
         let end = (offset + want)
-            .div_ceil(BLOCK_SIZE_U64)
-            .checked_mul(BLOCK_SIZE_U64)
+            .div_ceil(BLOCK_SIZE)
+            .checked_mul(BLOCK_SIZE)
             .ok_or_else(|| io::Error::other("flat read range overflow"))?
             .min(image_size);
         let mut aligned = vec![0u8; (end - start) as usize];
@@ -231,7 +228,7 @@ impl Filesystem for FlatImageFs {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let blocks = self.image_size().div_ceil(BLOCK_SIZE_U64);
+        let blocks = self.image_size().div_ceil(BLOCK_SIZE);
         reply.statfs(
             blocks,
             0,

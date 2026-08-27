@@ -98,9 +98,9 @@ pub struct LocalBlobCache {
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     inflight_block_groups: Mutex<HashMap<usize, Arc<BlockGroupFlight>>>,
-    /// Read-only mapping of the cache data file, created once every block_group is
-    /// ready. It serves reads by memcpy from the page cache, without the
-    /// pread round-trip per request. Bytes never change after ALL_READY
+    /// Read-only mapping of the cache data file, created once every block
+    /// group is ready. It serves reads by memcpy from the page cache, without
+    /// the pread round-trip per request. Bytes never change after ALL_READY
     /// latches (rewrites by racing processes are byte-identical).
     cache_mmap: OnceLock<memmap2::Mmap>,
     /// Keeps the processes sharing this cache from each fetching the same
@@ -140,15 +140,14 @@ impl LocalBlobCache {
 
         let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
-        let readiness_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
-        let readiness_count = blob_metadata.block_group_count();
+        let block_group_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
         // The block_group_map is only meaningful together with the cache data file it
         // describes: a leftover block_group_map whose data file has been removed
         // would claim block groups are ready while reads hit sparse zeros. Note this
         // before creating the data file below, which would otherwise mask it.
         // (Removing the map while keeping the data is the safe direction and
         // needs no handling.)
-        let stale_block_block_group_map = readiness_map_path.exists() && !cache_data_path.exists();
+        let stale_block_group_map = block_group_map_path.exists() && !cache_data_path.exists();
 
         // Create the cache data file eagerly, before the block_group_map, so that
         // "block_group_map file exists => data file exists" holds and the check above
@@ -162,15 +161,16 @@ impl LocalBlobCache {
         data_file.set_len(blob_metadata.uncompressed_size())?;
         drop(data_file);
 
-        let block_group_map = BlockGroupMap::open(&readiness_map_path, readiness_count)?;
-        if stale_block_block_group_map {
+        let block_group_map =
+            BlockGroupMap::open(&block_group_map_path, blob_metadata.block_group_count())?;
+        if stale_block_group_map {
             // Reset in place rather than unlinking: handles already mapping
             // this file observe the reset, whereas a replacement inode would
             // split them off with their readiness invisible to each other.
             block_group_map.reset()?;
             warn!(
-                "stale readiness map without cache data file, reset: {}",
-                readiness_map_path.display()
+                "stale block_group_map without cache data file, reset: {}",
+                block_group_map_path.display()
             );
         }
 
@@ -200,18 +200,18 @@ impl LocalBlobCache {
         &self.blob_metadata
     }
 
-    /// Fetch, decode and validate one block_group's bytes directly from the
-    /// backend, without touching the cache data file or readiness map. This
-    /// is the block_group-granular read used by `nydus optimize` to re-encode
-    /// accessed block_groups into an ondemand artifact.
-    pub fn read_block_group(&self, block_group_index: usize) -> io::Result<Vec<u8>> {
+    /// Fetch, decode and validate one block group's bytes directly from the
+    /// backend, without touching the cache data file or block_group_map. This
+    /// is the block-group-granular read used by `nydus optimize` to re-encode
+    /// accessed block groups into an ondemand artifact.
+    pub fn fetch_block_group(&self, block_group_index: usize) -> io::Result<Vec<u8>> {
         let block_group = *self
             .blob_metadata
             .block_group(block_group_index)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "block_group index out of range",
+                    "block group index out of range",
                 )
             })?;
         let mut buffers = BlockGroupBuffers::default();
@@ -270,9 +270,10 @@ impl LocalBlobCache {
     }
 
     /// The `[offset, offset+len)` slice of the cache-file mapping when every
-    /// block_group is ready, `None` when the blob is still filling (callers then
-    /// take the ensure + pread path). Redirect blobs never latch ALL_READY
-    /// through this path, so the mapping is only built for dense blobs.
+    /// block group is ready, `None` when the blob is still filling (callers
+    /// then take the ensure + pread path). Redirect blobs never latch
+    /// ALL_READY through this path, so the mapping is only built for dense
+    /// blobs.
     fn all_ready_slice(&self, offset: u64, len: usize) -> io::Result<Option<&[u8]>> {
         if !self.block_group_map.is_all_ready() {
             return Ok(None);
@@ -390,7 +391,7 @@ impl LocalBlobCache {
         result
     }
 
-    /// Ensure every block_group overlapping `[offset, offset + len)` is decoded and
+    /// Ensure every block group overlapping `[offset, offset + len)` is decoded and
     /// written to the cache file. Shared by `read_at` and `ensure_range`.
     fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
         // Redirect (ondemand) blobs have a non-uniform block group layout, so the
@@ -640,7 +641,7 @@ impl BlobCache for LocalBlobCache {
         cache_file.as_ref().read_exact_at(dst, offset)
     }
 
-    fn write_at_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
+    fn write_data_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
         if len == 0 {
             return Ok(());
         }
@@ -1071,9 +1072,6 @@ mod tests {
         assert!(cached.block_group_map.is_ready(0).unwrap());
     }
 
-    /// A CDC blob whose 8 KiB unique stream backs a 16 KiB logical space:
-    /// three records, two of which share the same unique bytes (the dedup),
-    /// with logical gaps (holes) that must read back as zeros.
     #[test]
     fn stale_block_block_group_map_without_data_file_is_reset() {
         let backend_dir = tempdir().unwrap();

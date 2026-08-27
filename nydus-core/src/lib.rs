@@ -122,7 +122,7 @@ impl NydusCore {
         let prefetch_timeout = config.prefetch.timeout;
         let prefetch_retry_delay_min = config.prefetch.retry_delay_min;
         let prefetch_retry_delay_max = config.prefetch.retry_delay_max;
-        nydus_storage::cache::set_crc_verification(config.storage.verify_crc);
+        nydus_storage::cache::set_verify_crc32(config.storage.verify_crc32);
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
         // The multi-device model hands each blob's cache file to the kernel
         // (as an EROFS device or fill target), so diskless mode cannot apply.

@@ -121,13 +121,13 @@ pub fn build_ondemand_blob(
                 ))
             })?;
 
-        // Read the block_group's decoded bytes straight from the backend at block_group
-        // granularity: the redirect fill on the runtime side works per source
-        // block_group.
+        // Fetch the block group's decoded bytes straight from the backend at
+        // block group granularity: the redirect fill on the runtime side works
+        // per source block group.
         let decoded = cache
-            .read_block_group(*block_group_index as usize)
+            .fetch_block_group(*block_group_index as usize)
             .with_context(|| {
-                format!("failed to read blob {blob_index} block_group {block_group_index} bytes")
+                format!("failed to fetch block group {block_group_index} of blob {blob_index}")
             })?;
 
         // Recompress the decoded bytes for the ondemand artifact, storing them

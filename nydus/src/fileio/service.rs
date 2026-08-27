@@ -23,7 +23,7 @@ use crate::mount::unmount;
 ///
 /// `FUSE_NOTIFY_STORE` carries its payload inline in a single notification,
 /// so the bootstrap is pushed in slices rather than as one multi-MiB message.
-const WARM_CHUNK: u64 = 1 << 20;
+const WARM_CHUNK_SIZE: u64 = 1 << 20;
 
 /// Path of the exported image file inside the FUSE mount.
 pub fn image_path(fuse_mountpoint: &Path) -> PathBuf {
@@ -50,7 +50,7 @@ pub fn warm_bootstrap(fs: &FlatImageFs, notifier: &Notifier, bootstrap_size: u64
 
     let mut offset = 0u64;
     while offset < end {
-        let len = WARM_CHUNK.min(end - offset);
+        let len = WARM_CHUNK_SIZE.min(end - offset);
         let data = match fs.read_image(offset, len as u32) {
             Ok(data) if !data.is_empty() => data,
             Ok(_) => break,

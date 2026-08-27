@@ -58,7 +58,7 @@ struct EncodeJob {
     data: Vec<u8>,
 }
 
-struct EncodeDone {
+struct EncodedBlockGroup {
     data: Vec<u8>,
     crc32: u32,
     /// `Some` when compression met the format's worthwhile threshold.
@@ -71,8 +71,8 @@ struct EncodeDone {
 /// buffers circulate back for reuse.
 struct BlockGroupEncoder {
     tx: Option<mpsc::Sender<EncodeJob>>,
-    done_rx: mpsc::Receiver<(u64, EncodeDone)>,
-    pending: BTreeMap<u64, EncodeDone>,
+    encoded_rx: mpsc::Receiver<(u64, EncodedBlockGroup)>,
+    pending: BTreeMap<u64, EncodedBlockGroup>,
     next_seq_in: u64,
     next_seq_out: u64,
     free_buffers: Vec<Vec<u8>>,
@@ -82,12 +82,12 @@ struct BlockGroupEncoder {
 impl BlockGroupEncoder {
     fn new(compressor: BlobMetadataCompressor) -> Self {
         let (tx, rx) = mpsc::channel::<EncodeJob>();
-        let (done_tx, done_rx) = mpsc::channel();
+        let (encoded_tx, encoded_rx) = mpsc::channel();
         let rx = Arc::new(Mutex::new(rx));
         let workers = (0..ENCODE_WORKERS)
             .map(|_| {
                 let rx = Arc::clone(&rx);
-                let done_tx = done_tx.clone();
+                let encoded_tx = encoded_tx.clone();
                 std::thread::spawn(move || loop {
                     let job = match rx.lock().unwrap_or_else(|p| p.into_inner()).recv() {
                         Ok(job) => job,
@@ -105,12 +105,12 @@ impl BlockGroupEncoder {
                                 .then_some(compressed)
                         }
                     };
-                    let done = EncodeDone {
+                    let encoded = EncodedBlockGroup {
                         data: job.data,
                         crc32,
                         compressed,
                     };
-                    if done_tx.send((job.seq, done)).is_err() {
+                    if encoded_tx.send((job.seq, encoded)).is_err() {
                         break;
                     }
                 })
@@ -118,7 +118,7 @@ impl BlockGroupEncoder {
             .collect();
         Self {
             tx: Some(tx),
-            done_rx,
+            encoded_rx,
             pending: BTreeMap::new(),
             next_seq_in: 0,
             next_seq_out: 0,
@@ -145,16 +145,16 @@ impl BlockGroupEncoder {
     }
 
     /// Receive the next completed group in submission order.
-    fn recv_next(&mut self) -> Result<EncodeDone> {
+    fn recv_next(&mut self) -> Result<EncodedBlockGroup> {
         loop {
-            if let Some(done) = self.pending.remove(&self.next_seq_out) {
+            if let Some(encoded) = self.pending.remove(&self.next_seq_out) {
                 self.next_seq_out += 1;
-                return Ok(done);
+                return Ok(encoded);
             }
-            let (seq, done) = self.done_rx.recv().map_err(|_| {
+            let (seq, encoded) = self.encoded_rx.recv().map_err(|_| {
                 Error::Runtime("block group encoder threads exited early".to_string())
             })?;
-            self.pending.insert(seq, done);
+            self.pending.insert(seq, encoded);
         }
     }
 
@@ -298,9 +298,9 @@ impl<W: Write> BlobWriter<W> {
     }
 
     pub fn finish(&mut self) -> Result<()> {
-        // The data stream is byte granular, so the tail block_group must be
-        // zero padded to a whole block before it is flushed (block_groups always
-        // describe whole uncompressed blocks).
+        // The data stream is byte granular, so the tail block group must be
+        // zero padded to a whole block before it is flushed (block groups
+        // always describe whole uncompressed blocks).
         if !self.block_group_buffer.is_empty() {
             let padded =
                 align_up_usize(self.block_group_buffer.len(), EROFS_BLOCK_SIZE as usize)
@@ -460,13 +460,13 @@ impl<W: Write> BlobWriter<W> {
 
     /// Write out the next completed block group, in submission order.
     fn drain_one_encoded(&mut self) -> Result<()> {
-        let done = self
+        let group = self
             .encoder
             .as_mut()
             .expect("drain is only called with a live encoder")
             .recv_next()?;
-        let uncompressed_len = done.data.len();
-        let encoded: &[u8] = done.compressed.as_deref().unwrap_or(&done.data);
+        let uncompressed_len = group.data.len();
+        let encoded: &[u8] = group.compressed.as_deref().unwrap_or(&group.data);
 
         // Encoded block group payloads are packed back-to-back in the data region.
         // No block padding is inserted between compressed block groups; they are read
@@ -490,7 +490,7 @@ impl<W: Write> BlobWriter<W> {
             block_count,
             compressed_offset,
             encoded.len() as u32,
-            done.crc32,
+            group.crc32,
         )?;
         self.blob_metadata_block_groups.push(entry);
         self.block_group_block_offset += block_count as u64;
@@ -498,7 +498,7 @@ impl<W: Write> BlobWriter<W> {
         self.encoder
             .as_mut()
             .expect("drain is only called with a live encoder")
-            .recycle_buffer(done.data);
+            .recycle_buffer(group.data);
         Ok(())
     }
 

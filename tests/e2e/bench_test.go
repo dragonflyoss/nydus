@@ -45,7 +45,7 @@ package e2e
 // whichever cache ended up holding them, which after the first pass is the
 // kernel's page cache in every mode — nydus's FUSE mode hands out effectively
 // infinite attr/entry timeouts plus FOPEN_CACHE_DIR, so even its warm stat
-// and readdir never leave the kernel. Set NYDUS_BENCH_WARM=1 to append the
+// and readdir never leave the kernel. Set NYDUSFS_BENCH_WARM=1 to append the
 // old steady-state fio and metadata rows for regression tracking.
 //
 // Unavailable modes (missing kernel module, old kernel, feature not compiled
@@ -72,11 +72,11 @@ package e2e
 //	NYDUSFS_PERF_READDIR_META_SECS       Readdir benchmark duration in seconds (default 3).
 //	NYDUSFS_PERF_READDIR_PASSES_PER_DIR  Repeated os.ReadDir calls per directory per iteration (default 8).
 //	NYDUSFS_PERF_COLD_RAND_IO_SIZE       Bytes read by the cold random-read pass (default 16MiB).
-//	NYDUS_BENCH_MODES                    Comma-separated mode names to run; others are skipped.
-//	NYDUS_BENCH_WARM                     Also run and print the steady-state fio/metadata rows.
-//	NYDUS_BENCH_NOCDC_FUSE               Add the fuse-nocdc column (image built with --deduplicator none).
-//	NYDUS_BENCH_FILEIO_NOWARM            Add the fileio-nowarm column (fileio without the FUSE_NOTIFY_STORE prewarm).
-//	NYDUS_V2_NYDUSD, NYDUS_V2_IMAGE_BIN  Paths to nydus v2 binaries; both set adds the v2-fuse column.
+//	NYDUSFS_BENCH_MODES                    Comma-separated mode names to run; others are skipped.
+//	NYDUSFS_BENCH_WARM                     Also run and print the steady-state fio/metadata rows.
+//	NYDUSFS_BENCH_NOCDC_FUSE               Add the fuse-nocdc column (image built with --deduplicator none).
+//	NYDUSFS_BENCH_FILEIO_NOWARM            Add the fileio-nowarm column (fileio without the FUSE_NOTIFY_STORE prewarm).
+//	NYDUSFS_BENCH_V2_NYDUSD, NYDUSFS_BENCH_V2_IMAGE_BIN  Paths to nydus v2 binaries; both set adds the v2-fuse column.
 
 import (
 	"bufio"
@@ -127,12 +127,12 @@ type benchEnv struct {
 	nbdDev    string // free /dev/nbdX picked for the NBD mode
 
 	// Optional fuse-nocdc comparison column (--deduplicator none image),
-	// enabled by the NYDUS_BENCH_NOCDC_FUSE environment variable.
+	// enabled by the NYDUSFS_BENCH_NOCDC_FUSE environment variable.
 	nocdcBootstrap string
 	nocdcBlobDir   string
 
 	// Optional nydus v2 (rafs v6) comparison column, enabled by the
-	// NYDUS_V2_NYDUSD and NYDUS_V2_IMAGE_BIN environment variables.
+	// NYDUSFS_BENCH_V2_NYDUSD and NYDUSFS_BENCH_V2_IMAGE_BIN environment variables.
 	v2Nydusd    string
 	v2ImageBin  string
 	v2Bootstrap string
@@ -155,14 +155,14 @@ type benchModeResult struct {
 	coldWalkSec      float64
 	coldWalkEntries  int
 	coldXattrWalkSec float64
-	negLookupOps     float64
+	negativeLookupOps     float64
 	firstReadSec     float64
 	coldSeqMiBps     float64
 	coldSeqCachedMiB float64 // page cache growth across the cold read
 	fetchedMiB       float64 // < 0 when the mode has no cache
 	coldRandIOPS     float64
 	coldRandLatUs    float64
-	bench            map[string]*benchResult // nil unless NYDUS_BENCH_WARM is set
+	bench            map[string]*benchResult // nil unless NYDUSFS_BENCH_WARM is set
 }
 
 // cachedMiB reports the kernel's total page cache from /proc/meminfo.
@@ -209,7 +209,7 @@ func TestBench(t *testing.T) {
 	t.Log("Building NydusFS image (chunksize=1MiB)...")
 	e.blobPath = buildNydusFSImageToDir(t, e.nydusBin, e.bootstrap, e.blobDir, corpusDir, 1024*1024)
 
-	if os.Getenv("NYDUS_BENCH_NOCDC_FUSE") != "" {
+	if os.Getenv("NYDUSFS_BENCH_NOCDC_FUSE") != "" {
 		t.Log("Building NydusFS image with --deduplicator none...")
 		e.nocdcBlobDir = filepath.Join(e.workDir, "nocdc-blobs")
 		e.nocdcBootstrap = filepath.Join(e.workDir, "nocdc.boot")
@@ -217,8 +217,8 @@ func TestBench(t *testing.T) {
 			"--deduplicator", "none")
 	}
 
-	e.v2Nydusd = os.Getenv("NYDUS_V2_NYDUSD")
-	e.v2ImageBin = os.Getenv("NYDUS_V2_IMAGE_BIN")
+	e.v2Nydusd = os.Getenv("NYDUSFS_BENCH_V2_NYDUSD")
+	e.v2ImageBin = os.Getenv("NYDUSFS_BENCH_V2_IMAGE_BIN")
 	if e.v2Nydusd != "" && e.v2ImageBin != "" {
 		t.Log("Building nydus v2 (rafs v6) image...")
 		e.v2BlobDir = filepath.Join(e.workDir, "v2-blobs")
@@ -235,17 +235,17 @@ func TestBench(t *testing.T) {
 	}
 
 	modes := e.buildModes(t)
-	// NYDUS_BENCH_MODES=fileio,fileio-directio runs just those columns —
+	// NYDUSFS_BENCH_MODES=fileio,fileio-directio runs just those columns —
 	// full runs cost minutes per mode, so comparing two variants should not
 	// pay for the other five.
-	if filter := os.Getenv("NYDUS_BENCH_MODES"); filter != "" {
+	if filter := os.Getenv("NYDUSFS_BENCH_MODES"); filter != "" {
 		wanted := make(map[string]bool)
 		for _, name := range strings.Split(filter, ",") {
 			wanted[strings.TrimSpace(name)] = true
 		}
 		for _, m := range modes {
 			if m.skip == "" && !wanted[m.name] {
-				m.skip = "filtered out by NYDUS_BENCH_MODES"
+				m.skip = "filtered out by NYDUSFS_BENCH_MODES"
 			}
 		}
 	}
@@ -287,8 +287,8 @@ func (e *benchEnv) runMode(t *testing.T, m *benchMode) *benchModeResult {
 		t.Logf("  cold metadata walk: %d entries in %.3fs (%.0f entries/s)",
 			res.coldWalkEntries, res.coldWalkSec, float64(res.coldWalkEntries)/res.coldWalkSec)
 
-		res.negLookupOps = benchNegativeLookup(t, filepath.Join(m.mnt, benchStatRel))
-		t.Logf("  negative lookups: %.0f ops/s", res.negLookupOps)
+		res.negativeLookupOps = benchNegativeLookup(t, filepath.Join(m.mnt, benchStatRel))
+		t.Logf("  negative lookups: %.0f ops/s", res.negativeLookupOps)
 
 		dropCaches(t)
 		target := filepath.Join(m.mnt, benchTargetRel)
@@ -324,7 +324,7 @@ func (e *benchEnv) runMode(t *testing.T, m *benchMode) *benchModeResult {
 		res.coldRandIOPS, res.coldRandLatUs = coldRandRead(t, e.fioBin, filepath.Join(m.mnt, benchRandRel))
 		t.Logf("  cold rand read 4K: %.0f IOPS, %.0f µs", res.coldRandIOPS, res.coldRandLatUs)
 
-		if os.Getenv("NYDUS_BENCH_WARM") != "" {
+		if os.Getenv("NYDUSFS_BENCH_WARM") != "" {
 			statDir := filepath.Join(m.mnt, benchStatRel)
 			res.bench = runBenchmarks(t, e.fioBin, target, statDir, filepath.Join(m.mnt, benchReaddirRel))
 			dropCaches(t)
@@ -460,7 +460,7 @@ func (e *benchEnv) buildModes(t *testing.T) []*benchMode {
 	// none (chunkless blob meta): isolates the CDC lookup/dedup cost.
 	nocdc := newMode("fuse-nocdc", e.startFuseNocdc)
 	if nocdc.skip = subOK("fuse"); nocdc.skip == "" && e.nocdcBootstrap == "" {
-		nocdc.skip = "set NYDUS_BENCH_NOCDC_FUSE=1 to enable the fuse-nocdc column"
+		nocdc.skip = "set NYDUSFS_BENCH_NOCDC_FUSE=1 to enable the fuse-nocdc column"
 	}
 	if nocdc.skip == "" {
 		e.writeConfig(t, "fuse-nocdc", e.nocdcBlobDir, nocdc.cache)
@@ -493,26 +493,26 @@ func (e *benchEnv) buildModes(t *testing.T) []*benchMode {
 		}
 	}
 
-	fio := newMode("fileio", e.startFileio)
-	if fio.skip = subOK("fileio"); fio.skip == "" {
+	fileio := newMode("fileio", e.startFileio)
+	if fileio.skip = subOK("fileio"); fileio.skip == "" {
 		if !erofsSupported() {
-			fio.skip = "erofs not in /proc/filesystems — kernel lacks EROFS support"
+			fileio.skip = "erofs not in /proc/filesystems — kernel lacks EROFS support"
 		} else if maj, min := kernelVersion(t); maj < 6 || (maj == 6 && min < 12) {
-			fio.skip = fmt.Sprintf("kernel %d.%d < 6.12: CONFIG_EROFS_FS_BACKED_BY_FILE unavailable", maj, min)
+			fileio.skip = fmt.Sprintf("kernel %d.%d < 6.12: CONFIG_EROFS_FS_BACKED_BY_FILE unavailable", maj, min)
 		}
 	}
 	require.NoError(t, os.MkdirAll(filepath.Join(e.workDir, "fileio-export"), 0755))
 
 	// Same serving path with the bootstrap prewarm off: the delta against the
 	// fileio column is what FUSE_NOTIFY_STORE is worth.
-	fioNoWarm := newMode("fileio-nowarm", e.startFileioNoWarm)
-	if fioNoWarm.skip = fio.skip; fioNoWarm.skip == "" && os.Getenv("NYDUS_BENCH_FILEIO_NOWARM") == "" {
-		fioNoWarm.skip = "set NYDUS_BENCH_FILEIO_NOWARM=1 to enable the fileio-nowarm column"
+	fileioNoWarm := newMode("fileio-nowarm", e.startFileioNoWarm)
+	if fileioNoWarm.skip = fileio.skip; fileioNoWarm.skip == "" && os.Getenv("NYDUSFS_BENCH_FILEIO_NOWARM") == "" {
+		fileioNoWarm.skip = "set NYDUSFS_BENCH_FILEIO_NOWARM=1 to enable the fileio-nowarm column"
 	}
 	require.NoError(t, os.MkdirAll(filepath.Join(e.workDir, "fileio-nowarm-export"), 0755))
 
-	fioBuffered := newMode("fileio-buffered", e.startFileioBuffered)
-	fioBuffered.skip = fio.skip
+	fileioBuffered := newMode("fileio-buffered", e.startFileioBuffered)
+	fileioBuffered.skip = fileio.skip
 	require.NoError(t, os.MkdirAll(filepath.Join(e.workDir, "fileio-buffered-export"), 0755))
 
 	cerofs := &benchMode{
@@ -534,10 +534,10 @@ func (e *benchEnv) buildModes(t *testing.T) []*benchMode {
 	require.NoError(t, os.MkdirAll(v2.mnt, 0755))
 	require.NoError(t, os.MkdirAll(v2.cache, 0755))
 	if e.v2Bootstrap == "" {
-		v2.skip = "set NYDUS_V2_NYDUSD and NYDUS_V2_IMAGE_BIN to enable the v2 column"
+		v2.skip = "set NYDUSFS_BENCH_V2_NYDUSD and NYDUSFS_BENCH_V2_IMAGE_BIN to enable the v2 column"
 	}
 
-	return []*benchMode{v2, fuse, nocdc, nbd, ublk, fan, fio, fioNoWarm, fioBuffered, cerofs}
+	return []*benchMode{v2, fuse, nocdc, nbd, ublk, fan, fileio, fileioNoWarm, fileioBuffered, cerofs}
 }
 
 func (e *benchEnv) startV2Fuse(t *testing.T) func() {
@@ -1015,7 +1015,7 @@ func printBenchTable(t *testing.T, modes []*benchMode, results map[string]*bench
 		return fmt.Sprintf("%+.3f s", res.coldXattrWalkSec-res.coldWalkSec)
 	})
 	appendRow("Negative lookup ops/s", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.0f op/s", res.negLookupOps)
+		return fmt.Sprintf("%.0f op/s", res.negativeLookupOps)
 	})
 	appendRow("First 1MiB cold read", func(res *benchModeResult) string {
 		return fmt.Sprintf("%.3f s", res.firstReadSec)
@@ -1039,7 +1039,7 @@ func printBenchTable(t *testing.T, modes []*benchMode, results map[string]*bench
 		return fmt.Sprintf("%.0f µs", res.coldRandLatUs)
 	})
 
-	// Steady-state rows: only populated under NYDUS_BENCH_WARM. They say
+	// Steady-state rows: only populated under NYDUSFS_BENCH_WARM. They say
 	// little about container start, and once every mode's metadata is in the
 	// kernel's caches they largely measure the same page-cache path.
 	rows := []row{
@@ -1063,7 +1063,7 @@ func printBenchTable(t *testing.T, modes []*benchMode, results map[string]*bench
 		{"Readdir+stat (ls -l) IOPS", "readdir_stat", "IOPS", iops},
 		{"Readdir+stat (ls -l) Latency", "readdir_stat", "µs", lat},
 	}
-	if os.Getenv("NYDUS_BENCH_WARM") != "" {
+	if os.Getenv("NYDUSFS_BENCH_WARM") != "" {
 		tw.AppendSeparator()
 		for _, r := range rows {
 			appendRow(r.label, func(res *benchModeResult) string {

@@ -28,13 +28,13 @@ const (
 	// at offset 12: unknown incompat bits mean the footer cannot be parsed.
 	// The version at offset 8 is informational and not gated on.
 	footerIncompatMask = 0x0000FFFF
-	// footerFlagBootstrapZstd marks the embedded bootstrap region as one zstd
+	// footerIncompatBootstrapZstd marks the embedded bootstrap region as one zstd
 	// frame. Staging copies the region verbatim (nydus merge decodes it), so
 	// the flag is understood, not acted on, here.
-	footerFlagBootstrapZstd = 1 << 0
+	footerIncompatBootstrapZstd = 1 << 0
 	// footerSupportedIncompat is the set of incompat flag bits this staging
 	// code can pass through.
-	footerSupportedIncompat = footerFlagBootstrapZstd
+	footerSupportedIncompat = footerIncompatBootstrapZstd
 	// bootstrapOffsetField is the byte offset of the u64 bootstrap_offset field
 	// within the footer.
 	bootstrapOffsetField = 32

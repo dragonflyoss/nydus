@@ -71,7 +71,7 @@ struct KWayVariants {
 struct KWayNode<'a> {
     layers: &'a [MergeLayer],
     whiteout_spec: WhiteoutSpec,
-    node: KWayVariants,
+    variants: KWayVariants,
 }
 
 impl KWayVariants {
@@ -85,7 +85,7 @@ impl KWayVariants {
 
 impl<'a> KWayNode<'a> {
     fn top_layer_and_inode(&self) -> Result<(&'a MergeLayer, u64)> {
-        let (layer_index, nid) = self.node.top();
+        let (layer_index, nid) = self.variants.top();
         Ok((&self.layers[layer_index], nid))
     }
 }
@@ -125,7 +125,7 @@ impl TreeNode<()> for KWayNode<'_> {
     }
 
     fn link_key(&mut self) -> Result<Option<MergeLinkId>> {
-        if self.node.is_dir {
+        if self.variants.is_dir {
             return Ok(None);
         }
         let (layer, nid) = self.top_layer_and_inode()?;
@@ -143,11 +143,11 @@ impl TreeNode<()> for KWayNode<'_> {
     }
 
     fn children(&mut self, _ctx: &mut ()) -> Result<Option<NamedChildren<Self>>> {
-        if !self.node.is_dir {
+        if !self.variants.is_dir {
             return Ok(None);
         }
         let mut merged: BTreeMap<Vec<u8>, KWayVariants> = BTreeMap::new();
-        for &(layer_index, nid) in &self.node.variants {
+        for &(layer_index, nid) in &self.variants.variants {
             let layer = &self.layers[layer_index];
             let inode = layer
                 .reader
@@ -159,13 +159,13 @@ impl TreeNode<()> for KWayNode<'_> {
         Ok(Some(
             merged
                 .into_iter()
-                .map(|(name, node)| {
+                .map(|(name, variants)| {
                     (
                         name,
                         KWayNode {
                             layers: self.layers,
                             whiteout_spec: self.whiteout_spec,
-                            node,
+                            variants,
                         },
                     )
                 })
@@ -336,7 +336,7 @@ pub fn merge_sources_to_bootstrap_writer(
     let root = KWayNode {
         layers: &layers,
         whiteout_spec,
-        node: KWayVariants {
+        variants: KWayVariants {
             variants: layers
                 .iter()
                 .enumerate()
@@ -407,7 +407,7 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
         layers: &layers,
         // A merged bootstrap carries no whiteout entries; the spec is inert.
         whiteout_spec: WhiteoutSpec::Oci,
-        node: KWayVariants {
+        variants: KWayVariants {
             variants: vec![(0, layers[0].reader.superblock().root_nid())],
             is_dir: true,
         },
@@ -816,7 +816,7 @@ mod tests {
         let root = KWayNode {
             layers: &layers,
             whiteout_spec: WhiteoutSpec::Oci,
-            node: KWayVariants {
+            variants: KWayVariants {
                 variants: vec![(0, layers[0].reader.superblock().root_nid())],
                 is_dir: true,
             },

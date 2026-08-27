@@ -246,8 +246,8 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(bootstrap_ranges[0].source_offset, 0);
     assert_eq!(bootstrap_ranges[0].len, EROFS_BLOCK_SIZE as u64);
 
-    // Fetch a block-aligned range spanning more than one block_group's worth of
-    // data; the cache file should be populated for that range and a second
+    // Fetch a block-aligned range spanning more than one block group's worth
+    // of data; the cache file should be populated for that range and a second
     // fetch is idempotent. The dense blob address space is independent of
     // path order, so exact file content is covered by the static read API
     // test below.
@@ -272,10 +272,8 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     core.blobs.fetch(&blob_id, offset, len).unwrap();
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
-    // The fetched logical range covers CDC records mapped to both of the
-    // first two unique-stream block_groups (records never straddle a block_group
-    // boundary — the builder pads instead), so both block_groups are traced in
-    // access order.
+    // The fetched logical range spans the first two block groups, so both
+    // are traced in access order.
     let trace = core.trace_snapshot();
     assert_eq!(trace.entries.len(), 2);
     assert!(trace.entries.iter().all(|entry| entry.blob_index == 1));
@@ -484,7 +482,7 @@ fn core_reads_back_duplicate_corpus_image() {
     let core = NydusCore::new(&bootstrap, config).unwrap();
 
     // Every file of the duplicate/shifted/holey corpus must read back
-    // byte-identical through the chunkless (block-group-only) blob path.
+    // byte-identical through the block group read path.
     for (name, expected) in &corpus {
         let entry = core.fs.open(name).unwrap();
         let all = entry.read().unwrap();

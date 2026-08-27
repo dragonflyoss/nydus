@@ -38,7 +38,7 @@ pub trait BlobCache: Send + Sync {
     /// Stream `len` bytes at `offset` into `writer`. The default bounces
     /// through a per-thread buffer; implementations that can serve reads from
     /// a mapping should override it to skip the intermediate copy.
-    fn write_at_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
+    fn write_data_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
         thread_local! {
             static SCRATCH: std::cell::RefCell<Vec<u8>> =
                 const { std::cell::RefCell::new(Vec::new()) };
@@ -418,7 +418,7 @@ pub fn validate_decoded_block_group(
         ));
     }
 
-    if !crc_verification_enabled() {
+    if !verify_crc32_enabled() {
         return Ok(());
     }
     let crc32 = crc32c::crc32c(decoded);
@@ -432,18 +432,18 @@ pub fn validate_decoded_block_group(
     Ok(())
 }
 
-/// Process-wide CRC verification switch, set once at service startup from
-/// `storage.verify_crc`. A process serves one mount, so a per-cache flag
+/// Process-wide crc32 verification switch, set once at service startup from
+/// `storage.verify_crc32`. A process serves one mount, so a per-cache flag
 /// would only thread the same value through every call site.
-static VERIFY_CRC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static VERIFY_CRC32: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// Disable or re-enable block group CRC validation for this process.
-pub fn set_crc_verification(enabled: bool) {
-    VERIFY_CRC.store(enabled, std::sync::atomic::Ordering::Relaxed);
+/// Disable or re-enable block group crc32 validation for this process.
+pub fn set_verify_crc32(enabled: bool) {
+    VERIFY_CRC32.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn crc_verification_enabled() -> bool {
-    VERIFY_CRC.load(std::sync::atomic::Ordering::Relaxed)
+fn verify_crc32_enabled() -> bool {
+    VERIFY_CRC32.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Marker error wrapped in an [`io::Error`] when a decoded block group fails CRC

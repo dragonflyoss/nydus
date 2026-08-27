@@ -79,6 +79,10 @@ storage:
   # written to disk. Kernel-served modes (fanotify/nbd/ublk/uffd) and
   # `nydus optimize` require a directory.
   dir: /var/lib/nydus/cache
+  # Whether decoded block groups are validated against their stored crc32
+  # before being served. Disable only when the transport is already trusted
+  # end to end and the crc32 pass shows up in the read-path profile.
+  # verify_crc32: true
 
 prefetch:
   # Number of concurrently prefetched blobs.

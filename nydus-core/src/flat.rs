@@ -140,7 +140,7 @@ impl FlatImage {
             .context("failed to fetch flat ranges")?;
         // The shared copy is gap-tolerant, so a drifted fetch contract would
         // show up as silently misplaced bytes rather than an error.
-        self.check_contiguous(&ranges, offset, len)?;
+        self.validate_contiguous_ranges(&ranges, offset, len)?;
         self.maps
             .copy_ranges(
                 &ranges,
@@ -152,7 +152,7 @@ impl FlatImage {
         Ok(())
     }
 
-    fn check_contiguous(&self, ranges: &[Extent], offset: u64, len: u64) -> Result<()> {
+    fn validate_contiguous_ranges(&self, ranges: &[Extent], offset: u64, len: u64) -> Result<()> {
         let mut written = 0u64;
         for range in ranges {
             if range.source_offset != offset + written {
