@@ -27,18 +27,17 @@ pub const NYDUS_BLOB_FOOTER_SIZE: usize = 4096;
 /// this boundary (the EROFS block size).
 pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
 
-/// `flags` is split EROFS-style (see [`crate::blob::flag`]): the low 16
-/// bits are incompatible features (unknown bits reject), the high 16 bits
-/// are compatible features (unknown bits are ignored). No bits are defined
-/// yet.
 /// Incompat flag: the embedded bootstrap region holds one zstd frame
 /// instead of raw EROFS bytes. `bootstrap_compressed_size` then carries the
 /// frame's exact byte length within the block-aligned region. The merged
-/// bootstrap and the blob meta sidecar the runtime mounts are unaffected;
+/// bootstrap and the blob meta sidecar the runtime mounts are unaffected,
 /// only merge, `check`, and single-blob mounts decode this region.
-pub const NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD: u32 = 1 << 0;
+pub const NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD: u32 = 1 << 0;
 
-const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD;
+/// `flags` is split EROFS-style (see [`crate::blob::flag`]): the low 16
+/// bits are incompatible features (unknown bits reject), the high 16 bits
+/// are compatible features (unknown bits are ignored).
+const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD;
 
 /// Byte range of the crc32 field within the footer.
 const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
@@ -131,7 +130,7 @@ impl BlobFooter {
         bootstrap_compressed_size: u64,
     ) -> Result<Self> {
         let flags = if bootstrap_compressed_size != 0 {
-            NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD
+            NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD
         } else {
             0
         };
@@ -285,7 +284,7 @@ impl BlobFooter {
             ));
         }
 
-        let compressed = self.flags & NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD != 0;
+        let compressed = self.flags & NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD != 0;
         if compressed
             && (self.bootstrap_compressed_size == 0
                 || self.bootstrap_compressed_size > self.bootstrap_size())
@@ -427,7 +426,7 @@ impl BlobFooter {
     /// Exact byte length of the zstd frame in the bootstrap region, or
     /// `None` when the bootstrap is stored raw.
     pub fn bootstrap_compressed_size(&self) -> Option<u64> {
-        (self.flags & NYDUS_BLOB_FOOTER_FLAG_BOOTSTRAP_ZSTD != 0)
+        (self.flags & NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD != 0)
             .then_some(self.bootstrap_compressed_size)
     }
 

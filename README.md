@@ -99,7 +99,7 @@ the comparison isolates the read transport:
   `curl | gunzip | tar -x`, as containerd does), no lazy loading.
 - **v2 FUSE** — optional column: the nydus v2 `nydusd` daemon serving the
   same rootfs as a RAFS v6 (zstd) image, enabled by pointing
-  `NYDUS_V2_NYDUSD` and `NYDUS_V2_IMAGE_BIN` at v2 binaries.
+  `NYDUSFS_BENCH_V2_NYDUSD` and `NYDUSFS_BENCH_V2_IMAGE_BIN` at v2 binaries.
 - **FUSE** — every read and metadata call is a userspace round trip through
   the `nydus fuse` daemon.
 - **NBD** — kernel EROFS over `/dev/nbdX`; cache misses reach the daemon

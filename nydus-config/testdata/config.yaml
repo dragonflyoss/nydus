@@ -20,6 +20,7 @@ backend:
 
 storage:
   dir: /var/lib/nydus/cache
+  verify_crc32: false
 
 prefetch:
   concurrent_blob_count: 4

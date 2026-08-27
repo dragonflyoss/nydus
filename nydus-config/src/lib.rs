@@ -108,6 +108,13 @@ fn default_dragonfly_fallback_interval() -> Duration {
     Duration::from_secs(1)
 }
 
+/// Returns the default for validating decoded block groups against their
+/// stored crc32.
+#[inline]
+fn default_storage_verify_crc32() -> bool {
+    true
+}
+
 /// The local backend configuration, serving blobs from a directory.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -322,23 +329,19 @@ pub struct StorageConfig {
     pub dir: Option<PathBuf>,
 
     /// Whether decoded block groups are validated against their stored
-    /// CRC32C before being served (the default). Disable only when the
-    /// transport is already trusted end to end and the CRC pass shows up in
-    /// the read-path profile.
-    #[serde(default = "default_verify_crc")]
-    pub verify_crc: bool,
+    /// crc32 before being served (the default). Disable only when the
+    /// transport is already trusted end to end and the crc32 pass shows up
+    /// in the read-path profile.
+    #[serde(default = "default_storage_verify_crc32")]
+    pub verify_crc32: bool,
 }
 
-fn default_verify_crc() -> bool {
-    true
-}
-
-/// CRC verification stays on when the `storage` section is omitted entirely.
+/// Implement Default for StorageConfig.
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             dir: None,
-            verify_crc: default_verify_crc(),
+            verify_crc32: default_storage_verify_crc32(),
         }
     }
 }
@@ -540,6 +543,7 @@ mod tests {
             config.storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
+        assert!(!config.storage.verify_crc32);
 
         assert_eq!(config.prefetch.concurrent_blob_count, 4);
         assert_eq!(config.prefetch.timeout, Duration::from_secs(120));
@@ -701,11 +705,11 @@ config:
             storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
-        assert!(storage.verify_crc);
+        assert!(storage.verify_crc32);
 
         let storage: StorageConfig =
-            serde_yaml::from_str("dir: /cache\nverify_crc: false\n").unwrap();
-        assert!(!storage.verify_crc);
+            serde_yaml::from_str("dir: /cache\nverify_crc32: false\n").unwrap();
+        assert!(!storage.verify_crc32);
     }
 
     #[test]

@@ -163,7 +163,7 @@ impl FuseCommand {
             None => None,
         };
         if let Some(config) = storage_config.as_ref() {
-            nydus_storage::cache::set_crc_verification(config.storage.verify_crc);
+            nydus_storage::cache::set_verify_crc32(config.storage.verify_crc32);
         }
 
         // Runs the FUSE service until shutdown.
