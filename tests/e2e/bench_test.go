@@ -151,18 +151,18 @@ type benchMode struct {
 
 // benchModeResult collects every measurement for one mode.
 type benchModeResult struct {
-	mountSec         float64
-	coldWalkSec      float64
-	coldWalkEntries  int
-	coldXattrWalkSec float64
-	negativeLookupOps     float64
-	firstReadSec     float64
-	coldSeqMiBps     float64
-	coldSeqCachedMiB float64 // page cache growth across the cold read
-	fetchedMiB       float64 // < 0 when the mode has no cache
-	coldRandIOPS     float64
-	coldRandLatUs    float64
-	bench            map[string]*benchResult // nil unless NYDUSFS_BENCH_WARM is set
+	mountSec          float64
+	coldWalkSec       float64
+	coldWalkEntries   int
+	coldXattrWalkSec  float64
+	negativeLookupOps float64
+	firstReadSec      float64
+	coldSeqMiBps      float64
+	coldSeqCachedMiB  float64 // page cache growth across the cold read
+	fetchedMiB        float64 // < 0 when the mode has no cache
+	coldRandIOPS      float64
+	coldRandLatUs     float64
+	bench             map[string]*benchResult // nil unless NYDUSFS_BENCH_WARM is set
 }
 
 // cachedMiB reports the kernel's total page cache from /proc/meminfo.
