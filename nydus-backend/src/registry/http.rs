@@ -18,6 +18,11 @@ use super::dns::SystemResolver;
 pub(crate) struct HTTP {
     /// The configured async HTTP client, wrapped with the retry middleware.
     client: ClientWithMiddleware,
+    /// The same client without the retry middleware, for callers that pace
+    /// their own retries (the Dragonfly fallback path).
+    raw_client: Client,
+    /// The configured retry budget ([`max_retries`](HttpConfig::max_retries)).
+    max_retries: u32,
 }
 
 impl HTTP {
@@ -74,14 +79,30 @@ impl HTTP {
             .map_err(|err| io::Error::other(format!("failed to build http client: {err}")))?;
 
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(config.max_retries);
+        let raw_client = client.clone();
         let client = ClientBuilder::new(client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy))
             .build();
-        Ok(HTTP { client })
+        Ok(HTTP {
+            client,
+            raw_client,
+            max_retries: config.max_retries,
+        })
     }
 
     /// The underlying async HTTP client.
     pub(crate) fn client(&self) -> &ClientWithMiddleware {
         &self.client
+    }
+
+    /// The async HTTP client without the retry middleware: one call issues
+    /// exactly one request attempt.
+    pub(crate) fn raw_client(&self) -> &Client {
+        &self.raw_client
+    }
+
+    /// The configured retry budget ([`max_retries`](HttpConfig::max_retries)).
+    pub(crate) fn max_retries(&self) -> u32 {
+        self.max_retries
     }
 }

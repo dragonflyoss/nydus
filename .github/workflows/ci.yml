@@ -14,8 +14,16 @@ on:
       - "docs/**"
       - "LICENSE*"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
 
 jobs:
   check:
@@ -44,20 +52,6 @@ jobs:
       - name: Run cargo check
         run: |
           cargo check --all --all-targets --all-features
-
-  lint:
-    name: Golang lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Golangci lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.7
-          working-directory: tests/e2e
 
   test:
     name: Run tests
@@ -96,7 +90,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -131,9 +125,6 @@ jobs:
         run: |
           make test-tooci
 
-      # fstests is deliberately not run: every generic/ case builds its
-      # fixture by writing to $TEST_DIR, so none of them can pass on a
-      # read-only mount. The suite below covers that ground instead.
       - name: Run read-only conformance tests
         run: |
           make test-fs
@@ -144,7 +135,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -176,7 +167,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -208,7 +199,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -248,11 +239,9 @@ jobs:
     name: Run UFFD tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -269,17 +258,12 @@ jobs:
         with:
           go-version: '1.25.5'
 
-      # The erofs module enables the loop-mounted whole-tree corpus diff in
-      # TestUffdRealFaultCopy; erofs-utils provides fsck.erofs for structural
-      # image validation.
       - name: Load erofs kernel module and install erofs-utils
         run: |
           sudo modprobe erofs || true
           sudo apt-get update -qq
           sudo apt-get install -y -qq erofs-utils
 
-      # UFFD_REQUIRE=1 turns missing userfaultfd runner capability into a hard
-      # unsupported-runner failure so this gate can never be silently skipped.
       - name: Run UFFD tests
         run: |
           make test-uffd \
@@ -300,7 +284,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2

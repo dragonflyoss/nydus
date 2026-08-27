@@ -1,0 +1,23 @@
+backend:
+  type: registry
+  config:
+    # The origin is the in-test injectable proxy (fronting the local
+    # registry): Dragonfly back-to-source works while the proxy is healthy,
+    # and the test injects hard failures to assert that reads fail once
+    # Dragonfly is down and origin fallback cannot succeed.
+    addr: http://127.0.0.1:18080
+    repository: nydus-e2e/dragonfly
+    http:
+      timeout: 5s
+      max_retries: 0
+      tls:
+        skip_verify: true
+    dragonfly:
+      scheduler_endpoint: http://127.0.0.1:8002
+      ondemand_max_retries: 1
+      prefetch_max_retries: 1
+      fallback_interval: 0s
+storage:
+  dir: /tmp/nydus-dragonfly/cache-strict
+prefetch:
+  scope: none

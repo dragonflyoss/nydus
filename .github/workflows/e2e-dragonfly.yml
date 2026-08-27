@@ -1,0 +1,397 @@
+name: E2E Test With Dragonfly
+
+on:
+  push:
+    branches: [main, release-*, v3]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
+  pull_request:
+    branches: [main, release-*, v3]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DRAGONFLY_VERSION: "2.4.3"
+  CLIENT_VERSION: "1.3.3"
+
+jobs:
+  nydus-build:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GH_TOKEN }}
+
+      - name: Setup Rust toolchain
+        uses: dsherret/rust-toolchain-file@v1
+
+      - name: Build nydus (with Dragonfly backend)
+        run: |
+          cargo build -p nydus --release --features "cli,backend-dragonfly-proxy"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: false
+
+      - name: Build nydusify
+        run: |
+          cd nydusify
+          go build -o ../target/release/nydusify .
+
+      - name: Upload nydus binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: nydus-artifact
+          path: |
+            target/release/nydus
+            target/release/nydusify
+
+  dragonfly-download:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Cache Dragonfly binaries
+        id: cache-dragonfly
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dragonfly-bin
+          key: dragonfly-${{ env.DRAGONFLY_VERSION }}-client-${{ env.CLIENT_VERSION }}-linux-amd64
+
+      - name: Download Dragonfly server binaries
+        if: steps.cache-dragonfly.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/dragonfly-bin
+          wget -q -O /tmp/dragonfly-server.tar.gz \
+            "https://github.com/dragonflyoss/dragonfly/releases/download/v${DRAGONFLY_VERSION}/dragonfly-${DRAGONFLY_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/dragonfly-server.tar.gz -C /tmp/dragonfly-bin manager scheduler
+          rm /tmp/dragonfly-server.tar.gz
+
+      - name: Download Dragonfly client binaries
+        if: steps.cache-dragonfly.outputs.cache-hit != 'true'
+        run: |
+          wget -q -O /tmp/dragonfly-client.tar.gz \
+            "https://github.com/dragonflyoss/client/releases/download/v${CLIENT_VERSION}/dragonfly-client-v${CLIENT_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf /tmp/dragonfly-client.tar.gz --strip-components=1 -C /tmp/dragonfly-bin
+          rm /tmp/dragonfly-client.tar.gz
+
+      - name: Upload Dragonfly binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: dragonfly-artifact
+          path: /tmp/dragonfly-bin
+
+  e2e-test:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    needs: [nydus-build, dragonfly-download]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: sdk-proxy-fallback
+            config: misc/dragonfly/nydus-sdk-fallback.yaml
+            cache_dir: /tmp/nydus-dragonfly/cache-fallback
+          - mode: sdk-proxy-strict
+            config: misc/dragonfly/nydus-sdk-strict.yaml
+            cache_dir: /tmp/nydus-dragonfly/cache-strict
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download nydus artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nydus-artifact
+          path: /tmp/nydus-bin
+
+      - name: Download Dragonfly artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dragonfly-artifact
+          path: /tmp/dragonfly-bin
+
+      - name: Install binaries
+        run: |
+          sudo install -m 0755 /tmp/nydus-bin/nydus /usr/local/bin/nydus
+          sudo install -m 0755 /tmp/nydus-bin/nydusify /usr/local/bin/nydusify
+          sudo install -m 0755 /tmp/dragonfly-bin/manager /usr/local/bin/manager
+          sudo install -m 0755 /tmp/dragonfly-bin/scheduler /usr/local/bin/scheduler
+          sudo install -m 0755 /tmp/dragonfly-bin/dfdaemon /usr/local/bin/dfdaemon
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: false
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-client redis-tools fuse3
+
+      - name: Start MySQL
+        run: |
+          docker run -d --name mysql \
+            -e MYSQL_ROOT_PASSWORD=dragonfly \
+            -e MYSQL_DATABASE=manager \
+            -p 3306:3306 \
+            mysql:8
+          for i in $(seq 1 60); do
+            if docker exec mysql mysqladmin ping -h 127.0.0.1 -u root -pdragonfly --silent 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Start Redis
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:latest
+          for i in $(seq 1 30); do
+            if docker exec redis redis-cli ping 2>/dev/null | grep -q PONG; then
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Setup Dragonfly config
+        run: |
+          sudo mkdir -p /etc/dragonfly
+          sudo cp misc/dragonfly/manager.yaml /etc/dragonfly/manager.yaml
+          sudo cp misc/dragonfly/scheduler.yaml /etc/dragonfly/scheduler.yaml
+          sudo cp misc/dragonfly/dfdaemon.yaml /etc/dragonfly/dfdaemon.yaml
+          mkdir -p /tmp/dragonfly/logs /tmp/dragonfly/cache /tmp/dragonfly/storage
+          mkdir -p /tmp/nydus-dragonfly/cache-fallback /tmp/nydus-dragonfly/cache-strict /tmp/nydus-dragonfly/mnt
+
+      - name: Start Dragonfly services
+        run: |
+          # manager/scheduler create their default workHome under /usr/local/dragonfly,
+          # so they must run as root. Start services sequentially since each one
+          # registers with the previous.
+          sudo /usr/local/bin/manager --config /etc/dragonfly/manager.yaml > /tmp/dragonfly/logs/manager.stdout.log 2>&1 &
+          timeout 90 bash -c 'until nc -z 127.0.0.1 65003; do sleep 1; done'
+
+          sudo /usr/local/bin/scheduler --config /etc/dragonfly/scheduler.yaml > /tmp/dragonfly/logs/scheduler.stdout.log 2>&1 &
+          timeout 60 bash -c 'until nc -z 127.0.0.1 8002; do sleep 1; done'
+
+          # Rust dfdaemon has no `daemon` subcommand and takes the log dir via --log-dir.
+          sudo /usr/local/bin/dfdaemon --config /etc/dragonfly/dfdaemon.yaml --log-dir /tmp/dragonfly/logs/dfdaemon > /tmp/dragonfly/logs/dfdaemon.stdout.log 2>&1 &
+          timeout 60 bash -c 'until nc -z 127.0.0.1 4001; do sleep 1; done'
+
+      - name: Build and push nydus test image
+        run: |
+          # Seed a throwaway local registry with a freshly converted nydus
+          # image: upstream nydus sample images use the legacy RAFS format,
+          # which this nydus cannot mount (EROFS-based bootstraps only).
+          docker run -d --name registry -p 5000:5000 --restart=no registry:2
+          timeout 30 bash -c 'until curl -sf http://127.0.0.1:5000/v2/ >/dev/null; do sleep 1; done'
+
+          WORK_DIR="/tmp/nydus-dragonfly"
+          mkdir -p "${WORK_DIR}/source/etc" "${WORK_DIR}/source/data"
+          printf 'NAME="Nydus Dragonfly E2E"\nID=nydus-e2e\nVERSION_ID=1\n' > "${WORK_DIR}/source/etc/os-release"
+          echo "root:x:0:0:root:/root:/bin/sh" > "${WORK_DIR}/source/etc/passwd"
+          echo "root:x:0:" > "${WORK_DIR}/source/etc/group"
+          head -c 4194304 /dev/urandom > "${WORK_DIR}/source/data/blob1.bin"
+          head -c 8388608 /dev/urandom > "${WORK_DIR}/source/data/blob2.bin"
+
+          nydusify convert --source "${WORK_DIR}/source" \
+            --target 127.0.0.1:5000/nydus-e2e/dragonfly:v1 \
+            --builder /usr/local/bin/nydus \
+            --target-insecure --target-plain-http
+          nydusify check --target 127.0.0.1:5000/nydus-e2e/dragonfly:v1 \
+            --work-dir "${WORK_DIR}/check" \
+            --builder /usr/local/bin/nydus \
+            --target-insecure --target-plain-http
+
+          BOOTSTRAP_FILE=$(find "${WORK_DIR}/check" -name image.boot | head -1)
+          [ -n "${BOOTSTRAP_FILE}" ] || { echo "exported image.boot not found under ${WORK_DIR}/check"; exit 1; }
+          cp "${BOOTSTRAP_FILE}" "${WORK_DIR}/bootstrap"
+
+      - name: Run Dragonfly FUSE E2E test (${{ matrix.mode }})
+        run: |
+          cd tests/e2e
+          sudo -E env "PATH=$PATH" \
+            NYDUS_BIN=/usr/local/bin/nydus \
+            NYDUS_CONFIG=${{ github.workspace }}/${{ matrix.config }} \
+            NYDUS_CACHE_DIR=${{ matrix.cache_dir }} \
+            DRAGONFLY_MODE=${{ matrix.mode }} \
+            BOOTSTRAP_PATH=/tmp/nydus-dragonfly/bootstrap \
+            WORK_DIR=/tmp/nydus-dragonfly \
+            go test -v -run '^TestDragonflyE2E$' -timeout 15m -count=1 dragonfly_test.go harness.go
+
+      - name: Dump service logs
+        if: always()
+        continue-on-error: true
+        run: |
+          LOG_DIR="/tmp/dragonfly-e2e-logs"
+          mkdir -p "${LOG_DIR}"
+          cp -r /tmp/dragonfly/logs/. "${LOG_DIR}/" 2>/dev/null || true
+          cp -r /tmp/nydus-dragonfly/logs "${LOG_DIR}/nydus" 2>/dev/null || true
+          docker logs mysql > "${LOG_DIR}/mysql.log" 2>&1 || true
+          docker logs redis > "${LOG_DIR}/redis.log" 2>&1 || true
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo umount /tmp/nydus-dragonfly/mnt 2>/dev/null || true
+          sudo pkill -f '/usr/local/bin/dfdaemon' 2>/dev/null || true
+          sudo pkill -f '/usr/local/bin/scheduler' 2>/dev/null || true
+          sudo pkill -f '/usr/local/bin/manager' 2>/dev/null || true
+          docker rm -f mysql redis registry 2>/dev/null || true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dragonfly-e2e-logs-${{ matrix.mode }}
+          path: /tmp/dragonfly-e2e-logs/
+
+  proxy-error-test:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    needs: [nydus-build, dragonfly-download]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download nydus artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nydus-artifact
+          path: /tmp/nydus-bin
+
+      - name: Download Dragonfly artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dragonfly-artifact
+          path: /tmp/dragonfly-bin
+
+      - name: Install binaries
+        run: |
+          sudo install -m 0755 /tmp/nydus-bin/nydus /usr/local/bin/nydus
+          sudo install -m 0755 /tmp/nydus-bin/nydusify /usr/local/bin/nydusify
+          sudo install -m 0755 /tmp/dragonfly-bin/manager /usr/local/bin/manager
+          sudo install -m 0755 /tmp/dragonfly-bin/scheduler /usr/local/bin/scheduler
+          sudo install -m 0755 /tmp/dragonfly-bin/dfdaemon /usr/local/bin/dfdaemon
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: false
+
+      - name: Start MySQL and Redis
+        run: |
+          docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=dragonfly -e MYSQL_DATABASE=manager -p 3306:3306 mysql:8
+          docker run -d --name redis -p 6379:6379 redis:latest
+          timeout 60 bash -c 'until docker exec mysql mysqladmin ping -h 127.0.0.1 -u root -pdragonfly --silent; do sleep 2; done'
+          timeout 30 bash -c 'until docker exec redis redis-cli ping | grep -q PONG; do sleep 1; done'
+
+      - name: Setup and start Dragonfly services
+        run: |
+          sudo mkdir -p /etc/dragonfly
+          sudo cp misc/dragonfly/manager.yaml /etc/dragonfly/manager.yaml
+          sudo cp misc/dragonfly/scheduler.yaml /etc/dragonfly/scheduler.yaml
+          sudo cp misc/dragonfly/dfdaemon.yaml /etc/dragonfly/dfdaemon.yaml
+          mkdir -p /tmp/dragonfly/logs /tmp/dragonfly/cache /tmp/dragonfly/storage
+          mkdir -p /tmp/nydus-dragonfly/cache-proxy-fallback /tmp/nydus-dragonfly/cache-proxy-strict /tmp/nydus-dragonfly/mnt
+
+          # manager/scheduler create their default workHome under /usr/local/dragonfly,
+          # so they must run as root. Start services sequentially since each one
+          # registers with the previous.
+          sudo /usr/local/bin/manager --config /etc/dragonfly/manager.yaml > /tmp/dragonfly/logs/manager.stdout.log 2>&1 &
+          timeout 90 bash -c 'until nc -z 127.0.0.1 65003; do sleep 1; done'
+
+          sudo /usr/local/bin/scheduler --config /etc/dragonfly/scheduler.yaml > /tmp/dragonfly/logs/scheduler.stdout.log 2>&1 &
+          timeout 60 bash -c 'until nc -z 127.0.0.1 8002; do sleep 1; done'
+
+          # Rust dfdaemon has no `daemon` subcommand and takes the log dir via --log-dir.
+          sudo /usr/local/bin/dfdaemon --config /etc/dragonfly/dfdaemon.yaml --log-dir /tmp/dragonfly/logs/dfdaemon > /tmp/dragonfly/logs/dfdaemon.stdout.log 2>&1 &
+          timeout 60 bash -c 'until nc -z 127.0.0.1 4001; do sleep 1; done'
+
+      - name: Build and push nydus test image
+        run: |
+          # Seed a throwaway local registry with a freshly converted nydus
+          # image: upstream nydus sample images use the legacy RAFS format,
+          # which this nydus cannot mount (EROFS-based bootstraps only).
+          docker run -d --name registry -p 5000:5000 --restart=no registry:2
+          timeout 30 bash -c 'until curl -sf http://127.0.0.1:5000/v2/ >/dev/null; do sleep 1; done'
+
+          WORK_DIR="/tmp/nydus-dragonfly"
+          mkdir -p "${WORK_DIR}/source/etc" "${WORK_DIR}/source/data"
+          printf 'NAME="Nydus Dragonfly E2E"\nID=nydus-e2e\nVERSION_ID=1\n' > "${WORK_DIR}/source/etc/os-release"
+          echo "root:x:0:0:root:/root:/bin/sh" > "${WORK_DIR}/source/etc/passwd"
+          echo "root:x:0:" > "${WORK_DIR}/source/etc/group"
+          head -c 4194304 /dev/urandom > "${WORK_DIR}/source/data/blob1.bin"
+          head -c 8388608 /dev/urandom > "${WORK_DIR}/source/data/blob2.bin"
+
+          nydusify convert --source "${WORK_DIR}/source" \
+            --target 127.0.0.1:5000/nydus-e2e/dragonfly:v1 \
+            --builder /usr/local/bin/nydus \
+            --target-insecure --target-plain-http
+          nydusify check --target 127.0.0.1:5000/nydus-e2e/dragonfly:v1 \
+            --work-dir "${WORK_DIR}/check" \
+            --builder /usr/local/bin/nydus \
+            --target-insecure --target-plain-http
+
+          BOOTSTRAP_FILE=$(find "${WORK_DIR}/check" -name image.boot | head -1)
+          [ -n "${BOOTSTRAP_FILE}" ] || { echo "exported image.boot not found under ${WORK_DIR}/check"; exit 1; }
+          cp "${BOOTSTRAP_FILE}" "${WORK_DIR}/bootstrap"
+
+      - name: Run proxy error simulation test
+        run: |
+          cd tests/e2e
+          sudo -E env "PATH=$PATH" \
+            NYDUS_BIN=/usr/local/bin/nydus \
+            NYDUS_CONFIG=${{ github.workspace }}/misc/dragonfly/nydus-sdk-fallback.yaml \
+            NYDUS_CACHE_DIR=/tmp/nydus-dragonfly/cache-proxy-fallback \
+            NYDUS_PROXY_ERROR_CONFIG=${{ github.workspace }}/misc/dragonfly/nydus-proxy-error-fallback.yaml \
+            BOOTSTRAP_PATH=/tmp/nydus-dragonfly/bootstrap \
+            WORK_DIR=/tmp/nydus-dragonfly \
+            go test -v -run '^TestProxyErrorSimulation$' -timeout 20m -count=1 dragonfly_test.go harness.go
+
+      - name: Dump logs
+        if: always()
+        continue-on-error: true
+        run: |
+          LOG_DIR="/tmp/proxy-error-test-logs"
+          mkdir -p "${LOG_DIR}"
+          cp -r /tmp/dragonfly/logs/. "${LOG_DIR}/" 2>/dev/null || true
+          cp -r /tmp/nydus-dragonfly/logs "${LOG_DIR}/nydus" 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo umount /tmp/nydus-dragonfly/mnt 2>/dev/null || true
+          sudo pkill -f '/usr/local/bin/dfdaemon' 2>/dev/null || true
+          sudo pkill -f '/usr/local/bin/scheduler' 2>/dev/null || true
+          sudo pkill -f '/usr/local/bin/manager' 2>/dev/null || true
+          docker rm -f mysql redis registry 2>/dev/null || true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proxy-error-test-logs
+          path: /tmp/proxy-error-test-logs/

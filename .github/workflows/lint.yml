@@ -14,9 +14,37 @@ on:
       - "docs/**"
       - "LICENSE*"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  lint:
-    name: Lint
+  rustfmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          toolchain: 1.88.0
+
+      - name: Run cargo fmt
+        run: |
+          cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -36,13 +64,27 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy, llvm-tools-preview
+          components: clippy
           toolchain: 1.88.0
-
-      - name: Run cargo fmt
-        run: |
-          cargo fmt --all -- --check
 
       - name: Run cargo clippy
         run: |
           cargo clippy --all --all-targets --all-features -- -D warnings
+
+  golangci-lint:
+    name: Golangci lint (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [nydusify, tests/e2e]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Golangci lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.7
+          working-directory: ${{ matrix.module }}

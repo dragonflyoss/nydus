@@ -40,6 +40,7 @@ pub use reader::ErofsReader;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use nydus_config::Config;
@@ -68,6 +69,10 @@ pub struct NydusCore {
     zero_file: Arc<File>,
     flat_size: u64,
     trace_recorder: Arc<TraceRecorder>,
+    /// Stop flag of the detached background prefetch worker, raised on drop
+    /// so the worker exits its retry/reschedule loop instead of holding the
+    /// cache and backend alive forever after the core is gone.
+    prefetch_stop: Option<Arc<AtomicBool>>,
 }
 
 impl NydusCore {
@@ -84,6 +89,8 @@ impl NydusCore {
     /// spawned before returning: for an optimized image it streams the
     /// "ondemand" redirect blob first (priority) to warm the source blobs'
     /// caches in recorded access order, then prefetches the remaining blobs.
+    /// Dropping the core raises the worker's stop flag so it winds down
+    /// instead of retrying throttled prefetches forever.
     /// The worker shares the reader's blob cache set, so callers that want
     /// network access (e.g. the virtio-pmem backend) must construct the core
     /// while the desired network namespace is active so the spawned thread
@@ -111,6 +118,8 @@ impl NydusCore {
         let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
         let prefetch_scope = config.prefetch.scope;
         let prefetch_timeout = config.prefetch.timeout;
+        let prefetch_retry_delay_min = config.prefetch.retry_delay_min;
+        let prefetch_retry_delay_max = config.prefetch.retry_delay_max;
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
         // The multi-device model hands each blob's cache file to the kernel
         // (as an EROFS device or fill target), so diskless mode cannot apply.
@@ -171,7 +180,10 @@ impl NydusCore {
         // set, so it keeps running (and keeps the caches alive) independently
         // of the returned core. The handle is detached: prefetch is
         // best-effort warmup and must never block core construction or
-        // teardown.
+        // teardown. The core retains only the worker's stop flag, raised on
+        // drop so the worker winds down instead of rescheduling throttled
+        // prefetches forever.
+        let mut prefetch_stop = None;
         if prefetch_scope != PrefetchScope::None {
             let prefetcher = BlobPrefetcher::new(
                 reader.blob_caches(),
@@ -179,9 +191,13 @@ impl NydusCore {
                 prefetch_concurrent_blob_count,
                 prefetch_scope,
                 prefetch_timeout,
+                prefetch_retry_delay_min,
+                prefetch_retry_delay_max,
             );
+            let stop_flag = prefetcher.stop_flag();
             match prefetcher.spawn() {
                 Ok(_handle) => {
+                    prefetch_stop = Some(stop_flag);
                     tracing::info!(
                         "nydus core: background prefetch started (scope={prefetch_scope:?})"
                     );
@@ -205,6 +221,7 @@ impl NydusCore {
             zero_file,
             flat_size,
             trace_recorder,
+            prefetch_stop,
         })
     }
 
@@ -326,5 +343,16 @@ impl NydusCore {
         }
 
         Ok(resolver.finish())
+    }
+}
+
+impl Drop for NydusCore {
+    /// Raise the background prefetch worker's stop flag so it stops starting
+    /// new work and exits its reschedule loop, instead of retrying throttled
+    /// prefetches forever after the core is gone.
+    fn drop(&mut self) {
+        if let Some(stop) = &self.prefetch_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
     }
 }
