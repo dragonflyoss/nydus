@@ -178,7 +178,7 @@ jobs:
           mkdir -p /tmp/nydus-test/cache /tmp/nydus-test/mnt
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
           cache: false
@@ -310,7 +310,7 @@ jobs:
           sudo chmod +x /usr/local/bin/nydus-image
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
           cache: false
