@@ -133,13 +133,13 @@ impl TreeNode<()> for KWayNode<'_> {
             .reader
             .inode(nid)
             .with_context(|| format!("failed to read inode: {nid}"))?;
-        Ok(
-            (mode_to_erofs_file_type(inode.mode()) == EROFS_FT_REG_FILE && inode.nlink() > 1)
-                .then_some(MergeLinkId {
-                    layer_id: layer.layer_id,
-                    nid,
-                }),
-        )
+        // Any non-directory can be hardlinked (fifos, sockets, devices and
+        // symlinks included); keying on the source (layer, nid) keeps every
+        // link of a group mapped to a single merged inode.
+        Ok((inode.nlink() > 1).then_some(MergeLinkId {
+            layer_id: layer.layer_id,
+            nid,
+        }))
     }
 
     fn children(&mut self, _ctx: &mut ()) -> Result<Option<NamedChildren<Self>>> {
@@ -728,6 +728,11 @@ mod tests {
         std::os::unix::fs::symlink("file_b", source.join("sym")).unwrap();
         let fifo = std::ffi::CString::new(source.join("fifo").as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        // Hardlinks to non-regular files must also survive the merge round
+        // trip as shared inodes (on Linux link(2) does not follow symlinks,
+        // so `link_sym` shares the symlink's inode).
+        fs::hard_link(source.join("fifo"), source.join("link_fifo")).unwrap();
+        fs::hard_link(source.join("sym"), source.join("link_sym")).unwrap();
         // `link_a` shares its inode with `dir1/file_a`, so its mtime is set
         // through that path.
         for (i, rel) in [
@@ -927,5 +932,129 @@ mod tests {
             }
         }
         assert_eq!(directories, 3);
+    }
+
+    /// Hardlink groups must survive a multi-layer merge: links within one
+    /// layer keep sharing a single merged inode (special files included),
+    /// and an upper layer shadowing one name splits only that name out of
+    /// its group.
+    #[test]
+    fn merge_preserves_hardlink_groups_across_layers() {
+        use crate::build::{build_image, BuildImageOptions};
+        use nydus_format::blob::BlobMetadataCompressor;
+        use nydus_format::utils::hex_string;
+        use std::collections::HashSet;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let build_layer = |source: &Path, scratch: &str| -> PathBuf {
+            let blob_path = dir.path().join(scratch);
+            let image = build_image(
+                &BuildImageOptions::new(
+                    source.to_path_buf(),
+                    EROFS_BLOCK_SIZE,
+                    1 << 20,
+                    BlobMetadataCompressor::None,
+                    HashSet::new(),
+                    false,
+                )
+                .unwrap(),
+                fs::File::create(&blob_path).unwrap(),
+            )
+            .unwrap();
+            // Merge sources are named by their full blob digest.
+            let merge_source = dir.path().join(hex_string(&image.full_blob_digest));
+            fs::rename(&blob_path, &merge_source).unwrap();
+            merge_source
+        };
+
+        // Lower layer: a hardlinked fifo pair and a hardlinked regular pair.
+        let lower = dir.path().join("lower");
+        fs::create_dir_all(&lower).unwrap();
+        let fifo = std::ffi::CString::new(lower.join("fifo").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        fs::hard_link(lower.join("fifo"), lower.join("fifo_link")).unwrap();
+        fs::write(lower.join("shared_a"), b"lower contents").unwrap();
+        fs::hard_link(lower.join("shared_a"), lower.join("shared_b")).unwrap();
+
+        // Upper layer: shadows one name of the regular pair and carries its
+        // own hardlinked symlink pair.
+        let upper = dir.path().join("upper");
+        fs::create_dir_all(&upper).unwrap();
+        fs::write(upper.join("shared_b"), b"upper replacement").unwrap();
+        std::os::unix::fs::symlink("shared_a", upper.join("sym")).unwrap();
+        fs::hard_link(upper.join("sym"), upper.join("sym_link")).unwrap();
+
+        let sources = [
+            build_layer(&lower, "lower.blob"),
+            build_layer(&upper, "upper.blob"),
+        ];
+
+        let mut device_slots = Vec::new();
+        let mut blob_indexes = HashMap::new();
+        let mut layers = Vec::new();
+        for (layer_id, source) in sources.iter().enumerate() {
+            let source_blob_id = parse_source_blob_id(source).unwrap();
+            let reader = ErofsReader::open_metadata_only(source).unwrap();
+            let local_to_global = register_blobs(
+                &reader,
+                source_blob_id,
+                &mut device_slots,
+                &mut blob_indexes,
+            )
+            .unwrap();
+            layers.push(MergeLayer {
+                layer_id: layer_id as u32,
+                epoch: reader.superblock().epoch(),
+                fixed_nsec: reader.superblock().fixed_nsec(),
+                local_to_global,
+                reader,
+            });
+        }
+        let root = KWayNode {
+            layers: &layers,
+            whiteout_spec: WhiteoutSpec::Oci,
+            variants: KWayVariants {
+                variants: layers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, layer)| (index, layer.reader.superblock().root_nid()))
+                    .collect(),
+                is_dir: true,
+            },
+        };
+        let inodes = flatten_tree(root, &mut ()).unwrap();
+
+        let InodeData::Directory { children, .. } = &inodes[0].data else {
+            panic!("root should be a directory")
+        };
+        let index_of = |name: &str| {
+            children
+                .iter()
+                .find(|child| child.name == name.as_bytes())
+                .unwrap_or_else(|| panic!("missing root entry {name}"))
+                .inode_index
+        };
+
+        assert_eq!(
+            index_of("fifo"),
+            index_of("fifo_link"),
+            "hardlinked fifo pair split by merge"
+        );
+        assert_eq!(
+            index_of("sym"),
+            index_of("sym_link"),
+            "hardlinked symlink pair split by merge"
+        );
+        assert_ne!(
+            index_of("shared_a"),
+            index_of("shared_b"),
+            "shadowed name must not share the lower group's inode"
+        );
+        assert_eq!(
+            inodes[index_of("shared_b")].size,
+            b"upper replacement".len() as u64,
+            "shared_b must come from the upper layer"
+        );
     }
 }
