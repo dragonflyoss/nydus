@@ -20,7 +20,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7.0.1
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:

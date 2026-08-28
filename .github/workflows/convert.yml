@@ -18,7 +18,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7.0.1
     - name: Setup Golang
       uses: actions/setup-go@v6
       with:
@@ -38,7 +38,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7.0.1
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:
@@ -62,7 +62,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
       - name: Build fsck.erofs
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential git autotools-dev automake libtool pkg-config uuid-dev liblz4-dev
@@ -81,7 +81,7 @@ jobs:
     needs: [nydusify-build, nydus-build, fsck-erofs-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
       - name: Login ghcr registry
         uses: docker/login-action@v3
         with:
@@ -160,7 +160,7 @@ jobs:
     needs: [nydusify-build, nydus-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
       - name: Login ghcr registry
         uses: docker/login-action@v3
         with:
@@ -214,7 +214,7 @@ jobs:
     needs: [nydusify-build, nydus-build, fsck-erofs-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
       - name: Login ghcr registry
         uses: docker/login-action@v3
         with:
@@ -277,7 +277,7 @@ jobs:
     needs: [nydusify-build, nydus-build, fsck-erofs-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
       - name: Login ghcr registry
         uses: docker/login-action@v3
         with:
@@ -342,7 +342,7 @@ jobs:
     needs: [convert-zran, convert-native-v5, convert-native-v6, convert-native-v6-batch]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
       - name: Download Zran Metric
         uses: actions/download-artifact@v7
         with:
