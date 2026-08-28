@@ -17,7 +17,7 @@ fuse-backend-rs = { workspace = true, features = ["persist"] }
 libc = "0.2"
 log = "0.4.8"
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
-nix = "0.24.0"
+nix = "0.25.1"
 rust-fsm = "0.6.0"
 sendfd = "0.4"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }

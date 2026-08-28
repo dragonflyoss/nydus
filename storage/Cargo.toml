@@ -25,7 +25,7 @@ lazy_static = "1.4.0"
 leaky-bucket = { version = "0.12.1" }
 libc = "0.2"
 log = "0.4.8"
-nix = "0.24"
+nix = "0.25"
 reqwest = { version = "0.12.28", features = [
     "blocking",
     "json",

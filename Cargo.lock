@@ -2791,6 +2791,8 @@ dependencies = [
  "bitflags 1.3.2",
  "cfg-if",
  "libc",
+ "memoffset 0.6.5",
+ "pin-utils",
 ]
 
 [[package]]
@@ -2929,7 +2931,7 @@ dependencies = [
  "indexmap",
  "libc",
  "log",
- "nix 0.24.3",
+ "nix 0.25.1",
  "nydus-api",
  "nydus-rafs",
  "nydus-storage",
@@ -2967,7 +2969,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "nix 0.24.3",
+ "nix 0.25.1",
  "nydus-api",
  "nydus-storage",
  "nydus-utils",
@@ -2996,7 +2998,7 @@ dependencies = [
  "log",
  "log-panics",
  "mio 0.8.11",
- "nix 0.24.3",
+ "nix 0.25.1",
  "nydus-api",
  "nydus-builder",
  "nydus-rafs",
@@ -3031,7 +3033,7 @@ dependencies = [
  "libc",
  "log",
  "mio 0.8.11",
- "nix 0.24.3",
+ "nix 0.25.1",
  "nydus-api",
  "nydus-rafs",
  "nydus-storage",
@@ -3081,7 +3083,7 @@ dependencies = [
  "leaky-bucket",
  "libc",
  "log",
- "nix 0.24.3",
+ "nix 0.25.1",
  "nydus-api",
  "nydus-utils",
  "once_cell",
@@ -3131,7 +3133,7 @@ dependencies = [
  "log",
  "lz4",
  "lz4-sys",
- "nix 0.24.3",
+ "nix 0.25.1",
  "nydus-api",
  "openssl",
  "serde",
@@ -3436,6 +3438,12 @@ name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
+
+[[package]]
+name = "pin-utils"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "piper"

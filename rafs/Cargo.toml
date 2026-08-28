@@ -15,7 +15,7 @@ bitflags = "1.2.1"
 lazy_static = "1.4.0"
 libc = "0.2"
 log = "0.4"
-nix = "0.24"
+nix = "0.25"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 vm-memory = { workspace = true }
