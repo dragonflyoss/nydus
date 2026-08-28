@@ -43,7 +43,7 @@ jobs:
         run: make release
 
       - name: Upload Nydus Binaries
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nydus-artifact
           path: |
@@ -79,7 +79,7 @@ jobs:
           rm /tmp/dragonfly-client.tar.gz
 
       - name: Upload Dragonfly Binaries
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: dragonfly-artifact
           path: /tmp/dragonfly-bin
@@ -284,7 +284,7 @@ jobs:
           docker rm -f mysql redis 2>/dev/null || true
 
       - name: Upload logs
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: dragonfly-e2e-logs-${{ matrix.mode }}
@@ -393,7 +393,7 @@ jobs:
           done
 
       - name: Upload logs
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: proxy-error-test-logs
