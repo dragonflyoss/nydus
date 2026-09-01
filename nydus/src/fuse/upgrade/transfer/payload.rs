@@ -12,6 +12,7 @@ use super::super::wire::{
     read_raw_frame_until, recv_fds_exact_until, send_fds_until, write_raw_frame_until,
     ProtocolDeadline,
 };
+use super::super::STANDALONE_UPGRADE_ERROR;
 use super::state::FuseInitState;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -94,7 +95,7 @@ pub struct SessionTransfer {
 }
 
 impl SessionTransfer {
-    pub(super) fn capture(
+    pub(in crate::fuse::upgrade) fn capture(
         info: &InstanceInfo,
         session_id: Uuid,
         fuse_session_state: &FuseInitState,
@@ -118,11 +119,15 @@ impl SessionTransfer {
         })
     }
 
-    pub(super) fn session_id(&self) -> Uuid {
+    pub(in crate::fuse::upgrade) fn session_id(&self) -> Uuid {
         self.metadata.session_id
     }
 
-    pub(super) fn send(&self, stream: &mut UnixStream, deadline: ProtocolDeadline) -> Result<()> {
+    pub(in crate::fuse::upgrade) fn send(
+        &self,
+        stream: &mut UnixStream,
+        deadline: ProtocolDeadline,
+    ) -> Result<()> {
         let metadata = self.metadata.encode()?;
         send_opaque_transfer(
             stream,
@@ -132,7 +137,7 @@ impl SessionTransfer {
         )
     }
 
-    pub(super) fn receive(
+    pub(in crate::fuse::upgrade) fn receive(
         stream: &mut UnixStream,
         deadline: ProtocolDeadline,
         session_id: Uuid,
@@ -141,7 +146,7 @@ impl SessionTransfer {
         Self::receive_expected(stream, deadline, Some(session_id), expected)
     }
 
-    pub(super) fn receive_retained(
+    pub(in crate::fuse::upgrade) fn receive_retained(
         stream: &mut UnixStream,
         deadline: ProtocolDeadline,
         expected: &InstanceInfo,
@@ -175,12 +180,16 @@ impl SessionTransfer {
 
     pub(in crate::fuse) fn into_adoption(
         self,
-    ) -> (SessionTransferMetadata, OwnedFd, FuseFailoverSession) {
+    ) -> (SessionTransferMetadata, OwnedFd, SessionProtection) {
         let failover = FuseFailoverSession {
             session_id: self.metadata.session_id,
             journal: self.journal,
         };
-        (self.metadata, self.fuse_fd, failover)
+        (
+            self.metadata,
+            self.fuse_fd,
+            SessionProtection::Failover(failover),
+        )
     }
 }
 
@@ -199,12 +208,77 @@ impl FuseFailoverSession {
     }
 }
 
-pub(super) struct OpaqueSessionTransfer {
+/// Describes whether a serving session has the resources required for
+/// hot upgrade and crash recovery.
+#[derive(Clone)]
+pub(in crate::fuse) enum SessionProtection {
+    /// Mountable, but rejects hot upgrade and recovery: no external escrow.
+    Standalone,
+    /// Protected by a Recovery Holder escrow.
+    Failover(FuseFailoverSession),
+}
+
+impl SessionProtection {
+    /// A fresh Failover-Protected identity with its inflight journal.
+    pub(in crate::fuse) fn fresh_failover() -> std::io::Result<Self> {
+        Ok(Self::Failover(FuseFailoverSession::create()?))
+    }
+
+    /// The protected Session Identity advertised by `INFO`.
+    pub(in crate::fuse) fn session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Standalone => None,
+            Self::Failover(failover) => Some(failover.session_id),
+        }
+    }
+
+    /// The inflight journal a session must record into, if any.
+    pub(in crate::fuse) fn journal(&self) -> Option<&fuser::InflightJournal> {
+        match self {
+            Self::Standalone => None,
+            Self::Failover(failover) => Some(&failover.journal),
+        }
+    }
+
+    /// Whether this session may enter a hot-upgrade handoff.
+    pub(in crate::fuse::upgrade) fn supports_handoff(&self) -> std::result::Result<(), String> {
+        match self {
+            Self::Standalone => Err(STANDALONE_UPGRADE_ERROR.to_string()),
+            Self::Failover(_) => Ok(()),
+        }
+    }
+
+    /// Captures a Session Transfer over the live session, or explains why
+    /// this session has none to offer.
+    pub(in crate::fuse::upgrade) fn capture_transfer(
+        &self,
+        info: &InstanceInfo,
+        fuse_session_state: &FuseInitState,
+        fuse_fd: BorrowedFd<'_>,
+    ) -> std::result::Result<SessionTransfer, String> {
+        let Self::Failover(failover) = self else {
+            return Err(
+                "session transfer is unavailable: this session is not protected by a supervisor"
+                    .to_string(),
+            );
+        };
+        SessionTransfer::capture(
+            info,
+            failover.session_id,
+            fuse_session_state,
+            fuse_fd,
+            &failover.journal,
+        )
+        .map_err(|err| err.report().to_string())
+    }
+}
+
+pub(in crate::fuse::upgrade) struct OpaqueSessionTransfer {
     pub metadata: Vec<u8>,
     pub fds: [OwnedFd; 2],
 }
 
-pub(super) fn send_opaque_transfer(
+pub(in crate::fuse::upgrade) fn send_opaque_transfer(
     stream: &mut UnixStream,
     metadata: &[u8],
     fds: [BorrowedFd<'_>; 2],
@@ -217,7 +291,7 @@ pub(super) fn send_opaque_transfer(
     Ok(())
 }
 
-pub(super) fn receive_opaque_transfer(
+pub(in crate::fuse::upgrade) fn receive_opaque_transfer(
     stream: &mut UnixStream,
     deadline: ProtocolDeadline,
 ) -> Result<OpaqueSessionTransfer> {
@@ -268,32 +342,24 @@ pub(in crate::fuse) fn validate_fuse_connection(fd: BorrowedFd<'_>) -> std::io::
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
     use std::mem::MaybeUninit;
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
     use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     use uuid::Uuid;
 
     use super::*;
-    use crate::fuse::upgrade::wire::{send_fds_until, ProtocolDeadline};
-
-    fn deadline() -> ProtocolDeadline {
-        ProtocolDeadline::after(Duration::from_secs(5), "session transfer test")
-    }
+    use crate::fuse::upgrade::test_support::{
+        assert_cloexec, assert_peer_closed, fuse_init_state, test_deadline,
+    };
+    use crate::fuse::upgrade::wire::send_fds_until;
 
     fn metadata() -> SessionTransferMetadata {
         SessionTransferMetadata {
             session_id: Uuid::from_u128(1),
             mountpoint: "/mnt/nydus".to_string(),
             image_digest: "01".repeat(32),
-            fuse_session_state: FuseInitState {
-                proto_major: 7,
-                proto_minor: 31,
-                negotiated_init_flags: 0,
-                kernel_init_flags: 0,
-            },
+            fuse_session_state: fuse_init_state(),
         }
     }
 
@@ -308,14 +374,6 @@ mod tests {
         let expected = stat(expected);
         assert_eq!(actual.st_dev, expected.st_dev);
         assert_eq!(actual.st_ino, expected.st_ino);
-    }
-
-    fn assert_cloexec(fds: &[std::os::fd::OwnedFd]) {
-        for fd in fds {
-            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
-            assert_ne!(flags, -1);
-            assert_ne!(flags & libc::FD_CLOEXEC, 0);
-        }
     }
 
     #[test]
@@ -343,34 +401,31 @@ mod tests {
             &mut sender,
             b"{\"opaque\":true}",
             [first.as_fd(), second.as_fd()],
-            deadline(),
+            test_deadline(),
         )
         .unwrap();
-        let received = receive_opaque_transfer(&mut receiver, deadline()).unwrap();
+        let received = receive_opaque_transfer(&mut receiver, test_deadline()).unwrap();
         assert_eq!(received.metadata, b"{\"opaque\":true}");
         assert_same_file(received.fds[0].as_fd(), first.as_fd());
         assert_same_file(received.fds[1].as_fd(), second.as_fd());
-        assert_cloexec(&received.fds);
+        assert_cloexec(received.fds.iter().map(AsFd::as_fd));
     }
 
     #[test]
     fn opaque_transfer_rejects_the_wrong_descriptor_count() {
         let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        write_raw_frame_until(&mut sender, deadline(), b"{\"opaque\":true}").unwrap();
-        let (sentinel, mut peer) = UnixStream::pair().unwrap();
-        send_fds_until(&sender, &[sentinel.as_fd()], deadline()).unwrap();
+        write_raw_frame_until(&mut sender, test_deadline(), b"{\"opaque\":true}").unwrap();
+        let (sentinel, peer) = UnixStream::pair().unwrap();
+        send_fds_until(&sender, &[sentinel.as_fd()], test_deadline()).unwrap();
         drop(sentinel);
 
-        let error = receive_opaque_transfer(&mut receiver, deadline())
+        let error = receive_opaque_transfer(&mut receiver, test_deadline())
             .err()
             .expect("wrong descriptor count must be rejected");
         assert_eq!(
             error.io_error().map(std::io::Error::kind),
             Some(std::io::ErrorKind::InvalidData)
         );
-
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-        let mut byte = [0u8; 1];
-        assert_eq!(peer.read(&mut byte).unwrap(), 0);
+        assert_peer_closed(peer);
     }
 }
