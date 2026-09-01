@@ -318,7 +318,11 @@ func mountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	args := []string{"fuse", "--mountpoint", mnt}
+	args := []string{
+		"fuse",
+		"--mountpoint", mnt,
+		"--control-socket", testControlSocket(t),
+	}
 	if imagePath != "" && blobdev != "" {
 		args = append(args, "--bootstrap", imagePath, "--blob-dir", filepath.Dir(blobdev))
 	} else if blobdev != "" {
@@ -348,12 +352,26 @@ func mountNydusBootstrapWithCache(
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	args := []string{"fuse", "--bootstrap", bootstrapPath, "--blob-dir", blobDir, "--mountpoint", mnt}
+	args := []string{
+		"fuse",
+		"--bootstrap", bootstrapPath,
+		"--blob-dir", blobDir,
+		"--mountpoint", mnt,
+		"--control-socket", testControlSocket(t),
+	}
 	if cacheDir != "" {
 		require.NoError(t, os.MkdirAll(cacheDir, 0755))
 		args = append(args, "--cache-dir", cacheDir)
 	}
 	return startFuseMount(t, exec.Command(nydusBin, args...), mnt, "nydus bootstrap fuse")
+}
+
+func testControlSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "nydus-ctl")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "control.sock")
 }
 
 // unmountFuse detaches mnt, retrying while the kernel still holds references.

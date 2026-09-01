@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -63,12 +63,6 @@ impl ControlServer {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Held through probe, reclamation, and bind. The startup `lock` is
-        // mountpoint-scoped, so two mountpoints configured with the same
-        // explicit control path could otherwise both deem the old socket
-        // stale, and the second remove+bind would silently unlink the first
-        // daemon's freshly bound endpoint.
-        let _path_lock = lock_control_path(path)?;
         let listener = match bind_listener(path) {
             Ok(listener) => listener,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -130,36 +124,6 @@ impl Drop for ControlServer {
             let _ = thread.join();
         }
     }
-}
-
-/// Serializes stale-socket reclamation and bind across starters that share
-/// one control-socket path: a sibling `<path>.lock` flock, exclusive and
-/// non-blocking. The lock file is left behind; flock ownership, not the
-/// file's existence, is the mutex.
-fn lock_control_path(path: &Path) -> Result<std::fs::File> {
-    let mut lock_path = path.as_os_str().to_os_string();
-    lock_path.push(".lock");
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(PathBuf::from(lock_path))?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let err = io::Error::last_os_error();
-        if err
-            .raw_os_error()
-            .is_some_and(|code| code == libc::EAGAIN || code == libc::EWOULDBLOCK)
-        {
-            return Err(Error::Runtime(format!(
-                "another process is reclaiming the control socket {}",
-                path.display()
-            )));
-        }
-        return Err(err).with_context(|| format!("failed to lock {}.lock", path.display()));
-    }
-    Ok(file)
 }
 
 fn bind_listener(path: &Path) -> io::Result<UnixListener> {
@@ -443,7 +407,7 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("control.sock");
-        let lock = StartupLock::acquire_in(dir.path(), "/mnt").unwrap();
+        let lock = StartupLock::acquire(&path).unwrap();
         let (handle, background, kernel) = parked_runtime_handle(session_id);
         let server =
             ControlServer::start(&path, InstanceInfo::new("/mnt", &[1; 32]), handle, lock).unwrap();
@@ -464,7 +428,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not-a.sock");
         std::fs::write(&path, b"operator data").unwrap();
-        let lock = StartupLock::acquire_in(dir.path(), "/mnt").unwrap();
+        let lock = StartupLock::acquire(&path).unwrap();
         let (handle, background, _kernel) = parked_runtime_handle(None);
 
         // bind reports AddrInUse and connect reports ECONNREFUSED for a

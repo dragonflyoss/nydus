@@ -18,6 +18,7 @@ pub const STANDALONE_UPGRADE_ERROR: &str =
 pub(in crate::fuse) const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub use handoff::SessionRuntimeHandle;
+pub use startup::{RunningSession, Startup, StartupMode};
 pub use transfer::SessionTransfer;
 
 #[cfg(test)]

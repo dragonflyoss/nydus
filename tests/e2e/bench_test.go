@@ -710,6 +710,7 @@ func (e *benchEnv) startFuseNamed(t *testing.T, name, bootstrap string) func() {
 		"--bootstrap", bootstrap,
 		"--config", e.configPath(name),
 		"--mountpoint", mnt,
+		"--control-socket", testControlSocket(t),
 		"--apiserver", "unix://"+e.apiSocket(name),
 	)
 	exited := spawnDaemon(t, cmd, e.logPath(name))
