@@ -1,8 +1,24 @@
 use std::fs;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::Path;
 use std::time::Duration;
 
 use tracing::{error, info};
+
+/// True once the FUSE kernel connection behind `fd` has ended: the kernel
+/// raises `POLLERR` on every fd of a dead connection (unmounted, aborted).
+/// A live connection reports at most `POLLIN` (queued requests), which is not
+/// requested here. Non-blocking (zero timeout).
+pub(crate) fn connection_dead(fd: BorrowedFd<'_>) -> bool {
+    let mut pfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: 0,
+        revents: 0,
+    };
+    // SAFETY: polling one fd owned by the caller for the duration of the call.
+    let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+    ret > 0 && pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+}
 
 /// Returns the `major:minor` that /proc/self/mountinfo reports for
 /// `mountpoint`, or `None` when nothing is mounted there.
