@@ -1,6 +1,6 @@
 [package]
 name = "nydus-error"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ readme = "README.md"
 default = []
 
 [dependencies]
-nydus-format = { version = "0.1.0", path = "../nydus-format" }
+nydus-format = { version = "3.0.0-alpha.1", path = "../nydus-format" }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
 thiserror = { workspace = true }

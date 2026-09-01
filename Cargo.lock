@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "nydus"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-backend"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-config"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "clap",
  "humantime-serde",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-core"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "libc",
  "memmap2",
@@ -2974,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-error"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "libc",
  "nydus-format",
@@ -2985,7 +2985,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-format"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "bitflags 2.11.0",
  "blake3",
@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "blake3",
  "crc32c",
@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-telemetry"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "prometheus",
  "rolling-file",

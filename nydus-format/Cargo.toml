@@ -1,6 +1,6 @@
 [package]
 name = "nydus-format"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
