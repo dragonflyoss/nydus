@@ -44,12 +44,6 @@ impl LifecyclePhase {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::fuse) enum SessionOrigin {
-    Fresh,
-    Adopted,
-}
-
 #[derive(Clone)]
 pub(in crate::fuse) struct SessionLifecycle {
     phase: Arc<AtomicU8>,

@@ -15,7 +15,12 @@ pub mod fanotify;
 pub mod fileio;
 #[cfg(feature = "fuse")]
 pub mod fuse;
-#[cfg(any(feature = "fanotify", feature = "fileio", feature = "nbd"))]
+#[cfg(any(
+    feature = "fanotify",
+    feature = "fileio",
+    feature = "fuse",
+    feature = "nbd"
+))]
 pub mod mount;
 #[cfg(feature = "nbd")]
 pub mod nbd;
