@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 mod handoff;
+mod holder;
 mod identity;
 mod lifecycle;
 mod startup;
