@@ -358,7 +358,14 @@ impl Filesystem for ErofsFs {
         }
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        flags: OpenFlags,
+        _kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Open);
         // ENOSYS makes the kernel treat this and every later open as success
         // without a handle, with KEEP_CACHE semantics; the read-only mount

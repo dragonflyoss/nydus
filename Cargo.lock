@@ -1507,15 +1507,14 @@ dependencies = [
 
 [[package]]
 name = "fuser"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80a5eca878900c2e39e9e52fd797954b7fc39eeefc8558257114bfea6a698fcf"
+version = "0.18.0"
+source = "git+https://github.com/Zephyrcf/fuser.git?tag=0.18.0-upgrade-rc2#921d13460c634e0aa21f4023bdeac4a1a7da0f9a"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
  "log",
  "memchr",
- "nix 0.30.1",
+ "nix 0.31.3",
  "num_enum",
  "page_size",
  "parking_lot",
@@ -2736,9 +2735,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.30.1"
+version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.11.0",
  "cfg-if",

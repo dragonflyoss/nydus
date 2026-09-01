@@ -15,7 +15,7 @@ required-features = ["cli"]
 [features]
 default = ["backend-registry"]
 # FUSE mount support (ErofsFs over fuser).
-fuse = ["dep:fuser", "dep:signal-hook"]
+fuse = ["dep:fuser", "dep:signal-hook", "dep:uuid"]
 # The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
 cli = [
   "fuse",
@@ -61,7 +61,9 @@ blake3 = "1"
 bytesize = { version = "1", optional = true }
 clap = { workspace = true, optional = true }
 crc32c = "0.6"
-fuser = { version = "0.17", optional = true }
+# Redirected by the workspace-level `[patch.crates-io]` to the fork release
+# carrying the hot-upgrade and failover primitives until they land upstream.
+fuser = { version = "0.18.0", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
@@ -97,7 +99,7 @@ tokio = { workspace = true, features = [
   "sync",
 ], optional = true }
 tracing = { workspace = true }
-uuid = { version = "1", features = ["v4"], optional = true }
+uuid = { version = "1", features = ["serde", "v4"], optional = true }
 xattr = { workspace = true }
 
 [dev-dependencies]
