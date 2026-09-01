@@ -3,7 +3,7 @@
 //! hot-upgrade handoff machinery in [`upgrade`].
 
 pub mod fs;
-mod mount;
+pub mod mount;
 pub mod service;
 pub mod upgrade;
 
