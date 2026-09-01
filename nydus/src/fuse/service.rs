@@ -124,7 +124,7 @@ impl FuseService {
                 let mut bg = Some(bg);
 
                 loop {
-                    if bg.as_ref().is_some_and(|bg| bg.guard.is_finished()) {
+                    if bg.as_ref().is_some_and(|bg| bg.is_finished()) {
                         let session = bg.take().expect("background session already taken");
                         let result = finish_session(session, &mountpoint, our_dev.clone());
                         let _ = result_tx.send(result);

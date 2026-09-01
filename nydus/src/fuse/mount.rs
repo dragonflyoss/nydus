@@ -84,7 +84,7 @@ pub(crate) fn finish_session(
     mountpoint: &Path,
     our_dev: Option<String>,
 ) -> std::io::Result<()> {
-    let session_alive = !session.guard.is_finished();
+    let session_alive = !session.is_finished();
     let same_dev = match mount_dev_of(mountpoint) {
         Ok(current) => current.is_some() && current == our_dev,
         Err(err) => {
@@ -103,7 +103,7 @@ pub(crate) fn finish_session(
     }
 
     for _ in 0..100 {
-        if session.guard.is_finished() {
+        if session.is_finished() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
