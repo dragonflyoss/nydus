@@ -258,9 +258,43 @@ func dropCaches(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 }
 
-// isMountpoint reports whether path is currently a mountpoint.
+// isMountpoint reports whether path is currently present in this process's
+// mount table. Do not stat the path: detached FUSE mounts can retain open
+// handles whose path lookup blocks after the serving daemon exits.
 func isMountpoint(path string) bool {
-	return exec.Command("mountpoint", "-q", path).Run() == nil
+	target, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(mountinfo), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 4 && unescapeMountInfoPath(fields[4]) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func unescapeMountInfoPath(path string) string {
+	var decoded strings.Builder
+	decoded.Grow(len(path))
+	for index := 0; index < len(path); {
+		if path[index] == '\\' && index+3 < len(path) {
+			a, b, c := path[index+1], path[index+2], path[index+3]
+			if a >= '0' && a <= '7' && b >= '0' && b <= '7' && c >= '0' && c <= '7' {
+				decoded.WriteByte((a-'0')<<6 | (b-'0')<<3 | (c - '0'))
+				index += 4
+				continue
+			}
+		}
+		decoded.WriteByte(path[index])
+		index++
+	}
+	return decoded.String()
 }
 
 // startFuseMount starts a prepared FUSE daemon command, waits for mnt to
