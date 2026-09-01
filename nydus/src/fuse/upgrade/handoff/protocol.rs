@@ -19,6 +19,7 @@ pub(super) enum Response {
         session_id: Option<Uuid>,
     },
     HandoffTransfer {},
+    Committed {},
     Abort {
         message: String,
     },
@@ -32,10 +33,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cutover_messages_use_ready_and_abort_wire_names() {
+    fn cutover_messages_use_their_wire_names() {
         assert_eq!(
             serde_json::to_value(Request::Ready {}).unwrap()["type"],
             "ready"
+        );
+        assert_eq!(
+            serde_json::to_value(Response::Committed {}).unwrap()["type"],
+            "committed"
         );
         assert_eq!(
             serde_json::to_value(Response::Abort {

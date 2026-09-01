@@ -1,7 +1,8 @@
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,97 @@ pub(in crate::fuse::upgrade) fn authenticate_peer(stream: &UnixStream) -> io::Re
             "fuse control peer has an invalid pid",
         )
     })
+}
+
+pub(super) enum PeerProcess {
+    Exited,
+    Tracked(OwnedFd),
+    Untracked,
+}
+
+impl PeerProcess {
+    pub(super) fn observe(pid: u32) -> Self {
+        let pid = match libc::pid_t::try_from(pid) {
+            Ok(pid) => pid,
+            Err(_) => return Self::Untracked,
+        };
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd >= 0 {
+            return Self::Tracked(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+        }
+        if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            Self::Exited
+        } else {
+            Self::Untracked
+        }
+    }
+
+    pub(super) fn confirm_exited(&self, timeout: Duration) -> bool {
+        let Self::Tracked(pidfd) = self else {
+            return matches!(self, Self::Exited);
+        };
+        let started = Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+            let mut poll = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut poll, 1, timeout_ms) };
+            if result > 0 {
+                return poll.revents & libc::POLLIN != 0;
+            }
+            if result == 0 {
+                return false;
+            }
+            if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return false;
+            }
+        }
+    }
+
+    pub(super) fn can_terminate(&self) -> bool {
+        let Self::Tracked(pidfd) = self else {
+            return matches!(self, Self::Exited);
+        };
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                0,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    pub(super) fn terminate_and_confirm(&self, timeout: Duration) -> io::Result<bool> {
+        let Self::Tracked(pidfd) = self else {
+            return Ok(matches!(self, Self::Exited));
+        };
+        if self.confirm_exited(Duration::ZERO) {
+            return Ok(true);
+        }
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(self.confirm_exited(timeout))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -91,6 +183,8 @@ impl InstanceInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     #[test]
@@ -113,5 +207,17 @@ mod tests {
         assert!(declared.check_pid(declared.pid).is_ok());
         declared.pid = declared.pid.saturating_add(1);
         assert!(declared.check_pid(std::process::id()).is_err());
+    }
+
+    #[test]
+    fn peer_process_can_terminate_and_confirm_exit() {
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+        let process = PeerProcess::observe(child.id());
+        assert!(!process.confirm_exited(Duration::ZERO));
+        assert!(process.can_terminate());
+        assert!(process
+            .terminate_and_confirm(Duration::from_secs(1))
+            .unwrap());
+        child.wait().unwrap();
     }
 }

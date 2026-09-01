@@ -1,5 +1,7 @@
 //! FUSE session continuity: hot upgrade and crash failover.
 
+use std::time::Duration;
+
 mod handoff;
 mod startup;
 #[cfg(test)]
@@ -9,6 +11,10 @@ mod wire;
 
 pub const STANDALONE_UPGRADE_ERROR: &str =
     "Standalone Session does not support hot upgrade without a Recovery Holder";
+
+/// Bound for a local control-socket response and for confirming that a
+/// successor exited after an abort could not be delivered.
+pub(in crate::fuse) const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub use handoff::SessionRuntimeHandle;
 pub use transfer::SessionTransfer;
