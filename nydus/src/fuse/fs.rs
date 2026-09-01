@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -35,8 +35,10 @@ const EROFS_NAME_MAX: usize = 255;
 
 pub struct ErofsFs {
     reader: Arc<ErofsReader>,
-    dir_handles: Mutex<HashMap<u64, Arc<DirHandle>>>,
-    next_dir_handle: AtomicU64,
+    /// Decoded directory listings keyed by inode rather than by an opendir
+    /// handle, so a handle opened by a predecessor process stays readable
+    /// after the /dev/fuse fd moves here.
+    dir_cache: DirCache,
     /// Kernel accepts ENOSYS from open/opendir as "stop sending them": file
     /// and directory opens then cost no FUSE round-trip at all and the dummy
     /// handles keep the page cache (KEEP_CACHE, and CACHE_DIR for dirs).
@@ -47,36 +49,13 @@ pub struct ErofsFs {
     no_xattr: bool,
 }
 
-/// An opened directory. Entries materialize on the first readdir; with
-/// FOPEN_CACHE_DIR the kernel usually serves repeat listings from the page
-/// cache and never sends that readdir, so opendir must not pay for one.
-struct DirHandle {
-    ino: u64,
-    entries: Mutex<Option<Arc<Vec<RawDirEntry>>>>,
-}
-
-impl DirHandle {
-    fn entries(&self, fs: &ErofsFs) -> io::Result<Arc<Vec<RawDirEntry>>> {
-        let mut guard = self.entries.lock().unwrap();
-        if let Some(entries) = guard.as_ref() {
-            return Ok(entries.clone());
-        }
-        let nid = fs.ino_to_nid(self.ino);
-        let vi = fs.reader.inode(nid)?;
-        let entries = Arc::new(fs.reader.read_dir(nid, &vi)?);
-        *guard = Some(entries.clone());
-        Ok(entries)
-    }
-}
-
 impl ErofsFs {
     pub fn new(reader: Arc<ErofsReader>) -> Self {
         let no_xattr =
             reader.superblock().feature_compat() & EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR != 0;
         Self {
             reader,
-            dir_handles: Mutex::new(HashMap::new()),
-            next_dir_handle: AtomicU64::new(1),
+            dir_cache: DirCache::default(),
             no_open: AtomicBool::new(false),
             no_opendir: AtomicBool::new(false),
             no_xattr,
@@ -148,35 +127,27 @@ impl ErofsFs {
         }
     }
 
-    fn create_dir_handle(&self, ino: u64) -> io::Result<u64> {
-        let handle = self.next_dir_handle.fetch_add(1, Ordering::Relaxed);
-        let dir_handle = Arc::new(DirHandle {
-            ino,
-            entries: Mutex::new(None),
-        });
-        self.dir_handles.lock().unwrap().insert(handle, dir_handle);
-        Ok(handle)
+    fn directory_entries(&self, ino: u64) -> io::Result<Arc<[RawDirEntry]>> {
+        self.dir_cache.get_or_try_insert_with(ino, || {
+            let nid = self.ino_to_nid(ino);
+            let inode = self.reader.inode(nid)?;
+            self.reader.read_dir(nid, &inode)
+        })
     }
 
-    fn dir_handle(&self, handle: u64) -> io::Result<Arc<DirHandle>> {
-        self.dir_handles
-            .lock()
-            .unwrap()
-            .get(&handle)
-            .cloned()
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))
-    }
-
-    /// Directory entries for a readdir(plus): through the handle when opendir
-    /// issued one, or straight from the inode for the kernel's no-opendir
-    /// dummy handle (fh 0).
-    fn dir_entries(&self, ino: INodeNo, fh: FileHandle) -> io::Result<Arc<Vec<RawDirEntry>>> {
-        if fh.0 != 0 {
-            return self.dir_handle(fh.0)?.entries(self);
+    /// Directory entries for a readdir(plus). A handle from opendir is the
+    /// directory's own inode, so it resolves through the inode-keyed cache
+    /// whether this process opened it or inherited it from a predecessor.
+    /// The kernel's no-opendir dummy handle (fh 0) has no opendir/releasedir
+    /// pair to bound a cache entry against, so it reads straight from the
+    /// inode instead.
+    fn dir_entries(&self, ino: INodeNo, fh: FileHandle) -> io::Result<Arc<[RawDirEntry]>> {
+        if fh.0 == 0 {
+            let nid = self.ino_to_nid(ino.0);
+            let vi = self.reader.inode(nid)?;
+            return Ok(self.reader.read_dir(nid, &vi)?.into());
         }
-        let nid = self.ino_to_nid(ino.0);
-        let vi = self.reader.inode(nid)?;
-        Ok(Arc::new(self.reader.read_dir(nid, &vi)?))
+        self.directory_entries(ino.0)
     }
 }
 
@@ -263,6 +234,88 @@ fn erofs_ft_to_kind(ft: u8) -> FileType {
 
 fn should_hide_xattr(ino: u64, name: &[u8]) -> bool {
     ino == FUSE_ROOT_ID && is_nydus_xattr(name)
+}
+
+#[derive(Default)]
+struct DirCache {
+    slots: Mutex<HashMap<u64, DirCacheRecord>>,
+}
+
+struct DirCacheRecord {
+    slot: Arc<DirCacheSlot>,
+    open_handles: usize,
+}
+
+#[derive(Default)]
+struct DirCacheSlot {
+    entries: Mutex<Option<Arc<[RawDirEntry]>>>,
+}
+
+fn for_each_cached_dir_entry<F>(entries: &[RawDirEntry], offset: u64, mut cb: F) -> io::Result<()>
+where
+    F: FnMut(&RawDirEntry, u64) -> io::Result<bool>,
+{
+    let start = usize::try_from(offset).unwrap_or(usize::MAX);
+    for (index, entry) in entries.iter().enumerate().skip(start) {
+        if !cb(entry, (index as u64) + 1)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+impl DirCache {
+    fn open(&self, ino: u64) {
+        let mut slots = self.slots.lock().unwrap();
+        let record = slots.entry(ino).or_insert_with(|| DirCacheRecord {
+            slot: Arc::new(DirCacheSlot::default()),
+            open_handles: 0,
+        });
+        record.open_handles += 1;
+    }
+
+    fn get_or_try_insert_with(
+        &self,
+        ino: u64,
+        load: impl FnOnce() -> io::Result<Vec<RawDirEntry>>,
+    ) -> io::Result<Arc<[RawDirEntry]>> {
+        let slot = {
+            let mut slots = self.slots.lock().unwrap();
+            Arc::clone(
+                &slots
+                    .entry(ino)
+                    .or_insert_with(|| DirCacheRecord {
+                        slot: Arc::new(DirCacheSlot::default()),
+                        open_handles: 1,
+                    })
+                    .slot,
+            )
+        };
+
+        let mut entries = slot.entries.lock().unwrap();
+        if let Some(entries) = entries.as_ref() {
+            return Ok(Arc::clone(entries));
+        }
+
+        let loaded: Arc<[RawDirEntry]> = load()?.into();
+        *entries = Some(Arc::clone(&loaded));
+        Ok(loaded)
+    }
+
+    fn release(&self, ino: u64) {
+        let mut slots = self.slots.lock().unwrap();
+        let should_remove = match slots.get_mut(&ino) {
+            Some(record) if record.open_handles > 1 => {
+                record.open_handles -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if should_remove {
+            slots.remove(&ino);
+        }
+    }
 }
 
 impl Filesystem for ErofsFs {
@@ -514,18 +567,17 @@ impl Filesystem for ErofsFs {
             return;
         }
 
-        match self.create_dir_handle(ino.0) {
-            Ok(handle) => reply.opened(
-                FileHandle(handle),
-                FopenFlags::FOPEN_KEEP_CACHE | FopenFlags::FOPEN_CACHE_DIR,
-            ),
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-            }
-        }
+        self.dir_cache.open(ino.0);
+        reply.opened(
+            FileHandle(ino.0),
+            FopenFlags::FOPEN_KEEP_CACHE | FopenFlags::FOPEN_CACHE_DIR,
+        );
     }
 
+    // Directory offsets remain process-independent ordinals. The immutable
+    // entry vector is only a reconstructible per-process cache, so an adopted
+    // process can rebuild it by inode and resume an existing handle at the
+    // same offset.
     fn readdir(
         &self,
         _req: &Request,
@@ -543,14 +595,18 @@ impl Filesystem for ErofsFs {
                 return;
             }
         };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
-            let ino = self.nid_to_ino(entry.nid);
-            let kind = erofs_ft_to_kind(entry.file_type);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(INodeNo(ino), (index as u64) + 1, kind, name) {
-                break;
-            }
+
+        if let Err(err) = for_each_cached_dir_entry(&entries, offset, |entry, next_offset| {
+            Ok(!reply.add(
+                INodeNo(self.nid_to_ino(entry.nid)),
+                next_offset,
+                erofs_ft_to_kind(entry.file_type),
+                OsStr::from_bytes(&entry.name),
+            ))
+        }) {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
@@ -572,29 +628,25 @@ impl Filesystem for ErofsFs {
                 return;
             }
         };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
+
+        if let Err(err) = for_each_cached_dir_entry(&entries, offset, |entry, next_offset| {
             let child_inode = match self.reader.inode(entry.nid) {
-                Ok(vi) => vi,
-                Err(err) => {
-                    m.fail();
-                    reply.error(io_errno(&err));
-                    return;
-                }
+                Ok(inode) => inode,
+                Err(err) => return Err(err),
             };
             let attr = self.make_attr(entry.nid, &child_inode);
-            let ino = self.nid_to_ino(entry.nid);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(
-                INodeNo(ino),
-                (index as u64) + 1,
-                name,
+            Ok(!reply.add(
+                INodeNo(self.nid_to_ino(entry.nid)),
+                next_offset,
+                OsStr::from_bytes(&entry.name),
                 &EROFS_FUSE_TIMEOUT,
                 &attr,
                 Generation(0),
-            ) {
-                break;
-            }
+            ))
+        }) {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
@@ -602,12 +654,12 @@ impl Filesystem for ErofsFs {
     fn releasedir(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        fh: FileHandle,
+        ino: INodeNo,
+        _fh: FileHandle,
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        self.dir_handles.lock().unwrap().remove(&fh.0);
+        self.dir_cache.release(ino.0);
         reply.ok();
     }
 
@@ -742,5 +794,144 @@ impl Filesystem for ErofsFs {
             return;
         }
         reply.data(&names_buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    fn raw_entry(name: &[u8]) -> RawDirEntry {
+        RawDirEntry {
+            nid: 7,
+            file_type: EROFS_FT_REG_FILE,
+            name: name.to_vec(),
+        }
+    }
+
+    fn raw_entries(names: &[&[u8]]) -> Vec<RawDirEntry> {
+        names.iter().map(|name| raw_entry(name)).collect()
+    }
+
+    #[test]
+    fn dir_cache_reuses_one_materialization() {
+        let cache = DirCache::default();
+        let loads = AtomicUsize::new(0);
+
+        let first = cache
+            .get_or_try_insert_with(42, || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![raw_entry(b"entry")])
+            })
+            .unwrap();
+        let second = cache
+            .get_or_try_insert_with(42, || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![raw_entry(b"replacement")])
+            })
+            .unwrap();
+
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(second[0].name, b"entry");
+    }
+
+    #[test]
+    fn dir_cache_retries_a_failed_load() {
+        let cache = DirCache::default();
+        let loads = AtomicUsize::new(0);
+
+        let err = cache
+            .get_or_try_insert_with(42, || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Err(io::Error::other("load failed"))
+            })
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+
+        let entries = cache
+            .get_or_try_insert_with(42, || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![raw_entry(b"retry")])
+            })
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        assert_eq!(entries[0].name, b"retry");
+    }
+
+    #[test]
+    fn dir_cache_keeps_entries_until_all_local_handles_close() {
+        let cache = DirCache::default();
+        cache.open(42);
+        cache.open(42);
+
+        let first = cache
+            .get_or_try_insert_with(42, || Ok(vec![raw_entry(b"first")]))
+            .unwrap();
+
+        cache.release(42);
+
+        let second = cache
+            .get_or_try_insert_with(42, || Ok(vec![raw_entry(b"second")]))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(second[0].name, b"first");
+    }
+
+    #[test]
+    fn dir_cache_evicts_entries_once_the_last_handle_releases() {
+        // A record reaches one open handle either through a local opendir or
+        // through the first readdir on a handle inherited from a predecessor,
+        // which never called opendir here. Both must evict on release so the
+        // next listing re-reads the directory.
+        for open_locally in [true, false] {
+            let cache = DirCache::default();
+            if open_locally {
+                cache.open(42);
+            }
+
+            let first = cache
+                .get_or_try_insert_with(42, || Ok(vec![raw_entry(b"first")]))
+                .unwrap();
+
+            cache.release(42);
+
+            let second = cache
+                .get_or_try_insert_with(42, || Ok(vec![raw_entry(b"second")]))
+                .unwrap();
+            assert!(
+                !Arc::ptr_eq(&first, &second),
+                "open_locally={open_locally}: release must drop the slot"
+            );
+            assert_eq!(second[0].name, b"second");
+        }
+    }
+
+    #[test]
+    fn cached_dir_entry_iteration_respects_offsets() {
+        let entries = raw_entries(&[b"alpha", b"beta", b"gamma"]);
+        for (offset, want) in [
+            (
+                0,
+                vec![
+                    (1, b"alpha".to_vec()),
+                    (2, b"beta".to_vec()),
+                    (3, b"gamma".to_vec()),
+                ],
+            ),
+            (1, vec![(2, b"beta".to_vec()), (3, b"gamma".to_vec())]),
+            (3, vec![]),
+        ] {
+            let mut seen = Vec::new();
+            for_each_cached_dir_entry(&entries, offset, |entry, next_offset| {
+                seen.push((next_offset, entry.name.clone()));
+                Ok(true)
+            })
+            .unwrap();
+            assert_eq!(seen, want);
+        }
     }
 }
