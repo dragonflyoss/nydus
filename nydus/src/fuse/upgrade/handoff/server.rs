@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -9,7 +9,6 @@ use tracing::{info, warn};
 
 use super::super::identity::{authenticate_peer, InstanceInfo, PeerProcess};
 use super::super::lifecycle::{handoff_deadline, SessionRuntimeHandle};
-use super::super::startup::StartupLock;
 use super::super::transfer::SessionTransfer;
 use super::super::wire::{read_frame_until, write_frame_until, ProtocolDeadline};
 use super::super::CONTROL_RESPONSE_TIMEOUT;
@@ -50,25 +49,16 @@ pub(in crate::fuse::upgrade) struct ControlServer {
 impl ControlServer {
     /// Binds the control socket and starts its accept loop.
     ///
-    /// Consumes the startup ownership `lock` and drops it only once the
-    /// listener is bound and the accept thread is running, so a concurrent
-    /// starter can never observe the gap between the ownership probe and the
-    /// bound socket.
+    /// The caller holds the startup lock through probing and this call so a
+    /// concurrent starter cannot observe a gap before endpoint publication.
     pub(in crate::fuse::upgrade) fn start(
         path: &Path,
         info: InstanceInfo,
         handle: SessionRuntimeHandle,
-        lock: StartupLock,
     ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Held through probe, reclamation, and bind. The startup `lock` is
-        // mountpoint-scoped, so two mountpoints configured with the same
-        // explicit control path could otherwise both deem the old socket
-        // stale, and the second remove+bind would silently unlink the first
-        // daemon's freshly bound endpoint.
-        let _path_lock = lock_control_path(path)?;
         let listener = match bind_listener(path) {
             Ok(listener) => listener,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -112,7 +102,6 @@ impl ControlServer {
                 return Err(err).context("failed to start the fuse control thread");
             }
         };
-        drop(lock);
         info!("control socket listening at {}", path.display());
         Ok(Self {
             command: Some(command),
@@ -130,36 +119,6 @@ impl Drop for ControlServer {
             let _ = thread.join();
         }
     }
-}
-
-/// Serializes stale-socket reclamation and bind across starters that share
-/// one control-socket path: a sibling `<path>.lock` flock, exclusive and
-/// non-blocking. The lock file is left behind; flock ownership, not the
-/// file's existence, is the mutex.
-fn lock_control_path(path: &Path) -> Result<std::fs::File> {
-    let mut lock_path = path.as_os_str().to_os_string();
-    lock_path.push(".lock");
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(PathBuf::from(lock_path))?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let err = io::Error::last_os_error();
-        if err
-            .raw_os_error()
-            .is_some_and(|code| code == libc::EAGAIN || code == libc::EWOULDBLOCK)
-        {
-            return Err(Error::Runtime(format!(
-                "another process is reclaiming the control socket {}",
-                path.display()
-            )));
-        }
-        return Err(err).with_context(|| format!("failed to lock {}.lock", path.display()));
-    }
-    Ok(file)
 }
 
 fn bind_listener(path: &Path) -> io::Result<UnixListener> {
@@ -460,10 +419,9 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("control.sock");
-        let lock = StartupLock::acquire_in(dir.path(), "/mnt").unwrap();
         let (handle, background, kernel) = parked_runtime_handle(session_id);
         let server =
-            ControlServer::start(&path, InstanceInfo::new("/mnt", &[1; 32]), handle, lock).unwrap();
+            ControlServer::start(&path, InstanceInfo::new("/mnt", &[1; 32]), handle).unwrap();
         (dir, path, server, background, kernel)
     }
 
@@ -481,14 +439,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not-a.sock");
         std::fs::write(&path, b"operator data").unwrap();
-        let lock = StartupLock::acquire_in(dir.path(), "/mnt").unwrap();
         let (handle, background, _kernel) = parked_runtime_handle(None);
 
         // bind reports AddrInUse and connect reports ECONNREFUSED for a
         // regular file exactly as they do for a stale socket, so startup must
         // refuse rather than delete whatever the path names.
-        let Err(err) =
-            ControlServer::start(&path, InstanceInfo::new("/mnt", &[1; 32]), handle, lock)
+        let Err(err) = ControlServer::start(&path, InstanceInfo::new("/mnt", &[1; 32]), handle)
         else {
             panic!("a non-socket at the control path must not be adopted");
         };
