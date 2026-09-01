@@ -1,6 +1,6 @@
 [package]
 name = "nydus-core"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -12,11 +12,11 @@ readme = "README.md"
 zstd = "0.13"
 libc = { workspace = true }
 memmap2 = { workspace = true }
-nydus-backend = { version = "0.1.0", path = "../nydus-backend" }
-nydus-config = { version = "0.1.0", path = "../nydus-config" }
-nydus-error = { version = "0.1.0", path = "../nydus-error" }
-nydus-format = { version = "0.1.0", path = "../nydus-format" }
-nydus-storage = { version = "0.1.0", path = "../nydus-storage" }
+nydus-backend = { version = "3.0.0-alpha.1", path = "../nydus-backend" }
+nydus-config = { version = "3.0.0-alpha.1", path = "../nydus-config" }
+nydus-error = { version = "3.0.0-alpha.1", path = "../nydus-error" }
+nydus-format = { version = "3.0.0-alpha.1", path = "../nydus-format" }
+nydus-storage = { version = "3.0.0-alpha.1", path = "../nydus-storage" }
 tracing = { workspace = true }
 
 [dev-dependencies]
