@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 mod handoff;
+mod holder;
 mod startup;
 #[cfg(test)]
 mod test_support;
