@@ -1222,9 +1222,11 @@ Header details:
 - `flags` is split EROFS-style: the low 16 bits are incompatible features — a
 	reader that does not know a set bit must reject the file (like
 	`feature_incompat`); the high 16 bits are compatible features — unknown
-	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`)
-	means zstd is the blob's default compressor; no compressor bit means
-	stored plain. `DIGESTER_BLAKE3` (`1 << 1`) is mandatory for chunk digests.
+	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`) or
+	`COMPRESSOR_LZ4` (`1 << 1`) names the blob's default compressor; no
+	compressor bit means stored plain. `DIGESTER_BLAKE3` (`1 << 2`) is mandatory
+	for chunk digests. `REDIRECT` (`1 << 3`) marks an ondemand blob whose block
+	groups are all redirect entries.
 	Entry-layout evolution (wider chunk/block group entries, new entry kinds) is
 	expressed as a new incompat bit — the same way EROFS gates compact vs
 	extended inodes — while header growth uses the reserved tail plus a compat

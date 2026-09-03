@@ -1000,7 +1000,7 @@ mod tests {
             BlobMetadataDigester::Blake3,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
-            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32, 0, 0, false).unwrap()],
             false,
         )
         .unwrap()
@@ -1273,7 +1273,7 @@ mod tests {
             BlobMetadataDigester::Blake3,
             1,
             Vec::new(),
-            vec![BlobMetadataBlockGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32, 1, 0, true).unwrap()],
             true,
         )
         .unwrap();

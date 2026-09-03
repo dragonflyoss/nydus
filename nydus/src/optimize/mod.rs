@@ -142,7 +142,7 @@ pub fn build_ondemand_blob(
 
         let compressed_offset = ondemand_data.len() as u64;
         ondemand_data.extend_from_slice(encoded);
-        ondemand_block_groups.push(BlobMetadataBlockGroup::new_redirect(
+        ondemand_block_groups.push(BlobMetadataBlockGroup::new(
             next_block_offset,
             block_group.uncompressed_block_count(),
             compressed_offset,
@@ -154,6 +154,7 @@ pub fn build_ondemand_blob(
             block_group.crc32(),
             *blob_index,
             *block_group_index,
+            true,
         )?);
         next_block_offset += block_group.uncompressed_block_count() as u64;
     }
