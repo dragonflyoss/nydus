@@ -86,6 +86,7 @@ bitflags! {
         const COMPRESSOR_ZSTD = 1 << 0;
         const DIGESTER_BLAKE3 = 1 << 1;
         const COMPRESSOR_LZ4 = 1 << 2;
+        const REDIRECT = 1 << 3;
     }
 }
 
@@ -796,18 +797,13 @@ impl BlobMetadataBlockGroup {
         self.crc32
     }
 
-    /// True when any block group redirects to another source blob.
-    fn has_redirect(block_groups: &[Self]) -> bool {
-        block_groups.iter().any(Self::is_redirect)
-    }
-
     /// Derive the header's `block_group_block_count_bits` from the groups
     /// themselves: the first group carries the uniform span (validated
     /// later), a lone group rounds up to a power of two, and empty or
     /// redirect tables fall back to the default geometry.
-    fn infer_block_count_bits(block_groups: &[Self]) -> Result<u8> {
+    fn infer_block_count_bits(block_groups: &[Self], is_redirect: bool) -> Result<u8> {
         let default_bits = DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT.ilog2() as u8;
-        if Self::has_redirect(block_groups) {
+        if is_redirect {
             return Ok(default_bits);
         }
 
@@ -866,11 +862,34 @@ impl BlobMetadata {
         chunks: Vec<BlobMetadataChunk>,
         block_groups: Vec<BlobMetadataBlockGroup>,
     ) -> Result<Self> {
+        Self::new_inner(compressor, chunk_block_count, chunks, block_groups, false)
+    }
+
+    /// Creates validated redirect metadata whose block groups reference
+    /// source blobs.
+    pub fn new_redirect(
+        compressor: BlobMetadataCompressor,
+        chunk_block_count: u32,
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+    ) -> Result<Self> {
+        Self::new_inner(compressor, chunk_block_count, chunks, block_groups, true)
+    }
+
+    fn new_inner(
+        compressor: BlobMetadataCompressor,
+        chunk_block_count: u32,
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+        is_redirect: bool,
+    ) -> Result<Self> {
+        let mut flags = BlobMetadataDigester::Blake3.flag() | compressor.flag();
+        flags.set(BlobMetadataFlags::REDIRECT, is_redirect);
         let chunks_offset = NYDUS_BLOB_METADATA_HEADER_SIZE as u64;
         let header = BlobMetadataHeader {
             magic: NYDUS_BLOB_METADATA_MAGIC,
             version: NYDUS_BLOB_METADATA_VERSION,
-            flags: (BlobMetadataDigester::Blake3.flag() | compressor.flag()).bits(),
+            flags: flags.bits(),
             crc32: 0,
             reserved0: 0,
             chunks_offset,
@@ -884,6 +903,7 @@ impl BlobMetadata {
             chunk_block_count_bits: block_count_to_bits(chunk_block_count)?,
             block_group_block_count_bits: BlobMetadataBlockGroup::infer_block_count_bits(
                 &block_groups,
+                is_redirect,
             )?,
         };
         header.validate()?;
@@ -1025,13 +1045,18 @@ impl BlobMetadata {
             ));
         }
 
-        let is_redirect = BlobMetadataBlockGroup::has_redirect(block_groups);
+        let is_redirect = self.is_redirect();
         let mut next_uncompressed_block_offset = 0u64;
         let mut next_compressed_offset = 0u64;
         for (index, block_group) in block_groups.iter().enumerate() {
             block_group
                 .validate()
                 .with_context(|| format!("invalid blob meta block group {index}"))?;
+            if block_group.is_redirect() != is_redirect {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta block group {index} does not match the redirect flag"
+                )));
+            }
             if block_group.uncompressed_block_offset() != next_uncompressed_block_offset {
                 return Err(Error::InvalidImage(format!(
                     "blob meta block groups must be dense: block group {index} starts at block {}, \
@@ -1127,19 +1152,19 @@ impl BlobMetadata {
     }
 
     /// Rebuilt metadata with every compressed offset shifted by `bias`, for
-    /// compressed data embedded at `bias` inside a full blob (resealed via
-    /// [`Self::new`]).
+    /// compressed data embedded at `bias` inside a full blob.
     pub fn checked_add_compressed_offset(&self, bias: u64) -> Result<Self> {
         let mut block_groups = Vec::with_capacity(self.block_group_count());
         for block_group in self.block_groups() {
             block_groups.push(block_group.checked_add_compressed_offset(bias)?);
         }
 
-        Self::new(
+        Self::new_inner(
             self.compressor(),
             self.chunk_block_count(),
             self.chunks().to_vec(),
             block_groups,
+            self.is_redirect(),
         )
     }
 
@@ -1248,7 +1273,7 @@ impl BlobMetadata {
     /// Whether any block group redirects to another source blob (an
     /// ondemand redirect blob).
     pub fn is_redirect(&self) -> bool {
-        BlobMetadataBlockGroup::has_redirect(self.block_groups())
+        self.header.flags().contains(BlobMetadataFlags::REDIRECT)
     }
 
     /// Total uncompressed size of the blob in 4KiB blocks: block groups are
@@ -1933,6 +1958,37 @@ mod tests {
     }
 
     #[test]
+    fn block_groups_must_match_the_redirect_flag() {
+        let payload = vec![0x45; EROFS_BLOCK_SIZE as usize];
+        let regular = block_group(0, 1, 0, EROFS_BLOCK_SIZE, &payload);
+        let redirect = BlobMetadataBlockGroup::new_redirect(
+            0,
+            1,
+            0,
+            EROFS_BLOCK_SIZE,
+            crc32c::crc32c(&payload),
+            1,
+            0,
+        )
+        .unwrap();
+
+        let err = BlobMetadata::new(BlobMetadataCompressor::None, 1, Vec::new(), vec![redirect])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("does not match the redirect flag"),
+            "{err}"
+        );
+
+        let err =
+            BlobMetadata::new_redirect(BlobMetadataCompressor::None, 1, Vec::new(), vec![regular])
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("does not match the redirect flag"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_redirect_blob_allows_non_uniform_block_groups_and_round_trips() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("ondemand.blob.meta");
@@ -1972,7 +2028,7 @@ mod tests {
             .unwrap(),
         ];
 
-        let blob_metadata = BlobMetadata::new(
+        let blob_metadata = BlobMetadata::new_redirect(
             BlobMetadataCompressor::None,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),

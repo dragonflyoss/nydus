@@ -163,7 +163,7 @@ pub fn build_ondemand_blob(
     let mut data_digest = [0u8; EROFS_BLOB_ID_SIZE];
     data_digest.copy_from_slice(&data_hasher.finalize());
 
-    let blob_metadata = BlobMetadata::new(
+    let blob_metadata = BlobMetadata::new_redirect(
         BlobMetadataCompressor::Zstd,
         DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
         Vec::new(),
