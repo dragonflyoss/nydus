@@ -983,7 +983,9 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor};
+    use nydus_format::blob::{
+        BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataDigester,
+    };
     use nydus_format::utils::sha256_bytes;
     use std::path::Path;
     use tempfile::tempdir;
@@ -995,9 +997,11 @@ mod tests {
     fn blob_metadata_with_crc32(payload: &[u8], crc32: u32) -> BlobMetadata {
         BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
             vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32).unwrap()],
+            false,
         )
         .unwrap()
     }
@@ -1264,11 +1268,13 @@ mod tests {
 
         // An ondemand (redirect) blob whose single block group redirects to source
         // blob 1 block group 0; its data region carries a copy of the source bytes.
-        let redirect_meta = BlobMetadata::new_redirect(
+        let redirect_meta = BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
             Vec::new(),
             vec![BlobMetadataBlockGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
+            true,
         )
         .unwrap();
         assert!(redirect_meta.is_redirect());

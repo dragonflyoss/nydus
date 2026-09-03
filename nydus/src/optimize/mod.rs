@@ -28,7 +28,7 @@ use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor,
+    BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor, BlobMetadataDigester,
     DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
@@ -163,11 +163,13 @@ pub fn build_ondemand_blob(
     let mut data_digest = [0u8; EROFS_BLOB_ID_SIZE];
     data_digest.copy_from_slice(&data_hasher.finalize());
 
-    let blob_metadata = BlobMetadata::new_redirect(
+    let blob_metadata = BlobMetadata::new(
         BlobMetadataCompressor::Zstd,
+        BlobMetadataDigester::Blake3,
         DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
         Vec::new(),
         ondemand_block_groups,
+        true,
     )
     .context("failed to assemble ondemand blob meta")?;
 

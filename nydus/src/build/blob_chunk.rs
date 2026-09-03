@@ -2,7 +2,7 @@ use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
+    BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
 };
 use nydus_format::erofs::{ErofsChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
 use nydus_format::utils::align_up_usize;
@@ -283,13 +283,19 @@ impl<W: Write> BlobWriter<W> {
     }
 
     pub fn blob_metadata(&self, source_offset_bias: u64) -> Result<BlobMetadata> {
+        let mut block_groups = Vec::with_capacity(self.blob_metadata_block_groups.len());
+        for block_group in &self.blob_metadata_block_groups {
+            block_groups.push(block_group.checked_add_compressed_offset(source_offset_bias)?);
+        }
+
         Ok(BlobMetadata::new(
             self.compressor,
+            BlobMetadataDigester::Blake3,
             self.file_chunk_size / EROFS_BLOCK_SIZE,
             self.blob_metadata_chunks.clone(),
-            self.blob_metadata_block_groups.clone(),
-        )?
-        .checked_add_compressed_offset(source_offset_bias)?)
+            block_groups,
+            false,
+        )?)
     }
 
     pub fn write_blob_metadata(&mut self, path: &Path, source_offset_bias: u64) -> Result<()> {
