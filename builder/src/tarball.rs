@@ -15,6 +15,7 @@
 //!   -- optionally dump file data associated with the tar header into RAFS data blob
 //! - arrange all generated RAFS nodes into a RAFS filesystem tree
 //! - dump the RAFS filesystem tree into RAFS metadata blob
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -23,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
-use tar::{Archive, Entry, EntryType, Header};
+use tar::{Archive, Entry, EntryType, Header, PaxExtensions};
 
 use nydus_api::enosys;
 use nydus_rafs::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
@@ -53,6 +54,9 @@ enum CompressionType {
     None,
     Gzip,
 }
+
+/// Key/value pairs of a PAX extended header, framed by the leading length of each record.
+type PaxRecords = Vec<(Vec<u8>, Vec<u8>)>;
 
 enum TarReader {
     File(File),
@@ -104,6 +108,7 @@ struct TarballTreeBuilder<'a> {
     blob_writer: &'a mut dyn Artifact,
     buf: Vec<u8>,
     builder: TarBuilder,
+    pax_bodies: Option<HashMap<u64, Vec<u8>>>,
 }
 
 impl<'a> TarballTreeBuilder<'a> {
@@ -123,6 +128,7 @@ impl<'a> TarballTreeBuilder<'a> {
             buf: Vec::new(),
             blob_writer,
             builder,
+            pax_bodies: None,
         }
     }
 
@@ -221,13 +227,12 @@ impl<'a> TarballTreeBuilder<'a> {
         };
         for entry in entries {
             let mut entry = entry.context("tarball: failed to read entry from tar")?;
-            let path = entry
-                .path()
-                .context("tarball: failed to to get path from tar entry")?;
+            let pax = self.pax_records(&mut entry)?;
+            let path = Self::entry_path(&entry, pax.as_ref())?;
             let path = PathBuf::from("/").join(path);
             let path = path.components().as_path();
             if !self.builder.is_stargz_special_files(path) {
-                self.parse_entry(&mut tree, &mut entry, path)?;
+                self.parse_entry(&mut tree, &mut entry, path, pax.as_ref())?;
             }
         }
 
@@ -244,6 +249,7 @@ impl<'a> TarballTreeBuilder<'a> {
         tree: &mut Tree,
         entry: &mut Entry<R>,
         path: &Path,
+        pax: Option<&PaxRecords>,
     ) -> Result<()> {
         let header = entry.header();
         let entry_type = header.entry_type();
@@ -272,7 +278,7 @@ impl<'a> TarballTreeBuilder<'a> {
         let mut file_size = entry.size();
         let name = Self::get_file_name(path)?;
         let mut mode = Self::get_mode(header)?;
-        let (mut uid, mut gid) = Self::get_uid_gid(self.ctx, header)?;
+        let (mut uid, mut gid) = Self::get_uid_gid(self.ctx, header, pax)?;
         let mut mtime = header.mtime().unwrap_or_default();
         let mut flags = match self.ctx.fs_version {
             RafsVersion::V5 => RafsInodeFlags::default(),
@@ -305,20 +311,16 @@ impl<'a> TarballTreeBuilder<'a> {
 
         // Parse symlink
         let (mut symlink, mut symlink_size) = if entry_type.is_symlink() {
-            let symlink_link_path = entry
-                .link_name()
+            let symlink_link_path = Self::get_link_name(entry, pax)
                 .context("tarball: failed to get target path for tar symlink entry")?
                 .ok_or_else(|| anyhow!("tarball: failed to get symlink target for tar entry"))?;
-            let symlink_size = symlink_link_path.as_os_str().byte_size();
+            let symlink_size = symlink_link_path.byte_size();
             if symlink_size > u16::MAX as usize {
                 bail!("tarball: symlink target from tar entry is too big");
             }
             file_size = symlink_size as u64;
             flags |= RafsInodeFlags::SYMLINK;
-            (
-                Some(symlink_link_path.as_os_str().to_owned()),
-                symlink_size as u16,
-            )
+            (Some(symlink_link_path), symlink_size as u16)
         } else {
             (None, 0)
         };
@@ -333,22 +335,28 @@ impl<'a> TarballTreeBuilder<'a> {
 
         // Parse xattrs
         let mut xattrs = RafsXAttrs::new();
-        if let Some(exts) = entry.pax_extensions()? {
-            for p in exts {
-                match p {
-                    Ok(pax) => {
-                        let prefix = b"SCHILY.xattr.";
-                        let key = pax.key_bytes();
+        let prefix = b"SCHILY.xattr.";
+        match pax {
+            Some(records) => {
+                for (key, value) in records {
+                    if key.starts_with(prefix) {
+                        let x_key = OsStr::from_bytes(&key[prefix.len()..]);
+                        xattrs.add(x_key.to_os_string(), value.clone())?;
+                    }
+                }
+            }
+            None => {
+                if let Some(exts) = entry.pax_extensions()? {
+                    for p in exts {
+                        // `pax_records()` returns the records of a header the crate cannot read,
+                        // so anything left here parses.
+                        let p =
+                            p.context("tarball: failed to parse PaxExtension from tar header")?;
+                        let key = p.key_bytes();
                         if key.starts_with(prefix) {
                             let x_key = OsStr::from_bytes(&key[prefix.len()..]);
-                            xattrs.add(x_key.to_os_string(), pax.value_bytes().to_vec())?;
+                            xattrs.add(x_key.to_os_string(), p.value_bytes().to_vec())?;
                         }
-                    }
-                    Err(e) => {
-                        return Err(anyhow!(
-                            "tarball: failed to parse PaxExtension from tar header, {}",
-                            e
-                        ))
                     }
                 }
             }
@@ -357,8 +365,7 @@ impl<'a> TarballTreeBuilder<'a> {
         // Handle hardlink ino
         let mut hardlink_target = None;
         let ino = if entry_type.is_hard_link() {
-            let link_path = entry
-                .link_name()
+            let link_path = Self::get_link_name(entry, pax)
                 .context("tarball: failed to get target path for tar hardlink entry")?
                 .ok_or_else(|| anyhow!("tarball: failed to get hardlink target for tar entry"))?;
             let link_path = PathBuf::from("/").join(link_path);
@@ -512,14 +519,267 @@ impl<'a> TarballTreeBuilder<'a> {
         self.builder.insert_into_tree(tree, node)
     }
 
-    fn get_uid_gid(ctx: &BuildContext, header: &Header) -> Result<(u32, u32)> {
+    // A PAX extended header holds records framed as "<len> <key>=<value>\n", where <len> counts
+    // the whole record including itself. That framing is what lets a value hold arbitrary bytes,
+    // newlines included — a symlink to a Git LFS pointer or to an npm shim script is one.
+    //
+    // tar 0.4.45 splits the body on newlines before honouring <len>, so every record of such a
+    // header comes back as an error, and the tail of the value comes back framed as a record of
+    // its own. `Entry::path()` and `Entry::link_name()` skip the errors and take that fragment,
+    // so a value holding "\n22 linkpath=/etc/evil\n" makes them report /etc/evil while a reader
+    // walking the records by their length sees no `linkpath` at all. Nothing the crate returns
+    // for such a header can be used, so read the records off the body here instead.
+    //
+    // Returns `None` when the entry has no PAX extended header, or when the crate read it, in
+    // which case both agree and the caller keeps using the crate.
+    fn pax_records<R: Read>(&mut self, entry: &mut Entry<R>) -> Result<Option<PaxRecords>> {
+        // A global header describes every entry after it rather than one, and is unsupported.
+        if entry.header().entry_type().is_pax_global_extensions() {
+            return Ok(None);
+        }
+        // `PaxExtensions` ends its iteration on an empty line rather than reporting one, so a
+        // body which opens with a newline reads as a header holding no records at all, and a
+        // header always holds at least one.
+        let (mut records, mut failed) = (0, false);
+        match entry.pax_extensions()? {
+            None => return Ok(None),
+            Some(exts) => {
+                for record in exts {
+                    records += 1;
+                    failed |= record.is_err();
+                }
+            }
+        }
+        if records > 0 && !failed {
+            return Ok(None);
+        }
+
+        let header_pos = entry.raw_header_position();
+        let name = String::from_utf8_lossy(&entry.header().path_bytes()).into_owned();
+        let body = self.pax_body(header_pos)?.ok_or_else(|| {
+            anyhow!(
+                "tarball: failed to parse the PAX extended header of {}, and no header was found \
+                 at offset {} of {} to read it back from",
+                name,
+                header_pos,
+                self.ctx.source_path.display()
+            )
+        })?;
+        let records = Self::parse_pax_body(&body).with_context(|| {
+            format!(
+                "tarball: failed to parse the PAX extended header of {}",
+                name
+            )
+        })?;
+
+        Ok(Some(records))
+    }
+
+    // The body of the PAX extended header describing the entry whose own header sits at
+    // `header_pos`. The crate keeps no handle on the bodies it fails to read, so they are
+    // collected in a pass of their own, over a second handle on the source.
+    fn pax_body(&mut self, header_pos: u64) -> Result<Option<Vec<u8>>> {
+        if self.pax_bodies.is_none() {
+            let bodies = self.collect_pax_bodies()?;
+            self.pax_bodies = Some(bodies);
+        }
+        Ok(self.pax_bodies.as_ref().unwrap().get(&header_pos).cloned())
+    }
+
+    // Walk the tarball for the PAX extended headers the crate cannot read, keyed by the offset of
+    // the header of the entry each one describes. Raw iteration hands over the headers the crate
+    // would otherwise consume on its own, so the tar framing stays the crate's to do.
+    fn collect_pax_bodies(&self) -> Result<HashMap<u64, Vec<u8>>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&self.ctx.source_path)
+            .context("tarball: can not reopen source file to read a PAX extended header")?;
+        if !file.metadata()?.file_type().is_file() {
+            bail!(
+                "tarball: can not read a PAX extended header back from {}, which is not a regular \
+                 file",
+                self.ctx.source_path.display()
+            );
+        }
+        let reader: Box<dyn Read> = match Self::detect_compression_algo(file)? {
+            (CompressionType::Gzip, buf_reader) => Box::new(ZlibDecoder::new(buf_reader)),
+            (CompressionType::None, buf_reader) => Box::new(buf_reader),
+        };
+
+        let mut tar = Archive::new(reader);
+        tar.set_ignore_zeros(true);
+        let mut bodies = HashMap::new();
+        let mut body: Option<Vec<u8>> = None;
+        for entry in tar.entries()?.raw(true) {
+            // Raw iteration frames every entry by the size in its own tar header, where the pass
+            // the crate runs applies a PAX `size` record over it, and adds a block for a GNU
+            // sparse header. Either puts this pass out of step with the stream, so stop at the
+            // first sign of one and let the caller report the header it could not read back.
+            let mut entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => break,
+            };
+            let entry_type = entry.header().entry_type();
+            if entry_type.is_pax_local_extensions() {
+                let mut read = Vec::new();
+                if entry.read_to_end(&mut read).is_err() {
+                    break;
+                }
+                if Self::pax_body_holds(&read, b"size") {
+                    break;
+                }
+                if !Self::tar_reads_pax_body(&read) {
+                    body = Some(read);
+                }
+            } else if !entry_type.is_gnu_longname() && !entry_type.is_gnu_longlink() {
+                // A GNU long name or long link sits between a PAX extended header and the entry
+                // both describe, and is not that entry.
+                if let Some(body) = body.take() {
+                    bodies.insert(entry.raw_header_position(), body);
+                }
+            }
+        }
+
+        Ok(bodies)
+    }
+
+    // Whether the records tar reports for `body` are the records `body` holds. A header holding
+    // no records reads as one tar cannot read, since that is what an unreadable one looks like
+    // to `pax_records()` as well.
+    fn tar_reads_pax_body(body: &[u8]) -> bool {
+        let walked = match Self::parse_pax_body(body) {
+            Ok(walked) if !walked.is_empty() => walked,
+            _ => return false,
+        };
+        let mut split = PaxExtensions::new(body);
+        for (key, value) in &walked {
+            match split.next() {
+                Some(Ok(record)) => {
+                    if record.key_bytes() != key || record.value_bytes() != value {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+
+        split.next().is_none()
+    }
+
+    fn pax_body_holds(body: &[u8], key: &[u8]) -> bool {
+        match Self::parse_pax_body(body) {
+            Ok(records) => Self::pax_value(&records, key).is_some(),
+            Err(_) => false,
+        }
+    }
+
+    fn parse_pax_body(body: &[u8]) -> Result<PaxRecords> {
+        let mut records = Vec::new();
+        let mut rest = body;
+        while !rest.is_empty() {
+            let space = rest
+                .iter()
+                .position(|b| *b == b' ')
+                .ok_or_else(|| anyhow!("record {} carries no length", records.len()))?;
+            let len: usize = std::str::from_utf8(&rest[..space])
+                .ok()
+                .and_then(|len| len.parse().ok())
+                .ok_or_else(|| anyhow!("record {} carries no length", records.len()))?;
+            if len <= space + 1 || len > rest.len() || rest[len - 1] != b'\n' {
+                bail!("record {} reports a length of {}", records.len(), len);
+            }
+            let record = &rest[space + 1..len - 1];
+            let equals = record
+                .iter()
+                .position(|b| *b == b'=')
+                .ok_or_else(|| anyhow!("record {} carries no key", records.len()))?;
+            records.push((record[..equals].to_vec(), record[equals + 1..].to_vec()));
+            rest = &rest[len..];
+        }
+
+        Ok(records)
+    }
+
+    // POSIX, GNU tar and Go's `archive/tar` all let the last record carrying a key win.
+    fn pax_value<'r>(records: &'r PaxRecords, key: &[u8]) -> Option<&'r [u8]> {
+        records
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.as_slice())
+    }
+
+    fn pax_number(pax: Option<&PaxRecords>, key: &[u8]) -> Result<Option<u64>> {
+        let value = match pax.and_then(|records| Self::pax_value(records, key)) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        std::str::from_utf8(value)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow!(
+                    "tarball: PAX record {}={} from tar header is not a number",
+                    String::from_utf8_lossy(key),
+                    String::from_utf8_lossy(value)
+                )
+            })
+    }
+
+    fn entry_path<R: Read>(entry: &Entry<R>, pax: Option<&PaxRecords>) -> Result<PathBuf> {
+        let records = match pax {
+            None => {
+                return Ok(entry
+                    .path()
+                    .context("tarball: failed to to get path from tar entry")?
+                    .into_owned())
+            }
+            Some(records) => records,
+        };
+        Ok(match Self::pax_value(records, b"path") {
+            Some(path) => PathBuf::from(OsStr::from_bytes(path)),
+            None => PathBuf::from(OsStr::from_bytes(&entry.header().path_bytes())),
+        })
+    }
+
+    fn get_link_name<R: Read>(
+        entry: &Entry<R>,
+        pax: Option<&PaxRecords>,
+    ) -> Result<Option<OsString>> {
+        let records = match pax {
+            None => return Ok(entry.link_name()?.map(|name| name.as_os_str().to_owned())),
+            Some(records) => records,
+        };
+        Ok(match Self::pax_value(records, b"linkpath") {
+            Some(name) => Some(OsStr::from_bytes(name).to_owned()),
+            None => entry
+                .header()
+                .link_name_bytes()
+                .map(|name| OsStr::from_bytes(&name).to_owned()),
+        })
+    }
+
+    fn get_uid_gid(
+        ctx: &BuildContext,
+        header: &Header,
+        pax: Option<&PaxRecords>,
+    ) -> Result<(u32, u32)> {
+        // tar applies the `uid` and `gid` records to the header itself, but drops every record of
+        // a header it cannot read, so a recovered one carries them here instead.
         let uid = if ctx.explicit_uidgid {
-            header.uid().unwrap_or_default()
+            match Self::pax_number(pax, b"uid")? {
+                Some(uid) => uid,
+                None => header.uid().unwrap_or_default(),
+            }
         } else {
             0
         };
         let gid = if ctx.explicit_uidgid {
-            header.gid().unwrap_or_default()
+            match Self::pax_number(pax, b"gid")? {
+                Some(gid) => gid,
+                None => header.gid().unwrap_or_default(),
+            }
         } else {
             0
         };
@@ -1048,26 +1308,233 @@ mod tests {
         assert!(err.to_string().contains("unknown target"), "{}", err);
     }
 
+    // Append a PAX extended header holding `body` verbatim, so that a record the tar crate writes
+    // correctly can be framed on purpose.
+    fn append_pax_header(tar: &mut tar::Builder<File>, name: &str, body: &str) {
+        let mut header = Header::new_ustar();
+        header.set_entry_type(EntryType::XHeader);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_size(body.len() as u64);
+        tar.append_data(&mut header, format!("PaxHeaders/{}", name), body.as_bytes())
+            .unwrap();
+    }
+
+    // Frame `record` as "%d %s", where the leading decimal counts the whole record including the
+    // digits of the count itself. That is self-referential, so widening the count can widen the
+    // record: settle it by feeding the framed length back until it stops growing.
+    fn pax_record(record: &str) -> String {
+        let mut len = record.len() + 1;
+        loop {
+            let framed = format!("{} {}", len, record);
+            if framed.len() == len {
+                return framed;
+            }
+            len = framed.len();
+        }
+    }
+
+    // Append a symlink whose ustar header carries `truncated` as its name and its target, the way
+    // a writer truncates both to the 100 bytes the header holds, and `body` as the PAX extended
+    // header holding what they really are.
+    fn append_pax_symlink(tar: &mut tar::Builder<File>, truncated: &str, body: &str) {
+        append_pax_header(tar, "entry", body);
+        let mut header = Header::new_ustar();
+        header.set_entry_type(EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        header.set_size(0);
+        header.set_link_name(truncated).unwrap();
+        tar.append_data(&mut header, truncated, &[][..]).unwrap();
+    }
+
+    // The Git LFS pointer shape: the target of the symlink is a three line file, which is legal —
+    // the leading length of a PAX record is what makes it legal — and which tar 0.4.45 reports as
+    // malformed, dropping the `path` and `linkpath` of the entry with it.
+    fn test_pax_record_containing_newline(version: RafsVersion) {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("newline-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        let target = "version https://git-lfs.github.com/spec/v1\n\
+                      oid sha256:493670e9619d3060a3a1d3a792d0f8a55f171b047a0496b78c51287e0b253ef3\n\
+                      size 31";
+        let path = format!("{}/map-overlay.png", "public".repeat(20));
+        assert!(target.len() > 100 && path.len() > 100);
+        let body = pax_record(&format!("path={}\n", path))
+            + &pax_record(&format!("linkpath={}\n", target))
+            + &pax_record("SCHILY.xattr.user.key=value\n");
+        append_pax_symlink(&mut tar, &path[..99], &body);
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, version);
+        let bootstrap = build_rafs(&mut ctx);
+
+        // Both the name and the target come from the records, not from the 100 bytes the ustar
+        // header holds, so neither is silently truncated.
+        let node = get_node(&bootstrap, &format!("/{}", path));
+        assert!(node.is_symlink());
+        assert_eq!(node.info.symlink, Some(OsString::from(target)));
+        assert_eq!(node.inode.symlink_size() as usize, target.len());
+        assert_eq!(node.inode.size() as usize, target.len());
+        // Records the build does read must survive the ones it does not.
+        assert_eq!(
+            node.info.xattrs.get(&OsString::from("user.key")),
+            Some(&b"value".to_vec())
+        );
+        assert!(node.inode.has_xattr());
+    }
+
+    #[test]
+    fn test_v5_pax_record_containing_newline() {
+        test_pax_record_containing_newline(RafsVersion::V5);
+    }
+
+    #[test]
+    fn test_v6_pax_record_containing_newline() {
+        test_pax_record_containing_newline(RafsVersion::V6);
+    }
+
+    // Why the records may not be read off the crate: `22 linkpath=/etc/evil` lives inside the
+    // value of user.a, yet splitting the body on newlines frames it as a record of its own, and
+    // `Entry::link_name()` reports it over the `harmless` in the ustar header. Walking the
+    // records by their length sees the value whole and no `linkpath` at all, as Go's
+    // `archive/tar` does, so the image keeps agreeing with the layer it was built from.
+    #[test]
+    fn test_pax_record_smuggled_inside_a_value_cannot_reach_the_image() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("smuggled-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        let value = format!("AAA\n{}", pax_record("linkpath=/etc/evil\n"));
+        let body = pax_record(&format!("SCHILY.xattr.user.a={}\n", value));
+        append_pax_symlink(&mut tar, "harmless", &body);
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let bootstrap = build_rafs(&mut ctx);
+
+        let node = get_node(&bootstrap, "/harmless");
+        assert_eq!(node.info.symlink, Some(OsString::from("harmless")));
+        assert_eq!(
+            node.info.xattrs.get(&OsString::from("user.a")),
+            Some(&value.as_bytes().to_vec())
+        );
+    }
+
+    // POSIX, GNU tar and Go's `archive/tar` all let the last record carrying a key win, so
+    // reading the first would build a node no other reader of the tarball agrees with.
+    #[test]
+    fn test_pax_duplicate_record_takes_the_last() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("duplicate-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        let body = pax_record("SCHILY.xattr.user.a=A\nB\n")
+            + &pax_record("linkpath=first\n")
+            + &pax_record("linkpath=second\n");
+        append_pax_symlink(&mut tar, "harmless", &body);
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let bootstrap = build_rafs(&mut ctx);
+
+        let node = get_node(&bootstrap, "/harmless");
+        assert_eq!(node.info.symlink, Some(OsString::from("second")));
+    }
+
+    // `PaxExtensions` ends its iteration on an empty line rather than reporting one, so a body
+    // opening with a newline reads as a header holding no records: every record of it would be
+    // dropped, and the entry would be built from the 100 bytes of its tar header.
+    #[test]
+    fn test_pax_body_opening_with_an_empty_line_is_rejected() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("empty-line-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        append_pax_symlink(
+            &mut tar,
+            "trunc",
+            &format!("\n{}", pax_record("path=evil\n")),
+        );
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let err = format!("{:#}", build_tree(&mut ctx).err().unwrap());
+        assert!(err.contains("PAX extended header of trunc"), "{}", err);
+        assert!(err.contains("carries no length"), "{}", err);
+    }
+
+    // A `size` record overrides the size in the tar header of an entry, which is how a file of
+    // 8GiB or more is written, and the pass collecting the headers frames the stream by the tar
+    // header alone. It must stop there rather than read file data as a tar header.
+    #[test]
+    fn test_pax_size_record_stops_the_collecting_pass() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("size-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        // The tar header of `big` reports no data, its PAX header reports 1024 bytes, and 1024
+        // bytes follow it.
+        append_pax_header(&mut tar, "big", &pax_record("size=1024\n"));
+        let mut header = Header::new_ustar();
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_size(0);
+        tar.append_data(&mut header, "big", &vec![0u8; 1024][..])
+            .unwrap();
+        append_pax_symlink(&mut tar, "lfs", &pax_record("linkpath=one\ntwo\n"));
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let err = format!("{:#}", build_tree(&mut ctx).err().unwrap());
+        // The entry which needs a header read back is named, rather than the tar header the
+        // collecting pass would have found in the middle of the data of `big`.
+        assert!(err.contains("PAX extended header of lfs"), "{}", err);
+        assert!(err.contains("read it back from"), "{}", err);
+    }
+
+    // Walking the records is what the whole header is read by, so each way the walk can fail
+    // must fail rather than resync on a fragment of a value.
+    #[test]
+    fn test_pax_body_framing_is_rejected() {
+        for body in [
+            &b"30SCHILY.xattr.user.key=value\n"[..], // no space, so no length
+            &b"xx SCHILY.xattr.user.key=value\n"[..], // a length which is not a number
+            &b"99 SCHILY.xattr.user.key=value\n"[..], // a length past the end of the body
+            &b"30 SCHILY.xattr.user.key=value"[..],  // a record which no newline ends
+            &b"11 novalue\n"[..],                    // a record which no key opens
+        ] {
+            assert!(
+                TarballTreeBuilder::parse_pax_body(body).is_err(),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        let body = b"12 path=one\n22 linkpath=two\nthree\n".to_vec();
+        assert_eq!(
+            TarballTreeBuilder::parse_pax_body(&body).unwrap(),
+            vec![
+                (b"path".to_vec(), b"one".to_vec()),
+                (b"linkpath".to_vec(), b"two\nthree".to_vec()),
+            ]
+        );
+    }
+
+    // A record whose leading length is not the length of the record leaves nothing to read the
+    // rest of the body by, so the entry stays unconvertible rather than becoming a node built
+    // from a header nobody can frame.
     #[test]
     fn test_malformed_pax_extension_is_rejected() {
         let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
         let source_path = tmp_dir.as_path().join("bad-pax.tar");
         let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
-        // A PAX record starts with its own length in decimal, here reported too long.
-        let pax = "99 SCHILY.xattr.user.key=value\n";
-        let mut header = Header::new_ustar();
-        header.set_entry_type(EntryType::XHeader);
-        header.set_mode(0o644);
-        header.set_mtime(0);
-        header.set_size(pax.len() as u64);
-        tar.append_data(&mut header, "PaxHeaders/foo", pax.as_bytes())
-            .unwrap();
+        append_pax_header(&mut tar, "foo", "99 SCHILY.xattr.user.key=value\n");
         append_entry(&mut tar, "foo", EntryType::Regular, None, b"hello");
         tar.finish().unwrap();
 
         let mut ctx = create_context(source_path, RafsVersion::V6);
-        let err = build_tree(&mut ctx).err().unwrap();
-        assert!(err.to_string().contains("PaxExtension"), "{}", err);
+        let err = format!("{:#}", build_tree(&mut ctx).err().unwrap());
+        // The entry is named, so an unconvertible image can be traced to what makes it one.
+        assert!(err.contains("PAX extended header of foo"), "{}", err);
+        assert!(err.contains("length of 99"), "{}", err);
     }
 
     #[test]
