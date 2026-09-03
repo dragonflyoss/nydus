@@ -1264,7 +1264,7 @@ mod tests {
 
         // An ondemand (redirect) blob whose single block group redirects to source
         // blob 1 block group 0; its data region carries a copy of the source bytes.
-        let redirect_meta = BlobMetadata::new(
+        let redirect_meta = BlobMetadata::new_redirect(
             BlobMetadataCompressor::None,
             1,
             Vec::new(),
