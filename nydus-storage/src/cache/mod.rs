@@ -496,6 +496,9 @@ mod tests {
             uncompressed_block_offset * EROFS_BLOCK_SIZE as u64,
             uncompressed_block_count * EROFS_BLOCK_SIZE,
             0,
+            0,
+            0,
+            false,
         )
         .unwrap()
     }

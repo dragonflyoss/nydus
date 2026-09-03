@@ -133,7 +133,10 @@ mod tests {
             BlobMetadataDigester::Blake3,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
-            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
+            vec![
+                BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload), 0, 0, false)
+                    .unwrap(),
+            ],
             false,
         )
         .unwrap()

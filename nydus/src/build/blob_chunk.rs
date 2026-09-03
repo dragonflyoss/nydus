@@ -497,6 +497,9 @@ impl<W: Write> BlobWriter<W> {
             compressed_offset,
             encoded.len() as u32,
             group.crc32,
+            0,
+            0,
+            false,
         )?;
         self.blob_metadata_block_groups.push(entry);
         self.block_group_block_offset += block_count as u64;
@@ -537,7 +540,9 @@ mod tests {
     fn blob_metadata_block_group_round_trips_minimal_fields() {
         let payload = vec![0u8; 0x3000];
         // Compressed byte offset is a plain byte position (not block aligned).
-        let entry = BlobMetadataBlockGroup::new(2, 3, 0x12345, 0x400, crc32c(&payload)).unwrap();
+        let entry =
+            BlobMetadataBlockGroup::new(2, 3, 0x12345, 0x400, crc32c(&payload), 0, 0, false)
+                .unwrap();
 
         assert_eq!(entry.uncompressed_block_offset(), 2);
         assert_eq!(entry.uncompressed_block_count(), 3);
