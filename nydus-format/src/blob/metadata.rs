@@ -118,7 +118,8 @@ const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = BlobMetadataFlags::all().bit
 ///                                       block count
 ///     49     1  block_group_block_count_bits
 ///                                       log2 of the per-block group
-///                                       4KiB block count
+///                                       4KiB block count, zero when the
+///                                       table is empty or redirects
 ///     50     6  reserved1               writers zero it, readers ignore it
 ///     56  4040  reserved                writers zero it, readers ignore it
 /// ```
@@ -800,15 +801,14 @@ impl BlobMetadataBlockGroup {
     /// Derive the header's `block_group_block_count_bits` from the groups
     /// themselves: the first group carries the uniform span (validated
     /// later), a lone group rounds up to a power of two, and empty or
-    /// redirect tables fall back to the default geometry.
+    /// redirect tables have no uniform span so the field is left zero.
     fn infer_block_count_bits(block_groups: &[Self], is_redirect: bool) -> Result<u8> {
-        let default_bits = DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT.ilog2() as u8;
         if is_redirect {
-            return Ok(default_bits);
+            return Ok(0);
         }
 
         match block_groups {
-            [] => Ok(default_bits),
+            [] => Ok(0),
             [only] => block_count_to_bits(only.uncompressed_block_count().next_power_of_two()),
             [first, ..] => block_count_to_bits(first.uncompressed_block_count()),
         }
@@ -1052,11 +1052,13 @@ impl BlobMetadata {
             block_group
                 .validate()
                 .with_context(|| format!("invalid blob meta block group {index}"))?;
+
             if block_group.is_redirect() != is_redirect {
                 return Err(Error::InvalidImage(format!(
                     "blob meta block group {index} does not match the redirect flag"
                 )));
             }
+
             if block_group.uncompressed_block_offset() != next_uncompressed_block_offset {
                 return Err(Error::InvalidImage(format!(
                     "blob meta block groups must be dense: block group {index} starts at block {}, \
@@ -2036,10 +2038,7 @@ mod tests {
         )
         .unwrap();
         assert!(blob_metadata.is_redirect());
-        assert_eq!(
-            blob_metadata.header().block_group_block_count(),
-            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT
-        );
+        assert_eq!(blob_metadata.header().block_group_block_count(), 1);
 
         blob_metadata.save(&path).unwrap();
         let loaded = BlobMetadata::from_path(&path, false).unwrap();
