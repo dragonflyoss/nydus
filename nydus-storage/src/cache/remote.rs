@@ -121,16 +121,20 @@ impl BlobCache for RemoteBlobCache {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor};
+    use nydus_format::blob::{
+        BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataDigester,
+    };
     use nydus_format::utils::write_minimal_full_blob;
     use tempfile::tempdir;
 
     fn blob_metadata(payload: &[u8]) -> BlobMetadata {
         BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
             vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
+            false,
         )
         .unwrap()
     }

@@ -13,7 +13,7 @@ pub mod algorithm;
 pub mod flag;
 pub mod footer;
 pub mod metadata;
-pub use algorithm::BlobMetadataCompressor;
+pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{

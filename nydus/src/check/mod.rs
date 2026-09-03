@@ -475,7 +475,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT;
+    use nydus_format::blob::{BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT};
     use std::fs;
     use tempfile::tempdir;
 
@@ -550,9 +550,11 @@ mod tests {
         let data_digest = sha256_bytes(&data);
         let blob_metadata = BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),
             Vec::new(),
+            false,
         )
         .unwrap();
         let mut blob_metadata_bytes = Vec::new();

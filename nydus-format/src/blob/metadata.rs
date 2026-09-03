@@ -852,39 +852,21 @@ pub struct BlobMetadata {
 }
 
 impl BlobMetadata {
-    /// Creates validated, sealed metadata from owned tables: the header is
-    /// derived from the tables and both are validated first, so constructed
-    /// metadata is valid by definition, then the crc32 is computed over the
-    /// final bytes.
+    /// Creates validated, sealed metadata from owned tables. `is_redirect`
+    /// marks an ondemand blob and must agree with every block group.
     pub fn new(
         compressor: BlobMetadataCompressor,
-        chunk_block_count: u32,
-        chunks: Vec<BlobMetadataChunk>,
-        block_groups: Vec<BlobMetadataBlockGroup>,
-    ) -> Result<Self> {
-        Self::new_inner(compressor, chunk_block_count, chunks, block_groups, false)
-    }
-
-    /// Creates validated redirect metadata whose block groups reference
-    /// source blobs.
-    pub fn new_redirect(
-        compressor: BlobMetadataCompressor,
-        chunk_block_count: u32,
-        chunks: Vec<BlobMetadataChunk>,
-        block_groups: Vec<BlobMetadataBlockGroup>,
-    ) -> Result<Self> {
-        Self::new_inner(compressor, chunk_block_count, chunks, block_groups, true)
-    }
-
-    fn new_inner(
-        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
         chunk_block_count: u32,
         chunks: Vec<BlobMetadataChunk>,
         block_groups: Vec<BlobMetadataBlockGroup>,
         is_redirect: bool,
     ) -> Result<Self> {
-        let mut flags = BlobMetadataDigester::Blake3.flag() | compressor.flag();
+        let mut flags = BlobMetadataFlags::empty();
+        flags.set(compressor.flag(), true);
+        flags.set(digester.flag(), true);
         flags.set(BlobMetadataFlags::REDIRECT, is_redirect);
+
         let chunks_offset = NYDUS_BLOB_METADATA_HEADER_SIZE as u64;
         let header = BlobMetadataHeader {
             magic: NYDUS_BLOB_METADATA_MAGIC,
@@ -1153,23 +1135,6 @@ impl BlobMetadata {
         Ok(())
     }
 
-    /// Rebuilt metadata with every compressed offset shifted by `bias`, for
-    /// compressed data embedded at `bias` inside a full blob.
-    pub fn checked_add_compressed_offset(&self, bias: u64) -> Result<Self> {
-        let mut block_groups = Vec::with_capacity(self.block_group_count());
-        for block_group in self.block_groups() {
-            block_groups.push(block_group.checked_add_compressed_offset(bias)?);
-        }
-
-        Self::new_inner(
-            self.compressor(),
-            self.chunk_block_count(),
-            self.chunks().to_vec(),
-            block_groups,
-            self.is_redirect(),
-        )
-    }
-
     /// Write the serialized metadata (header, tables, zero padding) to
     /// `writer`, resealing the crc32 over the emitted bytes: metadata
     /// mapped from a newer writer re-serializes with the reserved compat
@@ -1272,8 +1237,8 @@ impl BlobMetadata {
         self.block_groups().get(index)
     }
 
-    /// Whether any block group redirects to another source blob (an
-    /// ondemand redirect blob).
+    /// Whether the blob is an ondemand redirect blob (every block group
+    /// redirects to another source blob), per the header flag.
     pub fn is_redirect(&self) -> bool {
         self.header.flags().contains(BlobMetadataFlags::REDIRECT)
     }
@@ -1413,18 +1378,23 @@ mod tests {
         .unwrap()
     }
 
-    fn build(
+    fn blob_metadata(
         chunks: Vec<BlobMetadataChunk>,
         block_groups: Vec<BlobMetadataBlockGroup>,
     ) -> Result<BlobMetadata> {
-        BlobMetadata::new(BlobMetadataCompressor::None, 1, chunks, block_groups)
-    }
-
-    fn blob_metadata() -> BlobMetadata {
-        let payload = vec![0x33; EROFS_BLOCK_SIZE as usize];
         BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
+            chunks,
+            block_groups,
+            false,
+        )
+    }
+
+    fn minimal_blob_metadata() -> BlobMetadata {
+        let payload = vec![0x33; EROFS_BLOCK_SIZE as usize];
+        blob_metadata(
             vec![chunk(&payload, 0, 1)],
             vec![block_group(0, 1, 0, EROFS_BLOCK_SIZE, &payload)],
         )
@@ -1433,13 +1403,13 @@ mod tests {
 
     fn sealed_metadata() -> Vec<u8> {
         let mut raw = Vec::new();
-        blob_metadata().write_to(&mut raw).unwrap();
+        minimal_blob_metadata().write_to(&mut raw).unwrap();
         raw
     }
 
     #[test]
     fn accessors_expose_the_sealed_tables() {
-        let blob_metadata = blob_metadata();
+        let blob_metadata = minimal_blob_metadata();
         let header = blob_metadata.header();
 
         assert_eq!(header.version(), NYDUS_BLOB_METADATA_VERSION);
@@ -1493,9 +1463,11 @@ mod tests {
         let both = [payload_a.as_slice(), payload_b.as_slice()].concat();
         let blob_metadata = BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
             vec![chunk(&payload_a, 0, 1), chunk(&payload_b, 1, 1)],
             vec![block_group(0, 2, 8192, 8192, &both)],
+            false,
         )
         .unwrap();
         blob_metadata.save(&path).unwrap();
@@ -1654,7 +1626,7 @@ mod tests {
     #[test]
     fn nonzero_tail_padding_rejects() {
         let mut raw = sealed_metadata();
-        let used_size = blob_metadata().header().used_size() as usize;
+        let used_size = minimal_blob_metadata().header().used_size() as usize;
         raw[used_size] = 0xff;
 
         let err = BlobMetadata::from_bytes(&raw, false).unwrap_err();
@@ -1723,7 +1695,7 @@ mod tests {
     #[test]
     fn a_chunk_past_the_block_groups_rejects() {
         let one = vec![0x11; EROFS_BLOCK_SIZE as usize];
-        let err = build(
+        let err = blob_metadata(
             vec![chunk(&one, 1, 1)],
             vec![block_group(0, 1, 0, EROFS_BLOCK_SIZE, &one)],
         )
@@ -1738,7 +1710,7 @@ mod tests {
     #[test]
     fn block_groups_must_be_dense_from_block_zero() {
         let one = vec![0x11; EROFS_BLOCK_SIZE as usize];
-        let err = build(
+        let err = blob_metadata(
             vec![chunk(&one, 0, 1)],
             vec![block_group(1, 1, 0, EROFS_BLOCK_SIZE, &one)],
         )
@@ -1746,7 +1718,7 @@ mod tests {
         assert!(err.to_string().contains("dense"), "{err}");
 
         let two = vec![0x22; 2 * EROFS_BLOCK_SIZE as usize];
-        let err = build(
+        let err = blob_metadata(
             vec![chunk(&two, 0, 2)],
             vec![
                 block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
@@ -1767,7 +1739,7 @@ mod tests {
     fn block_group_index_from_uncompressed_offset_maps_by_division() {
         let two = vec![0x11; 2 * EROFS_BLOCK_SIZE as usize];
         let one = vec![0x22; EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = build(
+        let blob_metadata = blob_metadata(
             vec![chunk(&two, 0, 2), chunk(&two, 2, 2), chunk(&one, 4, 1)],
             vec![
                 block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
@@ -1809,7 +1781,7 @@ mod tests {
         let three = vec![0x22; 3 * EROFS_BLOCK_SIZE as usize];
         let one = vec![0x33; EROFS_BLOCK_SIZE as usize];
 
-        let err = build(
+        let err = blob_metadata(
             vec![chunk(&two, 0, 2), chunk(&three, 2, 3), chunk(&one, 5, 1)],
             vec![
                 block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
@@ -1826,7 +1798,7 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("must be exactly"), "{err}");
 
-        let err = build(
+        let err = blob_metadata(
             vec![chunk(&two, 0, 2), chunk(&three, 2, 3)],
             vec![
                 block_group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &two),
@@ -1846,7 +1818,7 @@ mod tests {
     #[test]
     fn a_single_block_group_uses_a_covering_power_of_two_exponent() {
         let three = vec![0x44; 3 * EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = build(
+        let blob_metadata = blob_metadata(
             vec![chunk(&three, 0, 3)],
             vec![block_group(0, 3, 0, 3 * EROFS_BLOCK_SIZE, &three)],
         )
@@ -1870,7 +1842,7 @@ mod tests {
     fn multi_block_group_blobs_require_power_of_two_full_block_groups() {
         let three = vec![0x55; 3 * EROFS_BLOCK_SIZE as usize];
         let one = vec![0x66; EROFS_BLOCK_SIZE as usize];
-        let err = build(
+        let err = blob_metadata(
             vec![chunk(&three, 0, 3), chunk(&one, 3, 1)],
             vec![
                 block_group(0, 3, 0, 3 * EROFS_BLOCK_SIZE, &three),
@@ -1885,7 +1857,7 @@ mod tests {
     #[test]
     fn packed_compressed_offsets_need_no_block_alignment() {
         let two = vec![0x11; 2 * EROFS_BLOCK_SIZE as usize];
-        let blob_metadata = build(
+        let blob_metadata = blob_metadata(
             vec![chunk(&two, 0, 2), chunk(&two, 2, 2)],
             vec![
                 block_group(0, 2, 0, 5000, &two),
@@ -1901,7 +1873,7 @@ mod tests {
     #[test]
     fn overlapping_compressed_ranges_reject() {
         let two = vec![0x22; 2 * EROFS_BLOCK_SIZE as usize];
-        let err = build(
+        let err = blob_metadata(
             vec![chunk(&two, 0, 2), chunk(&two, 2, 2)],
             vec![
                 block_group(0, 2, 0, 5000, &two),
@@ -1911,18 +1883,6 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("overlap"), "{err}");
-    }
-
-    #[test]
-    fn checked_add_compressed_offset_shifts_and_reseals() {
-        let shifted = blob_metadata().checked_add_compressed_offset(8192).unwrap();
-
-        assert_eq!(shifted.block_groups()[0].compressed_offset(), 8192);
-        assert_eq!(shifted.uncompressed_size(), 4096);
-
-        let mut raw = Vec::new();
-        shifted.write_to(&mut raw).unwrap();
-        BlobMetadata::from_bytes(&raw, true).unwrap();
     }
 
     #[test]
@@ -1974,20 +1934,18 @@ mod tests {
         )
         .unwrap();
 
-        let err = BlobMetadata::new(BlobMetadataCompressor::None, 1, Vec::new(), vec![redirect])
+        for (block_group, is_redirect) in [(regular, true), (redirect, false)] {
+            let err = BlobMetadata::new(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                1,
+                Vec::new(),
+                vec![block_group],
+                is_redirect,
+            )
             .unwrap_err();
-        assert!(
-            err.to_string().contains("does not match the redirect flag"),
-            "{err}"
-        );
-
-        let err =
-            BlobMetadata::new_redirect(BlobMetadataCompressor::None, 1, Vec::new(), vec![regular])
-                .unwrap_err();
-        assert!(
-            err.to_string().contains("does not match the redirect flag"),
-            "{err}"
-        );
+            assert!(err.to_string().contains("redirect flag"), "{err}");
+        }
     }
 
     #[test]
@@ -2030,11 +1988,13 @@ mod tests {
             .unwrap(),
         ];
 
-        let blob_metadata = BlobMetadata::new_redirect(
+        let blob_metadata = BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),
             block_groups.clone(),
+            true,
         )
         .unwrap();
         assert!(blob_metadata.is_redirect());
