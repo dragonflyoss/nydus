@@ -109,13 +109,13 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download Nydus artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: nydus-artifact
           path: /usr/local/bin
 
       - name: Download Dragonfly artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: dragonfly-artifact
           path: /usr/local/bin
@@ -299,7 +299,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download Nydus artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: nydus-artifact
           path: /usr/local/bin

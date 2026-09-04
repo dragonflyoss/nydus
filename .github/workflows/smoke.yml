@@ -163,13 +163,13 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
     - name: Download Nydus
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydus-artifact
         path: |
           target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -537,11 +537,11 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: Download nydus coverage file
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydus-test-coverage-artifact
     - name: Download contrib coverage file
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: contrib-test-coverage-artifact
     - name: Print aggregated coverage preview
@@ -634,15 +634,15 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: Download nydus coverage file
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydus-test-coverage-artifact
     - name: Download contrib coverage file
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: contrib-test-coverage-artifact
     - name: Download nydus integration coverage file
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydus-integration-test-coverage-artifact
     - name: Print aggregated coverage preview
@@ -756,12 +756,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Download Nydus
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -780,12 +780,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Download Nydus
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
