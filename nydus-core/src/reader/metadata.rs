@@ -68,6 +68,106 @@ impl ErofsReader {
         Ok(entries)
     }
 
+    /// Look up `name` in directory `nid` by binary search over the sorted
+    /// EROFS dirents (across blocks, then within the block), the same
+    /// algorithm the kernel driver uses. Returns the child nid, or `None`
+    /// when the name is absent or the directory data is malformed.
+    pub fn lookup_dir_entry(
+        &self,
+        nid: u64,
+        inode: &ErofsInode<'_>,
+        name: &[u8],
+    ) -> io::Result<Option<u64>> {
+        let dir_size = inode.size() as usize;
+        if dir_size == 0 {
+            return Ok(None);
+        }
+        match self.read_flat_data(nid, inode, 0, dir_size) {
+            Ok(data) => Ok(Self::find_dir_entry(data, dir_size, name)),
+            Err(_) => {
+                let data = self.read_flat_data_vec(nid, inode, 0, dir_size)?;
+                Ok(Self::find_dir_entry(&data, dir_size, name))
+            }
+        }
+    }
+
+    /// Entry `index` of one directory block as `(nid, name)`. `dirent_count`
+    /// must come from [`dir_block`], which bounds it by the bytes that
+    /// physically fit, so the dirent casts below cannot go out of range; only
+    /// the untrusted name offsets still need checking.
+    fn dir_block_entry(
+        block_data: &[u8],
+        dirent_count: usize,
+        index: usize,
+    ) -> Option<(u64, &[u8])> {
+        let block_len = block_data.len();
+        let de_off = index * EROFS_DIRENT_SIZE;
+        let de: &ErofsDirent = cast_ref(&block_data[de_off..de_off + EROFS_DIRENT_SIZE]);
+        let nameoff = de.nameoff() as usize;
+        let name_end = if index + 1 < dirent_count {
+            let next: &ErofsDirent = cast_ref(&block_data[(index + 1) * EROFS_DIRENT_SIZE..]);
+            next.nameoff() as usize
+        } else {
+            let mut end = nameoff.min(block_len);
+            while end < block_len && block_data[end] != 0 {
+                end += 1;
+            }
+            end
+        };
+        if nameoff >= block_len || name_end > block_len || name_end < nameoff {
+            return None;
+        }
+        Some((de.nid(), &block_data[nameoff..name_end]))
+    }
+
+    /// Directory block `index` of a directory of `dir_size` bytes, with its
+    /// entry count capped by what physically fits in the block.
+    fn dir_block(data: &[u8], dir_size: usize, index: usize) -> Option<(&[u8], usize)> {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let start = index * block_size;
+        let end = (start + block_size).min(dir_size);
+        let block_data = &data[start..end];
+        if block_data.len() < EROFS_DIRENT_SIZE {
+            return None;
+        }
+        let first: &ErofsDirent = cast_ref(&block_data[..EROFS_DIRENT_SIZE]);
+        let count = (first.nameoff() as usize / EROFS_DIRENT_SIZE)
+            .min(block_data.len() / EROFS_DIRENT_SIZE);
+        Some((block_data, count))
+    }
+
+    fn find_dir_entry(data: &[u8], dir_size: usize, target: &[u8]) -> Option<u64> {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let nblocks = dir_size.div_ceil(block_size);
+
+        // Rightmost block whose first entry name is <= target.
+        let (mut lo, mut hi) = (0usize, nblocks);
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            let first_name = Self::dir_block(data, dir_size, mid)
+                .and_then(|(bd, count)| Self::dir_block_entry(bd, count, 0))
+                .map(|(_, name)| name)?;
+            if first_name <= target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+
+        let (block_data, count) = Self::dir_block(data, dir_size, lo)?;
+        let (mut left, mut right) = (0usize, count);
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let (entry_nid, entry_name) = Self::dir_block_entry(block_data, count, mid)?;
+            match entry_name.cmp(target) {
+                std::cmp::Ordering::Equal => return Some(entry_nid),
+                std::cmp::Ordering::Less => left = mid + 1,
+                std::cmp::Ordering::Greater => right = mid,
+            }
+        }
+        None
+    }
+
     fn parse_dir_entries<F>(data: &[u8], dir_size: usize, cb: &mut F) -> io::Result<()>
     where
         F: FnMut(u64, u8, &[u8]) -> io::Result<bool>,

@@ -1,27 +1,24 @@
-# nydus-core
+# nydus-error
 
-Runtime core APIs for EROFS-based Nydus images.
+The [Nydus](https://github.com/dragonflyoss/nydus) error contract: the
+project-wide `Error`/`Result` and the `Context` extension trait.
 
-This crate provides the host-side building blocks used to serve Nydus images
-at runtime:
+Nydus splits errors along two planes:
 
-- `metadata`: EROFS on-disk metadata parsing (superblock, inodes, blob
-  metadata and footers).
-- `storage`: on-demand blob cache, storage backends (`local`, and `registry`
-  behind the `backend-registry` feature) and background prefetching.
-- `fs`: an EROFS image reader (`ErofsReader`).
-- `core`: the high-level `NydusCore` entry point exposing the device
-  table and block-aligned `fetch` APIs for microVM virtio-pmem use cases.
+- The data plane (`storage`, `fs`, and the FUSE/fanotify/NBD/UFFD read
+  paths) keeps `std::io::Result`: those errors must carry an OS errno so the
+  service edges can answer the kernel with a meaningful POSIX code.
+- Everything else (image building, config parsing, CLI, service setup)
+  returns `Result` with the project-wide `Error` defined here.
 
-## Features
+`Error` wraps `io::Error` transparently, so data-plane failures cross into
+the control plane with a plain `?`. Use `Context` to attach human-readable
+context while keeping the source chain intact.
 
-| Feature | Description |
-| --- | --- |
-| `backend-registry` | Container image registry backend (OCI distribution). |
-| `backend-dragonfly-proxy` | Dragonfly P2P SDK proxy support for the registry backend. |
-
-All features are disabled by default, keeping the dependency footprint
-minimal (local backend only).
+Following the std guidance that an error exposes its cause either through
+`source()` or through `Display` but not both, `Display` prints only the
+outermost layer. Print edges (logs, `eprintln!`) must format errors with
+`Error::report` to keep the whole cause chain on one line.
 
 ## License
 

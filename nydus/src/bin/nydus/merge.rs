@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use nydus::build::merge::{merge_sources_to_bootstrap_bytes, WhiteoutSpec as MergeWhiteoutSpec};
+use nydus::build::merge::{merge_sources_to_bootstrap_writer, WhiteoutSpec as MergeWhiteoutSpec};
 use nydus::error::{Context, Result};
 use nydus_telemetry::logging::init_command_tracing;
 use std::fs::File;
@@ -70,20 +70,17 @@ impl MergeCommand {
         self.run()
     }
 
-    /// Runs the merge: overlays the source layers in order and persists the
-    /// merged bootstrap.
+    /// Runs the merge: overlays the source layers in order and streams the
+    /// merged bootstrap straight to the output file.
     fn run(&self) -> Result<()> {
         let whiteout_spec = match self.whiteout_spec {
             WhiteoutSpec::Oci => MergeWhiteoutSpec::Oci,
         };
-        let bootstrap_bytes = merge_sources_to_bootstrap_bytes(&self.sources, whiteout_spec)?;
 
         let output = File::create(&self.bootstrap)
             .with_context(|| format!("failed to create bootstrap: {}", self.bootstrap.display()))?;
         let mut writer = BufWriter::new(output);
-        writer
-            .write_all(&bootstrap_bytes)
-            .with_context(|| format!("failed to write bootstrap: {}", self.bootstrap.display()))?;
+        merge_sources_to_bootstrap_writer(&self.sources, whiteout_spec, &mut writer)?;
         writer
             .flush()
             .with_context(|| format!("failed to flush bootstrap: {}", self.bootstrap.display()))?;

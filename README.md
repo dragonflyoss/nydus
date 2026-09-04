@@ -19,16 +19,17 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
 - **CLI-friendly** — non-core capabilities are removed and binary components
   reduced: one `nydus` binary (`build` / `merge` / `check` / `optimize` /
   `fuse` / `ublk` / `uffd` / `fanotify`) plus the `nydusify` image orchestrator. Each layer is one
-  self-contained blob artifact (`data + bootstrap + blob meta + footer`)
-  named by its SHA256, with an optional standalone metadata-only bootstrap.
+  self-contained blob artifact (`data + zstd-compressed bootstrap + blob
+  meta + footer`) named by its SHA256, with an optional standalone
+  metadata-only bootstrap.
 - **Native EROFS format** — a fully standard EROFS layout compatible with
   erofs-utils and kernel mounting; filesystem and chunk metadata are fetched
   in bulk up front via the compact bootstrap, then file data loads on demand.
-- **Decoupled dedup and compression units** — `--chunk-size` sets the
-  deduplication granularity (BLAKE3) while `--compress-size` sets the
-  compression and read unit (zstd, default 4 MiB), no longer tied to file
-  chunks: better compression efficiency and less read amplification, with
-  CRC32C validation enforced on every read path.
+- **Decoupled chunking and compression units** — `--chunk-size` sets the
+  file chunk granularity while `--compress-size` sets the compression and
+  read unit (zstd, default 4 MiB), no longer tied to file chunks: better
+  compression efficiency and less read amplification, with CRC32C
+  validation enforced on every read path.
 - **On-demand loading** — file reads map to compressed groups through an O(1)
   logical-address lookup; only the touched groups are fetched, validated,
   decoded, and cached.
@@ -87,63 +88,161 @@ is loaded on demand at runtime (that cost shows up inside Ready).
   cuts cold-start E2E from 22.62s to 8.94s (~2.5×), and against Nydus v2
   (row 4 vs 6) from 17.75s to 8.94s (~2×).
 
-### Read-path transport comparison (FUSE / NBD / ublk / fanotify)
+### Read-path transport comparison (FUSE / NBD / ublk / fileio / fanotify)
 
-`make test-bench` runs a unified cold-start benchmark where every serving
-mode mounts the SAME locally built image (local backend, prefetch disabled,
-separate caches), so the comparison isolates the read transport:
+The table below compares every serving mode on a REAL application cold
+start: all modes mount the SAME locally built image (separate caches), so
+the comparison isolates the read transport:
 
+- **OCI (full pull)** — baseline: download the gzip layer from the same
+  registry and fully extract it before starting the container (pipelined
+  `curl | gunzip | tar -x`, as containerd does), no lazy loading.
+- **v2 FUSE** — optional column: the nydus v2 `nydusd` daemon serving the
+  same rootfs as a RAFS v6 (zstd) image, enabled by pointing
+  `NYDUSFS_BENCH_V2_NYDUSD` and `NYDUSFS_BENCH_V2_IMAGE_BIN` at v2 binaries.
 - **FUSE** — every read and metadata call is a userspace round trip through
   the `nydus fuse` daemon.
 - **NBD** — kernel EROFS over `/dev/nbdX`; cache misses reach the daemon
   through the NBD socket, metadata is served by the kernel EROFS driver.
 - **ublk** — like NBD, but block requests travel through `ublk_drv`'s
   io_uring SQE/CQE shared memory instead of a kernel socket (Linux 6.0+).
+- **fileio** — kernel EROFS mounted file-backed over a FUSE export of the
+  flattened image; metadata is served by the kernel EROFS driver and only
+  backing-file reads reach the daemon (Linux 6.12+).
 - **fanotify** — kernel EROFS mount over the cache files; a `FAN_PRE_ACCESS`
   event fills missing ranges, warm reads never leave the kernel
   (Linux ≥ 6.15).
-- **erofsfuse** — optional column: the C erofsfuse reference implementation
-  reading the blob directly.
 
-Methodology (per mode): wipe the nydus cache, drop the page cache, start the
-daemon (recording **mount-ready** and **first-1MiB-read** latency), cold-read
-the whole fio target (the end-to-end on-demand fetch path, reported as
-**prewarm** throughput), then run every fio job and metadata benchmark with
-the page cache dropped before each job — warm nydus cache, cold page cache.
+Methodology: this is a REAL Next.js application end-to-end test, not a
+synthetic fio run. The image is a production `next build` of
+`create-next-app` on `node:20` (1.6 GiB rootfs, ~35k files), served from a
+local OCI registry (`registry:2`); extra network latency is injected on the
+registry traffic with `tc netem` to emulate remote registries. Per run the
+nydus cache and the page cache are wiped, the image is mounted (nydus +
+overlayfs), and the container is started with `runc` running `npm start`.
+The reported time is mount start until the FIRST successful HTTP 200 from
+the Next.js server — the moment the service is actually usable. Values are
+the mean of 2 runs; run-to-run spread is < 5%.
 
-<!-- Regenerate this table with `make test-bench` on a host with the nbd and
-     ublk_drv modules and a Linux >= 6.15 kernel (for the fanotify column). -->
+<!-- Next.js cold-start e2e, 2-run means. Rebuild the harness per
+     docs: local registry:2 + tc netem on port 5000; v2 column needs the
+     v2 nydusd/nydus-image binaries. -->
 
-| Benchmark | Unit | FUSE | NBD | ublk | fanotify |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Mount ready | s | 0.23 | 0.23 | 0.23 | 0.22 |
-| First 1 MiB cold read | s | 0.024 | 0.006 | 0.006 | 0.025 |
-| Prewarm (full-file cold fetch) | MiB/s | 902 | 1,345 | 1,239 | 804 |
-| Sequential read 128K | MiB/s | 6,486 | 31,177 | 32,125 | 32,033 |
-| Sequential read 4-job 128K | MiB/s | 24,991 | 109,374 | 58,732 | 55,039 |
-| Random read 128K | MiB/s | 7,569 | 8,304 | 10,105 | 11,356 |
-| Random read 4-job 128K | MiB/s | 35,271 | 44,448 | 41,836 | 44,726 |
-| Random read 4K | IOPS | 1,225,676 | 1,269,728 | 1,318,339 | 1,283,015 |
-| Random read 4K latency | µs | 0.7 | 0.7 | 0.7 | 0.7 |
-| Stat | IOPS | 1,333,959 | 1,522,750 | 1,681,039 | 1,517,389 |
-| Readdir | IOPS | 10,250 | 61,218 | 61,878 | 61,182 |
-| Listxattr | IOPS | 15,449 | 2,216,639 | 2,248,846 | 2,246,635 |
-| Getxattr | IOPS | 15,014 | 2,115,001 | 2,109,951 | 2,158,214 |
-| Readdir + stat (`ls -l`) | IOPS | 93.1 | 95.1 | 126.0 | 118.5 |
+| Serving mode | Image size | RTT ≈ 0 | RTT +30 ms | RTT +50 ms | Data fetched |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| v2 FUSE | 500 MiB | 1.72 s | 5.51 s | 8.64 s | 197 MiB |
+| FUSE | 465 MiB | 1.44 s | 3.48 s | 4.90 s | 230 MiB |
+| NBD | 465 MiB | 1.15 s | 3.28 s | 4.77 s | 231 MiB |
+| ublk | 465 MiB | 1.04 s | 3.09 s | 4.62 s | 231 MiB |
+| fileio | 465 MiB | 1.17 s | 3.21 s | 4.83 s | 230 MiB |
+| fanotify | 465 MiB | 1.10 s | 3.20 s | 4.60 s | 230 MiB |
+| FUSE + optimize | 521 MiB | 0.92 s | 1.56 s | 1.75 s | 230 MiB |
+| NBD + optimize | 521 MiB | 0.72 s | 1.25 s | 1.67 s | 230 MiB |
+| ublk + optimize | 521 MiB | 0.86 s | 1.14 s | 1.45 s | 230 MiB |
+| fileio + optimize | 521 MiB | 0.72 s | 1.18 s | 1.51 s | 230 MiB |
+| fanotify + optimize | 521 MiB | **0.59 s** | **1.08 s** | **1.38 s** | 230 MiB |
 
-- Measured on Ubuntu 24.04 (arm64), Linux 7.0.0, ext4-backed blob store and
-  caches; corpus: 8 × 64 MiB + 256 × 1 MiB + 10,000 small files
-  (~850 MiB blob), 1 MiB chunk size. The erofsfuse column was not available
-  on this host.
-- The unified suite replaces the earlier "Fanotify vs FUSE" (registry
-  backend) and "Block device vs FUSE" comparisons; their numbers were
-  produced by different setups and are not directly comparable.
-- Cold-page `direct=0` fio jobs largely re-warm during each 20 s job (the
-  target file is 64 MiB), so sequential rows partly reflect page-cache and
-  readahead policy, not just protocol overhead.
-- The kernel EROFS modes (NBD/ublk/fanotify) serve all metadata in-kernel,
-  which shows up as the readdir/xattr gap over FUSE; warm fanotify reads
-  never leave the kernel at all.
+- Measured on Ubuntu 24.04 (arm64), Linux 7.0.0; image built with 1 MiB
+  chunks, 4 MiB block groups, zstd. The v2 row is the same rootfs as a
+  RAFS v6 zstd image served by the v2 `nydusd` from the same registry.
+  All rows are 2-run means from one session.
+- The "+ optimize" rows mount the same image after `nydus optimize` rewrote
+  it from a recorded boot trace: mounts stream the 56 MiB hot-data
+  "ondemand" blob over ONE connection (prefetch scope `ondemand`) instead
+  of paying a round trip per cache miss, which makes ready time nearly
+  RTT-independent. The stored image grows by that ondemand blob; the rest
+  of the working set still loads on demand.
+- Image size counts what a registry transfer needs: the OCI row is the
+  gzip tar layer; the nydus rows are the full blob (zstd data plus the
+  zstd-compressed embedded bootstrap) and the gzipped merged bootstrap
+  (v2 bootstrap 7.5 MiB → 2.6 MiB gzipped, v3 bootstrap 21.7 MiB →
+  0.8 MiB gzipped). The v3 image is 10% below the OCI layer and 7%
+  below v2 for the same rootfs.
+- Every v3 mode beats v2 at every latency point: 1.6× at zero RTT and
+  1.8× at +50 ms RTT even without optimize. With optimize, v3 reaches
+  ready 6× faster than v2 and the OCI full pull at +50 ms (1.4 s vs
+  8.6 s) and 14× faster than OCI at zero RTT.
+- The OCI row barely moves with RTT because a full pull is a single
+  bandwidth-bound stream dominated by gunzip + untar of the whole layer;
+  it boots fast once extracted but pays all 517 MiB on every cold start.
+  Notably, v2 FUSE at +50 ms (8.64 s) is already no faster than the full
+  pull — its per-chunk round trips eat the entire lazy-loading win, while
+  v3's grouped fetches (and the optimize stream) keep it well ahead.
+- The gap grows with registry latency because v3 fetches data in 4 MiB
+  block groups — roughly a third of the HTTP round trips v2 needs — even
+  though it transfers more bytes (230 vs 197 MiB); on latency-bound paths
+  request count dominates bytes.
+- The kernel-EROFS modes (NBD/ublk/fileio/fanotify) serve all metadata
+  in-kernel; on metadata-heavy workloads (full-tree scans) they extend the
+  lead over v2 FUSE to 2–3×.
+
+### Image build performance (v2 vs v3)
+
+Building the Linux kernel source tree (1.8 GiB, ~95.8k files, warm page
+cache) into an image, measured with `/usr/bin/time -v`, 3 runs each:
+
+| Builder | Wall time | Peak RSS | Data blob | Bootstrap (gzip) | Total transfer |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| v2 `nydus-image create` (RAFS v6, zstd) | 5.6–6.1 s | 170 MiB | 298 MiB | 7.5 MiB | 306 MiB |
+| v3 `nydus build` (zstd) | **1.7–1.8 s** | **82 MiB** | **236 MiB** | **1.9 MiB** | **238 MiB** |
+
+- v3 builds 3.3× faster than v2: source reads stay on the produce thread
+  while per-block-group crc32 + zstd run on a small background pipeline
+  drained in submission order, so the output remains byte-for-byte
+  deterministic.
+- v3 output is 22% smaller end to end — the full blob stores its embedded
+  bootstrap as one zstd frame — and the metadata bootstrap compresses 4×
+  smaller than v2's (1.9 vs 7.5 MiB gzipped).
+- Peak memory is 52% lower than v2. The build is streaming end to end:
+  read buffers are recycled, the encode pipeline is bounded to a couple of
+  in-flight block groups, the bootstrap is rendered in place inside the
+  layout buffer (no assembly copy), the standalone bootstrap is patched
+  from the embedded one instead of re-rendered, and the inode tree is
+  freed as soon as rendering finishes.
+
+### Whole-image conversion (`nydusify convert`, v2 vs v3)
+
+Converting `gitlab/gitlab-ce` (5.38 GB docker size, 9 layers, ~440k
+files) between two local registries (pull from one, push to the other,
+the push registry recreated before every run), cold page cache. Memory is
+the peak of the summed RSS of the whole process tree:
+
+| Converter | Wall time | Peak memory (tree) | Output image |
+| --- | ---: | ---: | ---: |
+| v2 nydusify (RAFS v6, zstd) | 34.1–34.3 s | ~330 MiB | 1319 MiB |
+| v3 nydusify (zstd) | **29.7–34.6 s** | **~130 MiB** | **1275 MiB** |
+
+- The source OCI image is 1333 MiB of gzip layers; v3's output is 4%
+  smaller than the source and 3% smaller than v2's. Each layer is a
+  self-contained full blob whose embedded bootstrap is stored as one
+  zstd frame — only merge, `check`, and single-blob mounts decode it,
+  so the runtime read path (merged bootstrap + blob meta sidecar) is
+  untouched.
+- v3 converts layers with a bounded worker pool and one shared builder,
+  so its memory stays flat as images grow layers; v2 spawns one
+  `nydus-image` per layer in parallel, so its peak scales with the layer
+  count. Layer blobs are uploaded as soon as each is built, overlapping
+  the remaining conversions.
+- `nydus merge` (the bootstrap-merging step) never materialises the
+  merged tree: each directory's entries are k-way merged across the
+  layer bootstraps on demand while flattening, and the bootstrap is
+  stream-rendered; merging the 440k-inode gitlab tree peaks at ~107 MiB
+  in 0.1 s.
+
+Output image size across payload shapes (manifest layer totals):
+
+| Image | Source (OCI gzip) | v2 output | v3 output |
+| --- | ---: | ---: | ---: |
+| `continuumio/anaconda3` (2 layers, Python distro) | 1067 MiB | 1123 MiB | **965 MiB** (-10% / -14%) |
+| `n8nio/n8n` (12 layers, node_modules-dense) | 359 MiB | 419 MiB | **320 MiB** (-11% / -24%) |
+
+- The gap widens on small-file-heavy payloads: v3's 4 MiB block groups
+  compress the small-file stream far better than v2's 1 MiB chunks, and
+  the per-layer embedded bootstraps (108 MiB of raw EROFS metadata on
+  n8n's largest layer) shrink ~20× as zstd frames. v2 comes out larger
+  than the OCI source on both images; v3 beats the source on both. v3
+  also converts with a fraction of v2's peak process-tree memory
+  (anaconda3: 199 vs 449 MiB, n8n: 227 vs 523 MiB).
 
 ## Components
 

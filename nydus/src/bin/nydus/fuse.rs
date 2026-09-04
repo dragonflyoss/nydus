@@ -162,6 +162,9 @@ impl FuseCommand {
             Some(path) => Some(Config::load(path)?),
             None => None,
         };
+        if let Some(config) = storage_config.as_ref() {
+            nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
+        }
 
         // Runs the FUSE service until shutdown.
         self.run(storage_config)
@@ -257,7 +260,9 @@ impl FuseCommand {
         }
 
         let reader = match (&self.blob, &self.bootstrap, backend) {
-            (Some(blob), None, _) => ErofsReader::open_blob(blob),
+            // A self-contained full blob still wants the decoded-block-group
+            // cache: without it every read decodes from the blob in place.
+            (Some(blob), None, _) => ErofsReader::open_blob(blob, cache_dir.as_deref()),
             (None, Some(bootstrap), Some(backend)) => {
                 ErofsReader::open_bootstrap(bootstrap, backend, cache_dir.as_deref(), None)
             }

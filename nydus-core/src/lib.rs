@@ -30,18 +30,20 @@
 pub mod blob;
 pub mod entry;
 pub mod extent;
+pub mod flat;
 pub mod reader;
 
 pub use blob::{BlobId, BlobInfo, Blobs};
 pub use entry::FileType;
 pub use extent::{Extent, ResolveMode};
+pub use flat::FlatImage;
 pub use reader::ErofsReader;
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use nydus_config::Config;
 use nydus_error::{Context, Error, Result};
@@ -120,6 +122,7 @@ impl NydusCore {
         let prefetch_timeout = config.prefetch.timeout;
         let prefetch_retry_delay_min = config.prefetch.retry_delay_min;
         let prefetch_retry_delay_max = config.prefetch.retry_delay_max;
+        nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
         // The multi-device model hands each blob's cache file to the kernel
         // (as an EROFS device or fill target), so diskless mode cannot apply.
@@ -215,6 +218,7 @@ impl NydusCore {
                 raw_blob_infos,
                 index_by_blob_id,
                 flat_layout: OnceLock::new(),
+                flat_layout_init: Mutex::new(()),
             },
             fs: ImageFs::new(reader, zero_file.clone()),
             bootstrap: bootstrap_file,

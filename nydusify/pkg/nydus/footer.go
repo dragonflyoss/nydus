@@ -28,6 +28,13 @@ const (
 	// at offset 12: unknown incompat bits mean the footer cannot be parsed.
 	// The version at offset 8 is informational and not gated on.
 	footerIncompatMask = 0x0000FFFF
+	// footerIncompatBootstrapZstd marks the embedded bootstrap region as one zstd
+	// frame. Staging copies the region verbatim (nydus merge decodes it), so
+	// the flag is understood, not acted on, here.
+	footerIncompatBootstrapZstd = 1 << 0
+	// footerSupportedIncompat is the set of incompat flag bits this staging
+	// code can pass through.
+	footerSupportedIncompat = footerIncompatBootstrapZstd
 	// bootstrapOffsetField is the byte offset of the u64 bootstrap_offset field
 	// within the footer.
 	bootstrapOffsetField = 32
@@ -70,7 +77,7 @@ func readFooter(ra io.ReaderAt, size int64) ([]byte, error) {
 	if string(footer[0:8]) != NydusBlobFooterMagic {
 		return nil, errors.Errorf("not a nydus blob: bad footer magic %q", footer[0:8])
 	}
-	if incompat := binary.LittleEndian.Uint32(footer[12:16]) & footerIncompatMask; incompat != 0 {
+	if incompat := binary.LittleEndian.Uint32(footer[12:16]) & footerIncompatMask; incompat&^footerSupportedIncompat != 0 {
 		return nil, errors.Errorf("unsupported nydus footer incompat flags %#x", incompat)
 	}
 	return footer, nil

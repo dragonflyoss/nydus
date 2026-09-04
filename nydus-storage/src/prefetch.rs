@@ -285,6 +285,7 @@ mod tests {
     use nydus_backend::{BlobBackend, Local, ReadContext};
     use nydus_format::blob::{
         BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
+        BlobMetadataDigester,
     };
     use nydus_format::utils::{write_minimal_full_blob, SHA256_DIGEST_SIZE};
     use tempfile::tempdir;
@@ -368,9 +369,14 @@ mod tests {
         let payload = vec![0xabu8; 4096];
         let meta = BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(&payload).as_bytes(), 0, 1).unwrap()],
-            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(&payload)).unwrap()],
+            vec![
+                BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(&payload), 0, 0, false)
+                    .unwrap(),
+            ],
+            false,
         )
         .unwrap();
         (payload, meta)

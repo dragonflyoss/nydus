@@ -1,6 +1,6 @@
 [package]
 name = "nydus"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "EROFS-oriented image tooling and runtime core APIs for Nydus images."
@@ -33,16 +33,16 @@ cli = [
 ]
 # Device-level userfaultfd service for microVM virtio-pmem use cases.
 # This is intentionally not part of the default or builtin core path.
-uffd = [
-  "dep:sendfd",
-  "dep:signal-hook",
-  "dep:tokio",
-]
+uffd = ["dep:sendfd", "dep:signal-hook", "dep:tokio"]
 # Serve an EROFS multi-device image on demand through fanotify pre-content
 # hooks (FAN_CLASS_PRE_CONTENT + FAN_PRE_ACCESS). Requires Linux >= 6.15.
 fanotify = ["dep:signal-hook"]
 # Export a nydus image as a block device through the NBD protocol.
 nbd = ["dep:signal-hook"]
+# File-backed EROFS: export the flattened image as one file over FUSE and let
+# the kernel EROFS driver mount it. Requires Linux >= 6.12
+# (CONFIG_EROFS_FS_BACKED_BY_FILE).
+fileio = ["fuse", "dep:signal-hook"]
 # Container image registry backend (OCI distribution).
 backend-registry = ["nydus-backend/backend-registry"]
 # Dragonfly P2P SDK proxy support for the registry backend.
@@ -55,9 +55,9 @@ backend-dragonfly-proxy = [
 ublk = ["dep:libublk", "dep:signal-hook"]
 
 [dependencies]
-blake3 = "1"
 anstream = { version = "0.6", optional = true }
 anstyle = { version = "1", optional = true }
+blake3 = "1"
 bytesize = { version = "1", optional = true }
 clap = { workspace = true, optional = true }
 crc32c = "0.6"
@@ -68,13 +68,13 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = { workspace = true }
 libublk = { version = "0.4", default-features = false, optional = true }
 memmap2 = { workspace = true }
-nydus-backend = { version = "0.1.0", path = "../nydus-backend" }
-nydus-config = { version = "0.1.0", path = "../nydus-config" }
-nydus-error = { version = "0.1.0", path = "../nydus-error" }
-nydus-format = { version = "0.1.0", path = "../nydus-format" }
-nydus-core = { version = "0.1.0", path = "../nydus-core" }
-nydus-storage = { version = "0.1.0", path = "../nydus-storage" }
-nydus-telemetry = { version = "0.1.0", path = "../nydus-telemetry", features = [
+nydus-backend = { version = "3.0.0-alpha.1", path = "../nydus-backend" }
+nydus-config = { version = "3.0.0-alpha.1", path = "../nydus-config" }
+nydus-error = { version = "3.0.0-alpha.1", path = "../nydus-error" }
+nydus-format = { version = "3.0.0-alpha.1", path = "../nydus-format" }
+nydus-core = { version = "3.0.0-alpha.1", path = "../nydus-core" }
+nydus-storage = { version = "3.0.0-alpha.1", path = "../nydus-storage" }
+nydus-telemetry = { version = "3.0.0-alpha.1", path = "../nydus-telemetry", features = [
   "logging",
 ] }
 serde = { workspace = true }
@@ -85,6 +85,7 @@ signal-hook = { version = "0.3", optional = true }
 tar = "0.4"
 tabled = { version = "0.21.0", optional = true }
 zstd = "0.13"
+lz4_flex = "0.11"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "fs",
@@ -93,7 +94,7 @@ tokio = { workspace = true, features = [
   "net",
   "rt",
   "rt-multi-thread",
-  "sync"
+  "sync",
 ], optional = true }
 tracing = { workspace = true }
 uuid = { version = "1", features = ["v4"], optional = true }

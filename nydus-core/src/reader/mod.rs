@@ -72,8 +72,11 @@ pub struct ErofsReader {
 impl ErofsReader {
     /// Open a nydus blob / bootstrap file for metadata-only inspection.
     pub fn open_metadata_only(path: &Path) -> io::Result<Self> {
-        let mmap = Self::mmap_file(path)?;
-        let image_offset = Self::image_offset_from_footer(&mmap)?.unwrap_or(0);
+        let mmap = Self::mmap_file(path, false)?;
+        let (mmap, image_offset) = match Self::unpack_embedded_image(mmap)? {
+            (mmap, Some(image_offset)) => (mmap, image_offset),
+            (mmap, None) => (mmap, 0),
+        };
         let sb_offset = image_offset
             .checked_add(EROFS_SUPER_OFFSET as usize)
             .ok_or_else(|| {
@@ -92,13 +95,20 @@ impl ErofsReader {
     }
 
     /// Open a self-contained full blob (`payload + bootstrap + blob meta +
-    /// footer`): everything is served from the file itself, no backend or
-    /// cache is involved.
-    pub fn open_blob(blob_path: &Path) -> io::Result<Self> {
-        let mmap = Self::mmap_file(blob_path)?;
-        let image_offset = Self::image_offset_from_footer(&mmap)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "nydus blob footer not found")
-        })?;
+    /// footer`): everything is served from the file itself, no remote
+    /// backend is involved. `cache_dir`, when given, caches the decoded
+    /// block groups so repeat reads skip re-decoding from the blob.
+    pub fn open_blob(blob_path: &Path, cache_dir: Option<&Path>) -> io::Result<Self> {
+        let mmap = Self::mmap_file(blob_path, false)?;
+        let (mmap, image_offset) = match Self::unpack_embedded_image(mmap)? {
+            (mmap, Some(image_offset)) => (mmap, image_offset),
+            (_, None) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "nydus blob footer not found",
+                ))
+            }
+        };
         let sb_offset = image_offset
             .checked_add(EROFS_SUPER_OFFSET as usize)
             .ok_or_else(|| {
@@ -122,7 +132,7 @@ impl ErofsReader {
                 .iter()
                 .map(|info| (info.blob_index, info.blob_id)),
             nydus_backend::metered(backend),
-            None,
+            cache_dir,
             None,
         )?;
 
@@ -145,7 +155,7 @@ impl ErofsReader {
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<Self> {
-        let mmap = Self::mmap_file(bootstrap_path)?;
+        let mmap = Self::mmap_file(bootstrap_path, true)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
         Self::validate_superblock(sb)?;
@@ -170,19 +180,59 @@ impl ErofsReader {
         })
     }
 
-    fn mmap_file(path: &Path) -> io::Result<Mmap> {
+    fn mmap_file(path: &Path, populate: bool) -> io::Result<Mmap> {
         let file = fs::File::open(path)?;
-        unsafe { Mmap::map(&file) }
+        // Populate is only for standalone bootstraps: a few MiB that every
+        // metadata operation resolves against, so paying the read up front
+        // (milliseconds) removes a page fault per cold folio. Full blobs must
+        // NOT be populated — they carry the entire data region, and faulting
+        // in a multi-GiB blob just to read its metadata tail multiplies RSS
+        // by the blob size (as `nydus merge` over large layers showed).
+        let mut options = memmap2::MmapOptions::new();
+        if populate {
+            options.populate();
+        }
+        unsafe { options.map(&file) }
     }
 
-    fn image_offset_from_footer(mmap: &[u8]) -> io::Result<Option<usize>> {
-        let Some(footer) = BlobFooter::from_blob_bytes(mmap).map_err(io::Error::other)? else {
-            return Ok(None);
+    /// Resolve the EROFS image inside `mmap`: `(mmap, None)` for a bare
+    /// bootstrap without a footer, `(mmap, Some(offset))` for a full blob
+    /// with a raw embedded bootstrap, and a fresh anonymous mapping holding
+    /// the decompressed bytes (offset 0) when the footer declares the
+    /// bootstrap region zstd-compressed.
+    fn unpack_embedded_image(mmap: Mmap) -> io::Result<(Mmap, Option<usize>)> {
+        let Some(footer) = BlobFooter::from_blob_bytes(&mmap).map_err(io::Error::other)? else {
+            return Ok((mmap, None));
         };
 
-        usize::try_from(footer.bootstrap_offset())
-            .map(Some)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large"))
+        let bootstrap_offset = usize::try_from(footer.bootstrap_offset()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large")
+        })?;
+
+        let Some(compressed_size) = footer.bootstrap_compressed_size() else {
+            return Ok((mmap, Some(bootstrap_offset)));
+        };
+        let compressed_size = usize::try_from(compressed_size)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bootstrap frame too large"))?;
+        let end = bootstrap_offset
+            .checked_add(compressed_size)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "bootstrap region overflow")
+            })?;
+        if end > mmap.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "compressed bootstrap region beyond blob end",
+            ));
+        }
+
+        let decoded = zstd::stream::decode_all(&mmap[bootstrap_offset..end])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        // An anonymous mapping keeps the field type (and every downstream
+        // zero-copy cast) unchanged; the file mapping is dropped here.
+        let mut anon = memmap2::MmapOptions::new().len(decoded.len()).map_anon()?;
+        anon.copy_from_slice(&decoded);
+        Ok((anon.make_read_only()?, Some(0)))
     }
 
     fn superblock_from(mmap: &[u8], sb_offset: usize) -> io::Result<&ErofsSuperblock> {
@@ -398,9 +448,7 @@ impl ErofsReader {
         let absolute_offset = blob_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
         })?;
-        let mut buf = vec![0u8; len];
-        cache.read_at(absolute_offset, &mut buf)?;
-        writer.write_all(&buf)
+        cache.write_data_to(absolute_offset, len, writer)
     }
 
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {

@@ -20,6 +20,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/checker"
@@ -304,6 +305,10 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("converting image to nydus format")
+		// Converted layer blobs are uploaded as soon as they are built, so the
+		// registry upload overlaps the remaining layer conversions; the final
+		// push then skips the blobs that already landed.
+		var eagerPush errgroup.Group
 		newDesc, err = pipeline.Convert(ctx, provider.ContentStore(), srcDesc, pipeline.Option{
 			BuilderPath:    c.String("builder"),
 			WorkDir:        scratchDir,
@@ -312,7 +317,19 @@ func runConvert(c *cli.Context) error {
 			Compressor:     c.String("compressor"),
 			LogLevel:       c.String("log-level"),
 			PlatformMC:     platformMC,
+			OnBlobConverted: func(desc ocispec.Descriptor) {
+				eagerPush.Go(func() error {
+					if err := provider.PushBlob(ctx, desc, target); err != nil {
+						// Non-fatal: the final push uploads it again.
+						logrus.Warnf("eager blob push %s: %v", desc.Digest, err)
+					}
+					return nil
+				})
+			},
 		})
+		// Eager pushes never return errors (failures fall back to the final
+		// push); waiting only bounds their lifetime.
+		_ = eagerPush.Wait()
 		if err != nil {
 			return errors.Wrap(err, "convert")
 		}

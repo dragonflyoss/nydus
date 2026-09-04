@@ -73,6 +73,17 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 	}
 
 	for i, manifest := range index.Manifests {
+		// Non-nydus manifests carried by the index (e.g. buildkit
+		// attestation manifests with in-toto JSON layers) are passed
+		// through unchanged, mirroring the forward conversion.
+		nydusManifest, err := isNydusManifest(ctx, cs, manifest)
+		if err != nil {
+			return nil, errors.Wrapf(err, "inspect manifest %s", manifest.Digest)
+		}
+		if !nydusManifest {
+			labels[fmt.Sprintf("containerd.io/gc.ref.content.m.%d", i)] = manifest.Digest.String()
+			continue
+		}
 		newDesc, err := convertManifestToOCI(ctx, cs, manifest, opt)
 		if err != nil {
 			return nil, errors.Wrapf(err, "convert manifest %s", manifest.Digest)
@@ -83,6 +94,21 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 	}
 
 	return oci.WriteJSON(ctx, cs, index, desc, labels)
+}
+
+// isNydusManifest reports whether the manifest holds converted nydus layers
+// (data blobs plus a bootstrap), i.e. it is subject to the reverse
+// conversion rather than passed through.
+func isNydusManifest(ctx context.Context, cs content.Store, desc ocispec.Descriptor) (bool, error) {
+	if !images.IsManifestType(desc.MediaType) {
+		return false, nil
+	}
+	var manifest ocispec.Manifest
+	if err := oci.ReadJSON(ctx, cs, desc, &manifest); err != nil {
+		return false, errors.Wrap(err, "read manifest json")
+	}
+	blobs, bootstrap, _, err := nydus.SplitLayers(manifest.Layers)
+	return err == nil && bootstrap != nil && len(blobs) > 0, nil
 }
 
 func convertManifestToOCI(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt ToOCIOption) (*ocispec.Descriptor, error) {

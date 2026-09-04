@@ -55,6 +55,11 @@ pub fn mount_erofs(bootstrap: &Path, devices: &[BlobDevice], mountpoint: &Path) 
 /// Build the binary mount data without lossy UTF-8 conversion. A comma in a
 /// device path is rejected because the kernel option grammar cannot distinguish
 /// it from the next mount option.
+///
+/// `directio` is deliberately not passed. Measured on this corpus it cut cold
+/// random reads by 72% and cold sequential reads by half, while saving almost
+/// nothing: the backing files' page cache is what EROFS resolves metadata
+/// from and what absorbs sub-block reads, so it is not a redundant copy here.
 fn mount_options(devices: &[BlobDevice]) -> Result<Vec<u8>> {
     let mut options = b"ro".to_vec();
     let mut expected_index = 1u16;

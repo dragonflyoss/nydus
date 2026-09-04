@@ -1,6 +1,6 @@
 [package]
 name = "nydus-backend"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -23,19 +23,16 @@ backend-registry = [
   "dep:tokio-util",
 ]
 # Dragonfly P2P SDK proxy support for the registry backend.
-backend-dragonfly-proxy = [
-  "backend-registry",
-  "dep:dragonfly-client-request",
-]
+backend-dragonfly-proxy = ["backend-registry", "dep:dragonfly-client-request"]
 
 [dependencies]
 arc-swap = { version = "1", optional = true }
 dragonfly-client-request = { version = "=1.4.0", optional = true }
 futures = { version = "0.3", optional = true }
 libc = { workspace = true }
-nydus-config = { version = "0.1.0", path = "../nydus-config" }
-nydus-format = { version = "0.1.0", path = "../nydus-format" }
-nydus-telemetry = { version = "0.1.0", path = "../nydus-telemetry" }
+nydus-config = { version = "3.0.0-alpha.1", path = "../nydus-config" }
+nydus-format = { version = "3.0.0-alpha.1", path = "../nydus-format" }
+nydus-telemetry = { version = "3.0.0-alpha.1", path = "../nydus-telemetry" }
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "stream",
@@ -50,7 +47,7 @@ tokio = { workspace = true, features = [
   "net",
   "rt",
   "rt-multi-thread",
-  "sync"
+  "sync",
 ], optional = true }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
 tracing = { workspace = true }

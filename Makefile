@@ -211,7 +211,7 @@ test-nbd: release
 # is missing (nbd/ublk modules, Linux < 6.15 for fanotify) are skipped
 # individually. Requires root and fio; fanotify needs an ext4 cache dir —
 # TMPDIR is set to the repo's .test-tmp/ on the working tree filesystem.
-test-bench: FEATURES=cli,fuse,nbd,ublk,fanotify
+test-bench: FEATURES=cli,fuse,nbd,ublk,fanotify,fileio
 test-bench: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp

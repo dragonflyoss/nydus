@@ -412,3 +412,65 @@ func labelNydusBlobDiffIDs(ctx context.Context, cs content.Store, rootDesc ocisp
 	}
 	return nil
 }
+
+// labelSourceLayerDiffIDs sets the containerd.io/uncompressed content-store
+// label on every source layer, taking each diff id from the image config's
+// rootfs.diff_ids (1:1 with manifest layers). Without the label
+// images.GetDiffID decompresses every compressed layer just to recompute a
+// digest the config already carries.
+func labelSourceLayerDiffIDs(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) error {
+	var manifestDescs []ocispec.Descriptor
+	switch {
+	case images.IsManifestType(rootDesc.MediaType):
+		manifestDescs = []ocispec.Descriptor{rootDesc}
+	case images.IsIndexType(rootDesc.MediaType):
+		var index ocispec.Index
+		if err := oci.ReadJSON(ctx, cs, rootDesc, &index); err != nil {
+			return errors.Wrap(err, "read index json")
+		}
+		for _, m := range index.Manifests {
+			if m.Platform == nil || platformMC.Match(*m.Platform) {
+				manifestDescs = append(manifestDescs, m)
+			}
+		}
+	default:
+		return nil
+	}
+
+	for _, manifestDesc := range manifestDescs {
+		var manifest ocispec.Manifest
+		if err := oci.ReadJSON(ctx, cs, manifestDesc, &manifest); err != nil {
+			return errors.Wrap(err, "read manifest json")
+		}
+		var config ocispec.Image
+		if err := oci.ReadJSON(ctx, cs, manifest.Config, &config); err != nil {
+			return errors.Wrap(err, "read image config json")
+		}
+		if len(config.RootFS.DiffIDs) != len(manifest.Layers) {
+			// Layer/diff-id mismatch (e.g. foreign layers); leave GetDiffID
+			// to compute the truth.
+			continue
+		}
+		for i, layer := range manifest.Layers {
+			diffID := config.RootFS.DiffIDs[i].String()
+			info, err := cs.Info(ctx, layer.Digest)
+			if err != nil {
+				if errdefs.IsNotFound(err) {
+					continue
+				}
+				return errors.Wrapf(err, "stat layer %s", layer.Digest)
+			}
+			if info.Labels[nydus.LayerAnnotationUncompressed] == diffID {
+				continue
+			}
+			if info.Labels == nil {
+				info.Labels = map[string]string{}
+			}
+			info.Labels[nydus.LayerAnnotationUncompressed] = diffID
+			if _, err := cs.Update(ctx, info, "labels"); err != nil {
+				return errors.Wrapf(err, "label layer %s", layer.Digest)
+			}
+		}
+	}
+	return nil
+}

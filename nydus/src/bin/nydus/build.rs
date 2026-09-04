@@ -64,7 +64,7 @@ pub struct BuildCommand {
             DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE as u64 / bytesize::MIB
         ),
         env = "NYDUS_BUILD_BLOCK_GROUP_SIZE",
-        help = "Specify the uncompressed size of each block group, the unit of compression and of a single backend read (must be a power of two, >= 1MiB, and >= the chunk size). The value needs to be set with human readable format, for example: 4mib, 16mib"
+        help = "Specify the uncompressed size of each block group, the unit of compression and of a single backend read (must be a power of two, >= 512KiB, and >= the chunk size). The value needs to be set with human readable format, for example: 4mib, 16mib"
     )]
     block_group_size: ByteSize,
 
@@ -107,6 +107,7 @@ pub struct BuildCommand {
 pub enum Compressor {
     None,
     Zstd,
+    Lz4Block,
 }
 
 /// Implement the conversion from Compressor to BlobMetadataCompressor.
@@ -115,6 +116,7 @@ impl From<Compressor> for BlobMetadataCompressor {
         match value {
             Compressor::None => Self::None,
             Compressor::Zstd => Self::Zstd,
+            Compressor::Lz4Block => Self::Lz4Block,
         }
     }
 }
@@ -369,12 +371,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         full_blob_digest: String,
         #[tabled(rename = "CHUNK SIZE")]
         chunk_size: String,
-        #[tabled(rename = "CHUNK COUNT")]
-        chunk_count: String,
         #[tabled(rename = "BLOCK GROUP COUNT")]
         block_group_count: String,
-        #[tabled(rename = "CHUNK DIGESTER")]
-        chunk_digester: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
         chunk_compressor: String,
         #[tabled(rename = "BLOB COMPRESSED SIZE")]
@@ -406,9 +404,7 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         data_blob_digest: hex_string(summary.data_blob_digest),
         full_blob_digest: hex_string(summary.full_blob_digest),
         chunk_size: summary.blob_metadata.chunk_size().to_string(),
-        chunk_count: summary.blob_metadata.chunk_count().to_string(),
         block_group_count: summary.blob_metadata.block_group_count().to_string(),
-        chunk_digester: summary.blob_metadata.digester().to_string(),
         chunk_compressor: summary.blob_metadata.compressor().to_string(),
         blob_compressed_size: summary.blob_metadata.compressed_end().to_string(),
         blob_uncompressed_size: summary.blob_metadata.uncompressed_size().to_string(),

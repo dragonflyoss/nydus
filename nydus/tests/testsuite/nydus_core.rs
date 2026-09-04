@@ -39,6 +39,17 @@ fn build_test_image(
     build_test_image_with_layout(root, false)
 }
 
+fn build_duplicate_corpus_test_image(
+    root: &Path,
+) -> (
+    PathBuf,
+    Config,
+    [u8; EROFS_BLOB_ID_SIZE],
+    HashMap<String, Vec<u8>>,
+) {
+    build_test_image_full(root, false, true)
+}
+
 fn build_flattened_test_image(
     root: &Path,
 ) -> (
@@ -53,6 +64,19 @@ fn build_flattened_test_image(
 fn build_test_image_with_layout(
     root: &Path,
     flattened: bool,
+) -> (
+    PathBuf,
+    Config,
+    [u8; EROFS_BLOB_ID_SIZE],
+    HashMap<String, Vec<u8>>,
+) {
+    build_test_image_full(root, flattened, false)
+}
+
+fn build_test_image_full(
+    root: &Path,
+    flattened: bool,
+    dedup_corpus: bool,
 ) -> (
     PathBuf,
     Config,
@@ -84,6 +108,20 @@ fn build_test_image_with_layout(
     fs::write(corpus_dir.join("empty.txt"), b"").unwrap();
     corpus.insert("empty.txt".to_string(), Vec::new());
     symlink("file1", corpus_dir.join("link_to_file1")).unwrap();
+
+    if dedup_corpus {
+        let mut shifted = b"shifted-header:".to_vec();
+        shifted.extend_from_slice(&corpus["file1"]);
+        fs::write(corpus_dir.join("file1_shifted"), &shifted).unwrap();
+        corpus.insert("file1_shifted".to_string(), shifted);
+        fs::write(corpus_dir.join("file1_copy"), &corpus["file1"]).unwrap();
+        corpus.insert("file1_copy".to_string(), corpus["file1"].clone());
+        let mut holey = vec![0u8; 3 << 20];
+        holey[..4096].copy_from_slice(&corpus["file2"][..4096]);
+        holey[(2 << 20) + 5..(2 << 20) + 4101].copy_from_slice(&corpus["file2"][..4096]);
+        fs::write(corpus_dir.join("holey"), &holey).unwrap();
+        corpus.insert("holey".to_string(), holey);
+    }
 
     let blob_dir = root.join("blobs");
     fs::create_dir_all(&blob_dir).unwrap();
@@ -202,12 +240,13 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(bootstrap_ranges[0].source_offset, 0);
     assert_eq!(bootstrap_ranges[0].len, EROFS_BLOCK_SIZE as u64);
 
-    // Fetch a block-aligned range in the middle; the cache file should be
-    // populated for that range and a second fetch is idempotent. The dense
-    // blob address space is independent of path order, so exact file
-    // content is covered by the static read API test below.
+    // Fetch a block-aligned range spanning more than one block group's worth
+    // of data; the cache file should be populated for that range and a second
+    // fetch is idempotent. The dense blob address space is independent of
+    // path order, so exact file content is covered by the static read API
+    // test below.
     let block = EROFS_BLOCK_SIZE as u64;
-    let (blob_offset, len) = (256 * block, 16 * block);
+    let (blob_offset, len) = (block, 272 * block);
     let offset = descriptor.mapped_offset + blob_offset;
     assert!(core.probe_flat_ranges(offset, len).unwrap().is_empty());
     let fd_ranges = core.fetch_flat_ranges(offset, len).unwrap();
@@ -228,12 +267,13 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
     let trace = core.trace_snapshot();
-    assert_eq!(trace.entries.len(), 1);
-    assert_eq!(trace.entries[0].blob_index, 1);
-    assert_eq!(trace.entries[0].block_group_index, 1);
+    assert_eq!(trace.entries.len(), 2);
+    assert!(trace.entries.iter().all(|entry| entry.blob_index == 1));
+    assert_eq!(trace.entries[0].block_group_index, 0);
+    assert_eq!(trace.entries[1].block_group_index, 1);
     assert_eq!(
         core.trace_json(),
-        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"block_group_index\":1}]}"
+        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"block_group_index\":0},{\"blob_index\":1,\"block_group_index\":1}]}"
     );
 
     // Unaligned ranges and unknown blobs are rejected.
@@ -424,4 +464,36 @@ fn node_fetch_populates_blob_cache_without_reading_data() {
     assert!(after.iter().any(|byte| *byte != 0));
     file1_entry.fetch(0, 0).unwrap();
     core.fs.open("/").unwrap().fetch(0, 4096).unwrap_err();
+}
+
+#[test]
+fn core_reads_back_duplicate_corpus_image() {
+    let dir = tempdir().unwrap();
+    let (bootstrap, config, _blob_id, corpus) = build_duplicate_corpus_test_image(dir.path());
+
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+
+    for (name, expected) in &corpus {
+        let entry = core.fs.open(name).unwrap();
+        let all = entry.read().unwrap();
+        assert_eq!(
+            &all[..expected.len()],
+            expected.as_slice(),
+            "content mismatch for {name}"
+        );
+        assert!(
+            all[expected.len()..].iter().all(|byte| *byte == 0),
+            "tail padding not zero for {name}"
+        );
+    }
+
+    let entry = core.fs.open("file1_shifted").unwrap();
+    let mut buf = vec![0u8; 100_000];
+    let read = entry.read_at(123_457, &mut buf).unwrap();
+    assert_eq!(read, buf.len());
+    assert_eq!(&buf, &corpus["file1_shifted"][123_457..123_457 + read]);
+
+    let file1_entry = core.fs.open("file1").unwrap();
+    file1_entry.fetch(12345, 4097).unwrap();
+    assert!(!file1_entry.probe_ranges(12345, 4097).unwrap().is_empty());
 }

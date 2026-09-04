@@ -714,6 +714,10 @@ Fields:
 	layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
 	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`)
 	and `nydus optimize` require a directory and reject its absence at startup.
+- `storage.skip_verify_checksums` (default `true`) skips verifying decoded
+	block groups against their stored checksums before they are served. Set it
+	to `false` to verify every decoded block group when the transport is not
+	trusted end to end.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
 - `prefetch.timeout` (default `1h`) bounds how long prefetching one whole
@@ -991,7 +995,8 @@ full blob file: <full_blob_sha256>
 +-------------------------------+  byte = footer.compressed_data_offset + footer.compressed_data_size
 | padding to 4 KiB alignment    |
 +-------------------------------+  byte = footer.bootstrap_offset
-| bootstrap                     |
+| bootstrap (zstd frame)        |
+|  decodes to the EROFS image:  |
 |  block 0                      |
 |  +-------------------------+  |
 |  | 0x0000..0x03ff zeros    |  |
@@ -1040,7 +1045,9 @@ u64 blob_meta_offset
 u64 compressed_data_size
 u32 bootstrap_blocks
 u32 blob_meta_blocks
-u8  reserved1[4032]    compat area: writers zero, readers ignore
+u64 bootstrap_compressed_size   exact zstd frame bytes when the
+                                BOOTSTRAP_ZSTD flag is set, else 0
+u8  reserved1[4024]    compat area: writers zero, readers ignore
 ```
 
 The `magic + version + flags` header prefix matches the blob meta
@@ -1058,9 +1065,13 @@ The inequalities allow alignment padding between regions. Offsets and the footer
 offset must be 4 KiB aligned. The bootstrap and blob meta region lengths are
 stored as 4 KiB block counts in the footer.
 
-The bootstrap region is a valid metadata-only EROFS image by itself. When
-`--bootstrap` is specified, the standalone bootstrap is byte-for-byte identical
-to this embedded region.
+The bootstrap region stores the metadata-only EROFS image as a single zstd
+frame (footer incompat flag `BOOTSTRAP_ZSTD = 1 << 0`), padded with zeros to
+the 4 KiB region boundary; `bootstrap_compressed_size` carries the exact frame
+length so readers decode without trusting the zero tail. An empty bootstrap
+(ondemand blobs) keeps the flag clear and the size zero. When `--bootstrap` is
+specified, the standalone bootstrap file is byte-for-byte identical to the
+decoded region.
 
 ### Bootstrap region details
 
@@ -1209,9 +1220,11 @@ Header details:
 - `flags` is split EROFS-style: the low 16 bits are incompatible features — a
 	reader that does not know a set bit must reject the file (like
 	`feature_incompat`); the high 16 bits are compatible features — unknown
-	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`)
-	means zstd is the blob's default compressor; no compressor bit means
-	stored plain. `DIGESTER_BLAKE3` (`1 << 1`) is mandatory for chunk digests.
+	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`) or
+	`COMPRESSOR_LZ4` (`1 << 1`) names the blob's default compressor; no
+	compressor bit means stored plain. `DIGESTER_BLAKE3` (`1 << 2`) is mandatory
+	for chunk digests. `REDIRECT` (`1 << 3`) marks an ondemand blob whose block
+	groups are all redirect entries.
 	Entry-layout evolution (wider chunk/block group entries, new entry kinds) is
 	expressed as a new incompat bit — the same way EROFS gates compact vs
 	extended inodes — while header growth uses the reserved tail plus a compat

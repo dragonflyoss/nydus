@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -98,6 +98,11 @@ pub struct LocalBlobCache {
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     inflight_block_groups: Mutex<HashMap<usize, Arc<BlockGroupFlight>>>,
+    /// Read-only mapping of the cache data file, created once every block
+    /// group is ready. It serves reads by memcpy from the page cache, without
+    /// the pread round-trip per request. Bytes never change after ALL_READY
+    /// latches (rewrites by racing processes are byte-identical).
+    cache_mmap: OnceLock<memmap2::Mmap>,
     /// Keeps the processes sharing this cache from each fetching the same
     /// cold block group.
     block_group_locks: BlockGroupLocks,
@@ -135,15 +140,14 @@ impl LocalBlobCache {
 
         let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
-        let block_block_group_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
+        let block_group_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
         // The block_group_map is only meaningful together with the cache data file it
         // describes: a leftover block_group_map whose data file has been removed
         // would claim block groups are ready while reads hit sparse zeros. Note this
         // before creating the data file below, which would otherwise mask it.
         // (Removing the map while keeping the data is the safe direction and
         // needs no handling.)
-        let stale_block_block_group_map =
-            block_block_group_map_path.exists() && !cache_data_path.exists();
+        let stale_block_group_map = block_group_map_path.exists() && !cache_data_path.exists();
 
         // Create the cache data file eagerly, before the block_group_map, so that
         // "block_group_map file exists => data file exists" holds and the check above
@@ -157,18 +161,16 @@ impl LocalBlobCache {
         data_file.set_len(blob_metadata.uncompressed_size())?;
         drop(data_file);
 
-        let block_group_map = BlockGroupMap::open(
-            &block_block_group_map_path,
-            blob_metadata.block_group_count(),
-        )?;
-        if stale_block_block_group_map {
+        let block_group_map =
+            BlockGroupMap::open(&block_group_map_path, blob_metadata.block_group_count())?;
+        if stale_block_group_map {
             // Reset in place rather than unlinking: handles already mapping
             // this file observe the reset, whereas a replacement inode would
             // split them off with their readiness invisible to each other.
             block_group_map.reset()?;
             warn!(
                 "stale block_group_map without cache data file, reset: {}",
-                block_block_group_map_path.display()
+                block_group_map_path.display()
             );
         }
 
@@ -188,6 +190,7 @@ impl LocalBlobCache {
             backend,
             trace_recorder,
             inflight_block_groups: Mutex::new(HashMap::new()),
+            cache_mmap: OnceLock::new(),
             block_group_locks,
         })
     }
@@ -195,6 +198,32 @@ impl LocalBlobCache {
     /// The blob meta backing this cache (block groups, chunks, compressor).
     pub fn blob_metadata(&self) -> &BlobMetadata {
         &self.blob_metadata
+    }
+
+    /// Fetch, decode and validate one block group's bytes directly from the
+    /// backend, without touching the cache data file or block_group_map. This
+    /// is the block-group-granular read used by `nydus optimize` to re-encode
+    /// accessed block groups into an ondemand artifact.
+    pub fn fetch_block_group(&self, block_group_index: usize) -> io::Result<Vec<u8>> {
+        let block_group = *self
+            .blob_metadata
+            .block_group(block_group_index)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "block group index out of range",
+                )
+            })?;
+        let mut buffers = BlockGroupBuffers::default();
+        let decoded = fetch_decode_validate_block_group_into(
+            &self.blob_id,
+            &self.blob_metadata,
+            &self.backend,
+            &block_group,
+            &mut buffers,
+            ReadKind::OnDemand,
+        )?;
+        Ok(decoded.to_vec())
     }
 
     fn cache_file(&self) -> io::Result<Arc<File>> {
@@ -238,6 +267,37 @@ impl LocalBlobCache {
             ));
         }
         Ok(())
+    }
+
+    /// The `[offset, offset+len)` slice of the cache-file mapping when every
+    /// block group is ready, `None` when the blob is still filling (callers
+    /// then take the ensure + pread path). Redirect blobs never latch
+    /// ALL_READY through this path, so the mapping is only built for dense
+    /// blobs.
+    fn all_ready_slice(&self, offset: u64, len: usize) -> io::Result<Option<&[u8]>> {
+        if !self.block_group_map.is_all_ready() {
+            return Ok(None);
+        }
+        let mmap = if let Some(mmap) = self.cache_mmap.get() {
+            mmap
+        } else {
+            let file = self.cache_file()?;
+            // SAFETY: the mapping is read-only and its bytes are final once
+            // ALL_READY latches; concurrent identical rewrites are benign.
+            let mmap = unsafe { memmap2::MmapOptions::new().map(file.as_ref())? };
+            self.cache_mmap.get_or_init(|| mmap)
+        };
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "blob read overflow"))?;
+        if end > mmap.len() as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "blob read beyond cache data file",
+            ));
+        }
+        nydus_telemetry::metrics::inc_cache_hit_block_group();
+        Ok(Some(&mmap[offset as usize..end as usize]))
     }
 
     fn ensure_block_group(
@@ -500,6 +560,7 @@ impl BlobCache for LocalBlobCache {
         // Prefetch writes the bulk of the cache, so it is worth one stat to
         // make sure the file it fills is still the one other processes read.
         self.ensure_data_file_linked(&cache_file)?;
+
         // Prefetch owns its decode buffers and does not take `fetch_lock`, so it
         // never blocks on-demand FUSE reads. The block_group_map is internally locked
         // and `set_ready` is idempotent, so racing with a read at worst decodes
@@ -566,6 +627,11 @@ impl BlobCache for LocalBlobCache {
             return Ok(());
         }
 
+        if let Some(mapped) = self.all_ready_slice(offset, dst.len())? {
+            dst.copy_from_slice(mapped);
+            return Ok(());
+        }
+
         let cache_file = self.cache_file()?;
         self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref())?;
 
@@ -573,6 +639,16 @@ impl BlobCache for LocalBlobCache {
         // the covering block groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
         cache_file.as_ref().read_exact_at(dst, offset)
+    }
+
+    fn write_data_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        if let Some(mapped) = self.all_ready_slice(offset, len)? {
+            return writer.write_all(mapped);
+        }
+        super::write_data_via_scratch(self, offset, len, writer)
     }
 
     fn prepare(&self) -> io::Result<PathBuf> {
@@ -601,6 +677,7 @@ impl BlobCache for LocalBlobCache {
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob probe range overflow")
         })?;
+
         let (first, last) = self.block_group_span(offset, end)?.into_inner();
 
         self.block_group_map
@@ -819,14 +896,14 @@ impl BlobCache for LocalBlobCache {
                     "redirect fill block_group index out of range",
                 )
             })?;
-        if self.block_group_map.is_ready(block_group_index)? {
-            nydus_telemetry::metrics::inc_cache_hit_block_group();
-            return Ok(());
-        }
         // Cross-check against this blob's own block group metadata: the redirect
         // block group's crc32 was copied from this source block group at optimize time, so
         // any divergence (stale optimize artifact, corrupted transfer) is
         // caught here before it can poison the cache.
+        if self.block_group_map.is_ready(block_group_index)? {
+            nydus_telemetry::metrics::inc_cache_hit_block_group();
+            return Ok(());
+        }
         super::validate_block_group_with_metrics(&self.backend, block_group, decoded)?;
         let cache_file = self.cache_file()?;
         write_all_at(
@@ -906,7 +983,9 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor};
+    use nydus_format::blob::{
+        BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataDigester,
+    };
     use nydus_format::utils::sha256_bytes;
     use std::path::Path;
     use tempfile::tempdir;
@@ -918,9 +997,11 @@ mod tests {
     fn blob_metadata_with_crc32(payload: &[u8], crc32: u32) -> BlobMetadata {
         BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
             vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
-            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32, 0, 0, false).unwrap()],
+            false,
         )
         .unwrap()
     }
@@ -1189,9 +1270,11 @@ mod tests {
         // blob 1 block group 0; its data region carries a copy of the source bytes.
         let redirect_meta = BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             1,
             Vec::new(),
-            vec![BlobMetadataBlockGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
+            vec![BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32, 1, 0, true).unwrap()],
+            true,
         )
         .unwrap();
         assert!(redirect_meta.is_redirect());
@@ -1269,6 +1352,7 @@ mod tests {
 
     #[test]
     fn local_blob_cache_rejects_bad_crc32_before_marking_chunk_ready() {
+        super::super::set_skip_verify_checksums(false);
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xacu8; 4096];
@@ -1323,6 +1407,7 @@ mod tests {
 
     #[test]
     fn fill_block_group_from_redirect_validates_then_caches() {
+        super::super::set_skip_verify_checksums(false);
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x6eu8; 4096];

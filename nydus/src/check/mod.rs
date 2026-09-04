@@ -7,7 +7,7 @@ use memmap2::Mmap;
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
-use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor};
 use nydus_format::erofs::{
     mode_to_erofs_file_type, ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
@@ -138,10 +138,8 @@ struct BlobInspection {
 
 #[derive(Clone)]
 pub struct BlobMetadataSummary {
-    pub chunk_count: usize,
     pub block_group_count: usize,
     pub chunk_size: u32,
-    pub digester: BlobMetadataDigester,
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
@@ -466,10 +464,8 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> {
     let blob_metadata = BlobMetadata::from_bytes(data, false)?;
     Ok(BlobMetadataSummary {
-        chunk_count: blob_metadata.chunk_count(),
         block_group_count: blob_metadata.block_group_count(),
         chunk_size: blob_metadata.chunk_size(),
-        digester: blob_metadata.digester(),
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.uncompressed_size(),
         total_compressed_size: blob_metadata.compressed_end(),
@@ -479,7 +475,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT;
+    use nydus_format::blob::{BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT};
     use std::fs;
     use tempfile::tempdir;
 
@@ -554,9 +550,11 @@ mod tests {
         let data_digest = sha256_bytes(&data);
         let blob_metadata = BlobMetadata::new(
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
             Vec::new(),
             Vec::new(),
+            false,
         )
         .unwrap();
         let mut blob_metadata_bytes = Vec::new();
@@ -570,6 +568,7 @@ mod tests {
             0,
             data.len() as u64,
             1,
+            None,
         )
         .unwrap();
         let mut blob = Vec::new();

@@ -3,8 +3,10 @@ use nydus_format::utils::align_up_usize;
 
 /// Metadata layout allocator.
 ///
-/// Manages a contiguous byte buffer representing the metadata area
-/// starting at `meta_blkaddr` (block 1 = byte 4096 in the image).
+/// Manages a contiguous byte buffer holding the image head region (blocks
+/// `0..meta_blkaddr`, filled in later) followed by the metadata area, so the
+/// finished buffer IS the bootstrap and no assembly copy is needed. All
+/// offsets exposed to callers are metadata-relative.
 ///
 /// Two-phase usage:
 /// 1. Allocate inode slots with `alloc_inode()` — returns (offset, nid).
@@ -12,14 +14,20 @@ use nydus_format::utils::align_up_usize;
 /// 3. Allocate directory data blocks with `alloc_dir_data()`.
 /// 4. Write serialized data at the reserved offsets with `write_at()`.
 pub(crate) struct MetadataLayout {
-    /// The metadata byte buffer.
+    /// Head region bytes followed by the metadata byte buffer.
     buf: Vec<u8>,
 
-    /// Current allocation cursor.
+    /// Size of the head region at the start of `buf`.
+    head_size: usize,
+
+    /// Current allocation cursor, relative to the metadata area.
     cursor: usize,
 
     /// Starting block address of the metadata area in the image.
     meta_blkaddr: u32,
+
+    /// When set, the buffer is never grown: only offsets are tracked.
+    size_only: bool,
 }
 
 impl Default for MetadataLayout {
@@ -37,16 +45,47 @@ impl MetadataLayout {
     /// default block 1, for images whose device table pushes the metadata
     /// region past block 0.
     pub(crate) fn with_meta_blkaddr(meta_blkaddr: u32) -> Self {
+        let head_size = meta_blkaddr as usize * EROFS_BLOCK_SIZE as usize;
         Self {
-            buf: Vec::new(),
+            buf: vec![0u8; head_size],
+            head_size,
             cursor: 0,
             meta_blkaddr,
+            size_only: false,
+        }
+    }
+
+    /// A layout that only tracks offsets and never materialises the buffer,
+    /// for the sizing pass of streaming rendering: allocations return the
+    /// same offsets/nids as a real layout but cost no memory.
+    pub(crate) fn size_only(meta_blkaddr: u32) -> Self {
+        Self {
+            buf: Vec::new(),
+            head_size: meta_blkaddr as usize * EROFS_BLOCK_SIZE as usize,
+            cursor: 0,
+            meta_blkaddr,
+            size_only: true,
         }
     }
 
     /// The serialized metadata area.
     pub(crate) fn buf(&self) -> &[u8] {
-        &self.buf
+        &self.buf[self.head_size..]
+    }
+
+    /// Reserve capacity up front. Untouched capacity costs no resident
+    /// memory, while growing a tens-of-MiB buffer by doubling pays a full
+    /// copy at every realloc — a transient RSS spike of the buffer size.
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.buf.reserve(additional);
+    }
+
+    /// Consume the layout and return the full image buffer: the zeroed head
+    /// region followed by the block-padded metadata area. The head is filled
+    /// in by the caller; no copy of the metadata is made.
+    pub(crate) fn into_image_buf(mut self) -> Vec<u8> {
+        self.pad_to_block();
+        self.buf
     }
 
     /// Allocate space for an inode. Returns `(offset_in_buf, nid)`.
@@ -64,8 +103,8 @@ impl MetadataLayout {
         let aligned = align_up_usize(size, EROFS_SLOTSIZE as usize).expect("alignment overflowed");
         let offset = self.cursor;
         self.cursor += aligned;
-        if self.buf.len() < self.cursor {
-            self.buf.resize(self.cursor, 0);
+        if !self.size_only && self.buf.len() < self.head_size + self.cursor {
+            self.buf.resize(self.head_size + self.cursor, 0);
         }
 
         let nid = (offset / EROFS_SLOTSIZE as usize) as u64;
@@ -77,8 +116,8 @@ impl MetadataLayout {
         let aligned =
             align_up_usize(self.cursor, EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
         self.cursor = aligned;
-        if self.buf.len() < self.cursor {
-            self.buf.resize(self.cursor, 0);
+        if !self.size_only && self.buf.len() < self.head_size + self.cursor {
+            self.buf.resize(self.head_size + self.cursor, 0);
         }
 
         self.cursor
@@ -93,8 +132,8 @@ impl MetadataLayout {
         let aligned_size =
             align_up_usize(size, EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
         self.cursor += aligned_size;
-        if self.buf.len() < self.cursor {
-            self.buf.resize(self.cursor, 0);
+        if !self.size_only && self.buf.len() < self.head_size + self.cursor {
+            self.buf.resize(self.head_size + self.cursor, 0);
         }
 
         let startblk = self.meta_blkaddr as u64 + (offset / EROFS_BLOCK_SIZE as usize) as u64;
@@ -103,7 +142,8 @@ impl MetadataLayout {
 
     /// Write data at a previously allocated offset.
     pub(crate) fn write_at(&mut self, offset: usize, data: &[u8]) {
-        self.buf[offset..offset + data.len()].copy_from_slice(data);
+        let start = self.head_size + offset;
+        self.buf[start..start + data.len()].copy_from_slice(data);
     }
 }
 

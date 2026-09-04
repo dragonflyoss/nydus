@@ -71,7 +71,7 @@ impl ExportCommand {
     /// Runs the export: opens the source blob and streams its OCI layer tar
     /// to the output file, or to stdout when no output is given.
     fn run(&self) -> Result<()> {
-        let reader = ErofsReader::open_blob(&self.source)
+        let reader = ErofsReader::open_blob(&self.source, None)
             .with_context(|| format!("failed to open nydus blob: {}", self.source.display()))?;
 
         match &self.output {
@@ -114,7 +114,7 @@ mod tests {
         .unwrap();
         build_image(&options, File::create(blob).unwrap()).unwrap();
 
-        let reader = ErofsReader::open_blob(blob).unwrap();
+        let reader = ErofsReader::open_blob(blob, None).unwrap();
         let tar_file = File::create(tar_path).unwrap();
         write_tar(&reader, BufWriter::new(tar_file)).unwrap();
     }

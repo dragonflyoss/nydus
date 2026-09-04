@@ -28,12 +28,12 @@ use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor,
+    BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor, BlobMetadataDigester,
     DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
-use nydus_storage::cache::{BlobCache, LocalBlobCache};
+use nydus_storage::cache::LocalBlobCache;
 
 /// The result of [`build_ondemand_blob`]: the assembled ondemand artifact and
 /// the rewritten bootstrap, ready to be written out by the caller.
@@ -90,7 +90,6 @@ pub fn build_ondemand_blob(
     let mut ondemand_data = Vec::new();
     let mut ondemand_block_groups = Vec::new();
     let mut next_block_offset = 0u64;
-    let mut decoded = Vec::new();
 
     for BlockGroupRef {
         blob_index,
@@ -107,6 +106,11 @@ pub fn build_ondemand_blob(
                     .with_context(|| format!("failed to open source blob: {blob_index}"))?,
             ),
         };
+        if cache.blob_metadata().is_redirect() {
+            return Err(Error::InvalidImage(format!(
+                "source blob {blob_index} is already an ondemand blob; refusing to optimize"
+            )));
+        }
 
         let block_group = *cache
             .blob_metadata()
@@ -116,22 +120,14 @@ pub fn build_ondemand_blob(
                     "pattern references block group {block_group_index} out of range for blob {blob_index}"
                 ))
             })?;
-        if block_group.is_redirect() {
-            return Err(Error::InvalidImage(format!(
-                "source blob {blob_index} is already an ondemand blob (refusing to optimize)"
-            )));
-        }
 
-        let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|err| {
-            Error::Overflow(format!(
-                "block group uncompressed size exceeds usize: {err}"
-            ))
-        })?;
-        decoded.resize(decoded_len, 0);
-        cache
-            .read_at(block_group.uncompressed_offset(), &mut decoded)
+        // Fetch the block group's decoded bytes straight from the backend at
+        // block group granularity: the redirect fill on the runtime side works
+        // per source block group.
+        let decoded = cache
+            .fetch_block_group(*block_group_index as usize)
             .with_context(|| {
-                format!("failed to read block group {block_group_index} of blob {blob_index}")
+                format!("failed to fetch block group {block_group_index} of blob {blob_index}")
             })?;
 
         // Recompress the decoded bytes for the ondemand artifact, storing them
@@ -146,7 +142,7 @@ pub fn build_ondemand_blob(
 
         let compressed_offset = ondemand_data.len() as u64;
         ondemand_data.extend_from_slice(encoded);
-        ondemand_block_groups.push(BlobMetadataBlockGroup::new_redirect(
+        ondemand_block_groups.push(BlobMetadataBlockGroup::new(
             next_block_offset,
             block_group.uncompressed_block_count(),
             compressed_offset,
@@ -158,6 +154,7 @@ pub fn build_ondemand_blob(
             block_group.crc32(),
             *blob_index,
             *block_group_index,
+            true,
         )?);
         next_block_offset += block_group.uncompressed_block_count() as u64;
     }
@@ -169,9 +166,11 @@ pub fn build_ondemand_blob(
 
     let blob_metadata = BlobMetadata::new(
         BlobMetadataCompressor::Zstd,
+        BlobMetadataDigester::Blake3,
         DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
         Vec::new(),
         ondemand_block_groups,
+        true,
     )
     .context("failed to assemble ondemand blob meta")?;
 

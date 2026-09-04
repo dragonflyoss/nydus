@@ -108,6 +108,13 @@ fn default_dragonfly_fallback_interval() -> Duration {
     Duration::from_secs(1)
 }
 
+/// Returns the default for skipping decoded block group checksum
+/// verification.
+#[inline]
+fn default_storage_skip_verify_checksums() -> bool {
+    true
+}
+
 /// The local backend configuration, serving blobs from a directory.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -309,7 +316,7 @@ pub struct DragonflyConfig {
 }
 
 /// The storage configuration: where downloaded blob data is kept.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     /// The directory storing each blob's decoded chunk cache file. When
@@ -320,6 +327,22 @@ pub struct StorageConfig {
     /// require a directory.
     #[serde(default)]
     pub dir: Option<PathBuf>,
+
+    /// Skip verifying decoded block groups against their stored checksums
+    /// before they are served (the default). Set to `false` to verify every
+    /// decoded block group when the transport is not trusted end to end.
+    #[serde(default = "default_storage_skip_verify_checksums")]
+    pub skip_verify_checksums: bool,
+}
+
+/// Implement Default for StorageConfig.
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            skip_verify_checksums: default_storage_skip_verify_checksums(),
+        }
+    }
 }
 
 /// The prefetch configuration, controlling background blob prefetch.
@@ -519,6 +542,7 @@ mod tests {
             config.storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
+        assert!(!config.storage.skip_verify_checksums);
 
         assert_eq!(config.prefetch.concurrent_blob_count, 4);
         assert_eq!(config.prefetch.timeout, Duration::from_secs(120));
@@ -680,6 +704,11 @@ config:
             storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
+        assert!(storage.skip_verify_checksums);
+
+        let storage: StorageConfig =
+            serde_yaml::from_str("dir: /cache\nskip_verify_checksums: false\n").unwrap();
+        assert!(!storage.skip_verify_checksums);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::blob::flag::validate_incompat_flags;
+use crate::blob::flag::FeatureFlags;
 use crate::erofs::{blocks_to_bytes, EROFS_BLOCK_SIZE};
 use crate::error::{Context, Error, Result};
 use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
@@ -27,29 +27,24 @@ pub const NYDUS_BLOB_FOOTER_SIZE: usize = 4096;
 /// this boundary (the EROFS block size).
 pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
 
-/// `flags` is split EROFS-style (see [`crate::blob::flag`]): the low 16
-/// bits are incompatible features (unknown bits reject), the high 16 bits
-/// are compatible features (unknown bits are ignored). No bits are defined
-/// yet.
-const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = 0;
+/// Incompat flag: the embedded bootstrap region holds one zstd frame
+/// instead of raw EROFS bytes. `bootstrap_compressed_size` then carries the
+/// frame's exact byte length within the block-aligned region. The merged
+/// bootstrap and the blob meta sidecar the runtime mounts are unaffected,
+/// only merge, `check`, and single-blob mounts decode this region.
+pub const NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD: u32 = 1 << 0;
+
+/// The incompat bits this reader understands, enforced by
+/// [`FeatureFlags::validate_incompat`].
+const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD;
 
 /// Byte range of the crc32 field within the footer.
 const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
 
 /// The trailing footer of a nydus full blob: the blob's self-describing map,
-/// recording where each region lives, sealed with a crc32c.
-///
-/// A full blob lays its regions out back to back (alignment gaps allowed),
-/// every offset 4KiB aligned, with the footer as the fixed-size tail:
-///
-/// ```text
-/// ┌─────────────────┬───────────────────┬───────────┬────────┐
-/// │ compressed data │ bootstrap (EROFS) │ blob meta │ footer │
-/// └─────────────────┴───────────────────┴───────────┴────────┘
-/// 0                                                 ▲        EOF
-///                                 blob meta ends exactly at the
-///                                 footer offset (EOF - 4096)
-/// ```
+/// recording where each region lives, sealed with a crc32c. The whole-blob
+/// layout the fields describe is drawn at
+/// [`finish_full_blob`](crate::blob::finish_full_blob).
 ///
 /// The footer's own 4096 bytes (integers little-endian):
 ///
@@ -68,13 +63,15 @@ const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
 ///     56     4  bootstrap_blocks        4KiB blocks, zero for an ondemand
 ///                                       redirect blob without a bootstrap
 ///     60     4  blob_metadata_blocks    4KiB blocks, never zero
-///     64  4032  reserved                writers zero it, readers ignore it
+///     64     8  bootstrap_compressed_size  exact zstd frame bytes when the
+///                                       BOOTSTRAP_ZSTD flag is set, else 0
+///     72  4024  reserved                writers zero it, readers ignore it
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobFooter {
     magic: [u8; 8],
     version: u32,
-    flags: u32,
+    flags: FeatureFlags,
     crc32: u32,
     reserved0: u32,
     compressed_data_offset: u64,
@@ -83,12 +80,18 @@ pub struct BlobFooter {
     compressed_data_size: u64,
     bootstrap_blocks: u32,
     blob_metadata_blocks: u32,
+    bootstrap_compressed_size: u64,
 }
 
 impl BlobFooter {
     /// Creates a validated, sealed footer for the given region layout: the
     /// fields and the layout are checked first, so a constructed footer is
     /// valid by definition, then the crc32 is computed over the final bytes.
+    ///
+    /// `Some(n)` declares the bootstrap region stores one zstd frame of
+    /// exactly `n` bytes and sets the BOOTSTRAP_ZSTD incompat flag, `None`
+    /// keeps the region raw. [`Self::bootstrap_compressed_size`] reads the
+    /// same value back.
     pub fn new(
         compressed_data_offset: u64,
         compressed_data_size: u64,
@@ -96,11 +99,18 @@ impl BlobFooter {
         bootstrap_blocks: u32,
         blob_metadata_offset: u64,
         blob_metadata_blocks: u32,
+        bootstrap_compressed_size: Option<u64>,
     ) -> Result<Self> {
+        let mut flags = FeatureFlags::empty();
+        flags.set(
+            NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD,
+            bootstrap_compressed_size.is_some(),
+        );
+
         let mut footer = Self {
             magic: NYDUS_BLOB_FOOTER_MAGIC,
             version: NYDUS_BLOB_FOOTER_VERSION,
-            flags: 0,
+            flags,
             crc32: 0,
             reserved0: 0,
             compressed_data_offset,
@@ -109,6 +119,7 @@ impl BlobFooter {
             compressed_data_size,
             bootstrap_blocks,
             blob_metadata_blocks,
+            bootstrap_compressed_size: bootstrap_compressed_size.unwrap_or(0),
         };
 
         footer.validate()?;
@@ -129,7 +140,7 @@ impl BlobFooter {
         let footer = Self {
             magic: bytes[0..8].try_into().unwrap(),
             version: read_u32_at(bytes, 8),
-            flags: read_u32_at(bytes, 12),
+            flags: FeatureFlags::from_bits(read_u32_at(bytes, 12)),
             crc32: read_u32_at(bytes, 16),
             reserved0: read_u32_at(bytes, 20),
             compressed_data_offset: read_u64_at(bytes, 24),
@@ -138,6 +149,7 @@ impl BlobFooter {
             compressed_data_size: read_u64_at(bytes, 48),
             bootstrap_blocks: read_u32_at(bytes, 56),
             blob_metadata_blocks: read_u32_at(bytes, 60),
+            bootstrap_compressed_size: read_u64_at(bytes, 64),
         };
         footer.validate()?;
 
@@ -161,7 +173,7 @@ impl BlobFooter {
         let mut data = [0u8; NYDUS_BLOB_FOOTER_SIZE];
         data[0..8].copy_from_slice(&self.magic);
         write_u32_at(&mut data, 8, self.version);
-        write_u32_at(&mut data, 12, self.flags);
+        write_u32_at(&mut data, 12, self.flags.bits());
         write_u32_at(&mut data, 16, self.crc32);
         write_u32_at(&mut data, 20, self.reserved0);
         write_u64_at(&mut data, 24, self.compressed_data_offset);
@@ -170,6 +182,7 @@ impl BlobFooter {
         write_u64_at(&mut data, 48, self.compressed_data_size);
         write_u32_at(&mut data, 56, self.bootstrap_blocks);
         write_u32_at(&mut data, 60, self.blob_metadata_blocks);
+        write_u64_at(&mut data, 64, self.bootstrap_compressed_size);
         data
     }
 
@@ -244,7 +257,28 @@ impl BlobFooter {
             ));
         }
 
-        validate_incompat_flags(self.flags, NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT)?;
+        let compressed = self
+            .flags
+            .contains(NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD);
+        if compressed
+            && (self.bootstrap_compressed_size == 0
+                || self.bootstrap_compressed_size > self.bootstrap_size())
+        {
+            return Err(Error::InvalidImage(format!(
+                "nydus footer compressed bootstrap size {} outside its region of {} bytes",
+                self.bootstrap_compressed_size,
+                self.bootstrap_size()
+            )));
+        }
+        if !compressed && self.bootstrap_compressed_size != 0 {
+            return Err(Error::InvalidImage(
+                "nydus footer compressed bootstrap size requires the BOOTSTRAP_ZSTD flag"
+                    .to_string(),
+            ));
+        }
+
+        self.flags
+            .validate_incompat(NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT)?;
         Ok(())
     }
 
@@ -365,6 +399,14 @@ impl BlobFooter {
         blocks_to_bytes(self.bootstrap_blocks)
     }
 
+    /// Exact byte length of the zstd frame in the bootstrap region, or
+    /// `None` when the bootstrap is stored raw.
+    pub fn bootstrap_compressed_size(&self) -> Option<u64> {
+        self.flags
+            .contains(NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD)
+            .then_some(self.bootstrap_compressed_size)
+    }
+
     /// Size of the blob meta region in bytes.
     pub fn blob_metadata_size(&self) -> u64 {
         blocks_to_bytes(self.blob_metadata_blocks)
@@ -385,7 +427,7 @@ mod tests {
     use super::*;
 
     fn footer() -> BlobFooter {
-        BlobFooter::new(0, 17, 4096, 1, 8192, 1).unwrap()
+        BlobFooter::new(0, 17, 4096, 1, 8192, 1, None).unwrap()
     }
 
     fn reseal(mut bytes: [u8; NYDUS_BLOB_FOOTER_SIZE]) -> [u8; NYDUS_BLOB_FOOTER_SIZE] {
@@ -524,7 +566,7 @@ mod tests {
 
     #[test]
     fn zero_bootstrap_blocks_are_valid() {
-        BlobFooter::new(0, 17, 4096, 0, 4096, 1).unwrap();
+        BlobFooter::new(0, 17, 4096, 0, 4096, 1, None).unwrap();
     }
 
     #[test]
@@ -558,6 +600,7 @@ mod tests {
                 boot_blocks,
                 meta_off,
                 meta_blocks,
+                None,
             )
             .unwrap_err();
             assert!(err.to_string().contains(expected), "{case}: {err}");

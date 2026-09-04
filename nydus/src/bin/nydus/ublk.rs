@@ -8,7 +8,7 @@ use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 
 use super::*;
 
@@ -67,6 +67,13 @@ pub struct UblkCommand {
         help = "Specify whether to create the device in unprivileged mode (UBLK_F_UNPRIVILEGED_DEV)"
     )]
     unprivileged: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_UBLK_APISERVER",
+        help = "Specify the address to serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics`"
+    )]
+    apiserver: Option<String>,
 
     #[arg(
         short = 'l',
@@ -155,6 +162,18 @@ impl UblkCommand {
         let service = UblkService::new(core, &options)?;
         println!("{}", service.dev_path());
 
+        // Non-fatal like the fuse service: the device keeps serving without metrics.
+        let api_server = match self.apiserver.as_deref() {
+            Some(address) => match crate::api_server::ApiServer::start(address) {
+                Ok(server) => Some(server),
+                Err(err) => {
+                    warn!("failed to start metrics apiserver: {}", err.report());
+                    None
+                }
+            },
+            None => None,
+        };
+
         let handle = service.handle();
         let signal_thread = signal::spawn_signal_thread("ublk", signals, move || {
             handle.stop();
@@ -162,6 +181,9 @@ impl UblkCommand {
 
         let result = service.run();
         service.delete();
+        if let Some(server) = api_server {
+            server.stop();
+        }
 
         signal_thread.shutdown()?;
         result

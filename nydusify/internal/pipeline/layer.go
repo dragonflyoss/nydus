@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -29,6 +31,10 @@ import (
 // (preserving OCI whiteouts), then `nydus build` streams the resulting full
 // blob through a FIFO directly into the content store.
 func LayerConvertFunc(opt nydus.PackOption) converter.ConvertFunc {
+	// The containerd converter spawns every layer conversion at once; each
+	// one runs an extraction plus a `nydus build`, so an unbounded fan-out
+	// multiplies peak memory and thrashes the CPU on many-layer images.
+	slots := make(chan struct{}, layerConvertConcurrency())
 	return func(ctx context.Context, cs content.Store, desc ocispec.Descriptor) (*ocispec.Descriptor, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -41,12 +47,40 @@ func LayerConvertFunc(opt nydus.PackOption) converter.ConvertFunc {
 			return nil, nil
 		}
 
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
 		newDesc, err := convertLayer(ctx, cs, desc, opt)
 		if err != nil {
 			return nil, errors.Wrapf(err, "convert layer %s", desc.Digest)
 		}
 		return newDesc, nil
 	}
+}
+
+// layerConvertConcurrency bounds parallel layer conversions: enough to keep
+// the cores busy, small enough to bound the sum of concurrent extract dirs
+// and builder RSS. NYDUSIFY_LAYER_CONCURRENCY overrides the default (large
+// layers dominate the critical path, so lowering it trades little wall time
+// for a proportional peak-memory cut).
+func layerConvertConcurrency() int {
+	if env := os.Getenv("NYDUSIFY_LAYER_CONCURRENCY"); env != "" {
+		if n, err := strconv.Atoi(env); err == nil && n > 0 {
+			return n
+		}
+	}
+	n := runtime.NumCPU() / 2
+	if n < 2 {
+		n = 2
+	}
+	if n > 4 {
+		n = 4
+	}
+	return n
 }
 
 func convertLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt nydus.PackOption) (*ocispec.Descriptor, error) {

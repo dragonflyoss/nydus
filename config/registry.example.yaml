@@ -79,6 +79,10 @@ storage:
   # written to disk. Kernel-served modes (fanotify/nbd/ublk/uffd) and
   # `nydus optimize` require a directory.
   dir: /var/lib/nydus/cache
+  # Skip verifying decoded block groups against their stored checksums
+  # before they are served. Default: true. Set to false to verify every
+  # decoded block group when the transport is not trusted end to end.
+  # skip_verify_checksums: true
 
 prefetch:
   # Number of concurrently prefetched blobs.

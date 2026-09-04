@@ -24,24 +24,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use nydus_config::Config;
-use nydus_core::extent::MmapCache;
+use nydus_core::flat::{FlatImage, BLOCK_SIZE};
 use nydus_core::NydusCore;
-use nydus_error::{Context, Error, Result};
-use nydus_format::erofs::EROFS_BLOCK_SIZE;
-
-/// EROFS block size as u64 — reuses the canonical constant from the core.
-const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
+use nydus_error::{Error, Result};
 
 /// Read-side handle for the NBD on-demand service.
 ///
-/// Holds a shared core (so background prefetch keeps running) and the
-/// flattened device size computed at construction. All read paths are
-/// block-aligned by the NBD protocol, which matches the core's fetch
-/// precondition.
+/// A thin protocol adapter over the shared [`FlatImage`]: it adds the range
+/// check the NBD protocol guarantees (so a violated guarantee surfaces as an
+/// error instead of silent zeros) and reports the geometry the driver needs.
 pub struct NbdCore {
-    core: Arc<NydusCore>,
-    device_size: u64,
-    maps: MmapCache,
+    image: FlatImage,
 }
 
 impl NbdCore {
@@ -49,34 +42,24 @@ impl NbdCore {
     /// No blob meta is downloaded and no cache file is created until a read
     /// first touches a blob, so this returns quickly even for large images.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let core = Arc::new(NydusCore::new(bootstrap, config)?);
-
-        let flat_size = core.flat_size();
-        if flat_size == 0 {
-            return Err(Error::InvalidImage(
-                "flattened image size is zero".to_string(),
-            ));
-        }
-        if flat_size % BLOCK_SIZE != 0 {
-            return Err(Error::InvalidImage(format!(
-                "flattened image size {flat_size} is not a multiple of the {BLOCK_SIZE} B EROFS block size"
-            )));
-        }
-        Ok(Self {
-            core,
-            device_size: flat_size,
-            maps: MmapCache::default(),
-        })
+        // The NBD device addresses in EROFS blocks, so no extra rounding.
+        let image = FlatImage::open(bootstrap, config, BLOCK_SIZE)?;
+        Ok(Self { image })
     }
 
     /// Total size in bytes of the flattened block device exposed to the kernel.
     pub fn device_size(&self) -> u64 {
-        self.device_size
+        self.image.size()
     }
 
     /// Total block count (4 KiB units) reported to the NBD driver.
     pub fn block_count(&self) -> u64 {
-        self.device_size / BLOCK_SIZE
+        self.image.block_count()
+    }
+
+    /// Borrow the underlying core, e.g. to snapshot metrics.
+    pub fn core(&self) -> &Arc<NydusCore> {
+        self.image.core()
     }
 
     /// Fetch `[offset, offset + buf.len())` of the flattened device view and
@@ -88,50 +71,18 @@ impl NbdCore {
         if buf.is_empty() {
             return Ok(());
         }
-        debug_assert!(offset % BLOCK_SIZE == 0);
-        debug_assert!((buf.len() as u64) % BLOCK_SIZE == 0);
         let len = buf.len() as u64;
         let end = offset
             .checked_add(len)
             .ok_or_else(|| Error::Overflow("nbd read range overflow".to_string()))?;
-        if end > self.device_size {
+        // The shared view would zero-fill past the end; for NBD that can only
+        // mean a malformed request, so reject it instead.
+        if end > self.device_size() {
             return Err(Error::InvalidParameter(format!(
                 "nbd read [{offset}, +{len}) past flattened device size {}",
-                self.device_size
+                self.device_size()
             )));
         }
-
-        let ranges = self
-            .core
-            .fetch_flat_ranges(offset, len)
-            .context("failed to fetch flat ranges for nbd read")?;
-        // The fetch contract is a gapless cover of the request window; check it
-        // explicitly so a contract drift surfaces as an error instead of
-        // silently misplacing bytes (the shared copy below is gap-tolerant).
-        let mut written = 0usize;
-        for range in &ranges {
-            if range.source_offset != offset + written as u64 {
-                return Err(Error::Runtime(format!(
-                    "flat ranges are not contiguous: expected source offset {}, got {}",
-                    offset + written as u64,
-                    range.source_offset
-                )));
-            }
-            let seg_len = range.len as usize;
-            if written + seg_len > buf.len() {
-                return Err(Error::Runtime(format!(
-                    "flat range segment overflows read buffer: written={written} seg_len={seg_len} buf={}",
-                    buf.len()
-                )));
-            }
-            written += seg_len;
-        }
-        // Copy through the shared engine: zero fds serve zeros, everything else
-        // is copied out of a shared mapping when possible (pread fallback), and
-        // any uncovered tail is zero-filled defensively.
-        self.maps
-            .copy_ranges(&ranges, offset, self.core.zero_fd(), buf)
-            .context("failed to copy flat ranges for nbd read")?;
-        Ok(())
+        self.image.read_at(offset, buf)
     }
 }

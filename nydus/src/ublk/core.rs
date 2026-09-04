@@ -8,15 +8,14 @@
 //! the resulting device can be mounted with `mount -t erofs /dev/ublkbN`.
 
 use std::io;
-use std::os::fd::RawFd;
 use std::path::Path;
+use std::sync::Arc;
 
 use nydus_config::Config;
-use nydus_core::extent::MmapCache;
+use nydus_core::flat::FlatImage;
 use nydus_core::NydusCore;
-use nydus_error::{Context, Error, Result};
+use nydus_error::{Context, Result};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
-use nydus_format::utils::align_up_u64;
 use tracing::warn;
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
@@ -25,10 +24,7 @@ pub const UBLK_LOGICAL_BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 
 /// Read-only block device backed by a nydus image.
 pub struct UblkCore {
-    core: NydusCore,
-    zero_fd: RawFd,
-    device_size: u64,
-    maps: MmapCache,
+    image: FlatImage,
 }
 
 impl UblkCore {
@@ -37,38 +33,35 @@ impl UblkCore {
     /// table are prepared up front, and background prefetch follows
     /// `config.prefetch`.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let core = NydusCore::new(bootstrap, config)
-            .context("failed to open nydus image for the ublk device")?;
-        let zero_fd = core.zero_fd();
-        // Round the device size up to a whole block: the kernel always reads in
-        // block units, and the tail block of the last blob may be partial.
-        let device_size = align_up_u64(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
-            .ok_or_else(|| Error::Overflow("flattened device size overflow".to_string()))?;
-        // Preparing a blob loads and validates its meta and sizes its cache
-        // file. Doing it up front keeps the first block read (typically
-        // `mount`) from paying for it, and surfaces preparation errors at
-        // startup instead of as I/O errors.
-        core.blobs
-            .flat_layout()
-            .context("failed to prepare the blobs backing the device")?;
+        // The kernel always reads in whole blocks, and the tail block of the
+        // last blob may be partial, so the device is rounded up.
+        let image = FlatImage::open(bootstrap, config, UBLK_LOGICAL_BLOCK_SIZE)?;
+        // Warm the blob preparation (meta download + cache file sizing) in
+        // the background so device creation and the EROFS mount are not
+        // blocked on backend round trips. flat_layout() is single-flight: an
+        // I/O arriving first simply joins the same preparation.
+        let warm = image.core().clone();
+        std::thread::Builder::new()
+            .name("ublk-blob-warmup".to_string())
+            .spawn(move || {
+                if let Err(err) = warm.blobs.flat_layout() {
+                    tracing::warn!("background blob preparation failed: {err:#}");
+                }
+            })
+            .context("failed to spawn the blob warm-up thread")?;
 
-        Ok(Self {
-            core,
-            zero_fd,
-            device_size,
-            maps: MmapCache::default(),
-        })
+        Ok(Self { image })
     }
 
     /// Size of the block device in bytes, always a multiple of
     /// [`UBLK_LOGICAL_BLOCK_SIZE`].
     pub fn device_size(&self) -> u64 {
-        self.device_size
+        self.image.size()
     }
 
     /// Borrow the underlying core, e.g. to snapshot metrics.
-    pub fn core(&self) -> &NydusCore {
-        &self.core
+    pub fn core(&self) -> &Arc<NydusCore> {
+        self.image.core()
     }
 
     /// Read `buf.len()` bytes at `offset` of the flattened device.
@@ -78,29 +71,22 @@ impl UblkCore {
     /// device with sparse backing would return. Missing blob data is fetched
     /// from the backend on demand before the copy.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-        if offset >= self.device_size {
-            buf.fill(0);
-            return Ok(());
-        }
-
-        let len = (buf.len() as u64).min(self.device_size - offset);
-        let ranges = self.core.fetch_flat_ranges(offset, len).map_err(|err| {
+        self.image.read_at(offset, buf).map_err(|err| {
             // Recover the OS errno when the fetch failed on IO, so the ublk
             // reply carries the real code instead of collapsing to EIO. A
             // bare `from_raw_os_error` drops the context chain, so log it
             // here before converting.
             match err.io_error().and_then(|io_err| io_err.raw_os_error()) {
                 Some(errno) => {
-                    warn!("ublk fetch at {offset} (+{len}) failed: {}", err.report());
+                    warn!(
+                        "ublk read at {offset} (+{}) failed: {}",
+                        buf.len(),
+                        err.report()
+                    );
                     io::Error::from_raw_os_error(errno)
                 }
                 None => io::Error::other(err),
             }
-        })?;
-
-        self.maps.copy_ranges(&ranges, offset, self.zero_fd, buf)
+        })
     }
 }

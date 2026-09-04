@@ -1,6 +1,6 @@
 [package]
 name = "nydus-format"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -9,6 +9,7 @@ repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [dependencies]
+zstd = "0.13"
 bitflags = "2"
 crc32c = "0.6"
 libc = { workspace = true }
