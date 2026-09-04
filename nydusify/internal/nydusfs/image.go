@@ -63,6 +63,20 @@ type Image struct {
 	Bootstrap *ocispec.Descriptor
 }
 
+// RAFSVersion returns the bootstrap layer's declared RAFS version. Plain OCI
+// images have no RAFS version; legacy nydus images without the annotation
+// report "unknown".
+func (img *Image) RAFSVersion() string {
+	if img.Kind != KindNydus || img.Bootstrap == nil {
+		return ""
+	}
+	version := img.Bootstrap.Annotations[nydus.LayerAnnotationNydusFsVersion]
+	if version == "" {
+		return "unknown"
+	}
+	return version
+}
+
 // LoadImage pulls ref through provider and parses it into a single-platform
 // Image. The reference must be non-empty. pullOpt selects which data layers
 // are downloaded. reg selects which registry side's TLS/HTTP settings to use.
@@ -76,7 +90,16 @@ func LoadImage(ctx context.Context, provider *remote.Provider, ref string, platf
 	if err != nil {
 		return nil, errors.Wrap(err, "parse")
 	}
-	log.G(ctx).Infof("parsed %s as a %s image", ref, img.Kind)
+	if version := img.RAFSVersion(); version != "" {
+		log.G(ctx).Infof(
+			"parsed %s as %s image (RAFS version %s)",
+			ref,
+			img.Kind,
+			version,
+		)
+	} else {
+		log.G(ctx).Infof("parsed %s as %s image", ref, img.Kind)
+	}
 	return img, nil
 }
 
