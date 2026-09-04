@@ -167,16 +167,22 @@ impl ErofsFs {
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))
     }
 
-    /// Directory entries for a readdir(plus): through the handle when opendir
-    /// issued one, or straight from the inode for the kernel's no-opendir
-    /// dummy handle (fh 0).
-    fn dir_entries(&self, ino: INodeNo, fh: FileHandle) -> io::Result<Arc<Vec<RawDirEntry>>> {
+    fn for_each_dir_entry<F>(&self, ino: INodeNo, fh: FileHandle, mut cb: F) -> io::Result<()>
+    where
+        F: FnMut(u64, u8, &[u8]) -> io::Result<bool>,
+    {
         if fh.0 != 0 {
-            return self.dir_handle(fh.0)?.entries(self);
+            let entries = self.dir_handle(fh.0)?.entries(self)?;
+            for entry in entries.iter() {
+                if !cb(entry.nid, entry.file_type, &entry.name)? {
+                    break;
+                }
+            }
+            return Ok(());
         }
         let nid = self.ino_to_nid(ino.0);
         let vi = self.reader.inode(nid)?;
-        Ok(Arc::new(self.reader.read_dir(nid, &vi)?))
+        self.reader.for_each_dir_entry(nid, &vi, cb)
     }
 }
 
@@ -528,22 +534,21 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectory,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdir);
-        let entries = match self.dir_entries(ino, fh) {
-            Ok(entries) => entries,
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-                return;
+        let mut index = 0u64;
+        let result = self.for_each_dir_entry(ino, fh, |entry_nid, file_type, name| {
+            let entry_index = index;
+            index += 1;
+            if entry_index < offset {
+                return Ok(true);
             }
-        };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
-            let ino = self.nid_to_ino(entry.nid);
-            let kind = erofs_ft_to_kind(entry.file_type);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(INodeNo(ino), (index as u64) + 1, kind, name) {
-                break;
-            }
+            let ino = self.nid_to_ino(entry_nid);
+            let kind = erofs_ft_to_kind(file_type);
+            Ok(!reply.add(INodeNo(ino), index, kind, OsStr::from_bytes(name)))
+        });
+        if let Err(err) = result {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
@@ -557,37 +562,29 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectoryPlus,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdirplus);
-        let entries = match self.dir_entries(ino, fh) {
-            Ok(entries) => entries,
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-                return;
+        let mut index = 0u64;
+        let result = self.for_each_dir_entry(ino, fh, |entry_nid, _file_type, name| {
+            let entry_index = index;
+            index += 1;
+            if entry_index < offset {
+                return Ok(true);
             }
-        };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
-            let child_inode = match self.reader.inode(entry.nid) {
-                Ok(vi) => vi,
-                Err(err) => {
-                    m.fail();
-                    reply.error(io_errno(&err));
-                    return;
-                }
-            };
-            let attr = self.make_attr(entry.nid, &child_inode);
-            let ino = self.nid_to_ino(entry.nid);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(
+            let child_inode = self.reader.inode(entry_nid)?;
+            let attr = self.make_attr(entry_nid, &child_inode);
+            let ino = self.nid_to_ino(entry_nid);
+            Ok(!reply.add(
                 INodeNo(ino),
-                (index as u64) + 1,
-                name,
+                index,
+                OsStr::from_bytes(name),
                 &EROFS_FUSE_TIMEOUT,
                 &attr,
                 Generation(0),
-            ) {
-                break;
-            }
+            ))
+        });
+        if let Err(err) = result {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
