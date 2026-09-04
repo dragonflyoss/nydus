@@ -423,6 +423,12 @@ Current implementation notes:
 	through the storage config. See [Blob prefetch](#blob-prefetch).
 - Pass `--apiserver unix:///path/to/api.sock` to expose Prometheus metrics over a
 	Unix socket. See [Metrics](#metrics).
+- `--upgrade` adopts a Failover-Protected Session from the daemon already
+	serving the mountpoint. `--supervisor-socket` creates a Failover-Protected
+	Session through an external Recovery Holder by retaining the fixed two-fd
+	Session Transfer before readiness,
+	and boolean `--recover` receives that retained transfer after the previous
+	daemon exits. See [FUSE Session continuity](upgrade.md).
 
 Current CLI help:
 
@@ -430,7 +436,7 @@ Current CLI help:
 nydus fuse -h
 Mount a nydus image through FUSE
 
-Usage: nydus fuse [OPTIONS] --mountpoint <MOUNTPOINT>
+Usage: nydus fuse [OPTIONS] --mountpoint <MOUNTPOINT> --control-socket <CONTROL_SOCKET>
 
 Options:
 	--blob-dir <BLOB_DIR>
@@ -449,6 +455,14 @@ Options:
 		Specify the directory path to mount nydus filesystem [env: NYDUS_FUSE_MOUNTPOINT=]
 	--apiserver <APISERVER>
 		Specify the address to serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics` [env: NYDUS_FUSE_APISERVER=]
+	--upgrade
+		Hot-upgrade a Failover-Protected Session from the instance already serving this mountpoint. Requires pidfd process control to resolve cutover ownership [env: NYDUS_FUSE_UPGRADE=]
+	--supervisor-socket <SUPERVISOR_SOCKET>
+		Connect to this Recovery Holder socket to send or receive the FUSE Session Transfer. On a fresh mount, configuring a supervisor enables failover protection [env: NYDUS_FUSE_SUPERVISOR_SOCKET=]
+	--recover
+		Recover the FUSE Session Transfer retained by --supervisor-socket [env: NYDUS_FUSE_RECOVER=]
+	--control-socket <CONTROL_SOCKET>
+		Set the absolute instance control socket path outside the mountpoint. Every generation serving one mountpoint must reuse this path; its sibling .lock file serializes startup [env: NYDUS_FUSE_CONTROL_SOCKET=]
 	-l, --log-level <LOG_LEVEL>
 		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_FUSE_LOG_LEVEL=] [default: info]
 	--log-dir <LOG_DIR>
@@ -459,11 +473,27 @@ Options:
 
 Supported forms:
 
-- `nydus fuse --blob <blob> --mountpoint <mountpoint>`
-- `nydus fuse --bootstrap <bootstrap> --blob-dir <blob-dir> --mountpoint <mountpoint>`
-- `nydus fuse --bootstrap <bootstrap> --config <config.yaml> --mountpoint <mountpoint>`
+- `nydus fuse --blob <blob> --mountpoint <mountpoint> --control-socket <control>`
+- `nydus fuse --bootstrap <bootstrap> --blob-dir <blob-dir> --mountpoint <mountpoint> --control-socket <control>`
+- `nydus fuse --bootstrap <bootstrap> --config <config.yaml> --mountpoint <mountpoint> --control-socket <control>`
+- Add `--supervisor-socket <path>` to a fresh-mount form only when a Recovery
+  Holder is listening and will retain the fixed two-fd Session Transfer before
+  the mount is published.
+- Add `--upgrade` to take over a matching Failover-Protected Session. The
+  successor inherits the same Session Identity and recovery resource. A
+  Standalone Session rejects `--upgrade`.
+- Add `--recover --supervisor-socket <path>` to restore the retained FUSE
+  Session after the previous daemon has exited. The Holder supplies the
+  Session Identity inside the opaque transfer.
 
 The fuse command rejects mixed or partial combinations outside these forms.
+The control socket must be absolute and has no default. Its sibling
+`<control>.lock` serializes startup, so all generations serving one mountpoint
+must reuse the same path. Place it outside the mountpoint.
+`--recover` is mutually exclusive with `--upgrade` and requires
+`--supervisor-socket`; for a fresh Failover-Protected Session, readiness is
+published only after the Holder acknowledges retention and the control endpoint
+reports the retained Session Identity through `INFO`.
 `--cache-dir` is optional; without it (and without a cache directory from
 `--config`), runtime fetches and validates requested blob_meta block groups using a
 temporary cache directory that is removed on exit. When `--config` is provided,
@@ -747,7 +777,9 @@ Unknown `backend.type` values and unknown fields are rejected at load time.
 Example invocations:
 
 ```bash
-nydus fuse --bootstrap layer.bootstrap --config storage.yaml --mountpoint /mnt/nydus
+nydus fuse --bootstrap layer.bootstrap --config storage.yaml \
+  --mountpoint /mnt/nydus \
+  --control-socket "${XDG_RUNTIME_DIR:?}/nydus/control.sock"
 nydus uffd --bootstrap layer.bootstrap --config storage.yaml --socket /run/nydus/uffd.sock
 nydus check --bootstrap layer.bootstrap --config storage.yaml
 ```
@@ -862,8 +894,11 @@ Fields under `backend.config`:
 When `nydus fuse` is started with `--apiserver unix:///path/to/api.sock`, a
 small HTTP server is bound to that Unix socket and serves the Prometheus text
 exposition at `GET /metrics` and the recorded on-demand block group access order at
-`GET /trace` (any other path returns `404`). The server is torn down and the
-socket unlinked when the mount exits. Scrape it with, e.g.:
+`GET /trace` (any other path returns `404`). The server is torn down when the
+mount exits, but its socket pathname is intentionally left in place so an
+exiting hot-upgrade predecessor cannot unlink its successor's rebound endpoint.
+The next server start reclaims an inert pathname before binding; pathname
+removal must not be used as a shutdown signal. Scrape it with, e.g.:
 
 ```bash
 curl --unix-socket /run/nydus/api.sock http://localhost/metrics

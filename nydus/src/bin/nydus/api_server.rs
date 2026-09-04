@@ -8,7 +8,6 @@
 
 use nydus::error::{Context, Result};
 use nydus::parse_unix_address;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -25,7 +24,6 @@ use tracing::{error, info, warn};
 
 /// A running metrics HTTP server bound to a Unix socket.
 pub struct ApiServer {
-    socket_path: PathBuf,
     shutdown: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
 }
@@ -42,7 +40,9 @@ impl ApiServer {
                 })?;
             }
         }
-        // Remove a stale socket left behind by a previous run.
+        // Take over the pathname: remove a stale socket left behind by a
+        // previous run, or the still-bound socket of a hot-upgrade
+        // predecessor (which never unlinks, see `stop`).
         if socket_path.exists() {
             std::fs::remove_file(&socket_path).with_context(|| {
                 format!(
@@ -78,19 +78,21 @@ impl ApiServer {
             socket_path.display()
         );
         Ok(Self {
-            socket_path,
             shutdown,
             handle: Some(handle),
         })
     }
 
-    /// Stop the server, join its thread, and unlink the socket.
+    /// Stop the server and join its thread. The socket pathname is left in
+    /// place on purpose: during a hot upgrade the successor may already have
+    /// rebound the same path, and any check-then-unlink here races its
+    /// rebind (an inode comparison can even be fooled by inode reuse). A
+    /// leftover pathname is inert — every `start` reclaims it before binding.
     pub fn stop(mut self) {
         self.shutdown.notify_waiters();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 

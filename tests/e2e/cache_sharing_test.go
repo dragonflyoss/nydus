@@ -97,6 +97,7 @@ func startCoreMount(t *testing.T, nydusBin string, opt coreMountOption) *coreMou
 		"--blob-dir", opt.blobDir,
 		"--cache-dir", opt.cacheDir,
 		"--mountpoint", opt.mnt,
+		"--control-socket", filepath.Join(sockDir, "control.sock"),
 		"--apiserver", "unix://" + sock,
 	}
 	if opt.prefetch {
