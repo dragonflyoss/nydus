@@ -32,6 +32,7 @@ type ImageKind int
 const (
 	// KindOCI is a regular OCI image.
 	KindOCI ImageKind = iota
+
 	// KindNydus is a nydus (nydus-compatible) image with a bootstrap layer.
 	KindNydus
 )
@@ -63,18 +64,21 @@ type Image struct {
 	Bootstrap *ocispec.Descriptor
 }
 
-// RAFSVersion returns the bootstrap layer's declared RAFS version. Plain OCI
-// images have no RAFS version; legacy nydus images without the annotation
-// report "unknown".
-func (img *Image) RAFSVersion() string {
+// FsVersion returns the nydus fs-version declared by the bootstrap layer's
+// nydus.LayerAnnotationNydusFsVersion annotation. ok is false for plain OCI
+// images, which have no fs-version. Legacy nydus images that predate the
+// annotation report nydus.NydusFsVersionUnknown with ok set to true.
+func (img *Image) FsVersion() (string, bool) {
 	if img.Kind != KindNydus || img.Bootstrap == nil {
-		return ""
+		return "", false
 	}
+
 	version := img.Bootstrap.Annotations[nydus.LayerAnnotationNydusFsVersion]
 	if version == "" {
-		return "unknown"
+		return nydus.NydusFsVersionUnknown, true
 	}
-	return version
+
+	return version, true
 }
 
 // LoadImage pulls ref through provider and parses it into a single-platform
@@ -86,13 +90,15 @@ func LoadImage(ctx context.Context, provider *remote.Provider, ref string, platf
 	if err != nil {
 		return nil, errors.Wrap(err, "pull")
 	}
+
 	img, err := parseImage(ctx, provider.ContentStore(), ref, desc, platformMC)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse")
 	}
-	if version := img.RAFSVersion(); version != "" {
+
+	if version, ok := img.FsVersion(); ok {
 		log.G(ctx).Infof(
-			"parsed %s as %s image (RAFS version %s)",
+			"parsed %s as %s image (fs-version %s)",
 			ref,
 			img.Kind,
 			version,
@@ -100,6 +106,7 @@ func LoadImage(ctx context.Context, provider *remote.Provider, ref string, platf
 	} else {
 		log.G(ctx).Infof("parsed %s as %s image", ref, img.Kind)
 	}
+
 	return img, nil
 }
 

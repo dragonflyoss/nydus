@@ -36,18 +36,26 @@ const (
 
 	// LayerAnnotationNydusBlob marks a layer as a nydus data blob.
 	LayerAnnotationNydusBlob = "containerd.io/snapshot/nydus-blob"
+
 	// LayerAnnotationNydusBlobOptimized marks a nydus data blob as the ondemand
 	// blob appended by `nydusify optimize`. It holds a rearranged copy of data
 	// already present in the other blobs and describes no filesystem tree of
 	// its own.
 	LayerAnnotationNydusBlobOptimized = "containerd.io/snapshot/nydus-blob-optimized"
+
 	// LayerAnnotationNydusBootstrap marks a layer as the nydus bootstrap.
 	LayerAnnotationNydusBootstrap = "containerd.io/snapshot/nydus-bootstrap"
+
 	// LayerAnnotationNydusFsVersion marks a bootstrap layer as a nydus pmem
 	// image for snapshotters that dispatch by nydus fs-version annotations.
 	LayerAnnotationNydusFsVersion = "containerd.io/snapshot/nydus-fs-version"
+
 	// NydusFsVersion is the pseudo nydus fs-version used for nydus pmem images.
 	NydusFsVersion = "7"
+
+	// NydusFsVersionUnknown is reported for nydus images whose bootstrap layer
+	// predates LayerAnnotationNydusFsVersion and therefore declares no version.
+	NydusFsVersionUnknown = "unknown"
 
 	// LayerAnnotationUncompressed holds the uncompressed digest (diff id) of a
 	// layer, following the containerd convention.
@@ -58,8 +66,10 @@ const (
 const (
 	// DefaultChunkSize is the default nydus file chunk size in bytes.
 	DefaultChunkSize = 1 << 20
+
 	// DefaultBlockGroupSize is the default block group uncompressed size in bytes.
 	DefaultBlockGroupSize = 4 << 20
+
 	// DefaultCompressor is the default chunk data compressor.
 	DefaultCompressor = "zstd"
 )
