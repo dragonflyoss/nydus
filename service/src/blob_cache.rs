@@ -214,7 +214,7 @@ impl BlobCacheState {
             let scoped_blob_prefix = generate_blob_key(&param.domain_id, &param.blob_id);
 
             match self.id_to_config_map.get(&scoped_blob_prefix) {
-                None => return Err(enoent!("blob_cache: cache entry not found")),
+                None => return Ok(()),
                 Some(BlobConfig::MetaBlob(o)) => {
                     is_meta = true;
                     data_blobs = o.blobs.lock().unwrap().clone();
@@ -240,6 +240,13 @@ impl BlobCacheState {
 
     fn get(&self, key: &str) -> Option<BlobConfig> {
         self.id_to_config_map.get(key).cloned()
+    }
+
+    fn contains_blob_id(&self, blob_id: &str) -> bool {
+        self.id_to_config_map.values().any(|config| match config {
+            BlobConfig::MetaBlob(blob) => blob.blob_id == blob_id,
+            BlobConfig::DataBlob(blob) => blob.blob_info.blob_id() == blob_id,
+        })
     }
 }
 
@@ -308,6 +315,11 @@ impl BlobCacheMgr {
     /// Get configuration information of the cached blob with specified `key`.
     pub fn get_config(&self, key: &str) -> Option<BlobConfig> {
         self.get_state().get(key)
+    }
+
+    /// Check whether a bootstrap or data blob still has a configured reference.
+    pub fn contains_blob_id(&self, blob_id: &str) -> bool {
+        self.get_state().contains_blob_id(blob_id)
     }
 
     #[inline]
@@ -764,6 +776,7 @@ mod tests {
         mgr.add_blob_entry(&entry).unwrap();
         let blob_id = generate_blob_key(&entry.domain_id, &entry.blob_id);
         assert!(mgr.get_config(&blob_id).is_some());
+        assert!(mgr.contains_blob_id(&entry.blob_id));
 
         // add the same entry will trigger an error
         assert!(mgr.add_blob_entry(&entry).is_err());
@@ -774,6 +787,8 @@ mod tests {
             "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef",
         );
         assert!(mgr.get_config(&key).is_some());
+        assert!(mgr
+            .contains_blob_id("be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef"));
 
         assert_eq!(mgr.get_state().id_to_config_map.len(), 2);
 
@@ -798,9 +813,17 @@ mod tests {
             blob_id: "rafs-v6-cloned".to_string(),
         })
         .unwrap();
+        // Teardown retries must be idempotent after the first request removed the entry.
+        mgr.remove_blob_entry(&BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: "rafs-v6-cloned".to_string(),
+        })
+        .unwrap();
         assert_eq!(mgr.get_state().id_to_config_map.len(), 0);
         assert!(mgr.get_config(&blob_id).is_none());
         assert!(mgr.get_config(&blob_id_cloned).is_none());
+        assert!(!mgr
+            .contains_blob_id("be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef"));
     }
 
     #[test]

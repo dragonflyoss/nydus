@@ -19,8 +19,8 @@ use nydus_api::config::BlobCacheList;
 use nydus_api::BuildTimeInfo;
 
 use crate::daemon::{
-    DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
-    NydusDaemon,
+    BlobCullResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
+    DaemonStateMachineSubscriber, NydusDaemon,
 };
 use crate::fs_service::FsService;
 #[cfg(target_os = "linux")]
@@ -236,6 +236,28 @@ impl NydusDaemon for ServiceController {
                 return fscache
                     .cull_cache(_blob_id)
                     .map_err(|e| Error::StartService(format!("{}", e)));
+            }
+        }
+        Err(Error::Unsupported)
+    }
+
+    fn cull_blob(&self, _blob_id: String, _background: bool) -> Result<BlobCullResult> {
+        #[cfg(target_os = "linux")]
+        if self.fscache_enabled.load(Ordering::Acquire) {
+            if let Some(fscache) = self.fscache.lock().unwrap().clone() {
+                return fscache
+                    .cull_cache_status(_blob_id, _background)
+                    .map_err(|e| Error::StartService(format!("{}", e)));
+            }
+        }
+        Err(Error::Unsupported)
+    }
+
+    fn pending_culls(&self) -> Result<std::collections::HashMap<String, String>> {
+        #[cfg(target_os = "linux")]
+        if self.fscache_enabled.load(Ordering::Acquire) {
+            if let Some(fscache) = self.fscache.lock().unwrap().clone() {
+                return Ok(fscache.pending_culls());
             }
         }
         Err(Error::Unsupported)

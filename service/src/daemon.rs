@@ -8,6 +8,7 @@
 
 use std::any::Any;
 use std::cmp::PartialEq;
+use std::collections::HashMap;
 use std::convert::From;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
@@ -25,6 +26,15 @@ use serde::{self, Serialize};
 use crate::fs_service::{FsBackendCollection, FsService};
 use crate::upgrade::UpgradeManager;
 use crate::{BlobCacheMgr, Error, Result};
+
+/// Result of trying to reclaim a blob from the kernel fscache.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BlobCullResult {
+    /// The cache cookie was reclaimed or is stably absent.
+    Done,
+    /// Reclamation has not completed; background requests remain owned by the cull worker.
+    Pending(String),
+}
 
 /// Nydus daemon working states.
 #[allow(clippy::upper_case_acronyms)]
@@ -189,6 +199,16 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
     /// Delete a blob object managed by the daemon.
     fn delete_blob(&self, _blob_id: String) -> Result<()> {
         Ok(())
+    }
+
+    /// Try to reclaim a blob and report whether it completed synchronously.
+    fn cull_blob(&self, _blob_id: String, _background: bool) -> Result<BlobCullResult> {
+        Err(Error::Unsupported)
+    }
+
+    /// Return cull operations that are still waiting for a lifecycle or cachefiles event.
+    fn pending_culls(&self) -> Result<HashMap<String, String>> {
+        Err(Error::Unsupported)
     }
 }
 
