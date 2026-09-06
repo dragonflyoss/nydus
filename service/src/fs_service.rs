@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, MutexGuard};
 
+use crate::upgrade::UpgradeManager;
+use crate::{Error, FsBackendDescriptor, FsBackendType, Result};
 use fuse_backend_rs::abi::fuse_abi::ROOT_ID;
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::api::filesystem::{FileSystem, FsOptions, Layer};
@@ -31,8 +33,8 @@ use serde::{Deserialize, Serialize};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 
-use crate::upgrade::UpgradeManager;
-use crate::{Error, FsBackendDescriptor, FsBackendType, Result};
+type IdMapping = (u32, u32, u32);
+type BackendMountResult = (BackFileSystem, Option<IdMapping>);
 
 /// Request structure to mount a filesystem instance.
 #[derive(Clone, Versionize, Debug)]
@@ -115,8 +117,8 @@ pub trait FsService: Send + Sync {
         if self.backend_from_mountpoint(&cmd.mountpoint)?.is_some() {
             return Err(Error::AlreadyExists);
         }
-        let backend = fs_backend_factory(&cmd)?;
-        let index = self.get_vfs().mount(backend, &cmd.mountpoint)?;
+        let (backend, id_mapping) = fs_backend_factory(&cmd)?;
+        let index = self.get_vfs().mount(backend, &cmd.mountpoint, id_mapping)?;
         info!("{} filesystem mounted at {}", &cmd.fs_type, &cmd.mountpoint);
 
         if let Err(e) = self.backend_collection().add(&cmd.mountpoint, &cmd) {
@@ -169,9 +171,9 @@ pub trait FsService: Send + Sync {
 
     /// Restore a filesystem instance.
     fn restore_mount(&self, cmd: &FsBackendMountCmd, vfs_index: u8) -> Result<()> {
-        let backend = fs_backend_factory(cmd)?;
+        let (backend, id_mapping) = fs_backend_factory(cmd)?;
         self.get_vfs()
-            .restore_mount(backend, vfs_index, &cmd.mountpoint)
+            .restore_mount(backend, vfs_index, &cmd.mountpoint, id_mapping)
             .map_err(VfsError::RestoreMount)?;
         self.backend_collection().add(&cmd.mountpoint, cmd)?;
         info!("backend fs restored at {}", cmd.mountpoint);
@@ -293,12 +295,13 @@ fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> Result<Option<Vec
     }
 }
 
-fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
+fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackendMountResult> {
     let prefetch_files = validate_prefetch_file_list(&cmd.prefetch_files)?;
 
     match cmd.fs_type {
         FsBackendType::Rafs => {
             let config = ConfigV2::from_str(cmd.config.as_str()).map_err(RafsError::LoadConfig)?;
+            let id_mapping = config.get_id_mapping();
             let config = Arc::new(config);
             let (mut rafs, reader) = Rafs::new(&config, &cmd.mountpoint, Path::new(&cmd.source))?;
             rafs.import(reader, prefetch_files)?;
@@ -365,12 +368,12 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
                             .import()
                             .map_err(|e| Error::InvalidConfig(format!("{}", e)))?;
                         info!("Overlay filesystem imported");
-                        Ok(Box::new(overlayfs))
+                        Ok((Box::new(overlayfs), id_mapping))
                     }
                 }
                 None => {
                     info!("RAFS filesystem imported");
-                    Ok(Box::new(rafs))
+                    Ok((Box::new(rafs), id_mapping))
                 }
             }
         }
@@ -396,7 +399,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
                     PassthroughFs::<()>::new(fs_cfg).map_err(Error::PassthroughFs)?;
                 passthrough_fs.import().map_err(Error::PassthroughFs)?;
                 info!("PassthroughFs imported");
-                Ok(Box::new(passthrough_fs))
+                Ok((Box::new(passthrough_fs), None))
             }
         }
     }
@@ -405,6 +408,153 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
+    use std::sync::Mutex;
+
+    use fuse_backend_rs::api::filesystem::{Context, Entry, FileSystem};
+    use vmm_sys_util::tempdir::TempDir;
+
+    struct TestFsService {
+        vfs: Vfs,
+        backends: Mutex<FsBackendCollection>,
+    }
+
+    impl TestFsService {
+        fn new() -> Self {
+            Self {
+                vfs: Vfs::default(),
+                backends: Mutex::new(FsBackendCollection::default()),
+            }
+        }
+    }
+
+    impl FsService for TestFsService {
+        fn get_vfs(&self) -> &Vfs {
+            &self.vfs
+        }
+
+        fn upgrade_mgr(&self) -> Option<MutexGuard<'_, UpgradeManager>> {
+            None
+        }
+
+        fn backend_collection(&self) -> MutexGuard<'_, FsBackendCollection> {
+            self.backends.lock().unwrap()
+        }
+
+        fn export_inflight_ops(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn prepare_rafs_fixture() -> (TempDir, PathBuf) {
+        let tmp_dir = TempDir::new().unwrap();
+        let root_dir = std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+
+        let mut blob_src = PathBuf::from(&root_dir);
+        blob_src.push("../tests/texture/blobs/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+        let mut blob_dst = tmp_dir.as_path().to_path_buf();
+        blob_dst.push("be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+        std::fs::copy(&blob_src, &blob_dst).unwrap();
+
+        let mut bootstrap = PathBuf::from(&root_dir);
+        bootstrap.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+
+        (tmp_dir, bootstrap)
+    }
+
+    fn rafs_test_config(work_dir: &Path, id_mapping: Option<(u32, u32, u32)>) -> String {
+        let mut config = format!(
+            r#"
+            version = 2
+            id = "factory1"
+
+            [backend]
+            type = "localfs"
+
+            [backend.localfs]
+            dir = "{}"
+
+            [cache]
+            type = "filecache"
+
+            [cache.filecache]
+            work_dir = "{}"
+
+            [rafs]
+            mode = "direct"
+            enable_xattr = true
+        "#,
+            work_dir.display(),
+            work_dir.display()
+        );
+
+        if let Some((internal, external, range)) = id_mapping {
+            config.push_str(&format!(
+                "\n            id_mapping = [{internal}, {external}, {range}]\n"
+            ));
+        }
+
+        config
+    }
+
+    fn lookup_mount_root(vfs: &Vfs, mount_name: &str) -> Entry {
+        let ctx = Context::new();
+        vfs.lookup(
+            &ctx,
+            ROOT_ID.into(),
+            CString::new(mount_name).unwrap().as_c_str(),
+        )
+        .unwrap()
+    }
+
+    fn mount_rafs(
+        service: &TestFsService,
+        mountpoint: &str,
+        bootstrap: &Path,
+        work_dir: &Path,
+        id_mapping: Option<(u32, u32, u32)>,
+    ) {
+        service
+            .mount(FsBackendMountCmd {
+                fs_type: FsBackendType::Rafs,
+                config: rafs_test_config(work_dir, id_mapping),
+                mountpoint: mountpoint.to_string(),
+                source: bootstrap.display().to_string(),
+                prefetch_files: None,
+            })
+            .unwrap();
+    }
+
+    fn assert_vfs_root_ids(service: &TestFsService, mount_name: &str, uid: u32, gid: u32) {
+        let entry = lookup_mount_root(service.get_vfs(), mount_name);
+        assert_eq!(entry.attr.st_uid, uid);
+        assert_eq!(entry.attr.st_gid, gid);
+
+        let (attr, _) = service
+            .get_vfs()
+            .getattr(&Context::new(), entry.inode.into(), None)
+            .unwrap();
+        assert_eq!(attr.st_uid, uid);
+        assert_eq!(attr.st_gid, gid);
+    }
+
+    fn assert_backend_root_ids(service: &TestFsService, mountpoint: &str, uid: u32, gid: u32) {
+        let (backend, _) = service
+            .backend_from_mountpoint(mountpoint)
+            .unwrap()
+            .unwrap();
+        let rafs = backend.deref().as_any().downcast_ref::<Rafs>().unwrap();
+
+        let root_ino = rafs.get_root_inode().unwrap().ino();
+        let (attr, _) = rafs.getattr(&Context::new(), root_ino, None).unwrap();
+
+        assert_eq!(attr.st_uid, uid);
+        assert_eq!(attr.st_gid, gid);
+    }
 
     #[test]
     fn it_should_add_new_backend() {
@@ -539,45 +689,62 @@ mod tests {
 
     #[test]
     fn it_should_create_rafs_backend() {
-        let config = r#"
-        {
-            "device": {
-              "backend": {
-                "type": "oss",
-                "config": {
-                  "endpoint": "test",
-                  "access_key_id": "test",
-                  "access_key_secret": "test",
-                  "bucket_name": "antsys-nydus",
-                  "object_prefix":"nydus_v2/",
-                  "scheme": "http"
-                }
-              }
-            },
-            "mode": "direct",
-            "digest_validate": false,
-            "enable_xattr": true,
-            "fs_prefetch": {
-              "enable": true,
-              "threads_count": 10,
-              "merging_size": 131072,
-              "bandwidth_rate": 10485760
-            }
-          }"#;
-        let bootstrap = "../tests/texture/bootstrap/nydusd_daemon_test_bootstrap";
-        if fs_backend_factory(&FsBackendMountCmd {
+        let (tmp_dir, bootstrap) = prepare_rafs_fixture();
+        let config = rafs_test_config(tmp_dir.as_path(), None);
+        let (backend, id_mapping) = fs_backend_factory(&FsBackendMountCmd {
             fs_type: FsBackendType::Rafs,
-            config: config.to_string(),
+            config,
             mountpoint: "testmountpoint".to_string(),
-            source: bootstrap.to_string(),
+            source: bootstrap.display().to_string(),
             prefetch_files: Some(vec!["/testfile".to_string()]),
         })
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Rafs>()
-        .is_none()
-        {
+        .unwrap();
+
+        assert!(id_mapping.is_none());
+        if backend.as_any().downcast_ref::<Rafs>().is_none() {
             panic!("failed to create rafs backend")
         }
+    }
+
+    #[test]
+    fn it_should_apply_id_mapping_after_mount() {
+        let service = TestFsService::new();
+        let (tmp_dir, bootstrap) = prepare_rafs_fixture();
+
+        mount_rafs(
+            &service,
+            "/mapped",
+            &bootstrap,
+            tmp_dir.as_path(),
+            Some((0, 100000, 65536)),
+        );
+        assert_vfs_root_ids(&service, "mapped", 100000, 100000);
+        assert_backend_root_ids(&service, "/mapped", 0, 0);
+    }
+
+    #[test]
+    fn it_should_keep_per_mount_id_mapping_isolated() {
+        let service = TestFsService::new();
+        let (tmp_dir, bootstrap) = prepare_rafs_fixture();
+
+        mount_rafs(
+            &service,
+            "/mapped-a",
+            &bootstrap,
+            tmp_dir.as_path(),
+            Some((0, 100000, 65536)),
+        );
+        mount_rafs(
+            &service,
+            "/mapped-b",
+            &bootstrap,
+            tmp_dir.as_path(),
+            Some((0, 200000, 65536)),
+        );
+
+        assert_vfs_root_ids(&service, "mapped-a", 100000, 100000);
+        assert_vfs_root_ids(&service, "mapped-b", 200000, 200000);
+        assert_backend_root_ids(&service, "/mapped-a", 0, 0);
+        assert_backend_root_ids(&service, "/mapped-b", 0, 0);
     }
 }
