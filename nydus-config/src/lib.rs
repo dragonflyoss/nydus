@@ -269,6 +269,50 @@ impl TlsConfig {
 
 /// The Dragonfly configuration for the registry backend, routing blob `GET`s
 /// through the Dragonfly client SDK.
+///
+/// A seed peer answers with the error type header saying which layer failed,
+/// and the status code decides what nydus does next:
+///
+/// ```text
+/// nydus ──GET──▶ seed peer ──▶ dfdaemon ──miss──▶ origin registry
+///                    │             │                    │
+///                proxy error   dfdaemon error      backend error
+/// ```
+///
+/// | Layer    | Status                                | Meaning                                         |
+/// |----------|---------------------------------------|-------------------------------------------------|
+/// | proxy    | `400` / `401` / `403`                 | bad request, bad proxy credentials, blocklisted |
+/// | proxy    | `429`                                 | the seed peer is rate limited                   |
+/// | dfdaemon | `400` / `422`                         | invalid request, or the origin sent no length   |
+/// | dfdaemon | `507`                                 | the seed peer has no room for the blob          |
+/// | dfdaemon | `500`                                 | scheduling, peer download or streaming failed   |
+/// | backend  | the origin's own status               | the origin refused or failed the request        |
+///
+/// Whatever the layer, the status alone drives the outcome. A definitive answer
+/// is settled at once for both read kinds, a transient one splits by read kind:
+///
+/// ```text
+///                        ┌─ 2xx / 3xx ─────────────────▶ served
+///                        │
+/// seed peer answer ──────┼─ 401 ───────────────────────▶ auth handshake, resent
+///                        │
+///                        ├─ 400 / 403 / 404 / 422 ─────▶ read fails
+///                        │
+///                        └─ 429 / 5xx / 408 / timeout ─┬─ on-demand ─▶ retry, then origin
+///                                                      │
+///                                                      └─ prefetch ──▶ reschedule
+/// ```
+///
+/// | Answer                        | On-demand                                      | Prefetch                           |
+/// |-------------------------------|------------------------------------------------|------------------------------------|
+/// | `2xx` / `3xx`                 | served, a `3xx` followed through Dragonfly     | same                               |
+/// | `401`                         | registry auth handshake, then resent once      | same                               |
+/// | `400` / `403` / `404` / `422` | read fails, no retry, no origin                | same                               |
+/// | `429` / `5xx` / `408`         | retried on the next seed peer, then the origin | rescheduled hours later, no origin |
+///
+/// On-demand reads retry `max_retries` times and reach the origin under
+/// `back_to_source.request_rate_limit`. A timeout or connection failure counts
+/// as a transient answer.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DragonflyConfig {
