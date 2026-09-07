@@ -4,7 +4,9 @@
 # This config serves blobs from an OCI image registry instead of a local
 # directory. Mount with:
 #
-#   nydus fuse --bootstrap layer.bootstrap --config config/registry.example.yaml --mountpoint /mnt/nydus
+#   nydus fuse --bootstrap layer.bootstrap --config config/registry.example.yaml \
+#     --mountpoint /mnt/nydus \
+#     --control-socket "${XDG_RUNTIME_DIR:?}/nydus/control.sock"
 #
 # Note: `nydus check` only supports the `local` backend; this registry config
 # is intended for `nydus fuse`.

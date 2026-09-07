@@ -270,7 +270,8 @@ Build a directory into a nydus layer and mount it:
 nydus build --blob ./layer.blob /path/to/source-dir
 
 # Mount the blob directly.
-nydus fuse --blob ./layer.blob --mountpoint /mnt/nydus
+nydus fuse --blob ./layer.blob --mountpoint /mnt/nydus \
+  --control-socket "${XDG_RUNTIME_DIR:?}/nydus/control.sock"
 
 # Inspect it without mounting.
 nydus check --blob ./layer.blob
@@ -295,7 +296,9 @@ Mount a converted image lazily from the registry with a YAML storage config
 [`config/registry.example.yaml`](config/registry.example.yaml)):
 
 ```bash
-nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountpoint /mnt/nydus
+nydus fuse --bootstrap image.boot --config config/registry.example.yaml \
+  --mountpoint /mnt/nydus \
+  --control-socket "${XDG_RUNTIME_DIR:?}/nydus/control.sock"
 ```
 
 ## Documentation
@@ -303,6 +306,7 @@ nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountp
 | Document                       | Contents                                                                                                                                          |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`    |
+| [docs/upgrade.md](docs/upgrade.md) | Service continuity: startup modes, control protocols, hot upgrade, crash failover, recovery, and teardown; currently implemented for FUSE |
 | [docs/uffd.md](docs/uffd.md)   | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem |
 | [docs/ublk.md](docs/ublk.md)   | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths |
 | [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                   |
@@ -352,6 +356,9 @@ make test
 # End-to-end integration tests (requires root and FUSE).
 make test-e2e
 
+# FUSE hot-upgrade and crash-failover continuity tests (requires root and FUSE).
+make test-fuse-continuity
+
 # UFFD service smoke test.
 make test-uffd
 
@@ -368,9 +375,9 @@ make test-nbd
 # (requires root and fio; unavailable modes are skipped individually).
 make test-bench
 
-# xfstests regression (requires root).
-make test-xfstests
+# Filesystem behavior tests (requires root and FUSE).
+make test-fs
 ```
 
-Integration tests live under `tests/integration/`. See the `Makefile` for
-per-target knobs such as `E2E_TEST=<regex>` to select a single e2e test.
+End-to-end tests live under `tests/e2e/`. See the `Makefile` for per-target
+knobs such as `E2E_TEST=<regex>` and `FUSE_CONTINUITY_COUNT=<count>`.

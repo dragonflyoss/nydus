@@ -129,6 +129,40 @@ jobs:
         run: |
           make test-fs
 
+  fuse-continuity-tests:
+    name: Run FUSE continuity tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+
+      - name: Install fuse3 and erofs-utils
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fuse3 erofs-utils
+
+      - name: Run FUSE hot-upgrade and failover E2E tests
+        run: |
+          make test-fuse-continuity
+
   nbd-tests:
     name: Run NBD tests
     runs-on: ubuntu-latest

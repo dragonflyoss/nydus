@@ -1,4 +1,4 @@
-//! Mount helpers shared by the fanotify and NBD mount lifecycles.
+//! Mount helpers shared by the fanotify, FUSE, and NBD mount lifecycles.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;

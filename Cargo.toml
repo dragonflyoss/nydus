@@ -2,6 +2,12 @@
 resolver = "2"
 members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry"]
 
+# fuser 0.18.0 plus the live-session handoff and crash-failover primitives
+# (handshake-skip constructor, pausable event loops, mount disarm, inflight
+# journal and recovery), kept on a fork until they land upstream.
+[patch.crates-io]
+fuser = { git = "https://github.com/Zephyrcf/fuser.git", tag = "0.18.0-upgrade-rc2" }
+
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env", "string"] }
 libc = "0.2"

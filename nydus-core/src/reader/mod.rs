@@ -16,6 +16,7 @@ use nydus_format::erofs::{
     EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE,
     EROFS_SUPER_OFFSET,
 };
+use nydus_format::utils::sha256_bytes;
 use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
 use nydus_storage::prefetch::PrefetchPlan;
@@ -298,6 +299,17 @@ impl ErofsReader {
     /// Get a zero-copy reference to the on-disk superblock.
     pub fn superblock(&self) -> &ErofsSuperblock {
         cast_ref::<ErofsSuperblock>(&self.mmap[self.sb_offset..])
+    }
+
+    /// Stable commitment to the opened filesystem image metadata.
+    ///
+    /// A standalone bootstrap is hashed in full. For a full blob the mapped
+    /// region starts at its embedded bootstrap, so this covers the bootstrap,
+    /// blob metadata, and footer without re-reading the potentially large data
+    /// region. The bootstrap device slots commit that data by SHA-256, and
+    /// `open_blob` verifies the actual data region against the slot digest.
+    pub fn image_digest(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+        sha256_bytes(&self.mmap[self.image_offset..])
     }
 
     pub fn blob_infos(&self) -> io::Result<&[RawBlobInfo]> {

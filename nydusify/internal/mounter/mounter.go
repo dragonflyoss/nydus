@@ -163,12 +163,17 @@ func (m *Mounter) mountNydus(ctx context.Context, provider *remote.Provider, cs 
 	// Expose Prometheus metrics over a Unix socket under the work dir so the
 	// running mount can be scraped (e.g. curl --unix-socket).
 	apiSocket := filepath.Join(m.opt.WorkDir, "apiserver.sock")
+	controlSocket, err := filepath.Abs(filepath.Join(m.opt.WorkDir, "control.sock"))
+	if err != nil {
+		return errors.Wrap(err, "resolve nydus control socket")
+	}
 
 	args := []string{
 		"fuse",
 		"--bootstrap", bootstrapPath,
 		"--config", configPath,
 		"--mountpoint", m.opt.Mountpoint,
+		"--control-socket", controlSocket,
 		"--apiserver", "unix://" + apiSocket,
 		"--log-level", cmp.Or(m.opt.LogLevel, nydus.DefaultLogLevel),
 		"--log-dir", logDir,

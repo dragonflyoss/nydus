@@ -48,6 +48,10 @@ NBD_TIMEOUT ?= 600s
 NBD_COUNT ?= 1
 NBD_GO_TEST_ARGS ?=
 
+FUSE_CONTINUITY_TIMEOUT ?= 600s
+FUSE_CONTINUITY_COUNT ?= 1
+FUSE_CONTINUITY_GO_TEST_ARGS ?=
+
 FS_TIMEOUT ?= 1800s
 FS_COUNT ?= 1
 FS_GO_TEST_ARGS ?=
@@ -81,6 +85,9 @@ CACHE_SHARING_TEST_FILES = cache_sharing_test.go $(TEST_SUPPORT_FILES)
 FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
+FUSE_CONTINUITY_TEST_FILES = \
+	fuse_continuity_test.go \
+	$(TEST_SUPPORT_FILES)
 # NBD and bench use whole-package compilation: nbd_test.go and bench_test.go
 # reuse helpers (shaFile, usedBytes, kernelVersion, erofsSupported, etc.)
 # defined in fanotify_test.go and nbd_test.go, so the entire package must be
@@ -88,7 +95,7 @@ FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 NBD_TEST_PKG = .
 BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-fuse-continuity test-tooci test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -187,6 +194,18 @@ test-fanotify: release nydusify
 		FANOTIFY_RUN_FAIL_CLOSED="$(FANOTIFY_RUN_FAIL_CLOSED)" \
 		FANOTIFY_RUN_STRACE="$(FANOTIFY_RUN_STRACE)" \
 		$(GO_BIN) test -v -run '^TestFanotify$$' -count $(FANOTIFY_COUNT) -timeout $(FANOTIFY_TIMEOUT) $(FANOTIFY_GO_TEST_ARGS) $(FANOTIFY_TEST_FILES)
+
+# Run the retained FUSE continuity E2E tests (requires root: mounting needs
+# CAP_SYS_ADMIN). Uses a LOCAL backend (nydus build --blob-dir, no
+# docker/registry) so the test is hermetic. The three scenarios cover protected
+# hot upgrade, pre-READY rollback, and hot upgrade followed by two failovers
+# and explicit shutdown.
+test-fuse-continuity: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	mkdir -p $(CURDIR)/.test-tmp
+	cd tests/e2e && \
+		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
+		$(GO_BIN) test -v -run '^TestFuse(HotUpgrade|PreReadyRollback|FailoverMatrix)$$' -count $(FUSE_CONTINUITY_COUNT) -timeout $(FUSE_CONTINUITY_TIMEOUT) $(FUSE_CONTINUITY_GO_TEST_ARGS) $(FUSE_CONTINUITY_TEST_FILES)
 
 # Run the NBD E2E test (requires root, the nbd kernel module, EROFS support).
 # Builds nydus with the nbd feature. Uses a LOCAL backend (nydus build

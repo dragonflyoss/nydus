@@ -155,7 +155,14 @@ impl Filesystem for FlatImageFs {
         }
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn open(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _flags: OpenFlags,
+        _kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
         if ino.0 != IMAGE_INO {
             reply.error(Errno::ENOENT);
             return;

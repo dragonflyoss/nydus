@@ -1,7 +1,8 @@
 use clap::Parser;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::error::{Context, Error, Result};
-use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
+use nydus::fuse::upgrade::{Startup, StartupMode};
+use nydus::fuse::{ErofsFs, TermSignalMask};
 use nydus_backend::{build_backend, BlobBackend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_retry_delay_max,
@@ -95,6 +96,35 @@ pub struct FuseCommand {
     apiserver: Option<String>,
 
     #[arg(
+        long,
+        default_value_t = false,
+        env = "NYDUS_FUSE_UPGRADE",
+        help = "Hot-upgrade a Failover-Protected Session from the instance already serving this mountpoint. Requires pidfd process control to resolve cutover ownership"
+    )]
+    upgrade: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_SUPERVISOR_SOCKET",
+        help = "Connect to this Recovery Holder socket to send or receive the FUSE Session Transfer. On a fresh mount, configuring a supervisor enables failover protection"
+    )]
+    supervisor_socket: Option<PathBuf>,
+
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_RECOVER",
+        help = "Recover the FUSE Session Transfer retained by --supervisor-socket"
+    )]
+    recover: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_CONTROL_SOCKET",
+        help = "Set the absolute instance control socket path outside the mountpoint. Every generation serving one mountpoint must reuse this path; its sibling .lock file serializes startup"
+    )]
+    control_socket: PathBuf,
+
+    #[arg(
         short = 'l',
         long,
         default_value = "info",
@@ -140,6 +170,9 @@ impl FuseCommand {
     /// Executes the fuse sub command, mounting the nydus image through FUSE
     /// and serving it until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
+        let startup_mode =
+            StartupMode::from_options(self.upgrade, self.recover, self.supervisor_socket.clone())?;
+
         // Block termination signals before starting any helper threads so later
         // sigwait-based handling is the only path that consumes them.
         let _blocked_signals = TermSignalMask::block()?;
@@ -153,9 +186,6 @@ impl FuseCommand {
             self.console,
         );
 
-        // Validates the mountpoint before any expensive work.
-        self.validate()?;
-
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-dir/--cache-dir override the backend/cache directories.
         let storage_config = match &self.config {
@@ -165,28 +195,6 @@ impl FuseCommand {
         if let Some(config) = storage_config.as_ref() {
             nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         }
-
-        // Runs the FUSE service until shutdown.
-        self.run(storage_config)
-    }
-
-    /// Validates that the mountpoint is an existing directory.
-    fn validate(&self) -> Result<()> {
-        if !self.mountpoint.is_dir() {
-            return Err(Error::InvalidParameter(format!(
-                "mountpoint {} is not a directory",
-                self.mountpoint.display()
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Runs the FUSE service: resolves the cache, prefetch, and backend
-    /// settings, opens the EROFS image, mounts it, and serves until a
-    /// termination signal stops it.
-    fn run(&self, storage_config: Option<Config>) -> Result<()> {
-        let mountpoint = &self.mountpoint;
 
         let cache_dir = if let Some(dir) = self.cache_dir.clone() {
             Some(dir)
@@ -275,6 +283,7 @@ impl FuseCommand {
         .context("failed to open EROFS image")?;
 
         let reader = Arc::new(reader);
+
         let fs = ErofsFs::new(reader.clone());
         let mut config = FuseConfig::default();
         // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
@@ -292,8 +301,13 @@ impl FuseCommand {
         ];
         config.n_threads = Some(self.threads);
         config.clone_fd = true;
-
-        let session = FuseService::mount(fs, mountpoint, &config)?;
+        let startup = Startup::new(
+            &self.mountpoint,
+            self.control_socket.clone(),
+            &reader.image_digest(),
+            startup_mode,
+        )?;
+        let session = startup.start(fs, &config)?;
 
         let mut prefetch_stop = None;
         if prefetch_scope == PrefetchScope::None {
@@ -344,7 +358,6 @@ impl FuseCommand {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Tear down the metrics server before reporting the mount result.
         if let Some(server) = api_server {
             server.stop();
         }

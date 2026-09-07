@@ -70,6 +70,7 @@ func (e dragonflyEnv) startFuse(t *testing.T) func() {
 		"--bootstrap", e.bootstrap,
 		"--config", e.configPath,
 		"--mountpoint", e.mountpoint,
+		"--control-socket", testControlSocket(t),
 		"--log-level", "debug",
 		"--log-dir", filepath.Join(e.workDir, "logs"),
 	)
