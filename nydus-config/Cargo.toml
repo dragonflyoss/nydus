@@ -2,7 +2,7 @@
 name = "nydus-config"
 version = "3.0.0-alpha.1"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "YAML storage configuration for nydus: the typed schema, loading and validation."
 repository = "https://github.com/dragonflyoss/nydus"

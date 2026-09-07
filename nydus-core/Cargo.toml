@@ -2,7 +2,7 @@
 name = "nydus-core"
 version = "3.0.0-alpha.1"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "The nydus image reader: EROFS reading and path resolution over the data-plane crates, plus the NydusCore/Blobs runtime entry points the services drive."
 repository = "https://github.com/dragonflyoss/nydus"

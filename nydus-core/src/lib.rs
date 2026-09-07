@@ -120,8 +120,6 @@ impl NydusCore {
         let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
         let prefetch_scope = config.prefetch.scope;
         let prefetch_timeout = config.prefetch.timeout;
-        let prefetch_retry_delay_min = config.prefetch.retry_delay_min;
-        let prefetch_retry_delay_max = config.prefetch.retry_delay_max;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
         // The multi-device model hands each blob's cache file to the kernel
@@ -194,8 +192,6 @@ impl NydusCore {
                 prefetch_concurrent_blob_count,
                 prefetch_scope,
                 prefetch_timeout,
-                prefetch_retry_delay_min,
-                prefetch_retry_delay_max,
             );
             let stop_flag = prefetcher.stop_flag();
             match prefetcher.spawn() {

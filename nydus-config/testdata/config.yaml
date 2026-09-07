@@ -16,7 +16,11 @@ backend:
         skip_verify: true
         ca_cert: /etc/nydus/certs/registry-ca.pem
     dragonfly:
-      scheduler_endpoint: http://127.0.0.1:65000
+      scheduler_endpoint: http://127.0.0.1:8002
+      timeout: 10s
+      max_retries: 2
+      back_to_source:
+        request_rate_limit: 2
 
 storage:
   dir: /var/lib/nydus/cache

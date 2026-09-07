@@ -19,9 +19,16 @@ use crate::cache::BlobCaches;
 /// towards the next deadline.
 const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Whether the backend throttled this read (a Dragonfly proxy `429`, folded
-/// into [`io::ErrorKind::QuotaExceeded`] at the backend's trait boundary).
-fn is_throttled(err: &io::Error) -> bool {
+/// The window of the random delay before a deferred blob prefetch is
+/// re-attempted. Hours long so a Dragonfly outage or rate limit has time to
+/// clear, random so a fleet of instances does not retry in lockstep.
+const RESCHEDULE_DELAY_MIN: Duration = Duration::from_secs(6 * 60 * 60);
+const RESCHEDULE_DELAY_MAX: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// Whether the backend deferred this prefetch (a Dragonfly read it could not
+/// serve now, folded into [`io::ErrorKind::QuotaExceeded`] at the backend's
+/// trait boundary).
+fn is_deferred(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::QuotaExceeded
 }
 
@@ -34,11 +41,12 @@ fn is_throttled(err: &io::Error) -> bool {
 ///    concurrently with a worker pool; otherwise stop after the priority blobs so the
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" redirect blob).
-/// 3. Blobs whose prefetch the backend throttled (Dragonfly `429`, surfaced
-///    as [`io::ErrorKind::QuotaExceeded`]) are rescheduled after a random
-///    delay in the configured window and re-attempted until they stop being
-///    throttled or the [stop flag](Self::stop_flag) is raised. Other failures
-///    are logged and skipped.
+/// 3. Blobs whose prefetch the backend deferred (a Dragonfly read it could
+///    not serve, surfaced as [`io::ErrorKind::QuotaExceeded`]) are rescheduled
+///    after a random delay of [`RESCHEDULE_DELAY_MIN`] to
+///    [`RESCHEDULE_DELAY_MAX`] and re-attempted until they succeed or the
+///    [stop flag](Self::stop_flag) is raised. Other failures are logged and
+///    skipped.
 pub struct BlobPrefetcher {
     caches: Arc<BlobCaches>,
     priority: Vec<u16>,
@@ -47,10 +55,9 @@ pub struct BlobPrefetcher {
     scope: PrefetchScope,
     /// Per-blob prefetch timeout; `0s` disables the bound.
     timeout: Duration,
-    /// The `[min, max]` window for the random delay before a throttled blob
-    /// prefetch is re-attempted.
-    retry_delay_min: Duration,
-    retry_delay_max: Duration,
+    /// The `[min, max]` window for the random delay before a deferred blob
+    /// prefetch is re-attempted, the constants unless a test shortens it.
+    reschedule_delay: (Duration, Duration),
     /// Cooperative stop flag: once raised, no new prefetch work is started
     /// and the reschedule loop exits.
     stop: Arc<AtomicBool>,
@@ -69,16 +76,12 @@ pub struct PrefetchPlan {
 impl BlobPrefetcher {
     /// `plan` is typically the result of `ErofsReader::prefetch_plan`, and
     /// `blobs` the matching cache set (`ErofsReader::blob_caches`).
-    /// `retry_delay_min ..= retry_delay_max` is the window for the random
-    /// delay before a throttled blob prefetch is re-attempted.
     pub fn new(
         caches: Arc<BlobCaches>,
         plan: PrefetchPlan,
         threads: usize,
         scope: PrefetchScope,
         timeout: Duration,
-        retry_delay_min: Duration,
-        retry_delay_max: Duration,
     ) -> Self {
         Self {
             caches,
@@ -87,10 +90,17 @@ impl BlobPrefetcher {
             threads: threads.max(1),
             scope,
             timeout,
-            retry_delay_min,
-            retry_delay_max: retry_delay_max.max(retry_delay_min),
+            reschedule_delay: (RESCHEDULE_DELAY_MIN, RESCHEDULE_DELAY_MAX),
             stop: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Shorten the reschedule window so a test can watch a deferred prefetch
+    /// come back without waiting hours.
+    #[cfg(test)]
+    fn with_reschedule_delay(mut self, min: Duration, max: Duration) -> Self {
+        self.reschedule_delay = (min, max.max(min));
+        self
     }
 
     /// A handle to this prefetcher's stop flag. Storing `true` makes the
@@ -115,15 +125,15 @@ impl BlobPrefetcher {
     /// Drive the whole prefetch workflow synchronously on the calling thread:
     /// priority blobs sequentially in declared order, then (only when the scope
     /// is [`PrefetchScope::All`]) the remaining blobs through a worker pool,
-    /// then delayed retries of throttled blobs. Per-blob failures other than
-    /// backend throttling are logged and skipped.
+    /// then delayed retries of deferred blobs. Per-blob failures the backend
+    /// did not defer are logged and skipped.
     pub fn run(mut self) {
         if self.scope == PrefetchScope::None {
             return;
         }
 
-        // Blobs the backend throttled, awaiting a delayed retry.
-        let mut throttled: Vec<u16> = Vec::new();
+        // Blobs the backend deferred, awaiting a delayed retry.
+        let mut deferred: Vec<u16> = Vec::new();
 
         // Phase 1: priority blobs, sequential, in declared order. Under the
         // default "ondemand" scope only the redirect blob is warmed (it
@@ -150,13 +160,13 @@ impl BlobPrefetcher {
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
-                Err(err) if is_throttled(&err) => {
+                Err(err) if is_deferred(&err) => {
                     inc_prefetch_reschedule();
                     warn!(
-                        "backend throttled prefetch of priority blob {}, rescheduling: {}",
+                        "backend deferred prefetch of priority blob {}, rescheduling: {}",
                         blob_index, err
                     );
-                    throttled.push(blob_index);
+                    deferred.push(blob_index);
                 }
                 Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
@@ -167,13 +177,13 @@ impl BlobPrefetcher {
         if self.scope == PrefetchScope::All && !self.rest.is_empty() {
             let worker_count = self.threads.min(self.rest.len());
             let queue = Arc::new(Mutex::new(std::mem::take(&mut self.rest)));
-            let throttled_shared = Arc::new(Mutex::new(Vec::new()));
+            let deferred_shared = Arc::new(Mutex::new(Vec::new()));
             let timeout = self.timeout;
             let mut handles = Vec::with_capacity(worker_count);
             for _ in 0..worker_count {
                 let blobs = self.caches.clone();
                 let queue = queue.clone();
-                let throttled_shared = throttled_shared.clone();
+                let deferred_shared = deferred_shared.clone();
                 let stop = self.stop.clone();
                 let handle = thread::Builder::new()
                     .name("nydus_prefetch_worker".to_string())
@@ -188,13 +198,13 @@ impl BlobPrefetcher {
                         match blob_index {
                             Some(blob_index) => match blobs.prefetch_blob(blob_index, 1, timeout) {
                                 Ok(()) => info!("prefetched blob {}", blob_index),
-                                Err(err) if is_throttled(&err) => {
+                                Err(err) if is_deferred(&err) => {
                                     inc_prefetch_reschedule();
                                     warn!(
-                                        "backend throttled prefetch of blob {}, rescheduling: {}",
+                                        "backend deferred prefetch of blob {}, rescheduling: {}",
                                         blob_index, err
                                     );
-                                    throttled_shared.lock().unwrap().push(blob_index);
+                                    deferred_shared.lock().unwrap().push(blob_index);
                                 }
                                 Err(err) => {
                                     warn!("failed to prefetch blob {}: {}", blob_index, err)
@@ -211,15 +221,15 @@ impl BlobPrefetcher {
             for handle in handles {
                 let _ = handle.join();
             }
-            throttled.append(&mut throttled_shared.lock().unwrap());
+            deferred.append(&mut deferred_shared.lock().unwrap());
         }
 
-        // Phase 3: delayed retries of throttled blobs. Each blob gets a fresh
-        // random deadline inside the retry window; retries that get throttled
+        // Phase 3: delayed retries of deferred blobs. Each blob gets a fresh
+        // random deadline inside the retry window; retries that get deferred
         // again are rescheduled, other failures are dropped. The cross-process
         // prefetch flock and group-map skip logic inside `prefetch_blob` make
         // a rescheduled prefetch behind another node's progress nearly free.
-        let mut queue: Vec<(Instant, u16)> = throttled
+        let mut queue: Vec<(Instant, u16)> = deferred
             .into_iter()
             .map(|blob_index| (Instant::now() + self.retry_delay(), blob_index))
             .collect();
@@ -242,10 +252,10 @@ impl BlobPrefetcher {
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched rescheduled blob {}", blob_index),
-                Err(err) if is_throttled(&err) => {
+                Err(err) if is_deferred(&err) => {
                     inc_prefetch_reschedule();
                     warn!(
-                        "backend throttled rescheduled prefetch of blob {}, rescheduling again: {}",
+                        "backend deferred rescheduled prefetch of blob {}, rescheduling again: {}",
                         blob_index, err
                     );
                     queue.push((Instant::now() + self.retry_delay(), blob_index));
@@ -258,21 +268,21 @@ impl BlobPrefetcher {
         }
     }
 
-    /// A random delay inside the configured retry window, seeded from OS
-    /// entropy via `RandomState` so no `rand` dependency is needed.
+    /// A random delay inside the reschedule window, seeded from OS entropy via
+    /// `RandomState` so no `rand` dependency is needed.
     fn retry_delay(&self) -> Duration {
-        let span = self.retry_delay_max.saturating_sub(self.retry_delay_min);
+        let (min, max) = self.reschedule_delay;
+        let span = max.saturating_sub(min);
         if span.is_zero() {
-            return self.retry_delay_min;
+            return min;
         }
         use std::hash::{BuildHasher, Hasher};
         let seed = std::collections::hash_map::RandomState::new()
             .build_hasher()
             .finish();
-        // The default window (6h span) is far below `u64::MAX` nanoseconds
-        // (~584 years); clamp anyway so pathological configs cannot overflow.
+        // The 6h span is far below `u64::MAX` nanoseconds (~584 years).
         let span_nanos = u64::try_from(span.as_nanos()).unwrap_or(u64::MAX);
-        self.retry_delay_min + Duration::from_nanos(seed % span_nanos.saturating_add(1))
+        min + Duration::from_nanos(seed % span_nanos.saturating_add(1))
     }
 }
 
@@ -290,8 +300,8 @@ mod tests {
     use nydus_format::utils::{write_minimal_full_blob, SHA256_DIGEST_SIZE};
     use tempfile::tempdir;
 
-    fn throttled_error() -> io::Error {
-        io::Error::new(io::ErrorKind::QuotaExceeded, "proxy answered 429")
+    fn deferred_error() -> io::Error {
+        io::Error::new(io::ErrorKind::QuotaExceeded, "prefetch deferred")
     }
 
     /// Wraps a local backend and fails the first `failures` data reads with
@@ -360,9 +370,8 @@ mod tests {
             1,
             PrefetchScope::All,
             Duration::ZERO,
-            Duration::from_millis(30),
-            Duration::from_millis(60),
         )
+        .with_reschedule_delay(Duration::from_millis(30), Duration::from_millis(60))
     }
 
     fn test_payload() -> (Vec<u8>, BlobMetadata) {
@@ -383,12 +392,12 @@ mod tests {
     }
 
     #[test]
-    fn throttled_prefetch_is_rescheduled_and_retried() {
+    fn deferred_prefetch_is_rescheduled_and_retried() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (payload, meta) = test_payload();
-        // The first data read is throttled; the delayed retry succeeds.
-        let backend = FlakyBackend::new(backend_dir.path(), 1, throttled_error);
+        // The first data read is deferred; the delayed retry succeeds.
+        let backend = FlakyBackend::new(backend_dir.path(), 1, deferred_error);
         let prefetcher = prefetcher_over(
             backend.clone(),
             backend_dir.path(),
@@ -402,7 +411,7 @@ mod tests {
         let start = Instant::now();
         prefetcher.run();
 
-        // One throttled attempt plus the successful delayed retry.
+        // One deferred attempt plus the successful delayed retry.
         assert!(backend.attempts() >= 2, "attempts={}", backend.attempts());
         // The retry waited out (at least) the minimum delay.
         assert!(start.elapsed() >= Duration::from_millis(30));
@@ -411,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn non_throttled_failure_is_not_rescheduled() {
+    fn undeferred_failure_is_not_rescheduled() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (payload, meta) = test_payload();
@@ -441,7 +450,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (payload, meta) = test_payload();
-        let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, throttled_error);
+        let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, deferred_error);
         let prefetcher = prefetcher_over(
             backend.clone(),
             backend_dir.path(),

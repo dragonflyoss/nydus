@@ -5,9 +5,10 @@
 //! service edges; this crate must not depend on the control-plane error
 //! type. Backend-private errors (registry auth, Dragonfly classification) are
 //! matched for retry decisions internally and fold into `io::Error` at the
-//! trait boundary. A read the backend throttled (a Dragonfly proxy `429`)
-//! folds into [`io::ErrorKind::QuotaExceeded`], so the storage layer can
-//! reschedule throttled prefetches without a cross-crate error type.
+//! trait boundary. A prefetch read Dragonfly could not serve (`429`, `5xx`,
+//! `408`, or a transport failure) folds into [`io::ErrorKind::QuotaExceeded`],
+//! so the storage layer can reschedule it hours later without a cross-crate
+//! error type.
 
 mod local;
 

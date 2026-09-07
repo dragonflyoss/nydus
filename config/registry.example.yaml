@@ -26,9 +26,8 @@ backend:
     # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
 
-    # HTTP client settings: timeouts, retries, and TLS trust. The whole block
-    # and every field are optional; the timeout and retry limits also apply to
-    # Dragonfly SDK requests.
+    # HTTP client settings of requests to the origin registry: timeouts,
+    # retries, and TLS trust. The whole block and every field are optional.
     http:
       # Per-request timeout (connect + read), e.g. `5s` or `1m`; `0s` disables
       # it. Default: 5s. Kept short because a read holds the block group's fetch
@@ -37,7 +36,8 @@ backend:
       timeout: 5s
 
       # Maximum number of retry attempts per request, applied by the HTTP
-      # client's retry middleware and by the Dragonfly SDK. Default: 3.
+      # client's retry middleware on direct origin requests and on origin
+      # requests issued when Dragonfly cannot serve a read. Default: 3.
       max_retries: 3
 
       # Optional proxy block routing every registry request through an HTTP
@@ -63,14 +63,29 @@ backend:
 
     # Optional Dragonfly block (requires the `backend-dragonfly-proxy`
     # feature). When set, blob GETs are routed through the Dragonfly client
-    # SDK for P2P distribution, falling back to the origin registry when a
-    # Dragonfly request still fails after the SDK's retries; every other
-    # request goes directly to the origin registry. Omit to talk to the
-    # origin directly.
+    # SDK for P2P distribution. An on-demand read the seed peers cannot serve
+    # goes back to the origin registry through a rate limit, a prefetch read
+    # is rescheduled hours later instead. Every other request goes directly
+    # to the origin registry. Omit to talk to the origin directly.
     #
     # dragonfly:
-    #   # The Dragonfly scheduler endpoint (gRPC).
-    #   scheduler_endpoint: http://127.0.0.1:65000
+    #   # The Dragonfly scheduler service address with the scheme.
+    #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
+    #
+    #   # Timeout of each attempt of a request through the seed peers, e.g.
+    #   # `30s` or `1m`. Default: 30s.
+    #   timeout: 30s
+    #
+    #   # Retries of an on-demand read on a transient failure (timeout,
+    #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer.
+    #   # Default: 1, at most 3. Prefetch reads never retry.
+    #   max_retries: 1
+    #
+    #   # Origin reads issued when the seed peers cannot serve an on-demand
+    #   # read.
+    #   back_to_source:
+    #     # Rate limit in requests per second; 0 disables it. Default: 1.
+    #     request_rate_limit: 1
 
 storage:
   # Persistent chunk cache directory (equivalent to --cache-dir). Optional:

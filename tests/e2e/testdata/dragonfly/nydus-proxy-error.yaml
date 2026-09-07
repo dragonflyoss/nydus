@@ -8,9 +8,10 @@ backend:
       max_retries: 0
     dragonfly:
       scheduler_endpoint: http://127.0.0.1:8002
-      ondemand_max_retries: 3
-      prefetch_max_retries: 2
-      fallback_interval: 0s
+      timeout: 5s
+      max_retries: 3
+      back_to_source:
+        request_rate_limit: 0
 storage:
   dir: /tmp/nydus-dragonfly/cache
 prefetch:

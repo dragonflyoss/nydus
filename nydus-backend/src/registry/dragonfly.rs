@@ -1,42 +1,39 @@
 //! Dragonfly SDK transport (feature `backend-dragonfly-proxy`).
 //!
 //! Routes a blob `GET` through the Dragonfly client SDK using a scheduler
-//! endpoint, returning a streaming response. This bypasses plain HTTP and lets
-//! Dragonfly schedule P2P piece distribution directly; it is selected for blob
-//! `GET`s when a scheduler endpoint is configured, while every other request
-//! goes directly to the origin. SDK errors are classified into
-//! [`RegistryError`] here; retries are owned by the policy loop in the parent
-//! module, so the SDK's internal retries are disabled to keep the policy's
-//! attempt counts exact.
+//! endpoint. This bypasses plain HTTP and lets Dragonfly schedule P2P piece
+//! distribution directly, it is selected for blob `GET`s when a scheduler
+//! endpoint is configured, while every other request goes directly to the
+//! origin. The SDK owns the retries: an on-demand read retries a transient
+//! failure, a `429` included, on the next seed peer up to the configured
+//! budget, while a prefetch read never retries, a failed prefetch being left
+//! to the storage layer's long delayed reschedule instead. An answer the SDK
+//! reports as an error but that carries an HTTP status is handed back as a
+//! [`Response`], so the policy in the parent module classifies it by status
+//! like an origin answer.
 
+use std::collections::HashMap;
+use std::io;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue};
+use async_trait::async_trait;
+use bytes::BytesMut;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
 
-use dragonfly_client_request::errors::{BackendError, Error, ProxyError};
-use dragonfly_client_request::{Body, Builder, GetRequest, Proxy, Request as _};
+use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
+use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
 
 use super::{runtime, DragonflyTransport, RegistryError, RegistryResult, Response};
 use crate::ReadKind;
 
-/// The fallback request timeout when the configured timeout is `0` (disabled):
-/// SDK requests always need a bounded timeout.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// The priority hint for background prefetch requests.
 const PRIORITY_PREFETCH: i32 = 3;
 
 /// The priority hint for on-demand (foreground) requests.
 const PRIORITY_ONDEMAND: i32 = 6;
-
-/// The header carrying the Dragonfly scheduling priority of a request.
-const HEADER_PRIORITY: &str = "X-Dragonfly-Priority";
-
-/// The header opting a request into Dragonfly P2P distribution.
-const HEADER_USE_P2P: &str = "X-Dragonfly-Use-P2P";
 
 /// Map a read kind to its Dragonfly priority value.
 fn priority(kind: ReadKind) -> i32 {
@@ -46,102 +43,149 @@ fn priority(kind: ReadKind) -> i32 {
     }
 }
 
-/// The Dragonfly SDK transport, wrapping a scheduler connection.
+/// The Dragonfly SDK transport, one client per read kind so each kind keeps
+/// its own retry budget.
 pub(crate) struct Dragonfly {
-    /// The SDK client bound to the scheduler.
-    client: Proxy,
+    /// The client serving on-demand reads, retrying at once because a FUSE
+    /// reader is waiting, a `429` included since another seed peer may not be
+    /// rate limited.
+    ondemand: Proxy,
 
-    /// The per-request timeout.
+    /// The client serving prefetch reads, never retrying: a failed prefetch
+    /// is rescheduled hours later instead.
+    prefetch: Proxy,
+
+    /// The per-attempt timeout.
     timeout: Duration,
 }
 
 impl Dragonfly {
     /// Create a new Dragonfly transport connected to the configured scheduler.
-    /// `timeout` is the configured per-request timeout, `0s` (disabled)
-    /// falling back to [`DEFAULT_TIMEOUT`]. The SDK's internal retries are
-    /// disabled (`max_retries(0)`): the load-shedding policy in the parent
-    /// module owns retry counts, so they stay exact and observable.
-    pub(crate) fn new(config: &DragonflyConfig, timeout: Duration) -> std::io::Result<Dragonfly> {
+    /// Only the on-demand client retries, `max_retries` times across seed
+    /// peers.
+    pub(crate) fn new(config: &DragonflyConfig) -> io::Result<Dragonfly> {
+        let max_retries = u8::try_from(config.max_retries).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "dragonfly.max_retries {} exceeds the SDK limit",
+                    config.max_retries
+                ),
+            )
+        })?;
         let endpoint = config.scheduler_endpoint.clone();
-        let client = runtime()
+        let (ondemand, prefetch) = runtime()
             .block_on(async move {
-                Builder::default()
+                let ondemand = Proxy::builder()
+                    .scheduler_endpoint(endpoint.clone())
+                    .max_retries(max_retries)
+                    .build()
+                    .await?;
+                let prefetch = Proxy::builder()
                     .scheduler_endpoint(endpoint)
                     .max_retries(0)
                     .build()
-                    .await
+                    .await?;
+                Ok::<_, Error>((ondemand, prefetch))
             })
-            .map_err(|err| {
-                std::io::Error::other(format!("failed to build dragonfly client: {err}"))
-            })?;
+            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
-        let timeout = if timeout.is_zero() {
-            DEFAULT_TIMEOUT
-        } else {
-            timeout
-        };
-        Ok(Dragonfly { client, timeout })
+        Ok(Dragonfly {
+            ondemand,
+            prefetch,
+            timeout: config.timeout,
+        })
     }
-}
 
-/// Classify an SDK error into [`RegistryError`]: a proxy or backend `429` is
-/// `TooManyRequests`, a `403` is `Forbidden`, and everything else — request
-/// timeout, dfdaemon connectivity, `5xx`, any other transport error — folds
-/// into a retryable `Io`.
-fn classify(err: Error) -> RegistryError {
-    let status_code = match &err {
-        Error::ProxyError(ProxyError { status_code, .. })
-        | Error::BackendError(BackendError { status_code, .. }) => *status_code,
-        _ => None,
-    };
-    match status_code {
-        Some(StatusCode::TOO_MANY_REQUESTS) => RegistryError::TooManyRequests(err.to_string()),
-        Some(StatusCode::FORBIDDEN) => RegistryError::Forbidden(err.to_string()),
-        _ => RegistryError::Io(std::io::Error::other(format!("dragonfly error: {err}"))),
-    }
-}
-
-impl DragonflyTransport for Dragonfly {
-    /// Issue a blob `GET` through Dragonfly, attaching the priority and P2P
-    /// hints derived from the read kind.
-    fn get(&self, url: &str, mut headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
-        let priority = priority(kind);
-        if let Ok(value) = priority.to_string().parse() {
-            headers.insert(HEADER_PRIORITY, value);
+    /// The client serving reads of `kind`.
+    fn client(&self, kind: ReadKind) -> &Proxy {
+        match kind {
+            ReadKind::OnDemand => &self.ondemand,
+            ReadKind::Prefetch => &self.prefetch,
         }
-        headers.insert(HEADER_USE_P2P, HeaderValue::from_static("true"));
+    }
+}
 
+/// Convert an SDK outcome into a transport outcome. A success carries the
+/// buffered `body`. A proxy, backend or dfdaemon error carrying an HTTP
+/// status is an answer, rebuilt as a [`Response`] with its status, headers and
+/// message, so a `429`, `403` or a dfdaemon `422` reaches the policy the same
+/// way an origin answer does. Anything else, a request timeout, seed peer
+/// connectivity, a failed body stream, is a transport failure.
+fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> RegistryResult<Response> {
+    match result {
+        Ok(response) => Ok(Response {
+            status: response.status_code.unwrap_or(StatusCode::OK),
+            headers: response.header,
+            reader: Box::new(std::io::Cursor::new(body.freeze())),
+        }),
+        Err(Error::ProxyError(ProxyError {
+            status_code: Some(status),
+            header,
+            message,
+        }))
+        | Err(Error::BackendError(BackendError {
+            status_code: Some(status),
+            header,
+            message,
+        }))
+        | Err(Error::DfdaemonError(DfdaemonError {
+            status_code: Some(status),
+            header,
+            message,
+        })) => Ok(Response {
+            status,
+            headers: header_map(header),
+            reader: Box::new(std::io::Cursor::new(
+                message.unwrap_or_default().into_bytes(),
+            )),
+        }),
+        Err(Error::RequestTimeout(message)) => Err(RegistryError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("dragonfly request timed out: {message}"),
+        ))),
+        Err(err) => Err(RegistryError::Io(io::Error::other(format!(
+            "dragonfly error: {err}"
+        )))),
+    }
+}
+
+/// Rebuild a header map from the SDK's string map, dropping entries that are
+/// not valid HTTP headers.
+fn header_map(headers: HashMap<String, String>) -> HeaderMap {
+    headers
+        .into_iter()
+        .filter_map(|(name, value)| {
+            Some((
+                HeaderName::from_bytes(name.as_bytes()).ok()?,
+                HeaderValue::from_str(&value).ok()?,
+            ))
+        })
+        .collect()
+}
+
+#[async_trait]
+impl DragonflyTransport for Dragonfly {
+    /// Issue a blob `GET` through the client of the read kind with its
+    /// priority hint. The SDK adds the P2P and priority headers itself.
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
         let request = GetRequest {
             url: url.to_string(),
             header: headers,
             filtered_query_params: Vec::new(),
-            priority: Some(priority),
+            priority: Some(priority(kind)),
             timeout: self.timeout,
             ..Default::default()
         };
-
-        let response: Result<dragonfly_client_request::GetResponse<Body>, Error> =
-            runtime().block_on(async { self.client.get(&request).await });
-
-        match response {
-            Ok(response) => Ok(Response {
-                status: response.status_code.unwrap_or(StatusCode::OK),
-                headers: response.header,
-                reader: match response.reader {
-                    Some(reader) => Box::new(reader),
-                    None => Box::new(tokio::io::empty()),
-                },
-            }),
-            Err(err) => Err(classify(err)),
-        }
+        let mut body = BytesMut::new();
+        let result = self.client(kind).get_into(&request, &mut body).await;
+        into_response(result, body)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dragonfly_client_request::errors::{BackendError, DfdaemonError, ProxyError};
-    use std::collections::HashMap;
 
     fn proxy_error(status_code: Option<StatusCode>) -> Error {
         Error::ProxyError(ProxyError {
@@ -151,35 +195,110 @@ mod tests {
         })
     }
 
+    fn ok_response(status_code: StatusCode) -> GetResponse {
+        GetResponse {
+            success: status_code.is_success(),
+            header: HeaderMap::new(),
+            status_code: Some(status_code),
+            body: None,
+        }
+    }
+
     #[test]
-    fn classifies_sdk_errors() {
-        assert!(matches!(
-            classify(proxy_error(Some(StatusCode::TOO_MANY_REQUESTS))),
-            RegistryError::TooManyRequests(_)
-        ));
-        assert!(matches!(
-            classify(Error::BackendError(BackendError {
-                message: Some("origin 429".to_string()),
-                header: HashMap::new(),
-                status_code: Some(StatusCode::TOO_MANY_REQUESTS),
+    fn a_success_carries_the_buffered_body() {
+        let response = into_response(
+            Ok(ok_response(StatusCode::PARTIAL_CONTENT)),
+            BytesMut::from(&b"payload"[..]),
+        )
+        .unwrap();
+        assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.text().unwrap(), "payload");
+    }
+
+    #[test]
+    fn answers_with_a_status_become_responses() {
+        let response = into_response(
+            Err(proxy_error(Some(StatusCode::TOO_MANY_REQUESTS))),
+            BytesMut::new(),
+        )
+        .unwrap();
+        assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
+
+        let response = into_response(
+            Err(Error::BackendError(BackendError {
+                message: Some("origin said no".to_string()),
+                header: HashMap::from([("x-served-by".to_string(), "origin".to_string())]),
+                status_code: Some(StatusCode::FORBIDDEN),
             })),
-            RegistryError::TooManyRequests(_)
-        ));
-        assert!(matches!(
-            classify(proxy_error(Some(StatusCode::FORBIDDEN))),
-            RegistryError::Forbidden(_)
-        ));
+            BytesMut::new(),
+        )
+        .unwrap();
+        assert_eq!(response.status, StatusCode::FORBIDDEN);
+        assert_eq!(response.headers.get("x-served-by").unwrap(), "origin");
+        assert_eq!(response.text().unwrap(), "origin said no");
+
+        let response = into_response(
+            Err(proxy_error(Some(StatusCode::BAD_GATEWAY))),
+            BytesMut::new(),
+        )
+        .unwrap();
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INSUFFICIENT_STORAGE,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ] {
+            let response = into_response(
+                Err(Error::DfdaemonError(DfdaemonError {
+                    message: Some("no space".to_string()),
+                    header: HashMap::new(),
+                    status_code: Some(status),
+                })),
+                BytesMut::new(),
+            )
+            .unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.text().unwrap(), "no space");
+        }
+    }
+
+    #[test]
+    fn failures_without_a_status_are_transport_errors() {
+        let err = into_response(
+            Err(Error::RequestTimeout("deadline exceeded".to_string())),
+            BytesMut::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            matches!(&err, RegistryError::Io(io_err) if io_err.kind() == io::ErrorKind::TimedOut)
+        );
+
         for err in [
-            proxy_error(Some(StatusCode::BAD_GATEWAY)),
-            proxy_error(Some(StatusCode::NOT_FOUND)),
             proxy_error(None),
-            Error::RequestTimeout("deadline exceeded".to_string()),
             Error::DfdaemonError(DfdaemonError {
                 message: Some("connection refused".to_string()),
+                header: HashMap::new(),
+                status_code: None,
             }),
-            Error::Internal("boom".to_string()),
+            Error::Internal("failed to read response body".to_string()),
         ] {
-            assert!(matches!(classify(err), RegistryError::Io(_)));
+            assert!(matches!(
+                into_response(Err(err), BytesMut::new()),
+                Err(RegistryError::Io(_))
+            ));
         }
+    }
+
+    #[test]
+    fn header_map_drops_invalid_entries() {
+        let headers = header_map(HashMap::from([
+            ("content-length".to_string(), "4".to_string()),
+            ("bad header".to_string(), "x".to_string()),
+            ("x-ok".to_string(), "bad\nvalue".to_string()),
+        ]));
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.get("content-length").unwrap(), "4");
     }
 }

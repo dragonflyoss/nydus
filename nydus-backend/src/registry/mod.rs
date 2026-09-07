@@ -9,29 +9,34 @@
 //! [`blob_metadata`](BlobBackend::blob_metadata) recovers it from the blob's
 //! trailing footer via range reads.
 //!
-//! The HTTP transport helpers (connection building, DNS, the Dragonfly SDK
-//! client) live in this module's submodules; this file holds only the
-//! registry-specific logic, including the Dragonfly load-shedding policy that
-//! decides per read kind whether a failed Dragonfly read is retried, failed,
-//! or falls back to the origin through a throttle (see [`dragonfly_action`]).
+//! The transport helpers (connection building, DNS, the Dragonfly SDK client,
+//! the fallback throttle) and the load-shedding policy live in this module's
+//! submodules; this file holds only the registry-specific logic. The Dragonfly
+//! SDK retries transient failures across seed peers, then [`policy::decide`]
+//! serves the answer, defers a prefetch read to the storage layer's
+//! reschedule, or falls back an on-demand read to the origin through the
+//! fallback throttle.
 
 mod dns;
 #[cfg(feature = "backend-dragonfly-proxy")]
 mod dragonfly;
 mod http;
+mod policy;
 
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
+use async_trait::async_trait;
 use futures::TryStreamExt;
 use reqwest::header::{
     HeaderMap, AUTHORIZATION, CONTENT_LENGTH, LOCATION, RANGE, WWW_AUTHENTICATE,
 };
 use reqwest::{Method, StatusCode};
+use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::runtime::Runtime;
@@ -40,11 +45,12 @@ use tracing::debug;
 use url::Url;
 
 use crate::{BlobBackend, ReadContext, ReadKind};
-use nydus_config::{DragonflyConfig, RegistryConfig};
+use nydus_config::RegistryConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_FOOTER_SIZE};
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
-use self::http::HTTP;
+use self::http::{BackToSourceRateLimiter, HTTP};
+use self::policy::Action;
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use self::dragonfly::Dragonfly;
@@ -87,22 +93,19 @@ enum RegistryError {
     #[error("unexpected status {0}: {1}")]
     UnexpectedStatus(StatusCode, String),
 
-    /// The request was denied by Dragonfly (`403`).
-    #[error("forbidden: {0}")]
-    Forbidden(String),
-
-    /// The request was rate-limited by Dragonfly (`429`). Folds into
-    /// [`io::ErrorKind::QuotaExceeded`] so the storage layer can reschedule a
-    /// throttled prefetch.
-    #[error("too many requests: {0}")]
-    TooManyRequests(String),
+    /// A prefetch read Dragonfly could not serve: a `429`, `5xx` or `408`
+    /// answer, or a transport failure. Folds into
+    /// [`io::ErrorKind::QuotaExceeded`] so the storage layer reschedules the
+    /// blob's prefetch hours later instead of retrying now.
+    #[error("prefetch deferred: {0}")]
+    PrefetchDeferred(Box<RegistryError>),
 }
 
 impl From<RegistryError> for io::Error {
     fn from(err: RegistryError) -> Self {
         match err {
             RegistryError::Io(err) => err,
-            err @ RegistryError::TooManyRequests(_) => {
+            err @ RegistryError::PrefetchDeferred(_) => {
                 io::Error::new(io::ErrorKind::QuotaExceeded, err)
             }
             err => io::Error::other(err),
@@ -114,154 +117,13 @@ type RegistryResult<T> = Result<T, RegistryError>;
 
 /// The transport seam for Dragonfly reads: the SDK client in production,
 /// scripted fakes in tests. Unconditional (not feature-gated) so the policy
-/// loop and its tests compile without the `backend-dragonfly-proxy` feature.
+/// and its tests compile without the `backend-dragonfly-proxy` feature. One
+/// call spends the SDK's whole retry budget and returns a fully buffered
+/// response, so a mid-stream failure surfaces as a transport error here.
+#[async_trait]
 trait DragonflyTransport: Send + Sync {
     /// Issue a blob `GET` through Dragonfly.
-    fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response>;
-}
-
-/// Per-read-kind Dragonfly retry budgets, from the `registry.dragonfly`
-/// configuration.
-#[derive(Debug, Clone, Copy)]
-struct DragonflyPolicy {
-    /// Retries for a retryable prefetch failure before the read fails.
-    prefetch_max_retries: u32,
-    /// Retries for a retryable on-demand failure before falling back.
-    ondemand_max_retries: u32,
-}
-
-impl Default for DragonflyPolicy {
-    fn default() -> Self {
-        Self {
-            prefetch_max_retries: 10,
-            ondemand_max_retries: 3,
-        }
-    }
-}
-
-impl DragonflyPolicy {
-    /// The per-read-kind budgets from the `registry.dragonfly` configuration,
-    /// or the defaults when no Dragonfly section is configured.
-    fn from_config(config: Option<&DragonflyConfig>) -> Self {
-        config
-            .map(|dragonfly_config| DragonflyPolicy {
-                prefetch_max_retries: dragonfly_config.prefetch_max_retries,
-                ondemand_max_retries: dragonfly_config.ondemand_max_retries,
-            })
-            .unwrap_or_default()
-    }
-}
-
-/// The `[min, max]` window for the random delay before a Dragonfly prefetch
-/// retry. Prefetch retries are paced with this jitter so a burst of failing
-/// prefetch reads does not hammer a struggling Dragonfly proxy in lockstep;
-/// latency-sensitive on-demand retries are never delayed.
-const PREFETCH_RETRY_DELAY_MIN: Duration = Duration::from_millis(100);
-const PREFETCH_RETRY_DELAY_MAX: Duration = Duration::from_secs(1);
-
-/// A random delay inside the prefetch retry window, seeded from OS entropy
-/// via `RandomState` so no `rand` dependency is needed (same technique as the
-/// prefetch rescheduler in `nydus-storage`).
-fn prefetch_retry_delay() -> Duration {
-    use std::hash::{BuildHasher, Hasher};
-    let seed = std::collections::hash_map::RandomState::new()
-        .build_hasher()
-        .finish();
-    let span = PREFETCH_RETRY_DELAY_MAX - PREFETCH_RETRY_DELAY_MIN;
-    // The 900ms span is far below `u64::MAX` nanoseconds, so the cast is safe.
-    let span_nanos = span.as_nanos() as u64;
-    PREFETCH_RETRY_DELAY_MIN + Duration::from_nanos(seed % (span_nanos + 1))
-}
-
-/// What the load-shedding policy decides after one failed Dragonfly attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DragonflyAction {
-    /// Retry the read through Dragonfly.
-    Retry,
-    /// Give up on Dragonfly and fall back to the throttled origin path.
-    Fallback,
-    /// Fail the read without touching the origin.
-    Fail,
-}
-
-/// Decide what to do after a failed Dragonfly attempt. `attempts` counts the
-/// Dragonfly attempts made so far, including the one that just failed.
-///
-/// The policy: `Forbidden` (403) is terminal for both read kinds. A
-/// rate-limited (429) prefetch fails immediately — the caller reschedules it —
-/// while a rate-limited on-demand read falls back to the origin without
-/// retrying Dragonfly. Any other failure (timeout, connect, 5xx, mid-stream)
-/// is retried up to the read kind's budget; when the budget is exhausted a
-/// prefetch fails and an on-demand read falls back. Prefetch reads never fall
-/// back, so a Dragonfly outage degrades prefetch instead of flooding the
-/// origin.
-fn dragonfly_action(
-    policy: DragonflyPolicy,
-    kind: ReadKind,
-    err: &RegistryError,
-    attempts: u32,
-) -> DragonflyAction {
-    match err {
-        RegistryError::Forbidden(_) => DragonflyAction::Fail,
-        RegistryError::TooManyRequests(_) => match kind {
-            ReadKind::Prefetch => DragonflyAction::Fail,
-            ReadKind::OnDemand => DragonflyAction::Fallback,
-        },
-        _ => {
-            let budget = match kind {
-                ReadKind::Prefetch => policy.prefetch_max_retries,
-                ReadKind::OnDemand => policy.ondemand_max_retries,
-            };
-            if attempts <= budget {
-                DragonflyAction::Retry
-            } else {
-                match kind {
-                    ReadKind::Prefetch => DragonflyAction::Fail,
-                    ReadKind::OnDemand => DragonflyAction::Fallback,
-                }
-            }
-        }
-    }
-}
-
-/// Shapes origin requests issued as Dragonfly fallbacks to one request per
-/// interval (1 QPS by default), per registry backend. Slots are handed out
-/// FIFO under a mutex; the wait happens outside the lock so a sleeping waiter
-/// never blocks the next caller from claiming its own later slot.
-struct FallbackLimiter {
-    /// The minimum spacing between two fallback requests; zero disables the
-    /// throttle.
-    interval: Duration,
-    /// The earliest instant the next fallback request may start.
-    next_slot: Mutex<Instant>,
-}
-
-impl FallbackLimiter {
-    fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            next_slot: Mutex::new(Instant::now()),
-        }
-    }
-
-    /// Block until this caller's slot arrives, returning how long it waited.
-    fn acquire(&self) -> Duration {
-        if self.interval.is_zero() {
-            return Duration::ZERO;
-        }
-        let now = Instant::now();
-        let slot = {
-            let mut next = self.next_slot.lock().unwrap();
-            let slot = (*next).max(now);
-            *next = slot + self.interval;
-            slot
-        };
-        let wait = slot.saturating_duration_since(now);
-        if !wait.is_zero() {
-            std::thread::sleep(wait);
-        }
-        wait
-    }
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response>;
 }
 
 /// A response from the origin registry or the Dragonfly SDK: the status and
@@ -294,28 +156,6 @@ impl Response {
             let mut body = String::new();
             self.reader.read_to_string(&mut body).await?;
             Ok(body)
-        })
-    }
-
-    /// Drain the streaming body into memory, returning an equivalent response
-    /// backed by the buffered bytes. Pre-sizes the buffer from
-    /// `content-length` when present.
-    fn buffered(mut self) -> io::Result<Response> {
-        let capacity = self
-            .headers
-            .get(CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0);
-        let body = runtime().block_on(async {
-            let mut body = Vec::with_capacity(capacity);
-            self.reader.read_to_end(&mut body).await?;
-            io::Result::Ok(body)
-        })?;
-        Ok(Response {
-            status: self.status,
-            headers: self.headers,
-            reader: Box::new(std::io::Cursor::new(body)),
         })
     }
 }
@@ -410,13 +250,9 @@ pub(crate) struct Registry {
     http: HTTP,
     /// Routes blob `GET`s through the Dragonfly SDK when configured. Always
     /// `None` when the `backend-dragonfly-proxy` feature is off (the config
-    /// is rejected); kept unconditional so the policy loop and its tests
-    /// compile without the feature.
+    /// is rejected), kept unconditional so the policy and its tests compile
+    /// without the feature.
     dragonfly: Option<Box<dyn DragonflyTransport>>,
-    /// Per-read-kind retry budgets of the Dragonfly load-shedding policy.
-    dragonfly_policy: DragonflyPolicy,
-    /// Shapes origin requests issued as Dragonfly fallbacks.
-    fallback_limiter: FallbackLimiter,
     /// Whether reads are served through the Dragonfly SDK, used to attribute
     /// backend read and CRC metrics.
     target: nydus_telemetry::metrics::BackendTarget,
@@ -430,14 +266,18 @@ impl Registry {
     /// Build a registry backend from its configuration.
     pub(crate) fn new(config: RegistryConfig) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
-        let http = HTTP::new(&config.http)?;
+        let rate_limiter = BackToSourceRateLimiter::new(
+            config
+                .dragonfly
+                .as_ref()
+                .map(|dragonfly_config| dragonfly_config.back_to_source.request_rate_limit)
+                .unwrap_or(0),
+        );
+        let http = HTTP::new(&config.http, rate_limiter)?;
 
         #[cfg(feature = "backend-dragonfly-proxy")]
         let dragonfly: Option<Box<dyn DragonflyTransport>> = match &config.dragonfly {
-            Some(dragonfly_config) => Some(Box::new(Dragonfly::new(
-                dragonfly_config,
-                config.http.timeout,
-            )?)),
+            Some(dragonfly_config) => Some(Box::new(Dragonfly::new(dragonfly_config)?)),
             None => None,
         };
         #[cfg(not(feature = "backend-dragonfly-proxy"))]
@@ -454,15 +294,6 @@ impl Registry {
             }
             None => None,
         };
-
-        let dragonfly_policy = DragonflyPolicy::from_config(config.dragonfly.as_ref());
-        let fallback_limiter = FallbackLimiter::new(
-            config
-                .dragonfly
-                .as_ref()
-                .map(|dragonfly_config| dragonfly_config.fallback_interval)
-                .unwrap_or(Duration::ZERO),
-        );
 
         let target = if dragonfly.is_some() {
             nydus_telemetry::metrics::BackendTarget::Proxy
@@ -483,8 +314,6 @@ impl Registry {
             redirect_urls: RwLock::new(HashMap::new()),
             http,
             dragonfly,
-            dragonfly_policy,
-            fallback_limiter,
             target,
             first_read_done: AtomicBool::new(false),
         })
@@ -556,13 +385,13 @@ impl Registry {
     }
 
     /// Issue a request. Blob `GET`s ride the Dragonfly SDK when it is
-    /// configured, driven by the load-shedding policy (see
-    /// [`dragonfly_action`]): retryable failures are retried up to the read
-    /// kind's budget, on-demand reads then fall back to the origin through
-    /// the fallback throttle, and prefetch reads fail without touching the
-    /// origin. Everything else — and requests with `allow_dragonfly` false
-    /// (auth token fetches) — goes directly to the origin, where the HTTP
-    /// client's retry middleware retries transient failures.
+    /// configured: the SDK retries transient failures across seed peers, then
+    /// [`policy::decide`] serves the answer, defers a prefetch read to the
+    /// storage layer's reschedule, or falls back an on-demand read to the
+    /// origin through the fallback throttle.
+    /// Everything else, and requests with `allow_dragonfly` false (auth token
+    /// fetches), goes directly to the origin, where the HTTP client's retry
+    /// middleware retries transient failures.
     fn request(
         &self,
         method: Method,
@@ -573,65 +402,33 @@ impl Registry {
     ) -> RegistryResult<Response> {
         if allow_dragonfly && method == Method::GET {
             if let Some(dragonfly) = &self.dragonfly {
-                return self.request_via_dragonfly(dragonfly.as_ref(), url, headers, context);
+                let outcome =
+                    self.request_dragonfly(dragonfly.as_ref(), url, headers.clone(), context);
+                return match policy::decide(context.kind, outcome) {
+                    Action::Serve(response) => Ok(response),
+                    Action::Fallback(err) => {
+                        nydus_telemetry::metrics::record_dragonfly_error(context.kind);
+                        tracing::warn!(
+                            "dragonfly request failed, falling back to the origin: {err}"
+                        );
+                        self.fallback_request_http(method, url, headers, context)
+                    }
+                    Action::Defer(err) => {
+                        nydus_telemetry::metrics::record_dragonfly_error(context.kind);
+                        tracing::warn!("dragonfly request failed: {err}");
+                        Err(err)
+                    }
+                };
             }
         }
 
         self.request_http(method, url, headers, context)
     }
 
-    /// Drive a blob `GET` through Dragonfly under the load-shedding policy,
-    /// retrying, failing, or falling back to the throttled origin path as
-    /// [`dragonfly_action`] dictates. Prefetch retries wait a random
-    /// [`PREFETCH_RETRY_DELAY_MIN`]–[`PREFETCH_RETRY_DELAY_MAX`] delay first;
-    /// on-demand retries go immediately. Every failed attempt is recorded to
-    /// the Dragonfly error metrics.
-    fn request_via_dragonfly(
-        &self,
-        dragonfly: &dyn DragonflyTransport,
-        url: &str,
-        headers: HeaderMap,
-        context: ReadContext,
-    ) -> RegistryResult<Response> {
-        let mut attempts = 0u32;
-        let err = loop {
-            attempts += 1;
-            let err = match self.request_dragonfly(dragonfly, url, headers.clone(), context) {
-                Ok(response) => return Ok(response),
-                Err(err) => err,
-            };
-            nydus_telemetry::metrics::record_dragonfly_error(context.kind);
-
-            match dragonfly_action(self.dragonfly_policy, context.kind, &err, attempts) {
-                DragonflyAction::Retry => {
-                    tracing::warn!(
-                        "dragonfly request failed (attempt {attempts}), retrying: {err}"
-                    );
-                    if context.kind == ReadKind::Prefetch {
-                        std::thread::sleep(prefetch_retry_delay());
-                    }
-                }
-                DragonflyAction::Fallback => {
-                    tracing::warn!(
-                        "dragonfly request failed after {attempts} attempt(s), \
-                         falling back to the origin: {err}"
-                    );
-                    return self.fallback_request_http(Method::GET, url, headers, context);
-                }
-                DragonflyAction::Fail => break err,
-            }
-        };
-
-        tracing::warn!("dragonfly request failed terminally after {attempts} attempt(s): {err}");
-        Err(err)
-    }
-
-    /// Issue an origin request as a Dragonfly fallback. Retries are not left
-    /// to the HTTP client's retry middleware — its backoff would run under a
-    /// single fallback-throttle permit — but performed explicitly here: each
-    /// origin attempt (the first plus up to `http.max_retries` retries of
-    /// transient failures) waits for its own fallback-throttle slot, so actual
-    /// origin requests never exceed one per `fallback_interval`.
+    /// Issue an origin request as a Dragonfly fallback through the fallback
+    /// client: the retry middleware retries transient failures up to
+    /// `http.max_retries`, and every attempt first claims a fallback throttle
+    /// slot, so origin requests never exceed the fallback rate limit.
     fn fallback_request_http(
         &self,
         method: Method,
@@ -643,31 +440,13 @@ impl Registry {
         // it to the origin side of the proxy/origin split.
         crate::note_read_served_by(nydus_telemetry::metrics::BackendTarget::Origin);
 
-        let mut attempts = 0u32;
-        let result = loop {
-            attempts += 1;
-            let waited = self.fallback_limiter.acquire();
-            nydus_telemetry::metrics::record_fallback_throttle_wait(waited);
-
-            let result = self.request_http_once(method.clone(), url, headers.clone(), context);
-            // Mirror the retry middleware's transient classification: retry
-            // transport errors and retryable statuses, pass everything else on.
-            let transient = match &result {
-                Ok(response) => {
-                    response.status.is_server_error()
-                        || response.status == StatusCode::REQUEST_TIMEOUT
-                        || response.status == StatusCode::TOO_MANY_REQUESTS
-                }
-                Err(_) => true,
-            };
-            if !transient || attempts > self.http.max_retries() {
-                break result;
-            }
-            tracing::warn!(
-                "fallback origin request failed transiently (attempt {attempts}), \
-                 retrying through the fallback throttle"
-            );
-        };
+        let result = self.send_http(
+            self.http.back_to_source_client(),
+            method,
+            url,
+            headers,
+            context,
+        );
         nydus_telemetry::metrics::record_fallback_read(result.is_err());
         result
     }
@@ -681,23 +460,13 @@ impl Registry {
         headers: HeaderMap,
         context: ReadContext,
     ) -> RegistryResult<Response> {
-        let start = Instant::now();
-        let result = runtime().block_on(async {
-            self.http
-                .client()
-                .request(method.clone(), url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(io::Error::other)
-        });
-        self.finish_http_request(method, url, headers, context, start, result)
+        self.send_http(self.http.client(), method, url, headers, context)
     }
 
-    /// Send exactly one request attempt to the origin (no retry middleware)
-    /// and log its completion.
-    fn request_http_once(
+    /// Send a request to the origin through `client` and log its completion.
+    fn send_http(
         &self,
+        client: &ClientWithMiddleware,
         method: Method,
         url: &str,
         headers: HeaderMap,
@@ -705,8 +474,7 @@ impl Registry {
     ) -> RegistryResult<Response> {
         let start = Instant::now();
         let result = runtime().block_on(async {
-            self.http
-                .raw_client()
+            client
                 .request(method.clone(), url)
                 .headers(headers.clone())
                 .send()
@@ -769,13 +537,10 @@ impl Registry {
         }
     }
 
-    /// Send a single blob `GET` attempt through the Dragonfly transport and
-    /// log its completion. The body is drained into memory here, before the
-    /// attempt counts as a success: the caller consumes the response only
-    /// after the policy loop has returned, so a mid-stream dfdaemon/backend
-    /// failure surfaced later would bypass the Dragonfly error metrics,
-    /// retries, and fallback entirely. Buffering also means no bytes are ever
-    /// exposed from an attempt that is later retried.
+    /// Send a blob `GET` through the Dragonfly transport and log its
+    /// completion. The transport returns a fully buffered response, so a
+    /// mid-stream failure surfaces here instead of while the caller consumes
+    /// the response.
     fn request_dragonfly(
         &self,
         dragonfly: &dyn DragonflyTransport,
@@ -784,15 +549,7 @@ impl Registry {
         context: ReadContext,
     ) -> RegistryResult<Response> {
         let start = Instant::now();
-        let result = dragonfly
-            .get(url, headers.clone(), context.kind)
-            .and_then(|response| {
-                response.buffered().map_err(|err| {
-                    RegistryError::Io(io::Error::other(format!(
-                        "response body failed mid-stream: {err}"
-                    )))
-                })
-            });
+        let result = runtime().block_on(dragonfly.get(url, headers.clone(), context.kind));
         let duration = start.elapsed();
 
         match result {
@@ -829,9 +586,8 @@ impl Registry {
     }
 
     /// Fill `dst` with the blob byte range. Direct origin reads retry
-    /// transient failures inside the HTTP client's retry middleware;
-    /// Dragonfly reads are governed by the load-shedding policy in
-    /// [`Registry::request_via_dragonfly`].
+    /// transient failures inside the HTTP client's retry middleware,
+    /// Dragonfly reads inside the SDK, then [`policy::decide`] settles them.
     fn try_read(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -847,24 +603,15 @@ impl Registry {
         if let Some(redirect) = self.redirect_url(&hex) {
             let mut headers = HeaderMap::new();
             headers.insert(RANGE, range.parse().unwrap());
-            match self.request(Method::GET, &redirect, headers, context, true) {
-                Ok(response) => {
-                    let status = response.status;
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        // The signed link expired; drop it and fall through to re-resolve.
-                        self.remove_redirect_url(&hex);
-                    } else if status.is_success() {
-                        return fill_exact(response, dst);
-                    } else {
-                        return Err(status_error(response));
-                    }
-                }
-                // Dragonfly reports an expired signed link as a terminal 403
-                // error rather than a 403 response. The failure stays terminal
-                // for this attempt, but the stale URL must not be retried
-                // forever: drop it and fall through to re-resolve.
-                Err(RegistryError::Forbidden(_)) => self.remove_redirect_url(&hex),
-                Err(err) => return Err(err),
+            let response = self.request(Method::GET, &redirect, headers, context, true)?;
+            let status = response.status;
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                // The signed link expired; drop it and fall through to re-resolve.
+                self.remove_redirect_url(&hex);
+            } else if status.is_success() {
+                return fill_exact(response, dst);
+            } else {
+                return Err(status_error(response));
             }
         }
 
@@ -1309,142 +1056,20 @@ dragonfly:
         assert!(registry.cached_auth.read().unwrap().is_empty());
     }
 
-    fn rate_limited() -> RegistryError {
-        RegistryError::TooManyRequests("scripted failure".to_string())
-    }
-
-    fn forbidden() -> RegistryError {
-        RegistryError::Forbidden("scripted failure".to_string())
-    }
-
-    fn retryable() -> RegistryError {
-        RegistryError::Io(io::Error::other("scripted failure"))
-    }
-
-    #[test]
-    fn policy_matrix_matches_the_load_shedding_table() {
-        use DragonflyAction::*;
-        use ReadKind::*;
-
-        let policy = DragonflyPolicy::default();
-
-        // (kind, failure, attempts) -> action, one row per cell of the table.
-        let cases = [
-            // Proxy 429: prefetch fails at once, ondemand falls back at once.
-            (Prefetch, rate_limited as fn() -> RegistryError, 1, Fail),
-            (OnDemand, rate_limited, 1, Fallback),
-            // Proxy 403: terminal for both kinds.
-            (Prefetch, forbidden, 1, Fail),
-            (OnDemand, forbidden, 1, Fail),
-            // Retryable (timeout / connect / 5xx / mid-stream): prefetch
-            // retries ten times — 11 attempts total — then fails without
-            // fallback.
-            (Prefetch, retryable, 1, Retry),
-            (Prefetch, retryable, 10, Retry),
-            (Prefetch, retryable, 11, Fail),
-            // Ondemand retries three times — 4 attempts total — then falls back.
-            (OnDemand, retryable, 1, Retry),
-            (OnDemand, retryable, 2, Retry),
-            (OnDemand, retryable, 3, Retry),
-            (OnDemand, retryable, 4, Fallback),
-            // The failure class, not the attempt count, decides for 429/403:
-            // a class switch deep into a retryable budget is still terminal
-            // (or an immediate fallback) at that attempt.
-            (Prefetch, rate_limited, 2, Fail),
-            (OnDemand, rate_limited, 4, Fallback),
-            (Prefetch, forbidden, 2, Fail),
-            (OnDemand, forbidden, 4, Fail),
-        ];
-        for (kind, err, attempts, want) in cases {
-            let err = err();
-            assert_eq!(
-                dragonfly_action(policy, kind, &err, attempts),
-                want,
-                "kind={kind:?} err={err} attempts={attempts}"
-            );
-        }
-    }
-
-    #[test]
-    fn prefetch_retry_delay_stays_inside_the_window() {
-        for _ in 0..64 {
-            let delay = prefetch_retry_delay();
-            assert!(
-                (PREFETCH_RETRY_DELAY_MIN..=PREFETCH_RETRY_DELAY_MAX).contains(&delay),
-                "delay {delay:?} outside the window"
-            );
-        }
-    }
-
-    #[test]
-    fn custom_retry_budgets_are_honored() {
-        use DragonflyAction::*;
-        use ReadKind::*;
-
-        let policy = DragonflyPolicy {
-            prefetch_max_retries: 0,
-            ondemand_max_retries: 5,
-        };
-
-        // A zero prefetch budget makes the first retryable failure terminal.
-        assert_eq!(dragonfly_action(policy, Prefetch, &retryable(), 1), Fail);
-
-        // Ondemand retries through the enlarged budget, then falls back.
-        for attempts in 1..=5 {
-            assert_eq!(
-                dragonfly_action(policy, OnDemand, &retryable(), attempts),
-                Retry,
-                "attempts={attempts}"
-            );
-        }
-        assert_eq!(
-            dragonfly_action(policy, OnDemand, &retryable(), 6),
-            Fallback
-        );
-    }
-
-    #[test]
-    fn policy_budgets_come_from_the_dragonfly_config() {
-        let dragonfly: DragonflyConfig = serde_yaml::from_str(
-            "scheduler_endpoint: http://127.0.0.1:65000\n\
-             ondemand_max_retries: 5\n\
-             prefetch_max_retries: 0\n",
-        )
-        .unwrap();
-        let policy = DragonflyPolicy::from_config(Some(&dragonfly));
-        assert_eq!(policy.prefetch_max_retries, 0);
-        assert_eq!(policy.ondemand_max_retries, 5);
-
-        // No dragonfly section: the documented defaults.
-        let defaults = DragonflyPolicy::from_config(None);
-        assert_eq!(defaults.prefetch_max_retries, 10);
-        assert_eq!(defaults.ondemand_max_retries, 3);
-    }
-
     #[test]
     fn registry_error_to_io_error_preserves_dragonfly_messages() {
-        let too_many_requests: io::Error =
-            RegistryError::TooManyRequests("proxy answered 429".to_string()).into();
-        assert_eq!(too_many_requests.kind(), io::ErrorKind::QuotaExceeded);
+        let deferred: io::Error = RegistryError::PrefetchDeferred(Box::new(
+            RegistryError::UnexpectedStatus(StatusCode::TOO_MANY_REQUESTS, "slow down".to_string()),
+        ))
+        .into();
+        assert_eq!(deferred.kind(), io::ErrorKind::QuotaExceeded);
         assert!(
-            too_many_requests.to_string().contains("too many requests"),
-            "unexpected error: {too_many_requests}"
+            deferred.to_string().contains("prefetch deferred"),
+            "unexpected error: {deferred}"
         );
         assert!(
-            too_many_requests.to_string().contains("429"),
-            "unexpected error: {too_many_requests}"
-        );
-
-        let forbidden: io::Error =
-            RegistryError::Forbidden("proxy answered 403".to_string()).into();
-        assert_ne!(forbidden.kind(), io::ErrorKind::QuotaExceeded);
-        assert!(
-            forbidden.to_string().contains("forbidden"),
-            "unexpected error: {forbidden}"
-        );
-        assert!(
-            forbidden.to_string().contains("403"),
-            "unexpected error: {forbidden}"
+            deferred.to_string().contains("429"),
+            "unexpected error: {deferred}"
         );
 
         let inner = io::Error::new(io::ErrorKind::TimedOut, "timed out");
@@ -1453,41 +1078,30 @@ dragonfly:
         assert!(passthrough.to_string().contains("timed out"));
     }
 
-    #[test]
-    fn fallback_limiter_spaces_permits_by_the_interval() {
-        let interval = Duration::from_millis(40);
-        let limiter = FallbackLimiter::new(interval);
+    /// One scripted outcome of a Dragonfly `get`: the SDK has spent its
+    /// retries and hands back a `200` with `body`, an answer with `status`,
+    /// or a transport failure.
+    enum Scripted {
+        Body(Vec<u8>),
+        Status(StatusCode, HeaderMap),
+        Transport,
+    }
 
-        // Idle limiter grants (nearly) immediately.
-        let start = Instant::now();
-        limiter.acquire();
-        assert!(start.elapsed() < interval);
-
-        // Consecutive permits are spaced at least an interval apart.
-        limiter.acquire();
-        assert!(start.elapsed() >= interval);
-
-        // A zero interval disables the throttle.
-        let unthrottled = FallbackLimiter::new(Duration::ZERO);
-        let start = Instant::now();
-        for _ in 0..3 {
-            assert_eq!(unthrottled.acquire(), Duration::ZERO);
-        }
-        assert!(start.elapsed() < Duration::from_millis(20));
+    fn status(status: StatusCode) -> Scripted {
+        Scripted::Status(status, HeaderMap::new())
     }
 
     /// A scripted Dragonfly transport: pops one scripted outcome per `get`,
-    /// counting the calls. `Ok(body)` produces a `200` response serving the
-    /// bytes; `Err(err)` produces that classified error.
+    /// counting the calls.
     struct ScriptedTransport {
-        script: Mutex<std::collections::VecDeque<RegistryResult<Vec<u8>>>>,
+        script: std::sync::Mutex<std::collections::VecDeque<Scripted>>,
         calls: std::sync::atomic::AtomicU32,
     }
 
     impl ScriptedTransport {
-        fn new(script: impl IntoIterator<Item = RegistryResult<Vec<u8>>>) -> ScriptedTransport {
+        fn new(script: impl IntoIterator<Item = Scripted>) -> ScriptedTransport {
             ScriptedTransport {
-                script: Mutex::new(script.into_iter().collect()),
+                script: std::sync::Mutex::new(script.into_iter().collect()),
                 calls: std::sync::atomic::AtomicU32::new(0),
             }
         }
@@ -1497,8 +1111,9 @@ dragonfly:
         }
     }
 
+    #[async_trait]
     impl DragonflyTransport for ScriptedTransport {
-        fn get(
+        async fn get(
             &self,
             _url: &str,
             _headers: HeaderMap,
@@ -1511,11 +1126,35 @@ dragonfly:
                 .unwrap()
                 .pop_front()
                 .expect("transport called more times than scripted");
-            outcome.map(|body| Response {
-                status: StatusCode::OK,
-                headers: HeaderMap::new(),
-                reader: Box::new(std::io::Cursor::new(body)),
-            })
+            match outcome {
+                Scripted::Body(body) => Ok(Response {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    reader: Box::new(std::io::Cursor::new(body)),
+                }),
+                Scripted::Status(status, headers) => Ok(Response {
+                    status,
+                    headers,
+                    reader: Box::new(std::io::Cursor::new(Vec::new())),
+                }),
+                Scripted::Transport => Err(RegistryError::Io(io::Error::other("scripted failure"))),
+            }
+        }
+    }
+
+    /// Lets a test keep a handle on its [`ScriptedTransport`] after boxing it
+    /// into the registry.
+    struct SharedTransport(Arc<ScriptedTransport>);
+
+    #[async_trait]
+    impl DragonflyTransport for SharedTransport {
+        async fn get(
+            &self,
+            url: &str,
+            headers: HeaderMap,
+            kind: ReadKind,
+        ) -> RegistryResult<Response> {
+            self.0.get(url, headers, kind).await
         }
     }
 
@@ -1580,128 +1219,51 @@ dragonfly:
     }
 
     /// A registry wired to the origin stub, with a scripted Dragonfly
-    /// transport and a configurable fallback throttle.
+    /// transport and a fallback throttle of one slot per `throttle_interval`
+    /// (zero disabling it).
     fn scripted_registry(
         origin: &OriginStub,
         transport: Arc<ScriptedTransport>,
-        fallback_interval: Duration,
+        throttle_interval: Duration,
     ) -> Registry {
-        scripted_registry_at(origin.addr, transport, fallback_interval, 3)
+        scripted_registry_at(origin.addr, transport, throttle_interval, 3)
     }
 
     /// A registry pointed at `addr` as its origin with `origin_max_retries`
-    /// HTTP retries, a scripted Dragonfly transport, and a configurable
-    /// fallback throttle.
+    /// HTTP retries, a scripted Dragonfly transport, and a fallback throttle
+    /// of one slot per `throttle_interval` (zero disabling it).
     fn scripted_registry_at(
         addr: std::net::SocketAddr,
         transport: Arc<ScriptedTransport>,
-        fallback_interval: Duration,
+        throttle_interval: Duration,
         origin_max_retries: u32,
     ) -> Registry {
         let config: RegistryConfig = serde_yaml::from_str(&format!(
             "addr: http://{addr}\nrepository: library/ubuntu\nhttp:\n  max_retries: {origin_max_retries}\n",
         ))
         .unwrap();
+        let http = HTTP::new(
+            &config.http,
+            BackToSourceRateLimiter::with_interval(1, throttle_interval),
+        )
+        .unwrap();
         let mut registry = Registry::new(config).unwrap();
+        registry.http = http;
         registry.dragonfly = Some(Box::new(SharedTransport(transport)));
-        registry.fallback_limiter = FallbackLimiter::new(fallback_interval);
         registry.target = nydus_telemetry::metrics::BackendTarget::Proxy;
         registry
-    }
-
-    /// Lets a test keep a handle on its [`ScriptedTransport`] after boxing it
-    /// into the registry.
-    struct SharedTransport(Arc<ScriptedTransport>);
-
-    impl DragonflyTransport for SharedTransport {
-        fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
-            self.0.get(url, headers, kind)
-        }
-    }
-
-    /// A body that serves `data` and then fails instead of reaching EOF.
-    struct MidStreamFailingBody {
-        data: Vec<u8>,
-        pos: usize,
-    }
-
-    impl AsyncRead for MidStreamFailingBody {
-        fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<io::Result<()>> {
-            if self.pos < self.data.len() {
-                let n = buf.remaining().min(self.data.len() - self.pos);
-                let pos = self.pos;
-                buf.put_slice(&self.data[pos..pos + n]);
-                self.pos = pos + n;
-                std::task::Poll::Ready(Ok(()))
-            } else {
-                std::task::Poll::Ready(Err(io::Error::other("connection reset mid-stream")))
-            }
-        }
-    }
-
-    /// A transport handing out pre-built responses in order, counting calls.
-    struct SequencedTransport {
-        responses: Mutex<std::collections::VecDeque<Response>>,
-        calls: Arc<std::sync::atomic::AtomicU32>,
-    }
-
-    impl SequencedTransport {
-        fn new(
-            responses: impl IntoIterator<Item = Response>,
-        ) -> (SequencedTransport, Arc<std::sync::atomic::AtomicU32>) {
-            let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
-            let transport = SequencedTransport {
-                responses: Mutex::new(responses.into_iter().collect()),
-                calls: calls.clone(),
-            };
-            (transport, calls)
-        }
-    }
-
-    impl DragonflyTransport for SequencedTransport {
-        fn get(
-            &self,
-            _url: &str,
-            _headers: HeaderMap,
-            _kind: ReadKind,
-        ) -> RegistryResult<Response> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self
-                .responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("transport called more times than scripted"))
-        }
-    }
-
-    fn ok_response(reader: Box<dyn AsyncRead + Send + Unpin>) -> Response {
-        Response {
-            status: StatusCode::OK,
-            headers: HeaderMap::new(),
-            reader,
-        }
     }
 
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
     #[test]
-    fn ondemand_read_retries_dragonfly_then_falls_back_to_origin() {
+    fn ondemand_transport_failure_falls_back_to_origin() {
         let body = b"0123456789".to_vec();
         let origin = OriginStub::serve(body.clone());
-        // 4 Dragonfly attempts (1 + 3 retries) all fail retryably.
-        let transport = Arc::new(ScriptedTransport::new(vec![
-            Err(retryable()),
-            Err(retryable()),
-            Err(retryable()),
-            Err(retryable()),
-        ]));
+        let transport = Arc::new(ScriptedTransport::new(vec![Scripted::Transport]));
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
+        let errors_before = nydus_telemetry::metrics::dragonfly_error_total(ReadKind::OnDemand);
         let mut dst = vec![0u8; body.len()];
         registry
             .try_read(
@@ -1713,15 +1275,20 @@ dragonfly:
             .unwrap();
 
         assert_eq!(dst, body);
-        assert_eq!(transport.calls(), 4);
+        assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 1);
+        assert!(
+            nydus_telemetry::metrics::dragonfly_error_total(ReadKind::OnDemand) > errors_before
+        );
     }
 
     #[test]
     fn fallback_reads_are_attributed_to_the_origin() {
         let body = b"0123456789".to_vec();
         let origin = OriginStub::serve(body.clone());
-        let transport = Arc::new(ScriptedTransport::new(vec![Err(rate_limited())]));
+        let transport = Arc::new(ScriptedTransport::new(vec![status(
+            StatusCode::TOO_MANY_REQUESTS,
+        )]));
         let registry = scripted_registry(&origin, transport, Duration::ZERO);
         let metered = crate::metered(Arc::new(registry));
 
@@ -1756,197 +1323,137 @@ dragonfly:
     }
 
     #[test]
-    fn prefetch_read_fails_without_origin_fallback() {
-        let origin = OriginStub::serve(b"unused".to_vec());
-        // A 1-retry budget keeps the test fast (the default is 10, each
-        // prefetch retry sleeps a 100ms–1s jitter): 2 Dragonfly attempts
-        // (1 + 1 retry), then the read must fail.
-        let transport = Arc::new(ScriptedTransport::new(vec![
-            Err(retryable()),
-            Err(retryable()),
-        ]));
-        let mut registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-        registry.dragonfly_policy = DragonflyPolicy {
-            prefetch_max_retries: 1,
-            ..DragonflyPolicy::default()
-        };
+    fn prefetch_failures_are_deferred_without_origin_fallback() {
+        let test_cases = vec![
+            (Scripted::Transport, "scripted failure"),
+            (status(StatusCode::TOO_MANY_REQUESTS), "429"),
+            (status(StatusCode::SERVICE_UNAVAILABLE), "503"),
+            (status(StatusCode::REQUEST_TIMEOUT), "408"),
+            (status(StatusCode::INSUFFICIENT_STORAGE), "507"),
+        ];
 
-        let mut dst = vec![0u8; 4];
-        let err = registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::Prefetch),
-            )
-            .unwrap_err();
-
-        assert!(err.to_string().contains("scripted failure"));
-        assert_eq!(transport.calls(), 2);
-        assert_eq!(origin.hits(), 0);
-    }
-
-    #[test]
-    fn rate_limited_prefetch_fails_at_once_with_the_throttled_marker() {
-        let origin = OriginStub::serve(b"unused".to_vec());
-        let transport = Arc::new(ScriptedTransport::new(vec![Err(rate_limited())]));
-        let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-
-        let mut dst = vec![0u8; 4];
-        let err: io::Error = registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::Prefetch),
-            )
-            .unwrap_err()
-            .into();
-
-        assert_eq!(err.kind(), io::ErrorKind::QuotaExceeded);
-        assert_eq!(transport.calls(), 1);
-        assert_eq!(origin.hits(), 0);
-    }
-
-    #[test]
-    fn forbidden_is_terminal_for_ondemand_reads() {
-        let origin = OriginStub::serve(b"unused".to_vec());
-        let transport = Arc::new(ScriptedTransport::new(vec![Err(forbidden())]));
-        let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-
-        let mut dst = vec![0u8; 4];
-        let err = registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::OnDemand),
-            )
-            .unwrap_err();
-
-        assert!(matches!(err, RegistryError::Forbidden(_)));
-        assert_eq!(transport.calls(), 1);
-        assert_eq!(origin.hits(), 0);
-    }
-
-    #[test]
-    fn forbidden_is_terminal_for_prefetch_reads() {
-        let origin = OriginStub::serve(b"unused".to_vec());
-        let transport = Arc::new(ScriptedTransport::new(vec![Err(forbidden())]));
-        let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-
-        let mut dst = vec![0u8; 4];
-        let err = registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::Prefetch),
-            )
-            .unwrap_err();
-
-        assert!(matches!(err, RegistryError::Forbidden(_)));
-        assert_eq!(transport.calls(), 1);
-        assert_eq!(origin.hits(), 0);
-    }
-
-    #[test]
-    fn retryable_read_succeeds_on_a_dragonfly_retry() {
-        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
-            let body = b"retried".to_vec();
+        for (outcome, expected) in test_cases {
             let origin = OriginStub::serve(b"unused".to_vec());
-            // Attempt 1 fails retryably; the retry succeeds on Dragonfly, so
-            // the origin is never touched.
-            let transport = Arc::new(ScriptedTransport::new(vec![
-                Err(retryable()),
-                Ok(body.clone()),
-            ]));
+            let transport = Arc::new(ScriptedTransport::new(vec![outcome]));
             let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
-            let start = Instant::now();
+            let mut dst = vec![0u8; 4];
+            let err: io::Error = registry
+                .try_read(
+                    &TEST_BLOB_ID,
+                    0,
+                    &mut dst,
+                    ReadContext::raw(ReadKind::Prefetch),
+                )
+                .unwrap_err()
+                .into();
+
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::QuotaExceeded,
+                "expected: {expected}"
+            );
+            assert!(err.to_string().contains(expected), "error: {err}");
+            assert_eq!(transport.calls(), 1, "expected: {expected}");
+            assert_eq!(origin.hits(), 0, "expected: {expected}");
+        }
+    }
+
+    #[test]
+    fn transient_answers_fall_back_ondemand() {
+        let body = b"0123456789".to_vec();
+        let test_cases = vec![
+            status(StatusCode::TOO_MANY_REQUESTS),
+            status(StatusCode::SERVICE_UNAVAILABLE),
+            status(StatusCode::REQUEST_TIMEOUT),
+            status(StatusCode::INSUFFICIENT_STORAGE),
+            Scripted::Transport,
+        ];
+
+        for outcome in test_cases {
+            let origin = OriginStub::serve(body.clone());
+            let transport = Arc::new(ScriptedTransport::new(vec![outcome]));
+            let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
+
             let mut dst = vec![0u8; body.len()];
             registry
-                .try_read(&TEST_BLOB_ID, 0, &mut dst, ReadContext::raw(kind))
+                .try_read(
+                    &TEST_BLOB_ID,
+                    0,
+                    &mut dst,
+                    ReadContext::raw(ReadKind::OnDemand),
+                )
                 .unwrap();
-            let elapsed = start.elapsed();
 
-            assert_eq!(dst, body, "kind={kind:?}");
-            assert_eq!(transport.calls(), 2, "kind={kind:?}");
-            assert_eq!(origin.hits(), 0, "kind={kind:?}");
-            // Only the prefetch retry is paced by the jitter window;
-            // on-demand retries go immediately.
-            match kind {
-                ReadKind::Prefetch => assert!(
-                    elapsed >= PREFETCH_RETRY_DELAY_MIN,
-                    "prefetch retry skipped the jitter delay: {elapsed:?}"
-                ),
-                ReadKind::OnDemand => assert!(
-                    elapsed < PREFETCH_RETRY_DELAY_MIN,
-                    "on-demand retry must not be delayed: {elapsed:?}"
-                ),
+            assert_eq!(dst, body);
+            assert_eq!(transport.calls(), 1);
+            assert_eq!(origin.hits(), 1);
+        }
+    }
+
+    #[test]
+    fn definitive_answers_are_terminal_for_both_read_kinds() {
+        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+            for terminal in [
+                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ] {
+                let origin = OriginStub::serve(b"unused".to_vec());
+                let transport = Arc::new(ScriptedTransport::new(vec![status(terminal)]));
+                let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
+
+                let mut dst = vec![0u8; 4];
+                let err = registry
+                    .try_read(&TEST_BLOB_ID, 0, &mut dst, ReadContext::raw(kind))
+                    .unwrap_err();
+
+                assert!(
+                    matches!(err, RegistryError::UnexpectedStatus(got, _) if got == terminal),
+                    "kind={kind:?} status={terminal}: {err:?}"
+                );
+                assert_eq!(transport.calls(), 1, "kind={kind:?} status={terminal}");
+                assert_eq!(origin.hits(), 0, "kind={kind:?} status={terminal}");
             }
         }
     }
 
     #[test]
-    fn rate_limit_after_a_retryable_failure_falls_back_at_once() {
-        let body = b"0123456789".to_vec();
-        let origin = OriginStub::serve(body.clone());
-        // Attempt 1 is retryable; attempt 2 answers 429, which falls back
-        // immediately instead of burning the remaining retryable budget.
-        let transport = Arc::new(ScriptedTransport::new(vec![
-            Err(retryable()),
-            Err(rate_limited()),
-        ]));
-        let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
+    fn unauthorized_answer_triggers_the_auth_handshake() {
+        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+            let body = b"authorized".to_vec();
+            let origin = OriginStub::serve(b"unused".to_vec());
+            let mut challenge = HeaderMap::new();
+            challenge.insert(
+                WWW_AUTHENTICATE,
+                r#"Basic realm="registry""#.parse().unwrap(),
+            );
+            let transport = Arc::new(ScriptedTransport::new(vec![
+                Scripted::Status(StatusCode::UNAUTHORIZED, challenge),
+                Scripted::Body(body.clone()),
+            ]));
+            let mut registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
+            registry.basic_auth = Some("YWxpY2U6c2VjcmV0".to_string());
 
-        let mut dst = vec![0u8; body.len()];
-        registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::OnDemand),
-            )
-            .unwrap();
+            let mut dst = vec![0u8; body.len()];
+            registry
+                .try_read(&TEST_BLOB_ID, 0, &mut dst, ReadContext::raw(kind))
+                .unwrap();
 
-        assert_eq!(dst, body);
-        assert_eq!(transport.calls(), 2);
-        assert_eq!(origin.hits(), 1);
-    }
-
-    #[test]
-    fn rate_limit_after_a_retryable_prefetch_fails_with_the_throttled_marker() {
-        let origin = OriginStub::serve(b"unused".to_vec());
-        // Attempt 1 is retryable; the 429 on attempt 2 is terminal for
-        // prefetch and carries the throttled marker for the rescheduler.
-        let transport = Arc::new(ScriptedTransport::new(vec![
-            Err(retryable()),
-            Err(rate_limited()),
-        ]));
-        let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-
-        let mut dst = vec![0u8; 4];
-        let err: io::Error = registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::Prefetch),
-            )
-            .unwrap_err()
-            .into();
-
-        assert_eq!(err.kind(), io::ErrorKind::QuotaExceeded);
-        assert_eq!(transport.calls(), 2);
-        assert_eq!(origin.hits(), 0);
+            assert_eq!(dst, body, "kind={kind:?}");
+            assert_eq!(transport.calls(), 2, "kind={kind:?}");
+            assert_eq!(origin.hits(), 0, "kind={kind:?}");
+            assert_eq!(registry.current_auth(), "Basic YWxpY2U6c2VjcmV0");
+        }
     }
 
     #[test]
     fn fallback_origin_failure_surfaces_as_an_io_error() {
         // Nothing listens on the origin address, so the fallback's connect is
         // refused; zero origin retries keep the failure immediate.
-        let transport = Arc::new(ScriptedTransport::new(vec![Err(rate_limited())]));
+        let transport = Arc::new(ScriptedTransport::new(vec![status(
+            StatusCode::TOO_MANY_REQUESTS,
+        )]));
         let registry = scripted_registry_at(dead_addr(), transport.clone(), Duration::ZERO, 0);
 
         let errors_before = nydus_telemetry::metrics::backend_fallback_read_error_total();
@@ -1969,7 +1476,9 @@ dragonfly:
     fn fallback_gives_the_origin_its_http_retry_budget() {
         // The origin answers every fallback attempt with a retryable 500.
         let origin = OriginStub::serve_with_status("500 Internal Server Error", b"boom".to_vec());
-        let transport = Arc::new(ScriptedTransport::new(vec![Err(rate_limited())]));
+        let transport = Arc::new(ScriptedTransport::new(vec![status(
+            StatusCode::TOO_MANY_REQUESTS,
+        )]));
         // `http.max_retries: 1` gives the origin two attempts before the
         // fallback read fails.
         let registry = scripted_registry_at(origin.addr, transport.clone(), Duration::ZERO, 1);
@@ -1996,78 +1505,38 @@ dragonfly:
     }
 
     #[test]
-    fn mid_stream_body_failure_is_retried_by_the_policy() {
-        let body = b"whole body".to_vec();
-        let origin = OriginStub::serve(b"unused".to_vec());
-        // Attempt 1 starts streaming and dies mid-body; the policy must see
-        // it as a retryable failure and retry, never touching the origin.
-        let (transport, calls) = SequencedTransport::new(vec![
-            ok_response(Box::new(MidStreamFailingBody {
-                data: body[..4].to_vec(),
-                pos: 0,
-            })),
-            ok_response(Box::new(std::io::Cursor::new(body.clone()))),
-        ]);
-        let mut registry = scripted_registry(
-            &origin,
-            Arc::new(ScriptedTransport::new(vec![])),
-            Duration::ZERO,
-        );
-        registry.dragonfly = Some(Box::new(transport));
+    fn fallback_retries_are_throttled_per_attempt() {
+        // Every fallback attempt answers a retryable 500, so the read burns
+        // its full origin budget (1 + 1 retry); each attempt must wait for
+        // its own throttle slot.
+        let origin = OriginStub::serve_with_status("500 Internal Server Error", b"boom".to_vec());
+        let transport = Arc::new(ScriptedTransport::new(vec![status(
+            StatusCode::TOO_MANY_REQUESTS,
+        )]));
+        let interval = Duration::from_millis(80);
+        let start = Instant::now();
+        let registry = scripted_registry_at(origin.addr, transport.clone(), interval, 1);
 
-        let stream_errors_before =
-            nydus_telemetry::metrics::dragonfly_error_total(ReadKind::OnDemand);
-        let mut dst = vec![0u8; body.len()];
-        registry
+        let mut dst = vec![0u8; 4];
+        let err = registry
             .try_read(
                 &TEST_BLOB_ID,
                 0,
                 &mut dst,
                 ReadContext::raw(ReadKind::OnDemand),
             )
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(dst, body);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(origin.hits(), 0);
         assert!(
-            nydus_telemetry::metrics::dragonfly_error_total(ReadKind::OnDemand)
-                > stream_errors_before
+            matches!(
+                err,
+                RegistryError::UnexpectedStatus(StatusCode::INTERNAL_SERVER_ERROR, _)
+            ),
+            "unexpected: {err:?}"
         );
-    }
-
-    #[test]
-    fn mid_stream_body_failure_exhausts_the_budget_then_falls_back() {
-        let body = b"0123456789".to_vec();
-        let origin = OriginStub::serve(body.clone());
-        // Every Dragonfly attempt dies mid-body; the on-demand budget
-        // (1 + 3 retries) drains, then the read falls back to the origin.
-        let (transport, calls) = SequencedTransport::new((0..4).map(|_| {
-            ok_response(Box::new(MidStreamFailingBody {
-                data: b"par".to_vec(),
-                pos: 0,
-            }))
-        }));
-        let mut registry = scripted_registry(
-            &origin,
-            Arc::new(ScriptedTransport::new(vec![])),
-            Duration::ZERO,
-        );
-        registry.dragonfly = Some(Box::new(transport));
-
-        let mut dst = vec![0u8; body.len()];
-        registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::OnDemand),
-            )
-            .unwrap();
-
-        assert_eq!(dst, body);
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
-        assert_eq!(origin.hits(), 1);
+        assert_eq!(origin.hits(), 2);
+        // The retry had to wait for the next throttle slot.
+        assert!(start.elapsed() >= interval);
     }
 
     #[test]
@@ -2076,13 +1545,13 @@ dragonfly:
         let origin = OriginStub::serve(body.clone());
         // Two reads, each rate-limited once, each falling back to the origin.
         let transport = Arc::new(ScriptedTransport::new(vec![
-            Err(rate_limited()),
-            Err(rate_limited()),
+            status(StatusCode::TOO_MANY_REQUESTS),
+            status(StatusCode::TOO_MANY_REQUESTS),
         ]));
         let interval = Duration::from_millis(80);
+        let start = Instant::now();
         let registry = scripted_registry(&origin, transport.clone(), interval);
 
-        let start = Instant::now();
         let mut dst = vec![0u8; body.len()];
         for _ in 0..2 {
             registry
@@ -2097,7 +1566,7 @@ dragonfly:
         }
 
         assert_eq!(origin.hits(), 2);
-        // The second fallback had to wait for the next interval slot.
+        // The second fallback had to wait for the next throttle slot.
         assert!(start.elapsed() >= interval);
     }
 
@@ -2105,7 +1574,7 @@ dragonfly:
     fn cached_redirect_reads_ride_dragonfly() {
         let body = b"redirected".to_vec();
         let origin = OriginStub::serve(b"unused".to_vec());
-        let transport = Arc::new(ScriptedTransport::new(vec![Ok(body.clone())]));
+        let transport = Arc::new(ScriptedTransport::new(vec![Scripted::Body(body.clone())]));
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
         let hex = hex_string(&TEST_BLOB_ID);
         registry.set_redirect_url(&hex, "http://cdn.example.com/signed".to_string());
@@ -2129,12 +1598,11 @@ dragonfly:
     fn forbidden_cached_redirect_is_evicted_and_re_resolved() {
         let body = b"fresh".to_vec();
         let origin = OriginStub::serve(b"unused".to_vec());
-        // The cached signed URL fails with a Dragonfly 403 (expired link);
-        // the read evicts it and re-resolves through the blob URL, which
-        // succeeds on Dragonfly.
+        // The cached signed URL answers 403 (expired link); the read evicts it
+        // and re-resolves through the blob URL, which succeeds on Dragonfly.
         let transport = Arc::new(ScriptedTransport::new(vec![
-            Err(forbidden()),
-            Ok(body.clone()),
+            status(StatusCode::FORBIDDEN),
+            Scripted::Body(body.clone()),
         ]));
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
         let hex = hex_string(&TEST_BLOB_ID);
@@ -2153,38 +1621,5 @@ dragonfly:
         assert_eq!(dst, body);
         assert_eq!(transport.calls(), 2);
         assert!(registry.redirect_url(&hex).is_none());
-    }
-
-    #[test]
-    fn fallback_retries_are_throttled_per_attempt() {
-        // Every fallback attempt answers a retryable 500, so the read burns
-        // its full origin budget (1 + 1 retry); each attempt must wait for
-        // its own throttle slot.
-        let origin = OriginStub::serve_with_status("500 Internal Server Error", b"boom".to_vec());
-        let transport = Arc::new(ScriptedTransport::new(vec![Err(rate_limited())]));
-        let interval = Duration::from_millis(80);
-        let registry = scripted_registry_at(origin.addr, transport.clone(), interval, 1);
-
-        let start = Instant::now();
-        let mut dst = vec![0u8; 4];
-        let err = registry
-            .try_read(
-                &TEST_BLOB_ID,
-                0,
-                &mut dst,
-                ReadContext::raw(ReadKind::OnDemand),
-            )
-            .unwrap_err();
-
-        assert!(
-            matches!(
-                err,
-                RegistryError::UnexpectedStatus(StatusCode::INTERNAL_SERVER_ERROR, _)
-            ),
-            "unexpected: {err:?}"
-        );
-        assert_eq!(origin.hits(), 2);
-        // The retry had to wait for the next interval slot.
-        assert!(start.elapsed() >= interval);
     }
 }
