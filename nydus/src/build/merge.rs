@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::build::bootstrap::{render_flattened_bootstrap, render_flattened_bootstrap_to};
@@ -9,11 +8,11 @@ use crate::build::inode::{
 use nydus_core::reader::RawDirEntry;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
+use nydus_format::blob::BlobFooter;
 use nydus_format::erofs::{
     erofs_xattr_name_split, mode_to_erofs_file_type, ErofsChunkAddr, ErofsDeviceSlot, XattrEntry,
-    EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR,
-    EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED,
-    EROFS_NULL_ADDR,
+    EROFS_BLOB_ID_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO,
+    EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_NULL_ADDR,
 };
 use nydus_format::utils::parse_sha256_hex;
 
@@ -500,19 +499,12 @@ fn parse_source_blob_id(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
 }
 
 fn validate_single_layer_blob_source(path: &Path, reader: &ErofsReader) -> Result<()> {
-    let file_size = fs::metadata(path)
-        .with_context(|| format!("failed to stat merge source: {}", path.display()))?
-        .len();
-    let primary_image_size = reader.superblock().blocks() * EROFS_BLOCK_SIZE as u64;
+    BlobFooter::from_blob_path(path)
+        .with_context(|| format!("merge source must be a full blob file: {}", path.display()))?;
     let blob_infos = reader.blob_infos()?;
     if blob_infos.len() != 1 {
         return Err(Error::InvalidImage(
             "merge source must contain exactly one external blob".to_string(),
-        ));
-    }
-    if blob_infos[0].blocks > 0 && file_size == primary_image_size {
-        return Err(Error::InvalidImage(
-            "merge source must be a full blob file, not a metadata-only bootstrap".to_string(),
         ));
     }
     Ok(())
@@ -539,8 +531,11 @@ fn whiteout_target(name: &[u8], whiteout_spec: WhiteoutSpec) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
     use nydus_format::erofs::{
-        needs_erofs_extended_inode, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
+        needs_erofs_extended_inode, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
+        EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
     };
 
     const OPAQUE: &str = ".wh..wh..opq";
@@ -562,6 +557,74 @@ mod tests {
             .keys()
             .map(|k| String::from_utf8_lossy(k).into_owned())
             .collect()
+    }
+
+    #[test]
+    fn merge_accepts_full_blob_when_file_size_matches_primary_image() {
+        use crate::build::image::write_erofs_superblock_checksum;
+        use crate::build::{build_image, BuildImageOptions};
+        use nydus_format::blob::BlobMetadataCompressor;
+        use std::collections::HashSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("data"), vec![b'x'; 5000]).unwrap();
+
+        let path = dir.path().join("blob");
+        let image = build_image(
+            &BuildImageOptions::new(
+                source,
+                EROFS_BLOCK_SIZE,
+                1 << 20,
+                BlobMetadataCompressor::None,
+                HashSet::new(),
+                false,
+            )
+            .unwrap(),
+            fs::File::create(&path).unwrap(),
+        )
+        .unwrap();
+
+        let original_blob = fs::read(&path).unwrap();
+        let data_size = usize::try_from(image.blob_footer.compressed_data_size()).unwrap();
+        let bootstrap_offset = usize::try_from(image.blob_footer.bootstrap_offset()).unwrap();
+        let compressed_bootstrap_size =
+            usize::try_from(image.blob_footer.bootstrap_compressed_size().unwrap()).unwrap();
+        let mut bootstrap = zstd::stream::decode_all(
+            &original_blob[bootstrap_offset..bootstrap_offset + compressed_bootstrap_size],
+        )
+        .unwrap();
+        let blocks_lo_offset =
+            EROFS_SUPER_OFFSET as usize + std::mem::offset_of!(ErofsSuperblock, blocks_lo);
+        let mut file_blocks =
+            u32::try_from(original_blob.len() / EROFS_BLOCK_SIZE as usize).unwrap();
+        let blob = loop {
+            bootstrap[blocks_lo_offset..blocks_lo_offset + 4]
+                .copy_from_slice(&file_blocks.to_le_bytes());
+            write_erofs_superblock_checksum(&mut bootstrap).unwrap();
+
+            let mut rebuilt = original_blob[..data_size].to_vec();
+            nydus_format::blob::finish_full_blob(
+                &mut rebuilt,
+                data_size as u64,
+                &bootstrap,
+                &image.blob_metadata,
+            )
+            .unwrap();
+            assert_eq!(rebuilt.len() % EROFS_BLOCK_SIZE as usize, 0);
+            let rebuilt_blocks = u32::try_from(rebuilt.len() / EROFS_BLOCK_SIZE as usize).unwrap();
+            if rebuilt_blocks == file_blocks {
+                break rebuilt;
+            }
+            file_blocks = rebuilt_blocks;
+        };
+        fs::write(&path, blob).unwrap();
+
+        let reader = ErofsReader::open_metadata_only(&path).unwrap();
+        assert_eq!(reader.superblock().blocks(), u64::from(file_blocks));
+        assert!(reader.blob_infos().unwrap()[0].blocks > 0);
+        validate_single_layer_blob_source(&path, &reader).unwrap();
     }
 
     #[test]
