@@ -75,7 +75,7 @@ pub fn default_prefetch_timeout() -> Duration {
 /// Dragonfly seed peers.
 #[inline]
 fn default_registry_dragonfly_timeout() -> Duration {
-    Duration::from_secs(30)
+    Duration::from_secs(5)
 }
 
 /// Returns the default maximum number of retries of an on-demand blob `GET`
