@@ -614,6 +614,7 @@ Supported forms:
 - `nydus check --bootstrap <bootstrap>`
 - `nydus check --bootstrap <bootstrap> --blob-dir <blob-dir>`
 - `nydus check --bootstrap <bootstrap> --config <config.yaml>`
+- `nydus check --bootstrap <bootstrap> --blob-dir <blob-dir> --output json`
 
 Current implementation notes:
 
@@ -2696,9 +2697,13 @@ Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--source`, `-s` | required | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. Converting back to OCI takes exactly one image source. |
+| `--source`, `-s` | required except artifact mode | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. Converting back to OCI takes exactly one image source. Mutually exclusive with artifact mode. |
 | `--target`, `-t` | required | Target image reference to push. |
 | `--builder` | `nydus` | Path to the `nydus` binary (PATH-resolvable). |
+| `--bootstrap` | empty | Existing nydus bootstrap to package in artifact mode. Mutually exclusive with `--source`. |
+| `--blob` | empty | Local nydus blob artifact to include in artifact mode. Repeatable. |
+| `--blob-dir` | empty | Directory containing local nydus blob artifacts named by full blob SHA256 for artifact mode. |
+| `--parent-image` | empty | Existing nydus image whose data blob descriptors and blob meta files are reused in artifact mode without downloading parent data blobs. Only one parent image is currently supported. |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
 | `--chunk-size` | `0` (automatic) | Chunk size, 1MiB by default; explicit values are bytes (a power of two, at least 4KiB). The largest file chunk and the size of every chunk group. Not used by `erofs-lz4`/`erofs-zstd` and ignored when converting back to OCI. |
 | `--compressor` | `zstd` | `none`, `zstd`, `lz4`: chunk-based layouts served on demand; `erofs-none`, `erofs-lz4`, `erofs-zstd`: native EROFS layers without blob meta; `oci-gzip`, `oci-zstd`, `oci-tar`: reverse OCI conversion. |
