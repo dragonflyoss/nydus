@@ -1,5 +1,6 @@
 use clap::Parser;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
+use nydus::check::reject_non_standalone_blob;
 use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{build_backend, BlobBackend, Local};
@@ -262,7 +263,10 @@ impl FuseCommand {
         let reader = match (&self.blob, &self.bootstrap, backend) {
             // A self-contained full blob still wants the decoded-block-group
             // cache: without it every read decodes from the blob in place.
-            (Some(blob), None, _) => ErofsReader::open_blob(blob, cache_dir.as_deref()),
+            (Some(blob), None, _) => {
+                reject_non_standalone_blob(blob)?;
+                ErofsReader::open_blob(blob, cache_dir.as_deref())
+            }
             (None, Some(bootstrap), Some(backend)) => {
                 ErofsReader::open_bootstrap(bootstrap, backend, cache_dir.as_deref(), None)
             }

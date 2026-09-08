@@ -1,5 +1,7 @@
 use clap::Parser;
-use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
+use nydus::check::{
+    check_image, reject_non_standalone_blob, BlobSummary, CheckReport, ImageKind, ImageStats,
+};
 use nydus::error::{Error, Result};
 use nydus_config::{BackendConfig, Config};
 use nydus_format::erofs::{
@@ -108,6 +110,10 @@ impl CheckCommand {
     /// Runs the inspection: checks the image, prints the report, and fails
     /// on inline data crossing a metadata block.
     fn run(&self, kind: ImageKind, path: &Path, blob_dir: Option<&Path>) -> Result<()> {
+        if kind == ImageKind::Blob {
+            reject_non_standalone_blob(path)?;
+        }
+
         let report = check_image(kind, path, blob_dir)?;
 
         print_header(kind, path, &report);
