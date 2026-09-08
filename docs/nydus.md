@@ -384,6 +384,7 @@ Supported forms:
 - `nydus check --bootstrap <bootstrap>`
 - `nydus check --bootstrap <bootstrap> --blob-dir <blob-dir>`
 - `nydus check --bootstrap <bootstrap> --config <config.yaml>`
+- `nydus check --bootstrap <bootstrap> --blob-dir <blob-dir> --output json`
 
 Current implementation notes:
 
@@ -396,10 +397,11 @@ Current implementation notes:
 - `--config` supplies the blob directory through the storage config's
 	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
-- Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
-	`chunk_size`, `chunk_count`, `block_group_count`, `chunk_digester`,
-	`chunk_compressor`, and compressed/uncompressed totals when the referenced
-	blob can be resolved.
+- Blob entries report `data_blob_digest`, `full_blob_digest`, `blob_type`,
+	blob_meta `chunk_size`, `chunk_count`, `block_group_count`,
+	`chunk_digester`, `chunk_compressor`, and compressed/uncompressed totals when
+	the referenced blob can be resolved. `blob_type` is derived from blob_meta
+	flags and is one of `full`, `redirect`, `incremental`, or `<unresolved>`.
 - `--blob-dir` resolves by scanning full blob candidates. Device slots normally
 	store the data-region SHA256, while blob files are named by full blob SHA256
 	when produced by `--blob-dir`.
@@ -1075,6 +1077,18 @@ length so readers decode without trusting the zero tail. An empty bootstrap
 specified, the standalone bootstrap file is byte-for-byte identical to the
 decoded region.
 
+Incremental writer blobs use the same footer and blob meta machinery, but they
+are not standalone full blobs. The writer takes one output directory and
+`commit()` returns success after writing the final artifacts there: `image.boot`,
+`<full_blob_digest>` and `<full_blob_digest>.blob.meta` when upper data exists.
+Their blob layout is `[encoded upper data][blob meta][footer]`:
+`bootstrap_blocks = 0`, `bootstrap_compressed_size = 0`, and the blob meta header
+carries the `INCREMENTAL` flag. The filesystem view is stored in the separately
+committed bootstrap; unchanged chunks keep pointing at parent blob devices,
+while dirty non-zero chunks point at the incremental upper blob. All-zero dirty
+chunks are encoded as null chunks in the new bootstrap, so they cover parent
+data without writing payload bytes into the upper blob.
+
 ### Bootstrap region details
 
 Within the bootstrap region:
@@ -1260,7 +1274,9 @@ Header details:
 	`COMPRESSOR_LZ4` (`1 << 1`) names the blob's default compressor; no
 	compressor bit means stored plain. `DIGESTER_BLAKE3` (`1 << 2`) is mandatory
 	for chunk digests. `REDIRECT` (`1 << 3`) marks an ondemand blob whose block
-	groups are all redirect entries.
+	groups are all redirect entries. `INCREMENTAL` (`1 << 4`) marks an upper data
+	blob produced by the incremental writer; it stores payload block groups but no
+	embedded bootstrap. `REDIRECT` and `INCREMENTAL` are mutually exclusive.
 	Entry-layout evolution (wider chunk/block group entries, new entry kinds) is
 	expressed as a new incompat bit — the same way EROFS gates compact vs
 	extended inodes — while header growth uses the reserved tail plus a compat
@@ -2118,6 +2134,34 @@ Pipeline (multiple and/or directory sources, `internal/pipeline/multi.go`):
    source when present; otherwise a minimal config is synthesized. Push to
    `--target`.
 
+#### Artifact to nydus
+
+`nydusify convert --bootstrap <image.boot> [--blob <blob> ...|--blob-dir <dir>|--parent-image <ref>] --target <ref>`
+
+Artifact mode packages nydus runtime artifacts that were produced outside the
+normal `nydusify convert --source` pipeline. This is useful for incremental image
+writers: the writer has already committed the merged filesystem view into a new
+bootstrap and, when needed, an upper data blob. `nydusify` only assembles and
+pushes the OCI manifest.
+
+Artifact mode is mutually exclusive with `--source`. It requires a local
+`image.boot` and at least one source of data blob descriptors:
+
+- `--blob` and `--blob-dir` ingest local full or incremental blob files into the
+  content store and include their `.blob.meta` sidecars in the bootstrap layer.
+- `--parent-image` reuses blob descriptors and blob meta files from an existing
+  nydus image without downloading the parent data blobs. The parent image and
+  target image are checked to be in the same repository so the pushed manifest
+  can reference already-published parent blobs.
+- `nydus check --bootstrap <image.boot> --output json` is used to inspect the
+  bootstrap device table, filter unused blob descriptors, and fail early if the
+  bootstrap references a blob that is not provided locally or by the parent
+  image.
+
+The resulting manifest keeps the normal nydus shape: all data blob descriptors
+come first, followed by one bootstrap layer containing `image/image.boot`, all
+required `.blob.meta` files, and any `--append-in-bootstrap` files.
+
 #### nydus to OCI
 
 `nydusify convert --compressor oci-gzip|oci-zstd|oci-tar --source <nydus-ref> --target <oci-ref>`
@@ -2161,9 +2205,13 @@ Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--source`, `-s` | required | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. Converting back to OCI takes exactly one image source. |
+| `--source`, `-s` | required except artifact mode | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. Converting back to OCI takes exactly one image source. Mutually exclusive with artifact mode. |
 | `--target`, `-t` | required | Target image reference to push. |
 | `--builder` | `nydus` | Path to the `nydus` binary (PATH-resolvable). |
+| `--bootstrap` | empty | Existing nydus bootstrap to package in artifact mode. Mutually exclusive with `--source`. |
+| `--blob` | empty | Local nydus blob artifact to include in artifact mode. Repeatable. |
+| `--blob-dir` | empty | Directory containing local nydus blob artifacts named by full blob SHA256 for artifact mode. |
+| `--parent-image` | empty | Existing nydus image whose data blob descriptors and blob meta files are reused in artifact mode without downloading parent data blobs. Only one parent image is currently supported. |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
 | `--chunk-size` | `1048576` | Nydus file chunk size in bytes (1 MiB). Ignored when converting back to OCI. |
 | `--block-group-size` | `4194304` | Blob meta block group uncompressed size in bytes; a power of two, at least 1 MiB and at least `--chunk-size`. Ignored when converting back to OCI. |
