@@ -697,11 +697,9 @@ fn incremental_writer_creates_upper_blob_only_on_commit() {
         .unwrap();
     assert!(!output_dir.join("image.boot").exists());
     let commit = commit_upper_blob(&output_dir, writer);
-    let blob_metadata = nydus_format::blob::BlobMetadata::from_path(
-        commit.blob_metadata_path.as_ref().unwrap(),
-        false,
-    )
-    .unwrap();
+    let blob_metadata =
+        nydus_format::blob::BlobMetadata::from_path(commit.blob_metadata_path.as_ref().unwrap())
+            .unwrap();
     assert!(blob_metadata.is_incremental());
     assert_eq!(blob_metadata.digester(), BlobMetadataDigester::Blake3);
     assert_eq!(blob_metadata.lookup_granule(), DEFAULT_CHUNK_GROUP_MIN_SIZE);
@@ -725,11 +723,9 @@ fn incremental_writer_can_disable_chunk_digests() {
         .write_at(Path::new("memory.bin"), 0, &vec![b'N'; chunk_size])
         .unwrap();
     let commit = commit_upper_blob(&output_dir, writer);
-    let blob_metadata = nydus_format::blob::BlobMetadata::from_path(
-        commit.blob_metadata_path.as_ref().unwrap(),
-        false,
-    )
-    .unwrap();
+    let blob_metadata =
+        nydus_format::blob::BlobMetadata::from_path(commit.blob_metadata_path.as_ref().unwrap())
+            .unwrap();
 
     assert_eq!(blob_metadata.digester(), BlobMetadataDigester::None);
     assert_eq!(blob_metadata.lookup_granule(), EROFS_BLOCK_SIZE);

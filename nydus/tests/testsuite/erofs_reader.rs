@@ -468,13 +468,12 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
                     region.len() as u64,
                     crc32c::crc32c(&region),
                     (offset + region.len()) as u64,
-                    4096,
+                    0,
                     compressed_size,
                 )
                 .unwrap();
                 let mut blob = vec![0u8; offset];
                 blob.extend_from_slice(&region);
-                blob.resize(blob.len() + 4096, 0);
                 footer.write_to(&mut blob).unwrap();
                 let path = dir.path().join(format!("embedded-{offset}-{compressed}"));
                 fs::write(&path, &blob).unwrap();

@@ -940,6 +940,29 @@ impl BlobMetadata {
         })
     }
 
+    /// Inspect the data-only artifact features without allocating or decoding
+    /// metadata tables. Returns `(incremental, redirect)`.
+    pub fn artifact_features_from_bytes(bytes: &[u8]) -> Result<(bool, bool)> {
+        let header = BlobMetadataHeader::from_bytes(bytes)?;
+        FeatureFlags::from_bits(header.feature_incompat)
+            .validate_incompat(NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
+
+        let mut end = NYDUS_BLOB_METADATA_HEADER_SIZE;
+        let mut redirect = false;
+        for _ in 0..header.table_count {
+            let table = BlobMetadataTable::parse(bytes, end.next_multiple_of(8))?;
+            redirect |= table.table_type == NYDUS_BLOB_METADATA_TABLE_REDIRECT;
+            end = table.range().end;
+        }
+        let incremental = header.is_incremental();
+        if incremental && redirect {
+            return Err(Error::InvalidImage(
+                "blob metadata cannot be both redirect and incremental".to_string(),
+            ));
+        }
+        Ok((incremental, redirect))
+    }
+
     /// Read blob metadata from an in-memory byte slice, verifying the header
     /// crc32 over the full metadata.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
