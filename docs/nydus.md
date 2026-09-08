@@ -1084,6 +1084,40 @@ Within the bootstrap region:
 - the metadata area starts at block 1 and contains inode bodies, xattrs, chunk
 	index arrays and directory data.
 
+### Automatic FUSE xattr optimization
+
+Build, merge, and optimize record `trusted.nydus.no_xattr` with the exact value
+`1` on the bootstrap's root inode when the final tree contains no FUSE-visible
+xattrs. This is an EROFS inode xattr inside the bootstrap bytes, not an xattr
+on the host bootstrap file, an EROFS feature bit, or a blob footer flag.
+
+The shared build/merge/optimize flattening traversal accumulates whether any
+emitted inode has visible xattrs and finalizes the root marker before metadata
+layout. No separate inode-list scan is needed. Inherited root markers are
+replaced or removed, so an upper layer's marker
+cannot hide attributes on surviving lower-layer inodes. Root `trusted.nydus.*`
+attributes are internal and excluded from the decision; attributes on all
+other inodes count, including empty values and internal-looking names, because
+FUSE only hides that namespace on the root inode. Visible attributes are always
+serialized, regardless of the optimization.
+
+Bootstrap renderers preserve the finalized attributes and do not recompute
+the marker. Code that constructs inode lists directly or changes visible xattrs
+after flattening must finalize or invalidate the root marker before rendering.
+Adding root internal prefetch attributes does not change the decision.
+
+FUSE reads the root marker once during initialization. The exact name and value
+enable `ENOSYS` replies for getxattr/listxattr, allowing Linux FUSE to stop
+forwarding subsequent requests for each operation. Missing or unknown values
+do not enable the optimization. There is no CLI or environment override and no
+full-tree mount-time scan. Root metadata read errors fail initialization rather
+than being mistaken for absence of xattrs.
+
+The marker is present in embedded, standalone, merged, and optimized bootstraps
+when their final tree qualifies. It is hidden by the existing root internal
+xattr filter and omitted from exported OCI tar attributes. Non-FUSE readers
+and native EROFS mounts do not use it to disable xattr support.
+
 ## On-disk Metadata Design
 
 ### Superblock

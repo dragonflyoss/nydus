@@ -15,9 +15,9 @@ use fuser::{
 };
 
 use nydus_format::erofs::{
-    is_nydus_xattr, ErofsInode, EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR, EROFS_FT_BLKDEV,
-    EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK,
-    EROFS_FT_SYMLINK,
+    erofs_xattr_name_split, is_nydus_xattr, ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
+    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
+    EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR,
 };
 use nydus_telemetry::metrics;
 
@@ -42,8 +42,6 @@ pub struct ErofsFs {
     /// handles keep the page cache (KEEP_CACHE, and CACHE_DIR for dirs).
     no_open: AtomicBool,
     no_opendir: AtomicBool,
-    /// Image-wide "no inode has xattrs" declaration from the builder: xattr
-    /// requests answer ENOSYS so the kernel stops sending them entirely.
     no_xattr: bool,
 }
 
@@ -70,17 +68,25 @@ impl DirHandle {
 }
 
 impl ErofsFs {
-    pub fn new(reader: Arc<ErofsReader>) -> Self {
-        let no_xattr =
-            reader.superblock().feature_compat() & EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR != 0;
-        Self {
+    pub fn new(reader: Arc<ErofsReader>) -> io::Result<Self> {
+        let root_nid = reader.superblock().root_nid();
+        let root = reader.inode(root_nid)?;
+        let no_xattr = reader
+            .read_xattrs(root_nid, &root)?
+            .iter()
+            .any(|(name, value)| {
+                erofs_xattr_name_split(name)
+                    == Some((EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR))
+                    && value == b"1"
+            });
+        Ok(Self {
             reader,
             dir_handles: Mutex::new(HashMap::new()),
             next_dir_handle: AtomicU64::new(1),
             no_open: AtomicBool::new(false),
             no_opendir: AtomicBool::new(false),
             no_xattr,
-        }
+        })
     }
 
     fn ino_to_nid(&self, ino: u64) -> u64 {
@@ -735,5 +741,82 @@ impl Filesystem for ErofsFs {
             return;
         }
         reply.data(&names_buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::blob_chunk::BlobWriter;
+    use crate::build::bootstrap::render_bootstrap;
+    use crate::build::inode::build_tree;
+    use nydus_format::erofs::{XattrEntry, EROFS_BLOCK_SIZE, EROFS_XATTR_INDEX_USER};
+    use std::collections::HashSet;
+    use std::fs;
+
+    #[test]
+    fn no_xattr_is_derived_from_root_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("child"), b"").unwrap();
+        let mut writer = BlobWriter::new(&directory.path().join("data"), EROFS_BLOCK_SIZE).unwrap();
+        let mut inodes =
+            build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        let bootstrap = directory.path().join("bootstrap");
+
+        for (name_index, suffix, value, expected) in [
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"1".as_slice(),
+                true,
+            ),
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"0".as_slice(),
+                false,
+            ),
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"".as_slice(),
+                false,
+            ),
+            (
+                EROFS_XATTR_INDEX_USER,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"1".as_slice(),
+                false,
+            ),
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                b"nydus.other".as_slice(),
+                b"1".as_slice(),
+                false,
+            ),
+        ] {
+            inodes[0].xattrs = vec![XattrEntry {
+                name_index,
+                suffix: suffix.to_vec(),
+                value: value.to_vec(),
+            }];
+            inodes[1].xattrs = vec![XattrEntry {
+                name_index: EROFS_XATTR_INDEX_TRUSTED,
+                suffix: NYDUS_XATTR_SUFFIX_NO_XATTR.to_vec(),
+                value: b"1".to_vec(),
+            }];
+            let bytes = render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap();
+            fs::write(&bootstrap, bytes).unwrap();
+            let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+            let filesystem = ErofsFs::new(Arc::new(reader)).unwrap();
+            assert_eq!(filesystem.no_xattr, expected);
+        }
+        assert!(should_hide_xattr(FUSE_ROOT_ID, b"trusted.nydus.no_xattr"));
+        assert!(!should_hide_xattr(
+            FUSE_ROOT_ID + 1,
+            b"trusted.nydus.no_xattr"
+        ));
     }
 }

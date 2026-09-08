@@ -73,7 +73,7 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH
 	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
 TEST_SUPPORT_FILES = harness.go optimize.go diff.go
-E2E_TEST_FILES = roundtrip_test.go $(TEST_SUPPORT_FILES)
+E2E_TEST_FILES = roundtrip_test.go no_xattr_test.go $(TEST_SUPPORT_FILES)
 TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
 UFFD_TEST_FILES = uffd_test.go uffd_fault_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
@@ -109,7 +109,7 @@ test:
 	$(CARGO) test --workspace
 
 # Run end-to-end integration tests (requires root, builds release first).
-# Only runs tests/e2e/roundtrip_test.go.
+# Runs roundtrip and automatic no-xattr tests with their shared helpers.
 test-e2e: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
