@@ -25,12 +25,14 @@ pub struct RemoteBlobCache {
 
 /// Implement RemoteBlobCache.
 impl RemoteBlobCache {
-    /// Open the blob's metadata from the backend; no local file is created.
+    /// Open the blob's metadata from the backend, `kind` attributing that
+    /// fetch; no local file is created.
     pub fn open(
         blob_id: [u8; SHA256_DIGEST_SIZE],
         backend: Arc<dyn BlobBackend>,
+        kind: ReadKind,
     ) -> io::Result<Self> {
-        let blob_metadata = backend.blob_metadata(&blob_id)?;
+        let blob_metadata = backend.blob_metadata(&blob_id, kind)?;
         Ok(Self {
             blob_id,
             blob_metadata,
@@ -150,7 +152,7 @@ mod tests {
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
-        let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
+        let remote = RemoteBlobCache::open(full_blob_id, backend, ReadKind::OnDemand).unwrap();
 
         let mut buf = vec![0u8; 1024];
         remote.read_at(512, &mut buf).unwrap();
@@ -174,7 +176,7 @@ mod tests {
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
-        let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
+        let remote = RemoteBlobCache::open(full_blob_id, backend, ReadKind::OnDemand).unwrap();
 
         assert_eq!(
             remote.prepare().unwrap_err().kind(),

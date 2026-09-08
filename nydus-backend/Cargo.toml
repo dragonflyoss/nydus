@@ -12,7 +12,10 @@ readme = "README.md"
 default = []
 # Container image registry backend (OCI distribution).
 backend-registry = [
+  "dep:serde",
   "dep:serde_json",
+  "dep:thiserror",
+  "dep:tracing",
   "dep:reqwest",
   "dep:reqwest-middleware",
   "dep:reqwest-retry",
@@ -22,11 +25,12 @@ backend-registry = [
   "dep:futures",
   "dep:http",
   "dep:leaky-bucket",
+  "dep:lru",
   "dep:tokio",
   "dep:tokio-util",
 ]
-# Dragonfly P2P SDK proxy support for the registry backend.
-backend-dragonfly-proxy = [
+# Dragonfly P2P reads for the registry backend.
+backend-dragonfly = [
   "backend-registry",
   "dep:dragonfly-client-request",
   "dep:bytes",
@@ -40,28 +44,27 @@ dragonfly-client-request = { version = "=1.7.2", optional = true }
 futures = { version = "0.3", optional = true }
 http = { version = "1", optional = true }
 leaky-bucket = { version = "1", optional = true }
-libc = { workspace = true }
+lru = { version = "0.18", optional = true }
 nydus-config = { version = "3.0.0-alpha.1", path = "../nydus-config" }
 nydus-format = { version = "3.0.0-alpha.1", path = "../nydus-format" }
 nydus-telemetry = { version = "3.0.0-alpha.1", path = "../nydus-telemetry" }
 reqwest = { version = "0.12", default-features = false, features = [
+  "hickory-dns",
   "rustls-tls",
   "stream",
 ], optional = true }
 reqwest-middleware = { version = "0.4", optional = true }
 reqwest-retry = { version = "0.8", optional = true }
-serde = { workspace = true }
+serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-thiserror = { workspace = true }
+thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = [
   "io-util",
-  "net",
   "rt",
   "rt-multi-thread",
-  "sync",
 ], optional = true }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
-tracing = { workspace = true }
+tracing = { workspace = true, optional = true }
 url = { version = "2", optional = true }
 
 [dev-dependencies]

@@ -5,7 +5,8 @@
 
 use reqwest::StatusCode;
 
-use super::{status_error, RegistryError, RegistryResult, Response};
+use super::response::{status_error, Response};
+use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
 
 /// What a read does with the outcome of its Dragonfly request.
@@ -26,14 +27,14 @@ pub(super) enum Action {
 /// [`RegistryError::UnexpectedStatus`], a dfdaemon `507` among them since
 /// another seed peer may have room. Every other status passes through,
 /// including a dfdaemon `422` that no retry or fallback would change.
-pub(super) fn classify(response: Response) -> RegistryResult<Response> {
+pub(super) async fn classify(response: Response) -> RegistryResult<Response> {
     match response.status {
         status
             if status.is_server_error()
                 || status == StatusCode::REQUEST_TIMEOUT
                 || status == StatusCode::TOO_MANY_REQUESTS =>
         {
-            Err(status_error(response))
+            Err(status_error(response).await)
         }
         _ => Ok(response),
     }
@@ -43,8 +44,12 @@ pub(super) fn classify(response: Response) -> RegistryResult<Response> {
 /// request. Prefetch reads never touch the origin, so a Dragonfly outage
 /// degrades prefetch instead of flooding the registry, while on-demand reads
 /// fall back on every failure the SDK's retries did not cure.
-pub(super) fn decide(kind: ReadKind, outcome: RegistryResult<Response>) -> Action {
-    match outcome.and_then(classify) {
+pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) -> Action {
+    let outcome = match outcome {
+        Ok(response) => classify(response).await,
+        Err(err) => Err(err),
+    };
+    match outcome {
         Ok(response) => Action::Serve(response),
         Err(err) => match kind {
             ReadKind::Prefetch => Action::Defer(RegistryError::PrefetchDeferred(Box::new(err))),
@@ -56,6 +61,8 @@ pub(super) fn decide(kind: ReadKind, outcome: RegistryResult<Response>) -> Actio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::RUNTIME;
+    use nydus_telemetry::metrics::Protocol;
     use reqwest::header::HeaderMap;
     use std::io;
 
@@ -64,6 +71,7 @@ mod tests {
             status,
             headers: HeaderMap::new(),
             reader: Box::new(std::io::Cursor::new(Vec::new())),
+            protocol: Protocol::DragonflySdk,
         }
     }
 
@@ -83,7 +91,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    classify(response(status)),
+                    RUNTIME.block_on(classify(response(status))),
                     Err(RegistryError::UnexpectedStatus(got, _)) if got == status
                 ),
                 "status={status}"
@@ -98,7 +106,10 @@ mod tests {
             StatusCode::NOT_FOUND,
             StatusCode::UNPROCESSABLE_ENTITY,
         ] {
-            assert_eq!(classify(response(status)).unwrap().status, status);
+            assert_eq!(
+                RUNTIME.block_on(classify(response(status))).unwrap().status,
+                status
+            );
         }
     }
 
@@ -114,7 +125,10 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
             ] {
                 assert!(
-                    matches!(decide(kind, Ok(response(status))), Action::Serve(r) if r.status == status),
+                    matches!(
+                        RUNTIME.block_on(decide(kind, Ok(response(status)))),
+                        Action::Serve(r) if r.status == status
+                    ),
                     "kind={kind:?} status={status}"
                 );
             }
@@ -132,11 +146,11 @@ mod tests {
         ];
         for failure in failures {
             assert!(matches!(
-                decide(ReadKind::Prefetch, failure()),
+                RUNTIME.block_on(decide(ReadKind::Prefetch, failure())),
                 Action::Defer(RegistryError::PrefetchDeferred(_))
             ));
             assert!(matches!(
-                decide(ReadKind::OnDemand, failure()),
+                RUNTIME.block_on(decide(ReadKind::OnDemand, failure())),
                 Action::Fallback(_)
             ));
         }

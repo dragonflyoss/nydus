@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::{BlobBackend, ReadContext, ReadKind};
+use nydus_backend::{BlobBackend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -282,11 +282,6 @@ pub fn fetch_decode_validate_block_group_into<'a>(
     buffers: &'a mut BlockGroupBuffers,
     kind: ReadKind,
 ) -> io::Result<&'a [u8]> {
-    let ctx = ReadContext::block_group(
-        kind,
-        block_group.uncompressed_offset(),
-        block_group.uncompressed_size(),
-    );
     let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -299,7 +294,7 @@ pub fn fetch_decode_validate_block_group_into<'a>(
             blob_id,
             block_group.compressed_offset(),
             &mut buffers.decoded,
-            ctx,
+            kind,
         )?;
         validate_block_group_with_metrics(backend, block_group, &buffers.decoded)?;
         return Ok(&buffers.decoded);
@@ -312,7 +307,7 @@ pub fn fetch_decode_validate_block_group_into<'a>(
         blob_id,
         block_group.compressed_offset(),
         &mut buffers.encoded,
-        ctx,
+        kind,
     )?;
 
     buffers.decoded.clear();
@@ -386,20 +381,23 @@ fn decode_block_group(
     Ok(())
 }
 
-/// Validate a decoded block group and, on CRC failure, attribute a CRC error metric to
-/// the backend that served the bytes. A read diverted from the backend's
-/// static target (e.g. a Dragonfly fallback to the origin) is attributed to
-/// the side that actually served it, via [`nydus_backend::last_read_served_by`].
+/// Validate a decoded block group, counting the CRC check and, on a CRC
+/// mismatch, the failure against the backend.
 pub fn validate_block_group_with_metrics(
     backend: &Arc<dyn BlobBackend>,
     block_group: &BlobMetadataBlockGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
+    nydus_telemetry::metrics::collect_validate_block_group_started_metrics(
+        backend.backend(),
+        backend.protocol(),
+    );
     if let Err(err) = validate_decoded_block_group(block_group, decoded) {
         if is_block_group_crc_mismatch(&err) {
-            let target =
-                nydus_backend::last_read_served_by().unwrap_or_else(|| backend.backend_target());
-            nydus_telemetry::metrics::record_backend_crc_error(target);
+            nydus_telemetry::metrics::collect_validate_block_group_failure_metrics(
+                backend.backend(),
+                backend.protocol(),
+            );
         }
         return Err(err);
     }
@@ -534,17 +532,22 @@ mod tests {
         assert_eq!(batches, vec![0..1, 1..2]);
     }
 
-    /// A backend whose reads are never exercised; only its static target matters.
-    struct StaticTargetBackend;
+    /// A backend whose reads are never exercised; only its labels matter.
+    struct DragonflyBackend;
 
-    impl BlobBackend for StaticTargetBackend {
-        fn backend_target(&self) -> nydus_telemetry::metrics::BackendTarget {
-            nydus_telemetry::metrics::BackendTarget::Proxy
+    impl BlobBackend for DragonflyBackend {
+        fn backend(&self) -> nydus_telemetry::metrics::Backend {
+            nydus_telemetry::metrics::Backend::Registry
+        }
+
+        fn protocol(&self) -> Option<nydus_telemetry::metrics::Protocol> {
+            Some(nydus_telemetry::metrics::Protocol::DragonflySdk)
         }
 
         fn blob_metadata(
             &self,
             _blob_id: &[u8; SHA256_DIGEST_SIZE],
+            _kind: ReadKind,
         ) -> io::Result<nydus_format::blob::BlobMetadata> {
             Err(io::Error::other("unused"))
         }
@@ -554,29 +557,31 @@ mod tests {
             _blob_id: &[u8; SHA256_DIGEST_SIZE],
             _offset: u64,
             _dst: &mut [u8],
-            _context: ReadContext,
+            _kind: ReadKind,
         ) -> io::Result<()> {
             Err(io::Error::other("unused"))
         }
     }
 
     #[test]
-    fn crc_failure_is_attributed_to_the_static_target_without_an_override() {
+    fn crc_failure_is_counted_against_the_backend() {
         set_skip_verify_checksums(false);
-        use nydus_telemetry::metrics::BackendTarget;
 
-        let backend: Arc<dyn BlobBackend> = Arc::new(StaticTargetBackend);
+        let backend: Arc<dyn BlobBackend> = Arc::new(DragonflyBackend);
         // A zeroed block has crc32c != 0, so a group declaring crc 0 mismatches.
         let block_group = block_group(0, 1);
         let decoded = vec![0u8; EROFS_BLOCK_SIZE as usize];
-        assert!(nydus_backend::last_read_served_by().is_none());
 
-        let proxy_before = nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy);
+        let proxy_before = nydus_telemetry::metrics::VALIDATE_BLOCK_GROUP_FAILURE_COUNT
+            .with_label_values(&["registry", "dragonfly-sdk"])
+            .get();
         let err = validate_block_group_with_metrics(&backend, &block_group, &decoded)
             .expect_err("crc must mismatch");
         assert!(is_block_group_crc_mismatch(&err));
         assert_eq!(
-            nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy),
+            nydus_telemetry::metrics::VALIDATE_BLOCK_GROUP_FAILURE_COUNT
+                .with_label_values(&["registry", "dragonfly-sdk"])
+                .get(),
             proxy_before + 1
         );
     }

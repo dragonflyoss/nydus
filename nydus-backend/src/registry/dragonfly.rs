@@ -1,32 +1,31 @@
-//! Dragonfly SDK transport (feature `backend-dragonfly-proxy`).
+//! The Dragonfly SDK transport, feature `backend-dragonfly`.
 //!
-//! Routes a blob `GET` through the Dragonfly client SDK using a scheduler
-//! endpoint. This bypasses plain HTTP and lets Dragonfly schedule P2P piece
-//! distribution directly, it is selected for blob `GET`s when a scheduler
-//! endpoint is configured, while every other request goes directly to the
-//! origin. The SDK owns the retries: an on-demand read retries a transient
-//! failure, a `429` included, on the next seed peer up to the configured
-//! budget, while a prefetch read never retries, a failed prefetch being left
-//! to the storage layer's long delayed reschedule instead. An answer the SDK
-//! reports as an error but that carries an HTTP status is handed back as a
-//! [`Response`], so the policy in the parent module classifies it by status
-//! like an origin answer.
+//! A blob `GET` rides the Dragonfly client SDK to the seed peers named by the
+//! scheduler, every other request going straight to the origin. The SDK owns
+//! the retries: an on-demand read retries a transient failure, a `429`
+//! included, on the next seed peer up to the configured budget, while a
+//! prefetch read never retries, the storage layer rescheduling a failed
+//! prefetch hours later instead. An answer the SDK reports as an error but
+//! that carries an HTTP status is handed back as a [`Response`], so
+//! [`policy`](super::policy) classifies it by status like an origin answer.
 
 use std::collections::HashMap;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
 use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
+use nydus_telemetry::metrics::Protocol;
 
-use super::{runtime, DragonflyTransport, RegistryError, RegistryResult, Response};
+use super::response::{log_request_done, Response};
+use super::{BlobTransport, RegistryError, RegistryResult, RUNTIME};
 use crate::ReadKind;
 
 /// The priority hint for background prefetch requests.
@@ -35,7 +34,7 @@ const PRIORITY_PREFETCH: i32 = 3;
 /// The priority hint for on-demand (foreground) requests.
 const PRIORITY_ONDEMAND: i32 = 6;
 
-/// Map a read kind to its Dragonfly priority value.
+/// The Dragonfly priority of a read kind.
 fn priority(kind: ReadKind) -> i32 {
     match kind {
         ReadKind::Prefetch => PRIORITY_PREFETCH,
@@ -60,9 +59,8 @@ pub(crate) struct Dragonfly {
 }
 
 impl Dragonfly {
-    /// Create a new Dragonfly transport connected to the configured scheduler.
-    /// Only the on-demand client retries, `max_retries` times across seed
-    /// peers.
+    /// Connect to the configured scheduler. Only the on-demand client
+    /// retries, `max_retries` times across seed peers.
     pub(crate) fn new(config: &DragonflyConfig) -> io::Result<Dragonfly> {
         let max_retries = u8::try_from(config.max_retries).map_err(|_| {
             io::Error::new(
@@ -74,7 +72,7 @@ impl Dragonfly {
             )
         })?;
         let endpoint = config.scheduler_endpoint.clone();
-        let (ondemand, prefetch) = runtime()
+        let (ondemand, prefetch) = RUNTIME
             .block_on(async move {
                 let ondemand = Proxy::builder()
                     .scheduler_endpoint(endpoint.clone())
@@ -118,6 +116,7 @@ fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> Registry
             status: response.status_code.unwrap_or(StatusCode::OK),
             headers: response.header,
             reader: Box::new(std::io::Cursor::new(body.freeze())),
+            protocol: Protocol::DragonflySdk,
         }),
         Err(Error::ProxyError(ProxyError {
             status_code: Some(status),
@@ -139,6 +138,7 @@ fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> Registry
             reader: Box::new(std::io::Cursor::new(
                 message.unwrap_or_default().into_bytes(),
             )),
+            protocol: Protocol::DragonflySdk,
         }),
         Err(Error::RequestTimeout(message)) => Err(RegistryError::Io(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -165,21 +165,33 @@ fn header_map(headers: HashMap<String, String>) -> HeaderMap {
 }
 
 #[async_trait]
-impl DragonflyTransport for Dragonfly {
-    /// Issue a blob `GET` through the client of the read kind with its
-    /// priority hint. The SDK adds the P2P and priority headers itself.
+impl BlobTransport for Dragonfly {
+    /// Fetch `url` through the client of the read kind with its priority
+    /// hint, the SDK adding the P2P and priority headers itself, and log the
+    /// outcome.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
         let request = GetRequest {
             url: url.to_string(),
-            header: headers,
+            header: headers.clone(),
             filtered_query_params: Vec::new(),
             priority: Some(priority(kind)),
             timeout: self.timeout,
             ..Default::default()
         };
+        let start = Instant::now();
         let mut body = BytesMut::new();
         let result = self.client(kind).get_into(&request, &mut body).await;
-        into_response(result, body)
+        let result = into_response(result, body);
+        log_request_done(
+            "dragonfly_sdk",
+            &Method::GET,
+            url,
+            &headers,
+            kind,
+            &result,
+            start.elapsed(),
+        );
+        result
     }
 }
 
@@ -212,7 +224,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.text().unwrap(), "payload");
+        assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "payload");
     }
 
     #[test]
@@ -235,7 +247,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.status, StatusCode::FORBIDDEN);
         assert_eq!(response.headers.get("x-served-by").unwrap(), "origin");
-        assert_eq!(response.text().unwrap(), "origin said no");
+        assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "origin said no");
 
         let response = into_response(
             Err(proxy_error(Some(StatusCode::BAD_GATEWAY))),
@@ -259,7 +271,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(response.status, status);
-            assert_eq!(response.text().unwrap(), "no space");
+            assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "no space");
         }
     }
 

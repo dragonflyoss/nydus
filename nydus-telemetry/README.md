@@ -9,8 +9,9 @@ following the observability pillars:
   rolling files + panic hook). Only binaries enable this — libraries emit
   through the `tracing` facade and never install subscribers.
 
-This crate is a dependency leaf: it does not depend on other nydus crates, so
-every layer (data plane and control plane alike) can record metrics.
+This crate depends on no nydus crate but `nydus-config`, for the metric
+namespace, so every layer (data plane and control plane alike) can record
+metrics.
 
 ## Features
 

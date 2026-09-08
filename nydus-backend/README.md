@@ -15,7 +15,7 @@ boundary.
 | Feature | Description |
 | --- | --- |
 | `backend-registry` | Container image registry backend (OCI distribution). |
-| `backend-dragonfly-proxy` | Dragonfly P2P SDK proxy support for the registry backend. |
+| `backend-dragonfly` | Dragonfly P2P reads for the registry backend. |
 
 All features are disabled by default, keeping the dependency footprint
 minimal (local backend only).

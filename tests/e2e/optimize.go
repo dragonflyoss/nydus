@@ -169,9 +169,28 @@ func fetchMetrics(t *testing.T, socketPath string) map[string]float64 {
 	return metrics
 }
 
-// metricValue returns the metric's value, or 0 when absent.
-func metricValue(metrics map[string]float64, name string) float64 {
-	return metrics[name]
+// metricValue sums the series of every metric whose name matches name, a
+// bare name or a `*` glob such as `nydus_read_backend_total`, and whose
+// labels carry every given `label="value"` pair, 0 when absent.
+func metricValue(metrics map[string]float64, name string, labels ...string) float64 {
+	var total float64
+	for key, value := range metrics {
+		bare, rest, _ := strings.Cut(key, "{")
+		if matched, _ := filepath.Match(name, bare); !matched {
+			continue
+		}
+		matched := true
+		for _, label := range labels {
+			if !strings.Contains(rest, label) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			total += value
+		}
+	}
+	return total
 }
 
 // waitPrefetchQuiesce polls the prefetch read counter until it is non-zero and
@@ -183,7 +202,7 @@ func waitPrefetchQuiesce(t *testing.T, socketPath string) {
 	var last float64
 	stable := 0
 	require.Eventually(t, func() bool {
-		current := metricValue(fetchMetrics(t, socketPath), "backend_prefetch_read_count")
+		current := metricValue(fetchMetrics(t, socketPath), "nydus_read_backend_total", `type="prefetch"`)
 		if current > 0 && current == last {
 			stable++
 		} else {

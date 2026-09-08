@@ -61,7 +61,7 @@ backend:
         #
         # ca_cert: /etc/nydus/certs/registry-ca.pem
 
-    # Optional Dragonfly block (requires the `backend-dragonfly-proxy`
+    # Optional Dragonfly block (requires the `backend-dragonfly`
     # feature). When set, blob GETs are routed through the Dragonfly client
     # SDK for P2P distribution. An on-demand read the seed peers cannot serve
     # goes back to the origin registry through a rate limit, a prefetch read

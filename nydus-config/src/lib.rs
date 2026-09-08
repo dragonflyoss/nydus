@@ -164,7 +164,7 @@ pub struct RegistryConfig {
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
     /// hitting the origin registry directly. Only honored when built with the
-    /// `backend-dragonfly-proxy` feature; parsed unconditionally so a build
+    /// `backend-dragonfly` feature; parsed unconditionally so a build
     /// without the feature can reject the block loudly instead of silently
     /// ignoring it.
     #[serde(default)]

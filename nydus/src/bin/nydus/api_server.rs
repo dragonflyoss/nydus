@@ -1,7 +1,7 @@
 //! Lightweight HTTP server exposing Prometheus metrics over a Unix socket.
 //!
-//! The server is intentionally tiny: it serves `GET /metrics` (the Prometheus
-//! text exposition produced by [`nydus_telemetry::metrics`]) and returns `404` for
+//! The server is intentionally tiny: it serves `GET /metrics` (the text
+//! exposition of [`nydus_telemetry::metrics::REGISTRY`]) and returns `404` for
 //! everything else. It runs on its own current-thread Tokio runtime in a
 //! background thread so it stays independent of the backend's runtime and of
 //! any cargo feature, and is shut down cleanly when the mount exits.
@@ -18,6 +18,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use nydus_telemetry::metrics::REGISTRY;
+use prometheus::{Encoder, TextEncoder};
 use tokio::net::UnixListener;
 use tokio::runtime::Builder;
 use tokio::sync::Notify;
@@ -120,7 +122,10 @@ async fn handle_request(
     req: Request<Incoming>,
 ) -> std::result::Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
-        let body = nydus_telemetry::metrics::encode_text();
+        let mut body = Vec::new();
+        if let Err(err) = TextEncoder::new().encode(&REGISTRY.gather(), &mut body) {
+            error!("failed to encode metrics: {err}");
+        }
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain; version=0.0.4")

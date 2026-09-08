@@ -233,7 +233,7 @@ impl FuseCommand {
                     dir.display()
                 )));
             }
-            Some(nydus_backend::metered(Arc::new(Local::new(dir.clone()))))
+            Some(Arc::new(Local::new(dir.clone())))
         } else if let Some(config) = storage_config.as_ref() {
             Some(build_backend(&config.backend).context("failed to build blob backend")?)
         } else {

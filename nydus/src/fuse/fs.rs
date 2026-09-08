@@ -231,7 +231,11 @@ impl FsOpMetric {
 
 impl Drop for FsOpMetric {
     fn drop(&mut self) {
-        metrics::record_fs_op(self.op, self.start.elapsed(), self.errored);
+        if self.errored {
+            metrics::collect_fs_op_failure_metrics(self.op, self.start.elapsed());
+        } else {
+            metrics::collect_fs_op_finished_metrics(self.op, self.start.elapsed());
+        }
     }
 }
 

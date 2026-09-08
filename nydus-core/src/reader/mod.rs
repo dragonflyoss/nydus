@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
 
-use nydus_backend::{BlobBackend, Local};
+use nydus_backend::{BlobBackend, Local, ReadKind};
 use nydus_format::blob::BlobFooter;
 use nydus_format::erofs::{
     cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOB_ID_SIZE,
@@ -131,7 +131,7 @@ impl ErofsReader {
             blob_infos
                 .iter()
                 .map(|info| (info.blob_index, info.blob_id)),
-            nydus_backend::metered(backend),
+            backend,
             cache_dir,
             None,
         )?;
@@ -320,7 +320,7 @@ impl ErofsReader {
         &self,
         blob_index: u16,
     ) -> io::Result<std::sync::Arc<dyn nydus_storage::cache::BlobCache>> {
-        self.blobs.cache(blob_index)
+        self.blobs.cache(blob_index, ReadKind::OnDemand)
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
@@ -419,12 +419,15 @@ impl ErofsReader {
         chunk_off: u64,
         dst: &mut [u8],
     ) -> io::Result<()> {
-        let cache = self.blobs.try_cache(blob_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("blob {blob_index} not available"),
-            )
-        })??;
+        let cache = self
+            .blobs
+            .try_cache(blob_index, ReadKind::OnDemand)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("blob {blob_index} not available"),
+                )
+            })??;
         let absolute_offset = blob_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read offset overflow")
         })?;
@@ -439,12 +442,15 @@ impl ErofsReader {
         len: usize,
         writer: &mut dyn Write,
     ) -> io::Result<()> {
-        let cache = self.blobs.try_cache(blob_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("blob {blob_index} not available"),
-            )
-        })??;
+        let cache = self
+            .blobs
+            .try_cache(blob_index, ReadKind::OnDemand)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("blob {blob_index} not available"),
+                )
+            })??;
         let absolute_offset = blob_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
         })?;

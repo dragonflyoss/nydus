@@ -599,12 +599,12 @@ func (e *benchEnv) apiSocket(name string) string {
 	return filepath.Join(e.workDir, name+"-api.sock")
 }
 
-// backendReadMiB sums the backend_*_read_bytes counters from the daemon's
-// metrics endpoint: bytes actually pulled from the backend, as opposed to
-// cache-file disk allocation, which a 4 KiB block per tiny record inflates
-// (a decoded block group publishes its records at block-aligned logical
-// offsets, so `du` reports about 3x the real transfer on this corpus).
-// Returns -1 when the socket is absent or unreadable.
+// backendReadMiB sums the nydus_read_backend_traffic series of every backend
+// and type from the daemon's metrics endpoint: bytes actually pulled from the
+// backend, as opposed to cache-file disk allocation, which a 4 KiB block per
+// tiny record inflates (a decoded block group publishes its records at
+// block-aligned logical offsets, so `du` reports about 3x the real transfer
+// on this corpus). Returns -1 when the socket is absent or unreadable.
 func backendReadMiB(socket string) float64 {
 	client := http.Client{
 		Transport: &http.Transport{
@@ -633,12 +633,7 @@ func backendReadMiB(socket string) float64 {
 		if len(fields) != 2 {
 			continue
 		}
-		// Only the by-kind counters: origin/proxy count the same bytes
-		// again by source, so including them doubles the total.
-		switch fields[0] {
-		case "backend_ondemand_read_bytes", "backend_prefetch_read_bytes",
-			"backend_redirect_read_bytes":
-		default:
+		if name, _, _ := strings.Cut(fields[0], "{"); name != "nydus_read_backend_traffic" {
 			continue
 		}
 		if v, err := strconv.ParseFloat(fields[1], 64); err == nil {

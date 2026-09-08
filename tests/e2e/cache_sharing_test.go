@@ -411,7 +411,7 @@ func TestCacheSharingConcurrentColdReadAmplification(t *testing.T) {
 		mnt:       filepath.Join(root, "mnt-solo"),
 	})
 	readConcurrently(t, []*coreMount{solo}, "shared.bin")
-	soloFill := solo.metrics(t)["cache_ondemand_fill_block_group"]
+	soloFill := solo.metrics(t)[`nydus_read_block_group_total{backend="local",protocol="",storage="backend",type="ondemand"}`]
 	require.Greater(t, soloFill, 1.0,
 		"the read must span several block groups for the comparison below to mean anything")
 
@@ -427,7 +427,7 @@ func TestCacheSharingConcurrentColdReadAmplification(t *testing.T) {
 		})
 	}
 	readConcurrently(t, mounts, "shared.bin")
-	totalFill := sumMetric(t, mounts, "cache_ondemand_fill_block_group")
+	totalFill := sumMetric(t, mounts, `nydus_read_block_group_total{backend="local",protocol="",storage="backend",type="ondemand"}`)
 
 	t.Logf("cold read amplification: solo=%.0f block groups, %d processes=%.0f block groups (%.2fx)",
 		soloFill, coreProcs, totalFill, totalFill/soloFill)
@@ -461,7 +461,7 @@ func TestCacheSharingConcurrentPrefetchDeduplicates(t *testing.T) {
 	})
 	var soloFill float64
 	require.Eventually(t, func() bool {
-		soloFill = solo.metrics(t)["cache_fill_block_group"]
+		soloFill = solo.metrics(t)[`nydus_read_block_group_total{backend="local",protocol="",storage="backend",type="prefetch"}`]
 		return soloFill > 0
 	}, 60*time.Second, 200*time.Millisecond, "solo prefetch never filled a block group")
 
@@ -482,7 +482,7 @@ func TestCacheSharingConcurrentPrefetchDeduplicates(t *testing.T) {
 	// sampling a partial total.
 	var totalFill float64
 	require.Eventually(t, func() bool {
-		current := sumMetric(t, mounts, "cache_fill_block_group")
+		current := sumMetric(t, mounts, `nydus_read_block_group_total{backend="local",protocol="",storage="backend",type="prefetch"}`)
 		settled := current == totalFill && current > 0
 		totalFill = current
 		return settled
@@ -570,7 +570,7 @@ func TestCacheSharingPrefetchAndOnDemandConcurrent(t *testing.T) {
 	// Re-read once the prefetch has had time to finish, covering the handover
 	// from "filled by my own read" to "filled by the other process".
 	require.Eventually(t, func() bool {
-		return prefetcher.metrics(t)["cache_fill_block_group"] > 0
+		return prefetcher.metrics(t)[`nydus_read_block_group_total{backend="local",protocol="",storage="backend",type="prefetch"}`] > 0
 	}, 60*time.Second, 200*time.Millisecond, "prefetch never made progress")
 	require.Equal(t, want, sha256File(t, filepath.Join(reader.mnt, "shared.bin")))
 }

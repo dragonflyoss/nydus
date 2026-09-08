@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
 use crate::block_group_map::BlockGroupMap;
-use nydus_backend::{BlobBackend, ReadContext, ReadKind};
+use nydus_backend::{BlobBackend, ReadKind};
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataBlockGroup, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
     NYDUS_BLOB_METADATA_SUFFIX,
@@ -81,9 +81,6 @@ impl BlockGroupFlight {
 
 pub struct LocalBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
-    /// Digest naming this blob's cache files, shared by every image that
-    /// references the same blob.
-    cache_key: [u8; SHA256_DIGEST_SIZE],
     /// Device/blob index in the merged image, used to attribute on-demand block group
     /// accesses in the access trace.
     blob_index: u32,
@@ -115,15 +112,25 @@ impl LocalBlobCache {
         cache_dir: &Path,
         backend: Arc<dyn BlobBackend>,
     ) -> io::Result<Self> {
-        Self::open_with_trace(blob_id, blob_index, cache_dir, backend, None)
+        Self::open_with_trace(
+            blob_id,
+            blob_index,
+            cache_dir,
+            backend,
+            None,
+            ReadKind::OnDemand,
+        )
     }
 
+    /// Open the blob's cache, recording reads to `trace_recorder` when set
+    /// and attributing the blob metadata fetch a cold open may need to `kind`.
     pub fn open_with_trace(
         blob_id: [u8; SHA256_DIGEST_SIZE],
         blob_index: u32,
         cache_dir: &Path,
         backend: Arc<dyn BlobBackend>,
         trace_recorder: Option<Arc<TraceRecorder>>,
+        kind: ReadKind,
     ) -> io::Result<Self> {
         fs::create_dir_all(cache_dir)?;
 
@@ -132,11 +139,7 @@ impl LocalBlobCache {
         let blob_metadata_path =
             cache_dir.join(format!("{cache_key_hex}{NYDUS_BLOB_METADATA_SUFFIX}"));
         let blob_metadata =
-            load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
-        nydus_telemetry::metrics::track_blob_block_groups(
-            cache_key,
-            blob_metadata.block_group_count() as u64,
-        );
+            load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend, kind)?;
 
         let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
@@ -180,7 +183,6 @@ impl LocalBlobCache {
 
         Ok(Self {
             blob_id,
-            cache_key,
             blob_index,
             block_group_map,
             blob_metadata,
@@ -245,7 +247,6 @@ impl LocalBlobCache {
                 .open(&self.cache_data_path)?,
         );
         file.set_len(self.blob_metadata.uncompressed_size())?;
-        nydus_telemetry::metrics::inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
     }
@@ -296,7 +297,12 @@ impl LocalBlobCache {
                 "blob read beyond cache data file",
             ));
         }
-        nydus_telemetry::metrics::inc_cache_hit_block_group();
+        nydus_telemetry::metrics::collect_read_block_group_metrics(
+            ReadKind::OnDemand,
+            nydus_telemetry::metrics::Storage::Local,
+            self.backend.backend(),
+            self.backend.protocol(),
+        );
         Ok(Some(&mmap[offset as usize..end as usize]))
     }
 
@@ -307,7 +313,12 @@ impl LocalBlobCache {
         cache_file: &File,
     ) -> io::Result<()> {
         if self.block_group_map.is_ready(block_group_index)? {
-            nydus_telemetry::metrics::inc_cache_hit_block_group();
+            nydus_telemetry::metrics::collect_read_block_group_metrics(
+                ReadKind::OnDemand,
+                nydus_telemetry::metrics::Storage::Local,
+                self.backend.backend(),
+                self.backend.protocol(),
+            );
             return Ok(());
         }
 
@@ -342,7 +353,12 @@ impl LocalBlobCache {
 
         let result = (|| {
             if self.block_group_map.is_ready(block_group_index)? {
-                nydus_telemetry::metrics::inc_cache_hit_block_group();
+                nydus_telemetry::metrics::collect_read_block_group_metrics(
+                    ReadKind::OnDemand,
+                    nydus_telemetry::metrics::Storage::Local,
+                    self.backend.backend(),
+                    self.backend.protocol(),
+                );
                 return Ok(());
             }
             // Per-core isolation: a cache created through NydusCore records into
@@ -365,7 +381,12 @@ impl LocalBlobCache {
             // backend traffic.
             let _claim = self.block_group_locks.acquire(block_group_index);
             if self.block_group_map.is_ready(block_group_index)? {
-                nydus_telemetry::metrics::inc_cache_hit_block_group();
+                nydus_telemetry::metrics::collect_read_block_group_metrics(
+                    ReadKind::OnDemand,
+                    nydus_telemetry::metrics::Storage::Local,
+                    self.backend.backend(),
+                    self.backend.protocol(),
+                );
                 return Ok(());
             }
 
@@ -380,7 +401,12 @@ impl LocalBlobCache {
             )?;
             write_all_at(cache_file, block_group.uncompressed_offset(), decoded)?;
             self.block_group_map.set_ready(block_group_index)?;
-            nydus_telemetry::metrics::inc_cache_ondemand_fill_block_group();
+            nydus_telemetry::metrics::collect_read_block_group_metrics(
+                ReadKind::OnDemand,
+                nydus_telemetry::metrics::Storage::Backend,
+                self.backend.backend(),
+                self.backend.protocol(),
+            );
             Ok(())
         })();
 
@@ -411,7 +437,12 @@ impl LocalBlobCache {
         // Fast path: the sticky all-ready flag says every block group is already
         // decoded into the cache file, so skip the per-block group walk entirely.
         if self.block_group_map.is_all_ready() {
-            nydus_telemetry::metrics::inc_cache_hit_block_group();
+            nydus_telemetry::metrics::collect_read_block_group_metrics(
+                ReadKind::OnDemand,
+                nydus_telemetry::metrics::Storage::Local,
+                self.backend.backend(),
+                self.backend.protocol(),
+            );
             return Ok(());
         }
 
@@ -479,14 +510,8 @@ impl LocalBlobCache {
             )
         })?;
         window.resize(window_len, 0);
-        let uncompressed_offset = block_groups[batch.start].uncompressed_offset();
-        let uncompressed_size = last_block_group.uncompressed_offset()
-            + last_block_group.uncompressed_size()
-            - uncompressed_offset;
-        let ctx =
-            ReadContext::block_group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
         self.backend
-            .read_range_into(&self.blob_id, window_base, window, ctx)?;
+            .read_range_into(&self.blob_id, window_base, window, ReadKind::Prefetch)?;
         Ok(window_base)
     }
 
@@ -504,7 +529,7 @@ impl LocalBlobCache {
         cb: &(dyn Fn(&BlobMetadataBlockGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         let window_base = self.fetch_window(block_groups, &batch, window)?;
-        nydus_telemetry::metrics::record_backend_redirect_read(window.len() as u64);
+        nydus_telemetry::metrics::collect_prefetch_redirect_blob_metrics(window.len() as u64);
 
         for index in batch {
             let block_group = &block_groups[index];
@@ -516,31 +541,19 @@ impl LocalBlobCache {
                 window,
                 decoded,
             ) {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                nydus_telemetry::metrics::collect_fill_storage_local_block_group_failure_metrics();
                 warn!("skipping redirect block_group {index}: {err}");
                 continue;
             }
+            nydus_telemetry::metrics::collect_read_block_group_metrics(
+                ReadKind::Prefetch,
+                nydus_telemetry::metrics::Storage::Backend,
+                self.backend.backend(),
+                self.backend.protocol(),
+            );
             cb(block_group, decoded)?;
         }
         Ok(())
-    }
-}
-
-impl Drop for LocalBlobCache {
-    fn drop(&mut self) {
-        // Mirror the gauge updates from `open_with_trace` and `cache_file` so
-        // repeatedly opening and dropping caches does not inflate them.
-        // Recover from a poisoned lock: panicking in `Drop` during an unwind
-        // would abort the process.
-        let opened = self
-            .cache_file
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some();
-        if opened {
-            nydus_telemetry::metrics::dec_cache_opened_files();
-        }
-        nydus_telemetry::metrics::untrack_blob_block_groups(&self.cache_key);
     }
 }
 
@@ -604,7 +617,12 @@ impl BlobCache for LocalBlobCache {
                     &decoded,
                 )?;
                 self.block_group_map.set_ready(index)?;
-                nydus_telemetry::metrics::inc_cache_fill_block_group();
+                nydus_telemetry::metrics::collect_read_block_group_metrics(
+                    ReadKind::Prefetch,
+                    nydus_telemetry::metrics::Storage::Backend,
+                    self.backend.backend(),
+                    self.backend.protocol(),
+                );
             }
         }
 
@@ -901,7 +919,12 @@ impl BlobCache for LocalBlobCache {
         // any divergence (stale optimize artifact, corrupted transfer) is
         // caught here before it can poison the cache.
         if self.block_group_map.is_ready(block_group_index)? {
-            nydus_telemetry::metrics::inc_cache_hit_block_group();
+            nydus_telemetry::metrics::collect_read_block_group_metrics(
+                ReadKind::Prefetch,
+                nydus_telemetry::metrics::Storage::Local,
+                self.backend.backend(),
+                self.backend.protocol(),
+            );
             return Ok(());
         }
         super::validate_block_group_with_metrics(&self.backend, block_group, decoded)?;
@@ -912,7 +935,7 @@ impl BlobCache for LocalBlobCache {
             decoded,
         )?;
         self.block_group_map.set_ready(block_group_index)?;
-        nydus_telemetry::metrics::inc_cache_redirect_fill_block_group();
+        nydus_telemetry::metrics::collect_fill_storage_local_block_group_finished_metrics();
         Ok(())
     }
 }
@@ -922,6 +945,7 @@ fn load_or_fetch_blob_metadata(
     cache_dir: &Path,
     blob_metadata_path: &Path,
     backend: &Arc<dyn BlobBackend>,
+    kind: ReadKind,
 ) -> io::Result<BlobMetadata> {
     if !blob_metadata_path.is_file() {
         // `O_EXCL` creation keeps the name unique against other processes
@@ -930,7 +954,7 @@ fn load_or_fetch_blob_metadata(
             .prefix(".blob-meta-")
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
-        backend.save_blob_metadata(&blob_id, tmp.path())?;
+        backend.save_blob_metadata(&blob_id, kind, tmp.path())?;
         if let Err(err) = BlobMetadata::from_path(tmp.path(), true) {
             return Err(io::Error::other(err));
         }
@@ -1030,8 +1054,20 @@ mod tests {
     }
 
     impl BlobBackend for CountingBackend {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.inner.blob_metadata(blob_id)
+        fn backend(&self) -> nydus_telemetry::metrics::Backend {
+            self.inner.backend()
+        }
+
+        fn protocol(&self) -> Option<nydus_telemetry::metrics::Protocol> {
+            self.inner.protocol()
+        }
+
+        fn blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            kind: ReadKind,
+        ) -> io::Result<BlobMetadata> {
+            self.inner.blob_metadata(blob_id, kind)
         }
 
         fn read_range_into(
@@ -1039,10 +1075,10 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            ctx: ReadContext,
+            kind: ReadKind,
         ) -> io::Result<()> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst, ctx)
+            self.inner.read_range_into(blob_id, offset, dst, kind)
         }
     }
 

@@ -87,7 +87,7 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
-| `nydus-telemetry` | leaf | Metrics (including `ReadKind`) and feature-gated logging setup; a leaf so every layer can record without cycles | — |
+| `nydus-telemetry` | leaf | Metrics (including `ReadKind`) and feature-gated logging setup; depends only on `nydus-config` so every layer can record without cycles | — |
 
 `nydus-format` stays neutral by mirroring the error shape: its `FormatError`
 carries the same context-chain design, the data plane wraps it into
@@ -812,9 +812,9 @@ Fields under `backend.config`:
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
 	configured `timeout` per attempt; every other request (`HEAD`, auth token
 	fetches) goes directly to the origin registry. Only available when the
-	binary is built with the `backend-dragonfly-proxy` feature. Omit to talk
-	to the origin directly. Metrics attribute each read to the origin or proxy
-	side (see [Metrics](#metrics)).
+	binary is built with the `backend-dragonfly` feature. Omit to talk
+	to the origin directly. Each read is counted under the backend that served
+	it (see [Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
 	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times at
@@ -874,81 +874,92 @@ Each completed backend request is also logged at `debug` level after it returns,
 carrying the request source, transport, method, URL, request headers, response
 status and headers (or an error), and the wall-clock duration.
 
-For library embedders (no apiserver socket), `nydus_telemetry::metrics::snapshot()`
-returns a serializable `Snapshot` capturing every registered metric from the same
-registry. It serializes to a flat JSON map: counters as unsigned integers,
-gauges as signed integers, histograms expanded to `<name>_sum` / `<name>_count`,
-and labeled series keyed as `<name>{label="value",...}`. Embedders (e.g. a
-hypervisor's stats endpoint) include it to reason about runtime behavior — in
-particular `backend_ondemand_read_count > 0` means the prefetch did not cover
-the access pattern and the workload fell back to the network.
+For library embedders (no apiserver socket), `nydus_telemetry::metrics::REGISTRY`
+is the `prometheus::Registry` behind the endpoint: encode `REGISTRY.gather()`
+with a `prometheus::TextEncoder` to get the same text exposition, which a
+hypervisor's stats endpoint can serve as is or parse with the Prometheus client
+libraries (`expfmt` in Go, `prometheus-parse` in Rust). A non-zero
+`nydus_read_backend_total{type="ondemand"}` means the prefetch did not
+cover the access pattern and the workload fell back to the network.
 
 Exported metrics:
 
+Every name carries the `nydus_` namespace and is a verb followed by what it
+acts on. Counters end in `_total`, failure counters in `_failure_total`, byte
+counters in `_traffic`, and duration histograms in `_duration_milliseconds`
+(exponential buckets from 1ms to 2^23ms). Dimensions are labels, each with a
+fixed vocabulary:
+
+| Label | Meaning | Values |
+| --- | --- | --- |
+| `type` | what triggered the operation | `ondemand`, `prefetch` |
+| `backend` | the blob backend | `local`, `registry` |
+| `protocol` | how the registry backend fetched the bytes | `http`, `dragonfly-http`, `dragonfly-sdk` |
+| `storage` | where a block group was read from | `local`, `backend` |
+| `op` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
+
+`protocol` is `http` for the registry backend reading the origin,
+`dragonfly-sdk` for it reading the Dragonfly seed peers, and `dragonfly-http`
+for it reading the origin after Dragonfly could not serve the read. The local
+backend has no protocol and leaves the label empty. `storage` is `local` for a
+block group already in the local cache and `backend` for one fetched from the
+backend into the cache.
+
 Backend:
 
-- `backend_origin_read_count`, `backend_origin_read_errors`,
-	`backend_proxy_read_count`, `backend_proxy_read_errors` — read and error counts
-	split by whether the origin registry or a proxy served the read.
-- `backend_origin_read_latency`, `backend_proxy_read_latency` — read latency
-	histograms (seconds, exponential buckets from 1ms to ~8s).
-- `backend_origin_read_bytes`, `backend_proxy_read_bytes` — bytes read per side.
-- `backend_ondemand_read_count`, `backend_ondemand_read_bytes`,
-	`backend_ondemand_read_errors`, `backend_ondemand_read_high_latency_count` and
-	the `backend_prefetch_*` equivalents — reads split by on-demand vs prefetch
-	source. A read is "high latency" when it takes 250ms or more.
-- `backend_origin_crc_check_errors`, `backend_proxy_crc_check_errors` — CRC
-	validation failures on fetched data, attributed to the serving side.
-- `backend_dragonfly_read_errors{kind}` — Dragonfly reads that failed after
-	the SDK's retries, by read kind (`ondemand`, `prefetch`); the failure cause
-	is in the logs.
-- `backend_fallback_read_count`, `backend_fallback_read_errors` — origin
-	requests issued as Dragonfly fallbacks and how many of them failed; these
-	reads also count into the `backend_origin_*` split above. Each logical
-	fallback read counts once, however many throttled retry attempts it made.
-	The error counter covers only HTTP transport errors (connect failures,
-	timeouts) surfaced once the retry budget is spent — an HTTP error status
-	from the origin or a failure while streaming the response body is not
-	counted here. Watch this rate to confirm origin load stays shaped by
+- `nydus_read_backend_total{type,backend,protocol}`,
+	`nydus_read_backend_failure_total{type,backend,protocol}`,
+	`nydus_read_backend_duration_milliseconds{type,backend,protocol}`,
+	`nydus_read_backend_traffic{type,backend,protocol}` — backend reads, how
+	many failed, their duration and their bytes. A `dragonfly-sdk` failure is
+	one the SDK's retries did not cure; the cause is in the logs. A
+	`dragonfly-http` read is on-demand only and counts once, however many
+	rate-limited retry attempts it made; its failure counter covers only HTTP
+	transport errors surfaced once the retry budget is spent. Watch the
+	`dragonfly-http` rate to confirm origin load stays shaped by
 	`dragonfly.back_to_source.request_rate_limit`.
-- `backend_fallback_throttle_wait` — histogram of how long fallback reads
-	waited in the throttle queue (seconds).
-- `prefetch_reschedule_count`, `prefetch_reschedule_run_count` — deferred
-	blob prefetches queued for a delayed retry, and delayed retries executed.
+- `nydus_validate_block_group_total{backend,protocol}`,
+	`nydus_validate_block_group_failure_total{backend,protocol}` — CRC
+	validations of fetched block groups and how many mismatched. `protocol` is
+	the backend's default, `dragonfly-sdk` when Dragonfly is configured even for
+	a read that went back to the origin.
+- `nydus_prefetch_task_total`, `nydus_prefetch_task_failure_total`,
+	`nydus_prefetch_task_reschedule_total` — blob prefetch attempts, the ones
+	that failed outright, and the ones the backend deferred and queued for a
+	delayed retry. A rescheduled blob counts a new task when it is retried.
 
 Filesystem:
 
-- `fs_op_count{op}`, `fs_op_errors{op}` — successful and failed FUSE operations
-	by op (`read`, `lookup`, `getattr`, ...).
-- `fs_read_latency` — FUSE read latency histogram (seconds).
+- `nydus_fs_op_total{op}`, `nydus_fs_op_failure_total{op}` — successful and
+	failed FUSE operations by op (`read`, `lookup`, `getattr`, ...).
+- `nydus_fs_read_duration_milliseconds` — FUSE read duration histogram.
 
 Cache:
 
-- `cache_opened_files` — open blob data cache files (excludes the `.blob.meta`,
-	`.group.map` and `.lock` sidecars).
-- `cache_hit_block_group` — block groups served from cache without a backend read.
-- `cache_total_block_group` — total block groups across loaded blob metas, counted once per
-	blob however many caches are open on it.
-- `cache_fill_block_group` — block groups written into a blob's own cache by regular blob
-	prefetch.
-- `cache_ondemand_fill_block_group` — block groups written into a blob's own cache to
-	satisfy an on-demand read. Summing it across the instances sharing a cache
+- `nydus_read_block_group_total{type,storage,backend,protocol}` — block groups
+	read through a blob's cache. `storage="local"` was already in the cache and
+	needed no backend read, `storage="backend"` was fetched and written into
+	the cache. `protocol` is the backend's default. Summing
+	`{type="ondemand",storage="backend"}` across the instances sharing a cache
 	directory shows how much duplicate fetching they do.
-- `cache_redirect_fill_block_group` — block groups written into a **source** blob's cache
-	from a redirect (ondemand) blob during phase-0 prefetch.
-- `cache_redirect_skip_block_group` — redirect block groups skipped during ondemand
-	prefetch (decode/CRC failures, unknown source device, or failed fills);
-	normally zero.
 
-Redirect (ondemand blob) backend traffic:
+Redirect blob (ondemand blob) prefetch:
 
-- `backend_redirect_read_count`, `backend_redirect_read_bytes` — backend reads
-	that fetched ondemand (redirect) blob data, a subset of the
-	`backend_prefetch_*` counters. Together with `cache_redirect_fill_block_group`
-	these attribute cache warmup to the optimize pipeline: after an optimized
-	mount's prefetch quiesces, `backend_redirect_read_count > 0` proves the
-	ondemand blob was fetched and `cache_redirect_fill_block_group` equals the number
-	of traced block groups written into the source caches.
+- `nydus_fill_storage_local_block_group_total`,
+	`nydus_fill_storage_local_block_group_failure_total` — block groups decoded
+	from a redirect (ondemand) blob during phase-0 prefetch and filled into the
+	local storage of the blob they belong to, and the ones that could not be
+	(decode/CRC failures, unknown source device, or failed fills); the failure
+	counter is normally zero. Every decoded block group also counts in
+	`nydus_read_block_group_total{type="prefetch",storage="backend"}`.
+- `nydus_prefetch_redirect_blob_total`, `nydus_prefetch_redirect_blob_traffic`
+	— backend reads that fetched ondemand (redirect) blob data and their bytes,
+	a subset of the `type="prefetch"` backend reads. Together with
+	`nydus_fill_storage_local_block_group_total` these attribute cache warmup to the
+	optimize pipeline: after an optimized mount's prefetch quiesces, a non-zero
+	`nydus_prefetch_redirect_blob_total` proves the ondemand blob was fetched
+	and `nydus_fill_storage_local_block_group_total` equals the number of traced
+	block groups filled into local storage.
 
 
 ## Artifact Model
@@ -1804,7 +1815,7 @@ through `ublk_drv` over `io_uring`; see
 	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.
 - Access traces are recorded on actual backend fetches (not cache hits), and
-	`nydus_telemetry::metrics::snapshot()` exposes runtime counters for embedding
+	`nydus_telemetry::metrics::REGISTRY` exposes runtime counters for embedding
 	into hypervisor stats endpoints; a saved trace JSON can be replayed offline
 	via `nydus optimize --trace-file`. See [Metrics](#metrics).
 - `BlobId` is the public blob digest type. It converts to/from 64-character

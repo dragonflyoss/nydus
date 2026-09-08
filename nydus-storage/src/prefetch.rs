@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use nydus_config::PrefetchScope;
-use nydus_telemetry::metrics::{inc_prefetch_reschedule, inc_prefetch_reschedule_run};
+use nydus_telemetry::metrics::{
+    collect_prefetch_task_failure_metrics, collect_prefetch_task_reschedule_metrics,
+    collect_prefetch_task_started_metrics,
+};
 
 use crate::cache::BlobCaches;
 
@@ -43,8 +46,8 @@ fn is_deferred(err: &io::Error) -> bool {
 ///    optimized image's "ondemand" redirect blob).
 /// 3. Blobs whose prefetch the backend deferred (a Dragonfly read it could
 ///    not serve, surfaced as [`io::ErrorKind::QuotaExceeded`]) are rescheduled
-///    after a random delay of [`RESCHEDULE_DELAY_MIN`] to
-///    [`RESCHEDULE_DELAY_MAX`] and re-attempted until they succeed or the
+///    after a random delay of `RESCHEDULE_DELAY_MIN` to
+///    `RESCHEDULE_DELAY_MAX` and re-attempted until they succeed or the
 ///    [stop flag](Self::stop_flag) is raised. Other failures are logged and
 ///    skipped.
 pub struct BlobPrefetcher {
@@ -155,20 +158,24 @@ impl BlobPrefetcher {
                     }
                 }
             }
+            collect_prefetch_task_started_metrics();
             match self
                 .caches
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
                 Err(err) if is_deferred(&err) => {
-                    inc_prefetch_reschedule();
+                    collect_prefetch_task_reschedule_metrics();
                     warn!(
                         "backend deferred prefetch of priority blob {}, rescheduling: {}",
                         blob_index, err
                     );
                     deferred.push(blob_index);
                 }
-                Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
+                Err(err) => {
+                    collect_prefetch_task_failure_metrics();
+                    warn!("failed to prefetch priority blob {}: {}", blob_index, err)
+                }
             }
         }
 
@@ -195,22 +202,24 @@ impl BlobPrefetcher {
                             let mut guard = queue.lock().unwrap();
                             guard.pop()
                         };
-                        match blob_index {
-                            Some(blob_index) => match blobs.prefetch_blob(blob_index, 1, timeout) {
-                                Ok(()) => info!("prefetched blob {}", blob_index),
-                                Err(err) if is_deferred(&err) => {
-                                    inc_prefetch_reschedule();
-                                    warn!(
-                                        "backend deferred prefetch of blob {}, rescheduling: {}",
-                                        blob_index, err
-                                    );
-                                    deferred_shared.lock().unwrap().push(blob_index);
-                                }
-                                Err(err) => {
-                                    warn!("failed to prefetch blob {}: {}", blob_index, err)
-                                }
-                            },
-                            None => break,
+                        let Some(blob_index) = blob_index else {
+                            break;
+                        };
+                        collect_prefetch_task_started_metrics();
+                        match blobs.prefetch_blob(blob_index, 1, timeout) {
+                            Ok(()) => info!("prefetched blob {}", blob_index),
+                            Err(err) if is_deferred(&err) => {
+                                collect_prefetch_task_reschedule_metrics();
+                                warn!(
+                                    "backend deferred prefetch of blob {}, rescheduling: {}",
+                                    blob_index, err
+                                );
+                                deferred_shared.lock().unwrap().push(blob_index);
+                            }
+                            Err(err) => {
+                                collect_prefetch_task_failure_metrics();
+                                warn!("failed to prefetch blob {}: {}", blob_index, err)
+                            }
                         }
                     });
                 match handle {
@@ -246,24 +255,27 @@ impl BlobPrefetcher {
             if self.stopped() {
                 return;
             }
-            inc_prefetch_reschedule_run();
+            collect_prefetch_task_started_metrics();
             match self
                 .caches
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched rescheduled blob {}", blob_index),
                 Err(err) if is_deferred(&err) => {
-                    inc_prefetch_reschedule();
+                    collect_prefetch_task_reschedule_metrics();
                     warn!(
                         "backend deferred rescheduled prefetch of blob {}, rescheduling again: {}",
                         blob_index, err
                     );
                     queue.push((Instant::now() + self.retry_delay(), blob_index));
                 }
-                Err(err) => warn!(
-                    "failed to prefetch rescheduled blob {}, giving up: {}",
-                    blob_index, err
-                ),
+                Err(err) => {
+                    collect_prefetch_task_failure_metrics();
+                    warn!(
+                        "failed to prefetch rescheduled blob {}, giving up: {}",
+                        blob_index, err
+                    )
+                }
             }
         }
     }
@@ -292,7 +304,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
-    use nydus_backend::{BlobBackend, Local, ReadContext};
+    use nydus_backend::{BlobBackend, Local, ReadKind};
     use nydus_format::blob::{
         BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
         BlobMetadataDigester,
@@ -329,8 +341,20 @@ mod tests {
     }
 
     impl BlobBackend for FlakyBackend {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.inner.blob_metadata(blob_id)
+        fn backend(&self) -> nydus_telemetry::metrics::Backend {
+            self.inner.backend()
+        }
+
+        fn protocol(&self) -> Option<nydus_telemetry::metrics::Protocol> {
+            self.inner.protocol()
+        }
+
+        fn blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            kind: ReadKind,
+        ) -> io::Result<BlobMetadata> {
+            self.inner.blob_metadata(blob_id, kind)
         }
 
         fn read_range_into(
@@ -338,13 +362,13 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            ctx: ReadContext,
+            kind: ReadKind,
         ) -> io::Result<()> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
             }
-            self.inner.read_range_into(blob_id, offset, dst, ctx)
+            self.inner.read_range_into(blob_id, offset, dst, kind)
         }
     }
 
@@ -406,8 +430,12 @@ mod tests {
             &meta,
         );
 
-        let reschedules_before = nydus_telemetry::metrics::prefetch_reschedule_total();
-        let runs_before = nydus_telemetry::metrics::prefetch_reschedule_run_total();
+        let tasks_before = nydus_telemetry::metrics::PREFETCH_TASK_COUNT
+            .with_label_values(&[])
+            .get();
+        let reschedules_before = nydus_telemetry::metrics::PREFETCH_TASK_RESCHEDULE_COUNT
+            .with_label_values(&[])
+            .get();
         let start = Instant::now();
         prefetcher.run();
 
@@ -415,8 +443,18 @@ mod tests {
         assert!(backend.attempts() >= 2, "attempts={}", backend.attempts());
         // The retry waited out (at least) the minimum delay.
         assert!(start.elapsed() >= Duration::from_millis(30));
-        assert!(nydus_telemetry::metrics::prefetch_reschedule_total() > reschedules_before);
-        assert!(nydus_telemetry::metrics::prefetch_reschedule_run_total() > runs_before);
+        assert!(
+            nydus_telemetry::metrics::PREFETCH_TASK_COUNT
+                .with_label_values(&[])
+                .get()
+                >= tasks_before + 2
+        );
+        assert!(
+            nydus_telemetry::metrics::PREFETCH_TASK_RESCHEDULE_COUNT
+                .with_label_values(&[])
+                .get()
+                > reschedules_before
+        );
     }
 
     #[test]

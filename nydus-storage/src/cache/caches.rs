@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
-use nydus_backend::BlobBackend;
+use nydus_backend::{BlobBackend, ReadKind};
 use nydus_format::blob::BlobMetadataBlockGroup;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -38,7 +38,7 @@ struct BlobSlot {
 }
 
 impl BlobSlot {
-    fn cache(&self) -> io::Result<Arc<dyn BlobCache>> {
+    fn cache(&self, kind: ReadKind) -> io::Result<Arc<dyn BlobCache>> {
         if let Some(cache) = self.cache.read().unwrap().as_ref() {
             return Ok(cache.clone());
         }
@@ -53,8 +53,13 @@ impl BlobSlot {
                 cache_dir,
                 self.backend.clone(),
                 self.trace_recorder.clone(),
+                kind,
             )?),
-            None => Arc::new(RemoteBlobCache::open(self.blob_id, self.backend.clone())?),
+            None => Arc::new(RemoteBlobCache::open(
+                self.blob_id,
+                self.backend.clone(),
+                kind,
+            )?),
         };
         *guard = Some(cache.clone());
         Ok(cache)
@@ -113,9 +118,10 @@ impl BlobCaches {
         self.slots.keys().copied()
     }
 
-    /// The (lazily opened) blob cache for the blob identified by `blob_index`.
-    pub fn cache(&self, blob_index: u16) -> io::Result<Arc<dyn BlobCache>> {
-        self.try_cache(blob_index).ok_or_else(|| {
+    /// The (lazily opened) blob cache for the blob identified by `blob_index`,
+    /// `kind` attributing the blob metadata fetch a cold open may need.
+    pub fn cache(&self, blob_index: u16, kind: ReadKind) -> io::Result<Arc<dyn BlobCache>> {
+        self.try_cache(blob_index, kind).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("blob {blob_index} not found"),
@@ -127,15 +133,19 @@ impl BlobCaches {
     /// cache open (`Some(Err)`), so callers can attach their own errors.
     ///
     /// [`cache`]: Self::cache
-    pub fn try_cache(&self, blob_index: u16) -> Option<io::Result<Arc<dyn BlobCache>>> {
-        self.slots.get(&blob_index).map(BlobSlot::cache)
+    pub fn try_cache(
+        &self,
+        blob_index: u16,
+        kind: ReadKind,
+    ) -> Option<io::Result<Arc<dyn BlobCache>>> {
+        self.slots.get(&blob_index).map(|slot| slot.cache(kind))
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
     /// redirect blob (produced by `nydus optimize`). Opens the blob cache,
     /// which reads the local blob meta but performs no data prefetch.
     pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
-        Ok(self.cache(blob_index)?.is_redirect())
+        Ok(self.cache(blob_index, ReadKind::Prefetch)?.is_redirect())
     }
 
     /// Prefetch every block group of the blob identified by `blob_index`. An
@@ -151,7 +161,7 @@ impl BlobCaches {
         timeout: Duration,
     ) -> io::Result<()> {
         let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
-        let cache = self.cache(blob_index)?;
+        let cache = self.cache(blob_index, ReadKind::Prefetch)?;
         // Serialize prefetch of the same blob across processes sharing the
         // cache directory: with many identical instances cold-starting on one
         // node, only the lock owner streams from the backend while the others
@@ -164,9 +174,16 @@ impl BlobCaches {
             // Time the ondemand (redirect) blob prefetch and report how many
             // source block groups it warmed vs skipped, so operators can tell
             // whether the streaming warmup outran the workload.
-            let fill_before = nydus_telemetry::metrics::cache_redirect_fill_block_group_total();
-            let skip_before = nydus_telemetry::metrics::cache_redirect_skip_block_group_total();
-            let bytes_before = nydus_telemetry::metrics::backend_redirect_read_bytes_total();
+            let fill_before = nydus_telemetry::metrics::FILL_STORAGE_LOCAL_BLOCK_GROUP_COUNT
+                .with_label_values(&[])
+                .get();
+            let skip_before =
+                nydus_telemetry::metrics::FILL_STORAGE_LOCAL_BLOCK_GROUP_FAILURE_COUNT
+                    .with_label_values(&[])
+                    .get();
+            let bytes_before = nydus_telemetry::metrics::PREFETCH_REDIRECT_BLOB_TRAFFIC
+                .with_label_values(&[])
+                .get();
             let start = Instant::now();
             let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), threads, deadline);
             let elapsed = start.elapsed();
@@ -175,9 +192,9 @@ impl BlobCaches {
                 blob_index,
                 elapsed,
                 threads.max(1),
-                nydus_telemetry::metrics::cache_redirect_fill_block_group_total() - fill_before,
-                nydus_telemetry::metrics::cache_redirect_skip_block_group_total() - skip_before,
-                nydus_telemetry::metrics::backend_redirect_read_bytes_total() - bytes_before,
+                nydus_telemetry::metrics::FILL_STORAGE_LOCAL_BLOCK_GROUP_COUNT.with_label_values(&[]).get() - fill_before,
+                nydus_telemetry::metrics::FILL_STORAGE_LOCAL_BLOCK_GROUP_FAILURE_COUNT.with_label_values(&[]).get() - skip_before,
+                nydus_telemetry::metrics::PREFETCH_REDIRECT_BLOB_TRAFFIC.with_label_values(&[]).get() - bytes_before,
             );
             result
         } else {
@@ -206,7 +223,7 @@ impl BlobCaches {
             if !block_group.is_redirect() {
                 return false;
             }
-            match self.try_cache(block_group.source_blob_index()) {
+            match self.try_cache(block_group.source_blob_index(), ReadKind::Prefetch) {
                 Some(Ok(source_cache)) => source_cache
                     .is_block_group_ready(block_group.source_block_group_index() as usize),
                 _ => false,
@@ -214,27 +231,27 @@ impl BlobCaches {
         };
         cache.for_each_redirect_block_group(threads, deadline, &skip, &|block_group, decoded| {
             if !block_group.is_redirect() {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                nydus_telemetry::metrics::collect_fill_storage_local_block_group_failure_metrics();
                 warn!("ondemand blob {blob_index} contains a non-redirect block group (skipping)");
                 return Ok(());
             }
             let source_blob_index = block_group.source_blob_index();
             let source_index = block_group.source_block_group_index() as usize;
-            let source_cache = match self.try_cache(source_blob_index) {
+            let source_cache = match self.try_cache(source_blob_index, ReadKind::Prefetch) {
                 Some(Ok(cache)) => cache,
                 Some(Err(err)) => {
-                    nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                    nydus_telemetry::metrics::collect_fill_storage_local_block_group_failure_metrics();
                     warn!("failed to open source blob {source_blob_index} for redirect: {err}");
                     return Ok(());
                 }
                 None => {
-                    nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                    nydus_telemetry::metrics::collect_fill_storage_local_block_group_failure_metrics();
                     warn!("ondemand blob {blob_index} redirects to unknown blob {source_blob_index} (skipping block group)");
                     return Ok(());
                 }
             };
             if let Err(err) = source_cache.fill_block_group_from_redirect(source_index, decoded) {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_block_group();
+                nydus_telemetry::metrics::collect_fill_storage_local_block_group_failure_metrics();
                 warn!(
                     "failed to fill blob {source_blob_index} block group {source_index} from ondemand blob {blob_index}: {err}"
                 );
