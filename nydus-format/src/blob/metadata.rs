@@ -130,7 +130,12 @@ pub struct BlobMetadataHeader {
 }
 
 impl BlobMetadataHeader {
-    fn from_bytes(bytes: &[u8; NYDUS_BLOB_METADATA_HEADER_SIZE]) -> Result<Self> {
+    /// Parse and validate the fixed-size metadata header.
+    ///
+    /// This does not verify the crc32 or tables because those require the
+    /// complete metadata region; use [`BlobMetadata::from_bytes`] for full
+    /// validation.
+    pub fn from_bytes(bytes: &[u8; NYDUS_BLOB_METADATA_HEADER_SIZE]) -> Result<Self> {
         if bytes[21..24] != [0, 0, 0] {
             return Err(Error::InvalidImage(
                 "blob meta header reserved field must be zero".to_string(),
