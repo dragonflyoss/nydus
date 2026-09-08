@@ -759,6 +759,7 @@ Supported forms:
 - `nydus check --bootstrap <bootstrap>`
 - `nydus check --bootstrap <bootstrap> --blob-dir <blob-dir>`
 - `nydus check --bootstrap <bootstrap> --config <config.yaml>`
+- `nydus check --bootstrap <bootstrap> --blob-dir <blob-dir> --output json`
 
 Current implementation notes:
 
@@ -2691,6 +2692,72 @@ suitable for embedding; enable the registry backend with
 OCI registry. See [Crate Architecture](#crate-architecture) for how the
 library crates layer.
 
+## Incremental Image Writer
+
+The nydus-core crate exposes an incremental writer for VM snapshots and other
+fixed-size file sets. It updates the final filesystem view directly instead of
+building an upper filesystem and running a separate merge:
+
+- **NydusCore::writer(options)** reuses an opened parent reader, backend and
+  cache, so partial writes can fetch the unchanged bytes of a parent chunk.
+- **IncrementalWriter::open_metadata_only(parent_bootstrap, options)** avoids
+  opening parent data. Whole-file replacement and complete chunk writes work;
+  a partial write that needs unchanged parent bytes is rejected.
+- **IncrementalWriter::create(options)** starts without a parent. Files are
+  added with **create_file**, which returns a resolved file handle; unwritten
+  ranges are logical zeroes.
+- **open_file** resolves an existing path once and returns the same handle type
+  for repeated **write_at**, **write_at_owned**, **write_file_range** and
+  **write_memory_range** calls. Path-based variants provide the same operations
+  for infrequent writes.
+- **replace_file** replaces a complete file, including its logical size,
+  without reading parent data. A missing path creates a regular file with
+  default metadata; replacing an existing file requires its chunk size to
+  match the writer configuration.
+- **commit** materializes all dirty chunks into at most one upper blob, renders
+  image.boot, and preserves parent device mappings used by flattened chunk
+  addresses.
+
+Aligned complete chunks remain source-backed until materialization. Owned
+buffers can move into the blob writer, file ranges retain an Arc<File>, and
+memory ranges retain the caller-provided address under the unsafe lifetime
+contract: the range must remain readable and immutable until commit, unless a
+later full-chunk write clears that chunk's overlay first. A partially
+overlapping write does not release the range. Partial writes are recorded as
+ordered patches and materialize each dirty chunk once; a new patch drops older
+patches it fully covers, while partially covered patches remain. The
+materialized owned buffer then moves directly into the blob writer without
+another full-chunk copy. Partial writes use earlier staged data first,
+replacement data second and parent data last.
+
+A successful commit writes these artifacts under options.output_dir:
+
+    image.boot
+    <sha256(full blob)>
+    <sha256(full blob)>.blob.meta
+
+A completely zero upper chunk becomes an EROFS null chunk and writes no upper
+blob payload. Non-zero upper chunks are stored in one incremental data blob.
+This blob sets the blob metadata INCREMENTAL flag and intentionally carries no
+embedded bootstrap. Like REDIRECT blobs produced by optimize, it is a data-only
+artifact and cannot be opened or mounted as standalone EROFS. ErofsReader
+rejects both kinds before attempting to parse an embedded superblock; consumers
+must open image.boot with all referenced blobs available.
+
+Writers are independent and may be moved between threads, but each writer has
+single-writer ordering semantics. Reads through the parent NydusCore do not
+observe staged changes. Open the committed child bootstrap to read the merged
+view.
+
+Writer output can be packaged without rebuilding file data:
+
+    nydusify convert --bootstrap ./snapshot/image.boot --blob ./snapshot/<upper-blob-sha256> --parent-image registry.example.com/vm/snapshot:v1 --target registry.example.com/vm/snapshot:v2
+
+The parent and target must name the same registry repository. nydusify
+downloads only parent manifest/config/bootstrap metadata, reuses parent data
+blob descriptors, uploads local upper blobs directly, and writes a new
+bootstrap layer, config and manifest.
+
 ## Merge Design
 
 The current merge pipeline is:
@@ -2942,9 +3009,14 @@ Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--source`, `-s` | required | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. Converting back to OCI takes exactly one image source. |
+| `--source`, `-s` | required except artifact mode | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. Converting back to OCI takes exactly one image source. Mutually exclusive with artifact mode. |
 | `--target`, `-t` | required | Target image reference to push. |
 | `--builder` | `nydus` | Path to the `nydus` binary (PATH-resolvable). |
+| `--bootstrap` | empty | Existing nydus bootstrap to package in artifact mode. Mutually exclusive with `--source`. |
+| `--blob` | empty | Local nydus blob artifact to include in artifact mode. Repeatable. |
+| `--blob-dir` | empty | Directory containing local nydus blob artifacts named by full blob SHA256 for artifact mode. |
+| `--parent-image` | empty | Existing nydus image whose data blob descriptors, blob meta files and manifest annotations are reused in artifact mode without downloading parent data blobs. Explicit `--manifest-annotation` values override inherited keys. Only one parent image is currently supported. |
+| `--manifest-annotation` | empty | OCI manifest annotation in `key=value` form. Repeatable; values may contain `=`, and the last value wins for a repeated key. Supported when converting to nydus. |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
 | `--chunk-size` | `0` (automatic) | Chunk size, 2MiB by default; explicit values are bytes (a power of two, at least 4KiB). The largest file chunk (chunk groups follow the builder's defaults). Not used by `erofs-lz4`/`erofs-zstd` and ignored when converting back to OCI. |
 | `--compressor` | `zstd` | `none`, `zstd`, `lz4`: chunk-based layouts served on demand; `erofs-none`, `erofs-lz4`, `erofs-zstd`: native EROFS layers without blob meta; `oci-gzip`, `oci-zstd`, `oci-tar`: reverse OCI conversion. |
@@ -2992,6 +3064,20 @@ nydusify convert \
   --source ./layer-config \
 	--target localhost:5000/app-nydus \
 	--source-plain-http --target-plain-http
+
+# Package writer output while reusing parent blobs in the same repository.
+nydusify convert --bootstrap ./snapshot/image.boot --blob ./snapshot/<upper-blob-sha256> \
+  --parent-image registry.example.com/vm/snapshot:v1 --target registry.example.com/vm/snapshot:v2
+
+# Package writer output and attach VM rootfs metadata to the OCI manifest.
+nydusify convert \
+  --bootstrap ./snapshot/image.boot \
+  --blob ./snapshot/<blob-sha256> \
+  --target registry.example.com/vm/snapshot:v1 \
+  --manifest-annotation org.example.snapshot.backend=remote-snapshotter \
+  --manifest-annotation org.example.snapshot.digest=xxh3:0123456789abcdef \
+  --manifest-annotation org.example.snapshot.size=10737418240 \
+  --manifest-annotation org.example.snapshot.encoding=sparse-v1
 
 # Convert a nydus image back to a plain OCI image with gzip layers.
 nydusify convert \
