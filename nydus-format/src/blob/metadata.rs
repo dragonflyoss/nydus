@@ -1084,6 +1084,14 @@ impl BlobMetadata {
         granule_indices
     }
 
+    /// Validate a serialized metadata region and return its feature flags
+    /// without allocating copies of the metadata tables.
+    pub fn flags_from_bytes(bytes: &[u8], verify_crc32: bool) -> Result<BlobMetadataFlags> {
+        let header = BlobMetadataHeader::from_bytes(bytes)?;
+        Self::validate_bytes(bytes, &header, verify_crc32)?;
+        Ok(header.flags())
+    }
+
     /// Read blob metadata from an in-memory byte slice, optionally verifying
     /// the header crc32 over the full metadata.
     pub fn from_bytes(bytes: &[u8], verify_crc32: bool) -> Result<Self> {

@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use memmap2::Mmap;
 
 use nydus_backend::{BlobBackend, Local};
-use nydus_format::blob::BlobFooter;
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataFlags};
 use nydus_format::erofs::{
     cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs,
     EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE,
@@ -211,6 +211,37 @@ impl ErofsReader {
         let Some(footer) = BlobFooter::from_blob_bytes(&mmap).map_err(io::Error::other)? else {
             return Ok((mmap, None));
         };
+        if !footer.is_raw_device() {
+            let start = usize::try_from(footer.blob_metadata_offset()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "blob metadata offset too large")
+            })?;
+            let len = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "blob metadata size too large")
+            })?;
+            let end = start.checked_add(len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "blob metadata range overflow")
+            })?;
+            let metadata = mmap.get(start..end).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "blob metadata beyond blob end",
+                )
+            })?;
+            let flags =
+                BlobMetadata::flags_from_bytes(metadata, false).map_err(io::Error::other)?;
+            if flags.contains(BlobMetadataFlags::INCREMENTAL) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "incremental blob is not mountable as a standalone image; use a bootstrap with parent blobs",
+                ));
+            }
+            if flags.contains(BlobMetadataFlags::REDIRECT) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "redirect blob is not mountable as a standalone image; use the rewritten bootstrap with source blobs",
+                ));
+            }
+        }
 
         let bootstrap_offset = usize::try_from(footer.bootstrap_offset()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large")
