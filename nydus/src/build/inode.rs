@@ -7,7 +7,8 @@ use nydus_format::erofs::{
     ErofsInodeExtended, XattrEntry, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE,
     EROFS_FT_DIR, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_ENTRY_HEADER_SIZE,
-    EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
+    EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR,
+    NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
 };
 use nydus_format::utils::align_up_usize;
 use std::collections::{HashMap, HashSet};
@@ -210,6 +211,23 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]
     Ok(())
 }
 
+fn set_root_no_xattr_marker(root: &mut InodeInfo, no_xattr: bool) {
+    root.xattrs.retain(|entry| {
+        !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED
+            && entry.suffix == NYDUS_XATTR_SUFFIX_NO_XATTR)
+    });
+    if no_xattr {
+        root.xattrs.push(XattrEntry {
+            name_index: EROFS_XATTR_INDEX_TRUSTED,
+            suffix: NYDUS_XATTR_SUFFIX_NO_XATTR.to_vec(),
+            value: b"1".to_vec(),
+        });
+    }
+    root.xattrs.sort_by(|left, right| {
+        (left.name_index, &left.suffix).cmp(&(right.name_index, &right.suffix))
+    });
+}
+
 /// Build the in-memory inode tree from a source directory.
 ///
 /// Walks `source` recursively and returns one [`InodeInfo`] per filesystem
@@ -312,7 +330,16 @@ pub(crate) fn flatten_tree<C, N: TreeNode<C>>(root: N, ctx: &mut C) -> Result<Ve
     let mut inodes = Vec::new();
     let mut ino_counter = 0u32;
     let mut hardlink_map = HashMap::new();
-    flatten_tree_node(root, ctx, &mut inodes, &mut ino_counter, &mut hardlink_map)?;
+    let mut has_visible_xattrs = false;
+    flatten_tree_node(
+        root,
+        ctx,
+        &mut inodes,
+        &mut ino_counter,
+        &mut hardlink_map,
+        &mut has_visible_xattrs,
+    )?;
+    set_root_no_xattr_marker(&mut inodes[0], !has_visible_xattrs);
     Ok(inodes)
 }
 
@@ -327,6 +354,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
     inodes: &mut Vec<InodeInfo>,
     ino_counter: &mut u32,
     hardlink_map: &mut HashMap<N::LinkKey, usize>,
+    has_visible_xattrs: &mut bool,
 ) -> Result<usize> {
     let link_key = node.link_key()?;
     if let Some(key) = link_key {
@@ -339,6 +367,17 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
     *ino_counter += 1;
     let ino = *ino_counter;
     let inode_index = inodes.len();
+
+    if !*has_visible_xattrs {
+        *has_visible_xattrs = if inode_index == 0 {
+            attrs.xattrs.iter().any(|entry| {
+                !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED
+                    && entry.suffix.starts_with(b"nydus."))
+            })
+        } else {
+            !attrs.xattrs.is_empty()
+        };
+    }
 
     if let Some(children) = node.children(ctx)? {
         // Push the directory before its children to keep DFS pre-order; the
@@ -367,7 +406,14 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
         let mut child_entries = Vec::with_capacity(children.len());
         let mut subdir_count = 0u32;
         for (name, child) in children {
-            let child_index = flatten_tree_node(child, ctx, inodes, ino_counter, hardlink_map)?;
+            let child_index = flatten_tree_node(
+                child,
+                ctx,
+                inodes,
+                ino_counter,
+                hardlink_map,
+                has_visible_xattrs,
+            )?;
             let file_type = mode_to_erofs_file_type(inodes[child_index].mode);
             if file_type == EROFS_FT_DIR {
                 subdir_count += 1;
@@ -843,7 +889,7 @@ fn read_xattrs_from_path(path: &Path) -> Vec<XattrEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::erofs::EROFS_XATTR_INDEX_USER;
+    use nydus_format::erofs::{ErofsInode, EROFS_XATTR_INDEX_USER};
 
     fn root_inode_with_xattrs(xattrs: Vec<XattrEntry>) -> InodeInfo {
         InodeInfo {
@@ -900,5 +946,234 @@ mod tests {
                 && entry.suffix.as_slice() == b"keep"
                 && entry.value.as_slice() == b"value"
         }));
+    }
+
+    #[test]
+    fn no_xattr_marker_is_replaced_without_changing_other_attributes() {
+        let mut root = root_inode_with_xattrs(vec![XattrEntry {
+            name_index: EROFS_XATTR_INDEX_USER,
+            suffix: b"visible".to_vec(),
+            value: Vec::new(),
+        }]);
+        set_root_prefetch_blobs_xattr(&mut root, &[1]).unwrap();
+        for enabled in [true, true, false, false, true] {
+            set_root_no_xattr_marker(&mut root, enabled);
+            let markers: Vec<_> = root
+                .xattrs
+                .iter()
+                .filter(|entry| entry.suffix == NYDUS_XATTR_SUFFIX_NO_XATTR)
+                .collect();
+            assert_eq!(markers.len(), usize::from(enabled));
+            assert!(markers.iter().all(|entry| entry.value == b"1"));
+            assert!(root.xattrs.iter().any(|entry| {
+                entry.name_index == EROFS_XATTR_INDEX_USER
+                    && entry.suffix == b"visible"
+                    && entry.value.is_empty()
+            }));
+            assert!(root.xattrs.iter().any(|entry| {
+                entry.suffix == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS && entry.value == b"1"
+            }));
+        }
+    }
+
+    struct XattrTestNode {
+        xattrs: Vec<XattrEntry>,
+        children: Option<NamedChildren<Self>>,
+        link_key: Option<u64>,
+    }
+
+    impl TreeNode<usize> for XattrTestNode {
+        type LinkKey = u64;
+
+        fn attrs(&mut self) -> Result<NodeAttrs> {
+            Ok(NodeAttrs {
+                mode: if self.children.is_some() {
+                    0o040755
+                } else {
+                    0o100644
+                },
+                uid: 0,
+                gid: 0,
+                size: 0,
+                mtime: 0,
+                mtime_nsec: 0,
+                nlink: 2,
+                xattrs: std::mem::take(&mut self.xattrs),
+            })
+        }
+
+        fn link_key(&mut self) -> Result<Option<Self::LinkKey>> {
+            Ok(self.link_key)
+        }
+
+        fn children(&mut self, visited: &mut usize) -> Result<Option<NamedChildren<Self>>> {
+            *visited += 1;
+            Ok(self.children.take())
+        }
+
+        fn leaf_data(&mut self, _visited: &mut usize) -> Result<InodeData> {
+            Ok(InodeData::RegularFile {
+                chunk_index_entries: Vec::new(),
+                chunk_size_bits: EROFS_BLKSZBITS as u32,
+            })
+        }
+    }
+
+    #[test]
+    fn no_xattr_is_tracked_during_flattening_and_preserved_by_rendering() {
+        use crate::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
+        use nydus_core::ErofsReader;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bootstrap");
+        for (at_root, name_index, suffix, visible) in [
+            (
+                true,
+                EROFS_XATTR_INDEX_TRUSTED,
+                b"nydus.prefetch.blobs".as_slice(),
+                false,
+            ),
+            (true, EROFS_XATTR_INDEX_USER, b"visible".as_slice(), true),
+            (true, EROFS_XATTR_INDEX_TRUSTED, b"visible".as_slice(), true),
+            (false, EROFS_XATTR_INDEX_USER, b"visible".as_slice(), true),
+            (
+                false,
+                EROFS_XATTR_INDEX_TRUSTED,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                true,
+            ),
+        ] {
+            let entry = XattrEntry {
+                name_index,
+                suffix: suffix.to_vec(),
+                value: Vec::new(),
+            };
+            let mut root = XattrTestNode {
+                xattrs: vec![XattrEntry {
+                    name_index: EROFS_XATTR_INDEX_TRUSTED,
+                    suffix: NYDUS_XATTR_SUFFIX_NO_XATTR.to_vec(),
+                    value: b"stale".to_vec(),
+                }],
+                children: Some(vec![(
+                    b"child".to_vec(),
+                    XattrTestNode {
+                        xattrs: Vec::new(),
+                        children: None,
+                        link_key: None,
+                    },
+                )]),
+                link_key: None,
+            };
+            if at_root {
+                root.xattrs.push(entry.clone());
+            } else {
+                root.children.as_mut().unwrap()[0]
+                    .1
+                    .xattrs
+                    .push(entry.clone());
+            }
+            let mut visited = 0;
+            let mut inodes = flatten_tree(root, &mut visited).unwrap();
+            assert_eq!(visited, 2);
+            assert_eq!(
+                inodes[0].xattrs.iter().any(|entry| {
+                    entry.suffix == NYDUS_XATTR_SUFFIX_NO_XATTR && entry.value == b"1"
+                }),
+                !visible,
+            );
+            assert!(inodes[usize::from(!at_root)].xattrs.contains(&entry));
+
+            for flattened in [false, true, false] {
+                if flattened {
+                    set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
+                }
+                let bytes = if flattened {
+                    render_flattened_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap()
+                } else {
+                    render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap()
+                };
+                fs::write(&path, bytes).unwrap();
+                let reader = ErofsReader::open_metadata_only(&path).unwrap();
+                let root_nid = reader.superblock().root_nid();
+                let root = reader.inode(root_nid).unwrap();
+                let xattrs = reader.read_xattrs(root_nid, &root).unwrap();
+                assert_eq!(
+                    xattrs.iter().any(|(name, value)| {
+                        name == b"trusted.nydus.no_xattr" && value == b"1"
+                    }),
+                    !visible,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_xattr_tracking_handles_empty_trees_and_hardlinks() {
+        for with_xattr in [false, true] {
+            for child_count in [0, 2] {
+                let children = (0..child_count)
+                    .map(|index| {
+                        (
+                            format!("link{index}").into_bytes(),
+                            XattrTestNode {
+                                xattrs: if with_xattr {
+                                    vec![XattrEntry {
+                                        name_index: EROFS_XATTR_INDEX_USER,
+                                        suffix: b"visible".to_vec(),
+                                        value: Vec::new(),
+                                    }]
+                                } else {
+                                    Vec::new()
+                                },
+                                children: None,
+                                link_key: Some(1),
+                            },
+                        )
+                    })
+                    .collect();
+                let root = XattrTestNode {
+                    xattrs: Vec::new(),
+                    children: Some(children),
+                    link_key: None,
+                };
+                let mut visited = 0;
+                let inodes = flatten_tree(root, &mut visited).unwrap();
+                assert_eq!(visited, if child_count == 0 { 1 } else { 2 });
+                assert_eq!(inodes.len(), visited);
+                assert_eq!(
+                    inodes[0].xattrs.iter().any(|entry| {
+                        entry.suffix == NYDUS_XATTR_SUFFIX_NO_XATTR && entry.value == b"1"
+                    }),
+                    child_count == 0 || !with_xattr,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn serialize_inode_preserves_xattrs() {
+        let inode = root_inode_with_xattrs(vec![XattrEntry {
+            name_index: EROFS_XATTR_INDEX_USER,
+            suffix: b"key".to_vec(),
+            value: b"value".to_vec(),
+        }]);
+
+        let bytes = serialize_inode(&inode, 0);
+        let parsed = ErofsInode::parse(&bytes).unwrap();
+        let entry_offset = parsed.header_size() + EROFS_XATTR_IBODY_HEADER_SIZE;
+
+        assert_eq!(parsed.xattr_size(), erofs_xattr_ibody_size(&inode.xattrs));
+        assert_eq!(bytes[entry_offset], 3);
+        assert_eq!(bytes[entry_offset + 1], EROFS_XATTR_INDEX_USER);
+        assert_eq!(
+            u16::from_le_bytes(
+                bytes[entry_offset + 2..entry_offset + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            5
+        );
+        assert_eq!(&bytes[entry_offset + 4..entry_offset + 7], b"key");
+        assert_eq!(&bytes[entry_offset + 7..entry_offset + 12], b"value");
     }
 }

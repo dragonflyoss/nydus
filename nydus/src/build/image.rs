@@ -6,8 +6,7 @@ use crc32c::crc32c_append;
 use nydus_error::{Error, Result};
 use nydus_format::erofs::{
     ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
-    EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR,
-    EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
+    EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
     EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_SB_BASE_SIZE,
     EROFS_SUPER_OFFSET,
 };
@@ -36,7 +35,6 @@ pub(crate) fn write_image(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
-    has_xattrs: bool,
 ) -> Result<()> {
     let block_size = EROFS_BLOCK_SIZE as usize;
     let meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
@@ -51,7 +49,6 @@ pub(crate) fn write_image(
         epoch,
         device_slots,
         uuid,
-        has_xattrs,
     )?;
     image.write_all(&head)?;
 
@@ -79,17 +76,13 @@ pub(crate) fn fill_image_head(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
-    has_xattrs: bool,
 ) -> Result<()> {
     let block_size = EROFS_BLOCK_SIZE as usize;
     let meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
     let meta_blocks = metadata_len.div_ceil(block_size);
     let total_blocks = meta_blkaddr as u64 + meta_blocks as u64;
 
-    let mut feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
-    if !has_xattrs {
-        feature_compat |= EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR;
-    }
+    let feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
     let mut feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
     // The `*_hi` halves of chunk index and device slot addresses are only
@@ -201,7 +194,7 @@ mod tests {
     #[test]
     fn write_image_sets_erofs_superblock_checksum() {
         let mut image = Vec::new();
-        write_image(&mut image, &[], 0, 1, 0, &[], &[0u8; 16], false).unwrap();
+        write_image(&mut image, &[], 0, 1, 0, &[], &[0u8; 16]).unwrap();
 
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let feature_compat =
@@ -211,7 +204,10 @@ mod tests {
         checksum_bytes[4..8].fill(0);
 
         assert_ne!(checksum, 0);
-        assert_ne!(feature_compat & EROFS_FEATURE_COMPAT_SB_CHKSUM, 0);
+        assert_eq!(
+            feature_compat,
+            EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM
+        );
         assert_eq!(checksum, !crc32c_append(0u32, &checksum_bytes));
     }
 
@@ -237,17 +233,7 @@ mod tests {
             .collect();
 
         let mut image = Vec::new();
-        write_image(
-            &mut image,
-            &[0u8; 64],
-            0,
-            1,
-            0,
-            &device_slots,
-            &[0u8; 16],
-            false,
-        )
-        .unwrap();
+        write_image(&mut image, &[0u8; 64], 0, 1, 0, &device_slots, &[0u8; 16]).unwrap();
 
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let meta_blkaddr =

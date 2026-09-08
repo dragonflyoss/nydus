@@ -275,7 +275,7 @@ impl FuseCommand {
         .context("failed to open EROFS image")?;
 
         let reader = Arc::new(reader);
-        let fs = ErofsFs::new(reader.clone());
+        let fs = ErofsFs::new(reader.clone()).context("failed to initialize FUSE filesystem")?;
         let mut config = FuseConfig::default();
         // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
         // other than the daemon's, setuid binaries in the image have to keep

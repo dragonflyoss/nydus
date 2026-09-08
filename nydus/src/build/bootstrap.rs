@@ -9,7 +9,7 @@ use crate::build::inode::{
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
     ErofsDeviceSlot, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_FT_DIR, EROFS_SB_BASE_SIZE,
-    EROFS_SUPER_OFFSET, EROFS_XATTR_INDEX_TRUSTED,
+    EROFS_SUPER_OFFSET,
 };
 use nydus_format::utils::align_up_usize;
 use std::io::Write;
@@ -129,7 +129,6 @@ pub fn render_flattened_bootstrap_to(
         epoch,
         &flattened_slots,
         uuid,
-        has_visible_xattrs(inodes),
     )?;
     writer
         .write_all(&head)
@@ -405,7 +404,6 @@ fn render_bootstrap_inner(
         epoch,
         device_slots,
         uuid,
-        has_visible_xattrs(inodes),
     )?;
 
     Ok(bootstrap)
@@ -431,17 +429,6 @@ fn alloc_inodes(layout: &mut MetadataLayout, inodes: &mut [InodeInfo], epoch: u6
         inode.meta_offset = offset;
         inode.nid = nid;
     }
-}
-
-/// Whether any inode carries a user-visible xattr. Nydus-internal xattrs
-/// (trusted.nydus.*) are hidden from readers, so they alone do not
-/// disqualify the image-wide no-xattr shortcut.
-fn has_visible_xattrs(inodes: &[InodeInfo]) -> bool {
-    inodes.iter().any(|inode| {
-        inode.xattrs.iter().any(|entry| {
-            !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED && entry.suffix.starts_with(b"nydus."))
-        })
-    })
 }
 
 pub(crate) fn set_parent_nids(inodes: &mut [InodeInfo]) {

@@ -628,6 +628,151 @@ mod tests {
     }
 
     #[test]
+    fn no_xattr_marker_is_recomputed_after_merge_and_optimize() {
+        use crate::build::{build_image, BuildImageOptions};
+        use nydus_format::blob::BlobMetadataCompressor;
+        use nydus_format::erofs::is_nydus_xattr;
+        use nydus_format::utils::hex_string;
+        use std::collections::HashSet;
+
+        for (operation, source_has_xattrs, expected_no_xattr) in [
+            ("keep", true, false),
+            ("without-xattrs", false, true),
+            ("whiteout", true, true),
+            ("replace", true, true),
+            ("opaque", true, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let lower = directory.path().join("lower");
+            let upper = directory.path().join("upper");
+            fs::create_dir_all(lower.join("nested")).unwrap();
+            fs::create_dir_all(upper.join("nested")).unwrap();
+            fs::write(lower.join("nested/entry"), vec![b'x'; 8193]).unwrap();
+            if source_has_xattrs {
+                xattr::set(lower.join("nested/entry"), "user.test", b"preserved value").unwrap();
+                xattr::set(lower.join("nested/entry"), "user.empty", b"").unwrap();
+            }
+            let upper_entry = match operation {
+                "whiteout" => "nested/.wh.entry",
+                "replace" => "nested/entry",
+                "opaque" => "nested/.wh..wh..opq",
+                _ => "unrelated",
+            };
+            fs::write(upper.join(upper_entry), b"").unwrap();
+            let mut sources = Vec::new();
+            for (index, source) in [lower, upper].into_iter().enumerate() {
+                let blob = directory.path().join(format!("layer-{index}"));
+                let image = build_image(
+                    &BuildImageOptions::new(
+                        source,
+                        EROFS_BLOCK_SIZE,
+                        1 << 20,
+                        BlobMetadataCompressor::None,
+                        HashSet::new(),
+                        true,
+                    )
+                    .unwrap(),
+                    fs::File::create(&blob).unwrap(),
+                )
+                .unwrap();
+                let standalone = directory.path().join(format!("bootstrap-{index}"));
+                fs::write(&standalone, image.standalone_bootstrap.unwrap()).unwrap();
+                for path in [&blob, &standalone] {
+                    let reader = ErofsReader::open_metadata_only(path).unwrap();
+                    let root_nid = reader.superblock().root_nid();
+                    let root = reader.inode(root_nid).unwrap();
+                    assert_eq!(
+                        reader
+                            .read_xattrs(root_nid, &root)
+                            .unwrap()
+                            .iter()
+                            .any(|(name, value)| {
+                                name == b"trusted.nydus.no_xattr" && value == b"1"
+                            }),
+                        index == 1 || !source_has_xattrs
+                    );
+                }
+                let source = directory.path().join(hex_string(&image.full_blob_digest));
+                fs::rename(blob, &source).unwrap();
+                sources.push(source);
+            }
+            let merged = directory.path().join("merged");
+            fs::write(
+                &merged,
+                merge_sources_to_bootstrap_bytes(&sources, WhiteoutSpec::Oci).unwrap(),
+            )
+            .unwrap();
+            let optimized = directory.path().join("optimized");
+            fs::write(
+                &optimized,
+                rewrite_bootstrap_with_ondemand_blob(&merged, &[0x55; 32], 1).unwrap(),
+            )
+            .unwrap();
+            for path in [&merged, &optimized] {
+                let reader = ErofsReader::open_metadata_only(path).unwrap();
+                let root_nid = reader.superblock().root_nid();
+                let root = reader.inode(root_nid).unwrap();
+                assert_eq!(
+                    reader
+                        .read_xattrs(root_nid, &root)
+                        .unwrap()
+                        .iter()
+                        .any(|(name, value)| {
+                            name == b"trusted.nydus.no_xattr" && value == b"1"
+                        }),
+                    expected_no_xattr,
+                    "{operation}: {}",
+                    path.display()
+                );
+
+                let mut visible_xattrs = BTreeMap::new();
+                let mut pending = vec![(Vec::new(), root_nid)];
+                while let Some((relative_path, nid)) = pending.pop() {
+                    let inode = reader.inode(nid).unwrap();
+                    let mut xattrs = reader.read_xattrs(nid, &inode).unwrap();
+                    if nid == root_nid {
+                        xattrs.retain(|(name, _)| !is_nydus_xattr(name));
+                    }
+                    if !xattrs.is_empty() {
+                        xattrs.sort();
+                        visible_xattrs.insert(relative_path.clone(), xattrs);
+                    }
+                    if mode_to_erofs_file_type(inode.mode()) == EROFS_FT_DIR {
+                        for entry in reader.read_dir(nid, &inode).unwrap() {
+                            if entry.name == b"." || entry.name == b".." {
+                                continue;
+                            }
+                            let mut child_path = relative_path.clone();
+                            if !child_path.is_empty() {
+                                child_path.push(b'/');
+                            }
+                            child_path.extend_from_slice(&entry.name);
+                            pending.push((child_path, entry.nid));
+                        }
+                    }
+                }
+                let expected_xattrs = if expected_no_xattr {
+                    BTreeMap::new()
+                } else {
+                    BTreeMap::from([(
+                        b"nested/entry".to_vec(),
+                        vec![
+                            (b"user.empty".to_vec(), Vec::new()),
+                            (b"user.test".to_vec(), b"preserved value".to_vec()),
+                        ],
+                    )])
+                };
+                assert_eq!(
+                    visible_xattrs,
+                    expected_xattrs,
+                    "{operation}: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn whiteout_semantics_follow_the_oci_rules() {
         type Layers = &'static [&'static [(&'static str, u8)]];
         let cases: [(&str, Layers, &[&str]); 4] = [
