@@ -84,6 +84,18 @@ impl ErofsSuperblock {
         unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_SB_BASE_SIZE) }
     }
 
+    /// Records the available compression algorithm bitmap (bit 0 = LZ4),
+    /// valid when the COMPR_CFGS incompat feature is set.
+    pub fn set_available_compr_algs(&mut self, algs: u16) {
+        write_u16(&mut self.compr_or_distance, algs);
+    }
+
+    /// Records the packed inode holding fragment data, valid when the
+    /// FRAGMENTS incompat feature is set.
+    pub fn set_packed_nid(&mut self, nid: u64) {
+        write_u64(&mut self.packed_nid, nid);
+    }
+
     pub fn magic(&self) -> u32 {
         read_u32(&self.magic)
     }
@@ -126,6 +138,18 @@ impl ErofsSuperblock {
 
     pub fn devt_slotoff(&self) -> u16 {
         read_u16(&self.devt_slotoff)
+    }
+
+    /// Available compression algorithm bitmap (bit 0 = LZ4); non-zero only
+    /// for z_erofs images declaring COMPR_CFGS.
+    pub fn available_compr_algs(&self) -> u16 {
+        read_u16(&self.compr_or_distance)
+    }
+
+    /// The packed inode holding fragment data, or `None` without FRAGMENTS.
+    pub fn packed_nid(&self) -> Option<u64> {
+        (self.feature_incompat() & EROFS_FEATURE_INCOMPAT_FRAGMENTS != 0)
+            .then(|| read_u64(&self.packed_nid))
     }
 }
 
@@ -175,8 +199,14 @@ pub fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
             format!("unsupported EROFS block size bits: {}", sb.blkszbits),
         ));
     }
-    const SUPPORTED_INCOMPAT: u32 =
-        EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
+    // The z_erofs bits (ZERO_PADDING, BIG_PCLUSTER/COMPR_CFGS, FRAGMENTS)
+    // are accepted for metadata access (`merge` reads z layer bootstraps);
+    // data reads reject the COMPRESSED_FULL layout themselves.
+    const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
+        | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
+        | EROFS_FEATURE_INCOMPAT_ZERO_PADDING
+        | EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER
+        | EROFS_FEATURE_INCOMPAT_FRAGMENTS;
     let unknown = sb.feature_incompat() & !SUPPORTED_INCOMPAT;
     if unknown != 0 {
         return Err(io::Error::new(

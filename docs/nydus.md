@@ -239,6 +239,10 @@ Options:
 		Specify the file path to save the image as a single self-contained full blob; if the path is an existing FIFO the blob is streamed into it [env: NYDUS_BUILD_BLOB=]
 	--blob-dir <BLOB_DIR>
 		Specify the content-addressed store directory to save the full blob into, named by its SHA256, so mounts resolve it through the bootstrap and images share the store [env: NYDUS_BUILD_BLOB_DIR=]
+	--erofs-lz4
+		Build a z_erofs layer instead of a chunk-based blob: file data becomes native LZ4 pclusters the kernel decompresses (64KiB pclusters, files up to 64KiB packed into the shared fragment inode; kernel 6.1+, kernel mounts only). The blob output receives the raw layer data, named by its SHA256 or --blob-id, and --bootstrap the single-layer image whose device table names it; merge stacks such layers into one bootstrap mounted with device= options. --compressor, --chunk-size, --block-group-size and --digester do not apply [env: NYDUS_BUILD_EROFS_LZ4=]
+	--erofs-data-alignment <EROFS_DATA_ALIGNMENT>
+		With --erofs-lz4, start files of at least this size on this boundary of the layer data (a power of two multiple of 4KiB), so block-level dedup and snapshots of the volume see identical files at stable offsets, e.g. 2mib for cloud disks deduplicating at 2MiB; 0 (the default) packs files back to back [env: NYDUS_BUILD_EROFS_DATA_ALIGNMENT=] [default: 0]
 	--bootstrap <BOOTSTRAP>
 		Specify the file path to save the standalone bootstrap: the store layout's entry point, whose device table records each blob's SHA256 [env: NYDUS_BUILD_BOOTSTRAP=]
 	--chunk-size <CHUNK_SIZE>
@@ -331,6 +335,18 @@ the caller already trusts the content:
 - `sha2` is built with its `asm` feature (SHA2 instructions on aarch64) and
 	gzip layers are inflated by zlib-ng.
 
+#### z_erofs output
+
+`--erofs-lz4` switches the output from the chunk-based nydus blob to a native
+z_erofs layer for kernel mounts from a block device; see
+[z_erofs Layers for Block Devices](#z_erofs-layers-for-block-devices). It works
+with both source types and requires `--bootstrap`: the blob output receives the
+raw compressed layer data (named by its SHA256, or by `--blob-id`) and the
+bootstrap is a complete single-layer image whose device table names that data.
+`--erofs-data-alignment` (default `0`) aligns large files inside the layer data
+for block-level dedup. `--compressor`, `--chunk-size`, `--block-group-size` and
+`--digester` describe the chunk-based blob and are ignored.
+
 ### Export
 
 `nydus export <BLOB> [-o <path>]`
@@ -413,7 +429,7 @@ Merge multiple nydus layers into an overlaid bootstrap
 Usage: nydus merge [OPTIONS] --bootstrap <BOOTSTRAP> <SOURCES>...
 
 Arguments:
-	<SOURCES>...  Specify the nydus layer blob paths named by their SHA256
+	<SOURCES>...  Specify the layers to stack, lower to upper: nydus layer blob paths named by their SHA256, or the per-layer bootstraps written by build --erofs-lz4 --bootstrap (all sources must be of one kind)
 
 Options:
 	--bootstrap <BOOTSTRAP>
@@ -434,6 +450,11 @@ Current implementation notes:
 	digest stored in its embedded bootstrap, so the store/backend can resolve it.
 - Merge currently assumes source regular files use the nydus chunk-based data
 	layout and preserves each file's original chunkbits.
+- When the first source is a z_erofs layer bootstrap (`nydus build
+	--erofs-lz4 --bootstrap`), every source must be one, and the sources are
+	those bootstraps rather than blobs: they need no particular file name. The
+	output is a multi-device bootstrap whose device `i + 1` is layer `i`'s data
+	file; see [Merging z_erofs layers](#merging-z_erofs-layers).
 
 ### Optimize
 
@@ -530,6 +551,18 @@ Current implementation notes:
 	when produced by `--blob-dir`. A slot whose id matches no digest falls back
 	to the store entry of that file name (a blob built with `--blob-id`); it is
 	reported with `SLOT DIGEST KIND named` and counts as unverified.
+- Every blob entry carries a `VERIFIED` row: `yes` when the resolved file
+	reproduces the slot id, `no` when it was resolved by name only, and
+	`<unresolved>` when no candidate matched.
+- z_erofs images (superblock `COMPR OR DISTANCE` non-zero) are checked as
+	such: the incompat dump names `zero_padding`, `big_pcluster+compr_cfgs` and
+	`fragments`; the summary counts `Z_EROFS FILES`, `Z_EROFS FRAGMENT FILES`
+	and `Z_EROFS PCLUSTERS OUT OF RANGE` (HEAD/PLAIN lcluster addresses that no
+	device covers, always 0 for a sound image), and the packed inode is walked
+	too. Each device resolves to `<blob-dir>/<slot id>` as a raw data file
+	(`SLOT DIGEST KIND z_erofs_device`); it verifies when its size equals the
+	declared block count and its SHA256 equals the slot id. `CHUNK REFS` /
+	`UNIQUE CHUNKS` then count the pclusters addressing that device.
 
 ### Fuse
 
@@ -1632,6 +1665,124 @@ the scheduling details.
 The merge command emits an overlaid standalone bootstrap that references one or
 more previously built full blobs.
 
+## z_erofs Layers for Block Devices
+
+The chunk-based format above is designed for lazy loading through a nydus
+frontend. When an image instead lives on a block device the guest mounts
+directly (a cloud disk such as EBS, a local volume, a virtio-blk image), the
+cost model is different: there is no daemon, the kernel reads the device
+itself, and a network volume charges per request. `nydus build --erofs-lz4`
+produces a native **z_erofs** image for that case, laid out to minimise read
+requests and to dedup well on the volume.
+
+### Layer layout
+
+A layer built with `--erofs-lz4` has two artifacts:
+
+- **Layer data** (the blob output, `<store>/<sha256>` with `--blob-dir`): the
+	raw z_erofs data region — LZ4 pclusters of at most 64KiB, plus the packed
+	inode — with nothing else in the file. It is an EROFS *extra device*.
+- **Layer bootstrap** (`--bootstrap`): a complete single-layer EROFS image
+	(`[head | metadata]`) whose device table has one slot naming the layer
+	data by its SHA256 (or `--blob-id`) and mapping it just past the
+	bootstrap, on a 512KiB boundary. It mounts on its own with
+	`device=<layer data>`.
+
+Inside the layer data:
+
+- Regular files larger than 64KiB become `COMPRESSED_FULL` inodes: full
+	lcluster indexes (8 bytes per 4KiB logical block) behind the inode header,
+	HEAD1 pclusters spanning several lclusters with `CBLKCNT` carrying the
+	physical size (`BIG_PCLUSTER`), compressed payload tail-aligned in its
+	pcluster (`ZERO_PADDING`), and per-lcluster PLAIN blocks whenever a window
+	does not shrink by a block (the `mkfs.erofs` layout). Pclusters are packed
+	greedily with `LZ4_compress_destSize`: each consumes as much source as
+	fits into 64KiB of output, rounded down to whole lclusters.
+- Regular files of at most 64KiB are **fragments**: their bytes are appended
+	to one packed stream, compressed as it fills into the **packed inode** (a
+	regular compressed file outside the tree, referenced by the superblock's
+	`packed_nid`, `FRAGMENTS` incompat, kernel 6.1+). The file's 8-byte map
+	header has bit 63 set and holds its offset in the packed inode. Neighbouring
+	small files thus share pclusters and one read serves many of them — this is
+	what cuts the request count for `node_modules`-style trees.
+- Empty files are `COMPRESSED_FULL` inodes with no lclusters.
+- With `--erofs-data-alignment N`, a file of at least `N` bytes starts on an
+	`N`-byte boundary **of the layer data** (zero-filled gap, no pcluster
+	references it). Identical large files then occupy identical blocks
+	regardless of their neighbours, so a volume that deduplicates or snapshots
+	at a fixed granularity (2MiB on common cloud disks) sees stable blocks.
+	Because the alignment is relative to the data file, not to the image
+	address space, `merge` may map the device anywhere. Put the store on a
+	filesystem that keeps file extents on that grid as well (e.g. XFS with
+	`su=2m` / `extsize 2m`).
+
+The superblock declares `ZERO_PADDING | BIG_PCLUSTER (= COMPR_CFGS) |
+CHUNKED_FILE | DEVICE_TABLE` plus `FRAGMENTS` when a packed inode exists,
+`available_compr_algs = LZ4`, and the LZ4 `COMPR_CFGS` record (`max_distance
+65535`, `max_pclusterblks 16`) right after the superblock, so the device table
+starts at slot 10 (byte 1280) like `mkfs.erofs`. Directory and symlink data
+blocks resolve through the device table like file data, which is why the layer
+device must be mapped past the bootstrap.
+
+### Merging z_erofs layers
+
+`nydus merge --bootstrap out.img L0.meta L1.meta ...` recognises z layer
+bootstraps and emits one multi-device bootstrap:
+
+- device `i + 1` is layer `i`'s data file, placed back to back in the mapped
+	block space on 512KiB boundaries past the merged bootstrap; every HEAD/PLAIN
+	lcluster address in the copied inode tails is shifted by the difference
+	between the layer's and the merged mapping;
+- OCI whiteouts are applied and the k-way path merge is the same as for
+	chunk-based layers;
+- the layers' packed inodes are concatenated into one (each is block padded by
+	the builder so the lcluster grids line up) and every fragment offset is
+	shifted by the packed bytes of the layers below it.
+
+The data files are untouched, so a store shared by many images keeps one copy
+of each layer.
+
+### Mounting
+
+```bash
+# One layer.
+mount -t erofs -o device=/store/<sha256> layer.meta /mnt
+
+# A merged image: one device= per slot, in device table order (nydus check
+# prints them as "Blobs" entries).
+mount -t erofs -o "device=/store/<l0>,device=/store/<l1>,..." out.img /mnt
+```
+
+The bootstrap and the devices can be block devices (kernel 6.1+ with
+fragments, 5.15+ without) or regular files on a filesystem (file-backed EROFS,
+kernel 6.12+; file-backed I/O is capped at 64KiB per request, one pcluster). The
+FUSE and block frontends of nydus do not serve these images.
+
+### Checking
+
+`nydus check --bootstrap out.img --blob-dir /store` resolves every device by
+its slot id, verifies size and SHA256 (see [Check](#check)), counts z inodes and
+fragments, and reports any pcluster address outside the device table.
+
+### Measured effect
+
+`openclaw` image (31 layers, 118k files, 115k of them under 64KiB), same runc
+bundle, page cache dropped before each run, `ready` = container start until its
+healthcheck passes, IOs counted at the block device (direct I/O, 128KiB
+readahead), throttled to 60MB/s with a fixed per-request latency added by
+dm-delay to emulate a network volume:
+
+| Volume | ext4 + unpacked layers (overlayfs) | XFS + nydus z_erofs, merged, 2MiB aligned |
+|---|---|---|
+| unthrottled | 4.56 s · 7,522 IO · 143 MB | 3.27 s · 1,946 IO · 78 MB |
+| 60 MB/s | 5.38 s · 7,639 IO | 3.77 s · 1,947 IO |
+| 60 MB/s, +1 ms/IO | 8.98 s · 10,844 IO | 4.43 s · 2,182 IO |
+| 60 MB/s, +3 ms/IO | 23.57 s · 10,861 IO | 8.00 s · 2,197 IO |
+| on-disk size | 4,258 MB | 1,410 MB + 19 MB bootstrap |
+
+The remaining ~2.2k requests split into roughly 700 metadata, 200 large-file,
+320 mid-size and 1,200 packed-inode reads.
+
 ## Build Pipeline
 
 The build pipeline now follows this sequence:
@@ -2092,6 +2243,11 @@ are native EROFS images rather than RAFS metadata.
 EROFS compatibility is handled by exposing decoded cache data when running
 compatibility checks against C erofsfuse. Compressed full blobs are Nydus runtime
 artifacts and are not directly consumable as plain EROFS external devices.
+
+z_erofs layers (`nydus build --erofs-lz4`) are the opposite case: plain EROFS
+images the kernel mounts directly (5.15+ for the layout, 6.1+ for fragments),
+which the nydus FUSE and block frontends do not serve — their readers walk the
+metadata (`check`, `merge`) but do not decompress pclusters.
 
 ## Image Conversion (nydusify)
 

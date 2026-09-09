@@ -5,10 +5,10 @@ use nydus_format::erofs::{
     erofs_xattr_icount, erofs_xattr_name_split, mode_to_erofs_file_type,
     needs_erofs_extended_inode, ErofsChunkAddr, ErofsChunkIndex, ErofsInodeCompact,
     ErofsInodeExtended, XattrEntry, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE,
-    EROFS_FT_DIR, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE,
-    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_ENTRY_HEADER_SIZE,
-    EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR,
-    NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
+    EROFS_FT_DIR, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_COMPRESSED_FULL,
+    EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+    EROFS_XATTR_ENTRY_HEADER_SIZE, EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED,
+    NYDUS_XATTR_SUFFIX_NO_XATTR, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
 };
 use nydus_format::utils::align_up_usize;
 use std::collections::{HashMap, HashSet};
@@ -71,6 +71,13 @@ pub enum InodeData {
         chunk_size_bits: u32,
     },
 
+    /// Regular file compressed with z_erofs LZ4: the pre-rendered inode tail
+    /// (map header + full lcluster indexes) and the compressed block count.
+    ZFile {
+        tail: Vec<u8>,
+        compressed_blocks: u32,
+    },
+
     /// Directory: sorted children.
     Directory {
         // List of child entries (name, file type, inode index in the inodes vector).
@@ -100,6 +107,36 @@ pub enum InodeData {
 
     /// FIFO or socket (no data).
     FifoOrSocket,
+}
+
+/// The z_erofs packed inode: a root-owned, unreadable regular file outside
+/// the directory tree that holds the fragment data of all small files. It
+/// takes the next free inode number after `inodes`.
+pub fn packed_inode(
+    inodes: &[InodeInfo],
+    tail: Vec<u8>,
+    compressed_blocks: u32,
+    size: u64,
+) -> InodeInfo {
+    let ino = inodes.iter().map(|inode| inode.ino).max().unwrap_or(0) + 1;
+    InodeInfo {
+        mode: 0o100600,
+        uid: 0,
+        gid: 0,
+        size,
+        mtime: 0,
+        mtime_nsec: 0,
+        nlink: 1,
+        ino,
+        nid: 0,
+        meta_offset: 0,
+        is_extended: size > u32::MAX as u64,
+        data: InodeData::ZFile {
+            tail,
+            compressed_blocks,
+        },
+        xattrs: Vec::new(),
+    }
 }
 
 /// A directory entry referencing a child inode.
@@ -156,6 +193,10 @@ pub(crate) fn erofs_inode_size(inode: &InodeInfo) -> usize {
                     .expect("alignment overflowed")
                     + chunk_index_entries.len() * EROFS_CHUNK_INDEX_SIZE
             }
+        }
+        // The z_erofs map header must start 8-byte aligned.
+        InodeData::ZFile { tail, .. } => {
+            align_up_usize(inode_isize + xattr_isize, 8).expect("alignment overflowed") + tail.len()
         }
         InodeData::Directory { .. } => inode_isize + xattr_isize,
         InodeData::Symlink { target, .. } => {
@@ -464,7 +505,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
     } else {
         let data = node.leaf_data(ctx)?;
         let size = match &data {
-            InodeData::RegularFile { .. } => attrs.size,
+            InodeData::RegularFile { .. } | InodeData::ZFile { .. } => attrs.size,
             InodeData::Symlink { target, .. } => target.len() as u64,
             InodeData::Device { .. } | InodeData::FifoOrSocket => 0,
             InodeData::Directory { .. } => {
@@ -568,6 +609,15 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
     fn leaf_data(&mut self, ctx: &mut FsBuildContext<'a, W>) -> Result<InodeData> {
         let ft = self.meta.file_type();
         if ft.is_file() {
+            if ctx.blob_writer.zlz4_enabled() {
+                let zmeta = ctx
+                    .blob_writer
+                    .write_file_zlz4(&self.path, self.meta.size())?;
+                return Ok(InodeData::ZFile {
+                    tail: zmeta.tail,
+                    compressed_blocks: zmeta.compressed_blocks,
+                });
+            }
             let chunk_index_entries = ctx
                 .blob_writer
                 .write_file_chunks(&self.path, self.meta.size())?;
@@ -668,6 +718,56 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 let off = extent_offset + i * EROFS_CHUNK_INDEX_SIZE;
                 buf[off..off + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(index.as_bytes());
             }
+        }
+        InodeData::ZFile {
+            tail,
+            compressed_blocks,
+        } => {
+            let datalayout = EROFS_INODE_COMPRESSED_FULL;
+            let i_u = *compressed_blocks;
+
+            if inode.is_extended {
+                let i_format = erofs_extended_i_format(datalayout);
+                let hdr = ErofsInodeExtended::new(
+                    i_format,
+                    inode.mode,
+                    0,
+                    inode.size,
+                    i_u,
+                    inode.ino,
+                    inode.uid,
+                    inode.gid,
+                    inode.mtime,
+                    inode.mtime_nsec,
+                    inode.nlink,
+                );
+                buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
+            } else {
+                let i_format = erofs_compact_i_format(datalayout);
+                let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
+                let hdr = ErofsInodeCompact::new(
+                    i_format,
+                    inode.mode,
+                    1,
+                    inode.size as u32,
+                    i_mtime,
+                    i_u,
+                    inode.ino,
+                    inode.uid as u16,
+                    inode.gid as u16,
+                );
+                buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
+            }
+
+            let base = if inode.is_extended {
+                EROFS_INODE_EXTENDED_SIZE
+            } else {
+                EROFS_INODE_COMPACT_SIZE
+            };
+            let tail_offset = align_up_usize(base + xattr_size, 8).expect("alignment overflowed");
+            buf[tail_offset..tail_offset + tail.len()].copy_from_slice(tail);
         }
         InodeData::Directory { startblk, .. } => {
             let datalayout = EROFS_INODE_FLAT_PLAIN;

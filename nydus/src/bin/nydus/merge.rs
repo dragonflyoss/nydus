@@ -18,7 +18,7 @@ pub enum WhiteoutSpec {
 pub struct MergeCommand {
     #[arg(
         required = true,
-        help = "Specify the nydus layer blob paths named by their SHA256"
+        help = "Specify the layers to stack, lower to upper: nydus layer blob paths named by their SHA256, or the per-layer bootstraps written by build --erofs-lz4 --bootstrap (all sources must be of one kind)"
     )]
     sources: Vec<PathBuf>,
 

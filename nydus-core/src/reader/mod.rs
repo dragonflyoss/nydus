@@ -300,6 +300,18 @@ impl ErofsReader {
         cast_ref::<ErofsSuperblock>(&self.mmap[self.sb_offset..])
     }
 
+    /// The z_erofs LZ4 `max_pclusterblks` from the COMPR_CFGS record that
+    /// follows the superblock, or `None` for images without LZ4 data.
+    pub fn z_lz4_max_pclusterblks(&self) -> io::Result<Option<u16>> {
+        if self.superblock().available_compr_algs() & 1 == 0 {
+            return Ok(None);
+        }
+        // le16 record size, then z_erofs_lz4_cfgs { le16 max_distance,
+        // le16 max_pclusterblks, ... }.
+        let cfg = self.mmap_slice(self.sb_offset + EROFS_SB_BASE_SIZE, 6)?;
+        Ok(Some(u16::from_le_bytes([cfg[4], cfg[5]])))
+    }
+
     pub fn blob_infos(&self) -> io::Result<&[RawBlobInfo]> {
         if let Some(infos) = self.blob_infos.get() {
             return Ok(infos);

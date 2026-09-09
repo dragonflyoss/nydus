@@ -50,9 +50,21 @@ pub const EROFS_FEATURE_COMPAT_MTIME: u32 = 0x0000_0002;
 pub const EROFS_FEATURE_COMPAT_RAFS_V6: u32 = 0x4000_0000;
 pub const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 pub const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
+/// Small files (and file tails) live in the packed inode referenced by the
+/// superblock's `packed_nid` (kernel 6.1+).
+pub const EROFS_FEATURE_INCOMPAT_FRAGMENTS: u32 = 0x0000_0020;
 /// 48-bit block addressing: the kernel interprets the `*_hi` halves of chunk
 /// index and device slot addresses only when this bit is set.
 pub const EROFS_FEATURE_INCOMPAT_48BIT: u32 = 0x0000_0080;
+/// z_erofs: compressed data is tail-aligned inside its pcluster (leading
+/// zeros), which lets the kernel decompress in place.
+pub const EROFS_FEATURE_INCOMPAT_ZERO_PADDING: u32 = 0x0000_0001;
+/// z_erofs: pclusters may span more than one block (CBLKCNT lclusters).
+pub const EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER: u32 = 0x0000_0002;
+/// z_erofs: per-algorithm compression configs follow the superblock and
+/// `available_compr_algs` replaces the legacy `lz4_max_distance` field.
+/// Shares its bit with BIG_PCLUSTER (both landed in the same kernel release).
+pub const EROFS_FEATURE_INCOMPAT_COMPR_CFGS: u32 = 0x0000_0002;
 
 // Inode layout.
 pub const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
@@ -62,8 +74,28 @@ pub const EROFS_INODE_EXTENDED_SIZE: usize = 64;
 
 // Inode data layout.
 pub const EROFS_INODE_FLAT_PLAIN: u16 = 0;
+pub const EROFS_INODE_COMPRESSED_FULL: u16 = 1;
 pub const EROFS_INODE_FLAT_INLINE: u16 = 2;
 pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
+
+// z_erofs compressed layout (full lcluster indexes).
+pub const Z_EROFS_MAP_HEADER_SIZE: usize = 8;
+pub const Z_EROFS_LCLUSTER_INDEX_SIZE: usize = 8;
+pub const Z_EROFS_ADVISE_BIG_PCLUSTER_1: u16 = 0x0002;
+pub const Z_EROFS_LCLUSTER_TYPE_PLAIN: u16 = 0;
+pub const Z_EROFS_LCLUSTER_TYPE_HEAD1: u16 = 1;
+pub const Z_EROFS_LCLUSTER_TYPE_NONHEAD: u16 = 2;
+pub const Z_EROFS_LCLUSTER_TYPE_HEAD2: u16 = 3;
+/// Mask of the lcluster type bits in a full lcluster index `di_advise`.
+pub const Z_EROFS_LI_LCLUSTER_TYPE_MASK: u16 = 0x3;
+/// Bit 63 of an 8-byte z_erofs map header marks a whole-file fragment: the
+/// remaining bits hold the file's offset in the packed inode.
+pub const Z_EROFS_FRAGMENT_INODE_FLAG: u64 = 1 << 63;
+/// Set in `delta[0]` of the first NONHEAD lcluster to carry the pcluster's
+/// physical block count instead of a head distance.
+pub const Z_EROFS_LI_D0_CBLKCNT: u16 = 1 << 11;
+/// LZ4 sliding-window upper bound recorded in the superblock.
+pub const Z_EROFS_LZ4_MAX_DISTANCE: u16 = 65535;
 
 // Inode flag bits.
 pub const EROFS_I_VERSION_BIT: u16 = 0;

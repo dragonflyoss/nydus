@@ -39,6 +39,11 @@ enum TarNodeData {
         chunks: Vec<ErofsChunkAddr>,
         chunk_size_bits: u32,
     },
+    /// z_erofs LZ4 compressed file: pre-rendered inode tail + block count.
+    ZFile {
+        tail: Vec<u8>,
+        compressed_blocks: u32,
+    },
     Symlink {
         target: Vec<u8>,
     },
@@ -107,6 +112,13 @@ impl TreeNode<()> for TarNode {
             } => InodeData::RegularFile {
                 chunk_index_entries: chunks,
                 chunk_size_bits,
+            },
+            TarNodeData::ZFile {
+                tail,
+                compressed_blocks,
+            } => InodeData::ZFile {
+                tail,
+                compressed_blocks,
             },
             TarNodeData::Symlink { target } => InodeData::Symlink {
                 target,
@@ -342,11 +354,20 @@ fn apply_entry<R: Read, W: Write>(
             return Ok(());
         }
         EntryType::Regular | EntryType::Continuous => {
-            // Stream the file data into the blob right now.
-            let chunks = blob_writer.write_reader_chunks(entry, size)?;
-            let data = TarNodeData::File {
-                chunks,
-                chunk_size_bits,
+            // Stream the file data into the blob right now; this is where
+            // aligned placement happens for the streaming path too.
+            let data = if blob_writer.zlz4_enabled() {
+                let zmeta = blob_writer.write_reader_zlz4(entry, size)?;
+                TarNodeData::ZFile {
+                    tail: zmeta.tail,
+                    compressed_blocks: zmeta.compressed_blocks,
+                }
+            } else {
+                let chunks = blob_writer.write_reader_chunks(entry, size)?;
+                TarNodeData::File {
+                    chunks,
+                    chunk_size_bits,
+                }
             };
             TarNode {
                 mode: 0o100000 | (mode & 0o7777),
@@ -402,6 +423,13 @@ fn apply_entry<R: Read, W: Write>(
                     } => TarNodeData::File {
                         chunks: chunks.clone(),
                         chunk_size_bits: *chunk_size_bits,
+                    },
+                    TarNodeData::ZFile {
+                        tail,
+                        compressed_blocks,
+                    } => TarNodeData::ZFile {
+                        tail: tail.clone(),
+                        compressed_blocks: *compressed_blocks,
                     },
                     TarNodeData::Symlink { target } => TarNodeData::Symlink {
                         target: target.clone(),

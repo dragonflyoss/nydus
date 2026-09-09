@@ -3,8 +3,9 @@ use std::io::Write;
 
 use nydus_format::erofs::{
     cast_ref, ErofsChunkAddr, ErofsChunkIndex, ErofsInode, EROFS_BLOCK_SIZE,
-    EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
-    EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
+    EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
+    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, Z_EROFS_FRAGMENT_INODE_FLAG,
+    Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
 
@@ -144,6 +145,35 @@ impl ErofsReader {
     fn chunk_index_entry_at(index_bytes: &[u8], i: usize) -> &ErofsChunkIndex {
         let off = i * EROFS_CHUNK_INDEX_SIZE;
         cast_ref::<ErofsChunkIndex>(&index_bytes[off..])
+    }
+
+    /// The raw inode tail of a z_erofs COMPRESSED_FULL inode: either the
+    /// 8-byte whole-file fragment header (bit 63 set, rest = offset in the
+    /// packed inode) or the map header, 8 reserved bytes and one full
+    /// lcluster index per block of the file.
+    pub fn read_z_inode_tail<'a>(
+        &'a self,
+        nid: u64,
+        inode: &ErofsInode<'_>,
+    ) -> io::Result<&'a [u8]> {
+        if inode.data_layout() != EROFS_INODE_COMPRESSED_FULL {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not a z_erofs compressed inode",
+            ));
+        }
+        let inode_offset = self.nid_to_offset(nid);
+        let header_size = inode.header_size() + inode.xattr_size();
+        let tail_offset =
+            inode_offset + align_up_usize(header_size, 8).expect("alignment overflowed");
+        let head = self.mmap_slice(tail_offset, Z_EROFS_MAP_HEADER_SIZE)?;
+        let head = u64::from_le_bytes(head.try_into().expect("8-byte map header"));
+        if inode.size() > 0 && head & Z_EROFS_FRAGMENT_INODE_FLAG != 0 {
+            return self.mmap_slice(tail_offset, Z_EROFS_MAP_HEADER_SIZE);
+        }
+        let lclusters = inode.size().div_ceil(EROFS_BLOCK_SIZE as u64) as usize;
+        let len = Z_EROFS_MAP_HEADER_SIZE + 8 + lclusters * Z_EROFS_LCLUSTER_INDEX_SIZE;
+        self.mmap_slice(tail_offset, len)
     }
 
     pub fn read_chunk_index_entries(

@@ -1,6 +1,9 @@
 use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
-use nydus::build::{build_image, build_image_from_tar_layer, BuildImageOptions, Image};
+use nydus::build::{
+    build_erofs_layer_from_dir, build_erofs_layer_from_tar, build_image,
+    build_image_from_tar_layer, BuildImageOptions, Image,
+};
 use nydus::error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester,
@@ -12,6 +15,7 @@ use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use tabled::{settings::Style, Table, Tabled};
 use tracing::Level;
@@ -50,6 +54,22 @@ pub struct BuildCommand {
         help = "Specify the content-addressed store directory to save the full blob into, named by its SHA256, so mounts resolve it through the bootstrap and images share the store"
     )]
     blob_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        requires = "bootstrap",
+        env = "NYDUS_BUILD_EROFS_LZ4",
+        help = "Build a z_erofs layer instead of a chunk-based blob: file data becomes native LZ4 pclusters the kernel decompresses (64KiB pclusters, files up to 64KiB packed into the shared fragment inode; kernel 6.1+, kernel mounts only). The blob output receives the raw layer data, named by its SHA256 or --blob-id, and --bootstrap the single-layer image whose device table names it; merge stacks such layers into one bootstrap mounted with device= options. --compressor, --chunk-size, --block-group-size and --digester do not apply"
+    )]
+    erofs_lz4: bool,
+
+    #[arg(
+        long,
+        default_value = "0",
+        env = "NYDUS_BUILD_EROFS_DATA_ALIGNMENT",
+        help = "With --erofs-lz4, start files of at least this size on this boundary of the layer data (a power of two multiple of 4KiB), so block-level dedup and snapshots of the volume see identical files at stable offsets, e.g. 2mib for cloud disks deduplicating at 2MiB; 0 (the default) packs files back to back"
+    )]
+    erofs_data_alignment: ByteSize,
 
     #[arg(
         long,
@@ -286,6 +306,14 @@ impl BuildCommand {
             ))
         })?;
 
+        let erofs_data_alignment =
+            u32::try_from(self.erofs_data_alignment.as_u64()).map_err(|_| {
+                Error::InvalidParameter(format!(
+                    "data alignment {} exceeds the u32 range",
+                    self.erofs_data_alignment
+                ))
+            })?;
+
         Ok(BuildImageOptions::new(
             source,
             chunk_size,
@@ -295,12 +323,16 @@ impl BuildCommand {
             self.bootstrap.is_some(),
         )?
         .with_digester(self.digester.into())
-        .with_blob_id(self.blob_id))
+        .with_blob_id(self.blob_id)
+        .with_erofs_lz4(self.erofs_lz4, erofs_data_alignment))
     }
 
     /// Runs the build: writes the full blob, settles it under its final name,
     /// persists the sidecar artifacts, and prints the summary.
     fn run(&self, options: &BuildImageOptions) -> Result<()> {
+        if options.erofs_lz4() {
+            return self.run_erofs_layer(options);
+        }
         let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
         let writer = blob_output.create()?;
         let image = match self.source_type {
@@ -324,6 +356,36 @@ impl BuildCommand {
             blob_metadata_path: &blob_metadata_path,
             bootstrap_path: self.bootstrap.as_deref(),
         });
+        Ok(())
+    }
+
+    /// Builds a z_erofs layer: the raw compressed data goes to the blob
+    /// output (named by its SHA256 or `--blob-id` in a store) and the
+    /// single-layer bootstrap, whose device table references that name, to
+    /// `--bootstrap`.
+    fn run_erofs_layer(&self, options: &BuildImageOptions) -> Result<()> {
+        let bootstrap_path = self
+            .bootstrap
+            .as_deref()
+            .expect("clap enforces --bootstrap with --erofs-lz4");
+        let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
+        let writer = BufWriter::new(blob_output.create()?);
+        let layer = match self.source_type {
+            SourceType::DirNydus => build_erofs_layer_from_dir(options, writer),
+            SourceType::TarNydus => build_erofs_layer_from_tar(options, &self.source, writer),
+        }
+        .with_context(|| format!("failed to build layer: {}", blob_output.path().display()))?;
+        let blob_path = blob_output.finalize(&layer.blob_digest, options.blob_id().is_some())?;
+        fs::write(bootstrap_path, &layer.bootstrap)
+            .with_context(|| format!("failed to write bootstrap: {}", bootstrap_path.display()))?;
+        println!(" LAYER DATA PATH          {}", blob_path.display());
+        println!(
+            " LAYER DATA DIGEST        {}",
+            hex_string(&layer.blob_digest)
+        );
+        println!(" LAYER DATA BLOCKS        {}", layer.blob_blocks);
+        println!(" LAYER BOOTSTRAP PATH     {}", bootstrap_path.display());
+        println!(" LAYER BOOTSTRAP SIZE     {} bytes", layer.bootstrap.len());
         Ok(())
     }
 
