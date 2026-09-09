@@ -426,7 +426,7 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
     let mut device_slots: Vec<ErofsDeviceSlot> = blob_infos
         .iter()
         .map(|info| ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id))
-        .collect();
+        .collect::<nydus_format::error::Result<_>>()?;
     let ondemand_blob_index = u16::try_from(device_slots.len() + 1).map_err(|err| {
         Error::Overflow(format!(
             "ondemand blob index exceeds u16 device table range: {err}"
@@ -435,7 +435,7 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
     device_slots.push(ErofsDeviceSlot::with_blob_id(
         ondemand_blocks,
         ondemand_blob_id,
-    ));
+    )?);
 
     // Ondemand blob first, then the existing prefetch order (defaulting to all
     // blobs ascending when the parent has no prefetch xattr).
@@ -471,8 +471,11 @@ fn register_blobs(
     let global_blob_index = if let Some(existing) = blob_indexes.get(&source_blob_id) {
         *existing
     } else {
-        let next = device_slots.len() as u16 + 1;
-        device_slots.push(ErofsDeviceSlot::with_blob_id(info.blocks, &source_blob_id));
+        let next = u16::try_from(device_slots.len())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| Error::Overflow("merge device count exceeds u16".to_string()))?;
+        device_slots.push(ErofsDeviceSlot::with_blob_id(info.blocks, &source_blob_id)?);
         blob_indexes.insert(source_blob_id, next);
         next
     };

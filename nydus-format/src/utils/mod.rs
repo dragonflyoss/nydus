@@ -28,7 +28,7 @@ pub fn write_minimal_full_blob(
     save_sidecar: bool,
 ) -> [u8; SHA256_DIGEST_SIZE] {
     let mut bootstrap = vec![0u8; 8192];
-    let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]);
+    let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]).unwrap();
     let sb_start = EROFS_SUPER_OFFSET as usize;
     let sb_end = sb_start + sb.as_bytes().len();
     bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());

@@ -6,7 +6,7 @@ use crc32c::crc32c_append;
 use nydus_error::{Error, Result};
 use nydus_format::erofs::{
     ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
-    EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
+    EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM,
     EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_SB_BASE_SIZE,
     EROFS_SUPER_OFFSET,
 };
@@ -80,27 +80,13 @@ pub(crate) fn fill_image_head(
     let block_size = EROFS_BLOCK_SIZE as usize;
     let meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
     let meta_blocks = metadata_len.div_ceil(block_size);
-    let total_blocks = meta_blkaddr as u64 + meta_blocks as u64;
+    let total_blocks = (meta_blkaddr as u64)
+        .checked_add(meta_blocks as u64)
+        .ok_or_else(|| Error::Overflow("bootstrap block count overflow".to_string()))?;
 
     let feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
-    let mut feature_incompat =
+    let feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
-    // The `*_hi` halves of chunk index and device slot addresses are only
-    // interpreted by the kernel when the 48BIT incompat feature is declared.
-    // Declare it exactly when some block address actually exceeds 32 bits, so
-    // small images stay mountable on older kernels while large ones cannot be
-    // silently misread. The largest chunk block address is bounded by the end
-    // of the last mapped device (flattened layout) or the device's own block
-    // count (legacy blob-relative layout), both covered by `mapped + blocks`.
-    let max_block_end = device_slots
-        .iter()
-        .map(|slot| slot.mapped_blkaddr() + slot.blocks())
-        .max()
-        .unwrap_or(0)
-        .max(total_blocks);
-    if max_block_end > (1u64 << 32) {
-        feature_incompat |= EROFS_FEATURE_INCOMPAT_48BIT;
-    }
 
     let devt_slotoff: u16 = if device_slots.is_empty() {
         0
@@ -119,7 +105,7 @@ pub(crate) fn fill_image_head(
         device_slots.len() as u16,
         devt_slotoff,
         uuid,
-    );
+    )?;
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     image_buf[sb_offset..sb_offset + EROFS_SB_BASE_SIZE].copy_from_slice(sb.as_bytes());
 
@@ -148,6 +134,9 @@ pub(crate) fn fill_image_head(
 /// regions never overlap. With up to 23 device slots the table fits in block 0
 /// and this returns 1, preserving the original layout.
 pub(crate) fn device_table_meta_blkaddr(device_count: usize) -> Result<u32> {
+    if device_count > u16::MAX as usize {
+        return Err(Error::Overflow("device count exceeds u16".to_string()));
+    }
     let block_size = EROFS_BLOCK_SIZE as usize;
     let table_end = EROFS_SUPER_OFFSET as usize
         + EROFS_SB_BASE_SIZE
@@ -192,6 +181,29 @@ mod tests {
     use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 
     #[test]
+    fn image_head_checks_fields_without_limiting_aggregate_ranges() {
+        let mut head = vec![0; EROFS_BLOCK_SIZE as usize];
+        let slots = [ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(
+            u32::MAX as u64,
+            &[0; EROFS_BLOB_ID_SIZE],
+            u32::MAX as u64,
+        )
+        .unwrap()];
+        fill_image_head(&mut head, 0, 0, 1, 0, &slots, &[0; 16]).unwrap();
+        let offset = EROFS_SUPER_OFFSET as usize + 80;
+        assert_eq!(
+            u32::from_le_bytes(head[offset..offset + 4].try_into().unwrap()),
+            EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
+        );
+        let maximum_metadata = (u32::MAX as usize - 1) * EROFS_BLOCK_SIZE as usize;
+        fill_image_head(&mut head, maximum_metadata, 0, 1, 0, &[], &[0; 16]).unwrap();
+        let before = head.clone();
+        assert!(fill_image_head(&mut head, maximum_metadata + 1, 0, 1, 0, &[], &[0; 16]).is_err());
+        assert_eq!(head, before);
+        assert!(device_table_meta_blkaddr(u16::MAX as usize + 1).is_err());
+    }
+
+    #[test]
     fn write_image_sets_erofs_superblock_checksum() {
         let mut image = Vec::new();
         write_image(&mut image, &[], 0, 1, 0, &[], &[0u8; 16]).unwrap();
@@ -229,7 +241,10 @@ mod tests {
         let block_size = EROFS_BLOCK_SIZE as usize;
         // 30 slots overflow block 0, so metadata starts at block 2.
         let device_slots: Vec<ErofsDeviceSlot> = (0..30)
-            .map(|i| ErofsDeviceSlot::with_blob_id(i as u64 + 1, &[i as u8; EROFS_BLOB_ID_SIZE]))
+            .map(|index| {
+                ErofsDeviceSlot::with_blob_id(index as u64 + 1, &[index as u8; EROFS_BLOB_ID_SIZE])
+                    .unwrap()
+            })
             .collect();
 
         let mut image = Vec::new();

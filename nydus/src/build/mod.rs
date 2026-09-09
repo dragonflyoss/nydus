@@ -158,7 +158,7 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
     let uuid_bytes = [0u8; 16];
     let blob_blocks = blob_writer.total_blocks();
     let blob_id = blob_writer.data_digest();
-    let device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &blob_id)];
+    let device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &blob_id)?];
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1])?;
     let bootstrap_bytes = render_bootstrap(&mut inodes, epoch, &device_slots, &uuid_bytes)?;
     // Nothing after rendering reads the inode tree (the standalone bootstrap
@@ -190,7 +190,7 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
         let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
             blob_blocks,
             &full_blob_digest,
-        )];
+        )?];
         bootstrap::flatten_bootstrap_in_place(&mut standalone, &standalone_device_slots)?;
         Some(standalone)
     } else {

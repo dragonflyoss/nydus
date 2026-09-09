@@ -13,25 +13,26 @@ pub struct ErofsChunkIndex {
     pub startblk_lo: [u8; 4],
 }
 
-/// On-disk null chunk address sentinel: all 48 address bits set. Decoded back
-/// to [`EROFS_NULL_ADDR`] by [`ErofsChunkIndex::blkaddr`].
-const EROFS_CHUNK_NULL_ADDR: u64 = 0xFFFF_FFFF_FFFF;
+const EROFS_CHUNK_NULL_ADDR: u32 = u32::MAX;
 
 const _: () = assert!(mem::size_of::<ErofsChunkIndex>() == EROFS_CHUNK_INDEX_SIZE);
 
 impl ErofsChunkIndex {
-    pub fn new(blkaddr: u64, device_id: u16) -> Self {
-        let mut v: Self = unsafe { mem::zeroed() };
+    pub fn new(blkaddr: u64, device_id: u16) -> Result<Self> {
+        let mut entry: Self = unsafe { mem::zeroed() };
         if blkaddr == EROFS_NULL_ADDR {
-            v.startblk_hi = [0xFF; 2];
-            v.device_id = [0xFF; 2];
-            v.startblk_lo = [0xFF; 4];
+            write_u32(&mut entry.startblk_lo, EROFS_CHUNK_NULL_ADDR);
         } else {
-            write_u16(&mut v.startblk_hi, (blkaddr >> 32) as u16);
-            write_u16(&mut v.device_id, device_id);
-            write_u32(&mut v.startblk_lo, blkaddr as u32);
+            if blkaddr >= EROFS_CHUNK_NULL_ADDR as u64 {
+                return Err(Error::InvalidImage(format!(
+                    "EROFS chunk address {blkaddr} exceeds maximum data address {}",
+                    EROFS_CHUNK_NULL_ADDR - 1
+                )));
+            }
+            write_u16(&mut entry.device_id, device_id);
+            write_u32(&mut entry.startblk_lo, blkaddr as u32);
         }
-        v
+        Ok(entry)
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -39,16 +40,11 @@ impl ErofsChunkIndex {
     }
 
     pub fn blkaddr(&self) -> u64 {
-        let hi = read_u16(&self.startblk_hi) as u64;
-        let lo = read_u32(&self.startblk_lo) as u64;
-        let addr = (hi << 32) | lo;
-        // The on-disk null chunk (hole) has all 48 address bits set (written by
-        // `new(EROFS_NULL_ADDR, ..)` above); normalize it back to the in-memory
-        // EROFS_NULL_ADDR sentinel so every caller compares against one value.
+        let addr = read_u32(&self.startblk_lo);
         if addr == EROFS_CHUNK_NULL_ADDR {
             EROFS_NULL_ADDR
         } else {
-            addr
+            addr as u64
         }
     }
 
@@ -79,46 +75,54 @@ pub struct ErofsDeviceSlot {
 const _: () = assert!(mem::size_of::<ErofsDeviceSlot>() == EROFS_DEVICESLOT_SIZE);
 
 impl ErofsDeviceSlot {
-    pub fn new(blocks: u64) -> Self {
-        let mut v: Self = unsafe { mem::zeroed() };
-        debug_assert!(blocks < (1u64 << 48));
-        write_u32(&mut v.blocks_lo, blocks as u32);
-        write_u16(&mut v.blocks_hi, (blocks >> 32) as u16);
-        v
+    pub fn new(blocks: u64) -> Result<Self> {
+        let blocks = u32::try_from(blocks).map_err(|_| {
+            Error::InvalidImage(format!(
+                "EROFS device block count {blocks} exceeds 32-bit limit"
+            ))
+        })?;
+        let mut slot: Self = unsafe { mem::zeroed() };
+        write_u32(&mut slot.blocks_lo, blocks);
+        Ok(slot)
     }
 
     pub fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_DEVICESLOT_SIZE) }
     }
 
-    pub fn with_blob_id(blocks: u64, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> Self {
-        let mut v = Self::new(blocks);
-        v.set_blob_id(blob_id);
-        v
+    pub fn with_blob_id(blocks: u64, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> Result<Self> {
+        let mut slot = Self::new(blocks)?;
+        slot.set_blob_id(blob_id);
+        Ok(slot)
     }
 
     pub fn with_blob_id_and_mapped_blkaddr(
         blocks: u64,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         mapped_blkaddr: u64,
-    ) -> Self {
-        let mut v = Self::with_blob_id(blocks, blob_id);
-        v.set_mapped_blkaddr(mapped_blkaddr);
-        v
+    ) -> Result<Self> {
+        let mut slot = Self::with_blob_id(blocks, blob_id)?;
+        slot.set_mapped_blkaddr(mapped_blkaddr)?;
+        Ok(slot)
     }
 
     pub fn blocks(&self) -> u64 {
-        ((read_u16(&self.blocks_hi) as u64) << 32) | read_u32(&self.blocks_lo) as u64
+        read_u32(&self.blocks_lo) as u64
     }
 
     pub fn mapped_blkaddr(&self) -> u64 {
-        ((read_u16(&self.uniaddr_hi) as u64) << 32) | read_u32(&self.uniaddr_lo) as u64
+        read_u32(&self.uniaddr_lo) as u64
     }
 
-    pub fn set_mapped_blkaddr(&mut self, mapped_blkaddr: u64) {
-        debug_assert!(mapped_blkaddr < (1u64 << 48));
-        write_u32(&mut self.uniaddr_lo, mapped_blkaddr as u32);
-        write_u16(&mut self.uniaddr_hi, (mapped_blkaddr >> 32) as u16);
+    pub fn set_mapped_blkaddr(&mut self, mapped_blkaddr: u64) -> Result<()> {
+        let mapped_blkaddr = u32::try_from(mapped_blkaddr).map_err(|_| {
+            Error::InvalidImage(format!(
+                "EROFS mapped block address {mapped_blkaddr} exceeds 32-bit limit"
+            ))
+        })?;
+        write_u32(&mut self.uniaddr_lo, mapped_blkaddr);
+        self.uniaddr_hi = [0; 2];
+        Ok(())
     }
 
     pub fn set_blob_id(&mut self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) {
@@ -148,33 +152,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_slot_uses_erofs_48bit_block_fields() {
+    fn device_slot_checks_32bit_block_fields() {
         let blob_id = [0xAB; EROFS_BLOB_ID_SIZE];
-        let blocks = 0x1234_5678_9ABCu64;
-        let mapped_blkaddr = 0x2345_6789_ABCDu64;
-        let slot =
-            ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(blocks, &blob_id, mapped_blkaddr);
+        for blocks in [0, u32::MAX as u64 - 1, u32::MAX as u64] {
+            let mut slot =
+                ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(blocks, &blob_id, u32::MAX as u64)
+                    .unwrap();
+            assert_eq!(slot.blob_id().unwrap(), blob_id);
+            assert_eq!(slot.blocks(), blocks);
+            assert_eq!(slot.mapped_blkaddr(), u32::MAX as u64);
+            assert_eq!(&slot.as_bytes()[72..], &[0; 56]);
+            let before = slot.as_bytes().to_vec();
+            assert!(slot.set_mapped_blkaddr(1u64 << 32).is_err());
+            assert_eq!(slot.as_bytes(), before);
+            slot.blocks_hi = [0xff; 2];
+            slot.uniaddr_hi = [0xff; 2];
+            assert_eq!(slot.blocks(), blocks);
+            assert_eq!(slot.mapped_blkaddr(), u32::MAX as u64);
+        }
+        for blocks in [1u64 << 32, u64::MAX] {
+            assert!(ErofsDeviceSlot::new(blocks).is_err());
+        }
+    }
 
-        assert_eq!(slot.blob_id().unwrap(), blob_id);
-        assert_eq!(slot.blocks(), blocks);
-        assert_eq!(slot.mapped_blkaddr(), mapped_blkaddr);
-
-        let raw = slot.as_bytes();
-        assert_eq!(
-            u32::from_le_bytes(raw[64..68].try_into().unwrap()),
-            blocks as u32
-        );
-        assert_eq!(
-            u32::from_le_bytes(raw[68..72].try_into().unwrap()),
-            mapped_blkaddr as u32
-        );
-        assert_eq!(
-            u16::from_le_bytes(raw[72..74].try_into().unwrap()),
-            (blocks >> 32) as u16
-        );
-        assert_eq!(
-            u16::from_le_bytes(raw[74..76].try_into().unwrap()),
-            (mapped_blkaddr >> 32) as u16
-        );
+    #[test]
+    fn chunk_addresses_check_limits_and_use_low_word_holes() {
+        for address in [0, u32::MAX as u64 - 1] {
+            let mut entry = ErofsChunkIndex::new(address, 3).unwrap();
+            assert_eq!(entry.blkaddr(), address);
+            assert_eq!(entry.device_id(), 3);
+            assert_eq!(&entry.as_bytes()[..2], &[0; 2]);
+            entry.startblk_hi = [0xff; 2];
+            assert_eq!(entry.blkaddr(), address);
+        }
+        for address in [u32::MAX as u64, 1u64 << 32] {
+            assert!(ErofsChunkIndex::new(address, 1).is_err());
+        }
+        let hole = ErofsChunkIndex::new(EROFS_NULL_ADDR, 3).unwrap();
+        assert_eq!(hole.as_bytes(), &[0, 0, 0, 0, 255, 255, 255, 255]);
+        assert_eq!(hole.blkaddr(), EROFS_NULL_ADDR);
     }
 }
