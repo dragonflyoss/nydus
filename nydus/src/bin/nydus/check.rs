@@ -257,7 +257,7 @@ fn print_superblock(sb: &ErofsSuperblock) {
         xattr_prefix_start: u32::from_le_bytes(sb.xattr_prefix_start).to_string(),
         packed_nid: u64::from_le_bytes(sb.packed_nid).to_string(),
         xattr_filter_reserved: sb.xattr_filter_reserved.to_string(),
-        build_time: u64::from_le_bytes(sb.build_time).to_string(),
+        build_time: u32::from_le_bytes(sb.build_time).to_string(),
     };
 
     // Create a table and print it.
