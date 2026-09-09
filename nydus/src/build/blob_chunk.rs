@@ -25,9 +25,12 @@ pub struct BlobWriter<W> {
     file_chunk_size: u32,
     block_group_size: u32,
     compressor: BlobMetadataCompressor,
+    digester: BlobMetadataDigester,
     next_blkaddr: u64,
     next_compressed_offset: u64,
-    data_hasher: Sha256,
+    // `None` when the caller names the blob itself (`--blob-id`), so no
+    // sha256 pass over the data region is needed.
+    data_hasher: Option<Sha256>,
     block_group_block_offset: u64,
     block_group_buffer: Vec<u8>,
     blob_metadata_chunks: Vec<BlobMetadataChunk>,
@@ -244,9 +247,10 @@ impl<W: Write> BlobWriter<W> {
             file_chunk_size,
             block_group_size,
             compressor,
+            digester: BlobMetadataDigester::Blake3,
             next_blkaddr: 0,
             next_compressed_offset: 0,
-            data_hasher: Sha256::new(),
+            data_hasher: Some(Sha256::new()),
             block_group_block_offset: 0,
             block_group_buffer: Vec::with_capacity(block_group_size as usize),
             blob_metadata_chunks: Vec::new(),
@@ -260,17 +264,30 @@ impl<W: Write> BlobWriter<W> {
         self.next_blkaddr
     }
 
+    /// Selects the chunk digest algorithm recorded in the blob meta;
+    /// `None` writes zero digests and skips hashing.
+    pub fn set_digester(&mut self, digester: BlobMetadataDigester) {
+        self.digester = digester;
+    }
+
+    /// Stops hashing the data region. Only valid when the caller supplies
+    /// the blob id, since [`Self::data_digest`] then returns `None`.
+    pub fn disable_data_digest(&mut self) {
+        self.data_hasher = None;
+    }
+
     pub fn data_size(&self) -> u64 {
         self.next_compressed_offset
     }
 
-    pub fn data_digest(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+    pub fn data_digest(&self) -> Option<[u8; EROFS_BLOB_ID_SIZE]> {
+        let hasher = self.data_hasher.as_ref()?;
         let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-        digest.copy_from_slice(&self.data_hasher.clone().finalize());
-        digest
+        digest.copy_from_slice(&hasher.clone().finalize());
+        Some(digest)
     }
 
-    pub fn into_parts(self) -> (W, Sha256) {
+    pub fn into_parts(self) -> (W, Option<Sha256>) {
         (self.writer, self.data_hasher)
     }
 
@@ -290,7 +307,7 @@ impl<W: Write> BlobWriter<W> {
 
         Ok(BlobMetadata::new(
             self.compressor,
-            BlobMetadataDigester::Blake3,
+            self.digester,
             self.file_chunk_size / EROFS_BLOCK_SIZE,
             self.blob_metadata_chunks.clone(),
             block_groups,
@@ -331,6 +348,20 @@ impl<W: Write> BlobWriter<W> {
 
         let mut f = File::open(path)
             .with_context(|| format!("failed to open source file: {}", path.display()))?;
+        self.write_reader_chunks(&mut f, file_size)
+            .with_context(|| format!("failed to chunk source file: {}", path.display()))
+    }
+
+    /// Process exactly `file_size` bytes from `reader` (e.g. a tar entry) in
+    /// chunk-sized pieces and append every chunk to the blob device.
+    pub fn write_reader_chunks(
+        &mut self,
+        reader: &mut dyn Read,
+        file_size: u64,
+    ) -> Result<Vec<ErofsChunkAddr>> {
+        if file_size == 0 {
+            return Ok(Vec::new());
+        }
 
         let chunk_size = self.file_chunk_size as u64;
         let chunk_count = file_size.div_ceil(chunk_size);
@@ -343,9 +374,9 @@ impl<W: Write> BlobWriter<W> {
             let remaining = file_size - i * chunk_size;
             let to_read = remaining.min(chunk_size) as usize;
 
-            if let Err(err) = f
+            if let Err(err) = reader
                 .read_exact(&mut chunk_buf[..to_read])
-                .with_context(|| format!("failed to read source file: {}", path.display()))
+                .context("failed to read source data")
             {
                 self.chunk_buf = chunk_buf;
                 return Err(err);
@@ -410,12 +441,18 @@ impl<W: Write> BlobWriter<W> {
         // independently of block groups as a digest index only. The digest
         // covers the block-aligned payload (real bytes plus tail-block zero
         // padding), hashed in place to avoid materialising a padded copy.
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(data);
-        if write_len > data.len() {
-            hasher.update(&ZERO_BLOCK[..write_len - data.len()]);
-        }
-        let chunk = BlobMetadataChunk::new(*hasher.finalize().as_bytes(), addr, block_count)?;
+        let digest = match self.digester {
+            BlobMetadataDigester::Blake3 => {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(data);
+                if write_len > data.len() {
+                    hasher.update(&ZERO_BLOCK[..write_len - data.len()]);
+                }
+                *hasher.finalize().as_bytes()
+            }
+            BlobMetadataDigester::None => [0u8; 32],
+        };
+        let chunk = BlobMetadataChunk::new(digest, addr, block_count)?;
         self.blob_metadata_chunks.push(chunk);
 
         // The group stream mirrors the logical space one-to-one, so the
@@ -488,7 +525,9 @@ impl<W: Write> BlobWriter<W> {
         self.writer
             .write_all(encoded)
             .context("failed to write to blob device")?;
-        self.data_hasher.update(encoded);
+        if let Some(hasher) = self.data_hasher.as_mut() {
+            hasher.update(encoded);
+        }
         self.next_compressed_offset = compressed_offset + encoded.len() as u64;
 
         let block_count =

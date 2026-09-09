@@ -88,6 +88,8 @@ bitflags! {
         const DIGESTER_BLAKE3 = 1 << 2;
         const REDIRECT = 1 << 3;
         const INCREMENTAL = 1 << 4;
+        /// Chunk digests are all-zero placeholders (see `BlobMetadataDigester::None`).
+        const DIGESTER_NONE = 1 << 5;
     }
 }
 

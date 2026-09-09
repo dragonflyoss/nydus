@@ -212,12 +212,14 @@ A nydus image exists in exactly two on-disk layouts, and the `--blob`,
 
 `nydus build <--blob <BLOB>|--blob-dir <BLOB_DIR>> [OPTIONS] <SOURCE>`
 
-The `nydus build` command builds a source directory into the nydus EROFS
-format, in either image layout: `--blob` writes the single-file image,
-`--blob-dir` deposits the full blob into a store (see Image layouts above),
-and `--bootstrap` additionally emits the standalone metadata-only entry point.
-The reverse direction — turning a nydus full blob back into an OCI layer tar
-stream — is `nydus export` (see below).
+The `nydus build` command builds a source into the nydus EROFS format, in
+either image layout: `--blob` writes the single-file image, `--blob-dir`
+deposits the full blob into a store (see Image layouts above), and
+`--bootstrap` additionally emits the standalone metadata-only entry point.
+The source is a directory (`--type dir-nydus`, the default) or one OCI layer
+tarball (`--type tar-nydus`), see [Sources](#sources) below. The reverse
+direction — turning a nydus full blob back into an OCI layer tar stream — is
+`nydus export` (see below).
 
 Current CLI help:
 
@@ -228,9 +230,11 @@ Build a nydus filesystem image
 Usage: nydus build [OPTIONS] <--blob <BLOB>|--blob-dir <BLOB_DIR>> <SOURCE>
 
 Arguments:
-	<SOURCE>  Specify the source directory to build the nydus image from
+	<SOURCE>  Specify the source to build the nydus image from: a directory (--type dir-nydus) or one OCI layer tarball, gzip or plain (--type tar-nydus)
 
 Options:
+	--type <SOURCE_TYPE>
+		Specify the source type. tar-nydus stream-converts one OCI layer tarball: file data is written to the blob as the tar is read, no rootfs is staged on disk, and whiteout entries are kept for the merge subcommand [env: NYDUS_BUILD_TYPE=] [default: dir-nydus] [possible values: dir-nydus, tar-nydus]
 	--blob <BLOB>
 		Specify the file path to save the image as a single self-contained full blob; if the path is an existing FIFO the blob is streamed into it [env: NYDUS_BUILD_BLOB=]
 	--blob-dir <BLOB_DIR>
@@ -242,7 +246,11 @@ Options:
 	--block-group-size <BLOCK_GROUP_SIZE>
 		Specify the uncompressed size of each block group, the unit of compression and of a single backend read (must be a power of two, >= 1MiB, and >= the chunk size). The value needs to be set with human readable format, for example: 4mib, 16mib [env: NYDUS_BUILD_BLOCK_GROUP_SIZE=] [default: 4MiB]
 	--compressor <COMPRESSOR>
-		Specify the algorithm to compress data chunks [env: NYDUS_BUILD_COMPRESSOR=] [default: zstd] [possible values: none, zstd]
+		Specify the algorithm to compress data chunks [env: NYDUS_BUILD_COMPRESSOR=] [default: zstd] [possible values: none, zstd, lz4-block]
+	--digester <DIGESTER>
+		Specify the chunk digest algorithm recorded in the blob meta; "none" writes zero digests and skips hashing, for content already verified upstream [env: NYDUS_BUILD_DIGESTER=] [default: blake3] [possible values: blake3, none]
+	--blob-id <BLOB_ID>
+		Name the blob with this 64-hex id (e.g. the OCI layer digest) instead of its SHA256, skipping the data and full-blob hashing; with --blob-dir an existing entry of that name is replaced. Only local stores resolve such blobs (the id is the file name under --blob-dir); a registry serves blobs by their real digest [env: NYDUS_BUILD_BLOB_ID=]
 	--exclude <EXCLUDE>
 		Specify the absolute or current-working-directory-relative paths to exclude. May be specified multiple times. Entries inside the source tree are omitted from the blob and the resulting filesystem tree entirely
 	-l, --log-level <LOG_LEVEL>
@@ -283,6 +291,45 @@ Current implementation notes:
 	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_count`,
 	`block_group_count`, `chunk_digester`, `chunk_compressor`,
 	compressed/uncompressed totals, and full blob region offsets and block counts.
+
+#### Sources
+
+- `--type dir-nydus` (default) walks a directory tree. Whiteouts present in an
+	unpacked layer directory (OCI `.wh.` files or overlayfs character devices)
+	are stored as they are; `nydus merge` applies them.
+- `--type tar-nydus` stream-converts exactly one OCI layer tarball. The source
+	is sniffed for the gzip magic and may be plain tar or gzip, and it may be a
+	FIFO: nothing is seeked, so a layer can be piped in as it downloads. File
+	data is chunked into the blob the moment each tar entry is read and only the
+	directory tree (names, attributes, chunk indexes) is kept in memory, so no
+	rootfs is ever unpacked to disk. Hardlinks resolve to the already seen
+	target, PAX `SCHILY.xattr.*` records become EROFS xattrs, and `.wh.`
+	whiteout entries are kept as empty regular files for `merge`. The result is
+	one single-layer image per tarball; stack the layers with `nydus merge`.
+	Entry types nydus cannot represent (GNU sparse, volume headers) fail the
+	build rather than being dropped silently.
+- `--exclude` applies to directory sources only.
+
+#### Build speed knobs
+
+The default build hashes every chunk with BLAKE3 and the whole output twice with
+SHA256 (data region, full blob). Two flags trade those guarantees for speed when
+the caller already trusts the content:
+
+- `--digester none` records all-zero chunk digests and skips BLAKE3. The blob
+	meta header flags it as `DIGESTER_NONE`, an incompat bit, so a reader that
+	does not know it rejects the blob instead of failing verification. No mount
+	path verifies chunk digests today; `nydus check` reports the digester.
+- `--blob-id <64-hex>` (optionally prefixed `sha256:`) names the blob up front,
+	e.g. with the OCI layer digest, and skips both SHA256 passes. The id is
+	written to the device slot tag, used as the file name under `--blob-dir`
+	(replacing an existing entry) and reported as both digests. Because it is
+	not a digest of the bytes, only local stores can resolve such a blob by
+	name; a registry serves blobs under their real digest, so do not use
+	`--blob-id` for images that will be pushed. `nydus check` reports these
+	slots as `named` and unverified.
+- `sha2` is built with its `asm` feature (SHA2 instructions on aarch64) and
+	gzip layers are inflated by zlib-ng.
 
 ### Export
 
@@ -480,7 +527,9 @@ Current implementation notes:
 	blob can be resolved.
 - `--blob-dir` resolves by scanning full blob candidates. Device slots normally
 	store the data-region SHA256, while blob files are named by full blob SHA256
-	when produced by `--blob-dir`.
+	when produced by `--blob-dir`. A slot whose id matches no digest falls back
+	to the store entry of that file name (a blob built with `--blob-id`); it is
+	reported with `SLOT DIGEST KIND named` and counts as unverified.
 
 ### Fuse
 
@@ -1338,8 +1387,10 @@ Header details:
 	`feature_incompat`); the high 16 bits are compatible features — unknown
 	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`) or
 	`COMPRESSOR_LZ4` (`1 << 1`) names the blob's default compressor; no
-	compressor bit means stored plain. `DIGESTER_BLAKE3` (`1 << 2`) is mandatory
-	for chunk digests. `REDIRECT` (`1 << 3`) marks an ondemand blob whose block
+	compressor bit means stored plain. Exactly one digester bit is set:
+	`DIGESTER_BLAKE3` (`1 << 2`) for BLAKE3 chunk digests, or `DIGESTER_NONE`
+	(`1 << 4`) when the chunk digests are all-zero placeholders (`nydus build
+	--digester none`). `REDIRECT` (`1 << 3`) marks an ondemand blob whose block
 	groups are all redirect entries.
 	Entry-layout evolution (wider chunk/block group entries, new entry kinds) is
 	expressed as a new incompat bit — the same way EROFS gates compact vs

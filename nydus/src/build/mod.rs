@@ -12,10 +12,11 @@ pub mod image;
 pub mod inode;
 pub mod layout;
 pub mod merge;
+pub mod tar;
 
 use std::collections::HashSet;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -24,7 +25,7 @@ use bootstrap::render_bootstrap;
 use inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, NYDUS_BLOB_FOOTER_SIZE,
+    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester, NYDUS_BLOB_FOOTER_SIZE,
 };
 use nydus_format::erofs::{ErofsDeviceSlot, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_format::utils::sha256_bytes;
@@ -46,6 +47,11 @@ pub struct BuildImageOptions {
     block_group_size: u32,
     /// Algorithm to compress data chunks.
     compressor: BlobMetadataCompressor,
+    /// Chunk digest algorithm recorded in the blob meta.
+    digester: BlobMetadataDigester,
+    /// Caller-assigned blob id (device slot tag and store file name). When
+    /// set, no sha256 pass is made over the data region or the full blob.
+    blob_id: Option<[u8; EROFS_BLOB_ID_SIZE]>,
     /// Canonicalized paths inside `source` to omit from the image.
     excludes: HashSet<PathBuf>,
     /// Also render the standalone bootstrap — its device slot references the
@@ -56,9 +62,10 @@ pub struct BuildImageOptions {
 /// The built image as the caller sees it: the digests, blob meta and footer
 /// of the full blob whose bytes went into the writer.
 pub struct Image {
-    /// SHA256 of the compressed data region (the data blob digest).
+    /// SHA256 of the compressed data region (the data blob digest), or the
+    /// caller-assigned blob id.
     pub data_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
-    /// SHA256 of the whole full blob file.
+    /// SHA256 of the whole full blob file, or the caller-assigned blob id.
     pub full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
     pub blob_metadata: BlobMetadata,
     pub blob_footer: BlobFooter,
@@ -121,9 +128,38 @@ impl BuildImageOptions {
             chunk_size,
             block_group_size,
             compressor,
+            digester: BlobMetadataDigester::Blake3,
+            blob_id: None,
             excludes,
             render_standalone_bootstrap,
         })
+    }
+    /// Selects the chunk digest algorithm; `None` skips chunk hashing.
+    pub fn with_digester(mut self, digester: BlobMetadataDigester) -> Self {
+        self.digester = digester;
+        self
+    }
+
+    /// Names the blob up front instead of by its sha256, skipping both
+    /// data-region and full-blob hashing. The caller vouches for the id being
+    /// unique for this content and build configuration. Only local stores
+    /// resolve such a blob: the device slot tag is the file name under
+    /// `--blob-dir`, whereas a registry serves blobs by their real digest.
+    pub fn with_blob_id(mut self, blob_id: Option<[u8; EROFS_BLOB_ID_SIZE]>) -> Self {
+        self.blob_id = blob_id;
+        self
+    }
+
+    /// The caller-assigned blob id, if any.
+    pub fn blob_id(&self) -> Option<[u8; EROFS_BLOB_ID_SIZE]> {
+        self.blob_id
+    }
+
+    fn configure_writer<W: Write>(&self, blob_writer: &mut BlobWriter<W>) {
+        blob_writer.set_digester(self.digester);
+        if self.blob_id.is_some() {
+            blob_writer.disable_data_digest();
+        }
     }
 }
 
@@ -137,18 +173,53 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
         options.block_group_size,
         options.compressor,
     )?;
-    let mut inodes = build_tree(
+    options.configure_writer(&mut blob_writer);
+    let inodes = build_tree(
         &options.source,
         &mut blob_writer,
         options.chunk_size,
         &options.excludes,
     )?;
+    finish_image(inodes, blob_writer, options)
+}
+
+/// Builds the nydus image by streaming one OCI layer tarball (gzip or plain)
+/// straight into `writer`: file data is chunked into the blob as each tar
+/// entry is read, so no rootfs is staged on disk.
+pub fn build_image_from_tar_layer(
+    options: &BuildImageOptions,
+    layer: &Path,
+    writer: impl Write,
+) -> Result<Image> {
+    let mut blob_writer = BlobWriter::from_writer(
+        writer,
+        options.chunk_size,
+        options.block_group_size,
+        options.compressor,
+    )?;
+    options.configure_writer(&mut blob_writer);
+    let inodes = tar::build_tar_layer_tree(layer, &mut blob_writer, options.chunk_size)?;
+    finish_image(inodes, blob_writer, options)
+}
+
+/// Common back half of a build: finishes the blob, renders the bootstrap and
+/// assembles the full blob around the already-flattened inode table.
+fn finish_image<W: Write>(
+    mut inodes: Vec<inode::InodeInfo>,
+    mut blob_writer: BlobWriter<W>,
+    options: &BuildImageOptions,
+) -> Result<Image> {
     blob_writer.finish()?;
     let epoch = choose_epoch(&inodes);
 
     let uuid_bytes = [0u8; 16];
     let blob_blocks = blob_writer.total_blocks();
-    let blob_id = blob_writer.data_digest();
+    let blob_id = match options.blob_id {
+        Some(id) => id,
+        None => blob_writer.data_digest().ok_or_else(|| {
+            Error::InvalidParameter("data digest disabled without blob id".into())
+        })?,
+    };
     let device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &blob_id)?];
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1])?;
     let bootstrap_bytes = render_bootstrap(&mut inodes, epoch, &device_slots, &uuid_bytes)?;
@@ -170,7 +241,8 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
     )?;
     let full_blob_digest = blob_writer_stream
         .finish()
-        .context("failed to flush blob")?;
+        .context("failed to flush blob")?
+        .unwrap_or(blob_id);
 
     // The standalone bootstrap differs from the embedded one only in its
     // device table (full-blob id, flattened mapped addresses), so the
@@ -217,29 +289,34 @@ pub(crate) fn assemble_ondemand_artifact(
     Ok((artifact, digest, footer))
 }
 
-/// A writer that hashes every byte it forwards to the inner writer.
+/// A writer that hashes every byte it forwards to the inner writer, unless
+/// hashing was disabled by naming the blob explicitly.
 struct HashingWriter<W> {
     inner: W,
-    hasher: Sha256,
+    hasher: Option<Sha256>,
 }
 
 impl<W: Write> HashingWriter<W> {
-    fn new(inner: W, hasher: Sha256) -> Self {
+    fn new(inner: W, hasher: Option<Sha256>) -> Self {
         Self { inner, hasher }
     }
 
-    fn finish(mut self) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
+    fn finish(mut self) -> io::Result<Option<[u8; EROFS_BLOB_ID_SIZE]>> {
         self.inner.flush()?;
-        let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-        digest.copy_from_slice(&self.hasher.finalize());
-        Ok(digest)
+        Ok(self.hasher.map(|hasher| {
+            let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
+            digest.copy_from_slice(&hasher.finalize());
+            digest
+        }))
     }
 }
 
 impl<W: Write> Write for HashingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let written = self.inner.write(buf)?;
-        self.hasher.update(&buf[..written]);
+        if let Some(hasher) = self.hasher.as_mut() {
+            hasher.update(&buf[..written]);
+        }
         Ok(written)
     }
 

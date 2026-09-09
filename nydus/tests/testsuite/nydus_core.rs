@@ -144,7 +144,7 @@ fn build_test_image_full(
     .unwrap();
     writer.finish().unwrap();
 
-    let data_blob_id = writer.data_digest();
+    let data_blob_id = writer.data_digest().unwrap();
     let blob_metadata = writer.blob_metadata(0).unwrap();
     let blocks = writer.total_blocks();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
@@ -263,7 +263,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(core.probe_flat_ranges(offset, len).unwrap(), fd_ranges);
 
     // Idempotent re-fetch and zero-length fetch are fine.
-    core.blobs.fetch(&blob_id, offset, len).unwrap();
+    core.blobs.fetch(&blob_id, blob_offset, len).unwrap();
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
     let trace = core.trace_snapshot();
@@ -322,7 +322,7 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     .unwrap();
     writer.finish().unwrap();
 
-    let second_blob_id = writer.data_digest();
+    let second_blob_id = writer.data_digest().unwrap();
     let device_slots = [
         ErofsDeviceSlot::with_blob_id(blob_infos[0].blocks, &blob_id).unwrap(),
         ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id).unwrap(),

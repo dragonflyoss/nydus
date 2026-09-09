@@ -14,7 +14,7 @@ use nydus_format::erofs::{
     EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
     EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
 };
-use nydus_format::utils::sha256_bytes;
+use nydus_format::utils::{hex_string, sha256_bytes};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -150,6 +150,9 @@ pub struct BlobMetadataSummary {
 pub enum SlotSha256Kind {
     Blob,
     Data,
+    /// The slot ID is not a digest of the blob's bytes; the blob was located
+    /// by filename only (built with an explicit `--blob-id`).
+    Named,
     #[default]
     Unknown,
 }
@@ -159,6 +162,7 @@ impl SlotSha256Kind {
         match self {
             Self::Blob => "full_blob",
             Self::Data => "data_blob",
+            Self::Named => "named",
             Self::Unknown => "unknown",
         }
     }
@@ -421,6 +425,32 @@ fn resolve_blobs(
             resolved
                 .entry(blob.blob_index)
                 .or_insert_with(|| match_by_blob.clone());
+            continue;
+        }
+        if resolved.contains_key(&blob.blob_index) {
+            continue;
+        }
+        // Blobs built with `--blob-id` carry a caller-chosen ID (e.g. the OCI
+        // layer digest) that no digest of the file reproduces; fall back to
+        // the store entry of that name and report it as unverified.
+        let named = blob_dir.join(hex_string(&blob.blob_id));
+        if !named.is_file() {
+            continue;
+        }
+        if let Some(inspection) = inspect_blob(&named)? {
+            resolved.insert(
+                blob.blob_index,
+                ResolvedBlob {
+                    path: named,
+                    blob_size: inspection.blob_size,
+                    blob_sha256: inspection.blob_sha256,
+                    data_sha256: inspection.data_sha256,
+                    data_size: inspection.data_size,
+                    blob_metadata: inspection.blob_metadata,
+                    slot_sha256_kind: SlotSha256Kind::Named,
+                    verified: false,
+                },
+            );
         }
     }
 

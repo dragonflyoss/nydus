@@ -1,10 +1,11 @@
 use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
-use nydus::build::{build_image, BuildImageOptions, Image};
+use nydus::build::{build_image, build_image_from_tar_layer, BuildImageOptions, Image};
 use nydus::error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
-    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester,
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+    NYDUS_BLOB_METADATA_SUFFIX,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_format::utils::hex_string;
@@ -22,8 +23,19 @@ use tracing::Level;
         .args(["blob", "blob_dir"]),
 ))]
 pub struct BuildCommand {
-    #[arg(help = "Specify the source directory to build the nydus image from")]
+    #[arg(
+        help = "Specify the source to build the nydus image from: a directory (--type dir-nydus) or one OCI layer tarball, gzip or plain (--type tar-nydus)"
+    )]
     source: PathBuf,
+
+    #[arg(
+        long = "type",
+        value_enum,
+        default_value_t = SourceType::DirNydus,
+        env = "NYDUS_BUILD_TYPE",
+        help = "Specify the source type. tar-nydus stream-converts one OCI layer tarball: file data is written to the blob as the tar is read, no rootfs is staged on disk, and whiteout entries are kept for the merge subcommand"
+    )]
+    source_type: SourceType,
 
     #[arg(
         long,
@@ -79,6 +91,23 @@ pub struct BuildCommand {
 
     #[arg(
         long,
+        value_enum,
+        default_value_t = Digester::Blake3,
+        env = "NYDUS_BUILD_DIGESTER",
+        help = "Specify the chunk digest algorithm recorded in the blob meta; \"none\" writes zero digests and skips hashing, for content already verified upstream"
+    )]
+    digester: Digester,
+
+    #[arg(
+        long,
+        env = "NYDUS_BUILD_BLOB_ID",
+        value_parser = parse_blob_id,
+        help = "Name the blob with this 64-hex id (e.g. the OCI layer digest) instead of its SHA256, skipping the data and full-blob hashing; with --blob-dir an existing entry of that name is replaced. Only local stores resolve such blobs (the id is the file name under --blob-dir); a registry serves blobs by their real digest"
+    )]
+    blob_id: Option<[u8; EROFS_BLOB_ID_SIZE]>,
+
+    #[arg(
+        long,
         help = "Specify the absolute or current-working-directory-relative paths to exclude. May be specified multiple times. Entries inside the source tree are omitted from the blob and the resulting filesystem tree entirely"
     )]
     exclude: Vec<PathBuf>,
@@ -102,6 +131,15 @@ pub struct BuildCommand {
     console: bool,
 }
 
+/// What the positional source is.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SourceType {
+    /// A directory tree.
+    DirNydus,
+    /// One OCI layer tarball (gzip or plain tar).
+    TarNydus,
+}
+
 /// The algorithm to compress data chunks.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Compressor {
@@ -119,6 +157,38 @@ impl From<Compressor> for BlobMetadataCompressor {
             Compressor::Lz4Block => Self::Lz4Block,
         }
     }
+}
+
+/// The chunk digest algorithm.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Digester {
+    Blake3,
+    None,
+}
+
+impl From<Digester> for BlobMetadataDigester {
+    fn from(value: Digester) -> Self {
+        match value {
+            Digester::Blake3 => Self::Blake3,
+            Digester::None => Self::None,
+        }
+    }
+}
+
+fn parse_blob_id(s: &str) -> std::result::Result<[u8; EROFS_BLOB_ID_SIZE], String> {
+    let s = s.strip_prefix("sha256:").unwrap_or(s);
+    if s.len() != EROFS_BLOB_ID_SIZE * 2 {
+        return Err(format!(
+            "blob id must be {} hex characters",
+            EROFS_BLOB_ID_SIZE * 2
+        ));
+    }
+    let mut id = [0u8; EROFS_BLOB_ID_SIZE];
+    for (i, byte) in id.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|_| "blob id must be hexadecimal".to_string())?;
+    }
+    Ok(id)
 }
 
 /// Implement the execute for BuildCommand.
@@ -143,7 +213,7 @@ impl BuildCommand {
 
     /// Validates the flag combination before any expensive work: the
     /// standalone bootstrap must not overwrite the blob, and the source must
-    /// be a directory.
+    /// match `--type` (a directory, or a layer tarball which may be a FIFO).
     fn validate(&self) -> Result<()> {
         if let (Some(bootstrap), Some(blob)) = (&self.bootstrap, &self.blob) {
             if bootstrap == blob {
@@ -153,11 +223,24 @@ impl BuildCommand {
             }
         }
 
-        if !self.source.is_dir() {
-            return Err(Error::InvalidParameter(format!(
-                "source {} is not a directory",
-                self.source.display()
-            )));
+        match self.source_type {
+            SourceType::DirNydus => {
+                if !self.source.is_dir() {
+                    return Err(Error::InvalidParameter(format!(
+                        "source {} is not a directory",
+                        self.source.display()
+                    )));
+                }
+            }
+            // FIFOs are allowed so layers can be streamed in.
+            SourceType::TarNydus => {
+                if !self.source.exists() || self.source.is_dir() {
+                    return Err(Error::InvalidParameter(format!(
+                        "source {} is not a layer tarball",
+                        self.source.display()
+                    )));
+                }
+            }
         }
 
         Ok(())
@@ -167,18 +250,27 @@ impl BuildCommand {
     /// canonicalized and the chunk/block-group geometry is checked before any
     /// output file or directory is created.
     fn prepare(&self) -> Result<BuildImageOptions> {
-        let source = fs::canonicalize(&self.source)
-            .with_context(|| format!("failed to canonicalize source: {}", self.source.display()))?;
-
         let mut excludes: HashSet<PathBuf> = HashSet::new();
-        for path in &self.exclude {
-            let canonical = fs::canonicalize(path)
-                .with_context(|| format!("failed to canonicalize exclude: {}", path.display()))?;
+        let source = match self.source_type {
+            SourceType::DirNydus => {
+                let source = fs::canonicalize(&self.source).with_context(|| {
+                    format!("failed to canonicalize source: {}", self.source.display())
+                })?;
 
-            if canonical.starts_with(&source) {
-                excludes.insert(canonical);
+                for path in &self.exclude {
+                    let canonical = fs::canonicalize(path).with_context(|| {
+                        format!("failed to canonicalize exclude: {}", path.display())
+                    })?;
+
+                    if canonical.starts_with(&source) {
+                        excludes.insert(canonical);
+                    }
+                }
+                source
             }
-        }
+            // The tar path streams from `self.source` directly (it may be a FIFO).
+            SourceType::TarNydus => self.source.clone(),
+        };
 
         let chunk_size = u32::try_from(self.chunk_size.as_u64()).map_err(|_| {
             Error::InvalidParameter(format!(
@@ -194,14 +286,16 @@ impl BuildCommand {
             ))
         })?;
 
-        BuildImageOptions::new(
+        Ok(BuildImageOptions::new(
             source,
             chunk_size,
             block_group_size,
             self.compressor.into(),
             excludes,
             self.bootstrap.is_some(),
-        )
+        )?
+        .with_digester(self.digester.into())
+        .with_blob_id(self.blob_id))
     }
 
     /// Runs the build: writes the full blob, settles it under its final name,
@@ -209,10 +303,14 @@ impl BuildCommand {
     fn run(&self, options: &BuildImageOptions) -> Result<()> {
         let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
         let writer = blob_output.create()?;
-        let image = build_image(options, writer)
-            .with_context(|| format!("failed to build image: {}", blob_output.path().display()))?;
+        let image = match self.source_type {
+            SourceType::DirNydus => build_image(options, writer),
+            SourceType::TarNydus => build_image_from_tar_layer(options, &self.source, writer),
+        }
+        .with_context(|| format!("failed to build image: {}", blob_output.path().display()))?;
 
-        let full_blob_path = blob_output.finalize(&image.full_blob_digest)?;
+        let full_blob_path =
+            blob_output.finalize(&image.full_blob_digest, options.blob_id().is_some())?;
         let blob_metadata_path = Self::save_blob_metadata(&image, &full_blob_path)?;
         self.save_bootstrap(&image)?;
 
@@ -317,13 +415,18 @@ impl BlobOutput {
 
     /// Settles the blob under its final name: a file keeps the caller-named
     /// path; a store entry is renamed to its SHA256, dropping the temporary
-    /// file when that digest already exists (dedup).
-    fn finalize(self, full_blob_digest: &[u8; EROFS_BLOB_ID_SIZE]) -> Result<PathBuf> {
+    /// file when that digest already exists (dedup). An explicit id is not a
+    /// content digest, so `replace` makes the rename overwrite instead.
+    fn finalize(
+        self,
+        full_blob_digest: &[u8; EROFS_BLOB_ID_SIZE],
+        replace: bool,
+    ) -> Result<PathBuf> {
         match self {
             Self::File(path) => Ok(path),
             Self::Store { dir, temp } => {
                 let full_blob_path = dir.join(hex_string(full_blob_digest));
-                if full_blob_path.exists() {
+                if !replace && full_blob_path.exists() {
                     fs::remove_file(&temp).with_context(|| {
                         format!(
                             "failed to remove temporary blob after dedup hit: {}",
@@ -537,7 +640,7 @@ mod tests {
         fs::write(output.path(), b"blob bytes").unwrap();
         let digest = [0xab_u8; EROFS_BLOB_ID_SIZE];
 
-        let final_path = output.finalize(&digest).unwrap();
+        let final_path = output.finalize(&digest, false).unwrap();
 
         assert_eq!(final_path, store.join(hex_string(&digest)));
         assert_eq!(fs::read(&final_path).unwrap(), b"blob bytes");
@@ -554,7 +657,7 @@ mod tests {
         fs::write(&existing, b"already stored").unwrap();
         fs::write(output.path(), b"duplicate bytes").unwrap();
 
-        let final_path = output.finalize(&digest).unwrap();
+        let final_path = output.finalize(&digest, false).unwrap();
 
         assert_eq!(final_path, existing);
         assert_eq!(fs::read(&existing).unwrap(), b"already stored");
@@ -571,18 +674,17 @@ mod tests {
         fs::create_dir(&blob_dir).unwrap();
         fs::write(source.join("hello.txt"), b"hello nydus").unwrap();
 
-        BuildCommand {
-            source,
-            blob: None,
-            blob_dir: Some(blob_dir.clone()),
-            bootstrap: Some(bootstrap.clone()),
-            chunk_size: ByteSize::mib(1),
-            block_group_size: ByteSize::mib(4),
-            compressor: Compressor::Zstd,
-            exclude: Vec::new(),
-            log_level: Level::ERROR,
-            console: false,
-        }
+        BuildCommand::try_parse_from([
+            "build",
+            source.to_str().unwrap(),
+            "--blob-dir",
+            blob_dir.to_str().unwrap(),
+            "--bootstrap",
+            bootstrap.to_str().unwrap(),
+            "--compressor",
+            "zstd",
+        ])
+        .unwrap()
         .execute()
         .unwrap();
 
