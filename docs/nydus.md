@@ -39,8 +39,6 @@ encoded ranges in the stored data region.
 - Introduce cross-layer global deduplication beyond the current single-build dedup.
 - Rework the full EROFS on-disk layout to match every upstream variant.
 
-<<<<<<< Updated upstream
-=======
 ## Kernel Compatibility and Format Limits
 
 The generated FS version 7 bootstrap targets upstream Linux 5.16 EROFS
@@ -110,11 +108,7 @@ skips when the running kernel is older than 5.16 or EROFS is absent from
 `/proc/filesystems`; both built-in and loaded-module support are accepted.
 Other prerequisites remain mandatory on supported kernels. A skipped test is
 not native compatibility validation.
-Run it on upstream 5.16 and a newer kernel. The separate flatdev smoke is
-`make test-nbd` on 6.4+. Passing userspace tests or cross-compilation alone does
-not certify either native gate.
 
->>>>>>> Stashed changes
 ## Crate Architecture
 
 The Rust side is a workspace of eight crates. The split exists to encode
@@ -1226,7 +1220,7 @@ artifact without changing the original source-blob identities.
 
 `blocks_lo` stores the decoded external-device block count. `uniaddr_lo` stores
 its mapped start for flattened layouts; `blocks_hi`, `uniaddr_hi` and reserved
-bytes are zero.
+bytes are zero. These are 32-bit fields with the bounds described above.
 
 Regular file chunk indexes continue to use `blkaddr` and `device_id`, where:
 
