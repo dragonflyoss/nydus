@@ -52,6 +52,8 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
                 startblk: 0,
                 data_size: 0,
                 parent_nid: 0,
+                inline_len: 0,
+                inline_tail: Vec::new(),
             },
             xattrs: Vec::new(),
         },

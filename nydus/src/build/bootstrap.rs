@@ -4,7 +4,8 @@ use crate::build::image::{
     device_table_meta_blkaddr, fill_image_head, head_layout, write_erofs_superblock_checksum,
 };
 use crate::build::inode::{
-    erofs_inode_size, serialize_inode, symlink_is_inline, InodeData, InodeInfo,
+    directory_inline_len, erofs_inode_size, has_inline_data, serialize_inode, symlink_is_inline,
+    InodeData, InodeInfo,
 };
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
@@ -228,25 +229,16 @@ fn size_bootstrap(
     layout.pad_to_block();
 
     // Data-region entries in allocation (= write) order, identified by inode
-    // index: every directory's data, then every long symlink's target.
+    // index: every directory's block-backed data, then every long symlink's
+    // target.
     let mut data_entries: Vec<(usize, usize)> = Vec::new();
     for index in 0..inodes.len() {
         if !matches!(inodes[index].data, InodeData::Directory { .. }) {
             continue;
         }
-        let dir_data_len = serialize_dir_data(inodes, index).len();
-        let (data_offset, data_startblk) = layout.alloc_dir_data(dir_data_len);
-        if let InodeData::Directory {
-            ref mut startblk,
-            ref mut data_size,
-            ..
-        } = inodes[index].data
-        {
-            *startblk = data_startblk;
-            *data_size = dir_data_len;
+        if let Some(data_offset) = place_dir_data(&mut layout, inodes, index) {
+            data_entries.push((index, data_offset));
         }
-        inodes[index].size = dir_data_len as u64;
-        data_entries.push((index, data_offset));
     }
     for (index, inode) in inodes.iter_mut().enumerate() {
         if symlink_is_inline(inode) {
@@ -329,7 +321,10 @@ fn render_flattened_bootstrap_to_inner(
 
     // --- Write pass: inode region, then data region, in offset order ---
     let mut cursor = 0usize;
-    for inode in inodes.iter() {
+    let mut inode_order: Vec<usize> = (0..inodes.len()).collect();
+    inode_order.sort_unstable_by_key(|&index| inodes[index].meta_offset);
+    for index in inode_order {
+        let inode = &inodes[index];
         debug_assert!(inode.meta_offset >= cursor);
         write_zeros(writer, inode.meta_offset - cursor)?;
         let bytes = serialize_inode(inode, epoch)?;
@@ -343,12 +338,13 @@ fn render_flattened_bootstrap_to_inner(
         debug_assert!(data_offset >= cursor);
         write_zeros(writer, data_offset - cursor)?;
         match &inodes[index].data {
-            InodeData::Directory { .. } => {
+            InodeData::Directory { data_size, .. } => {
                 let dir_data = serialize_dir_data(inodes, index);
+                let block_part = &dir_data[..dir_data.len().min(*data_size)];
                 writer
-                    .write_all(&dir_data)
+                    .write_all(block_part)
                     .context("failed to write bootstrap directory data")?;
-                cursor = data_offset + dir_data.len();
+                cursor = data_offset + block_part.len();
             }
             InodeData::Symlink { target, .. } => {
                 writer
@@ -385,6 +381,44 @@ fn serialize_dir_data(inodes: &[InodeInfo], index: usize) -> Vec<u8> {
         })
         .collect();
     serialize_directory(&dir_children, inodes[index].nid, parent_nid)
+}
+
+/// Lays out one directory's data: the full blocks (if any) get a data-region
+/// allocation whose offset is returned, the partial last block is kept as the
+/// inode's inline tail when [`directory_inline_len`] allows it, else the data
+/// is block padded in the data region. Sets the inode's startblk, data_size,
+/// inline tail and size.
+fn place_dir_data(
+    layout: &mut MetadataLayout,
+    inodes: &mut [InodeInfo],
+    index: usize,
+) -> Option<usize> {
+    let data = serialize_dir_data(inodes, index);
+    let InodeData::Directory { inline_len, .. } = inodes[index].data else {
+        unreachable!("place_dir_data is only called for directories");
+    };
+    let (block_len, size) = if inline_len > 0 {
+        debug_assert_eq!(data.len() % EROFS_BLOCK_SIZE as usize, inline_len);
+        (data.len() - inline_len, data.len())
+    } else {
+        let padded =
+            align_up_usize(data.len(), EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
+        (padded, padded)
+    };
+    let placed = (block_len > 0).then(|| layout.alloc_dir_data(block_len));
+    if let InodeData::Directory {
+        ref mut startblk,
+        ref mut data_size,
+        ref mut inline_tail,
+        ..
+    } = inodes[index].data
+    {
+        *startblk = placed.map_or(0, |(_, startblk)| startblk);
+        *data_size = block_len;
+        *inline_tail = data[data.len() - inline_len..].to_vec();
+    }
+    inodes[index].size = size as u64;
+    placed.map(|(offset, _)| offset)
 }
 
 fn write_zeros(writer: &mut impl Write, n: usize) -> Result<()> {
@@ -514,43 +548,16 @@ fn render_bootstrap_inner(
         })
         .collect();
 
-    // Directories are processed one at a time: cloning every directory's
-    // child names up front would keep a second copy of all file names
-    // resident at once.
+    // Directories are processed one at a time: serializing every directory
+    // up front would keep a second copy of all file names resident at once.
     for index in dir_indexes {
-        let InodeData::Directory {
-            ref children,
-            parent_nid,
-            ..
-        } = inodes[index].data
-        else {
-            unreachable!("dir_indexes only collects directory inodes");
-        };
-        let self_nid = inodes[index].nid;
-        let dir_children: Vec<DirChild> = children
-            .iter()
-            .map(|de| DirChild {
-                name: de.name.clone(),
-                nid: inodes[de.inode_index].nid,
-                file_type: de.file_type,
-            })
-            .collect();
-        let dir_data = serialize_directory(&dir_children, self_nid, parent_nid);
-        drop(dir_children);
-        let dir_data_len = dir_data.len();
-        let (data_offset, startblk) = layout.alloc_dir_data(dir_data_len);
-        layout.write_at(data_offset, &dir_data);
-
-        if let InodeData::Directory {
-            startblk: ref mut slot_startblk,
-            data_size: ref mut slot_data_size,
-            ..
-        } = inodes[index].data
-        {
-            *slot_startblk = startblk;
-            *slot_data_size = dir_data_len;
+        if let Some(data_offset) = place_dir_data(&mut layout, inodes, index) {
+            let dir_data = serialize_dir_data(inodes, index);
+            let InodeData::Directory { data_size, .. } = inodes[index].data else {
+                unreachable!("dir_indexes only collects directory inodes");
+            };
+            layout.write_at(data_offset, &dir_data[..dir_data.len().min(data_size)]);
         }
-        inodes[index].size = dir_data_len as u64;
     }
 
     // Symlinks whose target is too long to ride behind the inode header get a
@@ -622,12 +629,54 @@ fn alloc_inodes(layout: &mut MetadataLayout, inodes: &mut [InodeInfo], epoch: u6
         if inode.mtime != epoch || inode.mtime_nsec != 0 {
             inode.is_extended = true;
         }
+        let inline_len = directory_inline_len(inode);
+        if let InodeData::Directory {
+            inline_len: ref mut slot,
+            ..
+        } = inode.data
+        {
+            *slot = inline_len;
+        }
+    }
+    for index in allocation_order(inodes) {
+        let inode = &mut inodes[index];
         let inode_size = erofs_inode_size(inode);
-        let has_inline = symlink_is_inline(inode);
-        let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
+        let (offset, nid) = layout.alloc_inode(inode_size, has_inline_data(inode));
         inode.meta_offset = offset;
         inode.nid = nid;
     }
+}
+
+/// Inode allocation order: the root, then for each directory (in that same
+/// order) all of its children back to back, as mkfs.erofs lays them out. A
+/// directory's inline dirents and its children's inodes thus share a few
+/// consecutive blocks, so listing or looking up siblings touches one or two
+/// metadata blocks instead of one per child. Inodes outside the tree (the
+/// z_erofs packed inode) come last.
+fn allocation_order(inodes: &[InodeInfo]) -> Vec<usize> {
+    let mut order = Vec::with_capacity(inodes.len());
+    let mut placed = vec![false; inodes.len()];
+    if inodes.is_empty() {
+        return order;
+    }
+    order.push(0);
+    placed[0] = true;
+    let mut next_dir = 0;
+    while next_dir < order.len() {
+        let dir = order[next_dir];
+        next_dir += 1;
+        if let InodeData::Directory { ref children, .. } = inodes[dir].data {
+            for child in children {
+                // Hardlinked inodes are listed under several parents.
+                if !placed[child.inode_index] {
+                    placed[child.inode_index] = true;
+                    order.push(child.inode_index);
+                }
+            }
+        }
+    }
+    order.extend((0..inodes.len()).filter(|&index| !placed[index]));
+    order
 }
 
 pub(crate) fn set_parent_nids(inodes: &mut [InodeInfo]) {
@@ -674,13 +723,16 @@ pub(crate) fn set_parent_nids(inodes: &mut [InodeInfo]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::inode::ChildRef;
+    use crate::build::blob_chunk::BlobWriter;
+    use crate::build::inode::{build_tree, choose_epoch, ChildRef};
     use nydus_core::ErofsReader;
     use nydus_format::erofs::{
         erofs_xattr_ibody_size, ErofsInode, XattrEntry, EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE,
         EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
         EROFS_XATTR_INDEX_USER,
     };
+    use std::collections::HashSet;
+    use std::fs;
 
     fn symlink_tree(
         target_len: usize,
@@ -709,6 +761,8 @@ mod tests {
                     }],
                     startblk: 0,
                     data_size: 0,
+                    inline_len: 0,
+                    inline_tail: Vec::new(),
                     parent_nid: 0,
                 },
                 xattrs: Vec::new(),
@@ -1017,5 +1071,97 @@ mod tests {
                 expected_extended,
             );
         }
+    }
+
+    /// Directories pack their last dirent block behind the inode and a
+    /// directory's children get consecutive nids; both must read back through
+    /// the metadata reader exactly.
+    #[test]
+    fn directories_inline_their_tail_and_children_are_contiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(source.join("small")).unwrap();
+        fs::create_dir_all(source.join("big")).unwrap();
+        for i in 0..8 {
+            fs::write(source.join("small").join(format!("f{i}")), b"x").unwrap();
+        }
+        // Long names so the dirents span several blocks (> 4KiB) and end in a
+        // partial block that still fits behind a compact inode.
+        let big_names: Vec<String> = (0..120)
+            .map(|i| format!("{i:04}-{}", "n".repeat(60)))
+            .collect();
+        for name in &big_names {
+            fs::write(source.join("big").join(name), b"y").unwrap();
+        }
+
+        let scratch = dir.path().join("scratch.blob");
+        let mut blob_writer = BlobWriter::new(&scratch, EROFS_BLOCK_SIZE).unwrap();
+        let mut inodes =
+            build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        // Fresh files carry sub-second mtimes, which force the extended inode
+        // layout; put every inode on the epoch so the children stay compact.
+        for inode in inodes.iter_mut() {
+            inode.mtime = 1_700_000_000;
+            inode.mtime_nsec = 0;
+        }
+        let epoch = choose_epoch(&inodes);
+        let bootstrap = render_flattened_bootstrap(&mut inodes, epoch, &[], &[0u8; 16]).unwrap();
+        let path = dir.path().join("bootstrap");
+        fs::write(&path, &bootstrap).unwrap();
+        let reader = ErofsReader::open_metadata_only(&path).unwrap();
+
+        let root_nid = reader.superblock().root_nid();
+        let root = reader.inode(root_nid).unwrap();
+        let lookup = |parent: u64, name: &str| {
+            let parent_inode = reader.inode(parent).unwrap();
+            reader
+                .lookup_dir_entry(parent, &parent_inode, name.as_bytes())
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name} missing"))
+        };
+
+        // Small directory: everything inline, size is the used length.
+        let small_nid = lookup(root_nid, "small");
+        let small = reader.inode(small_nid).unwrap();
+        assert_eq!(small.data_layout(), EROFS_INODE_FLAT_INLINE);
+        assert!(small.size() > 0 && small.size() < EROFS_BLOCK_SIZE as u64);
+        let mut names: Vec<Vec<u8>> = reader
+            .read_dir(small_nid, &small)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        names.sort();
+        let mut expected: Vec<Vec<u8>> = (0..8).map(|i| format!("f{i}").into_bytes()).collect();
+        expected.extend([b".".to_vec(), b"..".to_vec()]);
+        expected.sort();
+        assert_eq!(names, expected);
+        // Children allocated back to back, in dirent order (each one-chunk
+        // file is 40 bytes, i.e. two 32-byte slots).
+        let child_nids: Vec<u64> = (0..8)
+            .map(|i| lookup(small_nid, &format!("f{i}")))
+            .collect();
+        for pair in child_nids.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0] + 2,
+                "siblings must be allocated back to back"
+            );
+        }
+
+        // Big directory: full blocks in the data region plus an inline tail.
+        let big_nid = lookup(root_nid, "big");
+        let big = reader.inode(big_nid).unwrap();
+        assert_eq!(big.data_layout(), EROFS_INODE_FLAT_INLINE);
+        assert!(big.size() > EROFS_BLOCK_SIZE as u64);
+        assert_ne!(big.size() % EROFS_BLOCK_SIZE as u64, 0);
+        assert_ne!(big.startblk(), 0);
+        let entries = reader.read_dir(big_nid, &big).unwrap();
+        assert_eq!(entries.len(), big_names.len() + 2);
+        for name in &big_names {
+            let nid = lookup(big_nid, name);
+            assert_eq!(reader.inode(nid).unwrap().size(), 1);
+        }
+        assert_eq!(root.data_layout(), EROFS_INODE_FLAT_INLINE);
     }
 }

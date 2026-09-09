@@ -1248,6 +1248,21 @@ Within the bootstrap region:
 - the metadata area starts at `superblock.meta_blkaddr` and contains inode
 	bodies, xattrs, chunk index arrays and directory data. This is block 1 for
 	up to 23 device slots; a larger device table occupies additional head blocks.
+- directories are laid out like `mkfs.erofs` does: the full 4KiB blocks of
+	dirent data go to the data area, and the partial last block is packed right
+	behind the inode header (`EROFS_INODE_FLAT_INLINE`, `i_size` is the exact
+	used length) whenever header + xattrs + tail fit in the inode's block. A
+	directory whose data ends on a block boundary, or whose tail does not fit,
+	stays `FLAT_PLAIN` with block-padded data. Looking a name up in a small
+	directory therefore costs one metadata block instead of two.
+- inodes are allocated breadth first: the root, then for each directory (in
+	that order) all of its children back to back, hardlinked inodes once under
+	their first parent, and inodes outside the tree (the z_erofs packed inode)
+	last. A directory's inline dirents and its children's inodes thus share a
+	few consecutive blocks, so listing or `stat`-ing siblings touches one or two
+	metadata blocks rather than one per child. Both rules cut the openclaw
+	bootstrap from 71MB to 20MB and a cold `stat` of its 5.3k startup files from
+	1158 to 688 reads; they apply to every image nydus builds or merges.
 
 ### Automatic FUSE xattr optimization
 

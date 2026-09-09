@@ -1,4 +1,5 @@
 use crate::build::blob_chunk::BlobWriter;
+use crate::build::dir::directory_size;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
     erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_ibody_size,
@@ -79,18 +80,33 @@ pub enum InodeData {
     },
 
     /// Directory: sorted children.
+    ///
+    /// Like mkfs.erofs, the last (partial) block of dirent data is packed
+    /// right behind the inode header (`EROFS_INODE_FLAT_INLINE`) when it fits
+    /// in the inode's block, so looking a name up in a small directory costs
+    /// one metadata block instead of two; only the full blocks before it get
+    /// data blocks of their own.
     Directory {
         // List of child entries (name, file type, inode index in the inodes vector).
         children: Vec<ChildRef>,
 
-        /// Starting block address of the directory data (set during layout).
+        /// Starting block address of the block-backed directory data (set
+        /// during layout; 0 when everything is inline).
         startblk: u64,
 
-        /// Size of the directory data in bytes (set during layout).
+        /// Size of the block-backed directory data in bytes (set during
+        /// layout).
         data_size: usize,
 
         /// NID of the parent directory (set during layout, 0 for root).
         parent_nid: u64,
+
+        /// Bytes of dirent data packed behind the inode; 0 when the
+        /// directory is laid out FLAT_PLAIN (decided before allocation).
+        inline_len: usize,
+
+        /// The packed tail itself (set during layout, `inline_len` bytes).
+        inline_tail: Vec<u8>,
     },
 
     /// Symbolic link: target path.
@@ -198,7 +214,7 @@ pub(crate) fn erofs_inode_size(inode: &InodeInfo) -> usize {
         InodeData::ZFile { tail, .. } => {
             align_up_usize(inode_isize + xattr_isize, 8).expect("alignment overflowed") + tail.len()
         }
-        InodeData::Directory { .. } => inode_isize + xattr_isize,
+        InodeData::Directory { inline_len, .. } => inode_isize + xattr_isize + inline_len,
         InodeData::Symlink { target, .. } => {
             if symlink_is_inline(inode) {
                 inode_isize + xattr_isize + target.len()
@@ -230,6 +246,38 @@ pub(crate) fn symlink_is_inline(inode: &InodeInfo) -> bool {
             header_size + erofs_xattr_ibody_size(&inode.xattrs),
             target.len(),
         ),
+        _ => false,
+    }
+}
+
+/// The dirent bytes a directory would pack behind its inode: the used part of
+/// its last data block, provided that fits in the inode's block together with
+/// the header and xattrs. A directory whose data ends exactly on a block
+/// boundary has no partial block to pack and stays FLAT_PLAIN.
+pub(crate) fn directory_inline_len(inode: &InodeInfo) -> usize {
+    let InodeData::Directory { ref children, .. } = inode.data else {
+        return 0;
+    };
+    let size = directory_size(children.iter().map(|child| child.name.as_slice()));
+    let tail = size % EROFS_BLOCK_SIZE as usize;
+    let header = if inode.is_extended {
+        EROFS_INODE_EXTENDED_SIZE
+    } else {
+        EROFS_INODE_COMPACT_SIZE
+    } + erofs_xattr_ibody_size(&inode.xattrs);
+    if tail != 0 && header + tail <= EROFS_BLOCK_SIZE as usize {
+        tail
+    } else {
+        0
+    }
+}
+
+/// Whether an inode packs data behind its header, which must then stay
+/// inside the inode's metadata block.
+pub(crate) fn has_inline_data(inode: &InodeInfo) -> bool {
+    match inode.data {
+        InodeData::Directory { inline_len, .. } => inline_len > 0,
+        InodeData::Symlink { .. } => symlink_is_inline(inode),
         _ => false,
     }
 }
@@ -461,6 +509,8 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
                 startblk: 0,
                 data_size: 0,
                 parent_nid: 0,
+                inline_len: 0,
+                inline_tail: Vec::new(),
             },
             xattrs: attrs.xattrs,
         });
@@ -769,8 +819,19 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             let tail_offset = align_up_usize(base + xattr_size, 8).expect("alignment overflowed");
             buf[tail_offset..tail_offset + tail.len()].copy_from_slice(tail);
         }
-        InodeData::Directory { startblk, .. } => {
-            let datalayout = EROFS_INODE_FLAT_PLAIN;
+        InodeData::Directory {
+            startblk,
+            inline_len,
+            inline_tail,
+            ..
+        } => {
+            let inline = *inline_len > 0;
+            debug_assert_eq!(inline_tail.len(), *inline_len);
+            let datalayout = if inline {
+                EROFS_INODE_FLAT_INLINE
+            } else {
+                EROFS_INODE_FLAT_PLAIN
+            };
             let startblk_lo = u32::try_from(*startblk).map_err(|_| {
                 Error::Overflow(format!(
                     "directory inode {} block address {startblk} exceeds 32-bit limit",
@@ -813,6 +874,14 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 );
                 buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
+            }
+            if inline {
+                let inline_off = if inode.is_extended {
+                    EROFS_INODE_EXTENDED_SIZE
+                } else {
+                    EROFS_INODE_COMPACT_SIZE
+                } + xattr_size;
+                buf[inline_off..inline_off + inline_tail.len()].copy_from_slice(inline_tail);
             }
         }
         InodeData::Symlink { target, startblk } => {
@@ -1051,6 +1120,8 @@ mod tests {
                 startblk: 0,
                 data_size: 0,
                 parent_nid: 0,
+                inline_len: 0,
+                inline_tail: Vec::new(),
             },
             xattrs,
         }
@@ -1357,6 +1428,8 @@ mod tests {
                     children: Vec::new(),
                     startblk: address,
                     data_size: 0,
+                    inline_len: 0,
+                    inline_tail: Vec::new(),
                     parent_nid: 0,
                 };
                 let encoded = serialize_inode(&inode, 0);

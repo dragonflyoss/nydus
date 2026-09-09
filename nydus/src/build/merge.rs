@@ -892,6 +892,8 @@ mod tests {
                     children: Vec::new(),
                     startblk: 0,
                     data_size: 0,
+                    inline_len: 0,
+                    inline_tail: Vec::new(),
                     parent_nid: 0,
                 },
                 xattrs: Vec::new(),

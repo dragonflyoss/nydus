@@ -595,6 +595,10 @@ mod tests {
         assert_eq!(empty.data_layout(), EROFS_INODE_COMPRESSED_FULL);
         assert_eq!(empty.size(), 0);
         assert!(reader.superblock().packed_nid().is_some());
-        assert!(root.size() > 0);
+        assert_eq!(
+            root.size() % EROFS_BLOCK_SIZE as u64,
+            root.size(),
+            "root dirents inline"
+        );
     }
 }
