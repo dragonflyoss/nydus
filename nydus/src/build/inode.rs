@@ -579,6 +579,12 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
 
 /// Serialize an inode (header, xattrs, chunk indexes and inline tail) to bytes.
 pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> {
+    if !inode.is_extended && (inode.mtime != epoch || inode.mtime_nsec != 0) {
+        return Err(Error::InvalidImage(format!(
+            "compact inode {} time {}.{} differs from shared time {epoch}.0",
+            inode.ino, inode.mtime, inode.mtime_nsec
+        )));
+    }
     let blkszbits = EROFS_BLKSZBITS as u32;
     let inode_size = erofs_inode_size(inode);
     let mut buf = vec![0u8; inode_size];
@@ -614,7 +620,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout);
-                let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
+                let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
@@ -671,7 +677,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout);
-                let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
+                let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
@@ -731,7 +737,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout);
-                let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
+                let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
@@ -772,7 +778,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout);
-                let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
+                let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
@@ -810,7 +816,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout);
-                let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
+                let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
@@ -1164,6 +1170,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn compact_serialization_rejects_lossy_timestamps() {
+        let mut inode = root_inode_with_xattrs(Vec::new());
+        inode.mtime = 100;
+        for epoch in [0, 99, 101] {
+            assert!(serialize_inode(&inode, epoch).is_err());
+        }
+        assert!(serialize_inode(&inode, 100).is_ok());
+        inode.mtime_nsec = 1;
+        assert!(serialize_inode(&inode, 100).is_err());
+        inode.is_extended = true;
+        let bytes = serialize_inode(&inode, 0).unwrap();
+        let parsed = ErofsInode::parse(&bytes).unwrap();
+        assert_eq!(parsed.mtime(0), 100);
+        assert_eq!(parsed.effective_mtime_nsec(0), 1);
     }
 
     #[test]

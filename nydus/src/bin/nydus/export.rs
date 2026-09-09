@@ -143,6 +143,14 @@ mod tests {
         std::os::unix::fs::symlink("nested/hello.txt", source.join("link")).unwrap();
         fs::write(source.join(".wh.deleted"), b"").unwrap();
         let xattr_set = xattr::set(source.join("nested/hello.txt"), "user.demo", b"v1").is_ok();
+        File::options()
+            .write(true)
+            .open(source.join("nested/hello.txt"))
+            .unwrap()
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789),
+            )
+            .unwrap();
         build_and_export(&source, &blob, &tar_path);
 
         let mut entries = BTreeMap::new();
@@ -195,12 +203,12 @@ mod tests {
         assert_eq!(entries["linked.txt"].0, tar::EntryType::Link);
         assert_eq!(entries["linked.txt"].1.as_deref(), Some("alias.txt"));
 
+        let mut expected_pax = Vec::new();
         if xattr_set {
-            assert_eq!(
-                entries["nested/hello.txt"].3,
-                vec![("SCHILY.xattr.user.demo".to_string(), b"v1".to_vec())]
-            );
+            expected_pax.push(("SCHILY.xattr.user.demo".to_string(), b"v1".to_vec()));
         }
+        expected_pax.push(("mtime".to_string(), b"1700000000.123456789".to_vec()));
+        assert_eq!(entries["nested/hello.txt"].3, expected_pax);
     }
 
     #[test]

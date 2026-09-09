@@ -887,11 +887,7 @@ mod tests {
         assert_eq!(node.variants, vec![(1, 1)]);
     }
 
-    /// Set a path's mtime to whole seconds (no nanoseconds), without
-    /// following symlinks. Compact EROFS inodes store no mtime nanoseconds,
-    /// so a layer read back cannot reproduce them; pinning fixture mtimes to
-    /// whole seconds keeps the build and merge paths exactly comparable.
-    fn set_mtime_seconds(path: &Path, secs: i64) {
+    fn set_mtime(path: &Path, secs: i64, nanoseconds: i64) {
         use std::os::unix::ffi::OsStrExt;
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         let times = [
@@ -901,7 +897,7 @@ mod tests {
             },
             libc::timespec {
                 tv_sec: secs,
-                tv_nsec: 0,
+                tv_nsec: nanoseconds,
             },
         ];
         let rc = unsafe {
@@ -958,7 +954,11 @@ mod tests {
         .iter()
         .enumerate()
         {
-            set_mtime_seconds(&source.join(rel), 1_700_000_000 + i as i64);
+            set_mtime(
+                &source.join(rel),
+                1_700_000_000 + i as i64,
+                i as i64 * 123_456_789,
+            );
         }
 
         // Path A: build the tree straight from the host directory.
@@ -1143,6 +1143,49 @@ mod tests {
             }
         }
         assert_eq!(directories, 3);
+
+        let merged_bytes =
+            render_flattened_bootstrap(&mut merged, 0, &device_slots, &[0; 16]).unwrap();
+        let merged_path = dir.path().join("merged.bootstrap");
+        fs::write(&merged_path, merged_bytes).unwrap();
+        let reader = ErofsReader::open_metadata_only(&merged_path).unwrap();
+        for (expected, rendered) in built.iter().zip(&merged) {
+            let inode = reader.inode(rendered.nid).unwrap();
+            assert_eq!(inode.mtime(reader.superblock().epoch()), expected.mtime);
+            assert_eq!(
+                inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                expected.mtime_nsec
+            );
+        }
+        let optimized_path = dir.path().join("optimized.bootstrap");
+        fs::write(
+            &optimized_path,
+            rewrite_bootstrap_with_ondemand_blob(&merged_path, &[0xab; EROFS_BLOB_ID_SIZE], 1)
+                .unwrap(),
+        )
+        .unwrap();
+        let optimized = ErofsReader::open_metadata_only(&optimized_path).unwrap();
+        let optimized_layer = [MergeLayer {
+            layer_id: 0,
+            epoch: optimized.superblock().epoch(),
+            fixed_nsec: optimized.superblock().fixed_nsec(),
+            local_to_global: [(1, 1), (2, 2)].into_iter().collect(),
+            reader: optimized,
+        }];
+        let optimized_root = KWayNode {
+            layers: &optimized_layer,
+            whiteout_spec: WhiteoutSpec::Oci,
+            variants: KWayVariants {
+                variants: vec![(0, optimized_layer[0].reader.superblock().root_nid())],
+                is_dir: true,
+            },
+        };
+        let optimized_inodes = flatten_tree(optimized_root, &mut ()).unwrap();
+        assert_eq!(built.len(), optimized_inodes.len());
+        for (expected, actual) in built.iter().zip(optimized_inodes) {
+            assert_eq!(actual.mtime, expected.mtime);
+            assert_eq!(actual.mtime_nsec, expected.mtime_nsec);
+        }
     }
 
     /// Hardlink groups must survive a multi-layer merge: links within one

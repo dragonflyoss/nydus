@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,6 +25,185 @@ import (
 )
 
 const nydusRunErofsCompatEnv = "NYDUSFS_RUN_EROFS_COMPAT"
+
+func erofsKernelCompatibilitySkipReason(release, filesystems string) (string, error) {
+	var major, minor int
+	if _, err := fmt.Sscanf(release, "%d.%d", &major, &minor); err != nil {
+		return "", fmt.Errorf("parse kernel release %q: %w", release, err)
+	}
+	if major < 5 || (major == 5 && minor < 16) {
+		return fmt.Sprintf("native EROFS compatibility requires Linux 5.16 or newer; running %s", release), nil
+	}
+	for _, filesystem := range strings.Fields(filesystems) {
+		if filesystem == "erofs" {
+			return "", nil
+		}
+	}
+	return "EROFS is unavailable in /proc/filesystems (not built in or module not loaded)", nil
+}
+
+func TestErofsKernelCompatibilityPrerequisites(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		release     string
+		filesystems string
+		skipReason  string
+	}{
+		{"old major", "4.19.320", "\terofs\n", "requires Linux 5.16"},
+		{"old vendor kernel", "5.10.112-005.ali5000", "\terofs\n", "requires Linux 5.16"},
+		{"before minimum", "5.15.0-1092-azure", "\terofs\n", "requires Linux 5.16"},
+		{"minimum", "5.16.0", "nodev\tsysfs\n\terofs\n", ""},
+		{"new major", "6.0-rc1", "\terofs\n", ""},
+		{"new vendor kernel", "6.8.0-1021-azure", "\terofs\n", ""},
+		{"missing erofs", "6.8.0", "nodev\tsysfs\n\text4\n", "EROFS is unavailable"},
+		{"different filesystem", "6.8.0", "\terofs_test\n", "EROFS is unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reason, err := erofsKernelCompatibilitySkipReason(test.release, test.filesystems)
+			require.NoError(t, err)
+			if test.skipReason == "" {
+				require.Empty(t, reason)
+			} else {
+				require.Contains(t, reason, test.skipReason)
+			}
+		})
+	}
+	_, err := erofsKernelCompatibilitySkipReason("invalid", "\terofs\n")
+	require.Error(t, err)
+}
+
+func TestErofsKernelCompatibility(t *testing.T) {
+	kernel, err := exec.Command("uname", "-r").Output()
+	require.NoError(t, err)
+	release := strings.TrimSpace(string(kernel))
+	filesystems, err := os.ReadFile("/proc/filesystems")
+	require.NoError(t, err)
+	reason, err := erofsKernelCompatibilitySkipReason(release, string(filesystems))
+	require.NoError(t, err)
+	if reason != "" {
+		t.Skip(reason)
+	}
+	t.Logf("native EROFS kernel: %s", release)
+
+	require.Equal(t, 0, os.Geteuid(), "native EROFS validation requires root")
+	require.Equal(t, 4096, os.Getpagesize(), "native baseline requires 4 KiB pages")
+	for _, tool := range []string{"losetup", "mount", "fsck.erofs"} {
+		_, err := exec.LookPath(tool)
+		require.NoError(t, err, "required native validation tool: %s", tool)
+	}
+	root := t.TempDir()
+	blobDir := filepath.Join(root, "blobs")
+	decodedDir := filepath.Join(root, "decoded")
+	expected := filepath.Join(root, "expected")
+	for _, dir := range []string{blobDir, decodedDir, expected} {
+		require.NoError(t, os.MkdirAll(dir, 0755))
+	}
+	nydusBin := mustLookupExecutable(t, "nydus")
+	var sources []string
+	var firstDecoded []byte
+	for layerIndex := 0; layerIndex < 2; layerIndex++ {
+		source := filepath.Join(root, fmt.Sprintf("layer%d", layerIndex))
+		require.NoError(t, os.MkdirAll(source, 0755))
+		for index := 0; index < 3; index++ {
+			name := fmt.Sprintf("layer%d-file%d", layerIndex, index)
+			data := bytes.Repeat([]byte{byte(index + 1)}, 100+index*4096)
+			timestamp := time.Unix(1_700_000_000+int64(index), int64(index)*123_456_789)
+			for _, dir := range []string{source, expected} {
+				path := filepath.Join(dir, name)
+				require.NoError(t, os.WriteFile(path, data, 0644))
+				require.NoError(t, os.Chtimes(path, timestamp, timestamp))
+			}
+		}
+		bootstrap := filepath.Join(root, fmt.Sprintf("layer%d.bootstrap", layerIndex))
+		before := listFilesInDir(t, blobDir)
+		out, err := exec.Command(nydusBin, "build", "--blob-dir", blobDir,
+			"--bootstrap", bootstrap, "--chunk-size", "4096", "--block-group-size", "1048576",
+			"--compressor", "none", source).CombinedOutput()
+		require.NoError(t, err, "build: %s", out)
+		var blob string
+		for path := range listFilesInDir(t, blobDir) {
+			if _, existed := before[path]; !existed && sha256FilenamePattern.MatchString(filepath.Base(path)) {
+				require.Empty(t, blob)
+				blob = path
+			}
+		}
+		require.NotEmpty(t, blob)
+		sources = append(sources, blob)
+		header, err := os.ReadFile(bootstrap)
+		require.NoError(t, err)
+		slot := int(binary.LittleEndian.Uint16(header[erofsSuperOffset+erofsDevtSlotOffO:])) * erofsDevSlotSize
+		blocks := binary.LittleEndian.Uint32(header[slot+64:])
+		fullBlob, err := os.ReadFile(blob)
+		require.NoError(t, err)
+		decodedSize := int(blocks) * 4096
+		require.Less(t, decodedSize, 1048576)
+		require.GreaterOrEqual(t, len(fullBlob), decodedSize)
+		decoded := fullBlob[:decodedSize]
+		require.NoError(t, os.WriteFile(filepath.Join(decodedDir, filepath.Base(blob)), decoded, 0644))
+		if layerIndex == 0 {
+			firstDecoded = append([]byte(nil), decoded...)
+		}
+		t.Run(fmt.Sprintf("Build%d", layerIndex), func(t *testing.T) {
+			verifyNativeErofsTree(t, bootstrap, decodedDir, source)
+		})
+	}
+	merged := filepath.Join(root, "merged.bootstrap")
+	mergeNydusBootstrap(t, nydusBin, merged, sources...)
+	t.Run("Merge", func(t *testing.T) { verifyNativeErofsTree(t, merged, decodedDir, expected) })
+	config := filepath.Join(root, "config.yaml")
+	writeLocalStorageConfig(t, config, blobDir, filepath.Join(root, "cache"))
+	trace := filepath.Join(root, "trace.json")
+	require.NoError(t, os.WriteFile(trace, []byte(`{"version":1,"patterns":[{"blob_index":1,"block_group_index":0}]}`), 0644))
+	optimized := filepath.Join(root, "optimized.bootstrap")
+	out, err := exec.Command(nydusBin, "optimize", "--parent-bootstrap", merged,
+		"--bootstrap", optimized, "--blob-dir", blobDir, "--config", config, "--trace-file", trace).CombinedOutput()
+	require.NoError(t, err, "optimize: %s", out)
+	devices, err := erofsDeviceArgs(optimized, decodedDir)
+	require.NoError(t, err)
+	require.Len(t, devices, 3)
+	require.NoError(t, os.WriteFile(strings.TrimPrefix(devices[2], "--device="), firstDecoded, 0644))
+	t.Run("Optimize", func(t *testing.T) { verifyNativeErofsTree(t, optimized, decodedDir, expected) })
+}
+
+func verifyNativeErofsTree(t *testing.T, bootstrap, decodedDir, expected string) {
+	t.Helper()
+	fsckErofsImage(t, bootstrap, decodedDir)
+	deviceArgs, err := erofsDeviceArgs(bootstrap, decodedDir)
+	require.NoError(t, err)
+	mountpoint := filepath.Join(t.TempDir(), "mnt")
+	require.NoError(t, os.Mkdir(mountpoint, 0755))
+	mounted := false
+	attach := func(path string) string {
+		out, err := exec.Command("losetup", "--find", "--show", "--read-only", path).CombinedOutput()
+		require.NoError(t, err, "attach %s: %s", path, out)
+		device := strings.TrimSpace(string(out))
+		t.Cleanup(func() {
+			if mounted {
+				t.Errorf("retaining %s because native mount cleanup failed", device)
+				return
+			}
+			out, err := exec.Command("losetup", "--detach", device).CombinedOutput()
+			assert.NoError(t, err, "detach %s: %s", device, out)
+		})
+		return device
+	}
+	primary := attach(bootstrap)
+	options := []string{"ro"}
+	for _, arg := range deviceArgs {
+		options = append(options, "device="+attach(strings.TrimPrefix(arg, "--device=")))
+	}
+	out, err := exec.Command("mount", "-t", "erofs", "-o", strings.Join(options, ","), primary, mountpoint).CombinedOutput()
+	require.NoError(t, err, "native EROFS mount: %s", out)
+	mounted = true
+	t.Cleanup(func() {
+		if err := unix.Unmount(mountpoint, 0); err != nil {
+			t.Errorf("unmount native EROFS %s: %v", mountpoint, err)
+			return
+		}
+		mounted = false
+	})
+	roDiffTree(t, expected, mountpoint, true)
+}
 
 func TestBlobMount(t *testing.T) {
 	if os.Getuid() != 0 {

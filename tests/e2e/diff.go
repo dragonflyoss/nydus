@@ -49,9 +49,7 @@ func roDiffTree(t *testing.T, src, mnt string, compareMtimeNsec bool) {
 			require.Equal(t, want.Uid, got.Uid, "%s: st_uid", rel)
 			require.Equal(t, want.Gid, got.Gid, "%s: st_gid", rel)
 			require.Equal(t, want.Mtim.Sec, got.Mtim.Sec, "%s: mtime", rel)
-			// A compact EROFS inode has no sub-second mtime field, so only the
-			// inodes the builder was forced to widen carry nanoseconds.
-			if compareMtimeNsec && roExpectsExtendedInode(&want) {
+			if compareMtimeNsec {
 				require.Equal(t, want.Mtim.Nsec, got.Mtim.Nsec, "%s: mtime nsec", rel)
 			}
 			switch want.Mode & unix.S_IFMT {
@@ -200,15 +198,6 @@ func roInodeGroups(t *testing.T, root string) map[string][]string {
 		groups[paths[0]] = paths
 	}
 	return groups
-}
-
-// roExpectsExtendedInode mirrors the builder's rule for widening an inode to
-// the 64-byte extended layout, which is the only one with a nanosecond mtime.
-func roExpectsExtendedInode(st *unix.Stat_t) bool {
-	return st.Size > int64(^uint32(0)) ||
-		st.Uid > uint32(^uint16(0)) ||
-		st.Gid > uint32(^uint16(0)) ||
-		st.Nlink > 1
 }
 
 // roVisibleXattrs lists the xattr names of path, excluding the nydus-internal

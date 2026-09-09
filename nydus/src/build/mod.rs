@@ -144,10 +144,6 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
         &options.excludes,
     )?;
     blob_writer.finish()?;
-    // The root's mtime is dropped to keep builds reproducible, so it would drag
-    // the epoch to zero and cost every compact inode the range above 2106. A
-    // tree with nothing but a root has no timestamp to anchor to, and reading
-    // the clock there would make the image differ on every build.
     let epoch = inodes
         .iter()
         .skip(1)

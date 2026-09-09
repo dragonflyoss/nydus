@@ -74,10 +74,6 @@ impl ErofsInodeCompact {
         read_u32(&self.i_size) as u64
     }
 
-    pub fn mtime_delta(&self) -> u32 {
-        read_u32(&self.i_mtime)
-    }
-
     pub fn i_u(&self) -> u32 {
         read_u32(&self.i_u)
     }
@@ -311,7 +307,7 @@ impl<'a> ErofsInode<'a> {
     /// Absolute mtime in seconds. For compact inodes `epoch` must be provided.
     pub fn mtime(&self, epoch: u64) -> u64 {
         match self {
-            Self::Compact(c) => epoch + c.mtime_delta() as u64,
+            Self::Compact(_) => epoch,
             Self::Extended(e) => e.mtime(),
         }
     }
@@ -508,6 +504,15 @@ pub fn is_nydus_prefetch_blobs_xattr(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_timestamps_use_only_superblock_time() {
+        let inode = ErofsInodeCompact::new(0, 0o100644, 1, 0, u32::MAX, 0, 1, 0, 0);
+        let parsed = ErofsInode::parse(inode.as_bytes()).unwrap();
+        assert_eq!(parsed.mtime(1_700_000_000), 1_700_000_000);
+        assert_eq!(parsed.mtime(u64::MAX), u64::MAX);
+        assert_eq!(parsed.effective_mtime_nsec(123_456_789), 123_456_789);
+    }
 
     #[test]
     fn flat_addresses_do_not_include_compact_link_count_or_reserved_bits() {
