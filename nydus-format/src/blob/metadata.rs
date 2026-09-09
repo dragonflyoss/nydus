@@ -87,6 +87,7 @@ bitflags! {
         const COMPRESSOR_LZ4 = 1 << 1;
         const DIGESTER_BLAKE3 = 1 << 2;
         const REDIRECT = 1 << 3;
+        const INCREMENTAL = 1 << 4;
     }
 }
 
