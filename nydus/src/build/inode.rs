@@ -163,9 +163,14 @@ fn symlink_fits_inline(header_size: usize, target_len: usize) -> bool {
 /// block address' high bits, whereas the extended layout has a separate
 /// `i_nlink`.
 pub(crate) fn symlink_is_inline(inode: &InodeInfo) -> bool {
+    let header_size = if inode.is_extended {
+        EROFS_INODE_EXTENDED_SIZE
+    } else {
+        EROFS_INODE_COMPACT_SIZE
+    };
     match &inode.data {
         InodeData::Symlink { target, .. } => symlink_fits_inline(
-            EROFS_INODE_COMPACT_SIZE + erofs_xattr_ibody_size(&inode.xattrs),
+            header_size + erofs_xattr_ibody_size(&inode.xattrs),
             target.len(),
         ),
         _ => false,
