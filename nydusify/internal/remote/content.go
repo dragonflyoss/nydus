@@ -10,6 +10,7 @@ package remote
 
 import (
 	"context"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -19,6 +20,7 @@ import (
 	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
@@ -131,5 +133,32 @@ func push(ctx context.Context, store content.Store, resolver remotes.Resolver, d
 	if err != nil {
 		return errors.Wrapf(err, "create pusher for %q", pushRef)
 	}
-	return remotes.PushContent(ctx, pusher, desc, store, nil, platformMC, nil)
+	return remotes.PushContent(ctx, pusher, desc, store, nil, platformMC, retryPushHandler)
+}
+
+// pushRetries bounds the attempts per blob or manifest. Registries behind a
+// load balancer without session affinity route the upload's final PUT to a
+// backend that never saw the session and answer 404 BLOB_UPLOAD_INVALID; a
+// fresh attempt starts a new session and usually lands.
+const pushRetries = 5
+
+// retryPushHandler re-runs a push handler on transient failures. Content comes
+// from the local store, so repeating the upload is cheap and safe.
+func retryPushHandler(h images.Handler) images.Handler {
+	return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		var err error
+		for attempt := 1; ; attempt++ {
+			var children []ocispec.Descriptor
+			children, err = h.Handle(ctx, desc)
+			if err == nil || errdefs.IsAlreadyExists(err) || ctx.Err() != nil || attempt >= pushRetries {
+				return children, err
+			}
+			logrus.Warnf("push %s attempt %d/%d failed, retrying: %v", desc.Digest, attempt, pushRetries, err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
+	})
 }
