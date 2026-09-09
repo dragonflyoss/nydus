@@ -33,12 +33,15 @@ pub struct ErofsSuperblock {
     pub packed_nid: [u8; 8],
     pub xattr_filter_reserved: u8,
     pub _reserved2: [u8; 3],
-    pub build_time: [u8; 8],
+    pub build_time: [u8; 4],
     pub rootnid_8b: [u8; 8],
-    pub _reserved3: [u8; 4],
+    pub _reserved3: [u8; 8],
 }
 
 const _: () = assert!(mem::size_of::<ErofsSuperblock>() == EROFS_SB_BASE_SIZE);
+const _: () = assert!(mem::offset_of!(ErofsSuperblock, build_time) == 0x6c);
+const _: () = assert!(mem::offset_of!(ErofsSuperblock, rootnid_8b) == 0x70);
+const _: () = assert!(mem::offset_of!(ErofsSuperblock, _reserved3) == 0x78);
 
 impl ErofsSuperblock {
     #[allow(clippy::too_many_arguments)]
@@ -182,6 +185,23 @@ pub fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn superblock_tail_uses_standard_field_offsets() {
+        let mut sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 1, 1, 0, 0, &[0; 16]);
+        assert_eq!(&sb.as_bytes()[0x68..0x80], &[0; 24]);
+
+        sb.build_time = 0x1234_5678u32.to_le_bytes();
+        sb.rootnid_8b = 0x90ab_cdef_1234_5678u64.to_le_bytes();
+        sb._reserved3 = [0xa5; 8];
+
+        assert_eq!(&sb.as_bytes()[0x6c..0x70], &0x1234_5678u32.to_le_bytes());
+        assert_eq!(
+            &sb.as_bytes()[0x70..0x78],
+            &0x90ab_cdef_1234_5678u64.to_le_bytes()
+        );
+        assert_eq!(&sb.as_bytes()[0x78..0x80], &[0xa5; 8]);
+    }
 
     fn write_bootstrap(
         feature_compat: u32,
