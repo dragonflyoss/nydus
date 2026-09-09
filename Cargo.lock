@@ -2960,15 +2960,20 @@ dependencies = [
 name = "nydus-core"
 version = "3.0.0-alpha.1"
 dependencies = [
+ "blake3",
+ "crc32c",
  "libc",
+ "lz4_flex",
  "memmap2",
  "nydus-backend",
  "nydus-config",
  "nydus-error",
  "nydus-format",
  "nydus-storage",
+ "sha2 0.10.9",
  "tempfile",
  "tracing",
+ "xattr",
  "zstd",
 ]
 

@@ -265,7 +265,7 @@ pub fn build_tree<W: Write>(
 }
 
 /// Inode attributes gathered once per node by a [`TreeNode`] implementation.
-pub(crate) struct NodeAttrs {
+pub struct NodeAttrs {
     pub mode: u16,
     pub uid: u32,
     pub gid: u32,
@@ -282,7 +282,7 @@ pub(crate) struct NodeAttrs {
 }
 
 /// A directory's children as (name, node) pairs, sorted by name.
-pub(crate) type NamedChildren<N> = Vec<(Vec<u8>, N)>;
+pub type NamedChildren<N> = Vec<(Vec<u8>, N)>;
 
 /// A node of a source tree that [`flatten_tree`] can turn into [`InodeInfo`]s.
 ///
@@ -291,7 +291,7 @@ pub(crate) type NamedChildren<N> = Vec<(Vec<u8>, N)>;
 /// share a single flattening pass and cannot drift apart. `C` is the traversal
 /// state threaded through the walk (e.g. the blob writer receiving file
 /// contents).
-pub(crate) trait TreeNode<C>: Sized {
+pub trait TreeNode<C>: Sized {
     /// Identifies a hardlink group across the whole tree, e.g. host
     /// `(dev, ino)`.
     type LinkKey: Copy + Eq + std::hash::Hash;
@@ -313,6 +313,13 @@ pub(crate) trait TreeNode<C>: Sized {
     /// Type-specific data for a non-directory node; called exactly once per
     /// inode (regular-file contents are chunked into the blob here).
     fn leaf_data(&mut self, ctx: &mut C) -> Result<InodeData>;
+
+    /// Observe the final inode index assigned to this node. Called for both
+    /// newly flattened nodes and later hardlink references that reuse an
+    /// existing inode index.
+    fn mapped_index(&mut self, _ctx: &mut C, _index: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Flatten a source tree into one [`InodeInfo`] per filesystem object, as a
@@ -326,7 +333,7 @@ pub(crate) trait TreeNode<C>: Sized {
 /// than taken from source metadata, keeping the output independent of how the
 /// source filesystem reports directories. Layout fields (`nid`, `meta_offset`,
 /// etc.) are left 0 for a later pass.
-pub(crate) fn flatten_tree<C, N: TreeNode<C>>(root: N, ctx: &mut C) -> Result<Vec<InodeInfo>> {
+pub fn flatten_tree<C, N: TreeNode<C>>(root: N, ctx: &mut C) -> Result<Vec<InodeInfo>> {
     let mut inodes = Vec::new();
     let mut ino_counter = 0u32;
     let mut hardlink_map = HashMap::new();
@@ -359,6 +366,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
     let link_key = node.link_key()?;
     if let Some(key) = link_key {
         if let Some(existing_index) = hardlink_map.get(&key) {
+            node.mapped_index(ctx, *existing_index)?;
             return Ok(*existing_index);
         }
     }
@@ -471,6 +479,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
     if let Some(key) = link_key {
         hardlink_map.insert(key, inode_index);
     }
+    node.mapped_index(ctx, inode_index)?;
 
     Ok(inode_index)
 }
@@ -1022,7 +1031,7 @@ mod tests {
     #[test]
     fn no_xattr_is_tracked_during_flattening_and_preserved_by_rendering() {
         use crate::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
-        use nydus_core::ErofsReader;
+        use crate::ErofsReader;
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("bootstrap");

@@ -86,7 +86,10 @@ bitflags! {
         const COMPRESSOR_ZSTD = 1 << 0;
         const COMPRESSOR_LZ4 = 1 << 1;
         const DIGESTER_BLAKE3 = 1 << 2;
+        /// Blob data redirects to block groups from source blobs instead of storing payload.
         const REDIRECT = 1 << 3;
+        /// Blob stores incremental upper data and does not embed a standalone bootstrap.
+        const INCREMENTAL = 1 << 4;
     }
 }
 
@@ -245,6 +248,11 @@ impl BlobMetadataHeader {
         BlobMetadataDigester::try_from(flags)?;
         FeatureFlags::from_bits(self.flags)
             .validate_incompat(NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
+        if self.is_redirect() && self.is_incremental() {
+            return Err(Error::InvalidImage(
+                "blob meta cannot be both redirect and incremental".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -281,6 +289,11 @@ impl BlobMetadataHeader {
     /// Whether the blob is an ondemand redirect blob, per the flags.
     pub fn is_redirect(&self) -> bool {
         self.flags().contains(BlobMetadataFlags::REDIRECT)
+    }
+
+    /// Whether the blob stores incremental upper data without an embedded bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.flags().contains(BlobMetadataFlags::INCREMENTAL)
     }
 
     /// Number of entries in the chunk table.
@@ -802,10 +815,52 @@ impl BlobMetadata {
         block_groups: Vec<BlobMetadataBlockGroup>,
         is_redirect: bool,
     ) -> Result<Self> {
+        Self::new_with_extra_flags(
+            compressor,
+            digester,
+            chunk_block_count,
+            chunks,
+            block_groups,
+            is_redirect,
+            BlobMetadataFlags::empty(),
+        )
+    }
+
+    /// Creates metadata for an incremental upper blob. The blob carries regular
+    /// payload block groups, but unlike a full blob it does not embed a standalone
+    /// bootstrap.
+    pub fn new_incremental(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        chunk_block_count: u32,
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+    ) -> Result<Self> {
+        Self::new_with_extra_flags(
+            compressor,
+            digester,
+            chunk_block_count,
+            chunks,
+            block_groups,
+            false,
+            BlobMetadataFlags::INCREMENTAL,
+        )
+    }
+
+    fn new_with_extra_flags(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        chunk_block_count: u32,
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+        is_redirect: bool,
+        extra_flags: BlobMetadataFlags,
+    ) -> Result<Self> {
         let mut flags = BlobMetadataFlags::empty();
         flags.set(compressor.flag(), true);
         flags.set(digester.flag(), true);
         flags.set(BlobMetadataFlags::REDIRECT, is_redirect);
+        flags.set(extra_flags, true);
 
         let chunks_offset = NYDUS_BLOB_METADATA_HEADER_SIZE as u64;
         let header = BlobMetadataHeader {
@@ -1177,6 +1232,11 @@ impl BlobMetadata {
         self.header.is_redirect()
     }
 
+    /// Whether the blob stores incremental upper data without an embedded bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.header.is_incremental()
+    }
+
     /// Total uncompressed size of the blob in 4KiB blocks: block groups are
     /// validated dense from block 0, so the last group's end offset is the
     /// block count.
@@ -1480,7 +1540,7 @@ mod tests {
     fn mutated_bytes_follow_the_read_rules() {
         let base_flags = BlobMetadataDigester::Blake3.flag().bits();
         let used_size = minimal_blob_metadata().header().used_size() as usize;
-        let cases: [(&str, usize, [u8; 4], Option<&str>); 7] = [
+        let cases: [(&str, usize, [u8; 4], Option<&str>); 8] = [
             (
                 "legacy nydus magic rejects",
                 0,
@@ -1510,6 +1570,15 @@ mod tests {
                 12,
                 (base_flags | (1u32 << 15)).to_le_bytes(),
                 Some("incompat"),
+            ),
+            (
+                "redirect and incremental flags are mutually exclusive",
+                12,
+                (base_flags
+                    | BlobMetadataFlags::REDIRECT.bits()
+                    | BlobMetadataFlags::INCREMENTAL.bits())
+                .to_le_bytes(),
+                Some("both redirect and incremental"),
             ),
             (
                 "nonzero reserved tail is readable",
@@ -1859,6 +1928,28 @@ mod tests {
             .unwrap_err();
             assert!(err.to_string().contains("block group 0"), "{case}: {err}");
         }
+    }
+
+    #[test]
+    fn an_incremental_blob_round_trips_with_the_incremental_flag() {
+        let payload = vec![0x31; EROFS_BLOCK_SIZE as usize];
+        let blob_metadata = BlobMetadata::new_incremental(
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+            vec![chunk(&payload, 0, 1)],
+            vec![block_group(0, 1, 0, EROFS_BLOCK_SIZE, &payload)],
+        )
+        .unwrap();
+
+        assert!(blob_metadata.is_incremental());
+        assert!(!blob_metadata.is_redirect());
+
+        let mut raw = Vec::new();
+        blob_metadata.write_to(&mut raw).unwrap();
+        let loaded = BlobMetadata::from_bytes(&raw, true).unwrap();
+        assert!(loaded.is_incremental());
+        assert!(!loaded.is_redirect());
     }
 
     #[test]

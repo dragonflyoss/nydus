@@ -122,7 +122,7 @@ func fetchHandler(ingester content.Ingester, fetcher remotes.Fetcher) images.Han
 // ref.
 //
 // Adapted from containerd's client push flow.
-func push(ctx context.Context, store content.Store, resolver remotes.Resolver, desc ocispec.Descriptor, ref string, platformMC platforms.MatchComparer) error {
+func push(ctx context.Context, store content.Store, resolver remotes.Resolver, desc ocispec.Descriptor, ref string, platformMC platforms.MatchComparer, wrapper func(images.Handler) images.Handler) error {
 	pushRef := ref
 	if pushRef == "" {
 		return errors.New("empty push reference")
@@ -131,5 +131,5 @@ func push(ctx context.Context, store content.Store, resolver remotes.Resolver, d
 	if err != nil {
 		return errors.Wrapf(err, "create pusher for %q", pushRef)
 	}
-	return remotes.PushContent(ctx, pusher, desc, store, nil, platformMC, nil)
+	return remotes.PushContent(ctx, pusher, desc, store, nil, platformMC, wrapper)
 }

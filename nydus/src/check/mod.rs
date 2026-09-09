@@ -141,6 +141,8 @@ pub struct BlobMetadataSummary {
     pub block_group_count: usize,
     pub chunk_size: u32,
     pub compressor: BlobMetadataCompressor,
+    pub is_redirect: bool,
+    pub is_incremental: bool,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
 }
@@ -162,6 +164,36 @@ impl SlotSha256Kind {
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// Reject blob artifacts that cannot be opened as standalone EROFS images.
+///
+/// Full blobs carry an embedded bootstrap and can be used with `--blob`.
+/// Redirect/ondemand and incremental blobs only carry data, blob metadata and
+/// a footer; they must be used through a bootstrap that provides the complete
+/// filesystem view.
+pub fn reject_non_standalone_blob(path: &Path) -> Result<()> {
+    let Some(inspection) = inspect_blob(path)? else {
+        return Ok(());
+    };
+    let Some(blob_metadata) = inspection.blob_metadata else {
+        return Ok(());
+    };
+
+    if blob_metadata.is_incremental {
+        return Err(Error::InvalidParameter(format!(
+            "incremental blob {} is not mountable as a standalone image; use --bootstrap with parent blobs",
+            path.display()
+        )));
+    }
+    if blob_metadata.is_redirect {
+        return Err(Error::InvalidParameter(format!(
+            "redirect blob {} is not mountable as a standalone image; use the rewritten bootstrap with source blobs",
+            path.display()
+        )));
+    }
+
+    Ok(())
 }
 
 /// Inspect the image at `path`, resolving and verifying referenced blobs from
@@ -467,6 +499,8 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
         block_group_count: blob_metadata.block_group_count(),
         chunk_size: blob_metadata.chunk_size(),
         compressor: blob_metadata.compressor(),
+        is_redirect: blob_metadata.is_redirect(),
+        is_incremental: blob_metadata.is_incremental(),
         total_uncompressed_size: blob_metadata.uncompressed_size(),
         total_compressed_size: blob_metadata.compressed_end(),
     })
@@ -545,17 +579,96 @@ mod tests {
         assert!(!resolved.contains_key(&2));
     }
 
+    #[test]
+    fn resolve_blobs_reports_incremental_blob_metadata_flag() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("incremental-blob");
+
+        let (full_blob_digest, _) = write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
+
+        let blob_info = RawBlobInfo {
+            blob_index: 1,
+            blob_id: full_blob_digest,
+            blocks: 1,
+            mapped_blkaddr: 0,
+        };
+        let resolved = resolve_blobs(
+            ImageKind::Bootstrap,
+            Path::new("bootstrap.boot"),
+            Some(dir.path()),
+            &[blob_info],
+        )
+        .unwrap();
+        let blob_metadata = resolved.get(&1).unwrap().blob_metadata.as_ref().unwrap();
+
+        assert!(blob_metadata.is_incremental);
+        assert!(!blob_metadata.is_redirect);
+    }
+
+    #[test]
+    fn reject_non_standalone_blob_rejects_incremental_blob() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("incremental-blob");
+        write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
+
+        let err = reject_non_standalone_blob(&blob_path).unwrap_err();
+
+        assert!(err.to_string().contains("incremental blob"));
+    }
+
+    #[test]
+    fn reject_non_standalone_blob_rejects_redirect_blob() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("redirect-blob");
+        write_minimal_blob_with_kind(&blob_path, BlobKind::Redirect);
+
+        let err = reject_non_standalone_blob(&blob_path).unwrap_err();
+
+        assert!(err.to_string().contains("redirect blob"));
+    }
+
     fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
+        write_minimal_blob_with_kind(path, BlobKind::Full)
+    }
+
+    enum BlobKind {
+        Full,
+        Incremental,
+        Redirect,
+    }
+
+    fn write_minimal_blob_with_kind(
+        path: &Path,
+
+        blob_kind: BlobKind,
+    ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let data_digest = sha256_bytes(&data);
-        let blob_metadata = BlobMetadata::new(
-            BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
-            Vec::new(),
-            Vec::new(),
-            false,
-        )
+        let blob_metadata = match blob_kind {
+            BlobKind::Full => BlobMetadata::new(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+                Vec::new(),
+                Vec::new(),
+                false,
+            ),
+            BlobKind::Incremental => BlobMetadata::new_incremental(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+                Vec::new(),
+                Vec::new(),
+            ),
+            BlobKind::Redirect => BlobMetadata::new(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+                Vec::new(),
+                Vec::new(),
+                true,
+            ),
+        }
         .unwrap();
         let mut blob_metadata_bytes = Vec::new();
         blob_metadata.write_to(&mut blob_metadata_bytes).unwrap();

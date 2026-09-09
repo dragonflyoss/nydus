@@ -16,6 +16,7 @@ import (
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	"github.com/dustin/go-humanize"
+	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -53,10 +54,9 @@ func convertCommand() *cli.Command {
 		Usage: "Convert an image between OCI and nydus format and push the result",
 		Flags: []cli.Flag{
 			&cli.StringSliceFlag{
-				Name:     "source",
-				Aliases:  []string{"s"},
-				Usage:    "source image reference (e.g. registry/repo:tag) or local directory path; can be repeated to stack multiple sources (lower to upper) into one nydus image with a single merged bootstrap",
-				Required: true,
+				Name:    "source",
+				Aliases: []string{"s"},
+				Usage:   "source image reference (e.g. registry/repo:tag) or local directory path; can be repeated to stack multiple sources (lower to upper) into one nydus image with a single merged bootstrap",
 			},
 			&cli.StringFlag{
 				Name:     "target",
@@ -72,6 +72,22 @@ func convertCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:  "work-dir",
 				Usage: "scratch directory for conversion (defaults to a temp dir)",
+			},
+			&cli.StringFlag{
+				Name:  "bootstrap",
+				Usage: "existing nydus bootstrap path to package as image.boot instead of building from --source",
+			},
+			&cli.StringSliceFlag{
+				Name:  "blob",
+				Usage: "existing nydus full blob file to include; can be repeated and may be combined with --blob-dir",
+			},
+			&cli.StringFlag{
+				Name:  "blob-dir",
+				Usage: "directory containing digest-named nydus full blob files referenced by --bootstrap",
+			},
+			&cli.StringSliceFlag{
+				Name:  "parent-image",
+				Usage: "existing nydus image whose blob descriptors and blob.meta files are reused without downloading data blobs",
 			},
 			&cli.UintFlag{
 				Name:  "chunk-size",
@@ -158,9 +174,22 @@ func runConvert(c *cli.Context) error {
 	defer stop()
 
 	sources := c.StringSlice("source")
-	source := sources[0]
 	target := c.String("target")
 	appendFiles := c.StringSlice("append-in-bootstrap")
+	bootstrapPath := c.String("bootstrap")
+	blobPaths := c.StringSlice("blob")
+	blobDir := c.String("blob-dir")
+	parentImages := c.StringSlice("parent-image")
+	artifactMode, err := pipeline.ValidateConvertInputs(pipeline.ConvertInput{
+		Sources:       sources,
+		BootstrapPath: bootstrapPath,
+		BlobPaths:     blobPaths,
+		BlobDir:       blobDir,
+		ParentImages:  parentImages,
+	})
+	if err != nil {
+		return err
+	}
 	multiSource := len(sources) > 1
 
 	// The compressor picks the conversion direction, so reject unknown values
@@ -175,7 +204,7 @@ func runConvert(c *cli.Context) error {
 	// reference). When the source is a directory, we use ConvertLocalDir
 	// which builds a single-layer nydus image directly from the directory
 	// tree, excluding any --append-in-bootstrap files that reside inside it.
-	isLocalDir := isDir(source)
+	isLocalDir := len(sources) == 1 && isDir(sources[0])
 
 	platform := platforms.DefaultSpec()
 	platformMC := platforms.All
@@ -186,11 +215,11 @@ func runConvert(c *cli.Context) error {
 		}
 		platform = parsed
 		platformMC = platforms.Only(parsed)
-	} else if multiSource {
-		// Multiple sources are merged into one single-platform manifest, so
-		// image sources must be resolved to exactly one platform. Default to
-		// the host platform when --platform is not given.
-		logrus.Infof("multiple sources: defaulting to platform %s", platforms.Format(platform))
+	} else if multiSource || (artifactMode && len(parentImages) > 0) {
+		// Multiple inputs are merged into one single-platform manifest, so image
+		// inputs must be resolved to exactly one platform. Default to the host
+		// platform when --platform is not given.
+		logrus.Infof("merged image: defaulting to platform %s", platforms.Format(platform))
 		platformMC = platforms.Only(platform)
 	}
 
@@ -221,12 +250,17 @@ func runConvert(c *cli.Context) error {
 	}
 
 	var newDesc *ocispec.Descriptor
+	var externalBlobs []pipeline.ExternalBlob
 
 	if toOCI {
+		if artifactMode {
+			return errors.New("converting nydus artifacts back to OCI is not supported")
+		}
 		if multiSource || isLocalDir {
 			return errors.New("converting back to OCI expects exactly one nydus image as --source")
 		}
 
+		source := sources[0]
 		logrus.Infof("pulling nydus image %s", source)
 		srcDesc, err := provider.Pull(ctx, source, remote.PullAll, remote.Source)
 		if err != nil {
@@ -252,7 +286,43 @@ func runConvert(c *cli.Context) error {
 		return nil
 	}
 
-	if multiSource {
+	if artifactMode {
+		parents := make([]pipeline.ParentImageMetadata, 0, len(parentImages))
+		for _, parent := range parentImages {
+			sameRepo, err := remote.SameRepository(parent, target)
+			if err != nil {
+				return err
+			}
+			if !sameRepo {
+				return errors.Errorf("--parent-image %q must be in the same repository as target %q", parent, target)
+			}
+
+			logrus.Infof("pulling parent nydus metadata %s", parent)
+			desc, err := provider.Pull(ctx, parent, remote.PullOption{PullOCILayers: false, PullNydusBlobs: false}, remote.Target)
+			if err != nil {
+				return errors.Wrapf(err, "pull parent metadata %q", parent)
+			}
+			metadata, err := pipeline.LoadParentNydusArtifact(ctx, provider.ContentStore(), desc, platformMC, parent)
+			if err != nil {
+				return errors.Wrapf(err, "load parent metadata %q", parent)
+			}
+			parents = append(parents, metadata)
+		}
+
+		logrus.Infof("packaging nydus artifacts from bootstrap %s", bootstrapPath)
+		newDesc, externalBlobs, err = pipeline.ConvertNydusArtifacts(ctx, provider.ContentStore(), pipeline.ArtifactOption{
+			BuilderPath:       c.String("builder"),
+			BootstrapPath:     bootstrapPath,
+			BlobPaths:         blobPaths,
+			BlobDir:           blobDir,
+			ParentImages:      parents,
+			AppendInBootstrap: appendFiles,
+			Platform:          platform,
+		})
+		if err != nil {
+			return errors.Wrap(err, "package nydus artifacts")
+		}
+	} else if multiSource {
 		srcs := make([]pipeline.Source, 0, len(sources))
 		for _, s := range sources {
 			if isDir(s) {
@@ -283,6 +353,7 @@ func runConvert(c *cli.Context) error {
 			return errors.Wrap(err, "convert multiple sources")
 		}
 	} else if isLocalDir {
+		source := sources[0]
 		logrus.Infof("converting local directory %s to nydus format", source)
 		newDesc, err = pipeline.ConvertLocalDir(ctx, provider.ContentStore(), pipeline.LocalDirOption{
 			BuilderPath:       c.String("builder"),
@@ -298,6 +369,7 @@ func runConvert(c *cli.Context) error {
 			return errors.Wrap(err, "convert local directory")
 		}
 	} else {
+		source := sources[0]
 		logrus.Infof("pulling source image %s", source)
 		srcDesc, err := provider.Pull(ctx, source, remote.PullAll, remote.Source)
 		if err != nil {
@@ -348,11 +420,25 @@ func runConvert(c *cli.Context) error {
 	}
 
 	logrus.Infof("pushing nydus image %s", target)
-	if err := provider.Push(ctx, *newDesc, target); err != nil {
-		return errors.Wrapf(err, "push %q", target)
+	if len(externalBlobs) == 0 {
+		if err := provider.Push(ctx, *newDesc, target); err != nil {
+			return errors.Wrapf(err, "push %q", target)
+		}
+	} else {
+		skip := map[digest.Digest]struct{}{}
+		for _, blob := range externalBlobs {
+			skip[blob.Descriptor.Digest] = struct{}{}
+		}
+		if err := provider.PushSkipping(ctx, *newDesc, target, skip); err != nil {
+			return errors.Wrapf(err, "push %q", target)
+		}
 	}
 
-	logrus.Infof("done: %s -> %s (%s)", strings.Join(sources, ", "), target, newDesc.Digest)
+	sourceLabel := strings.Join(sources, ", ")
+	if artifactMode {
+		sourceLabel = bootstrapPath
+	}
+	logrus.Infof("done: %s -> %s (%s)", sourceLabel, target, newDesc.Digest)
 	return nil
 }
 

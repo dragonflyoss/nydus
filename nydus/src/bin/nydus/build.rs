@@ -1,10 +1,12 @@
 use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
-use nydus::build::{build_image, BuildImageOptions, Image};
+use nydus::build::{
+    build_image, finalize_digest_named_blob, save_blob_metadata_sidecar, BuildImageOptions, Image,
+};
 use nydus::error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobFooter, BlobMetadata, BlobMetadataCompressor, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
-    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_format::utils::hex_string;
@@ -213,7 +215,7 @@ impl BuildCommand {
             .with_context(|| format!("failed to build image: {}", blob_output.path().display()))?;
 
         let full_blob_path = blob_output.finalize(&image.full_blob_digest)?;
-        let blob_metadata_path = Self::save_blob_metadata(&image, &full_blob_path)?;
+        let blob_metadata_path = save_blob_metadata_sidecar(&image.blob_metadata, &full_blob_path)?;
         self.save_bootstrap(&image)?;
 
         print_blob_build_summary(BlobBuildSummary {
@@ -227,17 +229,6 @@ impl BuildCommand {
             bootstrap_path: self.bootstrap.as_deref(),
         });
         Ok(())
-    }
-
-    /// Persists the blob metadata sidecar next to the full blob
-    /// (`<full_blob>.blob.meta`) and returns its path.
-    fn save_blob_metadata(image: &Image, full_blob_path: &Path) -> Result<PathBuf> {
-        let mut path = full_blob_path.to_path_buf().into_os_string();
-        path.push(NYDUS_BLOB_METADATA_SUFFIX);
-
-        let blob_metadata_path: PathBuf = path.into();
-        image.blob_metadata.save(&blob_metadata_path)?;
-        Ok(blob_metadata_path)
     }
 
     /// Persists the standalone bootstrap rendered during the build when
@@ -321,29 +312,7 @@ impl BlobOutput {
     fn finalize(self, full_blob_digest: &[u8; EROFS_BLOB_ID_SIZE]) -> Result<PathBuf> {
         match self {
             Self::File(path) => Ok(path),
-            Self::Store { dir, temp } => {
-                let full_blob_path = dir.join(hex_string(full_blob_digest));
-                if full_blob_path.exists() {
-                    fs::remove_file(&temp).with_context(|| {
-                        format!(
-                            "failed to remove temporary blob after dedup hit: {}",
-                            temp.display()
-                        )
-                    })?;
-
-                    return Ok(full_blob_path);
-                }
-
-                fs::rename(&temp, &full_blob_path).with_context(|| {
-                    format!(
-                        "failed to rename blob {} to {}",
-                        temp.display(),
-                        full_blob_path.display()
-                    )
-                })?;
-
-                Ok(full_blob_path)
-            }
+            Self::Store { dir, temp } => finalize_digest_named_blob(&temp, &dir, full_blob_digest),
         }
     }
 }

@@ -1,5 +1,5 @@
 //! Tests for the [`nydus_core::NydusCore`] public API: fixture images are
-//! built through the public `build` module and served back through
+//! built through the nydus-core build helpers and served back through
 //! `NydusCore`.
 
 use crate::fixture;
@@ -9,12 +9,12 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use crc32c::crc32c_append;
-use nydus::build::blob_chunk::BlobWriter;
-use nydus::build::bootstrap::{
+use nydus_config::Config;
+use nydus_core::build::blob_chunk::BlobWriter;
+use nydus_core::build::bootstrap::{
     render_bootstrap, render_flattened_bootstrap, FLATTENED_BLOB_ALIGNMENT,
 };
-use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
-use nydus_config::Config;
+use nydus_core::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
 use nydus_core::ErofsReader;
 use nydus_core::{BlobId, FileType, NydusCore};
 use nydus_format::blob::BlobMetadataCompressor;

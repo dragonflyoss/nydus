@@ -20,10 +20,10 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::build::assemble_ondemand_artifact;
-use crate::build::blob_chunk::compression_is_worthwhile;
 use crate::build::merge::rewrite_bootstrap_with_ondemand_blob;
 use crate::parse_unix_address;
 use nydus_backend::BlobBackend;
+use nydus_core::build::blob_chunk::compression_is_worthwhile;
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};

@@ -747,9 +747,9 @@ impl Filesystem for ErofsFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::blob_chunk::BlobWriter;
-    use crate::build::bootstrap::render_bootstrap;
-    use crate::build::inode::build_tree;
+    use nydus_core::build::blob_chunk::BlobWriter;
+    use nydus_core::build::bootstrap::render_bootstrap;
+    use nydus_core::build::inode::build_tree;
     use nydus_format::erofs::{XattrEntry, EROFS_BLOCK_SIZE, EROFS_XATTR_INDEX_USER};
     use std::collections::HashSet;
     use std::fs;

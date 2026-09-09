@@ -1,5 +1,7 @@
 use clap::Parser;
-use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
+use nydus::check::{
+    check_image, reject_non_standalone_blob, BlobSummary, CheckReport, ImageKind, ImageStats,
+};
 use nydus::error::{Error, Result};
 use nydus_config::{BackendConfig, Config};
 use nydus_format::erofs::{
@@ -8,6 +10,7 @@ use nydus_format::erofs::{
     EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
 };
 use nydus_format::utils::hex_string;
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tabled::{
@@ -45,6 +48,14 @@ pub struct CheckCommand {
         help = "Specify the file path to a YAML storage config providing the backend directory. When set, --blob-dir can be omitted"
     )]
     config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_parser = ["table", "json"],
+        default_value = "table",
+        help = "Output format: table or json"
+    )]
+    output: String,
 }
 
 /// Implement the execute for CheckCommand.
@@ -108,13 +119,21 @@ impl CheckCommand {
     /// Runs the inspection: checks the image, prints the report, and fails
     /// on inline data crossing a metadata block.
     fn run(&self, kind: ImageKind, path: &Path, blob_dir: Option<&Path>) -> Result<()> {
+        if kind == ImageKind::Blob {
+            reject_non_standalone_blob(path)?;
+        }
+
         let report = check_image(kind, path, blob_dir)?;
 
-        print_header(kind, path, &report);
-        print_superblock(&report.superblock);
-        print_summary(&report.stats, &report.blobs);
-        print_blobs(&report.blobs);
-        print_inline_across_blocks(&report.stats);
+        if self.output == "json" {
+            print_json_report(kind, path, &report)?;
+        } else {
+            print_header(kind, path, &report);
+            print_superblock(&report.superblock);
+            print_summary(&report.stats, &report.blobs);
+            print_blobs(&report.blobs);
+            print_inline_across_blocks(&report.stats);
+        }
 
         if !report.stats.inline_overflows.is_empty() {
             return Err(Error::InvalidImage(format!(
@@ -125,6 +144,63 @@ impl CheckCommand {
 
         Ok(())
     }
+}
+
+#[derive(Serialize)]
+struct JsonCheckReport {
+    kind: &'static str,
+    path: String,
+    image_file_bytes: u64,
+    primary_image_bytes: u64,
+    blobs: Vec<JsonBlobSummary>,
+}
+
+#[derive(Serialize)]
+struct JsonBlobSummary {
+    index: u16,
+    slot_sha256: String,
+    slot_sha256_kind: &'static str,
+    declared_blocks: u64,
+    mapped_blkaddr: u64,
+    mapped_offset: u64,
+    declared_data_size: u64,
+    blob_type: String,
+    verified: bool,
+    chunk_refs: u64,
+    logical_bytes: u64,
+}
+
+fn print_json_report(kind: ImageKind, path: &Path, report: &CheckReport) -> Result<()> {
+    let blobs = report
+        .blobs
+        .iter()
+        .map(|(index, blob)| JsonBlobSummary {
+            index: *index,
+            slot_sha256: hex_string(&blob.slot_sha256),
+            slot_sha256_kind: blob.slot_sha256_kind.as_str(),
+            declared_blocks: blob.declared_blocks,
+            mapped_blkaddr: blob.mapped_blkaddr,
+            mapped_offset: blob.mapped_offset,
+            declared_data_size: blob.declared_data_size,
+            blob_type: blob_type(blob),
+            verified: blob.verified,
+            chunk_refs: blob.chunk_refs,
+            logical_bytes: blob.logical_bytes,
+        })
+        .collect();
+    let json = JsonCheckReport {
+        kind: match kind {
+            ImageKind::Blob => "blob",
+            ImageKind::Bootstrap => "bootstrap",
+        },
+        path: path.display().to_string(),
+        image_file_bytes: report.image_file_bytes,
+        primary_image_bytes: report.primary_image_bytes,
+        blobs,
+    };
+    serde_json::to_writer_pretty(std::io::stdout(), &json)?;
+    println!();
+    Ok(())
 }
 
 fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) {
@@ -432,6 +508,8 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         declared_uncompressed_size: String,
         #[tabled(rename = "SLOT DIGEST KIND")]
         slot_digest_kind: String,
+        #[tabled(rename = "BLOB TYPE")]
+        blob_type: String,
         #[tabled(rename = "DATA BLOB DIGEST")]
         data_blob_digest: String,
         #[tabled(rename = "FULL BLOB DIGEST")]
@@ -466,6 +544,7 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             declared_blocks: blob.declared_blocks.to_string(),
             declared_uncompressed_size: blob.declared_data_size.to_string(),
             slot_digest_kind: blob.slot_sha256_kind.as_str().to_string(),
+            blob_type: blob_type(blob),
             data_blob_digest: data_blob_digest(blob),
             full_blob_digest: optional_digest(blob.blob_sha256),
             chunk_size: blob_metadata_field(blob, |meta| meta.chunk_size),
@@ -497,6 +576,15 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         table.with(Style::blank());
         println!("{table}");
         println!();
+    }
+}
+
+fn blob_type(blob: &BlobSummary) -> String {
+    match &blob.blob_metadata {
+        Some(meta) if meta.is_redirect => "redirect".to_string(),
+        Some(meta) if meta.is_incremental => "incremental".to_string(),
+        Some(_) => "full".to_string(),
+        None => "<unresolved>".to_string(),
     }
 }
 
