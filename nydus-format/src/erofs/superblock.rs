@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::{Error, Result};
 use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -56,7 +57,12 @@ impl ErofsSuperblock {
         extra_devices: u16,
         devt_slotoff: u16,
         uuid: &[u8; 16],
-    ) -> Self {
+    ) -> Result<Self> {
+        let blocks = u32::try_from(blocks).map_err(|_| {
+            Error::InvalidImage(format!(
+                "EROFS bootstrap block count {blocks} exceeds 32-bit limit"
+            ))
+        })?;
         let mut sb: Self = unsafe { mem::zeroed() };
         write_u32(&mut sb.magic, EROFS_SUPER_MAGIC_V1);
         write_u32(&mut sb.feature_compat, feature_compat);
@@ -64,13 +70,14 @@ impl ErofsSuperblock {
         write_u16(&mut sb.rootnid_2b, root_nid);
         write_u64(&mut sb.inos, inos);
         write_u64(&mut sb.epoch, epoch);
-        write_u32(&mut sb.blocks_lo, blocks as u32);
+        write_u32(&mut sb.blocks_lo, blocks);
         write_u32(&mut sb.meta_blkaddr, meta_blkaddr);
         sb.uuid = *uuid;
         write_u32(&mut sb.feature_incompat, feature_incompat);
         write_u16(&mut sb.extra_devices, extra_devices);
         write_u16(&mut sb.devt_slotoff, devt_slotoff);
-        sb
+        validate_superblock(&sb).map_err(|err| Error::InvalidImage(err.to_string()))?;
+        Ok(sb)
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -168,9 +175,8 @@ pub fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
             format!("unsupported EROFS block size bits: {}", sb.blkszbits),
         ));
     }
-    const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
-        | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
-        | EROFS_FEATURE_INCOMPAT_48BIT;
+    const SUPPORTED_INCOMPAT: u32 =
+        EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
     let unknown = sb.feature_incompat() & !SUPPORTED_INCOMPAT;
     if unknown != 0 {
         return Err(io::Error::new(
@@ -188,7 +194,7 @@ mod tests {
 
     #[test]
     fn superblock_tail_uses_standard_field_offsets() {
-        let mut sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 1, 1, 0, 0, &[0; 16]);
+        let mut sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 1, 1, 0, 0, &[0; 16]).unwrap();
         assert_eq!(&sb.as_bytes()[0x68..0x80], &[0; 24]);
 
         sb.build_time = 0x1234_5678u32.to_le_bytes();
@@ -208,18 +214,9 @@ mod tests {
         feature_incompat: u32,
         magic: Option<u32>,
     ) -> tempfile::NamedTempFile {
-        let mut sb = ErofsSuperblock::new(
-            feature_compat,
-            feature_incompat,
-            0,
-            0,
-            0,
-            1,
-            1,
-            0,
-            0,
-            &[0u8; 16],
-        );
+        let mut sb =
+            ErofsSuperblock::new(feature_compat, 0, 0, 0, 0, 1, 1, 0, 0, &[0u8; 16]).unwrap();
+        write_u32(&mut sb.feature_incompat, feature_incompat);
         if let Some(m) = magic {
             write_u32(&mut sb.magic, m);
         }
@@ -228,6 +225,30 @@ mod tests {
         file.write_all(sb.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn checks_block_count_and_rejects_48bit_features() {
+        for blocks in [u32::MAX as u64 - 1, u32::MAX as u64] {
+            let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, blocks, 1, 0, 0, &[0; 16]).unwrap();
+            assert_eq!(sb.blocks(), blocks);
+        }
+        assert!(ErofsSuperblock::new(0, 0, 0, 0, 0, 1u64 << 32, 1, 0, 0, &[0; 16]).is_err());
+        assert!(ErofsSuperblock::new(
+            0,
+            EROFS_FEATURE_INCOMPAT_48BIT,
+            0,
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            &[0; 16]
+        )
+        .is_err());
+        let image = write_bootstrap(0, EROFS_FEATURE_INCOMPAT_48BIT, None);
+        assert!(is_rafs_v7_bootstrap(image.path()).is_err());
     }
 
     #[test]

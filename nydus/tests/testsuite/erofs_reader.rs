@@ -130,10 +130,8 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     blob_writer.finish().expect("finish blob writer");
 
     let data_blob_id = sha256_file(&data_path).expect("hash data blob");
-    let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(
-        blob_writer.total_blocks(),
-        &data_blob_id,
-    )];
+    let embedded_device_slots =
+        [ErofsDeviceSlot::with_blob_id(blob_writer.total_blocks(), &data_blob_id).unwrap()];
     let embedded_bootstrap = render_bootstrap(
         &mut inodes,
         1_700_000_000,
@@ -147,10 +145,8 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let full_blob_digest =
         fixture::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_metadata);
 
-    let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
-        blob_writer.total_blocks(),
-        &full_blob_digest,
-    )];
+    let standalone_device_slots =
+        [ErofsDeviceSlot::with_blob_id(blob_writer.total_blocks(), &full_blob_digest).unwrap()];
     let bootstrap = render_bootstrap(
         &mut inodes,
         1_700_000_000,

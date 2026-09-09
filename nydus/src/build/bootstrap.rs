@@ -139,7 +139,7 @@ pub fn render_flattened_bootstrap_to(
     for inode in inodes.iter() {
         debug_assert!(inode.meta_offset >= cursor);
         write_zeros(writer, inode.meta_offset - cursor)?;
-        let bytes = serialize_inode(inode, epoch);
+        let bytes = serialize_inode(inode, epoch)?;
         writer
             .write_all(&bytes)
             .context("failed to write bootstrap inode")?;
@@ -236,13 +236,14 @@ fn set_flattened_mapped_blkaddrs(
             ))
         })?;
         let mapped_offset = align_up_usize(next_offset_usize, alignment_usize)
-            .expect("alignment overflowed") as u64;
+            .ok_or_else(|| Error::Overflow("flattened blob alignment overflow".to_string()))?
+            as u64;
         if mapped_offset % block_size != 0 {
             return Err(Error::InvalidImage(
                 "flattened blob offset must be block aligned".to_string(),
             ));
         }
-        slot.set_mapped_blkaddr(mapped_offset / block_size);
+        slot.set_mapped_blkaddr(mapped_offset / block_size)?;
         next_offset = mapped_offset
             .checked_add(
                 slot.blocks()
@@ -379,7 +380,7 @@ fn render_bootstrap_inner(
     }
 
     for inode in inodes.iter() {
-        let inode_bytes = serialize_inode(inode, epoch);
+        let inode_bytes = serialize_inode(inode, epoch)?;
         let offset = inode.meta_offset;
         layout.write_at(offset, &inode_bytes);
     }
@@ -566,6 +567,30 @@ mod tests {
             reader.read_symlink(inodes[1].nid, &parsed).unwrap(),
             *target
         );
+    }
+
+    #[test]
+    fn flattened_device_starts_are_checked_after_alignment() {
+        let block_size = EROFS_BLOCK_SIZE as u64;
+        let mut slots = [ErofsDeviceSlot::new(u32::MAX as u64).unwrap()];
+        set_flattened_mapped_blkaddrs(&mut slots, u32::MAX as u64 * block_size, block_size)
+            .unwrap();
+        assert_eq!(slots[0].mapped_blkaddr(), u32::MAX as u64);
+        assert!(slots[0].mapped_blkaddr() + slots[0].blocks() > u32::MAX as u64);
+        assert!(set_flattened_mapped_blkaddrs(
+            &mut slots,
+            u32::MAX as u64 * block_size,
+            FLATTENED_BLOB_ALIGNMENT,
+        )
+        .is_err());
+        assert!(
+            set_flattened_mapped_blkaddrs(&mut slots, u64::MAX, FLATTENED_BLOB_ALIGNMENT).is_err()
+        );
+        let mut slots = [
+            ErofsDeviceSlot::new(u32::MAX as u64).unwrap(),
+            ErofsDeviceSlot::new(1).unwrap(),
+        ];
+        assert!(set_flattened_mapped_blkaddrs(&mut slots, block_size, block_size).is_err());
     }
 
     #[test]

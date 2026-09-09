@@ -396,9 +396,15 @@ impl<W: Write> BlobWriter<W> {
             Error::Overflow(format!("blob meta chunk block count exceeds u32: {err}"))
         })?;
 
-        // The chunk occupies `block_count` logical blocks (EROFS chunk indexes
-        // address the dense logical space).
-        self.next_blkaddr += block_count as u64;
+        let next_blkaddr = addr
+            .checked_add(block_count as u64)
+            .filter(|count| *count <= u32::MAX as u64)
+            .ok_or_else(|| {
+                Error::Overflow(format!(
+                "decoded blob exceeds 32-bit block count: start {addr}, chunk blocks {block_count}"
+            ))
+            })?;
+        self.next_blkaddr = next_blkaddr;
 
         // Record the chunk by its absolute block position; chunks are tracked
         // independently of block groups as a digest index only. The digest
@@ -554,6 +560,32 @@ mod tests {
     }
 
     #[test]
+    fn blob_writer_rejects_block_count_overflow_before_mutation() {
+        let mut writer = BlobWriter::from_writer(
+            Vec::new(),
+            EROFS_BLOCK_SIZE,
+            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
+            BlobMetadataCompressor::None,
+        )
+        .unwrap();
+        writer.next_blkaddr = u32::MAX as u64 - 1;
+        let data = [1; EROFS_BLOCK_SIZE as usize];
+        assert_eq!(
+            writer.append_chunk(&data, data.len()).unwrap(),
+            u32::MAX as u64 - 1
+        );
+        assert_eq!(writer.next_blkaddr, u32::MAX as u64);
+        let buffer = writer.block_group_buffer.clone();
+        let chunks = writer.blob_metadata_chunks.len();
+        assert!(writer.append_chunk(&data, data.len()).is_err());
+        assert_eq!(writer.next_blkaddr, u32::MAX as u64);
+        assert_eq!(writer.blob_metadata_chunks.len(), chunks);
+        assert_eq!(writer.block_group_buffer, buffer);
+        assert!(writer.writer.is_empty());
+        assert!(writer.encoder.is_none());
+    }
+
+    #[test]
     fn blob_writer_tracks_unique_blob_metadata_chunks() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
@@ -691,7 +723,8 @@ mod tests {
 
         // The on-disk null index encodes the all-ones sentinel.
         let raw =
-            nydus_format::erofs::ErofsChunkIndex::new(indexes[1].blkaddr, indexes[1].device_id);
+            nydus_format::erofs::ErofsChunkIndex::new(indexes[1].blkaddr, indexes[1].device_id)
+                .unwrap();
         assert_eq!(raw.blkaddr(), EROFS_NULL_ADDR);
     }
 

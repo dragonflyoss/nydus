@@ -148,7 +148,7 @@ fn build_test_image_full(
     let blob_metadata = writer.blob_metadata(0).unwrap();
     let blocks = writer.total_blocks();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
-    let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id)];
+    let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id).unwrap()];
     let embedded_bootstrap_bytes =
         render_bootstrap(&mut inodes, 0, &embedded_device_slots, &[0u8; 16]).unwrap();
     assert_eq!(
@@ -163,7 +163,7 @@ fn build_test_image_full(
         &blob_metadata,
     );
 
-    let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &full_blob_digest)];
+    let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &full_blob_digest).unwrap()];
     let bootstrap_bytes = if flattened {
         render_flattened_bootstrap(&mut inodes, 0, &device_slots, &[0u8; 16]).unwrap()
     } else {
@@ -324,8 +324,8 @@ fn flattened_bootstrap_records_mapped_device_slots() {
 
     let second_blob_id = writer.data_digest();
     let device_slots = [
-        ErofsDeviceSlot::with_blob_id(blob_infos[0].blocks, &blob_id),
-        ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id),
+        ErofsDeviceSlot::with_blob_id(blob_infos[0].blocks, &blob_id).unwrap(),
+        ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id).unwrap(),
     ];
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1, 2]).unwrap();
     let flattened = render_flattened_bootstrap(&mut inodes, 0, &device_slots, &[0u8; 16]).unwrap();
