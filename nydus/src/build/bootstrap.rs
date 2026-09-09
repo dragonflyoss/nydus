@@ -414,13 +414,13 @@ fn render_bootstrap_inner(
 /// one's metadata offset and nid.
 fn alloc_inodes(layout: &mut MetadataLayout, inodes: &mut [InodeInfo], epoch: u64) {
     for inode in inodes.iter_mut() {
-        if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
-            inode.is_extended = true;
-        }
         // A compact inode stores mtime as a 32-bit delta from the epoch, so a
         // timestamp further out than that has to move to the extended layout
         // rather than wrap.
         if inode.mtime.wrapping_sub(epoch) > u32::MAX as u64 {
+            inode.is_extended = true;
+        }
+        if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
             inode.is_extended = true;
         }
         let inode_size = erofs_inode_size(inode);
@@ -469,5 +469,140 @@ pub(crate) fn set_parent_nids(inodes: &mut [InodeInfo]) {
                 *parent_nid = parent_nid_val;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::inode::ChildRef;
+    use nydus_core::ErofsReader;
+    use nydus_format::erofs::{
+        erofs_xattr_ibody_size, ErofsInode, XattrEntry, EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE,
+        EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+        EROFS_XATTR_INDEX_USER,
+    };
+
+    fn symlink_tree(
+        target_len: usize,
+        is_extended: bool,
+        mtime: u64,
+        xattrs: Vec<XattrEntry>,
+    ) -> Vec<InodeInfo> {
+        vec![
+            InodeInfo {
+                mode: 0o040755,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                mtime: 0,
+                mtime_nsec: 0,
+                nlink: 2,
+                ino: 1,
+                nid: 0,
+                meta_offset: 0,
+                is_extended: true,
+                data: InodeData::Directory {
+                    children: vec![ChildRef {
+                        name: b"link".to_vec(),
+                        file_type: EROFS_FT_SYMLINK,
+                        inode_index: 1,
+                    }],
+                    startblk: 0,
+                    data_size: 0,
+                    parent_nid: 0,
+                },
+                xattrs: Vec::new(),
+            },
+            InodeInfo {
+                mode: 0o120777,
+                uid: if is_extended { u16::MAX as u32 + 1 } else { 0 },
+                gid: 0,
+                size: target_len as u64,
+                mtime,
+                mtime_nsec: 0,
+                nlink: 1,
+                ino: 2,
+                nid: 0,
+                meta_offset: 0,
+                is_extended,
+                data: InodeData::Symlink {
+                    target: vec![b'a'; target_len],
+                    startblk: 0,
+                },
+                xattrs,
+            },
+        ]
+    }
+
+    fn check_symlink_rendering(inodes: &mut [InodeInfo], expected_layout: u16) {
+        let image = render_bootstrap(inodes, 0, &[], &[0; 16]).unwrap();
+        let mut streamed = Vec::new();
+        render_flattened_bootstrap_to(&mut streamed, inodes, 0, &[], &[0; 16]).unwrap();
+        assert_eq!(image, streamed);
+
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let inode_offset = block_size + inodes[1].meta_offset;
+        let inode = ErofsInode::parse(&image[inode_offset..]).unwrap();
+        assert_eq!(inode.data_layout(), expected_layout);
+        let InodeData::Symlink { target, .. } = &inodes[1].data else {
+            unreachable!();
+        };
+        let data_offset = if expected_layout == EROFS_INODE_FLAT_INLINE {
+            let offset = inode_offset + inode.header_size() + inode.xattr_size();
+            assert!(offset % block_size + target.len() <= block_size);
+            offset
+        } else {
+            assert!(inodes[1].is_extended);
+            inode.startblk() as usize * block_size
+        };
+        assert_eq!(&image[data_offset..data_offset + target.len()], target);
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&image).unwrap();
+        let reader = ErofsReader::open_metadata_only(file.path()).unwrap();
+        let parsed = reader.inode(inodes[1].nid).unwrap();
+        assert_eq!(
+            reader.read_symlink(inodes[1].nid, &parsed).unwrap(),
+            *target
+        );
+    }
+
+    #[test]
+    fn symlink_inline_boundaries_use_actual_header_and_xattrs() {
+        for is_extended in [false, true] {
+            for has_xattrs in [false, true] {
+                let xattrs = if has_xattrs {
+                    vec![XattrEntry {
+                        name_index: EROFS_XATTR_INDEX_USER,
+                        suffix: b"key".to_vec(),
+                        value: b"value".to_vec(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let header_size = if is_extended {
+                    EROFS_INODE_EXTENDED_SIZE
+                } else {
+                    EROFS_INODE_COMPACT_SIZE
+                };
+                let limit =
+                    EROFS_BLOCK_SIZE as usize - header_size - erofs_xattr_ibody_size(&xattrs);
+                for (target_len, expected_layout) in [
+                    (limit, EROFS_INODE_FLAT_INLINE),
+                    (limit + 1, EROFS_INODE_FLAT_PLAIN),
+                ] {
+                    let mut inodes = symlink_tree(target_len, is_extended, 0, xattrs.clone());
+                    check_symlink_rendering(&mut inodes, expected_layout);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn symlink_inline_rechecks_fit_after_timestamp_promotion() {
+        let mut inodes = symlink_tree(4040, false, u32::MAX as u64 + 1, Vec::new());
+        check_symlink_rendering(&mut inodes, EROFS_INODE_FLAT_PLAIN);
+        assert!(inodes[1].is_extended);
     }
 }
