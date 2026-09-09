@@ -536,12 +536,12 @@ mod tests {
     struct DragonflyBackend;
 
     impl BlobBackend for DragonflyBackend {
-        fn backend(&self) -> nydus_telemetry::metrics::Backend {
-            nydus_telemetry::metrics::Backend::Registry
+        fn backend(&self) -> nydus_backend::Backend {
+            nydus_backend::Backend::Registry
         }
 
-        fn protocol(&self) -> Option<nydus_telemetry::metrics::Protocol> {
-            Some(nydus_telemetry::metrics::Protocol::DragonflySdk)
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
+            Some(nydus_backend::Protocol::DragonflySdk)
         }
 
         fn blob_metadata(

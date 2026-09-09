@@ -71,11 +71,11 @@ impl CheckCommand {
                     let config = Config::load(path)?;
                     match &config.backend {
                         BackendConfig::Local(local) => Some(local.dir.clone()),
-                        other => {
-                            return Err(Error::InvalidConfig(format!(
-                                "check only supports a local backend, but config backend is '{}'",
-                                other.kind()
-                            )));
+                        BackendConfig::Registry(_) => {
+                            return Err(Error::InvalidConfig(
+                                "check only supports a local backend, but config backend is 'registry'"
+                                    .to_string(),
+                            ));
                         }
                     }
                 }

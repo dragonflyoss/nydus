@@ -14,6 +14,7 @@ use nydus_error::{Context, Error, Result};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use serde::Deserialize;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -127,13 +128,70 @@ pub enum BackendConfig {
     Registry(RegistryConfig),
 }
 
-/// Implement BackendConfig.
-impl BackendConfig {
-    /// The `type` tag this configuration is selected by.
-    pub fn kind(&self) -> &'static str {
+/// The blob backend, the `type` tag of [`BackendConfig`] and the `backend`
+/// label of the metrics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Backend {
+    /// The local directory backend.
+    Local,
+
+    /// The registry backend.
+    Registry,
+}
+
+/// Implement Display for Backend.
+impl fmt::Display for Backend {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            BackendConfig::Local(_) => "local",
-            BackendConfig::Registry(_) => "registry",
+            Backend::Local => write!(f, "local"),
+            Backend::Registry => write!(f, "registry"),
+        }
+    }
+}
+
+/// How the registry backend fetches bytes, the `protocol` label of the
+/// metrics. The local backend has none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Protocol {
+    /// Reading the origin over HTTP.
+    Http,
+
+    /// Reading the origin over HTTP after Dragonfly could not serve the read.
+    DragonflyHttp,
+
+    /// Reading the Dragonfly seed peers through the SDK.
+    DragonflySdk,
+}
+
+/// Implement Display for Protocol.
+impl fmt::Display for Protocol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Protocol::Http => write!(f, "http"),
+            Protocol::DragonflyHttp => write!(f, "dragonfly-http"),
+            Protocol::DragonflySdk => write!(f, "dragonfly-sdk"),
+        }
+    }
+}
+
+/// What triggered a backend read, the `type` label of the metrics. Retry,
+/// throttling and Dragonfly priority key off it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReadKind {
+    /// A user-triggered read blocking a FUSE request.
+    #[default]
+    OnDemand,
+
+    /// A background prefetch read after mount.
+    Prefetch,
+}
+
+/// Implement Display for ReadKind.
+impl fmt::Display for ReadKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ReadKind::OnDemand => write!(f, "ondemand"),
+            ReadKind::Prefetch => write!(f, "prefetch"),
         }
     }
 }
@@ -606,7 +664,6 @@ config:
             panic!("expected a local backend, got {backend:?}");
         };
         assert_eq!(local.dir, Path::new("/blobs"));
-        assert_eq!(backend.kind(), "local");
     }
 
     #[test]
@@ -645,7 +702,6 @@ config:
             registry.dragonfly.as_ref().unwrap().scheduler_endpoint,
             "http://127.0.0.1:8002"
         );
-        assert_eq!(backend.kind(), "registry");
     }
 
     #[test]

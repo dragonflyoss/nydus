@@ -62,7 +62,7 @@ pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) ->
 mod tests {
     use super::*;
     use crate::registry::RUNTIME;
-    use nydus_telemetry::metrics::Protocol;
+    use crate::Protocol;
     use reqwest::header::HeaderMap;
     use std::io;
 

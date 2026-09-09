@@ -541,7 +541,7 @@ impl LocalBlobCache {
                 window,
                 decoded,
             ) {
-                nydus_telemetry::metrics::collect_fill_storage_local_block_group_failure_metrics();
+                nydus_telemetry::metrics::collect_fill_block_group_from_redirect_blob_failure_metrics();
                 warn!("skipping redirect block_group {index}: {err}");
                 continue;
             }
@@ -935,7 +935,7 @@ impl BlobCache for LocalBlobCache {
             decoded,
         )?;
         self.block_group_map.set_ready(block_group_index)?;
-        nydus_telemetry::metrics::collect_fill_storage_local_block_group_finished_metrics();
+        nydus_telemetry::metrics::collect_fill_block_group_from_redirect_blob_finished_metrics();
         Ok(())
     }
 }
@@ -1054,11 +1054,11 @@ mod tests {
     }
 
     impl BlobBackend for CountingBackend {
-        fn backend(&self) -> nydus_telemetry::metrics::Backend {
+        fn backend(&self) -> nydus_backend::Backend {
             self.inner.backend()
         }
 
-        fn protocol(&self) -> Option<nydus_telemetry::metrics::Protocol> {
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
             self.inner.protocol()
         }
 

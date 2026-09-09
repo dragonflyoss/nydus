@@ -58,10 +58,10 @@ use nydus_config::RegistryConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_FOOTER_SIZE};
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 use nydus_telemetry::metrics::{
-    collect_read_backend_failure_metrics, collect_read_backend_finished_metrics, Backend, Protocol,
+    collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
 };
 
-use crate::{BlobBackend, ReadKind};
+use crate::{Backend, BlobBackend, Protocol, ReadKind};
 
 use self::auth::Auth;
 #[cfg(feature = "backend-dragonfly")]

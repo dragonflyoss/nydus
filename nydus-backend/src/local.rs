@@ -13,10 +13,10 @@ use std::time::Instant;
 use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
 use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 use nydus_telemetry::metrics::{
-    collect_read_backend_failure_metrics, collect_read_backend_finished_metrics, Backend, Protocol,
+    collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
 };
 
-use crate::{BlobBackend, ReadKind};
+use crate::{Backend, BlobBackend, Protocol, ReadKind};
 
 /// A byte region embedded in a larger file.
 #[derive(Clone, Copy)]

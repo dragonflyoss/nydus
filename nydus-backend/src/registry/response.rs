@@ -8,10 +8,8 @@ use reqwest::{Method, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::debug;
 
-use nydus_telemetry::metrics::Protocol;
-
 use super::{RegistryError, RegistryResult};
-use crate::ReadKind;
+use crate::{Protocol, ReadKind};
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
 /// and headers up front, plus the body as an async reader. Origin bodies

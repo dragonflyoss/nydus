@@ -22,11 +22,10 @@ use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, Proxy
 use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
-use nydus_telemetry::metrics::Protocol;
 
 use super::response::{log_request_done, Response};
 use super::{BlobTransport, RegistryError, RegistryResult, RUNTIME};
-use crate::ReadKind;
+use crate::{Protocol, ReadKind};
 
 /// The priority hint for background prefetch requests.
 const PRIORITY_PREFETCH: i32 = 3;

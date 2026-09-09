@@ -341,11 +341,11 @@ mod tests {
     }
 
     impl BlobBackend for FlakyBackend {
-        fn backend(&self) -> nydus_telemetry::metrics::Backend {
+        fn backend(&self) -> nydus_backend::Backend {
             self.inner.backend()
         }
 
-        fn protocol(&self) -> Option<nydus_telemetry::metrics::Protocol> {
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
             self.inner.protocol()
         }
 

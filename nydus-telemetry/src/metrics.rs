@@ -4,7 +4,7 @@
 //!
 //! Every metric name carries the `nydus_` namespace and is a verb followed by
 //! what it acts on, `read_backend_total`, `validate_block_group_total`,
-//! `fill_storage_local_block_group_total`. Counters end in `_total`, failure counters in
+//! `prefetch_task_total`. Counters end in `_total`, failure counters in
 //! `_failure_total`, byte counters in `_traffic`, duration histograms in
 //! `_duration_milliseconds`. Dimensions are labels, each with a fixed
 //! vocabulary:
@@ -29,6 +29,8 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use prometheus::{exponential_buckets, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
+
+pub use nydus_config::{Backend, Protocol, ReadKind};
 
 /// Used to register all metrics.
 pub static REGISTRY: LazyLock<Registry> = LazyLock::new(|| {
@@ -208,26 +210,27 @@ pub static READ_BLOCK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric can be created")
 });
 
-/// Used to count the number of fill source block groups.
-pub static FILL_STORAGE_LOCAL_BLOCK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    IntCounterVec::new(
-        Opts::new(
-            "fill_storage_local_block_group_total",
-            "Counter of the number of the fill source block group.",
-        )
-        .namespace(nydus_config::NAME),
-        &[],
-    )
-    .expect("metric can be created")
-});
-
-/// Used to count the failed number of fill source block groups.
-pub static FILL_STORAGE_LOCAL_BLOCK_GROUP_FAILURE_COUNT: LazyLock<IntCounterVec> =
+/// Used to count the number of fill block groups from redirect blob.
+pub static FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT: LazyLock<IntCounterVec> =
     LazyLock::new(|| {
         IntCounterVec::new(
             Opts::new(
-                "fill_storage_local_block_group_failure_total",
-                "Counter of the number of failed of the fill source block group.",
+                "fill_block_group_from_redirect_blob_total",
+                "Counter of the number of the fill block group from redirect blob.",
+            )
+            .namespace(nydus_config::NAME),
+            &[],
+        )
+        .expect("metric can be created")
+    });
+
+/// Used to count the failed number of fill block groups from redirect blob.
+pub static FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT: LazyLock<IntCounterVec> =
+    LazyLock::new(|| {
+        IntCounterVec::new(
+            Opts::new(
+                "fill_block_group_from_redirect_blob_failure_total",
+                "Counter of the number of failed of the fill block group from redirect blob.",
             )
             .namespace(nydus_config::NAME),
             &[],
@@ -316,12 +319,12 @@ fn register_custom_metrics(registry: &Registry) {
         .expect("metric can be registered");
 
     registry
-        .register(Box::new(FILL_STORAGE_LOCAL_BLOCK_GROUP_COUNT.clone()))
+        .register(Box::new(FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT.clone()))
         .expect("metric can be registered");
 
     registry
         .register(Box::new(
-            FILL_STORAGE_LOCAL_BLOCK_GROUP_FAILURE_COUNT.clone(),
+            FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT.clone(),
         ))
         .expect("metric can be registered");
 
@@ -332,54 +335,6 @@ fn register_custom_metrics(registry: &Registry) {
     registry
         .register(Box::new(PREFETCH_REDIRECT_BLOB_TRAFFIC.clone()))
         .expect("metric can be registered");
-}
-
-/// Represents a blob backend, the `backend` label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    /// The local directory backend.
-    Local,
-
-    /// The registry backend.
-    Registry,
-}
-
-/// Implements the Display trait.
-impl fmt::Display for Backend {
-    /// fmt formats the Backend.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Backend::Local => write!(f, "local"),
-            Backend::Registry => write!(f, "registry"),
-        }
-    }
-}
-
-/// Represents how the registry backend fetched the bytes, the `protocol`
-/// label. The local backend has none and leaves the label empty.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Protocol {
-    /// The registry backend reading the origin over HTTP.
-    Http,
-
-    /// The registry backend reading the origin over HTTP after Dragonfly
-    /// could not serve the read.
-    DragonflyHttp,
-
-    /// The registry backend reading the Dragonfly seed peers through the SDK.
-    DragonflySdk,
-}
-
-/// Implements the Display trait.
-impl fmt::Display for Protocol {
-    /// fmt formats the Protocol.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Protocol::Http => write!(f, "http"),
-            Protocol::DragonflyHttp => write!(f, "dragonfly-http"),
-            Protocol::DragonflySdk => write!(f, "dragonfly-sdk"),
-        }
-    }
 }
 
 /// Represents where a block group was read from, the `storage` label.
@@ -408,31 +363,6 @@ fn protocol_label(protocol: Option<Protocol>) -> String {
     protocol
         .map(|protocol| protocol.to_string())
         .unwrap_or_default()
-}
-
-/// Represents the kind of a backend read. The storage layer keys retry,
-/// throttling and Dragonfly priority off it, re-exporting it as its policy
-/// type, and metrics label reads by it. Defined here so the storage layer need
-/// not be a dependency of this crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadKind {
-    /// A user-triggered read blocking a FUSE request.
-    #[default]
-    OnDemand,
-
-    /// A background prefetch read after mount.
-    Prefetch,
-}
-
-/// Implements the Display trait.
-impl fmt::Display for ReadKind {
-    /// fmt formats the ReadKind.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ReadKind::OnDemand => write!(f, "ondemand"),
-            ReadKind::Prefetch => write!(f, "prefetch"),
-        }
-    }
 }
 
 /// Represents a FUSE filesystem operation, mirroring nydus `StatsFop` for
@@ -595,16 +525,16 @@ pub fn collect_read_block_group_metrics(
         .inc();
 }
 
-/// Collects the fill source block group finished metrics.
-pub fn collect_fill_storage_local_block_group_finished_metrics() {
-    FILL_STORAGE_LOCAL_BLOCK_GROUP_COUNT
+/// Collects the fill block group from redirect blob finished metrics.
+pub fn collect_fill_block_group_from_redirect_blob_finished_metrics() {
+    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT
         .with_label_values(&[])
         .inc();
 }
 
-/// Collects the fill source block group failure metrics.
-pub fn collect_fill_storage_local_block_group_failure_metrics() {
-    FILL_STORAGE_LOCAL_BLOCK_GROUP_FAILURE_COUNT
+/// Collects the fill block group from redirect blob failure metrics.
+pub fn collect_fill_block_group_from_redirect_blob_failure_metrics() {
+    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
         .with_label_values(&[])
         .inc();
 }
@@ -845,17 +775,17 @@ mod tests {
     fn unlabeled_counters_move_by_one() {
         let test_cases: Vec<(Collect, Read)> = vec![
             (
-                collect_fill_storage_local_block_group_finished_metrics,
+                collect_fill_block_group_from_redirect_blob_finished_metrics,
                 || {
-                    FILL_STORAGE_LOCAL_BLOCK_GROUP_COUNT
+                    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT
                         .with_label_values(&[])
                         .get()
                 },
             ),
             (
-                collect_fill_storage_local_block_group_failure_metrics,
+                collect_fill_block_group_from_redirect_blob_failure_metrics,
                 || {
-                    FILL_STORAGE_LOCAL_BLOCK_GROUP_FAILURE_COUNT
+                    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
                         .with_label_values(&[])
                         .get()
                 },

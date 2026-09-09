@@ -27,10 +27,7 @@ pub use local::Local;
 #[cfg(feature = "backend-registry")]
 pub(crate) use registry::Registry;
 
-/// What kind of backend read this is, shared with the metrics layer. Retry,
-/// throttling and Dragonfly priority key off it here, its definition living in
-/// [`nydus_telemetry::metrics`] so that crate need not depend on this one.
-pub use nydus_telemetry::metrics::ReadKind;
+pub use nydus_config::{Backend, Protocol, ReadKind};
 
 /// A blob backend resolves blob data and metadata by content digest.
 ///
@@ -45,12 +42,12 @@ pub use nydus_telemetry::metrics::ReadKind;
 /// itself, once per [`read_range_into`](Self::read_range_into) call.
 pub trait BlobBackend: Send + Sync {
     /// Which backend this is, the `backend` label of its metrics.
-    fn backend(&self) -> nydus_telemetry::metrics::Backend;
+    fn backend(&self) -> Backend;
 
     /// How this backend fetches bytes when nothing else is known, the
     /// `protocol` label of the metrics recorded outside a read. `None` for a
     /// backend without a protocol.
-    fn protocol(&self) -> Option<nydus_telemetry::metrics::Protocol>;
+    fn protocol(&self) -> Option<Protocol>;
 
     /// The digest naming the blob's cache files, the blob digest itself unless
     /// the backend stores the blob under another name.

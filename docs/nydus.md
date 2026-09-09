@@ -87,7 +87,7 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
-| `nydus-telemetry` | leaf | Metrics (including `ReadKind`) and feature-gated logging setup; depends only on `nydus-config` so every layer can record without cycles | — |
+| `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, which owns the `Backend`/`Protocol`/`ReadKind` label vocabularies, so every layer can record without cycles | — |
 
 `nydus-format` stays neutral by mirroring the error shape: its `FormatError`
 carries the same context-chain design, the data plane wraps it into
@@ -945,8 +945,8 @@ Cache:
 
 Redirect blob (ondemand blob) prefetch:
 
-- `nydus_fill_storage_local_block_group_total`,
-	`nydus_fill_storage_local_block_group_failure_total` — block groups decoded
+- `nydus_fill_block_group_from_redirect_blob_total`,
+	`nydus_fill_block_group_from_redirect_blob_failure_total` — block groups decoded
 	from a redirect (ondemand) blob during phase-0 prefetch and filled into the
 	local storage of the blob they belong to, and the ones that could not be
 	(decode/CRC failures, unknown source device, or failed fills); the failure
@@ -955,10 +955,10 @@ Redirect blob (ondemand blob) prefetch:
 - `nydus_prefetch_redirect_blob_total`, `nydus_prefetch_redirect_blob_traffic`
 	— backend reads that fetched ondemand (redirect) blob data and their bytes,
 	a subset of the `type="prefetch"` backend reads. Together with
-	`nydus_fill_storage_local_block_group_total` these attribute cache warmup to the
+	`nydus_fill_block_group_from_redirect_blob_total` these attribute cache warmup to the
 	optimize pipeline: after an optimized mount's prefetch quiesces, a non-zero
 	`nydus_prefetch_redirect_blob_total` proves the ondemand blob was fetched
-	and `nydus_fill_storage_local_block_group_total` equals the number of traced
+	and `nydus_fill_block_group_from_redirect_blob_total` equals the number of traced
 	block groups filled into local storage.
 
 

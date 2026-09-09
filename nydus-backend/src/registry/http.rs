@@ -15,11 +15,10 @@ use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::io::StreamReader;
 
 use nydus_config::HttpConfig;
-use nydus_telemetry::metrics::Protocol;
 
 use super::response::{log_request_done, Response};
 use super::{BlobTransport, RegistryError, RegistryResult};
-use crate::ReadKind;
+use crate::{Protocol, ReadKind};
 
 /// An HTTP client talking straight to the origin registry. Its middleware
 /// stack retries transient failures with exponential backoff and, when built

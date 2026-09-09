@@ -463,7 +463,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 //     prefetch to quiesce, replay the same workload, and verify:
 //     - the ondemand blob was fetched (nydus_prefetch_redirect_blob_total > 0),
 //     - every traced block group was filled into its source blob's cache through
-//     the redirect path (nydus_fill_storage_local_block_group_total == trace
+//     the redirect path (nydus_fill_block_group_from_redirect_blob_total == trace
 //     size, no skips),
 //     - the workload triggered zero on-demand backend reads
 //     (nydus_read_backend_total{type="ondemand"} == 0), proving the
@@ -532,7 +532,7 @@ func TestNydusifyOptimize(t *testing.T) {
 		require.Greater(t, metricValue(metrics, "nydus_read_backend_total", `type="ondemand"`), 0.0,
 			"baseline workload must trigger on-demand backend reads")
 		require.Zero(t, metricValue(metrics, "nydus_prefetch_redirect_blob_total"))
-		require.Zero(t, metricValue(metrics, "nydus_fill_storage_local_block_group_total"))
+		require.Zero(t, metricValue(metrics, "nydus_fill_block_group_from_redirect_blob_total"))
 		require.Zero(t, metricValue(metrics, "nydus_read_block_group_total", `type="prefetch"`, `storage="backend"`),
 			"baseline mount must not prefetch")
 		traceCount = saveTrace(t, socket, filepath.Join(tmpDir, "pattern.json"))
@@ -561,15 +561,15 @@ func TestNydusifyOptimize(t *testing.T) {
 		metrics := fetchMetrics(t, socket)
 		require.Greater(t, metricValue(metrics, "nydus_prefetch_redirect_blob_total"), 0.0,
 			"prefetch must fetch the ondemand (redirect) blob from the backend")
-		require.Equal(t, float64(traceCount), metricValue(metrics, "nydus_fill_storage_local_block_group_total"),
+		require.Equal(t, float64(traceCount), metricValue(metrics, "nydus_fill_block_group_from_redirect_blob_total"),
 			"every traced group must be filled into its source cache via redirect")
-		require.Zero(t, metricValue(metrics, "nydus_fill_storage_local_block_group_failure_total"),
+		require.Zero(t, metricValue(metrics, "nydus_fill_block_group_from_redirect_blob_failure_total"),
 			"no redirect group may be skipped")
 		require.Zero(t, metricValue(metrics, "nydus_read_backend_total", `type="ondemand"`),
 			"prefetch warmup must not issue on-demand reads")
 		t.Logf("optimized after prefetch: redirect_reads=%v redirect_fills=%v regular_fills=%v",
 			metricValue(metrics, "nydus_prefetch_redirect_blob_total"),
-			metricValue(metrics, "nydus_fill_storage_local_block_group_total"),
+			metricValue(metrics, "nydus_fill_block_group_from_redirect_blob_total"),
 			metricValue(metrics, "nydus_read_block_group_total", `type="prefetch"`, `storage="backend"`))
 
 		workload(optMnt)
