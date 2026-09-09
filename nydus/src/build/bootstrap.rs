@@ -415,10 +415,7 @@ fn render_bootstrap_inner(
 /// one's metadata offset and nid.
 fn alloc_inodes(layout: &mut MetadataLayout, inodes: &mut [InodeInfo], epoch: u64) {
     for inode in inodes.iter_mut() {
-        // A compact inode stores mtime as a 32-bit delta from the epoch, so a
-        // timestamp further out than that has to move to the extended layout
-        // rather than wrap.
-        if inode.mtime.wrapping_sub(epoch) > u32::MAX as u64 {
+        if inode.mtime != epoch || inode.mtime_nsec != 0 {
             inode.is_extended = true;
         }
         if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
@@ -567,6 +564,53 @@ mod tests {
             reader.read_symlink(inodes[1].nid, &parsed).unwrap(),
             *target
         );
+    }
+
+    #[test]
+    fn timestamps_round_trip_across_epoch_and_nanosecond_boundaries() {
+        for epoch in [0u64, 1_700_000_000] {
+            for (seconds, nanoseconds) in [
+                (epoch, 0),
+                (epoch, 123_456_789),
+                (epoch.saturating_sub(1), 0),
+                (epoch + 1, 0),
+                (epoch + u32::MAX as u64 + 1, 999_999_999),
+            ] {
+                let mut inodes = symlink_tree(4040, false, seconds, Vec::new());
+                inodes[1].mtime_nsec = nanoseconds;
+                let image = render_bootstrap(&mut inodes, epoch, &[], &[0; 16]).unwrap();
+                let mut streamed = Vec::new();
+                render_flattened_bootstrap_to(&mut streamed, &mut inodes, epoch, &[], &[0; 16])
+                    .unwrap();
+                assert_eq!(image, streamed);
+                let mut file = tempfile::NamedTempFile::new().unwrap();
+                file.write_all(&image).unwrap();
+                let reader = ErofsReader::open_metadata_only(file.path()).unwrap();
+                let parsed = reader.inode(inodes[1].nid).unwrap();
+                let compact = seconds == epoch && nanoseconds == 0;
+                assert_eq!(
+                    parsed.header_size(),
+                    if compact {
+                        EROFS_INODE_COMPACT_SIZE
+                    } else {
+                        EROFS_INODE_EXTENDED_SIZE
+                    }
+                );
+                assert_eq!(parsed.mtime(reader.superblock().epoch()), seconds);
+                assert_eq!(
+                    parsed.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                    nanoseconds
+                );
+                assert_eq!(
+                    reader.read_symlink(inodes[1].nid, &parsed).unwrap(),
+                    vec![b'a'; 4040]
+                );
+                if compact {
+                    let offset = EROFS_BLOCK_SIZE as usize + inodes[1].meta_offset;
+                    assert_eq!(&image[offset + 12..offset + 16], &[0; 4]);
+                }
+            }
+        }
     }
 
     #[test]

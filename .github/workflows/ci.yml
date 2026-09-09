@@ -117,6 +117,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq acl attr erofs-utils fuse3 xfsprogs
 
+      - name: Try loading the erofs kernel module
+        run: sudo modprobe erofs || true
+
       - name: Run e2e tests
         run: |
           make test-e2e

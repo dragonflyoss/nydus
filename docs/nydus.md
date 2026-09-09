@@ -39,6 +39,82 @@ encoded ranges in the stored data region.
 - Introduce cross-layer global deduplication beyond the current single-build dedup.
 - Rework the full EROFS on-disk layout to match every upstream variant.
 
+<<<<<<< Updated upstream
+=======
+## Kernel Compatibility and Format Limits
+
+The generated FS version 7 bootstrap targets upstream Linux 5.16 EROFS
+metadata with 4 KiB blocks, using CHUNKED_FILE and DEVICE_TABLE incompat
+features. It does not use 48BIT addresses or compact-inode time deltas.
+This is a metadata baseline, not a claim that every mount transport works on
+Linux 5.16. Kernel configuration, vendor backports, architecture and page size
+also matter; the minimum-version validation environment is x86_64 with 4 KiB
+pages.
+
+| Capability or path | Upstream requirement | Reason |
+| --- | --- | --- |
+| Extended 64-byte inode | 4.19 staging, supported in formal EROFS 5.4 | Stores full per-inode timestamps and wider ownership/size fields |
+| Chunk-based regular files | 5.15 | Interprets chunk indexes rather than a contiguous file extent |
+| Bootstrap with explicit extra block devices | 5.16 | DEVICE_TABLE and `device=` support resolve the referenced decoded data devices |
+| Flattened NBD, ublk, or PMEM image | 6.4 | flatdev maps logical extra devices into the primary device using mapped block addresses; the ublk driver itself first appeared in 6.0 |
+| Nydus FUSE | No kernel EROFS requirement | Nydus parses metadata in userspace; FUSE support is still required |
+| Fanotify-backed EROFS | 6.15+ and the mode's kernel configuration/capabilities | Pre-content fanotify events service on-demand data before kernel reads |
+
+For PMEM/RunD, the EROFS requirement applies to the guest mounting the device.
+Host UFFD, PMEM and device prerequisites are separate. Linux 5.16 native tests
+must use explicit decoded extra devices, not the flattened single-device path.
+Compressed Nydus full blobs are not raw EROFS extra devices.
+
+Each bootstrap or decoded external device has at most `u32::MAX` blocks:
+`(2^32 - 1) * 4096 = 17,592,186,040,320` bytes, or **16 TiB minus 4 KiB**.
+This is not a compressed-blob size limit or a global limit on the sum of layers.
+Each device's mapped start is independently limited to `u32::MAX` blocks,
+including after alignment. A representable mapped start plus device size may
+exceed 32 bits; range calculations remain checked in 64 bits.
+
+Ordinary chunk addresses range from `0` through `0xfffffffe`. The low-word
+value `0xffffffff` denotes a hole; unused high fields are zero. Constructors,
+writers and bootstrap layout reject unrepresentable values instead of
+truncating them or enabling newer features. Readers reject 48BIT and
+unsupported chunk formats. A failed build does not finalize its output or
+write success sidecars; bytes already written to a direct file/FIFO may remain.
+
+Compact inodes use exactly the superblock's shared timestamp. The builder keeps
+its deterministic epoch selection and `fixed_nsec = 0`; any inode with different
+seconds or nonzero nanoseconds uses the extended format before layout is
+allocated. Build, merge, optimize and export preserve full timestamps, except
+for the existing intentional normalization of the source root to zero. Reserved
+compact time bytes are zero on output and are never decoded as a time delta.
+
+No compatibility with older development images is retained. Rebuild affected
+images and derived caches when the format changes; there is no format guessing,
+legacy decoder or migration fallback. Later upstream 48BIT and compact-time
+extensions first appeared in 6.15 and are deliberately not used here. The later
+extra-device high-field repair is likewise not a minimum-version dependency.
+
+Version references:
+
+- [Linux 4.19 staging inode layout](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v4.19/drivers/staging/erofs/erofs_fs.h)
+- [Linux 5.4 inode layout](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v5.4/fs/erofs/erofs_fs.h)
+- [Linux 5.15 chunk format](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v5.15/fs/erofs/erofs_fs.h)
+- [Linux 5.16 device table](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v5.16/fs/erofs/super.c)
+- [Linux 6.4 flatdev mapping](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v6.4/fs/erofs/data.c)
+- [Linux 6.15 compact time decoding](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v6.15/fs/erofs/inode.c)
+- [Extra-device high-field repair](https://github.com/torvalds/linux/commit/63c2f06198ca7513433f1c92f2c654869d72417e)
+
+The native metadata gate is `make test-e2e E2E_TEST=TestErofsKernelCompatibility`,
+with root, EROFS, loop devices, util-linux and erofs-utils available. It checks
+fresh, merged and optimized images using decoded devices, fsck and native
+content/timestamp comparisons. CI attempts `modprobe erofs` first. The test
+skips when the running kernel is older than 5.16 or EROFS is absent from
+`/proc/filesystems`; both built-in and loaded-module support are accepted.
+Other prerequisites remain mandatory on supported kernels. A skipped test is
+not native compatibility validation.
+Run it on upstream 5.16 and a newer kernel. The separate flatdev smoke is
+`make test-nbd` on 6.4+. Passing userspace tests or cross-compilation alone does
+not certify either native gate.
+
+>>>>>>> Stashed changes
 ## Crate Architecture
 
 The Rust side is a workspace of eight crates. The split exists to encode
