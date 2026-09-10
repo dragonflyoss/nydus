@@ -115,7 +115,7 @@ fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> Registry
             status: response.status_code.unwrap_or(StatusCode::OK),
             headers: response.header,
             reader: Box::new(std::io::Cursor::new(body.freeze())),
-            protocol: Protocol::DragonflySdk,
+            protocol: Protocol::Dragonfly,
         }),
         Err(Error::ProxyError(ProxyError {
             status_code: Some(status),
@@ -137,7 +137,7 @@ fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> Registry
             reader: Box::new(std::io::Cursor::new(
                 message.unwrap_or_default().into_bytes(),
             )),
-            protocol: Protocol::DragonflySdk,
+            protocol: Protocol::Dragonfly,
         }),
         Err(Error::RequestTimeout(message)) => Err(RegistryError::Io(io::Error::new(
             io::ErrorKind::TimedOut,

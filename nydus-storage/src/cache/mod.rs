@@ -541,7 +541,7 @@ mod tests {
         }
 
         fn protocol(&self) -> Option<nydus_backend::Protocol> {
-            Some(nydus_backend::Protocol::DragonflySdk)
+            Some(nydus_backend::Protocol::Dragonfly)
         }
 
         fn blob_metadata(
@@ -573,14 +573,14 @@ mod tests {
         let decoded = vec![0u8; EROFS_BLOCK_SIZE as usize];
 
         let proxy_before = nydus_telemetry::metrics::VALIDATE_BLOCK_GROUP_FAILURE_COUNT
-            .with_label_values(&["registry", "dragonfly-sdk"])
+            .with_label_values(&["registry", "dragonfly"])
             .get();
         let err = validate_block_group_with_metrics(&backend, &block_group, &decoded)
             .expect_err("crc must mismatch");
         assert!(is_block_group_crc_mismatch(&err));
         assert_eq!(
             nydus_telemetry::metrics::VALIDATE_BLOCK_GROUP_FAILURE_COUNT
-                .with_label_values(&["registry", "dragonfly-sdk"])
+                .with_label_values(&["registry", "dragonfly"])
                 .get(),
             proxy_before + 1
         );

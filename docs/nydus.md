@@ -87,7 +87,7 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
-| `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, which owns the `Backend`/`Protocol`/`ReadKind` label vocabularies, so every layer can record without cycles | — |
+| `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, whose `Backend`/`Protocol`/`ReadKind` it maps to label values, so every layer can record without cycles | — |
 
 `nydus-format` stays neutral by mirroring the error shape: its `FormatError`
 carries the same context-chain design, the data plane wraps it into
@@ -894,14 +894,14 @@ fixed vocabulary:
 | --- | --- | --- |
 | `type` | what triggered the operation | `ondemand`, `prefetch` |
 | `backend` | the blob backend | `local`, `registry` |
-| `protocol` | how the registry backend fetched the bytes | `http`, `dragonfly-http`, `dragonfly-sdk` |
+| `protocol` | how the registry backend fetched the bytes | `http`, `dragonfly` |
 | `storage` | where a block group was read from | `local`, `backend` |
 | `op` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
 
-`protocol` is `http` for the registry backend reading the origin,
-`dragonfly-sdk` for it reading the Dragonfly seed peers, and `dragonfly-http`
-for it reading the origin after Dragonfly could not serve the read. The local
-backend has no protocol and leaves the label empty. `storage` is `local` for a
+`protocol` is `http` for the registry backend reading the origin and
+`dragonfly` for it reading the Dragonfly seed peers; a read Dragonfly could not
+serve that went back to the origin is `http`. The local backend has no protocol
+and leaves the label empty. `storage` is `local` for a
 block group already in the local cache and `backend` for one fetched from the
 backend into the cache.
 
@@ -911,18 +911,18 @@ Backend:
 	`nydus_read_backend_failure_total{type,backend,protocol}`,
 	`nydus_read_backend_duration_milliseconds{type,backend,protocol}`,
 	`nydus_read_backend_traffic{type,backend,protocol}` — backend reads, how
-	many failed, their duration and their bytes. A `dragonfly-sdk` failure is
-	one the SDK's retries did not cure; the cause is in the logs. A
-	`dragonfly-http` read is on-demand only and counts once, however many
-	rate-limited retry attempts it made; its failure counter covers only HTTP
-	transport errors surfaced once the retry budget is spent. Watch the
-	`dragonfly-http` rate to confirm origin load stays shaped by
-	`dragonfly.back_to_source.request_rate_limit`.
+	many failed, their duration and their bytes. A `dragonfly` failure is one
+	the SDK's retries did not cure; the cause is in the logs. On a daemon with
+	Dragonfly configured an `http` read is an on-demand read that went back to
+	the origin; it counts once, however many rate-limited retry attempts it
+	made, and its failure counter covers only HTTP transport errors surfaced
+	once the retry budget is spent. Watch that `http` rate to confirm origin
+	load stays shaped by `dragonfly.back_to_source.request_rate_limit`.
 - `nydus_validate_block_group_total{backend,protocol}`,
 	`nydus_validate_block_group_failure_total{backend,protocol}` — CRC
 	validations of fetched block groups and how many mismatched. `protocol` is
-	the backend's default, `dragonfly-sdk` when Dragonfly is configured even for
-	a read that went back to the origin.
+	the backend's default, `dragonfly` when Dragonfly is configured even for a
+	read that went back to the origin.
 - `nydus_prefetch_task_total`, `nydus_prefetch_task_failure_total`,
 	`nydus_prefetch_task_reschedule_total` — blob prefetch attempts, the ones
 	that failed outright, and the ones the backend deferred and queued for a

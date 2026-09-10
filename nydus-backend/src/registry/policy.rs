@@ -71,7 +71,7 @@ mod tests {
             status,
             headers: HeaderMap::new(),
             reader: Box::new(std::io::Cursor::new(Vec::new())),
-            protocol: Protocol::DragonflySdk,
+            protocol: Protocol::Dragonfly,
         }
     }
 

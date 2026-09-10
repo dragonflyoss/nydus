@@ -18,7 +18,7 @@ pub(crate) struct Response {
     pub(crate) status: StatusCode,
     pub(crate) headers: HeaderMap,
     pub(crate) reader: Box<dyn AsyncRead + Send + Unpin>,
-    /// How the answer was fetched: the origin over HTTP, or the Dragonfly SDK.
+    /// How the answer was fetched: the origin over HTTP, or Dragonfly.
     pub(crate) protocol: Protocol,
 }
 

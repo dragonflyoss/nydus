@@ -14,7 +14,6 @@ use nydus_error::{Context, Error, Result};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use serde::Deserialize;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -128,8 +127,7 @@ pub enum BackendConfig {
     Registry(RegistryConfig),
 }
 
-/// The blob backend, the `type` tag of [`BackendConfig`] and the `backend`
-/// label of the metrics.
+/// The blob backend, the `type` tag of [`BackendConfig`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
     /// The local directory backend.
@@ -139,43 +137,18 @@ pub enum Backend {
     Registry,
 }
 
-/// Implement Display for Backend.
-impl fmt::Display for Backend {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Backend::Local => write!(f, "local"),
-            Backend::Registry => write!(f, "registry"),
-        }
-    }
-}
-
-/// How the registry backend fetches bytes, the `protocol` label of the
-/// metrics. The local backend has none.
+/// How the registry backend fetches bytes. The local backend has none.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Protocol {
     /// Reading the origin over HTTP.
     Http,
 
-    /// Reading the origin over HTTP after Dragonfly could not serve the read.
-    DragonflyHttp,
-
     /// Reading the Dragonfly seed peers through the SDK.
-    DragonflySdk,
+    Dragonfly,
 }
 
-/// Implement Display for Protocol.
-impl fmt::Display for Protocol {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Protocol::Http => write!(f, "http"),
-            Protocol::DragonflyHttp => write!(f, "dragonfly-http"),
-            Protocol::DragonflySdk => write!(f, "dragonfly-sdk"),
-        }
-    }
-}
-
-/// What triggered a backend read, the `type` label of the metrics. Retry,
-/// throttling and Dragonfly priority key off it.
+/// What triggered a backend read. Retry, throttling and Dragonfly priority
+/// key off it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ReadKind {
     /// A user-triggered read blocking a FUSE request.
@@ -184,16 +157,6 @@ pub enum ReadKind {
 
     /// A background prefetch read after mount.
     Prefetch,
-}
-
-/// Implement Display for ReadKind.
-impl fmt::Display for ReadKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ReadKind::OnDemand => write!(f, "ondemand"),
-            ReadKind::Prefetch => write!(f, "prefetch"),
-        }
-    }
 }
 
 /// The registry backend configuration, serving blobs from an OCI image

@@ -230,7 +230,7 @@ struct Inner {
     /// `backend-dragonfly` feature since the config is rejected.
     dragonfly: Option<Box<dyn BlobTransport>>,
     /// How reads are fetched when nothing else is known, the `protocol` label
-    /// of a failed read: the Dragonfly SDK when configured, otherwise HTTP.
+    /// of a failed read: Dragonfly when configured, otherwise HTTP.
     protocol: Protocol,
 }
 
@@ -288,7 +288,7 @@ impl Registry {
         dragonfly: Option<Box<dyn BlobTransport>>,
     ) -> Self {
         let protocol = if dragonfly.is_some() {
-            Protocol::DragonflySdk
+            Protocol::Dragonfly
         } else {
             Protocol::Http
         };
@@ -340,21 +340,17 @@ impl Inner {
             Action::Fallback(err) => {
                 warn!("dragonfly request failed, falling back to the origin: {err}");
                 let start = Instant::now();
-                match self.back_to_source.get(url, headers, kind).await {
-                    Ok(mut response) => {
-                        response.protocol = Protocol::DragonflyHttp;
-                        Ok(response)
-                    }
-                    Err(err) => {
+                self.back_to_source
+                    .get(url, headers, kind)
+                    .await
+                    .inspect_err(|_| {
                         collect_read_backend_failure_metrics(
                             kind,
                             Backend::Registry,
-                            Some(Protocol::DragonflyHttp),
+                            Some(Protocol::Http),
                             start.elapsed(),
-                        );
-                        Err(err)
-                    }
-                }
+                        )
+                    })
             }
             Action::Defer(err) => {
                 warn!("dragonfly request failed: {err}");
@@ -682,13 +678,13 @@ mod tests {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
                     reader: Box::new(std::io::Cursor::new(body)),
-                    protocol: Protocol::DragonflySdk,
+                    protocol: Protocol::Dragonfly,
                 }),
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
                     reader: Box::new(std::io::Cursor::new(Vec::new())),
-                    protocol: Protocol::DragonflySdk,
+                    protocol: Protocol::Dragonfly,
                 }),
                 Scripted::Transport => Err(RegistryError::Io(io::Error::other("scripted failure"))),
             }
@@ -734,7 +730,7 @@ mod tests {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
                     reader: Box::new(std::io::Cursor::new(b"ok".to_vec())),
-                    protocol: Protocol::DragonflySdk,
+                    protocol: Protocol::Dragonfly,
                 });
             }
             self.challenges.fetch_add(1, Ordering::SeqCst);
@@ -747,7 +743,7 @@ mod tests {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
                 reader: Box::new(std::io::Cursor::new(Vec::new())),
-                protocol: Protocol::DragonflySdk,
+                protocol: Protocol::Dragonfly,
             })
         }
     }
@@ -975,7 +971,7 @@ dragonfly:
         let mut dst = vec![0u8; body.len()];
         let protocol = read(&registry, ReadKind::OnDemand, &mut dst).unwrap();
 
-        assert_eq!(protocol, Protocol::DragonflyHttp);
+        assert_eq!(protocol, Protocol::Http);
         assert_eq!(dst, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 1);
@@ -989,7 +985,7 @@ dragonfly:
         let registry = scripted_registry(&origin, transport, Duration::ZERO);
 
         let back_to_source_before = metrics::READ_BACKEND_COUNT
-            .with_label_values(&["ondemand", "registry", "dragonfly-http"])
+            .with_label_values(&["ondemand", "registry", "http"])
             .get();
         let mut dst = vec![0u8; body.len()];
         registry
@@ -1000,7 +996,7 @@ dragonfly:
         assert_eq!(origin.hits(), 1);
         assert!(
             metrics::READ_BACKEND_COUNT
-                .with_label_values(&["ondemand", "registry", "dragonfly-http"])
+                .with_label_values(&["ondemand", "registry", "http"])
                 .get()
                 > back_to_source_before
         );
@@ -1182,7 +1178,7 @@ dragonfly:
         let registry = scripted_registry_at(dead_addr(), transport.clone(), Duration::ZERO, 0);
 
         let errors_before = metrics::READ_BACKEND_FAILURE_COUNT
-            .with_label_values(&["ondemand", "registry", "dragonfly-http"])
+            .with_label_values(&["ondemand", "registry", "http"])
             .get();
         let mut dst = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut dst).unwrap_err();
@@ -1191,7 +1187,7 @@ dragonfly:
         assert_eq!(transport.calls(), 1);
         assert!(
             metrics::READ_BACKEND_FAILURE_COUNT
-                .with_label_values(&["ondemand", "registry", "dragonfly-http"])
+                .with_label_values(&["ondemand", "registry", "http"])
                 .get()
                 > errors_before
         );
@@ -1276,7 +1272,7 @@ dragonfly:
         let mut dst = vec![0u8; body.len()];
         let protocol = read(&registry, ReadKind::OnDemand, &mut dst).unwrap();
 
-        assert_eq!(protocol, Protocol::DragonflySdk);
+        assert_eq!(protocol, Protocol::Dragonfly);
         assert_eq!(dst, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);

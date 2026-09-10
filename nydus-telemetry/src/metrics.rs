@@ -12,15 +12,15 @@
 //! ```text
 //! type      what triggered the operation           ondemand | prefetch
 //! backend   the blob backend                       local | registry
-//! protocol  how the registry backend fetched       http | dragonfly-http | dragonfly-sdk
+//! protocol  how the registry backend fetched       http | dragonfly
 //! storage   where a block group was read from      local | backend
 //! op        the FUSE operation                     lookup | read | getattr | ...
 //! ```
 //!
-//! `protocol` is `http` for the registry backend reading the origin,
-//! `dragonfly-sdk` for it reading the Dragonfly seed peers, and
-//! `dragonfly-http` for it reading the origin after Dragonfly could not serve
-//! the read. The local backend has no protocol and leaves the label empty.
+//! `protocol` is `http` for the registry backend reading the origin and
+//! `dragonfly` for it reading the Dragonfly seed peers; a read Dragonfly could
+//! not serve that went back to the origin is `http`. The local backend has no
+//! protocol and leaves the label empty.
 //! `storage` is `local` for a block group already in the local cache and
 //! `backend` for one fetched from the backend into the cache.
 
@@ -358,11 +358,29 @@ impl fmt::Display for Storage {
     }
 }
 
+/// The `type` label value of a read kind.
+fn read_kind_label(kind: ReadKind) -> &'static str {
+    match kind {
+        ReadKind::OnDemand => "ondemand",
+        ReadKind::Prefetch => "prefetch",
+    }
+}
+
+/// The `backend` label value of a backend.
+fn backend_label(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Local => "local",
+        Backend::Registry => "registry",
+    }
+}
+
 /// The `protocol` label value of a backend, empty when it has none.
-fn protocol_label(protocol: Option<Protocol>) -> String {
-    protocol
-        .map(|protocol| protocol.to_string())
-        .unwrap_or_default()
+fn protocol_label(protocol: Option<Protocol>) -> &'static str {
+    match protocol {
+        Some(Protocol::Http) => "http",
+        Some(Protocol::Dragonfly) => "dragonfly",
+        None => "",
+    }
 }
 
 /// Represents a FUSE filesystem operation, mirroring nydus `StatsFop` for
@@ -416,10 +434,11 @@ pub fn collect_read_backend_finished_metrics(
     length: u64,
     cost: Duration,
 ) {
-    let kind = kind.to_string();
-    let backend = backend.to_string();
-    let protocol = protocol_label(protocol);
-    let labels = [kind.as_str(), backend.as_str(), protocol.as_str()];
+    let labels = [
+        read_kind_label(kind),
+        backend_label(backend),
+        protocol_label(protocol),
+    ];
 
     READ_BACKEND_COUNT.with_label_values(&labels).inc();
 
@@ -439,10 +458,11 @@ pub fn collect_read_backend_failure_metrics(
     protocol: Option<Protocol>,
     cost: Duration,
 ) {
-    let kind = kind.to_string();
-    let backend = backend.to_string();
-    let protocol = protocol_label(protocol);
-    let labels = [kind.as_str(), backend.as_str(), protocol.as_str()];
+    let labels = [
+        read_kind_label(kind),
+        backend_label(backend),
+        protocol_label(protocol),
+    ];
 
     READ_BACKEND_COUNT.with_label_values(&labels).inc();
 
@@ -456,14 +476,14 @@ pub fn collect_read_backend_failure_metrics(
 /// Collects the validate block group started metrics.
 pub fn collect_validate_block_group_started_metrics(backend: Backend, protocol: Option<Protocol>) {
     VALIDATE_BLOCK_GROUP_COUNT
-        .with_label_values(&[backend.to_string().as_str(), &protocol_label(protocol)])
+        .with_label_values(&[backend_label(backend), protocol_label(protocol)])
         .inc();
 }
 
 /// Collects the validate block group failure metrics.
 pub fn collect_validate_block_group_failure_metrics(backend: Backend, protocol: Option<Protocol>) {
     VALIDATE_BLOCK_GROUP_FAILURE_COUNT
-        .with_label_values(&[backend.to_string().as_str(), &protocol_label(protocol)])
+        .with_label_values(&[backend_label(backend), protocol_label(protocol)])
         .inc();
 }
 
@@ -517,10 +537,10 @@ pub fn collect_read_block_group_metrics(
 ) {
     READ_BLOCK_GROUP_COUNT
         .with_label_values(&[
-            kind.to_string().as_str(),
+            read_kind_label(kind),
             storage.to_string().as_str(),
-            backend.to_string().as_str(),
-            &protocol_label(protocol),
+            backend_label(backend),
+            protocol_label(protocol),
         ])
         .inc();
 }
@@ -564,10 +584,11 @@ mod tests {
     }
 
     fn read_sample(kind: ReadKind, backend: Backend, protocol: Option<Protocol>) -> ReadSample {
-        let kind = kind.to_string();
-        let backend = backend.to_string();
-        let protocol = protocol_label(protocol);
-        let labels = [kind.as_str(), backend.as_str(), protocol.as_str()];
+        let labels = [
+            read_kind_label(kind),
+            backend_label(backend),
+            protocol_label(protocol),
+        ];
         ReadSample {
             count: READ_BACKEND_COUNT.with_label_values(&labels).get(),
             failure: READ_BACKEND_FAILURE_COUNT.with_label_values(&labels).get(),
@@ -590,12 +611,7 @@ mod tests {
             (
                 ReadKind::Prefetch,
                 Backend::Registry,
-                Some(Protocol::DragonflySdk),
-            ),
-            (
-                ReadKind::OnDemand,
-                Backend::Registry,
-                Some(Protocol::DragonflyHttp),
+                Some(Protocol::Dragonfly),
             ),
         ];
 
@@ -613,24 +629,24 @@ mod tests {
 
             assert!(
                 after.count - before.count >= 2,
-                "kind: {kind}, backend: {backend}, protocol: {protocol:?}"
+                "kind: {kind:?}, backend: {backend:?}, protocol: {protocol:?}"
             );
             assert_eq!(
                 after.failure - before.failure,
                 1,
-                "kind: {kind}, backend: {backend}, protocol: {protocol:?}"
+                "kind: {kind:?}, backend: {backend:?}, protocol: {protocol:?}"
             );
             assert!(
                 after.traffic - before.traffic >= 1024,
-                "kind: {kind}, backend: {backend}, protocol: {protocol:?}"
+                "kind: {kind:?}, backend: {backend:?}, protocol: {protocol:?}"
             );
             assert!(
                 after.duration_count - before.duration_count >= 2,
-                "kind: {kind}, backend: {backend}, protocol: {protocol:?}"
+                "kind: {kind:?}, backend: {backend:?}, protocol: {protocol:?}"
             );
             assert!(
                 after.duration_sum - before.duration_sum >= 12.0,
-                "kind: {kind}, backend: {backend}, protocol: {protocol:?}"
+                "kind: {kind:?}, backend: {backend:?}, protocol: {protocol:?}"
             );
         }
     }
@@ -640,13 +656,11 @@ mod tests {
         let test_cases = vec![
             (Backend::Local, None),
             (Backend::Registry, Some(Protocol::Http)),
-            (Backend::Registry, Some(Protocol::DragonflySdk)),
+            (Backend::Registry, Some(Protocol::Dragonfly)),
         ];
 
         for (backend, protocol) in test_cases {
-            let backend_label = backend.to_string();
-            let protocol_label = protocol_label(protocol);
-            let labels = [backend_label.as_str(), protocol_label.as_str()];
+            let labels = [backend_label(backend), protocol_label(protocol)];
             let count_before = VALIDATE_BLOCK_GROUP_COUNT.with_label_values(&labels).get();
             let failure_before = VALIDATE_BLOCK_GROUP_FAILURE_COUNT
                 .with_label_values(&labels)
@@ -657,14 +671,14 @@ mod tests {
 
             assert!(
                 VALIDATE_BLOCK_GROUP_COUNT.with_label_values(&labels).get() > count_before,
-                "backend: {backend}, protocol: {protocol:?}"
+                "backend: {backend:?}, protocol: {protocol:?}"
             );
             assert!(
                 VALIDATE_BLOCK_GROUP_FAILURE_COUNT
                     .with_label_values(&labels)
                     .get()
                     > failure_before,
-                "backend: {backend}, protocol: {protocol:?}"
+                "backend: {backend:?}, protocol: {protocol:?}"
             );
         }
     }
@@ -722,20 +736,17 @@ mod tests {
                 ReadKind::Prefetch,
                 Storage::Local,
                 Backend::Registry,
-                Some(Protocol::DragonflySdk),
+                Some(Protocol::Dragonfly),
             ),
         ];
 
         for (kind, storage, backend, protocol) in test_cases {
-            let kind_label = kind.to_string();
             let storage_label = storage.to_string();
-            let backend_label = backend.to_string();
-            let protocol_label = protocol_label(protocol);
             let labels = [
-                kind_label.as_str(),
+                read_kind_label(kind),
                 storage_label.as_str(),
-                backend_label.as_str(),
-                protocol_label.as_str(),
+                backend_label(backend),
+                protocol_label(protocol),
             ];
             let before = READ_BLOCK_GROUP_COUNT.with_label_values(&labels).get();
 
@@ -743,7 +754,7 @@ mod tests {
 
             assert!(
                 READ_BLOCK_GROUP_COUNT.with_label_values(&labels).get() > before,
-                "kind: {kind}, storage: {storage}, backend: {backend}, protocol: {protocol:?}"
+                "kind: {kind:?}, storage: {storage}, backend: {backend:?}, protocol: {protocol:?}"
             );
         }
     }
