@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 use blob_chunk::BlobWriter;
 use bootstrap::render_bootstrap;
-use inode::{build_tree, set_root_prefetch_blobs_xattr};
+use inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobFooter, BlobMetadata, BlobMetadataCompressor, NYDUS_BLOB_FOOTER_SIZE,
@@ -144,12 +144,7 @@ pub fn build_image(options: &BuildImageOptions, writer: impl Write) -> Result<Im
         &options.excludes,
     )?;
     blob_writer.finish()?;
-    let epoch = inodes
-        .iter()
-        .skip(1)
-        .map(|inode| inode.mtime)
-        .min()
-        .unwrap_or(0);
+    let epoch = choose_epoch(&inodes);
 
     let uuid_bytes = [0u8; 16];
     let blob_blocks = blob_writer.total_blocks();

@@ -114,6 +114,26 @@ pub struct ChildRef {
     pub inode_index: usize,
 }
 
+pub(crate) fn choose_epoch(inodes: &[InodeInfo]) -> u64 {
+    let mut counts = HashMap::<u64, usize>::new();
+    for inode in inodes {
+        if inode.mtime_nsec == 0
+            && !needs_erofs_extended_inode(inode.size, inode.uid, inode.gid, inode.nlink as u64)
+        {
+            *counts.entry(inode.mtime).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|(left_time, left_count), (right_time, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_time.cmp(left_time))
+        })
+        .map(|(mtime, _)| mtime)
+        .unwrap_or(0)
+}
+
 /// Calculate the size of an inode's metadata (header + xattr ibody + chunk indexes) for the final
 /// image.
 pub(crate) fn erofs_inode_size(inode: &InodeInfo) -> usize {
@@ -934,6 +954,44 @@ mod tests {
             },
             xattrs,
         }
+    }
+
+    #[test]
+    fn choose_epoch_counts_only_compact_candidates_and_breaks_ties_by_time() {
+        let candidate = |mtime| {
+            let mut inode = root_inode_with_xattrs(Vec::new());
+            inode.nlink = 1;
+            inode.mtime = mtime;
+            inode.mode = 0o100644;
+            inode.data = InodeData::RegularFile {
+                chunk_index_entries: Vec::new(),
+                chunk_size_bits: 12,
+            };
+            inode
+        };
+        assert_eq!(choose_epoch(&[]), 0);
+        assert_eq!(choose_epoch(&[root_inode_with_xattrs(Vec::new())]), 0);
+        let mut inodes = vec![candidate(0), candidate(100), candidate(100), candidate(200)];
+        for index in 0..5 {
+            let mut excluded = candidate(200);
+            match index {
+                0 => excluded.mtime_nsec = 1,
+                1 => excluded.size = u32::MAX as u64 + 1,
+                2 => excluded.uid = u16::MAX as u32 + 1,
+                3 => excluded.gid = u16::MAX as u32 + 1,
+                _ => excluded.nlink = 2,
+            }
+            assert_eq!(choose_epoch(std::slice::from_ref(&excluded)), 0);
+            inodes.push(excluded);
+        }
+        assert_eq!(choose_epoch(&inodes), 100);
+        inodes.reverse();
+        assert_eq!(choose_epoch(&inodes), 100);
+        inodes.push(candidate(200));
+        assert_eq!(choose_epoch(&inodes), 100);
+        inodes.push(candidate(200));
+        assert_eq!(choose_epoch(&inodes), 200);
+        assert_eq!(choose_epoch(&[candidate(100), candidate(0)]), 0);
     }
 
     #[test]

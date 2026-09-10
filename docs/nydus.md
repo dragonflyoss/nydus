@@ -77,8 +77,12 @@ truncating them or enabling newer features. Readers reject 48BIT and
 unsupported chunk formats. A failed build does not finalize its output or
 write success sidecars; bytes already written to a direct file/FIFO may remain.
 
-Compact inodes use exactly the superblock's shared timestamp. The builder keeps
-its deterministic epoch selection and `fixed_nsec = 0`; any inode with different
+Compact inodes use exactly the superblock's shared timestamp. Build, merge and
+optimize choose the most frequent mtime among distinct output inodes with zero
+nanoseconds that otherwise fit compact size, ownership and link-count fields.
+Ties choose the smallest seconds value; no candidates yields zero. Selection
+uses the final flattened tree, so hidden lower-layer inodes do not vote.
+With `fixed_nsec = 0`, any inode with different
 seconds or nonzero nanoseconds uses the extended format before layout is
 allocated. Build, merge, optimize and export preserve full timestamps, except
 for the existing intentional normalization of the source root to zero. Reserved
