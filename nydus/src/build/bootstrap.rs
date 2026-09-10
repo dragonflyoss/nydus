@@ -567,6 +567,77 @@ mod tests {
     }
 
     #[test]
+    fn common_epoch_reduces_bootstrap_size_without_changing_timestamps() {
+        use crate::build::inode::choose_epoch;
+        use nydus_format::erofs::EROFS_FT_REG_FILE;
+
+        let make_tree = || {
+            let mut inodes = symlink_tree(0, false, 0, Vec::new());
+            inodes.pop();
+            let mut children = Vec::new();
+            for index in 0..1024 {
+                children.push(ChildRef {
+                    name: format!("file-{index:04}").into_bytes(),
+                    file_type: EROFS_FT_REG_FILE,
+                    inode_index: index + 1,
+                });
+                inodes.push(InodeInfo {
+                    mode: 0o100644,
+                    uid: 0,
+                    gid: 0,
+                    size: 0,
+                    mtime: if index == 0 { 0 } else { 1_700_000_000 },
+                    mtime_nsec: 0,
+                    nlink: 1,
+                    ino: index as u32 + 2,
+                    nid: 0,
+                    meta_offset: 0,
+                    is_extended: false,
+                    data: InodeData::RegularFile {
+                        chunk_index_entries: Vec::new(),
+                        chunk_size_bits: 12,
+                    },
+                    xattrs: Vec::new(),
+                });
+            }
+            let InodeData::Directory {
+                children: root_children,
+                ..
+            } = &mut inodes[0].data
+            else {
+                unreachable!()
+            };
+            *root_children = children;
+            inodes
+        };
+        let mut before = make_tree();
+        let old = render_bootstrap(&mut before, 0, &[], &[0; 16]).unwrap();
+        let mut after = make_tree();
+        let epoch = choose_epoch(&after);
+        assert_eq!(epoch, 1_700_000_000);
+        let new = render_bootstrap(&mut after, epoch, &[], &[0; 16]).unwrap();
+        let old_compact = before.iter().filter(|inode| !inode.is_extended).count();
+        let new_compact = after.iter().filter(|inode| !inode.is_extended).count();
+        assert_eq!((old_compact, new_compact), (1, 1023));
+        assert!(new.len() < old.len());
+        for (old_inode, new_inode) in before.iter().zip(&after) {
+            let old_parsed =
+                ErofsInode::parse(&old[EROFS_BLOCK_SIZE as usize + old_inode.meta_offset..])
+                    .unwrap();
+            let new_parsed =
+                ErofsInode::parse(&new[EROFS_BLOCK_SIZE as usize + new_inode.meta_offset..])
+                    .unwrap();
+            assert_eq!(old_parsed.mtime(0), new_parsed.mtime(epoch));
+            assert_eq!(
+                old_parsed.effective_mtime_nsec(0),
+                new_parsed.effective_mtime_nsec(0)
+            );
+        }
+        println!("1024 empty files + root: bootstrap {} -> {} bytes; compact {old_compact} -> {new_compact}; extended {} -> {}",
+            old.len(), new.len(), before.len() - old_compact, after.len() - new_compact);
+    }
+
+    #[test]
     fn timestamps_round_trip_across_epoch_and_nanosecond_boundaries() {
         for epoch in [0u64, 1_700_000_000] {
             for (seconds, nanoseconds) in [

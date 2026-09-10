@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::build::bootstrap::{render_flattened_bootstrap, render_flattened_bootstrap_to};
 use crate::build::inode::{
-    flatten_tree, set_root_prefetch_blobs_xattr, InodeData, NamedChildren, NodeAttrs, TreeNode,
+    choose_epoch, flatten_tree, set_root_prefetch_blobs_xattr, InodeData, NamedChildren, NodeAttrs,
+    TreeNode,
 };
 use nydus_core::reader::RawDirEntry;
 use nydus_core::ErofsReader;
@@ -351,9 +352,7 @@ pub fn merge_sources_to_bootstrap_writer(
     drop(layers);
     release_freed_heap();
 
-    // `build_tree` zeroes the root mtime for reproducibility, so the minimum
-    // inode mtime read back from any layer is always 0.
-    let epoch = 0;
+    let epoch = choose_epoch(&inodes);
     let uuid = [0u8; 16];
     let blob_count = u16::try_from(device_slots.len())
         .map_err(|err| Error::Overflow(format!("device slot count exceeds u16: {err}")))?;
@@ -448,8 +447,7 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
     }
     set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_indexes)?;
 
-    // See merge_sources_to_bootstrap_bytes: the root mtime is always 0.
-    let epoch = 0;
+    let epoch = choose_epoch(&inodes);
     let uuid = [0u8; 16];
     render_flattened_bootstrap(&mut inodes, epoch, &device_slots, &uuid)
 }
@@ -560,6 +558,313 @@ mod tests {
             .keys()
             .map(|k| String::from_utf8_lossy(k).into_owned())
             .collect()
+    }
+
+    #[test]
+    fn build_merge_and_optimize_choose_epoch_from_visible_compact_candidates() {
+        use crate::build::{build_image, BuildImageOptions};
+        use nydus_format::blob::BlobMetadataCompressor;
+        use nydus_format::erofs::EROFS_INODE_COMPACT_SIZE;
+        use nydus_format::utils::hex_string;
+        use std::collections::HashSet;
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let lower = directory.path().join("lower");
+        let upper = directory.path().join("upper");
+        fs::create_dir(&lower).unwrap();
+        fs::create_dir(&upper).unwrap();
+        let lower_times = [
+            ("a", 100, 0, 1),
+            ("b", 100, 0, 1),
+            ("c", 100, 0, 1),
+            ("d", 200, 0, 1),
+            ("e", 200, 0, 1),
+            ("outlier", 0, 0, 1),
+            ("precise", 100, 123_456_789, 1),
+            ("linked", 1000, 0, 2),
+            ("survivor", 300, 0, 1),
+        ];
+        let upper_times = [("a", 300, 0, 1), ("b", 300, 0, 1), ("c", 300, 0, 1)];
+        let verify = |path: &Path, expected: &BTreeMap<&str, (u64, u32, u32, u32, u32)>| {
+            let mut counts = BTreeMap::<u64, usize>::new();
+            for &(seconds, nanoseconds, nlink, uid, gid) in expected.values() {
+                if nanoseconds == 0 && !needs_erofs_extended_inode(8, uid, gid, nlink as u64) {
+                    *counts.entry(seconds).or_default() += 1;
+                }
+            }
+            let epoch = counts
+                .into_iter()
+                .min_by_key(|&(seconds, count)| (std::cmp::Reverse(count), seconds))
+                .map_or(0, |(seconds, _)| seconds);
+            let reader = ErofsReader::open_metadata_only(path).unwrap();
+            assert_eq!(reader.superblock().epoch(), epoch, "{}", path.display());
+            let root_nid = reader.superblock().root_nid();
+            let root = reader.inode(root_nid).unwrap();
+            assert_eq!(root.mtime(epoch), 0);
+            assert_eq!(
+                root.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                0
+            );
+            let mut actual = BTreeMap::new();
+            for entry in reader.read_dir(root_nid, &root).unwrap() {
+                if entry.name == b"." || entry.name == b".." {
+                    continue;
+                }
+                let inode = reader.inode(entry.nid).unwrap();
+                let name = String::from_utf8(entry.name).unwrap();
+                let &(seconds, nanoseconds, nlink, uid, gid) = expected.get(name.as_str()).unwrap();
+                assert_eq!(inode.mtime(epoch), seconds);
+                assert_eq!(
+                    inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                    nanoseconds
+                );
+                assert_eq!(inode.nlink(), nlink);
+                assert_eq!(inode.uid(), uid);
+                assert_eq!(inode.gid(), gid);
+                assert_eq!(
+                    inode.header_size() == EROFS_INODE_COMPACT_SIZE,
+                    seconds == epoch
+                        && nanoseconds == 0
+                        && !needs_erofs_extended_inode(8, uid, gid, nlink as u64),
+                    "{name}"
+                );
+                actual.insert(name, (seconds, nanoseconds, nlink));
+            }
+            assert_eq!(actual.len(), expected.len());
+        };
+        let mut expected = BTreeMap::new();
+        let mut sources = Vec::new();
+        for (index, (source, times)) in [
+            (&lower, lower_times.as_slice()),
+            (&upper, upper_times.as_slice()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut layer_expected = BTreeMap::new();
+            for &(name, seconds, nanoseconds, nlink) in times {
+                let path = source.join(name);
+                fs::write(&path, b"contents").unwrap();
+                set_mtime(&path, seconds, nanoseconds);
+                let metadata = fs::metadata(&path).unwrap();
+                layer_expected.insert(
+                    name,
+                    (
+                        seconds as u64,
+                        nanoseconds as u32,
+                        nlink,
+                        metadata.uid(),
+                        metadata.gid(),
+                    ),
+                );
+            }
+            if index == 0 {
+                fs::hard_link(source.join("linked"), source.join("linked-alias")).unwrap();
+                layer_expected.insert("linked-alias", layer_expected["linked"]);
+            }
+            let blob = directory.path().join(format!("layer-{index}"));
+            let image = build_image(
+                &BuildImageOptions::new(
+                    source.to_path_buf(),
+                    EROFS_BLOCK_SIZE,
+                    1 << 20,
+                    BlobMetadataCompressor::None,
+                    HashSet::new(),
+                    true,
+                )
+                .unwrap(),
+                fs::File::create(&blob).unwrap(),
+            )
+            .unwrap();
+            let standalone = directory.path().join(format!("standalone-{index}"));
+            fs::write(&standalone, image.standalone_bootstrap.unwrap()).unwrap();
+            verify(&blob, &layer_expected);
+            verify(&standalone, &layer_expected);
+            let source_blob = directory.path().join(hex_string(&image.full_blob_digest));
+            fs::rename(blob, &source_blob).unwrap();
+            sources.push(source_blob);
+            expected.extend(layer_expected);
+        }
+        let merged = directory.path().join("merged");
+        fs::write(
+            &merged,
+            merge_sources_to_bootstrap_bytes(&sources, WhiteoutSpec::Oci).unwrap(),
+        )
+        .unwrap();
+        verify(&merged, &expected);
+        let optimized = directory.path().join("optimized");
+        fs::write(
+            &optimized,
+            rewrite_bootstrap_with_ondemand_blob(&merged, &[0x55; 32], 1).unwrap(),
+        )
+        .unwrap();
+        verify(&optimized, &expected);
+    }
+
+    #[test]
+    fn merge_and_optimize_reselect_epoch_and_reencode_parent_inodes() {
+        use crate::build::blob_chunk::BlobWriter;
+        use crate::build::bootstrap::render_bootstrap;
+        use crate::build::inode::{ChildRef, InodeInfo};
+        use nydus_format::blob::{finish_full_blob, BlobMetadataCompressor};
+        use nydus_format::erofs::{
+            EROFS_INODE_COMPACT_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+        };
+        use nydus_format::utils::{hex_string, sha256_bytes};
+
+        for (uid, gid) in [(0, 0), (u16::MAX as u32 + 1, 0), (0, u16::MAX as u32 + 1)] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = vec![b'a'; 4040];
+            let mut inodes = vec![InodeInfo {
+                mode: 0o040755,
+                uid,
+                gid,
+                size: 0,
+                mtime: 0,
+                mtime_nsec: 0,
+                nlink: 2,
+                ino: 1,
+                nid: 0,
+                meta_offset: 0,
+                is_extended: true,
+                data: InodeData::Directory {
+                    children: Vec::new(),
+                    startblk: 0,
+                    data_size: 0,
+                    parent_nid: 0,
+                },
+                xattrs: Vec::new(),
+            }];
+            let mut children = Vec::new();
+            for (name, seconds) in [
+                ("early", 100),
+                ("file-a", 300),
+                ("file-b", 300),
+                ("link", 300),
+            ] {
+                let is_symlink = name == "link";
+                let size = if is_symlink { target.len() as u64 } else { 0 };
+                let index = inodes.len();
+                children.push(ChildRef {
+                    name: name.as_bytes().to_vec(),
+                    file_type: if is_symlink {
+                        EROFS_FT_SYMLINK
+                    } else {
+                        EROFS_FT_REG_FILE
+                    },
+                    inode_index: index,
+                });
+                inodes.push(InodeInfo {
+                    mode: if is_symlink { 0o120777 } else { 0o100644 },
+                    uid,
+                    gid,
+                    size,
+                    mtime: seconds,
+                    mtime_nsec: 0,
+                    nlink: 1,
+                    ino: index as u32 + 1,
+                    nid: 0,
+                    meta_offset: 0,
+                    is_extended: needs_erofs_extended_inode(size, uid, gid, 1),
+                    data: if is_symlink {
+                        InodeData::Symlink {
+                            target: target.clone(),
+                            startblk: 0,
+                        }
+                    } else {
+                        InodeData::RegularFile {
+                            chunk_index_entries: Vec::new(),
+                            chunk_size_bits: 12,
+                        }
+                    },
+                    xattrs: Vec::new(),
+                });
+            }
+            if let InodeData::Directory {
+                children: root_children,
+                ..
+            } = &mut inodes[0].data
+            {
+                *root_children = children;
+            }
+            let slots = [ErofsDeviceSlot::with_blob_id(0, &[0x11; 32]).unwrap()];
+            let parent = directory.path().join("parent");
+            let parent_bytes = render_bootstrap(&mut inodes, 100, &slots, &[0; 16]).unwrap();
+            fs::write(&parent, &parent_bytes).unwrap();
+            let blob_writer = BlobWriter::from_writer(
+                Vec::new(),
+                EROFS_BLOCK_SIZE,
+                1 << 20,
+                BlobMetadataCompressor::None,
+            )
+            .unwrap();
+            let mut full_blob = Vec::new();
+            finish_full_blob(
+                &mut full_blob,
+                0,
+                &parent_bytes,
+                &blob_writer.blob_metadata(0).unwrap(),
+            )
+            .unwrap();
+            let source = directory.path().join(hex_string(&sha256_bytes(&full_blob)));
+            fs::write(&source, full_blob).unwrap();
+            let merged = directory.path().join("merged");
+            fs::write(
+                &merged,
+                merge_sources_to_bootstrap_bytes(&[source], WhiteoutSpec::Oci).unwrap(),
+            )
+            .unwrap();
+            let optimized = directory.path().join("optimized");
+            fs::write(
+                &optimized,
+                rewrite_bootstrap_with_ondemand_blob(&parent, &[0x55; 32], 1).unwrap(),
+            )
+            .unwrap();
+
+            let eligible = !needs_erofs_extended_inode(target.len() as u64, uid, gid, 1);
+            let chosen_epoch = if eligible { 300 } else { 0 };
+            for (path, epoch) in [
+                (&parent, 100),
+                (&merged, chosen_epoch),
+                (&optimized, chosen_epoch),
+            ] {
+                let reader = ErofsReader::open_metadata_only(path).unwrap();
+                assert_eq!(reader.superblock().epoch(), epoch);
+                let root_nid = reader.superblock().root_nid();
+                let root = reader.inode(root_nid).unwrap();
+                assert_eq!(root.mtime(epoch), 0);
+                let entries = reader.read_dir(root_nid, &root).unwrap();
+                let entries: Vec<_> = entries
+                    .iter()
+                    .filter(|entry| entry.name != b"." && entry.name != b"..")
+                    .collect();
+                assert_eq!(entries.len(), 4);
+                for entry in entries {
+                    let inode = reader.inode(entry.nid).unwrap();
+                    let seconds = if entry.name == b"early" { 100 } else { 300 };
+                    let compact = eligible && seconds == epoch;
+                    assert_eq!(inode.header_size() == EROFS_INODE_COMPACT_SIZE, compact);
+                    assert_eq!(inode.mtime(epoch), seconds);
+                    assert_eq!(
+                        inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                        0
+                    );
+                    assert_eq!((inode.uid(), inode.gid(), inode.nlink()), (uid, gid, 1));
+                    if entry.name == b"link" {
+                        assert_eq!(
+                            inode.data_layout(),
+                            if compact {
+                                EROFS_INODE_FLAT_INLINE
+                            } else {
+                                EROFS_INODE_FLAT_PLAIN
+                            }
+                        );
+                        assert_eq!(reader.read_symlink(entry.nid, &inode).unwrap(), target);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
