@@ -88,6 +88,11 @@ allocated. Build, merge, optimize and export preserve full timestamps, except
 for the existing intentional normalization of the source root to zero. Reserved
 compact time bytes are zero on output and are never decoded as a time delta.
 
+A non-inline symlink does not require an extended inode by itself: both header
+formats store its checked 32-bit data-block address. Header selection still
+respects size, ownership, link count and timestamp constraints; inline capacity
+uses the selected header size together with xattrs.
+
 No compatibility with older development images is retained. Rebuild affected
 images and derived caches when the format changes; there is no format guessing,
 legacy decoder or migration fallback. Later upstream 48BIT and compact-time

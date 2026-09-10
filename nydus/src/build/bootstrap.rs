@@ -418,9 +418,6 @@ fn alloc_inodes(layout: &mut MetadataLayout, inodes: &mut [InodeInfo], epoch: u6
         if inode.mtime != epoch || inode.mtime_nsec != 0 {
             inode.is_extended = true;
         }
-        if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
-            inode.is_extended = true;
-        }
         let inode_size = erofs_inode_size(inode);
         let has_inline = symlink_is_inline(inode);
         let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
@@ -533,16 +530,42 @@ mod tests {
         ]
     }
 
-    fn check_symlink_rendering(inodes: &mut [InodeInfo], expected_layout: u16) {
-        let image = render_bootstrap(inodes, 0, &[], &[0; 16]).unwrap();
+    fn check_symlink_rendering(
+        make_inodes: impl Fn() -> Vec<InodeInfo>,
+        expected_layout: u16,
+        expected_extended: bool,
+    ) {
+        let mut inodes = make_inodes();
+        let mut streamed_inodes = make_inodes();
+        let image = render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap();
         let mut streamed = Vec::new();
-        render_flattened_bootstrap_to(&mut streamed, inodes, 0, &[], &[0; 16]).unwrap();
+        render_flattened_bootstrap_to(&mut streamed, &mut streamed_inodes, 0, &[], &[0; 16])
+            .unwrap();
         assert_eq!(image, streamed);
+        for (buffered_inode, streamed_inode) in inodes.iter().zip(&streamed_inodes) {
+            assert_eq!(buffered_inode.nid, streamed_inode.nid);
+            assert_eq!(buffered_inode.meta_offset, streamed_inode.meta_offset);
+            assert_eq!(buffered_inode.is_extended, streamed_inode.is_extended);
+        }
 
         let block_size = EROFS_BLOCK_SIZE as usize;
         let inode_offset = block_size + inodes[1].meta_offset;
         let inode = ErofsInode::parse(&image[inode_offset..]).unwrap();
         assert_eq!(inode.data_layout(), expected_layout);
+        assert_eq!(inodes[1].is_extended, expected_extended);
+        assert_eq!(
+            inode.header_size(),
+            if expected_extended {
+                EROFS_INODE_EXTENDED_SIZE
+            } else {
+                EROFS_INODE_COMPACT_SIZE
+            }
+        );
+        assert_eq!(inode.uid(), inodes[1].uid);
+        assert_eq!(inode.gid(), inodes[1].gid);
+        assert_eq!(inode.nlink(), inodes[1].nlink);
+        assert_eq!(inode.mtime(0), inodes[1].mtime);
+        assert_eq!(inode.effective_mtime_nsec(0), inodes[1].mtime_nsec);
         let InodeData::Symlink { target, .. } = &inodes[1].data else {
             unreachable!();
         };
@@ -551,7 +574,7 @@ mod tests {
             assert!(offset % block_size + target.len() <= block_size);
             offset
         } else {
-            assert!(inodes[1].is_extended);
+            assert_ne!(inode.startblk(), 0);
             inode.startblk() as usize * block_size
         };
         assert_eq!(&image[data_offset..data_offset + target.len()], target);
@@ -647,12 +670,23 @@ mod tests {
                 (epoch + 1, 0),
                 (epoch + u32::MAX as u64 + 1, 999_999_999),
             ] {
-                let mut inodes = symlink_tree(4040, false, seconds, Vec::new());
-                inodes[1].mtime_nsec = nanoseconds;
+                let make_inodes = || {
+                    let mut inodes = symlink_tree(4040, false, seconds, Vec::new());
+                    inodes[1].mtime_nsec = nanoseconds;
+                    inodes
+                };
+                let mut inodes = make_inodes();
+                let mut streamed_inodes = make_inodes();
                 let image = render_bootstrap(&mut inodes, epoch, &[], &[0; 16]).unwrap();
                 let mut streamed = Vec::new();
-                render_flattened_bootstrap_to(&mut streamed, &mut inodes, epoch, &[], &[0; 16])
-                    .unwrap();
+                render_flattened_bootstrap_to(
+                    &mut streamed,
+                    &mut streamed_inodes,
+                    epoch,
+                    &[],
+                    &[0; 16],
+                )
+                .unwrap();
                 assert_eq!(image, streamed);
                 let mut file = tempfile::NamedTempFile::new().unwrap();
                 file.write_all(&image).unwrap();
@@ -732,8 +766,11 @@ mod tests {
                     (limit, EROFS_INODE_FLAT_INLINE),
                     (limit + 1, EROFS_INODE_FLAT_PLAIN),
                 ] {
-                    let mut inodes = symlink_tree(target_len, is_extended, 0, xattrs.clone());
-                    check_symlink_rendering(&mut inodes, expected_layout);
+                    check_symlink_rendering(
+                        || symlink_tree(target_len, is_extended, 0, xattrs.clone()),
+                        expected_layout,
+                        is_extended,
+                    );
                 }
             }
         }
@@ -741,8 +778,40 @@ mod tests {
 
     #[test]
     fn symlink_inline_rechecks_fit_after_timestamp_promotion() {
-        let mut inodes = symlink_tree(4040, false, u32::MAX as u64 + 1, Vec::new());
-        check_symlink_rendering(&mut inodes, EROFS_INODE_FLAT_PLAIN);
-        assert!(inodes[1].is_extended);
+        check_symlink_rendering(
+            || symlink_tree(4040, false, u32::MAX as u64 + 1, Vec::new()),
+            EROFS_INODE_FLAT_PLAIN,
+            true,
+        );
+    }
+
+    #[test]
+    fn non_inline_symlinks_preserve_header_constraints_and_metadata() {
+        use nydus_format::erofs::needs_erofs_extended_inode;
+
+        for (uid, gid, nlink, seconds, nanoseconds, expected_extended) in [
+            (0, 0, 1, 0, 0, false),
+            (u16::MAX as u32 + 1, 0, 1, 0, 0, true),
+            (0, u16::MAX as u32 + 1, 1, 0, 0, true),
+            (0, 0, 2, 0, 0, true),
+            (0, 0, 1, 1, 0, true),
+            (0, 0, 1, 0, 1, true),
+        ] {
+            check_symlink_rendering(
+                || {
+                    let mut inodes = symlink_tree(4070, false, seconds, Vec::new());
+                    let inode = &mut inodes[1];
+                    inode.uid = uid;
+                    inode.gid = gid;
+                    inode.nlink = nlink;
+                    inode.mtime_nsec = nanoseconds;
+                    inode.is_extended =
+                        needs_erofs_extended_inode(inode.size, uid, gid, nlink as u64);
+                    inodes
+                },
+                EROFS_INODE_FLAT_PLAIN,
+                expected_extended,
+            );
+        }
     }
 }
