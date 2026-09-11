@@ -1,6 +1,6 @@
 [package]
 name = "nydus"
-version = "3.0.0-alpha.1"
+version = "3.0.0-alpha.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "EROFS-oriented image tooling and runtime core APIs for Nydus images."
@@ -68,13 +68,13 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = { workspace = true }
 libublk = { version = "0.4", default-features = false, optional = true }
 memmap2 = { workspace = true }
-nydus-backend = { version = "3.0.0-alpha.1", path = "../nydus-backend" }
-nydus-config = { version = "3.0.0-alpha.1", path = "../nydus-config" }
-nydus-error = { version = "3.0.0-alpha.1", path = "../nydus-error" }
-nydus-format = { version = "3.0.0-alpha.1", path = "../nydus-format" }
-nydus-core = { version = "3.0.0-alpha.1", path = "../nydus-core" }
-nydus-storage = { version = "3.0.0-alpha.1", path = "../nydus-storage" }
-nydus-telemetry = { version = "3.0.0-alpha.1", path = "../nydus-telemetry", features = [
+nydus-backend = { version = "3.0.0-alpha.2", path = "../nydus-backend" }
+nydus-config = { version = "3.0.0-alpha.2", path = "../nydus-config" }
+nydus-error = { version = "3.0.0-alpha.2", path = "../nydus-error" }
+nydus-format = { version = "3.0.0-alpha.2", path = "../nydus-format" }
+nydus-core = { version = "3.0.0-alpha.2", path = "../nydus-core" }
+nydus-storage = { version = "3.0.0-alpha.2", path = "../nydus-storage" }
+nydus-telemetry = { version = "3.0.0-alpha.2", path = "../nydus-telemetry", features = [
   "logging",
 ] }
 serde = { workspace = true }
