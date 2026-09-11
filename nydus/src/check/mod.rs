@@ -156,6 +156,17 @@ pub struct BlobMetadataSummary {
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
+    /// Dense block groups (`DENSE_GROUPS`): chunk bytes encoded without
+    /// tail-block padding.
+    pub dense: bool,
+    /// Chunk table entries (pack chunks count once).
+    pub chunk_entries: usize,
+    /// Dense blobs: pack chunks and the small files they bundle.
+    pub pack_chunks: usize,
+    pub packed_files: u64,
+    /// Dense blobs: bytes the block groups decode to, i.e. the padded size
+    /// minus the tail padding the encoding leaves out.
+    pub dense_size: u64,
 }
 
 /// Which digest the device slot's blob ID turned out to be.
@@ -642,12 +653,29 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 
 fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> {
     let blob_metadata = BlobMetadata::from_bytes(data, false)?;
+    let mut pack_chunks = 0usize;
+    let mut packed_files = 0u64;
+    for index in 0..blob_metadata.chunk_count() {
+        if let Some(files) = blob_metadata.pack_files(index) {
+            pack_chunks += 1;
+            packed_files += files.count() as u64;
+        }
+    }
     Ok(BlobMetadataSummary {
         block_group_count: blob_metadata.block_group_count(),
         chunk_size: blob_metadata.chunk_size(),
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.uncompressed_size(),
         total_compressed_size: blob_metadata.compressed_end(),
+        dense: blob_metadata.is_dense(),
+        chunk_entries: blob_metadata.chunk_count(),
+        pack_chunks,
+        packed_files,
+        dense_size: blob_metadata
+            .block_groups()
+            .iter()
+            .map(|group| group.dense_size() as u64)
+            .sum(),
     })
 }
 

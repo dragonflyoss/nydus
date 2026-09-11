@@ -456,6 +456,14 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         block_group_count: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
         chunk_compressor: String,
+        #[tabled(rename = "GROUP LAYOUT")]
+        group_layout: String,
+        #[tabled(rename = "BLOB META CHUNK ENTRIES")]
+        blob_meta_chunk_entries: String,
+        #[tabled(rename = "PACK CHUNKS / PACKED FILES")]
+        pack_chunks: String,
+        #[tabled(rename = "BLOB DENSE SIZE")]
+        blob_dense_size: String,
         #[tabled(rename = "BLOB COMPRESSED SIZE")]
         blob_compressed_size: String,
         #[tabled(rename = "BLOB UNCOMPRESSED SIZE")]
@@ -472,6 +480,18 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
     }
 
     for (index, (blob_index, blob)) in blobs.iter().enumerate() {
+        let group_layout =
+            blob_metadata_field(blob, |meta| if meta.dense { "dense" } else { "padded" });
+        let pack_chunks = blob_metadata_field(blob, |meta| {
+            format!("{} / {}", meta.pack_chunks, meta.packed_files)
+        });
+        let blob_dense_size = blob_metadata_field(blob, |meta| {
+            if meta.dense {
+                meta.dense_size.to_string()
+            } else {
+                "-".to_string()
+            }
+        });
         let row = BlobRow {
             entry: index.to_string(),
             blob_index: blob_index.to_string(),
@@ -490,6 +510,10 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             chunk_size: blob_metadata_field(blob, |meta| meta.chunk_size),
             block_group_count: blob_metadata_field(blob, |meta| meta.block_group_count),
             chunk_compressor: blob_metadata_field(blob, |meta| meta.compressor),
+            group_layout,
+            blob_meta_chunk_entries: blob_metadata_field(blob, |meta| meta.chunk_entries),
+            pack_chunks,
+            blob_dense_size,
             blob_compressed_size: blob_metadata_field_or(
                 blob,
                 |meta| meta.total_compressed_size,

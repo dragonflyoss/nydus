@@ -241,6 +241,10 @@ Options:
 		Specify the content-addressed store directory to save the full blob into, named by its SHA256, so mounts resolve it through the bootstrap and images share the store [env: NYDUS_BUILD_BLOB_DIR=]
 	--erofs-data-alignment <EROFS_DATA_ALIGNMENT>
 		With --compressor erofs-lz4 or erofs-zstd, start files of at least this size on this boundary of the layer data (a power of two multiple of 4KiB), so block-level dedup and snapshots of the volume see identical files at stable offsets, e.g. 2mib for cloud disks deduplicating at 2MiB; 0 (the default) packs files back to back [env: NYDUS_BUILD_EROFS_DATA_ALIGNMENT=] [default: 0]
+	--dense-groups
+		Encode chunk-based block groups densely: file bytes are stored back to back without the per-file 4KiB tail padding of the address space the EROFS chunk indexes point into, and files of at most --pack-threshold bytes are bundled into pack chunks with a single blob meta entry. The mounted layout, DAX and kernel requirements are unchanged; the cache is inflated back to the padded layout on fill. Requires a nydus that understands the DENSE_GROUPS blob meta flag [env: NYDUS_BUILD_DENSE_GROUPS=]
+	--pack-threshold <PACK_THRESHOLD>
+		With --dense-groups, bundle regular files of at most this size into pack chunks (0 disables packing; at most the chunk size) [env: NYDUS_BUILD_PACK_THRESHOLD=] [default: 64KiB]
 	--bootstrap <BOOTSTRAP>
 		Specify the file path to save the standalone bootstrap: the store layout's entry point, whose device table records each blob's SHA256 [env: NYDUS_BUILD_BOOTSTRAP=]
 	--chunk-size <CHUNK_SIZE>
@@ -332,6 +336,56 @@ the caller already trusts the content:
 	slots as `named` and unverified.
 - `sha2` is built with its `asm` feature (SHA2 instructions on aarch64) and
 	gzip layers are inflated by zlib-ng.
+
+#### Dense block groups
+
+`--dense-groups` changes only how chunk-based block groups are encoded; the
+EROFS bootstrap, the chunk indexes, the padded address space the kernel reads
+and therefore DAX and the 5.16+ kernel requirement are exactly as without it.
+By default every file's last block is zero padded in the encoded stream as
+well, because a block group is the byte-for-byte image of its span of the
+address space. On a node_modules-heavy image that padding is large: in
+OpenClaw 2026.9.3 (123k regular files, 97% of them at most 64KiB) it is 352MB
+of a 3.27GB address space, 42.7% of the small-file region, and one blob meta
+chunk entry per file adds 5.9MB of `.blob.meta`.
+
+With the flag on, the encoded stream carries the files' bytes back to back
+(see [Dense block groups](#dense-block-groups-1) under the blob meta layout):
+
+- Regular files of at most `--pack-threshold` bytes (default 64KiB, at most
+	the chunk size) that follow each other in tree order are bundled into one
+	*pack chunk* of up to a chunk size of bytes — one chunk table entry whose
+	digest covers the pack — while each file still starts on its own block of
+	the padded address space, so its EROFS chunk index is unchanged. An
+	all-zero small file stays a hole. A larger file closes the open pack so all
+	three orders (stream, chunk table, address space) stay the same.
+- Larger files are chunked as before, minus the tail padding.
+- Block groups are filled to `--block-group-size` of dense bytes and cut at
+	the last block-aligned point, so their spans of the padded space vary but
+	every block belongs to exactly one group.
+- On fill the daemon scatters a decoded group back onto the padded blocks, so
+	the cache file, `read_at` and the pmem/DAX extents are unchanged; only the
+	fetch side sees dense groups.
+
+Measured on the same 31 OpenClaw layers (26 unique blobs, 4MiB groups):
+
+| | padded (default) | `--dense-groups` |
+| --- | ---: | ---: |
+| chunk table entries | 124,829 | 6,744 (1,779 packs) |
+| `.blob.meta` bytes | 6,180,864 | 749,568 |
+| block groups | 793 | 710 |
+| full blob bytes | 900,464,640 | 889,540,608 |
+| bytes the groups decode to | 3,272,032,256 | 2,919,993,731 |
+
+The small-file region alone drops from 194 to 111 groups of the same size, so
+a start-up hot set of small files needs about 43% fewer group fetches; zstd
+already compressed most of the padding away, so the full blob shrinks by only
+1.2%. Cache and page-cache footprint do not change: that is the price of
+keeping the padded layout the kernel mounts. The flag sets the incompat
+`DENSE_GROUPS` bit, so older nydus binaries reject such blobs instead of
+misreading them; `nydus check` reports `GROUP LAYOUT`, the chunk entry count
+and the packs per blob. z_erofs output has no chunk-based groups and rejects
+the flag.
 
 #### z_erofs output
 
@@ -1400,6 +1454,8 @@ embedded blob meta region
 | block_group_count                   |
 | chunk_block_count_bits (u8)         |
 | block_group_block_count_bits (u8 + pad)   |
+| pack_layout_offset (u64, dense only)      |
+| pack_layout_size (u32, dense only)        |
 | reserved tail (compat area)   |
 +-------------------------------+
 | chunk entries                 |
@@ -1408,7 +1464,7 @@ embedded blob meta region
 | digest (BLAKE3)               |
 | uncompressed_block_offset     |
 | uncompressed_block_count      |
-| reserved                      |
+| byte_len (dense only, else 0) |
 +-------------------------------+
 | block_group entries                 |
 | 40 bytes each                 |
@@ -1420,7 +1476,12 @@ embedded blob meta region
 | crc32c                        |
 | source_block_group_index            |
 | source_blob_index               |
-| reserved (6 bytes)            |
+| reserved (2 bytes)            |
+| dense_size (dense only, else 0) |
++-------------------------------+
+| pack layout (dense only)      |
+| per pack chunk: varint count, |
+| varint byte length per file   |
 +-------------------------------+
 | zero padding to 4 KiB         |
 +-------------------------------+
@@ -1443,7 +1504,9 @@ Header details:
 	`DIGESTER_BLAKE3` (`1 << 2`) for BLAKE3 chunk digests, or `DIGESTER_NONE`
 	(`1 << 4`) when the chunk digests are all-zero placeholders (`nydus build
 	--digester none`). `REDIRECT` (`1 << 3`) marks an ondemand blob whose block
-	groups are all redirect entries.
+	groups are all redirect entries. `DENSE_GROUPS` (`1 << 6`) marks a blob
+	whose groups encode the chunks' bytes without tail-block padding (see
+	[Dense block groups](#dense-block-groups-1) below).
 	Entry-layout evolution (wider chunk/block group entries, new entry kinds) is
 	expressed as a new incompat bit — the same way EROFS gates compact vs
 	extended inodes — while header growth uses the reserved tail plus a compat
@@ -1523,6 +1586,72 @@ The writer does not bias `compressed_offset` by the bootstrap size, and
 does not bias `uncompressed_block_offset`. Only the data region as a whole is
 padded to a 4 KiB boundary (so the embedded bootstrap that follows starts on a
 block); block groups themselves are not individually padded.
+
+#### Dense block groups
+
+With the incompat flag `DENSE_GROUPS` (`nydus build --dense-groups`) the
+encoded stream is the chunks' bytes back to back, not the byte-for-byte image
+of the padded address space. The address space itself — what the EROFS chunk
+indexes point into, what the cache file mirrors and what the kernel reads —
+is unchanged: every chunk and every packed file still starts on its own
+block. The two spaces differ only by the tail-block padding after each
+chunk, which the reader puts back when it writes a decoded group into the
+cache:
+
+```text
+address space (padded, what chunk indexes and the cache see)
++--------+----+--------------+----+---+----+--------------------+---+
+| file A | 0  |   file B     | 0  | C | 0  |      file D        | 0 |
++--------+----+--------------+----+---+----+--------------------+---+
+|<- pack chunk: A, B, C each on its own block ->|<- plain chunk D ->|
+
+encoded stream (dense, what block groups compress)
++--------+--------------+---+--------------------+
+| file A |   file B     | C |      file D        |
++--------+--------------+---+--------------------+
+|<--- pack, byte_len = |A|+|B|+|C| --->|<- D ->|
+```
+
+Field semantics under the flag:
+
+- Chunk entry `byte_len` (the padded layout's reserved field) is the chunk's
+	exact length in the encoded stream; bit 31 marks a *pack chunk*. A plain
+	chunk's `uncompressed_block_count` is `byte_len` rounded up to blocks. A
+	pack chunk bundles consecutive whole small files (at most `--pack-threshold`
+	bytes each, at most a chunk size together); its block count sums the files'
+	padded blocks and its digest covers the pack's bytes. The chunk table is
+	sorted by block offset with no overlaps, and its dense offsets are the
+	prefix sums of `byte_len`.
+- The pack layout table follows the block group table (`pack_layout_offset`,
+	`pack_layout_size` in the header): for every pack chunk in chunk table
+	order, an LEB128 varint file count followed by the files' varint byte
+	lengths. Together with the chunk's block offset that pins every file's
+	dense and padded position.
+- Block group entry `dense_size` (the first four reserved bytes) is the byte
+	length the payload decodes to and what `crc32c` covers; a group is stored
+	plain when `compressed_size == dense_size`. `uncompressed_block_offset` and
+	`uncompressed_block_count` are the group's span of the padded space, which
+	now varies: a group starts where the previous one ends and runs to the
+	block holding its last byte. The builder fills a group with block group
+	size bytes of the dense stream and cuts at the last block-aligned point (a
+	file start, a chunk start, or a 4KiB multiple inside a file), so every
+	block belongs to exactly one group and every group but the last decodes to
+	more than `block_group_size - 4KiB` bytes, i.e. spans at least the block
+	group size.
+- Redirect (ondemand) blobs copy `dense_size` from the source group along
+	with the crc; the artifact carries the flag when any source is dense, and a
+	redirect with `dense_size == 0` is a padded source group.
+
+Lookups stay O(1). Because every non-final group spans at least the block
+group size, a block-group-sized window of the address space meets at most two
+groups; the reader derives a window table at load (the first group meeting
+each window, 4 bytes per window — about 3KB for a 3GB blob) and answers
+`block >> block_group_block_count_bits` with one table read plus one
+comparison against the next group's start. Likewise it derives each group's
+dense offset and first chunk, and each chunk's dense offset and pack record,
+as prefix sums over the tables it already validates, so scattering a decoded
+group walks only the chunks (and, inside a pack, the files) that overlap it.
+Nothing is searched; nothing extra is stored on disk beyond the pack layout.
 
 ### Blocks, chunks and block groups
 

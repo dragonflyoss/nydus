@@ -67,13 +67,18 @@ const NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS: u8 = 19;
 /// Byte range of the crc32 field within the header.
 const NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD: Range<usize> = 16..20;
 
-/// Chunk entries' reserved field, held to zero: entry-layout evolution is
-/// signalled by an incompat flag bit, so writers zero it and readers reject
-/// anything else.
+/// Chunk entries' reserved field, held to zero in the padded layout:
+/// entry-layout evolution is signalled by an incompat flag bit, so writers
+/// zero it and readers reject anything else. Dense blobs
+/// ([`BlobMetadataFlags::DENSE_GROUPS`]) store the chunk's byte length there.
 const NYDUS_BLOB_METADATA_CHUNK_RESERVED: u32 = 0;
 
-/// Block group entries' reserved tail, held to zero the same way.
-const NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED: [u8; 6] = [0u8; 6];
+/// Bit of a dense chunk's byte-length field marking a pack chunk: several
+/// whole small files stored back to back, laid out by the pack layout table.
+pub const NYDUS_BLOB_METADATA_CHUNK_PACK_FLAG: u32 = 1 << 31;
+
+/// Block group entries' reserved tail, held to zero.
+const NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED: [u8; 2] = [0u8; 2];
 
 bitflags! {
     /// Feature bits, split EROFS-style (see [`crate::blob::flag`]): the low
@@ -90,6 +95,14 @@ bitflags! {
         const INCREMENTAL = 1 << 4;
         /// Chunk digests are all-zero placeholders (see `BlobMetadataDigester::None`).
         const DIGESTER_NONE = 1 << 5;
+        /// Incompat: block groups encode the chunks' bytes back to back
+        /// without the per-chunk tail-block padding of the uncompressed
+        /// address space. Chunk entries carry their byte length (pack
+        /// chunks bundle several small files, laid out by the pack layout
+        /// table), block group entries carry their dense payload size and
+        /// span a variable number of blocks, and a decoded group is
+        /// scattered back into the padded address space on cache fill.
+        const DENSE_GROUPS = 1 << 6;
         /// Compat: the data region is a raw z_erofs device (the kernel's
         /// pcluster map addresses it) and the block groups are stored-plain
         /// identity windows over it, carrying only fetch and crc granularity.
@@ -128,7 +141,11 @@ const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = BlobMetadataFlags::all().bit
 ///                                       4KiB block count, zero when the
 ///                                       table is empty or redirects
 ///     50     6  reserved1               writers zero it, readers ignore it
-///     56  4040  reserved                writers zero it, readers ignore it
+///     56     8  pack_layout_offset      dense blobs only: byte offset of
+///                                       the pack layout table, right
+///                                       after the block group table
+///     64     4  pack_layout_size        dense blobs only: its byte size
+///     68  4028  reserved                writers zero it, readers ignore it
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobMetadataHeader {
@@ -143,6 +160,8 @@ pub struct BlobMetadataHeader {
     block_group_count: u32,
     chunk_block_count_bits: u8,
     block_group_block_count_bits: u8,
+    pack_layout_offset: u64,
+    pack_layout_size: u32,
 }
 
 impl BlobMetadataHeader {
@@ -163,6 +182,8 @@ impl BlobMetadataHeader {
             block_group_count: read_u32_at(bytes, 44),
             chunk_block_count_bits: read_u8_at(bytes, 48),
             block_group_block_count_bits: read_u8_at(bytes, 49),
+            pack_layout_offset: read_u64_at(bytes, 56),
+            pack_layout_size: read_u32_at(bytes, 64),
         };
 
         header.validate()?;
@@ -186,6 +207,8 @@ impl BlobMetadataHeader {
         write_u32_at(&mut data, 44, self.block_group_count);
         write_u8_at(&mut data, 48, self.chunk_block_count_bits);
         write_u8_at(&mut data, 49, self.block_group_block_count_bits);
+        write_u64_at(&mut data, 56, self.pack_layout_offset);
+        write_u32_at(&mut data, 64, self.pack_layout_size);
         data
     }
 
@@ -252,6 +275,31 @@ impl BlobMetadataHeader {
         BlobMetadataDigester::try_from(flags)?;
         FeatureFlags::from_bits(self.flags)
             .validate_incompat(NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
+
+        // The pack layout fields sit in the reserved tail: a dense writer
+        // anchors the table right behind the block groups, any other
+        // writer's values there are ignored compat data.
+        if flags.contains(BlobMetadataFlags::DENSE_GROUPS) {
+            let expected_pack_layout_offset = self
+                .block_groups_offset
+                .checked_add(self.block_group_table_size())
+                .ok_or_else(|| {
+                    Error::Overflow("blob meta pack layout offset overflow".to_string())
+                })?;
+            if self.pack_layout_offset != expected_pack_layout_offset {
+                return Err(Error::InvalidImage(format!(
+                    "invalid blob meta pack layout offset: {}",
+                    self.pack_layout_offset
+                )));
+            }
+            if self.block_group_block_count_bits == 0
+                && !flags.contains(BlobMetadataFlags::REDIRECT)
+            {
+                return Err(Error::InvalidImage(
+                    "dense blob meta must declare its block group size".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -296,6 +344,13 @@ impl BlobMetadataHeader {
         self.flags().contains(BlobMetadataFlags::Z_EROFS_DEVICE)
     }
 
+    /// Whether block groups encode the chunks' bytes densely, without the
+    /// tail-block padding of the uncompressed address space (see
+    /// [`BlobMetadataFlags::DENSE_GROUPS`]).
+    pub fn is_dense(&self) -> bool {
+        self.flags().contains(BlobMetadataFlags::DENSE_GROUPS)
+    }
+
     /// Number of entries in the chunk table.
     pub fn chunk_count(&self) -> u32 {
         self.chunk_count
@@ -332,6 +387,12 @@ impl BlobMetadataHeader {
         1u32 << self.block_group_block_count_bits
     }
 
+    /// Uncompressed bytes per block group; for a dense blob, the dense
+    /// payload budget a group is filled up to.
+    pub fn block_group_size(&self) -> u32 {
+        EROFS_BLOCK_SIZE << self.block_group_block_count_bits
+    }
+
     /// Byte offset of the block group table, right after the chunk table.
     pub fn block_groups_offset(&self) -> u64 {
         self.block_groups_offset
@@ -342,10 +403,26 @@ impl BlobMetadataHeader {
         self.block_group_count as u64 * size_of::<BlobMetadataBlockGroup>() as u64
     }
 
+    /// Byte offset of the pack layout table (dense blobs), right after the
+    /// block group table; zero otherwise.
+    pub fn pack_layout_offset(&self) -> u64 {
+        self.pack_layout_offset
+    }
+
+    /// Byte size of the pack layout table (dense blobs); zero otherwise.
+    pub fn pack_layout_size(&self) -> u32 {
+        self.pack_layout_size
+    }
+
     /// Bytes the header and the tables actually use, before the tail
     /// padding.
     pub fn used_size(&self) -> u64 {
-        self.block_groups_offset + self.block_group_table_size()
+        let tables_end = self.block_groups_offset + self.block_group_table_size();
+        if self.is_dense() {
+            tables_end + self.pack_layout_size as u64
+        } else {
+            tables_end
+        }
     }
 
     /// The full serialized size: [`Self::used_size`] aligned up to one
@@ -369,8 +446,17 @@ impl BlobMetadataHeader {
 ///                                          digester flag
 ///     32     8  uncompressed_block_offset  4KiB blocks
 ///     40     4  uncompressed_block_count   4KiB blocks, never zero
-///     44     4  reserved                   must be zero
+///     44     4  byte_len                   dense blobs: the chunk's exact
+///                                          byte length in the encoded
+///                                          stream, bit 31 marking a pack
+///                                          chunk; zero otherwise
 /// ```
+///
+/// In a dense blob a plain chunk's `uncompressed_block_count` is its byte
+/// length rounded up to whole blocks. A pack chunk bundles several whole
+/// small files back to back in the encoded stream, each starting on its own
+/// block of the uncompressed address space; the pack layout table lists
+/// their byte lengths in order.
 ///
 /// The Rust layout is pinned to the on-disk layout (`repr(C)` plus the const
 /// size assert) so a mapped chunk table is readable in place, zero-copy.
@@ -380,7 +466,7 @@ pub struct BlobMetadataChunk {
     digest: [u8; 32],
     uncompressed_block_offset: u64,
     uncompressed_block_count: u32,
-    reserved: u32,
+    byte_len: u32,
 }
 
 // Pins the Rust layout to the on-disk entry size: a drift would break the
@@ -388,8 +474,8 @@ pub struct BlobMetadataChunk {
 const _: () = assert!(size_of::<BlobMetadataChunk>() == NYDUS_BLOB_METADATA_CHUNK_ENTRY_SIZE);
 
 impl BlobMetadataChunk {
-    /// Creates a validated chunk entry, so a constructed chunk is valid by
-    /// definition.
+    /// Creates a validated chunk entry of a padded blob, so a constructed
+    /// chunk is valid by definition.
     pub fn new(
         digest: [u8; 32],
         uncompressed_block_offset: u64,
@@ -399,7 +485,40 @@ impl BlobMetadataChunk {
             digest,
             uncompressed_block_offset,
             uncompressed_block_count,
-            reserved: NYDUS_BLOB_METADATA_CHUNK_RESERVED,
+            byte_len: NYDUS_BLOB_METADATA_CHUNK_RESERVED,
+        };
+
+        chunk.validate()?;
+        Ok(chunk)
+    }
+
+    /// Creates a validated chunk entry of a dense blob: `byte_len` is the
+    /// chunk's exact length in the encoded stream and `is_pack` marks a pack
+    /// of small files (whose `uncompressed_block_count` sums the files'
+    /// padded blocks). Cross-checks against the pack layout happen at table
+    /// validation.
+    pub fn new_dense(
+        digest: [u8; 32],
+        uncompressed_block_offset: u64,
+        uncompressed_block_count: u32,
+        byte_len: u32,
+        is_pack: bool,
+    ) -> Result<Self> {
+        if byte_len == 0 || byte_len & NYDUS_BLOB_METADATA_CHUNK_PACK_FLAG != 0 {
+            return Err(Error::InvalidImage(format!(
+                "blob meta dense chunk byte length out of range: {byte_len}"
+            )));
+        }
+        let chunk = Self {
+            digest,
+            uncompressed_block_offset,
+            uncompressed_block_count,
+            byte_len: byte_len
+                | if is_pack {
+                    NYDUS_BLOB_METADATA_CHUNK_PACK_FLAG
+                } else {
+                    0
+                },
         };
 
         chunk.validate()?;
@@ -413,7 +532,7 @@ impl BlobMetadataChunk {
             digest: bytes[0..32].try_into().unwrap(),
             uncompressed_block_offset: read_u64_at(bytes, 32),
             uncompressed_block_count: read_u32_at(bytes, 40),
-            reserved: read_u32_at(bytes, 44),
+            byte_len: read_u32_at(bytes, 44),
         };
 
         chunk.validate()?;
@@ -426,23 +545,18 @@ impl BlobMetadataChunk {
         data[0..32].copy_from_slice(&self.digest);
         write_u64_at(&mut data, 32, self.uncompressed_block_offset);
         write_u32_at(&mut data, 40, self.uncompressed_block_count);
-        write_u32_at(&mut data, 44, self.reserved);
+        write_u32_at(&mut data, 44, self.byte_len);
         data
     }
 
     /// Validate the intrinsic field invariants. Run by every construction
     /// path ([`Self::new`], [`Self::from_bytes`]), so a chunk in hand is
-    /// always valid. Mapped tables are validated entry by entry at load.
+    /// always valid. Whether the byte length field may be non-zero depends
+    /// on the header's dense flag, checked at table validation.
     fn validate(&self) -> Result<()> {
         if self.uncompressed_block_count == 0 {
             return Err(Error::InvalidImage(
                 "blob meta chunk uncompressed block count must be non-zero".to_string(),
-            ));
-        }
-
-        if self.reserved != NYDUS_BLOB_METADATA_CHUNK_RESERVED {
-            return Err(Error::InvalidImage(
-                "blob meta chunk reserved field must be zero".to_string(),
             ));
         }
 
@@ -494,6 +608,18 @@ impl BlobMetadataChunk {
     pub fn uncompressed_size(&self) -> u64 {
         self.uncompressed_block_count as u64 * EROFS_BLOCK_SIZE as u64
     }
+
+    /// Dense blobs: the chunk's exact byte length in the encoded stream
+    /// (zero in a padded blob, whose chunks are whole blocks).
+    pub fn byte_len(&self) -> u32 {
+        self.byte_len & !NYDUS_BLOB_METADATA_CHUNK_PACK_FLAG
+    }
+
+    /// Dense blobs: whether the chunk is a pack of small files laid out by
+    /// the pack layout table.
+    pub fn is_pack(&self) -> bool {
+        self.byte_len & NYDUS_BLOB_METADATA_CHUNK_PACK_FLAG != 0
+    }
 }
 
 /// One block group entry: how a span of the dense uncompressed address
@@ -523,12 +649,23 @@ impl BlobMetadataChunk {
 ///                                          back, no block alignment
 ///     16     4  uncompressed_block_count   4KiB blocks, never zero
 ///     20     4  compressed_size            bytes, never zero
-///     24     4  crc32                      crc32c of the uncompressed
-///                                          payload
+///     24     4  crc32                      crc32c of the decoded payload
 ///     28     4  source_block_group_index   redirect only, else zero
 ///     32     2  source_blob_index          non-zero marks a redirect
-///     34     6  reserved                   must be zero
+///     34     2  reserved                   must be zero
+///     36     4  dense_size                 dense blobs: bytes of the
+///                                          decoded payload, the chunks'
+///                                          bytes back to back; zero in a
+///                                          padded blob (payload = span)
 /// ```
+///
+/// In a dense blob the group's span is variable: it covers the padded
+/// blocks of the chunk bytes it encodes (plus any alignment gap before them)
+/// and starts where the previous group ends. Every group but the last
+/// encodes more than `block_group_size - 4KiB` dense bytes, so its span is
+/// at least the block group size and any block group sized window of the
+/// address space meets at most two groups (see
+/// [`BlobMetadata::block_group_index_from_uncompressed_offset`]).
 ///
 /// The Rust layout is pinned to the on-disk layout (`repr(C)` plus the const
 /// size assert) so a mapped block group table is readable in place,
@@ -543,7 +680,8 @@ pub struct BlobMetadataBlockGroup {
     crc32: u32,
     source_block_group_index: u32,
     source_blob_index: u16,
-    reserved: [u8; 6],
+    reserved: [u8; 2],
+    dense_size: u32,
 }
 
 // The same layout pin for block group entries.
@@ -551,8 +689,9 @@ const _: () =
     assert!(size_of::<BlobMetadataBlockGroup>() == NYDUS_BLOB_METADATA_BLOCK_GROUP_ENTRY_SIZE);
 
 impl BlobMetadataBlockGroup {
-    /// Creates a validated entry. `is_redirect` must agree with the non-zero
-    /// `source_blob_index` that marks a payload living in another source blob.
+    /// Creates a validated entry of a padded blob. `is_redirect` must agree
+    /// with the non-zero `source_blob_index` that marks a payload living in
+    /// another source blob.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         uncompressed_block_offset: u64,
@@ -564,6 +703,34 @@ impl BlobMetadataBlockGroup {
         source_block_group_index: u32,
         is_redirect: bool,
     ) -> Result<Self> {
+        Self::new_dense(
+            uncompressed_block_offset,
+            uncompressed_block_count,
+            compressed_offset,
+            compressed_size,
+            crc32,
+            source_blob_index,
+            source_block_group_index,
+            is_redirect,
+            0,
+        )
+    }
+
+    /// [`Self::new`] with the dense payload size: the number of bytes the
+    /// group decodes to when the blob is dense (zero for a padded blob or
+    /// a redirect of a padded source group).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_dense(
+        uncompressed_block_offset: u64,
+        uncompressed_block_count: u32,
+        compressed_offset: u64,
+        compressed_size: u32,
+        crc32: u32,
+        source_blob_index: u16,
+        source_block_group_index: u32,
+        is_redirect: bool,
+        dense_size: u32,
+    ) -> Result<Self> {
         let block_group = Self {
             uncompressed_block_offset,
             compressed_offset,
@@ -573,6 +740,7 @@ impl BlobMetadataBlockGroup {
             source_block_group_index,
             source_blob_index,
             reserved: NYDUS_BLOB_METADATA_BLOCK_GROUP_RESERVED,
+            dense_size,
         };
 
         block_group.validate(is_redirect)?;
@@ -593,7 +761,8 @@ impl BlobMetadataBlockGroup {
             crc32: read_u32_at(bytes, 24),
             source_block_group_index: read_u32_at(bytes, 28),
             source_blob_index: read_u16_at(bytes, 32),
-            reserved: bytes[34..40].try_into().unwrap(),
+            reserved: bytes[34..36].try_into().unwrap(),
+            dense_size: read_u32_at(bytes, 36),
         };
 
         block_group.validate(is_redirect)?;
@@ -610,7 +779,8 @@ impl BlobMetadataBlockGroup {
         write_u32_at(&mut data, 24, self.crc32);
         write_u32_at(&mut data, 28, self.source_block_group_index);
         write_u16_at(&mut data, 32, self.source_blob_index);
-        data[34..40].copy_from_slice(&self.reserved);
+        data[34..36].copy_from_slice(&self.reserved);
+        write_u32_at(&mut data, 36, self.dense_size);
         data
     }
 
@@ -649,6 +819,14 @@ impl BlobMetadataBlockGroup {
             return Err(Error::InvalidImage(
                 "blob meta block group reserved field must be zero".to_string(),
             ));
+        }
+
+        if self.dense_size as u64 > self.uncompressed_size() {
+            return Err(Error::InvalidImage(format!(
+                "blob meta block group dense size {} exceeds its {}-byte span",
+                self.dense_size,
+                self.uncompressed_size()
+            )));
         }
 
         self.uncompressed_block_offset
@@ -746,9 +924,31 @@ impl BlobMetadataBlockGroup {
         self.compressed_size
     }
 
-    /// crc32c of the group's uncompressed payload, checked after decode.
+    /// crc32c of the group's decoded payload, checked after decode.
     pub fn crc32(&self) -> u32 {
         self.crc32
+    }
+
+    /// Dense blobs: byte size of the decoded payload (the chunks' bytes
+    /// back to back); zero when the payload is the padded span itself.
+    pub fn dense_size(&self) -> u32 {
+        self.dense_size
+    }
+
+    /// Byte size the encoded payload decodes to: the dense size when set,
+    /// else the whole padded span.
+    pub fn payload_size(&self) -> u64 {
+        if self.dense_size != 0 {
+            self.dense_size as u64
+        } else {
+            self.uncompressed_size()
+        }
+    }
+
+    /// Whether the payload is the padded span itself, so a decoded group
+    /// is written to the cache in one piece at its span offset.
+    pub fn is_padded_payload(&self) -> bool {
+        self.dense_size == 0
     }
 
     /// Derive the header's `block_group_block_count_bits` from the groups
@@ -775,8 +975,245 @@ enum BlobMetadataStorage {
     Owned {
         chunks: Vec<BlobMetadataChunk>,
         block_groups: Vec<BlobMetadataBlockGroup>,
+        pack_layout: Vec<u8>,
     },
     Mapped(Mmap),
+}
+
+/// Append one pack's record to a pack layout table: a LEB128 varint file
+/// count followed by the files' LEB128 varint byte lengths, in the order
+/// the files sit in the pack.
+pub fn encode_pack_layout(file_lens: &[u32], out: &mut Vec<u8>) {
+    write_varint(file_lens.len() as u32, out);
+    for len in file_lens {
+        write_varint(*len, out);
+    }
+}
+
+fn write_varint(mut value: u32, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_varint(bytes: &[u8], pos: &mut usize) -> Result<u32> {
+    let mut value = 0u32;
+    for shift in (0..35).step_by(7) {
+        let byte = *bytes
+            .get(*pos)
+            .ok_or_else(|| Error::InvalidImage("blob meta pack layout truncated".to_string()))?;
+        *pos += 1;
+        let bits = (byte & 0x7f) as u32;
+        if shift == 28 && bits > 0xf {
+            break;
+        }
+        value |= bits << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(Error::InvalidImage(
+        "blob meta pack layout varint overflow".to_string(),
+    ))
+}
+
+/// The byte lengths of one pack's files, decoded from the pack layout table
+/// at the pack's record offset.
+pub struct PackFiles<'a> {
+    layout: &'a [u8],
+    pos: usize,
+    remaining: u32,
+}
+
+impl Iterator for PackFiles<'_> {
+    type Item = Result<u32>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        Some(read_varint(self.layout, &mut self.pos))
+    }
+}
+
+/// Lookup structures a dense blob derives from its tables at load, so the
+/// variable-span block groups still answer offset queries in O(1) and a
+/// decoded group scatters back into the padded address space without a
+/// search. All prefix sums over tables the load already walks; a few bytes
+/// per block group and per chunk.
+#[derive(Debug)]
+struct DenseIndex {
+    /// Per block-group-sized window of the uncompressed address space, the
+    /// first block group meeting it. Groups span at least one window, so a
+    /// window meets this group and at most the next one.
+    window_first_group: Vec<u32>,
+    /// Each group's start in the dense stream (prefix sum of dense sizes).
+    group_dense_offset: Vec<u64>,
+    /// Each group's first chunk: the first whose dense range reaches into
+    /// the group.
+    group_first_chunk: Vec<u32>,
+    /// Each chunk's start in the dense stream (prefix sum of byte lengths).
+    chunk_dense_offset: Vec<u64>,
+    /// Each chunk's record offset in the pack layout table, `u32::MAX` for
+    /// a plain chunk.
+    chunk_pack_layout: Vec<u32>,
+}
+
+impl DenseIndex {
+    /// Build the index, validating the dense invariants on the way: chunks
+    /// sorted and non-overlapping with byte lengths matching their spans,
+    /// pack records matching their chunks, group payloads filling the block
+    /// group size (all but the last), and both streams summing to the same
+    /// dense length.
+    fn build(
+        header: &BlobMetadataHeader,
+        chunks: &[BlobMetadataChunk],
+        block_groups: &[BlobMetadataBlockGroup],
+        pack_layout: &[u8],
+    ) -> Result<Self> {
+        let is_redirect = header.is_redirect();
+        let block_size = EROFS_BLOCK_SIZE as u64;
+        let chunk_size = header.chunk_size() as u64;
+
+        let mut chunk_dense_offset = Vec::with_capacity(chunks.len());
+        let mut chunk_pack_layout = Vec::with_capacity(chunks.len());
+        let mut dense_pos = 0u64;
+        let mut next_block = 0u64;
+        let mut layout_pos = 0usize;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let byte_len = chunk.byte_len() as u64;
+            if byte_len == 0 || byte_len > chunk_size {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta dense chunk {index} byte length {byte_len} out of range"
+                )));
+            }
+            if chunk.uncompressed_block_offset() < next_block {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta dense chunk {index} overlaps the previous chunk"
+                )));
+            }
+            let expected_blocks = if chunk.is_pack() {
+                let record = layout_pos;
+                let count = read_varint(pack_layout, &mut layout_pos)?;
+                let mut sum = 0u64;
+                let mut blocks = 0u64;
+                for _ in 0..count {
+                    let len = read_varint(pack_layout, &mut layout_pos)? as u64;
+                    if len == 0 {
+                        return Err(Error::InvalidImage(format!(
+                            "blob meta pack chunk {index} lists an empty file"
+                        )));
+                    }
+                    sum += len;
+                    blocks += len.div_ceil(block_size);
+                }
+                if sum != byte_len {
+                    return Err(Error::InvalidImage(format!(
+                        "blob meta pack chunk {index} files sum to {sum} bytes, chunk has {byte_len}"
+                    )));
+                }
+                chunk_pack_layout.push(u32::try_from(record).map_err(|_| {
+                    Error::Overflow("blob meta pack layout offset exceeds u32".to_string())
+                })?);
+                blocks
+            } else {
+                chunk_pack_layout.push(u32::MAX);
+                byte_len.div_ceil(block_size)
+            };
+            if chunk.uncompressed_block_count() as u64 != expected_blocks {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta dense chunk {index} spans {} blocks, its bytes need {expected_blocks}",
+                    chunk.uncompressed_block_count()
+                )));
+            }
+            chunk_dense_offset.push(dense_pos);
+            dense_pos += byte_len;
+            next_block =
+                chunk.uncompressed_block_offset() + chunk.uncompressed_block_count() as u64;
+        }
+        if layout_pos != pack_layout.len() {
+            return Err(Error::InvalidImage(
+                "blob meta pack layout has trailing bytes".to_string(),
+            ));
+        }
+        let chunk_dense_total = dense_pos;
+
+        let group_size = header.block_group_size() as u64;
+        let mut group_dense_offset = Vec::with_capacity(block_groups.len());
+        let mut group_first_chunk = Vec::with_capacity(block_groups.len());
+        let mut dense_pos = 0u64;
+        let mut chunk = 0usize;
+        for (index, block_group) in block_groups.iter().enumerate() {
+            let dense_size = block_group.dense_size() as u64;
+            let last = index + 1 == block_groups.len();
+            if !is_redirect {
+                if dense_size == 0 || dense_size > group_size {
+                    return Err(Error::InvalidImage(format!(
+                        "blob meta dense block group {index} payload {dense_size} out of range"
+                    )));
+                }
+                if !last && dense_size + block_size <= group_size {
+                    return Err(Error::InvalidImage(format!(
+                        "blob meta dense block group {index} payload {dense_size} leaves more than \
+                         a block of the {group_size}-byte group unused"
+                    )));
+                }
+            }
+            group_dense_offset.push(dense_pos);
+            while chunk < chunks.len()
+                && chunk_dense_offset[chunk] + chunks[chunk].byte_len() as u64 <= dense_pos
+            {
+                chunk += 1;
+            }
+            group_first_chunk.push(chunk as u32);
+            dense_pos += dense_size;
+        }
+        if !is_redirect && dense_pos != chunk_dense_total {
+            return Err(Error::InvalidImage(format!(
+                "blob meta dense block groups decode to {dense_pos} bytes, chunks hold {chunk_dense_total}"
+            )));
+        }
+
+        let total_blocks = block_groups
+            .last()
+            .map(|g| g.uncompressed_block_offset() + g.uncompressed_block_count() as u64)
+            .unwrap_or(0);
+        let bits = header.block_group_block_count_bits;
+        let windows = if bits == 0 {
+            0
+        } else {
+            usize::try_from(total_blocks.div_ceil(1u64 << bits))
+                .map_err(|_| Error::Overflow("blob meta window count exceeds usize".to_string()))?
+        };
+        let mut window_first_group = vec![u32::MAX; windows];
+        for (index, block_group) in block_groups.iter().enumerate() {
+            if bits == 0 {
+                break;
+            }
+            let start = block_group.uncompressed_block_offset() >> bits;
+            let end = (block_group.uncompressed_block_offset()
+                + block_group.uncompressed_block_count() as u64
+                - 1)
+                >> bits;
+            for window in start..=end {
+                let slot = &mut window_first_group[window as usize];
+                if *slot == u32::MAX {
+                    *slot = index as u32;
+                }
+            }
+        }
+
+        Ok(Self {
+            window_first_group,
+            group_dense_offset,
+            group_first_chunk,
+            chunk_dense_offset,
+            chunk_pack_layout,
+        })
+    }
 }
 
 /// A nydus blob's metadata: the chunk digest table and the block group table
@@ -787,10 +1224,10 @@ enum BlobMetadataStorage {
 /// the blob meta region of a full blob (see [`super::footer::BlobFooter`]):
 ///
 /// ```text
-/// ┌────────┬─────────────┬───────────────────┬──────────────┐
-/// │ header │ chunk table │ block group table │ zero padding │
-/// └────────┴─────────────┴───────────────────┴──────────────┘
-/// 0        4096                              ▲              EOF
+/// ┌────────┬─────────────┬───────────────────┬─────────────┬──────────────┐
+/// │ header │ chunk table │ block group table │ pack layout │ zero padding │
+/// └────────┴─────────────┴───────────────────┴─────────────┴──────────────┘
+/// 0        4096                              (dense only)  ▲              EOF
 ///                            the entries end here, the padding
 ///                            runs to the 4KiB-aligned padded_size
 /// ```
@@ -802,6 +1239,7 @@ enum BlobMetadataStorage {
 pub struct BlobMetadata {
     header: BlobMetadataHeader,
     storage: BlobMetadataStorage,
+    dense: Option<DenseIndex>,
 }
 
 impl BlobMetadata {
@@ -837,12 +1275,87 @@ impl BlobMetadata {
         is_redirect: bool,
         extra: BlobMetadataFlags,
     ) -> Result<Self> {
+        let block_group_block_count_bits =
+            BlobMetadataBlockGroup::infer_block_count_bits(&block_groups, is_redirect)?;
+        Self::assemble(
+            compressor,
+            digester,
+            block_count_to_bits(chunk_block_count)?,
+            block_group_block_count_bits,
+            chunks,
+            block_groups,
+            Vec::new(),
+            is_redirect,
+            extra,
+        )
+    }
+
+    /// Creates validated, sealed metadata of a dense blob
+    /// ([`BlobMetadataFlags::DENSE_GROUPS`]): the block group size is given
+    /// explicitly since the groups' spans vary, and `pack_layout` holds the
+    /// pack chunks' records in chunk table order (see
+    /// [`encode_pack_layout`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_dense(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        chunk_block_count: u32,
+        block_group_block_count: u32,
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+        pack_layout: Vec<u8>,
+        is_redirect: bool,
+        extra: BlobMetadataFlags,
+    ) -> Result<Self> {
+        Self::assemble(
+            compressor,
+            digester,
+            block_count_to_bits(chunk_block_count)?,
+            block_count_to_bits(block_group_block_count)?,
+            chunks,
+            block_groups,
+            pack_layout,
+            is_redirect,
+            extra | BlobMetadataFlags::DENSE_GROUPS,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        chunk_block_count_bits: u8,
+        block_group_block_count_bits: u8,
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+        pack_layout: Vec<u8>,
+        is_redirect: bool,
+        extra: BlobMetadataFlags,
+    ) -> Result<Self> {
         let mut flags = extra;
         flags.set(compressor.flag(), true);
         flags.set(digester.flag(), true);
         flags.set(BlobMetadataFlags::REDIRECT, is_redirect);
+        let is_dense = flags.contains(BlobMetadataFlags::DENSE_GROUPS);
+        if !is_dense && !pack_layout.is_empty() {
+            return Err(Error::InvalidParameter(
+                "blob meta pack layout requires dense block groups".to_string(),
+            ));
+        }
 
         let chunks_offset = NYDUS_BLOB_METADATA_HEADER_SIZE as u64;
+        let block_groups_offset = chunks_offset
+            .checked_add(chunks.len() as u64 * size_of::<BlobMetadataChunk>() as u64)
+            .ok_or_else(|| Error::Overflow("blob meta block group offset overflow".to_string()))?;
+        let pack_layout_offset = if is_dense {
+            block_groups_offset
+                .checked_add(block_groups.len() as u64 * size_of::<BlobMetadataBlockGroup>() as u64)
+                .ok_or_else(|| {
+                    Error::Overflow("blob meta pack layout offset overflow".to_string())
+                })?
+        } else {
+            0
+        };
         let header = BlobMetadataHeader {
             magic: NYDUS_BLOB_METADATA_MAGIC,
             version: NYDUS_BLOB_METADATA_VERSION,
@@ -850,18 +1363,14 @@ impl BlobMetadata {
             crc32: 0,
             reserved0: 0,
             chunks_offset,
-            block_groups_offset: chunks_offset
-                .checked_add(chunks.len() as u64 * size_of::<BlobMetadataChunk>() as u64)
-                .ok_or_else(|| {
-                    Error::Overflow("blob meta block group offset overflow".to_string())
-                })?,
+            block_groups_offset,
             chunk_count: chunks.len() as u32,
             block_group_count: block_groups.len() as u32,
-            chunk_block_count_bits: block_count_to_bits(chunk_block_count)?,
-            block_group_block_count_bits: BlobMetadataBlockGroup::infer_block_count_bits(
-                &block_groups,
-                is_redirect,
-            )?,
+            chunk_block_count_bits,
+            block_group_block_count_bits,
+            pack_layout_offset,
+            pack_layout_size: u32::try_from(pack_layout.len())
+                .map_err(|_| Error::Overflow("blob meta pack layout exceeds u32".to_string()))?,
         };
         header.validate()?;
 
@@ -870,9 +1379,12 @@ impl BlobMetadata {
             storage: BlobMetadataStorage::Owned {
                 chunks,
                 block_groups,
+                pack_layout,
             },
+            dense: None,
         };
         blob_metadata.validate()?;
+        blob_metadata.index_dense()?;
         blob_metadata.header.crc32 = blob_metadata.compute_crc32_from_parts();
         Ok(blob_metadata)
     }
@@ -899,8 +1411,9 @@ impl BlobMetadata {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let block_group_table =
-            &bytes[header.block_groups_offset() as usize..header.used_size() as usize];
+        let block_groups_end =
+            header.block_groups_offset() as usize + header.block_group_table_size() as usize;
+        let block_group_table = &bytes[header.block_groups_offset() as usize..block_groups_end];
         let block_groups = block_group_table
             .chunks_exact(size_of::<BlobMetadataBlockGroup>())
             .enumerate()
@@ -909,15 +1422,19 @@ impl BlobMetadata {
                     .with_context(|| format!("failed to read blob meta block group {index}"))
             })
             .collect::<Result<Vec<_>>>()?;
+        let pack_layout = bytes[block_groups_end..header.used_size() as usize].to_vec();
 
-        let blob_metadata = Self {
+        let mut blob_metadata = Self {
             header,
             storage: BlobMetadataStorage::Owned {
                 chunks,
                 block_groups,
+                pack_layout,
             },
+            dense: None,
         };
         blob_metadata.validate()?;
+        blob_metadata.index_dense()?;
         Ok(blob_metadata)
     }
 
@@ -937,12 +1454,28 @@ impl BlobMetadata {
         let header = BlobMetadataHeader::from_bytes(header_bytes)?;
         Self::validate_bytes(&mmap, &header, verify_crc32)?;
 
-        let blob_metadata = Self {
+        let mut blob_metadata = Self {
             header,
             storage: BlobMetadataStorage::Mapped(mmap),
+            dense: None,
         };
         blob_metadata.validate()?;
+        blob_metadata.index_dense()?;
         Ok(blob_metadata)
+    }
+
+    /// Derive the dense lookup index when the header declares dense block
+    /// groups (a padded blob keeps `None` and the shift-based lookup).
+    fn index_dense(&mut self) -> Result<()> {
+        if self.header.is_dense() {
+            self.dense = Some(DenseIndex::build(
+                &self.header,
+                self.chunks(),
+                self.block_groups(),
+                self.pack_layout(),
+            )?);
+        }
+        Ok(())
     }
 
     /// Validate the cross-entry table invariants. Run by every construction
@@ -954,7 +1487,9 @@ impl BlobMetadata {
 
     /// Every chunk must be intrinsically valid and end within the blocks
     /// the block groups cover. Runs before the density checks, so the bound
-    /// is just the last group's end, not yet a total.
+    /// is just the last group's end, not yet a total. A padded blob's
+    /// chunks must leave the byte length field zero; a dense blob's are
+    /// cross-checked in [`DenseIndex::build`].
     fn validate_chunks(&self) -> Result<()> {
         let uncompressed_block_end = self
             .block_groups()
@@ -964,11 +1499,18 @@ impl BlobMetadata {
                     + block_group.uncompressed_block_count() as u64
             })
             .unwrap_or(0);
+        let is_dense = self.header.is_dense();
 
         for (index, chunk) in self.chunks().iter().enumerate() {
             chunk
                 .validate()
                 .with_context(|| format!("invalid blob meta chunk {index}"))?;
+
+            if !is_dense && chunk.byte_len != NYDUS_BLOB_METADATA_CHUNK_RESERVED {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta chunk {index} reserved field must be zero"
+                )));
+            }
 
             let chunk_block_end = chunk
                 .uncompressed_block_offset()
@@ -991,8 +1533,9 @@ impl BlobMetadata {
     /// The block groups must tile the uncompressed address space densely
     /// from block 0 (making the last group's end the blob's total size),
     /// keep the uniform span the header declares (the final group may be
-    /// short, redirect blobs are exempt), and keep their compressed ranges
-    /// ordered and non-overlapping (gaps allowed).
+    /// short; redirect blobs and dense blobs, whose spans vary, are exempt),
+    /// and keep their compressed ranges ordered and non-overlapping (gaps
+    /// allowed). A padded blob's groups must leave the dense size zero.
     fn validate_block_groups(&self) -> Result<()> {
         let block_groups = self.block_groups();
         let block_group_block_count = self.header.block_group_block_count();
@@ -1003,12 +1546,19 @@ impl BlobMetadata {
         }
 
         let is_redirect = self.is_redirect();
+        let is_dense = self.header.is_dense();
         let mut next_uncompressed_block_offset = 0u64;
         let mut next_compressed_offset = 0u64;
         for (index, block_group) in block_groups.iter().enumerate() {
             block_group
                 .validate(is_redirect)
                 .with_context(|| format!("invalid blob meta block group {index}"))?;
+
+            if !is_dense && block_group.dense_size() != 0 {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta block group {index} dense size must be zero"
+                )));
+            }
 
             if block_group.uncompressed_block_offset() != next_uncompressed_block_offset {
                 return Err(Error::InvalidImage(format!(
@@ -1018,7 +1568,7 @@ impl BlobMetadata {
                 )));
             }
 
-            if !is_redirect {
+            if !is_redirect && !is_dense {
                 match (
                     index + 1 == block_groups.len(),
                     block_group.uncompressed_block_count(),
@@ -1120,6 +1670,7 @@ impl BlobMetadata {
         for block_group in self.block_groups() {
             block_group.write_to(writer)?;
         }
+        writer.write_all(self.pack_layout())?;
 
         let padding_size = (self.padded_size() - self.header.used_size()) as usize;
         writer.write_all(&[0u8; EROFS_BLOCK_SIZE as usize][..padding_size])?;
@@ -1206,6 +1757,133 @@ impl BlobMetadata {
         self.block_groups().get(index)
     }
 
+    /// The pack layout table (dense blobs; empty otherwise), backed the
+    /// same two ways as [`Self::chunks`].
+    pub fn pack_layout(&self) -> &[u8] {
+        match &self.storage {
+            BlobMetadataStorage::Owned { pack_layout, .. } => pack_layout,
+            BlobMetadataStorage::Mapped(mmap) => {
+                if !self.header.is_dense() {
+                    return &[];
+                }
+                let offset = self.header.pack_layout_offset() as usize;
+                &mmap[offset..offset + self.header.pack_layout_size() as usize]
+            }
+        }
+    }
+
+    /// Whether block groups encode the chunks' bytes densely (see
+    /// [`BlobMetadataFlags::DENSE_GROUPS`]), per the header flag.
+    pub fn is_dense(&self) -> bool {
+        self.header.is_dense()
+    }
+
+    /// Dense blobs: the byte lengths of the files in pack chunk
+    /// `chunk_index`, in pack order; `None` for a plain chunk or a padded
+    /// blob.
+    pub fn pack_files(&self, chunk_index: usize) -> Option<PackFiles<'_>> {
+        let dense = self.dense.as_ref()?;
+        let record = *dense.chunk_pack_layout.get(chunk_index)?;
+        if record == u32::MAX {
+            return None;
+        }
+        let layout = self.pack_layout();
+        let mut pos = record as usize;
+        let remaining = read_varint(layout, &mut pos).ok()?;
+        Some(PackFiles {
+            layout,
+            pos,
+            remaining,
+        })
+    }
+
+    /// Dense blobs: scatter block group `group_index`'s decoded payload
+    /// back into the padded uncompressed address space, calling `sink` with
+    /// every contiguous piece's absolute byte offset and bytes, in address
+    /// order. Pieces are the chunks (or, in a pack chunk, the files)
+    /// overlapping the group: each starts on its own block, so the bytes
+    /// between pieces are the tail-block padding the cache leaves zero.
+    /// For a padded blob the whole payload is one piece at the span start.
+    pub fn for_each_decoded_piece(
+        &self,
+        group_index: usize,
+        payload: &[u8],
+        sink: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let block_group = self.block_group(group_index).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "block group index out of range",
+            )
+        })?;
+        if payload.len() as u64 != block_group.payload_size() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "decoded block group length does not match its payload size",
+            ));
+        }
+        let Some(dense) = self
+            .dense
+            .as_ref()
+            .filter(|_| !block_group.is_padded_payload())
+        else {
+            return sink(block_group.uncompressed_offset(), payload);
+        };
+
+        let chunks = self.chunks();
+        let layout = self.pack_layout();
+        let block_size = EROFS_BLOCK_SIZE as u64;
+        let group_start = dense.group_dense_offset[group_index];
+        let group_end = group_start + payload.len() as u64;
+        let mut index = dense.group_first_chunk[group_index] as usize;
+        while index < chunks.len() {
+            let chunk = &chunks[index];
+            let chunk_start = dense.chunk_dense_offset[index];
+            if chunk_start >= group_end {
+                break;
+            }
+            let chunk_end = chunk_start + chunk.byte_len() as u64;
+            let piece_start = chunk_start.max(group_start);
+            let piece_end = chunk_end.min(group_end);
+            if piece_start < piece_end {
+                let record = dense.chunk_pack_layout[index];
+                if record == u32::MAX {
+                    let offset = chunk.uncompressed_offset() + (piece_start - chunk_start);
+                    sink(
+                        offset,
+                        &payload[(piece_start - group_start) as usize
+                            ..(piece_end - group_start) as usize],
+                    )?;
+                } else {
+                    let mut pos = record as usize;
+                    let count = read_varint(layout, &mut pos).map_err(invalid_layout)?;
+                    let mut file_start = chunk_start;
+                    let mut file_offset = chunk.uncompressed_offset();
+                    for _ in 0..count {
+                        let len = read_varint(layout, &mut pos).map_err(invalid_layout)? as u64;
+                        let file_end = file_start + len;
+                        if file_start >= piece_end {
+                            break;
+                        }
+                        let start = file_start.max(piece_start);
+                        let end = file_end.min(piece_end);
+                        if start < end {
+                            sink(
+                                file_offset + (start - file_start),
+                                &payload
+                                    [(start - group_start) as usize..(end - group_start) as usize],
+                            )?;
+                        }
+                        file_start = file_end;
+                        file_offset += len.div_ceil(block_size) * block_size;
+                    }
+                }
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
     /// Whether the blob is an ondemand redirect blob (every block group
     /// redirects to another source blob), per the header flag.
     pub fn is_redirect(&self) -> bool {
@@ -1232,8 +1910,11 @@ impl BlobMetadata {
     }
 
     /// The block group covering `uncompressed_offset`, `None` past the end
-    /// of the blob: dense fixed-size groups make this a single shift, no
-    /// search.
+    /// of the blob. Padded blobs have fixed-size groups, so this is a
+    /// single shift; dense blobs look the block group sized window up in
+    /// the load-time index and step to the next group when the offset lies
+    /// past its start (a window meets at most two groups). No search either
+    /// way.
     pub fn block_group_index_from_uncompressed_offset(
         &self,
         uncompressed_offset: u64,
@@ -1243,7 +1924,17 @@ impl BlobMetadata {
             return None;
         }
 
-        usize::try_from(block >> self.header.block_group_block_count_bits).ok()
+        let window = usize::try_from(block >> self.header.block_group_block_count_bits).ok()?;
+        let Some(dense) = self.dense.as_ref() else {
+            return Some(window);
+        };
+        let mut index = *dense.window_first_group.get(window)? as usize;
+        if let Some(next) = self.block_group(index + 1) {
+            if block >= next.uncompressed_block_offset() {
+                index += 1;
+            }
+        }
+        Some(index)
     }
 
     /// Total uncompressed byte size of the blob: block groups are validated
@@ -1298,10 +1989,15 @@ impl BlobMetadata {
         for block_group in self.block_groups() {
             crc32 = crc32c_append(crc32, &block_group.to_bytes());
         }
+        crc32 = crc32c_append(crc32, self.pack_layout());
 
         let padding_size = (self.padded_size() - self.header.used_size()) as usize;
         crc32c_append(crc32, &[0u8; EROFS_BLOCK_SIZE as usize][..padding_size])
     }
+}
+
+fn invalid_layout(err: Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
 }
 
 /// Encode a power-of-two 4KiB block count as the log2 stored in the
@@ -1678,9 +2374,6 @@ mod tests {
 
     #[test]
     fn invalid_chunk_entries_reject() {
-        let mut dirty_reserved = chunk(&[0x11], 0, 1).to_bytes();
-        write_u32_at(&mut dirty_reserved, 44, 1);
-
         let cases = [
             (
                 "zero block count",
@@ -1692,17 +2385,19 @@ mod tests {
                 BlobMetadataChunk::new([0u8; 32], u64::MAX, 1),
                 "overflow",
             ),
-            (
-                "nonzero reserved field",
-                BlobMetadataChunk::from_bytes(&dirty_reserved),
-                "reserved",
-            ),
         ];
 
         for (case, result, expected) in cases {
             let err = result.unwrap_err();
             assert!(err.to_string().contains(expected), "{case}: {err}");
         }
+
+        // The byte length field is reserved in a padded blob: the entry
+        // parses, the table rejects it.
+        let mut bytes = sealed_metadata();
+        write_u32_at(&mut bytes, NYDUS_BLOB_METADATA_HEADER_SIZE + 44, 1);
+        let err = BlobMetadata::from_bytes(&bytes, false).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
     }
 
     #[test]
@@ -1930,5 +2625,330 @@ mod tests {
         let loaded = BlobMetadata::from_bytes(&raw, true).unwrap();
         assert!(loaded.is_redirect());
         assert_eq!(loaded.block_groups(), block_groups.as_slice());
+    }
+
+    /// A dense fixture: a 2-block group budget (8 KiB), one pack of three
+    /// small files (100 + 5000 + 40 bytes, spanning 1 + 2 + 1 blocks) and a
+    /// 6000-byte plain chunk (2 blocks), cut into groups at aligned points.
+    /// Dense stream: [pack 5140][chunk 6000]; group 0 takes the whole pack
+    /// plus the first 4096 bytes of the chunk (9236 > 8192 - 4096, but the
+    /// cut must be block aligned, so 5140 + 4096 = 9236 exceeds the 8192
+    /// budget: group 0 is the pack alone and group 1 the chunk).
+    fn dense_fixture() -> (BlobMetadata, Vec<u8>, Vec<u8>) {
+        let files: [Vec<u8>; 3] = [vec![0xa1; 100], vec![0xb2; 5000], vec![0xc3; 40]];
+        let chunk_bytes = vec![0xd4; 6000];
+        let pack_bytes: Vec<u8> = files.concat();
+        let mut layout = Vec::new();
+        encode_pack_layout(&[100, 5000, 40], &mut layout);
+        let chunks = vec![
+            BlobMetadataChunk::new_dense(digest(&pack_bytes), 0, 4, 5140, true).unwrap(),
+            BlobMetadataChunk::new_dense(digest(&chunk_bytes), 4, 2, 6000, false).unwrap(),
+        ];
+        let block_groups = vec![
+            BlobMetadataBlockGroup::new_dense(
+                0,
+                4,
+                0,
+                5140,
+                crc32c::crc32c(&pack_bytes),
+                0,
+                0,
+                false,
+                5140,
+            )
+            .unwrap(),
+            BlobMetadataBlockGroup::new_dense(
+                4,
+                2,
+                5140,
+                6000,
+                crc32c::crc32c(&chunk_bytes),
+                0,
+                0,
+                false,
+                6000,
+            )
+            .unwrap(),
+        ];
+        let meta = BlobMetadata::new_dense(
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
+            2,
+            2,
+            chunks,
+            block_groups,
+            layout,
+            false,
+            BlobMetadataFlags::empty(),
+        )
+        .unwrap();
+        (meta, pack_bytes, chunk_bytes)
+    }
+
+    #[test]
+    fn dense_metadata_round_trips_and_scatters_packs() {
+        let (meta, pack_bytes, chunk_bytes) = dense_fixture();
+        assert!(meta.is_dense());
+        assert_eq!(meta.header().block_group_size(), 8192);
+        assert_eq!(meta.uncompressed_size(), 6 * EROFS_BLOCK_SIZE as u64);
+
+        let mut raw = Vec::new();
+        meta.write_to(&mut raw).unwrap();
+        let loaded = BlobMetadata::from_bytes(&raw, true).unwrap();
+        assert_eq!(loaded.chunks(), meta.chunks());
+        assert_eq!(loaded.block_groups(), meta.block_groups());
+        assert_eq!(loaded.pack_layout(), meta.pack_layout());
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dense.blob.meta");
+        meta.save(&path).unwrap();
+        let mapped = BlobMetadata::from_path(&path, true).unwrap();
+        assert_eq!(mapped.pack_layout(), meta.pack_layout());
+        assert!(mapped.chunks()[0].is_pack());
+        assert_eq!(mapped.chunks()[0].byte_len(), 5140);
+        assert!(!mapped.chunks()[1].is_pack());
+        assert_eq!(
+            mapped
+                .pack_files(0)
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap(),
+            vec![100, 5000, 40]
+        );
+        assert!(mapped.pack_files(1).is_none());
+
+        // Scatter: the pack's files land on their own blocks, the chunk at
+        // block 4.
+        let mut pieces = Vec::new();
+        mapped
+            .for_each_decoded_piece(0, &pack_bytes, &mut |offset, bytes| {
+                pieces.push((offset, bytes.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            pieces,
+            vec![
+                (0, vec![0xa1; 100]),
+                (4096, vec![0xb2; 5000]),
+                (3 * 4096, vec![0xc3; 40]),
+            ]
+        );
+        pieces.clear();
+        mapped
+            .for_each_decoded_piece(1, &chunk_bytes, &mut |offset, bytes| {
+                pieces.push((offset, bytes.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(pieces, vec![(4 * 4096, chunk_bytes.clone())]);
+        assert!(mapped
+            .for_each_decoded_piece(1, &chunk_bytes[..10], &mut |_, _| Ok(()))
+            .is_err());
+    }
+
+    #[test]
+    fn dense_lookup_is_by_window_and_handles_variable_spans() {
+        // Three groups whose spans differ from the 2-block budget: group 0
+        // spans 3 blocks (a 100-byte file padded twice over), group 1 spans
+        // 2, group 2 spans 4. Windows of 2 blocks each meet at most two.
+        let f = |len: usize, fill: u8| vec![fill; len];
+        let g0 = [f(100, 1), f(8000, 2)].concat(); // pack: 1 + 2 blocks
+        let g1 = f(8192, 3); // plain chunk, 2 blocks
+        let g2 = [f(1, 4), f(1, 5), f(1, 6), f(1, 7)].concat(); // pack: 4 blocks
+        let mut layout = Vec::new();
+        encode_pack_layout(&[100, 8000], &mut layout);
+        encode_pack_layout(&[1, 1, 1, 1], &mut layout);
+        let chunks = vec![
+            BlobMetadataChunk::new_dense(digest(&g0), 0, 3, 8100, true).unwrap(),
+            BlobMetadataChunk::new_dense(digest(&g1), 3, 2, 8192, false).unwrap(),
+            BlobMetadataChunk::new_dense(digest(&g2), 5, 4, 4, true).unwrap(),
+        ];
+        let groups = vec![
+            BlobMetadataBlockGroup::new_dense(
+                0,
+                3,
+                0,
+                8100,
+                crc32c::crc32c(&g0),
+                0,
+                0,
+                false,
+                8100,
+            )
+            .unwrap(),
+            BlobMetadataBlockGroup::new_dense(
+                3,
+                2,
+                8100,
+                8192,
+                crc32c::crc32c(&g1),
+                0,
+                0,
+                false,
+                8192,
+            )
+            .unwrap(),
+            BlobMetadataBlockGroup::new_dense(5, 4, 16292, 4, crc32c::crc32c(&g2), 0, 0, false, 4)
+                .unwrap(),
+        ];
+        let meta = BlobMetadata::new_dense(
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
+            2,
+            2,
+            chunks,
+            groups,
+            layout,
+            false,
+            BlobMetadataFlags::empty(),
+        )
+        .unwrap();
+        let block = EROFS_BLOCK_SIZE as u64;
+        let expect = [0, 0, 0, 1, 1, 2, 2, 2, 2];
+        for (b, g) in expect.iter().enumerate() {
+            assert_eq!(
+                meta.block_group_index_from_uncompressed_offset(b as u64 * block),
+                Some(*g),
+                "block {b}"
+            );
+            assert_eq!(
+                meta.block_group_index_from_uncompressed_offset(b as u64 * block + block - 1),
+                Some(*g),
+                "block {b} end"
+            );
+        }
+        assert_eq!(
+            meta.block_group_index_from_uncompressed_offset(9 * block),
+            None
+        );
+
+        let mut pieces = Vec::new();
+        meta.for_each_decoded_piece(2, &g2, &mut |offset, bytes| {
+            pieces.push((offset, bytes.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            pieces,
+            vec![
+                (5 * block, vec![4]),
+                (6 * block, vec![5]),
+                (7 * block, vec![6]),
+                (8 * block, vec![7]),
+            ]
+        );
+    }
+
+    #[test]
+    fn dense_tables_reject_inconsistent_layouts() {
+        let (meta, pack_bytes, chunk_bytes) = dense_fixture();
+        let chunks = meta.chunks().to_vec();
+        let groups = meta.block_groups().to_vec();
+        let layout = meta.pack_layout().to_vec();
+        let build = |chunks: Vec<BlobMetadataChunk>,
+                     groups: Vec<BlobMetadataBlockGroup>,
+                     layout: Vec<u8>| {
+            BlobMetadata::new_dense(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                2,
+                2,
+                chunks,
+                groups,
+                layout,
+                false,
+                BlobMetadataFlags::empty(),
+            )
+        };
+
+        // Pack files not summing to the chunk's bytes.
+        let mut bad_layout = Vec::new();
+        encode_pack_layout(&[100, 5000, 41], &mut bad_layout);
+        let err = build(chunks.clone(), groups.clone(), bad_layout).unwrap_err();
+        assert!(err.to_string().contains("sum to"), "{err}");
+
+        // Plain chunk whose block count does not cover its bytes.
+        let mut short = chunks.clone();
+        short[1] = BlobMetadataChunk::new_dense(digest(&chunk_bytes), 4, 1, 6000, false).unwrap();
+        let mut short_groups = groups.clone();
+        short_groups[1] = BlobMetadataBlockGroup::new_dense(
+            4,
+            1,
+            5140,
+            6000,
+            crc32c::crc32c(&chunk_bytes),
+            0,
+            0,
+            false,
+            4096,
+        )
+        .unwrap();
+        let err = build(short, short_groups, layout.clone()).unwrap_err();
+        assert!(err.to_string().contains("spans 1 blocks"), "{err}");
+
+        // Groups decoding to fewer bytes than the chunks hold.
+        let mut light = groups.clone();
+        light[1] = BlobMetadataBlockGroup::new_dense(
+            4,
+            2,
+            5140,
+            6000,
+            crc32c::crc32c(&chunk_bytes),
+            0,
+            0,
+            false,
+            5999,
+        )
+        .unwrap();
+        let err = build(chunks.clone(), light, layout.clone()).unwrap_err();
+        assert!(err.to_string().contains("decode to"), "{err}");
+
+        // A non-final group leaving more than a block of its budget unused.
+        let mut loose = groups.clone();
+        loose[0] = BlobMetadataBlockGroup::new_dense(
+            0,
+            4,
+            0,
+            5140,
+            crc32c::crc32c(&pack_bytes),
+            0,
+            0,
+            false,
+            4000,
+        )
+        .unwrap();
+        loose[1] = BlobMetadataBlockGroup::new_dense(
+            4,
+            2,
+            5140,
+            6000,
+            crc32c::crc32c(&chunk_bytes),
+            0,
+            0,
+            false,
+            7140,
+        )
+        .unwrap();
+        let err = build(chunks.clone(), loose, layout.clone()).unwrap_err();
+        assert!(err.to_string().contains("unused"), "{err}");
+
+        // Trailing pack layout bytes.
+        let mut trailing = layout.clone();
+        trailing.push(0);
+        let err = build(chunks.clone(), groups.clone(), trailing).unwrap_err();
+        assert!(err.to_string().contains("trailing"), "{err}");
+
+        // A padded blob must not carry a pack layout or dense sizes.
+        let err = BlobMetadata::new_with_flags(
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
+            1,
+            Vec::new(),
+            vec![groups[0]],
+            false,
+            BlobMetadataFlags::empty(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("dense size must be zero"), "{err}");
     }
 }

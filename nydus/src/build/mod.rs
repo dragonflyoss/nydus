@@ -73,6 +73,12 @@ pub struct BuildImageOptions {
     z_data_alignment: u32,
     /// Share packed fragment offsets between identical small files.
     z_fragment_dedup: bool,
+    /// Dense block groups: chunk bytes are encoded back to back without
+    /// tail-block padding and regular files of at most `pack_threshold`
+    /// bytes are bundled into pack chunks (see
+    /// `BlobMetadataFlags::DENSE_GROUPS`). The EROFS layout is unchanged.
+    dense_groups: bool,
+    pack_threshold: u64,
 }
 
 /// The built image as the caller sees it: the digests, blob meta and footer
@@ -152,12 +158,34 @@ impl BuildImageOptions {
             z_window_size: DEFAULT_Z_WINDOW_SIZE,
             z_data_alignment: 0,
             z_fragment_dedup: true,
+            dense_groups: false,
+            pack_threshold: 0,
         })
     }
     /// Selects the chunk digest algorithm; `None` skips chunk hashing.
     pub fn with_digester(mut self, digester: BlobMetadataDigester) -> Self {
         self.digester = digester;
         self
+    }
+
+    /// Selects dense block groups, bundling regular files of at most
+    /// `pack_threshold` bytes (0 packs nothing; at most the chunk size) into
+    /// pack chunks. Chunk-based output only.
+    pub fn with_dense_groups(mut self, pack_threshold: u64) -> Result<Self> {
+        if self.z_erofs.is_some() {
+            return Err(Error::InvalidParameter(
+                "dense block groups apply to chunk-based output only".to_string(),
+            ));
+        }
+        if pack_threshold > self.chunk_size as u64 {
+            return Err(Error::InvalidParameter(format!(
+                "pack threshold {pack_threshold} exceeds the chunk size {}",
+                self.chunk_size
+            )));
+        }
+        self.dense_groups = true;
+        self.pack_threshold = pack_threshold;
+        Ok(self)
     }
 
     /// Names the blob up front instead of by its sha256, skipping both
@@ -179,6 +207,11 @@ impl BuildImageOptions {
         blob_writer.set_digester(self.digester);
         if self.blob_id.is_some() {
             blob_writer.disable_data_digest();
+        }
+        if self.dense_groups {
+            blob_writer
+                .set_dense(self.pack_threshold)
+                .expect("dense options validated against the chunk size on a fresh writer");
         }
     }
 

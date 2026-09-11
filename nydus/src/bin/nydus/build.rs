@@ -73,6 +73,21 @@ pub struct BuildCommand {
 
     #[arg(
         long,
+        env = "NYDUS_BUILD_DENSE_GROUPS",
+        help = "Encode chunk-based block groups densely: file bytes are stored back to back without the per-file 4KiB tail padding of the address space the EROFS chunk indexes point into, and files of at most --pack-threshold bytes are bundled into pack chunks with a single blob meta entry. The mounted layout, DAX and kernel requirements are unchanged; the cache is inflated back to the padded layout on fill. Requires a nydus that understands the DENSE_GROUPS blob meta flag"
+    )]
+    dense_groups: bool,
+
+    #[arg(
+        long,
+        default_value = "64KiB",
+        env = "NYDUS_BUILD_PACK_THRESHOLD",
+        help = "With --dense-groups, bundle regular files of at most this size into pack chunks (0 disables packing; at most the chunk size)"
+    )]
+    pack_threshold: ByteSize,
+
+    #[arg(
+        long,
         env = "NYDUS_BUILD_BOOTSTRAP",
         help = "Specify the file path to save the standalone bootstrap: the store layout's entry point, whose device table records each blob's SHA256"
     )]
@@ -262,6 +277,11 @@ impl BuildCommand {
                 "--erofs-data-alignment requires --compressor erofs-lz4 or erofs-zstd".to_string(),
             ));
         }
+        if self.dense_groups && self.compressor.z_erofs().is_some() {
+            return Err(Error::InvalidParameter(
+                "--dense-groups applies to chunk-based compressors only".to_string(),
+            ));
+        }
 
         match self.source_type {
             SourceType::DirNydus => {
@@ -353,7 +373,7 @@ impl BuildCommand {
             .map(|options| options.with_z_fragment_dedup(self.erofs_fragment_dedup));
         }
 
-        Ok(BuildImageOptions::new(
+        let options = BuildImageOptions::new(
             source,
             chunk_size,
             block_group_size,
@@ -362,7 +382,11 @@ impl BuildCommand {
             self.bootstrap.is_some(),
         )?
         .with_digester(self.digester.into())
-        .with_blob_id(self.blob_id))
+        .with_blob_id(self.blob_id);
+        if self.dense_groups {
+            return options.with_dense_groups(self.pack_threshold.as_u64());
+        }
+        Ok(options)
     }
 
     /// Runs the build: writes the full blob, settles it under its final name,

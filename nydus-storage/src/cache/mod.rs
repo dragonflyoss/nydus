@@ -251,10 +251,10 @@ pub fn decode_block_group_from_window(
             )
         })?;
 
-    let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
+    let decoded_len = usize::try_from(block_group.payload_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "blob meta block group uncompressed size exceeds usize",
+            "blob meta block group payload size exceeds usize",
         )
     })?;
 
@@ -287,10 +287,10 @@ pub fn fetch_decode_validate_block_group_into<'a>(
         block_group.uncompressed_offset(),
         block_group.uncompressed_size(),
     );
-    let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
+    let decoded_len = usize::try_from(block_group.payload_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "blob meta block group uncompressed size exceeds usize",
+            "blob meta block group payload size exceeds usize",
         )
     })?;
     if is_stored_plain_block_group(blob_metadata, block_group) {
@@ -411,14 +411,42 @@ fn is_stored_plain_block_group(
     block_group: &BlobMetadataBlockGroup,
 ) -> bool {
     blob_metadata.compressor() == BlobMetadataCompressor::None
-        || u64::from(block_group.compressed_size()) == block_group.uncompressed_size()
+        || u64::from(block_group.compressed_size()) == block_group.payload_size()
+}
+
+/// Expand a decoded block group into its padded span: the payload itself
+/// for a padded blob, else the dense pieces scattered onto their blocks
+/// with zero tail padding between them.
+pub fn inflate_decoded_block_group<'a>(
+    blob_metadata: &BlobMetadata,
+    block_group_index: usize,
+    block_group: &BlobMetadataBlockGroup,
+    decoded: &'a [u8],
+) -> io::Result<std::borrow::Cow<'a, [u8]>> {
+    if block_group.is_padded_payload() {
+        return Ok(std::borrow::Cow::Borrowed(decoded));
+    }
+    let span = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "blob meta block group span exceeds usize",
+        )
+    })?;
+    let base = block_group.uncompressed_offset();
+    let mut padded = vec![0u8; span];
+    blob_metadata.for_each_decoded_piece(block_group_index, decoded, &mut |offset, bytes| {
+        let start = (offset - base) as usize;
+        padded[start..start + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    })?;
+    Ok(std::borrow::Cow::Owned(padded))
 }
 
 pub fn validate_decoded_block_group(
     block_group: &BlobMetadataBlockGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
-    let expected = block_group.uncompressed_size();
+    let expected = block_group.payload_size();
     if decoded.len() as u64 != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

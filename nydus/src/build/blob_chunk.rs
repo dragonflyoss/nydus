@@ -1,8 +1,9 @@
 use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-    BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
+    encode_pack_layout, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk,
+    BlobMetadataCompressor, BlobMetadataDigester, BlobMetadataFlags,
+    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
 };
 use nydus_format::erofs::{
     ErofsChunkAddr, ZAlgorithm, ZComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
@@ -74,6 +75,32 @@ pub struct BlobWriter<W> {
     z_frag_threshold: u64,
     z_packed: Option<ZPackedStream>,
     z_fragment_dedup: bool,
+    // Dense block groups (`BlobMetadataFlags::DENSE_GROUPS`): the group
+    // stream carries chunk bytes without tail-block padding and is cut at
+    // block-aligned points, so groups span a variable number of padded
+    // blocks. Regular files of at most `pack_threshold` bytes are bundled
+    // into pack chunks, each file still starting on its own block of the
+    // padded address space the EROFS chunk indexes address.
+    dense: bool,
+    pack_threshold: u64,
+    pack: Option<PackAccum>,
+    pack_layout: Vec<u8>,
+    // Padded byte position just past the last byte in `block_group_buffer`
+    // and the padded block where the next group's span starts (the
+    // previous group's end), plus the spans of groups handed to the
+    // encoder, in submission order.
+    dense_group_end: u64,
+    dense_next_group_block: u64,
+    dense_group_spans: VecDeque<(u64, u64)>,
+}
+
+/// A pack chunk under construction: consecutive small files appended back
+/// to back, each reserving its padded blocks from `start_blkaddr` on.
+struct PackAccum {
+    start_blkaddr: u64,
+    bytes: Vec<u8>,
+    file_lens: Vec<u32>,
+    blocks: u64,
 }
 
 /// The packed inode under construction: the bytes not yet handed to a
@@ -842,7 +869,40 @@ impl<W: Write> BlobWriter<W> {
             z_frag_threshold: 0,
             z_packed: None,
             z_fragment_dedup: true,
+            dense: false,
+            pack_threshold: 0,
+            pack: None,
+            pack_layout: Vec::new(),
+            dense_group_end: 0,
+            dense_next_group_block: 0,
+            dense_group_spans: VecDeque::new(),
         })
+    }
+
+    /// Enables dense block groups: chunk bytes are encoded back to back
+    /// without tail-block padding, and regular files of at most
+    /// `pack_threshold` bytes (zero packs nothing; at most the chunk size)
+    /// are bundled into pack chunks. Must be set before any data is written.
+    pub fn set_dense(&mut self, pack_threshold: u64) -> Result<()> {
+        if self.next_blkaddr != 0 || !self.block_group_buffer.is_empty() {
+            return Err(Error::InvalidParameter(
+                "dense block groups must be enabled before writing data".to_string(),
+            ));
+        }
+        if pack_threshold > self.file_chunk_size as u64 {
+            return Err(Error::InvalidParameter(format!(
+                "pack threshold {pack_threshold} exceeds the {}-byte chunk size",
+                self.file_chunk_size
+            )));
+        }
+        self.dense = true;
+        self.pack_threshold = pack_threshold;
+        Ok(())
+    }
+
+    /// Whether dense block groups are enabled.
+    pub fn is_dense(&self) -> bool {
+        self.dense
     }
 
     /// Selects the chunk digest algorithm recorded in the blob meta;
@@ -1241,6 +1301,19 @@ impl<W: Write> BlobWriter<W> {
             block_groups.push(block_group.checked_add_compressed_offset(source_offset_bias)?);
         }
 
+        if self.dense {
+            return Ok(BlobMetadata::new_dense(
+                self.compressor,
+                self.digester,
+                self.file_chunk_size / EROFS_BLOCK_SIZE,
+                self.block_group_size / EROFS_BLOCK_SIZE,
+                self.blob_metadata_chunks.clone(),
+                block_groups,
+                self.pack_layout.clone(),
+                false,
+                BlobMetadataFlags::empty(),
+            )?);
+        }
         Ok(BlobMetadata::new(
             self.compressor,
             self.digester,
@@ -1257,10 +1330,12 @@ impl<W: Write> BlobWriter<W> {
     }
 
     pub fn finish(&mut self) -> Result<()> {
-        // The data stream is byte granular, so the tail block group must be
-        // zero padded to a whole block before it is flushed (block groups
-        // always describe whole uncompressed blocks).
-        if !self.block_group_buffer.is_empty() {
+        self.flush_pack()?;
+        // The padded data stream is byte granular, so the tail block group
+        // must be zero padded to a whole block before it is flushed (block
+        // groups always describe whole uncompressed blocks). Dense groups
+        // carry no padding: their span rounds up on its own.
+        if !self.dense && !self.block_group_buffer.is_empty() {
             let padded =
                 align_up_usize(self.block_group_buffer.len(), EROFS_BLOCK_SIZE as usize)
                     .ok_or_else(|| Error::Overflow("block group padding overflow".to_string()))?;
@@ -1307,6 +1382,44 @@ impl<W: Write> BlobWriter<W> {
         if chunk_buf.len() < self.file_chunk_size as usize {
             chunk_buf = vec![0u8; self.file_chunk_size as usize];
         }
+
+        // Dense mode bundles small files into pack chunks; anything else
+        // closes the open pack first so the encoded stream, the chunk table
+        // and the padded address space all keep the same order.
+        if self.dense && self.pack_threshold > 0 && file_size <= self.pack_threshold {
+            let to_read = file_size as usize;
+            if let Err(err) = reader
+                .read_exact(&mut chunk_buf[..to_read])
+                .context("failed to read source data")
+            {
+                self.chunk_buf = chunk_buf;
+                return Err(err);
+            }
+            let index = if chunk_buf[..to_read].iter().all(|&byte| byte == 0) {
+                ErofsChunkAddr {
+                    blkaddr: EROFS_NULL_ADDR,
+                    device_id: 0,
+                }
+            } else {
+                match self.pack_file(&chunk_buf[..to_read]) {
+                    Ok(blkaddr) => ErofsChunkAddr {
+                        blkaddr,
+                        device_id: 1,
+                    },
+                    Err(err) => {
+                        self.chunk_buf = chunk_buf;
+                        return Err(err);
+                    }
+                }
+            };
+            self.chunk_buf = chunk_buf;
+            return Ok(vec![index]);
+        }
+        if let Err(err) = self.flush_pack() {
+            self.chunk_buf = chunk_buf;
+            return Err(err);
+        }
+
         for i in 0..chunk_count {
             let remaining = file_size - i * chunk_size;
             let to_read = remaining.min(chunk_size) as usize;
@@ -1375,20 +1488,28 @@ impl<W: Write> BlobWriter<W> {
         self.next_blkaddr = next_blkaddr;
 
         // Record the chunk by its absolute block position; chunks are tracked
-        // independently of block groups as a digest index only. The digest
-        // covers the block-aligned payload (real bytes plus tail-block zero
-        // padding), hashed in place to avoid materialising a padded copy.
+        // independently of block groups as a digest index only. A padded
+        // blob's digest covers the block-aligned payload (real bytes plus
+        // tail-block zero padding), hashed in place to avoid materialising a
+        // padded copy; a dense blob's covers the bytes it actually stores.
         let digest = match self.digester {
             BlobMetadataDigester::Blake3 => {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(data);
-                if write_len > data.len() {
+                if !self.dense && write_len > data.len() {
                     hasher.update(&ZERO_BLOCK[..write_len - data.len()]);
                 }
                 *hasher.finalize().as_bytes()
             }
             BlobMetadataDigester::None => [0u8; 32],
         };
+        if self.dense {
+            let chunk =
+                BlobMetadataChunk::new_dense(digest, addr, block_count, data.len() as u32, false)?;
+            self.blob_metadata_chunks.push(chunk);
+            self.append_dense_piece(data, addr * EROFS_BLOCK_SIZE as u64)?;
+            return Ok(addr);
+        }
         let chunk = BlobMetadataChunk::new(digest, addr, block_count)?;
         self.blob_metadata_chunks.push(chunk);
 
@@ -1399,6 +1520,112 @@ impl<W: Write> BlobWriter<W> {
             self.append_to_block_group_stream(&ZERO_BLOCK[..write_len - data.len()])?;
         }
         Ok(addr)
+    }
+
+    /// Dense mode: append one small file to the open pack (starting a new
+    /// pack when there is none or the file would not fit), reserving its
+    /// padded blocks, and return the block it starts on.
+    fn pack_file(&mut self, data: &[u8]) -> Result<u64> {
+        let blocks = data.len().div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
+        if self
+            .pack
+            .as_ref()
+            .is_some_and(|pack| pack.bytes.len() + data.len() > self.file_chunk_size as usize)
+        {
+            self.flush_pack()?;
+        }
+        let next_blkaddr = self
+            .next_blkaddr
+            .checked_add(blocks)
+            .filter(|count| *count <= u32::MAX as u64)
+            .ok_or_else(|| {
+                Error::Overflow(format!(
+                    "decoded blob exceeds 32-bit block count: start {}, file blocks {blocks}",
+                    self.next_blkaddr
+                ))
+            })?;
+        let pack = self.pack.get_or_insert_with(|| PackAccum {
+            start_blkaddr: self.next_blkaddr,
+            bytes: Vec::with_capacity(self.file_chunk_size as usize),
+            file_lens: Vec::new(),
+            blocks: 0,
+        });
+        let blkaddr = pack.start_blkaddr + pack.blocks;
+        pack.bytes.extend_from_slice(data);
+        pack.file_lens.push(data.len() as u32);
+        pack.blocks += blocks;
+        self.next_blkaddr = next_blkaddr;
+        Ok(blkaddr)
+    }
+
+    /// Dense mode: close the open pack into a pack chunk entry, a pack
+    /// layout record, and its files' bytes on the group stream.
+    fn flush_pack(&mut self) -> Result<()> {
+        let Some(pack) = self.pack.take() else {
+            return Ok(());
+        };
+        let digest = match self.digester {
+            BlobMetadataDigester::Blake3 => *blake3::hash(&pack.bytes).as_bytes(),
+            BlobMetadataDigester::None => [0u8; 32],
+        };
+        let block_count = u32::try_from(pack.blocks).map_err(|err| {
+            Error::Overflow(format!("blob meta pack block count exceeds u32: {err}"))
+        })?;
+        self.blob_metadata_chunks.push(BlobMetadataChunk::new_dense(
+            digest,
+            pack.start_blkaddr,
+            block_count,
+            pack.bytes.len() as u32,
+            true,
+        )?);
+        encode_pack_layout(&pack.file_lens, &mut self.pack_layout);
+
+        // Files go on the stream one by one so every file start is a legal
+        // cut point (each starts on its own padded block).
+        let mut padded = pack.start_blkaddr * EROFS_BLOCK_SIZE as u64;
+        let mut start = 0usize;
+        for len in pack.file_lens {
+            let end = start + len as usize;
+            self.append_dense_piece(&pack.bytes[start..end], padded)?;
+            padded += (len as u64).div_ceil(EROFS_BLOCK_SIZE as u64) * EROFS_BLOCK_SIZE as u64;
+            start = end;
+        }
+        Ok(())
+    }
+
+    /// Dense mode: append a piece (a chunk or a packed file) whose first
+    /// byte sits at padded position `padded_start`, a block boundary. The
+    /// group budget is the block group size of dense bytes; when a piece
+    /// straddles it, the cut lands on the last block-aligned point within
+    /// the piece so every group span stays whole blocks and every block
+    /// belongs to exactly one group.
+    fn append_dense_piece(&mut self, data: &[u8], padded_start: u64) -> Result<()> {
+        let block_group_size = self.block_group_size as usize;
+        let block = EROFS_BLOCK_SIZE as usize;
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let space = block_group_size - self.block_group_buffer.len();
+            let remaining = data.len() - offset;
+            let take = if space >= remaining {
+                remaining
+            } else {
+                space / block * block
+            };
+            if take == 0 {
+                // Only reachable with a non-empty buffer: an empty group has a
+                // full budget, which is at least one block.
+                self.flush_block_group()?;
+                continue;
+            }
+            self.block_group_buffer
+                .extend_from_slice(&data[offset..offset + take]);
+            offset += take;
+            self.dense_group_end = padded_start + offset as u64;
+            if self.block_group_buffer.len() == block_group_size {
+                self.flush_block_group()?;
+            }
+        }
+        Ok(())
     }
 
     /// Append data to the current block group, flushing whenever it fills to
@@ -1421,6 +1648,14 @@ impl<W: Write> BlobWriter<W> {
     fn flush_block_group(&mut self) -> Result<()> {
         if self.block_group_buffer.is_empty() {
             return Ok(());
+        }
+        if self.dense {
+            // The span starts where the previous group ended and runs to the
+            // block holding the last appended byte.
+            let end_block = self.dense_group_end.div_ceil(EROFS_BLOCK_SIZE as u64);
+            self.dense_group_spans
+                .push_back((self.dense_next_group_block, end_block));
+            self.dense_next_group_block = end_block;
         }
 
         if self.encoder.is_none() {
@@ -1473,18 +1708,40 @@ impl<W: Write> BlobWriter<W> {
                     "blob meta block group uncompressed block count exceeds u32: {err}"
                 ))
             })?;
-        let entry = BlobMetadataBlockGroup::new(
-            self.block_group_block_offset,
-            block_count,
-            compressed_offset,
-            encoded.len() as u32,
-            group.crc32,
-            0,
-            0,
-            false,
-        )?;
+        let entry = if self.dense {
+            let (start_block, end_block) = self
+                .dense_group_spans
+                .pop_front()
+                .expect("every submitted dense group queued its span");
+            let span = u32::try_from(end_block - start_block).map_err(|err| {
+                Error::Overflow(format!("blob meta block group span exceeds u32: {err}"))
+            })?;
+            BlobMetadataBlockGroup::new_dense(
+                start_block,
+                span,
+                compressed_offset,
+                encoded.len() as u32,
+                group.crc32,
+                0,
+                0,
+                false,
+                uncompressed_len as u32,
+            )?
+        } else {
+            let entry = BlobMetadataBlockGroup::new(
+                self.block_group_block_offset,
+                block_count,
+                compressed_offset,
+                encoded.len() as u32,
+                group.crc32,
+                0,
+                0,
+                false,
+            )?;
+            self.block_group_block_offset += block_count as u64;
+            entry
+        };
         self.blob_metadata_block_groups.push(entry);
-        self.block_group_block_offset += block_count as u64;
 
         self.encoder
             .as_mut()
@@ -1858,6 +2115,146 @@ mod tests {
         let tail = &data[EROFS_BLOCK_SIZE as usize..];
         assert!(tail[..100].iter().all(|b| *b == b'c'));
         assert!(tail[100..].iter().all(|b| *b == 0));
+    }
+
+    /// Dense groups: small files pack back to back, larger files lose their
+    /// tail padding, groups cut on block-aligned points and the blob meta
+    /// scatters every group back onto the padded blocks the chunk indexes
+    /// address.
+    #[test]
+    fn blob_writer_dense_groups_pack_small_files_and_scatter_back() {
+        let block = EROFS_BLOCK_SIZE as usize;
+        // 8 KiB chunks, 16 KiB groups: a few files are enough to cross both.
+        let mut writer = BlobWriter::from_writer(
+            Vec::new(),
+            2 * block as u32,
+            4 * block as u32,
+            BlobMetadataCompressor::None,
+        )
+        .unwrap();
+        writer.set_dense(1000).unwrap();
+        let files: Vec<Vec<u8>> = vec![
+            pseudo_random_bytes(100),           // packed
+            pseudo_random_bytes(900),           // packed, same pack
+            pseudo_random_bytes(5000),          // plain chunk, 2 blocks, closes the pack
+            pseudo_random_bytes(300),           // packed, new pack
+            vec![0u8; 500],                     // all zero: a hole, no bytes stored
+            pseudo_random_bytes(3 * block + 7), // two chunks (8 KiB + 4103), 4 blocks
+            pseudo_random_bytes(1),             // packed, new pack
+        ];
+        let mut indexes = Vec::new();
+        for file in &files {
+            let mut cursor = std::io::Cursor::new(file);
+            indexes.push(
+                writer
+                    .write_reader_chunks(&mut cursor, file.len() as u64)
+                    .unwrap(),
+            );
+        }
+        writer.finish().unwrap();
+        let blob_metadata = writer.blob_metadata(0).unwrap();
+        assert!(blob_metadata.is_dense());
+
+        // Padded placement: 100 -> block 0, 900 -> 1, 5000 -> 2..4, 300 -> 4,
+        // hole -> none, 12295 -> 5..9, 1 -> 9; ten blocks in all.
+        let addrs: Vec<Vec<u64>> = indexes
+            .iter()
+            .map(|index| index.iter().map(|i| i.blkaddr).collect())
+            .collect();
+        assert_eq!(addrs[0], vec![0]);
+        assert_eq!(addrs[1], vec![1]);
+        assert_eq!(addrs[2], vec![2]);
+        assert_eq!(addrs[3], vec![4]);
+        assert_eq!(addrs[4], vec![EROFS_NULL_ADDR]);
+        assert_eq!(addrs[5], vec![5, 7]);
+        assert_eq!(addrs[6], vec![9]);
+        assert_eq!(writer.total_blocks(), 10);
+        assert_eq!(blob_metadata.uncompressed_size(), 10 * block as u64);
+
+        // Chunk table: pack(100+900), chunk 5000, pack(300), chunk 8192,
+        // chunk 4103, pack(1). The dense stream is their bytes back to back.
+        let chunks = blob_metadata.chunks();
+        let expect: [(bool, u32, u64, u32); 6] = [
+            (true, 1000, 0, 2),
+            (false, 5000, 2, 2),
+            (true, 300, 4, 1),
+            (false, 2 * block as u32, 5, 2),
+            (false, block as u32 + 7, 7, 2),
+            (true, 1, 9, 1),
+        ];
+        assert_eq!(chunks.len(), expect.len());
+        for (chunk, (pack, len, addr, blocks)) in chunks.iter().zip(expect) {
+            assert_eq!(chunk.is_pack(), pack);
+            assert_eq!(chunk.byte_len(), len);
+            assert_eq!(chunk.uncompressed_block_offset(), addr);
+            assert_eq!(chunk.uncompressed_block_count(), blocks);
+        }
+        assert_eq!(
+            blob_metadata
+                .pack_files(0)
+                .unwrap()
+                .collect::<nydus_format::error::Result<Vec<_>>>()
+                .unwrap(),
+            vec![100, 900]
+        );
+
+        // Groups: 16 KiB of dense bytes each, cut on block-aligned points.
+        // Stream: 1000 | 5000 | 300 | 8192 | 4103 | 1 = 18596 bytes. After
+        // 1000 + 5000 + 300 + 8192 = 14492 bytes only 1892 remain in the
+        // budget, and the 4103-byte chunk has no block-aligned cut below
+        // 4096, so the first group closes there (within a block of full)
+        // and the rest goes to the last group.
+        let groups = blob_metadata.block_groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].dense_size(), 14492);
+        assert_eq!(groups[0].uncompressed_block_offset(), 0);
+        assert_eq!(groups[0].uncompressed_block_count(), 7);
+        assert_eq!(groups[1].dense_size(), 4104);
+        assert_eq!(groups[1].uncompressed_block_offset(), 7);
+        assert_eq!(groups[1].uncompressed_block_count(), 3);
+        let total_dense: u64 = groups.iter().map(|g| g.dense_size() as u64).sum();
+        assert_eq!(total_dense, 18596);
+        assert_eq!(
+            blob_metadata.block_group_index_from_uncompressed_offset(6 * block as u64 + 4095),
+            Some(0)
+        );
+        assert_eq!(
+            blob_metadata.block_group_index_from_uncompressed_offset(7 * block as u64),
+            Some(1)
+        );
+
+        // Stored plain (compressor None): the data region is the dense
+        // stream. Scatter every group and compare with the files.
+        let (data, _) = writer.into_parts();
+        assert_eq!(data.len(), 18596);
+        let mut padded = vec![0u8; 10 * block];
+        for (index, group) in groups.iter().enumerate() {
+            let start = group.compressed_offset() as usize;
+            let payload = &data[start..start + group.compressed_size() as usize];
+            assert_eq!(crc32c(payload), group.crc32());
+            blob_metadata
+                .for_each_decoded_piece(index, payload, &mut |offset, bytes| {
+                    padded[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        for (file, addrs) in files.iter().zip(&addrs) {
+            let mut expected = Vec::new();
+            for (i, addr) in addrs.iter().enumerate() {
+                let len = (file.len() - i * 2 * block).min(2 * block);
+                if *addr == EROFS_NULL_ADDR {
+                    expected.extend(vec![0u8; len]);
+                } else {
+                    let start = *addr as usize * block;
+                    expected.extend_from_slice(&padded[start..start + len]);
+                }
+            }
+            assert_eq!(&expected, file);
+        }
+        // Tail padding stays zero.
+        assert!(padded[100..block].iter().all(|b| *b == 0));
+        assert!(padded[4 * block + 300..5 * block].iter().all(|b| *b == 0));
     }
 
     fn pseudo_random_bytes(len: usize) -> Vec<u8> {
