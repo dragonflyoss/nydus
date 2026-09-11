@@ -24,8 +24,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const nydusRunErofsCompatEnv = "NYDUSFS_RUN_EROFS_COMPAT"
-
 func erofsKernelCompatibilitySkipReason(release, filesystems string) (string, error) {
 	var major, minor int
 	if _, err := fmt.Sscanf(release, "%d.%d", &major, &minor); err != nil {
@@ -170,6 +168,16 @@ func verifyNativeErofsTree(t *testing.T, bootstrap, decodedDir, expected string)
 	fsckErofsImage(t, bootstrap, decodedDir)
 	deviceArgs, err := erofsDeviceArgs(bootstrap, decodedDir)
 	require.NoError(t, err)
+	devicePaths := make([]string, 0, len(deviceArgs))
+	for _, arg := range deviceArgs {
+		devicePaths = append(devicePaths, strings.TrimPrefix(arg, "--device="))
+	}
+	mountpoint := mountNativeErofs(t, bootstrap, devicePaths...)
+	roDiffTree(t, expected, mountpoint, true)
+}
+
+func mountNativeErofs(t *testing.T, bootstrap string, devicePaths ...string) string {
+	t.Helper()
 	mountpoint := filepath.Join(t.TempDir(), "mnt")
 	require.NoError(t, os.Mkdir(mountpoint, 0755))
 	mounted := false
@@ -189,8 +197,8 @@ func verifyNativeErofsTree(t *testing.T, bootstrap, decodedDir, expected string)
 	}
 	primary := attach(bootstrap)
 	options := []string{"ro"}
-	for _, arg := range deviceArgs {
-		options = append(options, "device="+attach(strings.TrimPrefix(arg, "--device=")))
+	for _, path := range devicePaths {
+		options = append(options, "device="+attach(path))
 	}
 	out, err := exec.Command("mount", "-t", "erofs", "-o", strings.Join(options, ","), primary, mountpoint).CombinedOutput()
 	require.NoError(t, err, "native EROFS mount: %s", out)
@@ -202,7 +210,7 @@ func verifyNativeErofsTree(t *testing.T, bootstrap, decodedDir, expected string)
 		}
 		mounted = false
 	})
-	roDiffTree(t, expected, mountpoint, true)
+	return mountpoint
 }
 
 func TestBlobMount(t *testing.T) {
@@ -303,42 +311,79 @@ func TestMergedMount(t *testing.T) {
 		roDiffTree(t, expectedDir, mountpoint, true)
 		verifyWhiteoutResults(t, mountpoint)
 		verifyBlobCacheArtifacts(t, cacheDir, layer1Blob, layer2Blob, layer3Blob)
-		verifyMergedMountMatchesErofsFuseWhenEnabled(
-			t,
-			mergedBootstrap,
-			mountpoint,
-			cachedBlobDataDevicesForBlobs(t, cacheDir, layer1Blob, layer2Blob, layer3Blob)...,
-		)
 		pauseMergeDebugIfRequested(t, mountpoint)
 	}()
 }
 
-func verifyMergedMountMatchesErofsFuseWhenEnabled(
-	t *testing.T,
-	mergedBootstrap string,
-	nydusMountpoint string,
-	blobs ...string,
-) {
-	t.Helper()
-	if os.Getenv(nydusRunErofsCompatEnv) != "1" {
-		t.Logf("Skipping erofsfuse compatibility step; set %s=1 to enable", nydusRunErofsCompatEnv)
-		return
+func TestMergedMountKernelErofsMatchesNydusFuse(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root")
+	}
+	kernel, err := exec.Command("uname", "-r").Output()
+	require.NoError(t, err)
+	release := strings.TrimSpace(string(kernel))
+	filesystems, err := os.ReadFile("/proc/filesystems")
+	require.NoError(t, err)
+	reason, err := erofsKernelCompatibilitySkipReason(release, string(filesystems))
+	require.NoError(t, err)
+	if reason != "" {
+		t.Skip(reason)
+	}
+	for _, tool := range []string{"losetup", "mount"} {
+		_, err := exec.LookPath(tool)
+		require.NoError(t, err, "required native validation tool: %s", tool)
 	}
 
-	setupCErofsFuse(t)
-	cErofsFuseBin := mustLookupCErofsFuse(t)
-	erofsMountpoint := filepath.Join(t.TempDir(), "erofsfuse-mnt")
-	unmount := mountCErofsFuse(t, cErofsFuseBin, mergedBootstrap, erofsMountpoint, blobs...)
-	defer unmount()
+	tmpDir := t.TempDir()
+	layer1Dir := filepath.Join(tmpDir, "layer1")
+	layer2Dir := filepath.Join(tmpDir, "layer2")
+	layer3Dir := filepath.Join(tmpDir, "layer3")
+	expectedDir := filepath.Join(tmpDir, "expected")
+	nydusMountpoint := filepath.Join(tmpDir, "nydus-mnt")
+	prepareMergedE2ECorpora(t, layer1Dir, layer2Dir, layer3Dir, expectedDir)
 
-	roDiffTree(t, erofsMountpoint, nydusMountpoint, false)
+	nydusBin := mustLookupExecutable(t, "nydus")
+	blobDir := filepath.Join(tmpDir, "blobs")
+	layer1Bootstrap := filepath.Join(tmpDir, "layer1.bootstrap")
+	layer2Bootstrap := filepath.Join(tmpDir, "layer2.bootstrap")
+	layer3Bootstrap := filepath.Join(tmpDir, "layer3.bootstrap")
+	mergedBootstrap := filepath.Join(tmpDir, "merged.bootstrap")
+	cacheDir := filepath.Join(tmpDir, "cache")
+
+	layer1Blob := buildNydusFSImageToDir(t, nydusBin, layer1Bootstrap, blobDir, layer1Dir, 4096)
+	layer2Blob := buildNydusFSImageToDir(t, nydusBin, layer2Bootstrap, blobDir, layer2Dir, 4096)
+	layer3Blob := buildNydusFSImageToDir(t, nydusBin, layer3Bootstrap, blobDir, layer3Dir, 4096)
+	mergeNydusBootstrap(
+		t,
+		nydusBin,
+		mergedBootstrap,
+		layer1Blob,
+		layer2Blob,
+		layer3Blob,
+	)
+
+	unmountNydus := mountNydusBootstrapWithCache(t, nydusBin, mergedBootstrap, blobDir, cacheDir, nydusMountpoint)
+	defer unmountNydus()
+
+	// Full-tree walk against the expected merge prewarms cache data so the
+	// cached .blob.data devices can back a native kernel mount.
+	roDiffTree(t, expectedDir, nydusMountpoint, true)
+	verifyBlobCacheArtifacts(t, cacheDir, layer1Blob, layer2Blob, layer3Blob)
+
+	nativeMountpoint := mountNativeErofs(
+		t,
+		mergedBootstrap,
+		cachedBlobDataDevicesForBlobs(t, cacheDir, layer1Blob, layer2Blob, layer3Blob)...,
+	)
+	roDiffTree(t, nativeMountpoint, nydusMountpoint, true)
 }
 
 func cachedBlobDataDevicesForBlobs(t *testing.T, cacheDir string, blobs ...string) []string {
 	t.Helper()
 
-	// erofsfuse consumes plain external devices. Nydus builds zstd-compressed
-	// full blobs, so compat mode must use the cache files populated by nydus fuse.
+	// The kernel EROFS mount consumes plain external devices. Nydus builds
+	// zstd-compressed full blobs, so this path uses cache files populated by
+	// nydus fuse as decoded .blob.data devices.
 	devices := make([]string, 0, len(blobs))
 	for _, blob := range blobs {
 		blobID := fullBlobDigest(t, blob)
