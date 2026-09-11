@@ -24,28 +24,7 @@ var blobMetaFilenamePattern = regexp.MustCompile(`^[0-9a-f]{64}\.blob\.meta$`)
 
 const (
 	erofsCFuseEnv = "EROFS_C_FUSE"
-	erofsMkfsEnv  = "EROFS_MKFS"
 )
-
-// setupCErofsFuse checks if erofsfuse is available. An explicit EROFS_C_FUSE
-// path wins and skips the setup script.
-func setupCErofsFuse(t *testing.T) {
-	if _, err := lookupCErofsFuseExecutable(); err == nil {
-		if os.Getenv(erofsMkfsEnv) != "" {
-			_, err := lookupCErofsMkfsExecutable()
-			require.NoError(t, err)
-		}
-		return
-	} else if os.Getenv(erofsCFuseEnv) != "" {
-		require.NoError(t, err)
-	}
-
-	script, err := filepath.Abs(filepath.Join("..", "scripts", "setup_erofsfuse.sh"))
-	require.NoError(t, err)
-
-	out, err := exec.Command("bash", script).CombinedOutput()
-	require.NoError(t, err, "setup_erofsfuse.sh failed:\n%s", out)
-}
 
 // mustLookupExecutable is a test helper that wraps lookupExecutable and fails the test if the executable is not found.
 func mustLookupExecutable(t *testing.T, name string) string {
@@ -126,21 +105,6 @@ func lookupCErofsFuseExecutable() (string, error) {
 	}
 
 	return "", fmt.Errorf("erofsfuse not found, set %s=path to enable comparison", erofsCFuseEnv)
-}
-
-func lookupCErofsMkfsExecutable() (string, error) {
-	if p := os.Getenv(erofsMkfsEnv); p != "" {
-		if err := validateExecutablePath(p, erofsMkfsEnv); err != nil {
-			return "", err
-		}
-		return p, nil
-	}
-
-	if p, err := exec.LookPath("mkfs.erofs"); err == nil {
-		return p, nil
-	}
-
-	return "", fmt.Errorf("mkfs.erofs not found, set %s=path if a test requires it", erofsMkfsEnv)
 }
 
 // fsckErofsImage validates a freshly built bootstrap with erofs-utils. A nydus
