@@ -462,6 +462,7 @@ impl Filesystem for ErofsFs {
             {
                 Ok(_) => reply.data(&buf),
                 Err(err) => {
+                    tracing::warn!(nid, offset, size, "read failed: {err}");
                     m.fail();
                     reply.error(io_errno(&err));
                 }

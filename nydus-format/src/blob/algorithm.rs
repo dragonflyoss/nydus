@@ -53,10 +53,13 @@ impl From<BlobMetadataFlags> for BlobMetadataCompressor {
 }
 
 /// The chunk digest algorithm a blob meta declares, always explicit (see
-/// the `TryFrom` below).
+/// the `TryFrom` below). `None` records zero digests: the chunk table is
+/// still addressable but carries no integrity information, for blobs built
+/// from content that was already verified upstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobMetadataDigester {
     Blake3,
+    None,
 }
 
 impl BlobMetadataDigester {
@@ -64,6 +67,7 @@ impl BlobMetadataDigester {
     pub fn flag(self) -> BlobMetadataFlags {
         match self {
             Self::Blake3 => BlobMetadataFlags::DIGESTER_BLAKE3,
+            Self::None => BlobMetadataFlags::DIGESTER_NONE,
         }
     }
 }
@@ -74,6 +78,7 @@ impl fmt::Display for BlobMetadataDigester {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Blake3 => "blake3",
+            Self::None => "none",
         })
     }
 }
@@ -84,12 +89,17 @@ impl TryFrom<BlobMetadataFlags> for BlobMetadataDigester {
     type Error = Error;
 
     fn try_from(value: BlobMetadataFlags) -> Result<Self> {
-        if value.contains(BlobMetadataFlags::DIGESTER_BLAKE3) {
-            Ok(Self::Blake3)
-        } else {
-            Err(Error::InvalidImage(
+        let blake3 = value.contains(BlobMetadataFlags::DIGESTER_BLAKE3);
+        let none = value.contains(BlobMetadataFlags::DIGESTER_NONE);
+        match (blake3, none) {
+            (true, false) => Ok(Self::Blake3),
+            (false, true) => Ok(Self::None),
+            (true, true) => Err(Error::InvalidImage(
+                "blob meta declares more than one digester".to_string(),
+            )),
+            (false, false) => Err(Error::InvalidImage(
                 "blob meta digester flag is missing".to_string(),
-            ))
+            )),
         }
     }
 }

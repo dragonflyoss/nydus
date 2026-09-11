@@ -67,6 +67,7 @@ hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = { workspace = true }
 libublk = { version = "0.4", default-features = false, optional = true }
+flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 memmap2 = { workspace = true }
 nydus-backend = { version = "3.0.0-alpha.1", path = "../nydus-backend" }
 nydus-config = { version = "3.0.0-alpha.1", path = "../nydus-config" }
@@ -86,6 +87,7 @@ tar = "0.4"
 tabled = { version = "0.21.0", optional = true }
 zstd = "0.13"
 lz4_flex = "0.11"
+lz4-sys = "1"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "fs",

@@ -47,7 +47,18 @@ fn build_duplicate_corpus_test_image(
     [u8; EROFS_BLOB_ID_SIZE],
     HashMap<String, Vec<u8>>,
 ) {
-    build_test_image_full(root, false, true)
+    build_test_image_full(root, false, true, false)
+}
+
+fn build_dense_test_image(
+    root: &Path,
+) -> (
+    PathBuf,
+    Config,
+    [u8; EROFS_BLOB_ID_SIZE],
+    HashMap<String, Vec<u8>>,
+) {
+    build_test_image_full(root, true, true, true)
 }
 
 fn build_flattened_test_image(
@@ -70,13 +81,14 @@ fn build_test_image_with_layout(
     [u8; EROFS_BLOB_ID_SIZE],
     HashMap<String, Vec<u8>>,
 ) {
-    build_test_image_full(root, flattened, false)
+    build_test_image_full(root, flattened, false, false)
 }
 
 fn build_test_image_full(
     root: &Path,
     flattened: bool,
     dedup_corpus: bool,
+    dense: bool,
 ) -> (
     PathBuf,
     Config,
@@ -122,6 +134,25 @@ fn build_test_image_full(
         fs::write(corpus_dir.join("holey"), &holey).unwrap();
         corpus.insert("holey".to_string(), holey);
     }
+    if dense {
+        // Many small files of assorted sizes so packs form, fill up and
+        // straddle block group cuts.
+        fs::create_dir_all(corpus_dir.join("small")).unwrap();
+        let mut state = 0xdead_beef_u64;
+        for i in 0..200u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = 1 + (state % 20_000) as usize;
+            let data: Vec<u8> = (0..len).map(|j| (j as u32 * 31 + i) as u8).collect();
+            let name = format!("small/f{i:03}");
+            fs::write(corpus_dir.join(&name), &data).unwrap();
+            corpus.insert(name, data);
+        }
+        // A small file that is all zero stays a hole even in a pack.
+        fs::write(corpus_dir.join("small/zeros"), vec![0u8; 3000]).unwrap();
+        corpus.insert("small/zeros".to_string(), vec![0u8; 3000]);
+    }
 
     let blob_dir = root.join("blobs");
     fs::create_dir_all(&blob_dir).unwrap();
@@ -135,6 +166,9 @@ fn build_test_image_full(
         BlobMetadataCompressor::Zstd,
     )
     .unwrap();
+    if dense {
+        writer.set_dense(64 * 1024).unwrap();
+    }
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
@@ -144,7 +178,7 @@ fn build_test_image_full(
     .unwrap();
     writer.finish().unwrap();
 
-    let data_blob_id = writer.data_digest();
+    let data_blob_id = writer.data_digest().unwrap();
     let blob_metadata = writer.blob_metadata(0).unwrap();
     let blocks = writer.total_blocks();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
@@ -263,7 +297,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(core.probe_flat_ranges(offset, len).unwrap(), fd_ranges);
 
     // Idempotent re-fetch and zero-length fetch are fine.
-    core.blobs.fetch(&blob_id, offset, len).unwrap();
+    core.blobs.fetch(&blob_id, blob_offset, len).unwrap();
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
     let trace = core.trace_snapshot();
@@ -322,7 +356,7 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     .unwrap();
     writer.finish().unwrap();
 
-    let second_blob_id = writer.data_digest();
+    let second_blob_id = writer.data_digest().unwrap();
     let device_slots = [
         ErofsDeviceSlot::with_blob_id(blob_infos[0].blocks, &blob_id).unwrap(),
         ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id).unwrap(),
@@ -496,4 +530,81 @@ fn core_reads_back_duplicate_corpus_image() {
     let file1_entry = core.fs.open("file1").unwrap();
     file1_entry.fetch(12345, 4097).unwrap();
     assert!(!file1_entry.probe_ranges(12345, 4097).unwrap().is_empty());
+}
+
+/// Dense block groups: the blob meta packs the small files, the block
+/// groups span a variable number of blocks, and every file reads back
+/// through the padded cache exactly as built (whole, at random offsets and
+/// via the fetch API the DAX path uses).
+#[test]
+fn core_reads_back_dense_image() {
+    let dir = tempdir().unwrap();
+    let (bootstrap, config, blob_id, corpus) = build_dense_test_image(dir.path());
+
+    let blob_metadata = nydus_format::blob::BlobMetadata::from_path(
+        &dir.path()
+            .join("blobs")
+            .join(format!("{}.blob.meta", hex_string(&blob_id))),
+        true,
+    )
+    .unwrap();
+    assert!(blob_metadata.is_dense());
+    let packs: Vec<usize> = (0..blob_metadata.chunk_count())
+        .filter(|index| blob_metadata.pack_files(*index).is_some())
+        .collect();
+    assert!(!packs.is_empty(), "small files were not packed");
+    let packed_files: usize = packs
+        .iter()
+        .map(|index| blob_metadata.pack_files(*index).unwrap().count())
+        .sum();
+    // 200 small files plus small.txt/tiny.txt (zeros is a hole).
+    assert_eq!(packed_files, 202);
+    assert!(blob_metadata.chunk_count() < packed_files);
+    let groups = blob_metadata.block_groups();
+    assert!(groups.len() > 1);
+    assert!(groups.iter().all(|group| group.dense_size() > 0
+        && u64::from(group.dense_size()) <= group.uncompressed_size()));
+    assert!(groups
+        .iter()
+        .any(|group| u64::from(group.dense_size()) < group.uncompressed_size()));
+    let dense_total: u64 = groups.iter().map(|g| g.dense_size() as u64).sum();
+    assert!(dense_total < blob_metadata.uncompressed_size());
+
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+    for (name, expected) in &corpus {
+        let entry = core.fs.open(name).unwrap();
+        let all = entry.read().unwrap();
+        assert_eq!(
+            &all[..expected.len()],
+            expected.as_slice(),
+            "content mismatch for {name}"
+        );
+        assert!(
+            all[expected.len()..].iter().all(|byte| *byte == 0),
+            "tail padding not zero for {name}"
+        );
+    }
+
+    let entry = core.fs.open("file1_shifted").unwrap();
+    let mut buf = vec![0u8; 100_000];
+    let read = entry.read_at(123_457, &mut buf).unwrap();
+    assert_eq!(read, buf.len());
+    assert_eq!(&buf, &corpus["file1_shifted"][123_457..123_457 + read]);
+
+    // The cache mirrors the padded address space: a packed file's fetch
+    // range maps straight into the cache file at its own block.
+    let small = core.fs.open("small/f001").unwrap();
+    let ranges = small
+        .fetch_ranges(0, corpus["small/f001"].len() as u64)
+        .unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].offset % EROFS_BLOCK_SIZE as u64, 0);
+    assert_ne!(ranges[0].fd, core.zero_fd());
+    let blobs = core.blobs.prepare_all().unwrap();
+    let cache = fs::read(&blobs[0].cache_path).unwrap();
+    let start = ranges[0].offset as usize;
+    assert_eq!(
+        &cache[start..start + corpus["small/f001"].len()],
+        corpus["small/f001"].as_slice()
+    );
 }

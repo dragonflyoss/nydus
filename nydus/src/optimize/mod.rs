@@ -29,6 +29,7 @@ use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor, BlobMetadataDigester,
+    BlobMetadataFlags, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
     DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
@@ -89,6 +90,7 @@ pub fn build_ondemand_blob(
     let mut source_caches: HashMap<u16, LocalBlobCache> = HashMap::new();
     let mut ondemand_data = Vec::new();
     let mut ondemand_block_groups = Vec::new();
+    let mut any_dense = false;
     let mut next_block_offset = 0u64;
 
     for BlockGroupRef {
@@ -142,7 +144,8 @@ pub fn build_ondemand_blob(
 
         let compressed_offset = ondemand_data.len() as u64;
         ondemand_data.extend_from_slice(encoded);
-        ondemand_block_groups.push(BlobMetadataBlockGroup::new(
+        any_dense |= cache.blob_metadata().is_dense();
+        ondemand_block_groups.push(BlobMetadataBlockGroup::new_dense(
             next_block_offset,
             block_group.uncompressed_block_count(),
             compressed_offset,
@@ -155,6 +158,7 @@ pub fn build_ondemand_blob(
             *blob_index,
             *block_group_index,
             true,
+            block_group.dense_size(),
         )?);
         next_block_offset += block_group.uncompressed_block_count() as u64;
     }
@@ -164,14 +168,31 @@ pub fn build_ondemand_blob(
     let mut data_digest = [0u8; EROFS_BLOB_ID_SIZE];
     data_digest.copy_from_slice(&data_hasher.finalize());
 
-    let blob_metadata = BlobMetadata::new(
-        BlobMetadataCompressor::Zstd,
-        BlobMetadataDigester::Blake3,
-        DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
-        Vec::new(),
-        ondemand_block_groups,
-        true,
-    )
+    // A redirect of a dense source group decodes to the source's dense
+    // payload, which only a dense-aware reader scatters correctly, so the
+    // artifact declares the incompat flag whenever any source is dense.
+    let blob_metadata = if any_dense {
+        BlobMetadata::new_dense(
+            BlobMetadataCompressor::Zstd,
+            BlobMetadataDigester::Blake3,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
+            Vec::new(),
+            ondemand_block_groups,
+            Vec::new(),
+            true,
+            BlobMetadataFlags::empty(),
+        )
+    } else {
+        BlobMetadata::new(
+            BlobMetadataCompressor::Zstd,
+            BlobMetadataDigester::Blake3,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+            Vec::new(),
+            ondemand_block_groups,
+            true,
+        )
+    }
     .context("failed to assemble ondemand blob meta")?;
 
     let (artifact, full_blob_digest, footer) =

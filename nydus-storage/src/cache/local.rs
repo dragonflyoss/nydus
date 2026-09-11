@@ -378,7 +378,7 @@ impl LocalBlobCache {
                 &mut buffers,
                 ReadKind::OnDemand,
             )?;
-            write_all_at(cache_file, block_group.uncompressed_offset(), decoded)?;
+            write_decoded_block_group(&self.blob_metadata, block_group_index, cache_file, decoded)?;
             self.block_group_map.set_ready(block_group_index)?;
             nydus_telemetry::metrics::inc_cache_ondemand_fill_block_group();
             Ok(())
@@ -598,9 +598,10 @@ impl BlobCache for LocalBlobCache {
                     &window,
                     &mut decoded,
                 )?;
-                write_all_at(
+                write_decoded_block_group(
+                    &self.blob_metadata,
+                    index,
                     cache_file.as_ref(),
-                    block_group.uncompressed_offset(),
                     &decoded,
                 )?;
                 self.block_group_map.set_ready(index)?;
@@ -906,9 +907,10 @@ impl BlobCache for LocalBlobCache {
         }
         super::validate_block_group_with_metrics(&self.backend, block_group, decoded)?;
         let cache_file = self.cache_file()?;
-        write_all_at(
+        write_decoded_block_group(
+            &self.blob_metadata,
+            block_group_index,
             cache_file.as_ref(),
-            block_group.uncompressed_offset(),
             decoded,
         )?;
         self.block_group_map.set_ready(block_group_index)?;
@@ -977,6 +979,21 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
         written += n;
     }
     Ok(())
+}
+
+/// Write a decoded block group into the cache file, which mirrors the
+/// padded uncompressed address space: one write at the span offset for a
+/// padded blob, one write per chunk or packed file for a dense blob (the
+/// tail-block padding between them stays the file's zeros).
+fn write_decoded_block_group(
+    blob_metadata: &BlobMetadata,
+    block_group_index: usize,
+    file: &File,
+    decoded: &[u8],
+) -> io::Result<()> {
+    blob_metadata.for_each_decoded_piece(block_group_index, decoded, &mut |offset, bytes| {
+        write_all_at(file, offset, bytes)
+    })
 }
 
 #[cfg(test)]

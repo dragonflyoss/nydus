@@ -17,10 +17,11 @@ pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
-    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk,
-    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
+    encode_pack_layout, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataFlags,
+    PackFiles, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
     DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
-    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_CHUNK_PACK_FLAG,
+    NYDUS_BLOB_METADATA_SUFFIX,
 };
 
 /// Finish a full blob: append everything behind the data region to `writer`,
