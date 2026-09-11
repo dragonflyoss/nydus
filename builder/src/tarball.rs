@@ -1376,6 +1376,8 @@ mod tests {
             + &pax_record(&format!("linkpath={}\n", target))
             + &pax_record("SCHILY.xattr.user.key=value\n");
         append_pax_symlink(&mut tar, &path[..99], &body);
+        append_pax_header(&mut tar, "plain", &pax_record("SCHILY.xattr.user.b=bee\n"));
+        append_entry(&mut tar, "plain", EntryType::Regular, None, b"hi");
         tar.finish().unwrap();
 
         let mut ctx = create_context(source_path, version);
@@ -1394,6 +1396,13 @@ mod tests {
             Some(&b"value".to_vec())
         );
         assert!(node.inode.has_xattr());
+
+        // An entry of the same tarball whose header the crate reads keeps reading it.
+        let plain = get_node(&bootstrap, "/plain");
+        assert_eq!(
+            plain.info.xattrs.get(&OsString::from("user.b")),
+            Some(&b"bee".to_vec())
+        );
     }
 
     #[test]
@@ -1501,6 +1510,32 @@ mod tests {
     // A header the crate reads whole reports the records this walks, so a `path` in one is a
     // `path` in the other: with neither holding one, the long name is all that is left for the
     // crate to report, and it is kept even though the header is resolved here.
+    // A layer arrives gzipped, so the pass collecting the headers has to inflate the source a
+    // second time to reach them.
+    #[test]
+    fn test_pax_record_containing_newline_in_a_gzipped_source() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let tar_path = tmp_dir.as_path().join("newline-pax.tar");
+        let source_path = tmp_dir.as_path().join("newline-pax.tar.gz");
+        let target = "one\ntwo";
+        let mut tar = tar::Builder::new(File::create(&tar_path).unwrap());
+        append_pax_symlink(
+            &mut tar,
+            "sym",
+            &pax_record(&format!("linkpath={}\n", target)),
+        );
+        tar.finish().unwrap();
+        let tar = std::fs::read(&tar_path).unwrap();
+        let (gz, _) = compress::compress(&tar, compress::Algorithm::GZip).unwrap();
+        std::fs::write(&source_path, gz).unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let bootstrap = build_rafs(&mut ctx);
+
+        let node = get_node(&bootstrap, "/sym");
+        assert_eq!(node.info.symlink, Some(OsString::from(target)));
+    }
+
     // POSIX, GNU tar and Go's `archive/tar` all let the last record carrying a key win, so
     // reading the first would build a node no other reader of the tarball agrees with. The
     // crate reads the first, whether or not the header also holds a record it cannot read.
