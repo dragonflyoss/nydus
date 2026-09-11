@@ -16,7 +16,7 @@ flume = "0.12"
 fuse-backend-rs = { workspace = true, features = ["persist"] }
 libc = "0.2"
 log = "0.4.8"
-mio = { version = "0.8", features = ["os-poll", "os-ext"] }
+mio = { version = "1.0", features = ["os-poll", "os-ext"] }
 nix = "0.24.0"
 rust-fsm = "0.6.0"
 sendfd = "0.4"

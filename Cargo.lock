@@ -2687,6 +2687,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2886843bf800fba2e3377cff24abf6379b4c4d5c6681eaf9ea5b0d15090450bd"
 dependencies = [
  "libc",
+ "log",
  "wasi",
  "windows-sys 0.52.0",
 ]
@@ -2909,7 +2910,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "mio 0.8.11",
+ "mio 1.0.3",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2995,7 +2996,7 @@ dependencies = [
  "libc",
  "log",
  "log-panics",
- "mio 0.8.11",
+ "mio 1.0.3",
  "nix 0.24.3",
  "nydus-api",
  "nydus-builder",
@@ -3030,7 +3031,7 @@ dependencies = [
  "fuse-backend-rs",
  "libc",
  "log",
- "mio 0.8.11",
+ "mio 1.0.3",
  "nix 0.24.3",
  "nydus-api",
  "nydus-rafs",
