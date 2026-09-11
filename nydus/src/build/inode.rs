@@ -1,4 +1,4 @@
-use crate::build::blob_chunk::BlobWriter;
+use crate::build::blob_chunk::{BlobWriter, ZFileRef};
 use crate::build::dir::directory_size;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
@@ -79,6 +79,11 @@ pub enum InodeData {
         compressed_blocks: u32,
     },
 
+    /// A z_erofs file whose segments may still be in the compression
+    /// pipeline; resolved into [`InodeData::ZFile`] by
+    /// [`resolve_z_files`] once the blob writer has finished.
+    ZPending(ZFileRef),
+
     /// Directory: sorted children.
     ///
     /// Like mkfs.erofs, the last (partial) block of dirent data is packed
@@ -123,6 +128,22 @@ pub enum InodeData {
 
     /// FIFO or socket (no data).
     FifoOrSocket,
+}
+
+/// Replaces every [`InodeData::ZPending`] with the metadata its handle now
+/// carries. Call once the blob writer has finished, before laying out the
+/// bootstrap.
+pub fn resolve_z_files(inodes: &mut [InodeInfo]) -> Result<()> {
+    for inode in inodes.iter_mut() {
+        if let InodeData::ZPending(zfile) = &inode.data {
+            let meta = zfile.resolve()?;
+            inode.data = InodeData::ZFile {
+                tail: meta.tail,
+                compressed_blocks: meta.compressed_blocks,
+            };
+        }
+    }
+    Ok(())
 }
 
 /// The z_erofs packed inode: a root-owned, unreadable regular file outside
@@ -214,6 +235,7 @@ pub(crate) fn erofs_inode_size(inode: &InodeInfo) -> usize {
         InodeData::ZFile { tail, .. } => {
             align_up_usize(inode_isize + xattr_isize, 8).expect("alignment overflowed") + tail.len()
         }
+        InodeData::ZPending(_) => unreachable!("z_erofs files are resolved before layout"),
         InodeData::Directory { inline_len, .. } => inode_isize + xattr_isize + inline_len,
         InodeData::Symlink { target, .. } => {
             if symlink_is_inline(inode) {
@@ -555,7 +577,9 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
     } else {
         let data = node.leaf_data(ctx)?;
         let size = match &data {
-            InodeData::RegularFile { .. } | InodeData::ZFile { .. } => attrs.size,
+            InodeData::RegularFile { .. } | InodeData::ZFile { .. } | InodeData::ZPending(_) => {
+                attrs.size
+            }
             InodeData::Symlink { target, .. } => target.len() as u64,
             InodeData::Device { .. } | InodeData::FifoOrSocket => 0,
             InodeData::Directory { .. } => {
@@ -659,14 +683,9 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
     fn leaf_data(&mut self, ctx: &mut FsBuildContext<'a, W>) -> Result<InodeData> {
         let ft = self.meta.file_type();
         if ft.is_file() {
-            if ctx.blob_writer.zlz4_enabled() {
-                let zmeta = ctx
-                    .blob_writer
-                    .write_file_zlz4(&self.path, self.meta.size())?;
-                return Ok(InodeData::ZFile {
-                    tail: zmeta.tail,
-                    compressed_blocks: zmeta.compressed_blocks,
-                });
+            if ctx.blob_writer.z_erofs_enabled() {
+                let zfile = ctx.blob_writer.write_file_z(&self.path, self.meta.size())?;
+                return Ok(InodeData::ZPending(zfile));
             }
             let chunk_index_entries = ctx
                 .blob_writer
@@ -769,6 +788,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 buf[off..off + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(index.as_bytes());
             }
         }
+        InodeData::ZPending(_) => unreachable!("z_erofs files are resolved before rendering"),
         InodeData::ZFile {
             tail,
             compressed_blocks,

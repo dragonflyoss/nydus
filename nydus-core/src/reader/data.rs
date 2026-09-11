@@ -1,14 +1,18 @@
+use std::cell::RefCell;
 use std::io;
 use std::io::Write;
 
 use nydus_format::erofs::{
-    cast_ref, ErofsChunkAddr, ErofsChunkIndex, ErofsInode, EROFS_BLOCK_SIZE,
+    cast_ref, ErofsChunkAddr, ErofsChunkIndex, ErofsInode, ZAlgorithm, EROFS_BLOCK_SIZE,
     EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
-    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, Z_EROFS_FRAGMENT_INODE_FLAG,
-    Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_MAP_HEADER_SIZE,
+    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
+    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
+    Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
+    Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
 
+use super::z_cache::PclusterKey;
 use super::{ErofsReader, RawBlobInfo};
 
 /// Resolve an absolute byte offset in the flattened device to the blob that
@@ -224,6 +228,9 @@ impl ErofsReader {
                 self.write_flat_data_to(nid, inode, offset, actual_size, w)
             }
             EROFS_INODE_CHUNK_BASED => self.write_chunk_data_to(nid, inode, offset, actual_size, w),
+            EROFS_INODE_COMPRESSED_FULL => {
+                self.write_z_data_to(nid, inode, offset, actual_size, w, 0)
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported data layout: {layout}"),
@@ -315,6 +322,248 @@ impl ErofsReader {
         )?;
 
         Ok(written as usize)
+    }
+
+    // ------------------------------------------------------------------
+    // z_erofs (COMPRESSED_FULL) read: userspace counterpart of the kernel's
+    // pcluster decompression, over the blob caches holding the raw
+    // (compressed) layer data.
+    // ------------------------------------------------------------------
+
+    /// Reads z_erofs ranges through packed fragments and cached LZ4/zstd pclusters.
+    fn write_z_data_to(
+        &self,
+        nid: u64,
+        inode: &ErofsInode<'_>,
+        offset: u64,
+        size: usize,
+        w: &mut dyn Write,
+        depth: u8,
+    ) -> io::Result<usize> {
+        let tail = self.read_z_inode_tail(nid, inode)?;
+        let head = u64::from_le_bytes(tail[..Z_EROFS_MAP_HEADER_SIZE].try_into().unwrap());
+        if head & Z_EROFS_FRAGMENT_INODE_FLAG != 0 {
+            if depth > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "packed inode is itself a fragment",
+                ));
+            }
+            let packed_nid = self.superblock().packed_nid().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "fragment without packed inode")
+            })?;
+            let packed = self.inode(packed_nid)?;
+            let frag_off = head & !Z_EROFS_FRAGMENT_INODE_FLAG;
+            return self.write_z_data_to(
+                packed_nid,
+                &packed,
+                frag_off + offset,
+                size,
+                w,
+                depth + 1,
+            );
+        }
+
+        let block = EROFS_BLOCK_SIZE as u64;
+        let file_size = inode.size();
+        let indexes = &tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
+        let nlclusters = indexes.len() / Z_EROFS_LCLUSTER_INDEX_SIZE;
+        let index_at = |i: usize| -> (u16, u32) {
+            let e = &indexes[i * Z_EROFS_LCLUSTER_INDEX_SIZE..][..Z_EROFS_LCLUSTER_INDEX_SIZE];
+            let advise = u16::from_le_bytes(e[..2].try_into().unwrap());
+            let word = u32::from_le_bytes(e[4..8].try_into().unwrap());
+            (advise & Z_EROFS_LI_LCLUSTER_TYPE_MASK, word)
+        };
+        // Tail fragment: the last extent is served from the packed inode.
+        let h_advise = u16::from_le_bytes(tail[4..6].try_into().unwrap());
+        let algorithm = ZAlgorithm::from_type(tail[6] & 0x0f).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported z_erofs algorithm {}", tail[6] & 0x0f),
+            )
+        })?;
+        let tail_fragment = if h_advise & Z_EROFS_ADVISE_FRAGMENT_PCLUSTER != 0 {
+            let head = (0..nlclusters)
+                .rev()
+                .find(|&i| index_at(i).0 != Z_EROFS_LCLUSTER_TYPE_NONHEAD)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "tail fragment without head")
+                })?;
+            let lo = u32::from_le_bytes(tail[..4].try_into().unwrap());
+            Some((head, (u64::from(index_at(head).1) << 32) | u64::from(lo)))
+        } else {
+            None
+        };
+        let blob_layout = self.blob_infos()?;
+        let end = offset + size as u64;
+
+        // Back up to the head of the pcluster covering `offset`.
+        let mut i = (offset / block) as usize;
+        while index_at(i).0 == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+            let delta0 = index_at(i).1 as u16;
+            let distance = if delta0 & Z_EROFS_LI_D0_CBLKCNT != 0 {
+                1
+            } else {
+                usize::from(delta0)
+            };
+            if distance == 0 || distance > i {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid pcluster head distance",
+                ));
+            }
+            i -= distance;
+        }
+
+        thread_local! {
+            static Z_BUFS: RefCell<(Vec<u8>, Vec<u8>, Option<zstd::bulk::Decompressor<'static>>)> =
+                const { RefCell::new((Vec::new(), Vec::new(), None)) };
+        }
+        let mut written = 0usize;
+        // The tail fragment is the file's last extent; it is read after the
+        // scratch buffers are released since it recurses into the packed inode.
+        let mut deferred_tail: Option<(u64, u64)> = None;
+        Z_BUFS.with(|cell| -> io::Result<()> {
+            let mut bufs = cell.borrow_mut();
+            let (compressed, decoded, zstd) = &mut *bufs;
+            while i < nlclusters {
+                let logical_start = i as u64 * block;
+                if logical_start >= end {
+                    break;
+                }
+                let (kind, word) = index_at(i);
+                let mut j = i + 1;
+                while j < nlclusters && index_at(j).0 == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+                    let distance = (index_at(j).1 >> 16) as usize + 1;
+                    j = j
+                        .checked_add(distance)
+                        .filter(|&end| end <= nlclusters)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "invalid pcluster tail distance",
+                            )
+                        })?;
+                }
+                let logical_len = ((j - i) as u64 * block).min(file_size - logical_start) as usize;
+                if let Some((head, frag_off)) = tail_fragment {
+                    if i == head {
+                        let from = offset.max(logical_start) - logical_start;
+                        let to = end.min(logical_start + logical_len as u64) - logical_start;
+                        if to > from {
+                            deferred_tail = Some((frag_off + from, to - from));
+                        }
+                        break;
+                    }
+                }
+                let phys_blocks = match kind {
+                    Z_EROFS_LCLUSTER_TYPE_PLAIN => 1usize,
+                    Z_EROFS_LCLUSTER_TYPE_HEAD1 if j - i >= 2 => {
+                        let delta0 = index_at(i + 1).1 as u16;
+                        if delta0 & Z_EROFS_LI_D0_CBLKCNT == 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "z_erofs pcluster without CBLKCNT",
+                            ));
+                        }
+                        (delta0 & !Z_EROFS_LI_D0_CBLKCNT) as usize
+                    }
+                    Z_EROFS_LCLUSTER_TYPE_HEAD1 => 1,
+                    other => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("unsupported z_erofs lcluster type {other}"),
+                        ))
+                    }
+                };
+                let phys_len = phys_blocks * EROFS_BLOCK_SIZE as usize;
+                let (blob_index, blob_off) = locate_flat_blob(blob_layout, word as u64 * block)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("z_erofs pcluster at block {word} outside every device"),
+                        )
+                    })?;
+                let key = PclusterKey {
+                    blob_index,
+                    offset: blob_off,
+                    physical_len: phys_len,
+                    logical_len,
+                    algorithm,
+                };
+                let from = (offset.max(logical_start) - logical_start) as usize;
+                let to = (end.min(logical_start + logical_len as u64) - logical_start) as usize;
+                if kind == Z_EROFS_LCLUSTER_TYPE_HEAD1 {
+                    if let Some(data) = self.z_pclusters.get(key) {
+                        w.write_all(&data[from..to])?;
+                        written += to - from;
+                        i = j;
+                        continue;
+                    }
+                }
+                compressed.resize(phys_len, 0);
+                self.read_blob_into(blob_index, blob_off, 0, &mut compressed[..phys_len])?;
+
+                let data: &[u8] = if kind == Z_EROFS_LCLUSTER_TYPE_PLAIN {
+                    &compressed[..logical_len]
+                } else {
+                    // ZERO_PADDING: the compressed payload is tail-aligned in
+                    // the pcluster and never starts with a zero byte (LZ4
+                    // token or zstd magic).
+                    let payload_start = compressed[..phys_len]
+                        .iter()
+                        .position(|b| *b != 0)
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::InvalidData, "empty z_erofs pcluster")
+                        })?;
+                    decoded.resize(logical_len, 0);
+                    let payload = &compressed[payload_start..phys_len];
+                    let n = match algorithm {
+                        ZAlgorithm::Lz4 => lz4_flex::block::decompress_into(payload, decoded)
+                            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
+                        ZAlgorithm::Zstd => {
+                            if zstd.is_none() {
+                                *zstd = Some(zstd::bulk::Decompressor::new()?);
+                            }
+                            zstd.as_mut()
+                                .expect("initialized above")
+                                .decompress_to_buffer(payload, decoded)?
+                        }
+                    };
+                    if n != logical_len {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "z_erofs pcluster decoded to {n} bytes, expected {logical_len}"
+                            ),
+                        ));
+                    }
+                    self.z_pclusters.insert(key, decoded);
+                    &decoded[..]
+                };
+
+                let from = offset.max(logical_start) - logical_start;
+                let to = end.min(logical_start + logical_len as u64) - logical_start;
+                if to > from {
+                    w.write_all(&data[from as usize..to as usize])?;
+                    written += (to - from) as usize;
+                }
+                i = j;
+            }
+            Ok(())
+        })?;
+        if let Some((packed_off, len)) = deferred_tail {
+            let packed_nid = self.superblock().packed_nid().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "tail fragment without packed inode",
+                )
+            })?;
+            let packed = self.inode(packed_nid)?;
+            written +=
+                self.write_z_data_to(packed_nid, &packed, packed_off, len as usize, w, depth + 1)?;
+        }
+        Ok(written)
     }
 
     // ------------------------------------------------------------------

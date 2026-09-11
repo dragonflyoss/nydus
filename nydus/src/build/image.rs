@@ -5,12 +5,12 @@ use crc32c::crc32c_append;
 
 use nydus_error::{Error, Result};
 use nydus_format::erofs::{
-    ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
+    ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
     EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM,
     EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
     EROFS_FEATURE_INCOMPAT_COMPR_CFGS, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
     EROFS_FEATURE_INCOMPAT_FRAGMENTS, EROFS_FEATURE_INCOMPAT_ZERO_PADDING, EROFS_SB_BASE_SIZE,
-    EROFS_SUPER_OFFSET, Z_EROFS_LZ4_MAX_DISTANCE,
+    EROFS_SUPER_OFFSET,
 };
 
 /// Write the complete EROFS image file.
@@ -51,7 +51,7 @@ pub(crate) fn write_image(
         epoch,
         device_slots,
         uuid,
-        0,
+        ZComprCfgs::default(),
         0,
         None,
     )?;
@@ -86,13 +86,13 @@ pub(crate) fn fill_image_head(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
-    z_max_pclusterblks: u16,
+    z_cfgs: ZComprCfgs,
     min_total_blocks: u64,
     packed_nid: Option<u64>,
 ) -> Result<()> {
-    let z_lz4 = z_max_pclusterblks != 0;
+    let z_erofs = !z_cfgs.is_empty();
     let block_size = EROFS_BLOCK_SIZE as usize;
-    let (devslot_offset, meta_blkaddr) = head_layout(device_slots.len(), z_lz4)?;
+    let (devslot_offset, meta_blkaddr) = head_layout(device_slots.len(), z_erofs)?;
     let meta_blocks = metadata_len.div_ceil(block_size);
     let total_blocks = (meta_blkaddr as u64)
         .checked_add(meta_blocks as u64)
@@ -102,13 +102,13 @@ pub(crate) fn fill_image_head(
     let feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
     let mut feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
-    if z_lz4 {
+    if z_erofs {
         feature_incompat |= EROFS_FEATURE_INCOMPAT_ZERO_PADDING
             | EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER
             | EROFS_FEATURE_INCOMPAT_COMPR_CFGS;
     }
     if packed_nid.is_some() {
-        if !z_lz4 {
+        if !z_erofs {
             return Err(Error::InvalidParameter(
                 "fragments require z_erofs compression".to_string(),
             ));
@@ -135,8 +135,8 @@ pub(crate) fn fill_image_head(
         devt_slotoff,
         uuid,
     )?;
-    if z_lz4 {
-        sb.set_available_compr_algs(1); // bit 0 = LZ4
+    if z_erofs {
+        sb.set_available_compr_algs(z_cfgs.available_compr_algs());
     }
     if let Some(nid) = packed_nid {
         sb.set_packed_nid(nid);
@@ -144,15 +144,12 @@ pub(crate) fn fill_image_head(
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     image_buf[sb_offset..sb_offset + EROFS_SB_BASE_SIZE].copy_from_slice(sb.as_bytes());
 
-    if z_lz4 {
-        // COMPR_CFGS record right after the superblock: le16 size followed
-        // by z_erofs_lz4_cfgs { max_distance, max_pclusterblks, reserved }.
-        // The device table starts one slot later (see [`head_layout`]).
+    if z_erofs {
+        // COMPR_CFGS records right after the superblock, one per declared
+        // algorithm. The device table starts one slot later (see
+        // [`head_layout`]), which leaves room for every record.
         let cfg_offset = sb_offset + EROFS_SB_BASE_SIZE;
-        let mut cfg = [0u8; 16];
-        cfg[0..2].copy_from_slice(&14u16.to_le_bytes());
-        cfg[2..4].copy_from_slice(&Z_EROFS_LZ4_MAX_DISTANCE.to_le_bytes());
-        cfg[4..6].copy_from_slice(&z_max_pclusterblks.to_le_bytes());
+        let cfg = z_cfgs.to_bytes();
         image_buf[cfg_offset..cfg_offset + cfg.len()].copy_from_slice(&cfg);
     }
 
@@ -184,17 +181,17 @@ pub(crate) fn device_table_meta_blkaddr(device_count: usize) -> Result<u32> {
 }
 
 /// Byte offset of the device table and the number of head blocks it makes
-/// the metadata region skip. z_erofs images carry the LZ4 COMPR_CFGS record
+/// the metadata region skip. z_erofs images carry the COMPR_CFGS records
 /// right after the superblock, so their device table starts one slot later
 /// (byte 1280, `devt_slotoff` 10) like mkfs.erofs lays it out.
-pub(crate) fn head_layout(device_count: usize, z_lz4: bool) -> Result<(usize, u32)> {
+pub(crate) fn head_layout(device_count: usize, z_erofs: bool) -> Result<(usize, u32)> {
     if device_count > u16::MAX as usize {
         return Err(Error::Overflow("device count exceeds u16".to_string()));
     }
     let block_size = EROFS_BLOCK_SIZE as usize;
     let devslot_offset = EROFS_SUPER_OFFSET as usize
         + EROFS_SB_BASE_SIZE
-        + if z_lz4 { EROFS_DEVICESLOT_SIZE } else { 0 };
+        + if z_erofs { EROFS_DEVICESLOT_SIZE } else { 0 };
     let table_end = devslot_offset
         + device_count
             .checked_mul(EROFS_DEVICESLOT_SIZE)
@@ -246,7 +243,19 @@ mod tests {
             u32::MAX as u64,
         )
         .unwrap()];
-        fill_image_head(&mut head, 0, 0, 1, 0, &slots, &[0; 16], 0, 0, None).unwrap();
+        fill_image_head(
+            &mut head,
+            0,
+            0,
+            1,
+            0,
+            &slots,
+            &[0; 16],
+            ZComprCfgs::default(),
+            0,
+            None,
+        )
+        .unwrap();
         let offset = EROFS_SUPER_OFFSET as usize + 80;
         assert_eq!(
             u32::from_le_bytes(head[offset..offset + 4].try_into().unwrap()),
@@ -261,7 +270,7 @@ mod tests {
             0,
             &[],
             &[0; 16],
-            0,
+            ZComprCfgs::default(),
             0,
             None,
         )
@@ -275,7 +284,7 @@ mod tests {
             0,
             &[],
             &[0; 16],
-            0,
+            ZComprCfgs::default(),
             0,
             None,
         )

@@ -17,7 +17,7 @@ pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
-    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk,
+    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataFlags,
     DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
     DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
     DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,

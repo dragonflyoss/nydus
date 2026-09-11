@@ -13,8 +13,8 @@ use nydus_format::erofs::{
     EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
     EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
-    Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LI_LCLUSTER_TYPE_MASK,
-    Z_EROFS_MAP_HEADER_SIZE,
+    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
+    Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::{hex_string, sha256_bytes};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -60,11 +60,13 @@ pub struct ImageStats {
     pub flat_plain_files: u64,
     pub flat_inline_files: u64,
     pub other_layout_files: u64,
-    /// z_erofs COMPRESSED_FULL files (LZ4 pclusters), including whole-file
+    /// z_erofs COMPRESSED_FULL files (compressed pclusters), including whole-file
     /// fragments.
     pub z_compressed_files: u64,
     /// z_erofs files stored entirely in the packed inode.
     pub z_fragment_files: u64,
+    /// z_erofs files whose final extent lives in the packed inode.
+    pub z_tail_fragment_files: u64,
     /// HEAD/PLAIN lcluster indexes whose block address lies in no device.
     pub z_pclusters_out_of_range: u64,
     pub xattr_entries: u64,
@@ -194,8 +196,11 @@ pub fn check_image(kind: ImageKind, path: &Path, blob_dir: Option<&Path>) -> Res
         .len();
     let primary_image_bytes = sb.blocks() * EROFS_BLOCK_SIZE as u64;
     let blob_infos = reader.blob_infos().context("failed to read device slots")?;
-    let z_image = reader.z_lz4_max_pclusterblks()?.is_some();
-    let resolved_blobs = if z_image {
+    let z_image = reader.z_compr_cfgs()?.is_some();
+    // A single z full blob (`--blob`) verifies like a chunk-based one: the
+    // embedded slot names the data region. Store-resolved z devices verify
+    // against their full-blob names.
+    let resolved_blobs = if z_image && kind == ImageKind::Bootstrap {
         resolve_z_devices(blob_dir, blob_infos)?
     } else {
         resolve_blobs(kind, path, blob_dir, blob_infos)?
@@ -372,7 +377,7 @@ fn walk_inode(
                     if inode.size() > 0 && tail.len() == Z_EROFS_MAP_HEADER_SIZE {
                         stats.z_fragment_files += 1;
                     } else if tail.len() > Z_EROFS_MAP_HEADER_SIZE + 8 {
-                        account_z_pclusters(&tail[Z_EROFS_MAP_HEADER_SIZE + 8..], stats, blobs);
+                        account_z_pclusters(tail, stats, blobs);
                     }
                 }
                 _ => {
@@ -406,11 +411,31 @@ fn walk_inode(
 /// mapped range contains its block address; addresses in no device are
 /// counted as out of range.
 fn account_z_pclusters(
-    indexes: &[u8],
+    tail: &[u8],
     stats: &mut ImageStats,
     blobs: &mut BTreeMap<u16, BlobSummary>,
 ) {
-    for index in indexes.chunks_exact(Z_EROFS_LCLUSTER_INDEX_SIZE) {
+    let indexes = &tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
+    // The last HEAD of a tail-fragment inode addresses the packed inode.
+    let advise = u16::from_le_bytes([tail[4], tail[5]]);
+    let count = indexes.len() / Z_EROFS_LCLUSTER_INDEX_SIZE;
+    let tail_fragment_head = (advise & Z_EROFS_ADVISE_FRAGMENT_PCLUSTER != 0)
+        .then(|| {
+            (0..count).rev().find(|&i| {
+                let e = &indexes[i * Z_EROFS_LCLUSTER_INDEX_SIZE..];
+                u16::from_le_bytes([e[0], e[1]]) & Z_EROFS_LI_LCLUSTER_TYPE_MASK
+                    != Z_EROFS_LCLUSTER_TYPE_NONHEAD
+            })
+        })
+        .flatten();
+    for (i, index) in indexes
+        .chunks_exact(Z_EROFS_LCLUSTER_INDEX_SIZE)
+        .enumerate()
+    {
+        if Some(i) == tail_fragment_head {
+            stats.z_tail_fragment_files += 1;
+            continue;
+        }
         let advise = u16::from_le_bytes([index[0], index[1]]);
         if advise & Z_EROFS_LI_LCLUSTER_TYPE_MASK == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
             continue;
@@ -429,10 +454,11 @@ fn account_z_pclusters(
     }
 }
 
-/// z_erofs layer devices are raw compressed data named by the slot ID in the
-/// store; a device verifies when its size matches the declared block count
-/// and its SHA256 reproduces the slot ID (it cannot when the layer was built
-/// with `--blob-id`).
+/// z_erofs layers are full blobs whose data region is the raw layer device,
+/// named by the slot ID (their SHA256) in the store. A device verifies when
+/// the footer's data region spans the declared block count and the file's
+/// SHA256 reproduces the slot ID (it cannot when the layer was built with
+/// `--blob-id`). A bare data file without a footer is accepted as well.
 fn resolve_z_devices(
     blob_dir: Option<&Path>,
     blob_infos: &[RawBlobInfo],
@@ -446,25 +472,39 @@ fn resolve_z_devices(
         if !path.is_file() {
             continue;
         }
-        let file = fs::File::open(&path)
-            .with_context(|| format!("failed to open layer device: {}", path.display()))?;
-        let mmap = unsafe { Mmap::map(&file) }
-            .with_context(|| format!("failed to map layer device: {}", path.display()))?;
-        let sha256 = sha256_bytes(&mmap);
-        let size = mmap.len() as u64;
-        resolved.insert(
-            blob.blob_index,
-            ResolvedBlob {
+        let declared = blob.blocks * EROFS_BLOCK_SIZE as u64;
+        let resolved_blob = match inspect_blob(&path)? {
+            Some(inspection) => ResolvedBlob {
                 path,
-                blob_size: size,
-                blob_sha256: sha256,
-                data_sha256: sha256,
-                data_size: size,
-                blob_metadata: None,
+                verified: inspection.data_size == declared
+                    && inspection.blob_sha256 == blob.blob_id,
+                blob_size: inspection.blob_size,
+                blob_sha256: inspection.blob_sha256,
+                data_sha256: inspection.data_sha256,
+                data_size: inspection.data_size,
+                blob_metadata: inspection.blob_metadata,
                 slot_sha256_kind: SlotSha256Kind::ZDevice,
-                verified: size == blob.blocks * EROFS_BLOCK_SIZE as u64 && sha256 == blob.blob_id,
             },
-        );
+            None => {
+                let file = fs::File::open(&path)
+                    .with_context(|| format!("failed to open layer device: {}", path.display()))?;
+                let mmap = unsafe { Mmap::map(&file) }
+                    .with_context(|| format!("failed to map layer device: {}", path.display()))?;
+                let sha256 = sha256_bytes(&mmap);
+                let size = mmap.len() as u64;
+                ResolvedBlob {
+                    path,
+                    blob_size: size,
+                    blob_sha256: sha256,
+                    data_sha256: sha256,
+                    data_size: size,
+                    blob_metadata: None,
+                    slot_sha256_kind: SlotSha256Kind::ZDevice,
+                    verified: size == declared && sha256 == blob.blob_id,
+                }
+            }
+        };
+        resolved.insert(blob.blob_index, resolved_blob);
     }
     Ok(resolved)
 }

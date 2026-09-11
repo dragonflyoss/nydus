@@ -3019,6 +3019,7 @@ name = "nydus-core"
 version = "3.0.0-alpha.1"
 dependencies = [
  "libc",
+ "lz4_flex",
  "memmap2",
  "nydus-backend",
  "nydus-config",

@@ -4,10 +4,9 @@ use nydus::error::{Error, Result};
 use nydus_config::{BackendConfig, Config};
 use nydus_format::erofs::{
     ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
-    EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
-    EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
-    EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_FEATURE_INCOMPAT_FRAGMENTS,
-    EROFS_FEATURE_INCOMPAT_ZERO_PADDING,
+    EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER,
+    EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+    EROFS_FEATURE_INCOMPAT_FRAGMENTS, EROFS_FEATURE_INCOMPAT_ZERO_PADDING,
 };
 use nydus_format::utils::hex_string;
 use std::collections::{BTreeMap, BTreeSet};
@@ -358,6 +357,8 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
         z_compressed_files: String,
         #[tabled(rename = "Z_EROFS FRAGMENT FILES")]
         z_fragment_files: String,
+        #[tabled(rename = "Z_EROFS TAIL FRAGMENT FILES")]
+        z_tail_fragment_files: String,
         #[tabled(rename = "Z_EROFS PCLUSTERS OUT OF RANGE")]
         z_pclusters_out_of_range: String,
         #[tabled(rename = "XATTR ENTRIES")]
@@ -399,6 +400,7 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
         other_layout_files: stats.other_layout_files.to_string(),
         z_compressed_files: stats.z_compressed_files.to_string(),
         z_fragment_files: stats.z_fragment_files.to_string(),
+        z_tail_fragment_files: stats.z_tail_fragment_files.to_string(),
         z_pclusters_out_of_range: stats.z_pclusters_out_of_range.to_string(),
         xattr_entries: stats.xattr_entries.to_string(),
         hardlink_inodes: stats.hardlink_inodes.to_string(),
@@ -591,9 +593,6 @@ fn incompat_features(bits: u32) -> String {
     }
     if bits & EROFS_FEATURE_INCOMPAT_FRAGMENTS != 0 {
         features.push("fragments");
-    }
-    if bits & EROFS_FEATURE_INCOMPAT_48BIT != 0 {
-        features.push("48bit");
     }
     if features.is_empty() {
         "none".to_string()

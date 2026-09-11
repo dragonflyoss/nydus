@@ -82,6 +82,10 @@ pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
 pub const Z_EROFS_MAP_HEADER_SIZE: usize = 8;
 pub const Z_EROFS_LCLUSTER_INDEX_SIZE: usize = 8;
 pub const Z_EROFS_ADVISE_BIG_PCLUSTER_1: u16 = 0x0002;
+/// The inode's last extent lives in the packed inode: `h_fragmentoff` (the
+/// first 4 header bytes) holds the low 32 bits of its offset there and the
+/// HEAD lcluster index of that extent the high 32 bits in its blkaddr field.
+pub const Z_EROFS_ADVISE_FRAGMENT_PCLUSTER: u16 = 0x0020;
 pub const Z_EROFS_LCLUSTER_TYPE_PLAIN: u16 = 0;
 pub const Z_EROFS_LCLUSTER_TYPE_HEAD1: u16 = 1;
 pub const Z_EROFS_LCLUSTER_TYPE_NONHEAD: u16 = 2;
@@ -96,6 +100,161 @@ pub const Z_EROFS_FRAGMENT_INODE_FLAG: u64 = 1 << 63;
 pub const Z_EROFS_LI_D0_CBLKCNT: u16 = 1 << 11;
 /// LZ4 sliding-window upper bound recorded in the superblock.
 pub const Z_EROFS_LZ4_MAX_DISTANCE: u16 = 65535;
+/// `z_erofs_zstd_cfgs.windowlog` is stored relative to this
+/// (`ZSTD_WINDOWLOG_ABSOLUTEMIN`).
+pub const Z_EROFS_ZSTD_WINDOWLOG_BASE: u8 = 10;
+/// Largest zstd window the kernel accepts for z_erofs (1MiB, log2 20).
+pub const Z_EROFS_ZSTD_MAX_WINDOWLOG: u8 = 20;
+
+/// A z_erofs pcluster compression algorithm (`z_erofs_map_header
+/// .h_algorithmtype` low nibble, and its bit in `available_compr_algs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ZAlgorithm {
+    /// LZ4 blocks (kernel 5.x+).
+    Lz4 = 0,
+    /// zstd frames (kernel 6.10+).
+    Zstd = 3,
+}
+
+impl ZAlgorithm {
+    /// The `h_algorithmtype` value / `available_compr_algs` bit index.
+    pub fn as_type(self) -> u8 {
+        self as u8
+    }
+
+    /// Parses an `h_algorithmtype` nibble.
+    pub fn from_type(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Lz4),
+            3 => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ZAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Lz4 => "lz4",
+            Self::Zstd => "zstd",
+        })
+    }
+}
+
+/// The z_erofs algorithms an image declares and their COMPR_CFGS records:
+/// `available_compr_algs` in the superblock, and right after it one
+/// `le16 size` + config record per set bit in algorithm order. Only the
+/// algorithms this crate produces are representable; parsing rejects any
+/// other bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ZComprCfgs {
+    /// LZ4 `max_pclusterblks` (the record's `max_distance` is always
+    /// [`Z_EROFS_LZ4_MAX_DISTANCE`]), `Some` when LZ4 pclusters may occur.
+    pub lz4_max_pclusterblks: Option<u16>,
+    /// zstd window log2 (absolute, e.g. 19 for 512KiB), `Some` when zstd
+    /// pclusters may occur.
+    pub zstd_windowlog: Option<u8>,
+}
+
+impl ZComprCfgs {
+    /// Upper bound of the serialized records: 16 bytes LZ4 + 8 bytes zstd.
+    pub const MAX_SIZE: usize = 16 + 8;
+
+    /// No algorithm declared: not a z_erofs image.
+    pub fn is_empty(&self) -> bool {
+        self.lz4_max_pclusterblks.is_none() && self.zstd_windowlog.is_none()
+    }
+
+    /// The `available_compr_algs` bit mask.
+    pub fn available_compr_algs(&self) -> u16 {
+        let mut algs = 0u16;
+        if self.lz4_max_pclusterblks.is_some() {
+            algs |= 1 << ZAlgorithm::Lz4.as_type();
+        }
+        if self.zstd_windowlog.is_some() {
+            algs |= 1 << ZAlgorithm::Zstd.as_type();
+        }
+        algs
+    }
+
+    /// Whether pclusters of `algorithm` are declared.
+    pub fn has(&self, algorithm: ZAlgorithm) -> bool {
+        match algorithm {
+            ZAlgorithm::Lz4 => self.lz4_max_pclusterblks.is_some(),
+            ZAlgorithm::Zstd => self.zstd_windowlog.is_some(),
+        }
+    }
+
+    /// The union of two images' configs (a merged image must decode every
+    /// layer): per algorithm the larger limit wins.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            lz4_max_pclusterblks: self.lz4_max_pclusterblks.max(other.lz4_max_pclusterblks),
+            zstd_windowlog: self.zstd_windowlog.max(other.zstd_windowlog),
+        }
+    }
+
+    /// The records as laid out after the superblock.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::MAX_SIZE);
+        if let Some(max_pclusterblks) = self.lz4_max_pclusterblks {
+            // le16 size, then z_erofs_lz4_cfgs { max_distance, max_pclusterblks, reserved[10] }.
+            out.extend_from_slice(&14u16.to_le_bytes());
+            out.extend_from_slice(&Z_EROFS_LZ4_MAX_DISTANCE.to_le_bytes());
+            out.extend_from_slice(&max_pclusterblks.to_le_bytes());
+            out.extend_from_slice(&[0u8; 10]);
+        }
+        if let Some(windowlog) = self.zstd_windowlog {
+            // le16 size, then z_erofs_zstd_cfgs { format, windowlog, reserved[4] }.
+            out.extend_from_slice(&6u16.to_le_bytes());
+            out.push(0);
+            out.push(windowlog - Z_EROFS_ZSTD_WINDOWLOG_BASE);
+            out.extend_from_slice(&[0u8; 4]);
+        }
+        out
+    }
+
+    /// Parses the records for the algorithms in `algs` from the bytes after
+    /// the superblock. Returns the config and the number of bytes consumed.
+    pub fn parse(algs: u16, bytes: &[u8]) -> Result<(Self, usize), String> {
+        let mut cfgs = Self::default();
+        let mut pos = 0usize;
+        for alg in 0..16u8 {
+            if algs & (1 << alg) == 0 {
+                continue;
+            }
+            let algorithm = ZAlgorithm::from_type(alg)
+                .ok_or_else(|| format!("unsupported z_erofs algorithm {alg}"))?;
+            let size = bytes
+                .get(pos..pos + 2)
+                .map(|s| u16::from_le_bytes([s[0], s[1]]) as usize)
+                .ok_or("truncated z_erofs compression config")?;
+            let record = bytes
+                .get(pos + 2..pos + 2 + size)
+                .ok_or("truncated z_erofs compression config")?;
+            match algorithm {
+                ZAlgorithm::Lz4 => {
+                    if size < 4 {
+                        return Err("short z_erofs LZ4 config".to_string());
+                    }
+                    cfgs.lz4_max_pclusterblks = Some(u16::from_le_bytes([record[2], record[3]]));
+                }
+                ZAlgorithm::Zstd => {
+                    if size < 2 {
+                        return Err("short z_erofs zstd config".to_string());
+                    }
+                    if record[0] != 0 {
+                        return Err(format!("unsupported z_erofs zstd format {}", record[0]));
+                    }
+                    cfgs.zstd_windowlog = Some(record[1] + Z_EROFS_ZSTD_WINDOWLOG_BASE);
+                }
+            }
+            pos += 2 + size;
+        }
+        Ok((cfgs, pos))
+    }
+}
 
 // Inode flag bits.
 pub const EROFS_I_VERSION_BIT: u16 = 0;
@@ -160,5 +319,34 @@ mod tests {
         assert!(is_nydus_xattr(b"trusted.nydus.other"));
         assert!(!is_nydus_xattr(b"trusted.other"));
         assert!(!is_nydus_xattr(b"user.nydus.prefetch.blobs"));
+    }
+
+    #[test]
+    fn z_compr_cfgs_round_trip_in_algorithm_order() {
+        let both = ZComprCfgs {
+            lz4_max_pclusterblks: Some(16),
+            zstd_windowlog: Some(19),
+        };
+        assert_eq!(both.available_compr_algs(), 0b1001);
+        let bytes = both.to_bytes();
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(&bytes[..6], &[14, 0, 0xff, 0xff, 16, 0]);
+        assert_eq!(&bytes[16..20], &[6, 0, 0, 9]);
+        assert_eq!(ZComprCfgs::parse(0b1001, &bytes).unwrap(), (both, 24));
+
+        let zstd_only = ZComprCfgs {
+            lz4_max_pclusterblks: None,
+            zstd_windowlog: Some(20),
+        };
+        let bytes = zstd_only.to_bytes();
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(ZComprCfgs::parse(0b1000, &bytes).unwrap(), (zstd_only, 8));
+        assert!(
+            ZComprCfgs::parse(0b0010, &bytes).is_err(),
+            "lzma is rejected"
+        );
+        assert!(ZComprCfgs::default().is_empty());
+        assert_eq!(zstd_only.union(both), both.union(zstd_only));
+        assert_eq!(zstd_only.union(both).zstd_windowlog, Some(20));
     }
 }

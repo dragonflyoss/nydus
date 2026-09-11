@@ -9,10 +9,10 @@ use crate::build::inode::{
 };
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
-    cast_ref, ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
-    EROFS_FT_DIR, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET, Z_EROFS_FRAGMENT_INODE_FLAG,
-    Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LI_LCLUSTER_TYPE_MASK,
-    Z_EROFS_MAP_HEADER_SIZE,
+    cast_ref, ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs, EROFS_BLOCK_SIZE,
+    EROFS_DEVICESLOT_SIZE, EROFS_FT_DIR, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET,
+    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
+    Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
 use std::io::Write;
@@ -54,7 +54,16 @@ pub fn render_flattened_bootstrap_to(
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
 ) -> Result<u64> {
-    render_flattened_bootstrap_to_inner(writer, inodes, epoch, device_slots, uuid, 0, 0, None)
+    render_flattened_bootstrap_to_inner(
+        writer,
+        inodes,
+        epoch,
+        device_slots,
+        uuid,
+        ZComprCfgs::default(),
+        0,
+        None,
+    )
 }
 
 /// z_erofs multi-device variant: the compressed data lives in external
@@ -68,7 +77,7 @@ pub fn render_z_device_bootstrap(
     inodes: &mut [InodeInfo],
     epoch: u64,
     uuid: &[u8; 16],
-    z_max_pclusterblks: u16,
+    z_cfgs: ZComprCfgs,
     device_slots: &[ErofsDeviceSlot],
     packed_index: Option<usize>,
 ) -> Result<Vec<u8>> {
@@ -84,7 +93,7 @@ pub fn render_z_device_bootstrap(
         epoch,
         device_slots,
         uuid,
-        z_max_pclusterblks,
+        z_cfgs,
         min_total_blocks,
         packed_index,
     )?;
@@ -166,8 +175,45 @@ impl ZRelocation {
         if tail.len() < Z_EROFS_MAP_HEADER_SIZE + 8 {
             return Ok(tail);
         }
+        // A tail fragment's HEAD carries the high half of a packed offset,
+        // not a device address: relocate that offset with the packed inode.
+        let advise = u16::from_le_bytes([tail[4], tail[5]]);
+        let tail_fragment_head = if advise & Z_EROFS_ADVISE_FRAGMENT_PCLUSTER != 0 {
+            let indexes = &tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
+            let count = indexes.len() / Z_EROFS_LCLUSTER_INDEX_SIZE;
+            let head = (0..count).rev().find(|&i| {
+                let e = &indexes[i * Z_EROFS_LCLUSTER_INDEX_SIZE..];
+                u16::from_le_bytes([e[0], e[1]]) & Z_EROFS_LI_LCLUSTER_TYPE_MASK
+                    != Z_EROFS_LCLUSTER_TYPE_NONHEAD
+            });
+            let Some(head) = head else {
+                return Err(Error::InvalidImage(
+                    "tail fragment inode without a head lcluster".to_string(),
+                ));
+            };
+            let e = &indexes[head * Z_EROFS_LCLUSTER_INDEX_SIZE..];
+            let hi = u32::from_le_bytes(e[4..8].try_into().expect("4-byte blkaddr"));
+            let lo = u32::from_le_bytes(tail[..4].try_into().expect("4-byte fragmentoff"));
+            let offset = ((u64::from(hi) << 32) | u64::from(lo))
+                .checked_add(self.packed_base)
+                .ok_or_else(|| {
+                    Error::Overflow("merged tail fragment offset overflow".to_string())
+                })?;
+            tail[..4].copy_from_slice(&(offset as u32).to_le_bytes());
+            tail[Z_EROFS_MAP_HEADER_SIZE + 8 + head * Z_EROFS_LCLUSTER_INDEX_SIZE + 4..][..4]
+                .copy_from_slice(&((offset >> 32) as u32).to_le_bytes());
+            Some(head)
+        } else {
+            None
+        };
         let indexes = &mut tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
-        for index in indexes.chunks_exact_mut(Z_EROFS_LCLUSTER_INDEX_SIZE) {
+        for (i, index) in indexes
+            .chunks_exact_mut(Z_EROFS_LCLUSTER_INDEX_SIZE)
+            .enumerate()
+        {
+            if Some(i) == tail_fragment_head {
+                continue;
+            }
             let advise = u16::from_le_bytes([index[0], index[1]]);
             if advise & Z_EROFS_LI_LCLUSTER_TYPE_MASK == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
                 continue;
@@ -209,7 +255,7 @@ fn size_bootstrap(
     inodes: &mut [InodeInfo],
     epoch: u64,
     device_count: usize,
-    z_lz4: bool,
+    z_erofs: bool,
 ) -> Result<Sizing> {
     if inodes.is_empty() {
         return Err(Error::InvalidParameter(
@@ -219,7 +265,7 @@ fn size_bootstrap(
 
     // The head (superblock + device table) occupies the leading blocks; the
     // metadata region follows it.
-    let meta_blkaddr = head_layout(device_count, z_lz4)?.1;
+    let meta_blkaddr = head_layout(device_count, z_erofs)?.1;
     let head_size = meta_blkaddr as usize * EROFS_BLOCK_SIZE as usize;
     let mut layout = MetadataLayout::size_only(meta_blkaddr);
 
@@ -272,16 +318,16 @@ fn render_flattened_bootstrap_to_inner(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
-    z_max_pclusterblks: u16,
+    z_cfgs: ZComprCfgs,
     min_total_blocks: u64,
     packed_index: Option<usize>,
 ) -> Result<u64> {
-    let z_lz4 = z_max_pclusterblks != 0;
+    let z_erofs = !z_cfgs.is_empty();
     let Sizing {
         head_size,
         metadata_len,
         data_entries,
-    } = size_bootstrap(inodes, epoch, device_slots.len(), z_lz4)?;
+    } = size_bootstrap(inodes, epoch, device_slots.len(), z_erofs)?;
     let bootstrap_size = (head_size + metadata_len) as u64;
 
     // The head can be written up front: the flattened device addresses only
@@ -289,7 +335,7 @@ fn render_flattened_bootstrap_to_inner(
     // z device slots arrive pre-placed (their addresses are baked into the
     // inode tails), so they are written as given.
     let mut flattened_slots = device_slots.to_vec();
-    if !z_lz4 {
+    if !z_erofs {
         set_flattened_mapped_blkaddrs(
             &mut flattened_slots,
             bootstrap_size,
@@ -311,7 +357,7 @@ fn render_flattened_bootstrap_to_inner(
         epoch,
         &flattened_slots,
         uuid,
-        z_max_pclusterblks,
+        z_cfgs,
         min_total_blocks,
         packed_nid,
     )?;
@@ -482,7 +528,14 @@ fn set_flattened_mapped_blkaddrs(
     Ok(())
 }
 
-fn patch_device_slots(bootstrap: &mut [u8], device_slots: &[ErofsDeviceSlot]) -> Result<()> {
+/// Overwrite the device table of a rendered bootstrap with `device_slots`
+/// (same count as rendered) and refresh the superblock checksum. Addresses
+/// inside the metadata are left alone, so callers must keep each slot's
+/// mapped address unless the metadata was rendered independent of it.
+pub(crate) fn patch_device_slots(
+    bootstrap: &mut [u8],
+    device_slots: &[ErofsDeviceSlot],
+) -> Result<()> {
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     if bootstrap.len() < sb_offset + EROFS_SB_BASE_SIZE {
         return Err(Error::InvalidImage(
@@ -613,7 +666,7 @@ fn render_bootstrap_inner(
         epoch,
         device_slots,
         uuid,
-        0,
+        ZComprCfgs::default(),
         0,
         None,
     )?;

@@ -1,5 +1,6 @@
 pub(crate) mod data;
 mod metadata;
+mod z_cache;
 
 use std::collections::HashSet;
 use std::fs;
@@ -12,9 +13,9 @@ use memmap2::Mmap;
 use nydus_backend::{BlobBackend, Local};
 use nydus_format::blob::BlobFooter;
 use nydus_format::erofs::{
-    cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOB_ID_SIZE,
-    EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE,
-    EROFS_SUPER_OFFSET,
+    cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs,
+    EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE,
+    EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
 use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
@@ -55,13 +56,14 @@ fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
         .collect()
 }
 
-/// EROFS image reader — lock-free, zero-copy.
+/// EROFS metadata reader with blob caches and bounded decoded-pcluster reuse.
 ///
 /// Both the image and blob device are memory-mapped for zero-copy access.
 /// On-disk structs are cast directly from the mapped memory.
 pub struct ErofsReader {
     pub(crate) mmap: Mmap,
     blobs: Arc<BlobCaches>,
+    z_pclusters: z_cache::PclusterCache,
     /// Memoised device table. Pre-populated by the open paths that already
     /// parse it; metadata-only readers fill it on first use.
     blob_infos: OnceLock<Vec<RawBlobInfo>>,
@@ -88,6 +90,7 @@ impl ErofsReader {
         Ok(Self {
             mmap,
             blobs: Arc::new(BlobCaches::empty()),
+            z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::new(),
             image_offset,
             sb_offset,
@@ -139,6 +142,7 @@ impl ErofsReader {
         Ok(Self {
             mmap,
             blobs: Arc::new(blobs),
+            z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::from(blob_infos),
             image_offset,
             sb_offset,
@@ -174,6 +178,7 @@ impl ErofsReader {
         Ok(Self {
             mmap,
             blobs: Arc::new(blobs),
+            z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::from(blob_infos),
             image_offset: 0,
             sb_offset,
@@ -300,16 +305,17 @@ impl ErofsReader {
         cast_ref::<ErofsSuperblock>(&self.mmap[self.sb_offset..])
     }
 
-    /// The z_erofs LZ4 `max_pclusterblks` from the COMPR_CFGS record that
-    /// follows the superblock, or `None` for images without LZ4 data.
-    pub fn z_lz4_max_pclusterblks(&self) -> io::Result<Option<u16>> {
-        if self.superblock().available_compr_algs() & 1 == 0 {
+    /// The z_erofs compression configs (COMPR_CFGS records after the
+    /// superblock), or `None` for images without compressed data.
+    pub fn z_compr_cfgs(&self) -> io::Result<Option<ZComprCfgs>> {
+        let algs = self.superblock().available_compr_algs();
+        if algs == 0 {
             return Ok(None);
         }
-        // le16 record size, then z_erofs_lz4_cfgs { le16 max_distance,
-        // le16 max_pclusterblks, ... }.
-        let cfg = self.mmap_slice(self.sb_offset + EROFS_SB_BASE_SIZE, 6)?;
-        Ok(Some(u16::from_le_bytes([cfg[4], cfg[5]])))
+        let bytes = self.mmap_slice(self.sb_offset + EROFS_SB_BASE_SIZE, ZComprCfgs::MAX_SIZE)?;
+        let (cfgs, _) = ZComprCfgs::parse(algs, bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(Some(cfgs))
     }
 
     pub fn blob_infos(&self) -> io::Result<&[RawBlobInfo]> {

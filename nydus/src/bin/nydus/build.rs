@@ -1,8 +1,7 @@
 use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
 use nydus::build::{
-    build_erofs_layer_from_dir, build_erofs_layer_from_tar, build_image,
-    build_image_from_tar_layer, BuildImageOptions, Image,
+    build_image, build_image_from_tar_layer, BuildImageOptions, Image, DEFAULT_Z_WINDOW_SIZE,
 };
 use nydus::error::{Context, Error, Result};
 use nydus_format::blob::{
@@ -10,7 +9,7 @@ use nydus_format::blob::{
     DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
     NYDUS_BLOB_METADATA_SUFFIX,
 };
-use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
+use nydus_format::erofs::{ZAlgorithm, EROFS_BLOB_ID_SIZE};
 use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
 use std::collections::HashSet;
@@ -57,19 +56,20 @@ pub struct BuildCommand {
 
     #[arg(
         long,
-        requires = "bootstrap",
-        env = "NYDUS_BUILD_EROFS_LZ4",
-        help = "Build a z_erofs layer instead of a chunk-based blob: file data becomes native LZ4 pclusters the kernel decompresses (64KiB pclusters, files up to 64KiB packed into the shared fragment inode; kernel 6.1+, kernel mounts only). The blob output receives the raw layer data, named by its SHA256 or --blob-id, and --bootstrap the single-layer image whose device table names it; merge stacks such layers into one bootstrap mounted with device= options. --compressor, --chunk-size, --block-group-size and --digester do not apply"
+        default_value = "0",
+        env = "NYDUS_BUILD_EROFS_DATA_ALIGNMENT",
+        help = "With --compressor erofs-lz4 or erofs-zstd, start files of at least this size on this boundary of the layer data (a power of two multiple of 4KiB), so block-level dedup and snapshots of the volume see identical files at stable offsets, e.g. 2mib for cloud disks deduplicating at 2MiB; 0 (the default) packs files back to back"
     )]
-    erofs_lz4: bool,
+    erofs_data_alignment: ByteSize,
 
     #[arg(
         long,
-        default_value = "0",
-        env = "NYDUS_BUILD_EROFS_DATA_ALIGNMENT",
-        help = "With --erofs-lz4, start files of at least this size on this boundary of the layer data (a power of two multiple of 4KiB), so block-level dedup and snapshots of the volume see identical files at stable offsets, e.g. 2mib for cloud disks deduplicating at 2MiB; 0 (the default) packs files back to back"
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        env = "NYDUS_BUILD_EROFS_FRAGMENT_DEDUP",
+        help = "With --compressor erofs-lz4 or erofs-zstd, share packed fragment data between identical small files; false stores each small file separately"
     )]
-    erofs_data_alignment: ByteSize,
+    erofs_fragment_dedup: bool,
 
     #[arg(
         long,
@@ -80,14 +80,10 @@ pub struct BuildCommand {
 
     #[arg(
         long,
-        default_value = format!(
-            "{}MiB",
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64 / bytesize::MIB
-        ),
         env = "NYDUS_BUILD_CHUNK_SIZE",
-        help = "Specify the file chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned). The value needs to be set with human readable format, for example: 4kib, 1mib"
+        help = "Specify the file chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned; default 1MiB). With --compressor erofs-lz4 or erofs-zstd there are no chunks and this is instead the fetch window: the size of one backend read and cache fill over the raw layer data (a power of two >= 64KiB; default 2MiB). The value needs to be set with human readable format, for example: 4kib, 1mib"
     )]
-    chunk_size: ByteSize,
+    chunk_size: Option<ByteSize>,
 
     #[arg(
         long,
@@ -105,7 +101,7 @@ pub struct BuildCommand {
         value_enum,
         default_value_t = Compressor::Zstd,
         env = "NYDUS_BUILD_COMPRESSOR",
-        help = "Specify the algorithm to compress data chunks"
+        help = "Specify the data compression. zstd, lz4-block and none compress chunk-based block groups the nydus daemon decodes. erofs-lz4 and erofs-zstd instead build a z_erofs layer: file data becomes native LZ4 or zstd pclusters the kernel decompresses (64KiB pclusters, files up to 64KiB packed into the shared fragment inode; kernel mounts need 6.1+ for erofs-lz4 and 6.10+ for erofs-zstd, nydus fuse any kernel). The full blob's data region is the raw layer device, so the store file also serves as a device= of a block-device mount. --block-group-size and --digester do not apply to the erofs-* compressors"
     )]
     compressor: Compressor,
 
@@ -160,12 +156,29 @@ pub enum SourceType {
     TarNydus,
 }
 
-/// The algorithm to compress data chunks.
+/// The data compression.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Compressor {
     None,
     Zstd,
     Lz4Block,
+    /// z_erofs LZ4 pclusters decompressed by the kernel.
+    #[value(alias = "lz4")]
+    ErofsLz4,
+    /// z_erofs zstd pclusters decompressed by the kernel (6.10+).
+    ErofsZstd,
+}
+
+impl Compressor {
+    /// The z_erofs pcluster algorithm, for the compressors that build a
+    /// z_erofs layer instead of chunk-based block groups.
+    fn z_erofs(self) -> Option<ZAlgorithm> {
+        match self {
+            Self::ErofsLz4 => Some(ZAlgorithm::Lz4),
+            Self::ErofsZstd => Some(ZAlgorithm::Zstd),
+            Self::None | Self::Zstd | Self::Lz4Block => None,
+        }
+    }
 }
 
 /// Implement the conversion from Compressor to BlobMetadataCompressor.
@@ -175,6 +188,8 @@ impl From<Compressor> for BlobMetadataCompressor {
             Compressor::None => Self::None,
             Compressor::Zstd => Self::Zstd,
             Compressor::Lz4Block => Self::Lz4Block,
+            // z_erofs blobs carry no chunk-based compression.
+            Compressor::ErofsLz4 | Compressor::ErofsZstd => Self::None,
         }
     }
 }
@@ -242,6 +257,11 @@ impl BuildCommand {
                 ));
             }
         }
+        if self.erofs_data_alignment.as_u64() != 0 && self.compressor.z_erofs().is_none() {
+            return Err(Error::InvalidParameter(
+                "--erofs-data-alignment requires --compressor erofs-lz4 or erofs-zstd".to_string(),
+            ));
+        }
 
         match self.source_type {
             SourceType::DirNydus => {
@@ -292,11 +312,15 @@ impl BuildCommand {
             SourceType::TarNydus => self.source.clone(),
         };
 
-        let chunk_size = u32::try_from(self.chunk_size.as_u64()).map_err(|_| {
-            Error::InvalidParameter(format!(
-                "chunk size {} exceeds the u32 range",
-                self.chunk_size
-            ))
+        let chunk_size = self
+            .chunk_size
+            .unwrap_or(if self.compressor.z_erofs().is_some() {
+                ByteSize::b(DEFAULT_Z_WINDOW_SIZE as u64)
+            } else {
+                ByteSize::b(DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64)
+            });
+        let chunk_size = u32::try_from(chunk_size.as_u64()).map_err(|_| {
+            Error::InvalidParameter(format!("chunk size {chunk_size} exceeds the u32 range"))
         })?;
 
         let block_group_size = u32::try_from(self.block_group_size.as_u64()).map_err(|_| {
@@ -314,6 +338,21 @@ impl BuildCommand {
                 ))
             })?;
 
+        if let Some(algorithm) = self.compressor.z_erofs() {
+            // No chunk geometry applies; the window rides on `chunk_size`.
+            return BuildImageOptions::new(
+                source,
+                DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+                DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
+                BlobMetadataCompressor::None,
+                excludes,
+                self.bootstrap.is_some(),
+            )?
+            .with_blob_id(self.blob_id)
+            .with_z_erofs(algorithm, chunk_size, erofs_data_alignment)
+            .map(|options| options.with_z_fragment_dedup(self.erofs_fragment_dedup));
+        }
+
         Ok(BuildImageOptions::new(
             source,
             chunk_size,
@@ -323,18 +362,14 @@ impl BuildCommand {
             self.bootstrap.is_some(),
         )?
         .with_digester(self.digester.into())
-        .with_blob_id(self.blob_id)
-        .with_erofs_lz4(self.erofs_lz4, erofs_data_alignment))
+        .with_blob_id(self.blob_id))
     }
 
     /// Runs the build: writes the full blob, settles it under its final name,
     /// persists the sidecar artifacts, and prints the summary.
     fn run(&self, options: &BuildImageOptions) -> Result<()> {
-        if options.erofs_lz4() {
-            return self.run_erofs_layer(options);
-        }
         let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
-        let writer = blob_output.create()?;
+        let writer = BufWriter::new(blob_output.create()?);
         let image = match self.source_type {
             SourceType::DirNydus => build_image(options, writer),
             SourceType::TarNydus => build_image_from_tar_layer(options, &self.source, writer),
@@ -355,37 +390,8 @@ impl BuildCommand {
             full_blob_path: &full_blob_path,
             blob_metadata_path: &blob_metadata_path,
             bootstrap_path: self.bootstrap.as_deref(),
+            z_algorithm: options.z_erofs(),
         });
-        Ok(())
-    }
-
-    /// Builds a z_erofs layer: the raw compressed data goes to the blob
-    /// output (named by its SHA256 or `--blob-id` in a store) and the
-    /// single-layer bootstrap, whose device table references that name, to
-    /// `--bootstrap`.
-    fn run_erofs_layer(&self, options: &BuildImageOptions) -> Result<()> {
-        let bootstrap_path = self
-            .bootstrap
-            .as_deref()
-            .expect("clap enforces --bootstrap with --erofs-lz4");
-        let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
-        let writer = BufWriter::new(blob_output.create()?);
-        let layer = match self.source_type {
-            SourceType::DirNydus => build_erofs_layer_from_dir(options, writer),
-            SourceType::TarNydus => build_erofs_layer_from_tar(options, &self.source, writer),
-        }
-        .with_context(|| format!("failed to build layer: {}", blob_output.path().display()))?;
-        let blob_path = blob_output.finalize(&layer.blob_digest, options.blob_id().is_some())?;
-        fs::write(bootstrap_path, &layer.bootstrap)
-            .with_context(|| format!("failed to write bootstrap: {}", bootstrap_path.display()))?;
-        println!(" LAYER DATA PATH          {}", blob_path.display());
-        println!(
-            " LAYER DATA DIGEST        {}",
-            hex_string(&layer.blob_digest)
-        );
-        println!(" LAYER DATA BLOCKS        {}", layer.blob_blocks);
-        println!(" LAYER BOOTSTRAP PATH     {}", bootstrap_path.display());
-        println!(" LAYER BOOTSTRAP SIZE     {} bytes", layer.bootstrap.len());
         Ok(())
     }
 
@@ -522,6 +528,7 @@ struct BlobBuildSummary<'a> {
     full_blob_path: &'a Path,
     blob_metadata_path: &'a Path,
     bootstrap_path: Option<&'a Path>,
+    z_algorithm: Option<ZAlgorithm>,
 }
 
 fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
@@ -534,6 +541,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         data_blob_digest: String,
         #[tabled(rename = "FULL BLOB DIGEST")]
         full_blob_digest: String,
+        #[tabled(rename = "DATA LAYOUT")]
+        data_layout: String,
         #[tabled(rename = "CHUNK SIZE")]
         chunk_size: String,
         #[tabled(rename = "BLOCK GROUP COUNT")]
@@ -568,6 +577,10 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         blob_index: summary.index.to_string(),
         data_blob_digest: hex_string(summary.data_blob_digest),
         full_blob_digest: hex_string(summary.full_blob_digest),
+        data_layout: match summary.z_algorithm {
+            Some(algorithm) => format!("z_erofs {algorithm} device"),
+            None => "chunk-based".to_string(),
+        },
         chunk_size: summary.blob_metadata.chunk_size().to_string(),
         block_group_count: summary.blob_metadata.block_group_count().to_string(),
         chunk_compressor: summary.blob_metadata.compressor().to_string(),
@@ -604,8 +617,59 @@ mod tests {
     fn build_uses_cli_defaults_when_options_are_omitted() {
         let cmd = BuildCommand::try_parse_from(["build", "/tmp/source", "--blob", "/tmp/out.blob"])
             .unwrap();
-        assert_eq!(cmd.chunk_size, ByteSize::mib(1));
+        assert_eq!(cmd.chunk_size, None);
         assert_eq!(cmd.block_group_size, ByteSize::mib(4));
+        assert_eq!(cmd.compressor, Compressor::Zstd);
+    }
+
+    #[test]
+    fn erofs_compressors_select_z_erofs_with_the_window_default() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        for (value, algorithm) in [
+            ("erofs-lz4", ZAlgorithm::Lz4),
+            ("lz4", ZAlgorithm::Lz4),
+            ("erofs-zstd", ZAlgorithm::Zstd),
+        ] {
+            let cmd = BuildCommand::try_parse_from([
+                "build",
+                source.to_str().unwrap(),
+                "--blob",
+                "/tmp/out.blob",
+                "--compressor",
+                value,
+            ])
+            .unwrap();
+            let options = cmd.prepare().unwrap();
+            assert_eq!(options.z_erofs(), Some(algorithm), "{value}");
+        }
+
+        let cmd = BuildCommand::try_parse_from([
+            "build",
+            source.to_str().unwrap(),
+            "--blob",
+            "/tmp/out.blob",
+            "--compressor",
+            "lz4",
+            "--chunk-size",
+            "48KiB",
+        ])
+        .unwrap();
+        let err = cmd.prepare().unwrap_err();
+        assert!(err.to_string().contains("fetch window"), "{err}");
+
+        let cmd = BuildCommand::try_parse_from([
+            "build",
+            source.to_str().unwrap(),
+            "--blob",
+            "/tmp/out.blob",
+            "--erofs-data-alignment",
+            "2MiB",
+        ])
+        .unwrap();
+        let err = cmd.validate().unwrap_err();
+        assert!(err.to_string().contains("--compressor erofs-lz4"), "{err}");
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! consumed the tree is flattened through the same [`flatten_tree`] pass as
 //! the directory builder, so both sources render identical bootstraps.
 
-use crate::build::blob_chunk::BlobWriter;
+use crate::build::blob_chunk::{BlobWriter, ZFileRef};
 use crate::build::inode::{flatten_tree, InodeData, InodeInfo, NamedChildren, NodeAttrs, TreeNode};
 use flate2::read::GzDecoder;
 use nydus_error::{Context, Error, Result};
@@ -39,11 +39,9 @@ enum TarNodeData {
         chunks: Vec<ErofsChunkAddr>,
         chunk_size_bits: u32,
     },
-    /// z_erofs LZ4 compressed file: pre-rendered inode tail + block count.
-    ZFile {
-        tail: Vec<u8>,
-        compressed_blocks: u32,
-    },
+    /// z_erofs LZ4 compressed file: its metadata handle (resolved after the
+    /// blob is finished).
+    ZFile(ZFileRef),
     Symlink {
         target: Vec<u8>,
     },
@@ -113,13 +111,7 @@ impl TreeNode<()> for TarNode {
                 chunk_index_entries: chunks,
                 chunk_size_bits,
             },
-            TarNodeData::ZFile {
-                tail,
-                compressed_blocks,
-            } => InodeData::ZFile {
-                tail,
-                compressed_blocks,
-            },
+            TarNodeData::ZFile(zfile) => InodeData::ZPending(zfile),
             TarNodeData::Symlink { target } => InodeData::Symlink {
                 target,
                 startblk: 0,
@@ -356,12 +348,8 @@ fn apply_entry<R: Read, W: Write>(
         EntryType::Regular | EntryType::Continuous => {
             // Stream the file data into the blob right now; this is where
             // aligned placement happens for the streaming path too.
-            let data = if blob_writer.zlz4_enabled() {
-                let zmeta = blob_writer.write_reader_zlz4(entry, size)?;
-                TarNodeData::ZFile {
-                    tail: zmeta.tail,
-                    compressed_blocks: zmeta.compressed_blocks,
-                }
+            let data = if blob_writer.z_erofs_enabled() {
+                TarNodeData::ZFile(blob_writer.write_reader_z(entry, size)?)
             } else {
                 let chunks = blob_writer.write_reader_chunks(entry, size)?;
                 TarNodeData::File {
@@ -424,13 +412,7 @@ fn apply_entry<R: Read, W: Write>(
                         chunks: chunks.clone(),
                         chunk_size_bits: *chunk_size_bits,
                     },
-                    TarNodeData::ZFile {
-                        tail,
-                        compressed_blocks,
-                    } => TarNodeData::ZFile {
-                        tail: tail.clone(),
-                        compressed_blocks: *compressed_blocks,
-                    },
+                    TarNodeData::ZFile(zfile) => TarNodeData::ZFile(zfile.clone()),
                     TarNodeData::Symlink { target } => TarNodeData::Symlink {
                         target: target.clone(),
                     },

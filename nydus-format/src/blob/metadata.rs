@@ -90,11 +90,15 @@ bitflags! {
         const INCREMENTAL = 1 << 4;
         /// Chunk digests are all-zero placeholders (see `BlobMetadataDigester::None`).
         const DIGESTER_NONE = 1 << 5;
+        /// Compat: the data region is a raw z_erofs device (the kernel's
+        /// pcluster map addresses it) and the block groups are stored-plain
+        /// identity windows over it, carrying only fetch and crc granularity.
+        const Z_EROFS_DEVICE = 1 << 16;
     }
 }
 
-/// Every defined flag bit sits in the incompat half, so the full set doubles
-/// as the supported-incompat set (unknown incompat bits reject the file).
+/// Every defined incompat bit is supported (unknown incompat bits reject the
+/// file); the compat half is masked off by the validation itself.
 const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = BlobMetadataFlags::all().bits();
 
 /// The fixed-size header leading the serialized metadata: the geometry and
@@ -284,6 +288,12 @@ impl BlobMetadataHeader {
     /// Whether the blob is an ondemand redirect blob, per the flags.
     pub fn is_redirect(&self) -> bool {
         self.flags().contains(BlobMetadataFlags::REDIRECT)
+    }
+
+    /// Whether the data region is a raw z_erofs device described by identity
+    /// windows (see [`BlobMetadataFlags::Z_EROFS_DEVICE`]).
+    pub fn is_z_erofs_device(&self) -> bool {
+        self.flags().contains(BlobMetadataFlags::Z_EROFS_DEVICE)
     }
 
     /// Number of entries in the chunk table.
@@ -805,7 +815,29 @@ impl BlobMetadata {
         block_groups: Vec<BlobMetadataBlockGroup>,
         is_redirect: bool,
     ) -> Result<Self> {
-        let mut flags = BlobMetadataFlags::empty();
+        Self::new_with_flags(
+            compressor,
+            digester,
+            chunk_block_count,
+            chunks,
+            block_groups,
+            is_redirect,
+            BlobMetadataFlags::empty(),
+        )
+    }
+
+    /// [`Self::new`] with additional compat flags (the compressor, digester
+    /// and redirect bits are derived from the other arguments).
+    pub fn new_with_flags(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        chunk_block_count: u32,
+        chunks: Vec<BlobMetadataChunk>,
+        block_groups: Vec<BlobMetadataBlockGroup>,
+        is_redirect: bool,
+        extra: BlobMetadataFlags,
+    ) -> Result<Self> {
+        let mut flags = extra;
         flags.set(compressor.flag(), true);
         flags.set(digester.flag(), true);
         flags.set(BlobMetadataFlags::REDIRECT, is_redirect);
@@ -1178,6 +1210,12 @@ impl BlobMetadata {
     /// redirects to another source blob), per the header flag.
     pub fn is_redirect(&self) -> bool {
         self.header.is_redirect()
+    }
+
+    /// Whether the data region is a raw z_erofs device described by identity
+    /// windows, per the header flag.
+    pub fn is_z_erofs_device(&self) -> bool {
+        self.header.is_z_erofs_device()
     }
 
     /// Total uncompressed size of the blob in 4KiB blocks: block groups are

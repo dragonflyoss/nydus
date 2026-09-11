@@ -16,9 +16,9 @@ use nydus_error::{Context, Error, Result};
 use nydus_format::blob::BlobFooter;
 use nydus_format::erofs::{
     erofs_xattr_name_split, mode_to_erofs_file_type, ErofsChunkAddr, ErofsDeviceSlot, XattrEntry,
-    EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR,
-    EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED,
-    EROFS_INODE_COMPRESSED_FULL, EROFS_NULL_ADDR, Z_EROFS_MAP_HEADER_SIZE,
+    ZComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
+    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
+    EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL, EROFS_NULL_ADDR, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::parse_sha256_hex;
 
@@ -328,7 +328,7 @@ pub fn merge_sources_to_bootstrap_writer(
     }
     let first = ErofsReader::open_metadata_only(&sources[0])
         .with_context(|| format!("failed to load layer: {}", sources[0].display()))?;
-    if first.z_lz4_max_pclusterblks()?.is_some() {
+    if first.z_compr_cfgs()?.is_some() {
         return merge_z_sources_to_bootstrap_writer(sources, whiteout_spec, writer);
     }
 
@@ -388,12 +388,14 @@ pub fn merge_sources_to_bootstrap_writer(
     Ok(())
 }
 
-/// Merge z_erofs layer bootstraps (see `build_erofs_layer_from_tar`)
-/// into one multi-device bootstrap: layer `i`'s data file becomes device
-/// `i + 1`, placed back to back in the mapped block space, and the layers'
-/// packed inodes are concatenated into one so fragments keep working. The
-/// data files are untouched; they are passed to the kernel at mount time as
-/// `device=` options in device table order.
+/// Merge z_erofs layers into one multi-device bootstrap: layer `i`'s blob
+/// becomes device `i + 1`, placed back to back in the mapped block space,
+/// and the layers' packed inodes are concatenated into one so fragments keep
+/// working. Sources are the layers' full blobs named by their SHA256 (the
+/// device slot tag a store or registry serves them under); a standalone
+/// bootstrap, whose slot already carries that tag, is accepted too. The
+/// blobs are untouched: their data regions are the `device=`s of a kernel
+/// mount and the fetch targets of the on-demand runtime.
 fn merge_z_sources_to_bootstrap_writer(
     sources: &[PathBuf],
     whiteout_spec: WhiteoutSpec,
@@ -401,17 +403,17 @@ fn merge_z_sources_to_bootstrap_writer(
 ) -> Result<()> {
     let mut readers = Vec::with_capacity(sources.len());
     let mut device_slots = Vec::with_capacity(sources.len());
-    let mut z_max_pclusterblks = 0u16;
+    let mut z_cfgs = ZComprCfgs::default();
     for source in sources {
         let reader = ErofsReader::open_metadata_only(source)
             .with_context(|| format!("failed to load layer: {}", source.display()))?;
-        let pclusterblks = reader.z_lz4_max_pclusterblks()?.ok_or_else(|| {
+        let cfgs = reader.z_compr_cfgs()?.ok_or_else(|| {
             Error::InvalidImage(format!(
                 "merge source is not a z_erofs layer: {}",
                 source.display()
             ))
         })?;
-        z_max_pclusterblks = z_max_pclusterblks.max(pclusterblks);
+        z_cfgs = z_cfgs.union(cfgs);
         let infos = reader.blob_infos()?;
         let [info] = infos else {
             return Err(Error::InvalidImage(format!(
@@ -419,7 +421,15 @@ fn merge_z_sources_to_bootstrap_writer(
                 source.display()
             )));
         };
-        device_slots.push(ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id)?);
+        // A full blob embeds a bootstrap tagged with its data digest; the
+        // merged slot must carry the full-blob digest, i.e. the file name.
+        let blob_id = if BlobFooter::from_blob_path(source).is_ok() {
+            parse_source_blob_id(source)
+                .with_context(|| format!("invalid merge source: {}", source.display()))?
+        } else {
+            info.blob_id
+        };
+        device_slots.push(ErofsDeviceSlot::with_blob_id(info.blocks, &blob_id)?);
         readers.push(reader);
     }
     // Provisional placement right after the alignment boundary; the devices
@@ -512,7 +522,7 @@ fn merge_z_sources_to_bootstrap_writer(
         &mut inodes,
         epoch,
         &uuid,
-        z_max_pclusterblks,
+        z_cfgs,
         &device_slots,
         packed_index,
     )?;
@@ -553,13 +563,18 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
         .iter()
         .map(|info| (info.blob_index, info.blob_index))
         .collect();
+    let z_cfgs = reader.z_compr_cfgs()?;
     let layers = [MergeLayer {
         layer_id: 0,
         epoch: reader.superblock().epoch(),
         fixed_nsec: reader.superblock().fixed_nsec(),
         local_to_global: identity,
         reader,
-        z: None,
+        z: z_cfgs.map(|_| ZRelocation {
+            old_mapped_blkaddr: 0,
+            new_mapped_blkaddr: 0,
+            packed_base: 0,
+        }),
     }];
     let root = KWayNode {
         layers: &layers,
@@ -584,7 +599,13 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
 
     let mut device_slots: Vec<ErofsDeviceSlot> = blob_infos
         .iter()
-        .map(|info| ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id))
+        .map(|info| {
+            let mut slot = ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id)?;
+            if z_cfgs.is_some() {
+                slot.set_mapped_blkaddr(info.mapped_blkaddr)?;
+            }
+            Ok(slot)
+        })
         .collect::<nydus_format::error::Result<_>>()?;
     let ondemand_blob_index = u16::try_from(device_slots.len() + 1).map_err(|err| {
         Error::Overflow(format!(
@@ -609,6 +630,39 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
 
     let epoch = choose_epoch(&inodes);
     let uuid = [0u8; 16];
+    if let Some(cfgs) = z_cfgs {
+        let packed_index = if let Some(nid) = reader.superblock().packed_nid() {
+            let packed = reader.inode(nid)?;
+            inodes.push(packed_inode(
+                &inodes,
+                reader.read_z_inode_tail(nid, &packed)?.to_vec(),
+                packed.i_u(),
+                packed.size(),
+            ));
+            Some(inodes.len() - 1)
+        } else {
+            None
+        };
+        let end = blob_infos.iter().try_fold(0u64, |end, info| {
+            info.mapped_blkaddr
+                .checked_add(info.blocks)
+                .map(|next| end.max(next))
+                .ok_or_else(|| Error::Overflow("z device range overflow".to_string()))
+        })?;
+        let end = end
+            .checked_mul(EROFS_BLOCK_SIZE as u64)
+            .ok_or_else(|| Error::Overflow("z device byte range overflow".to_string()))?;
+        place_z_device_slots(&mut device_slots[blob_infos.len()..], end)?;
+        fit_z_devices_past_bootstrap(&mut inodes, epoch, &mut device_slots)?;
+        return render_z_device_bootstrap(
+            &mut inodes,
+            epoch,
+            &uuid,
+            cfgs,
+            &device_slots,
+            packed_index,
+        );
+    }
     render_flattened_bootstrap(&mut inodes, epoch, &device_slots, &uuid)
 }
 
@@ -1816,9 +1870,10 @@ mod tests {
 
     #[test]
     fn z_layers_merge_into_one_device_table_with_relocated_addresses() {
-        use crate::build::{build_erofs_layer_from_tar, BuildImageOptions};
+        use crate::build::{build_image_from_tar_layer, BuildImageOptions};
         use nydus_format::blob::BlobMetadataCompressor;
-        use nydus_format::erofs::{EROFS_FT_REG_FILE, Z_EROFS_FRAGMENT_INODE_FLAG};
+        use nydus_format::erofs::{ZAlgorithm, EROFS_FT_REG_FILE, Z_EROFS_FRAGMENT_INODE_FLAG};
+        use nydus_format::utils::hex_string;
         use std::collections::HashSet;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1853,32 +1908,43 @@ mod tests {
             1 << 20,
             BlobMetadataCompressor::None,
             HashSet::new(),
-            false,
+            true,
         )
         .unwrap()
-        .with_erofs_lz4(true, 0);
+        .with_z_erofs(ZAlgorithm::Lz4, 2 << 20, 0)
+        .unwrap();
 
-        let mut metas = Vec::new();
+        // Merge sources are the full blobs named by their digest, like chunk
+        // layers; the standalone bootstraps only serve the per-layer checks.
+        let store = dir.path().join("store");
+        fs::create_dir(&store).unwrap();
+        let mut sources = Vec::new();
         let mut layer_packed_sizes = Vec::new();
         for (index, layer) in [lower, upper].iter().enumerate() {
-            let blob_path = dir.path().join(format!("blob{index}"));
+            let tmp_path = dir.path().join(format!("blob{index}"));
             let layer =
-                build_erofs_layer_from_tar(&options, layer, fs::File::create(&blob_path).unwrap())
+                build_image_from_tar_layer(&options, layer, fs::File::create(&tmp_path).unwrap())
                     .unwrap();
-            assert_eq!(
-                fs::metadata(&blob_path).unwrap().len(),
-                layer.blob_blocks * EROFS_BLOCK_SIZE as u64
-            );
+            let blob_path = store.join(hex_string(&layer.full_blob_digest));
+            fs::rename(&tmp_path, &blob_path).unwrap();
+            // A full blob: the layer data leads, a footer trails.
+            let footer = nydus_format::blob::BlobFooter::from_blob_path(&blob_path).unwrap();
+            assert_eq!(footer, layer.blob_footer);
+            let bootstrap = layer.standalone_bootstrap.expect("requested");
             let meta_path = dir.path().join(format!("layer{index}.meta"));
-            fs::write(&meta_path, &layer.bootstrap).unwrap();
+            fs::write(&meta_path, &bootstrap).unwrap();
 
             let reader = ErofsReader::open_metadata_only(&meta_path).unwrap();
             let [info] = reader.blob_infos().unwrap() else {
                 panic!("one device per layer");
             };
-            assert_eq!(info.blob_id, layer.blob_digest);
+            assert_eq!(info.blob_id, layer.full_blob_digest);
+            assert_eq!(
+                info.blocks * EROFS_BLOCK_SIZE as u64,
+                footer.compressed_data_size()
+            );
             assert!(
-                info.mapped_blkaddr * EROFS_BLOCK_SIZE as u64 >= layer.bootstrap.len() as u64,
+                info.mapped_blkaddr * EROFS_BLOCK_SIZE as u64 >= bootstrap.len() as u64,
                 "layer device must start past its bootstrap"
             );
             let packed_nid = reader.superblock().packed_nid().expect("fragments enabled");
@@ -1889,10 +1955,10 @@ mod tests {
                 "packed inode is block padded"
             );
             layer_packed_sizes.push(packed.size());
-            metas.push(meta_path);
+            sources.push(blob_path);
         }
 
-        let merged = merge_sources_to_bootstrap_bytes(&metas, WhiteoutSpec::Oci).unwrap();
+        let merged = merge_sources_to_bootstrap_bytes(&sources, WhiteoutSpec::Oci).unwrap();
         let merged_path = dir.path().join("merged.img");
         fs::write(&merged_path, &merged).unwrap();
         let reader = ErofsReader::open_metadata_only(&merged_path).unwrap();
