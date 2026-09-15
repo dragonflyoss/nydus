@@ -15,7 +15,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// nydus blob footer layout (see src/metadata/blob_footer.rs). The footer is the
+// nydus blob footer layout (see nydus-format/src/blob/footer.rs). The footer is the
 // last NydusBlobFooterSize bytes of a full blob and records the absolute
 // offsets of the data / bootstrap / blob-meta regions.
 const (
@@ -32,9 +32,14 @@ const (
 	// frame. Staging copies the region verbatim (nydus merge decodes it), so
 	// the flag is understood, not acted on, here.
 	footerIncompatBootstrapZstd = 1 << 0
+	// footerFlagRawDevice marks a native EROFS layer: the data region is the
+	// raw device and there is no blob meta region.
+	footerFlagRawDevice = 1 << 1
+	// footerFlagsField is the byte offset of the u32 flags field within the footer.
+	footerFlagsField = 12
 	// footerSupportedIncompat is the set of incompat flag bits this staging
 	// code can pass through.
-	footerSupportedIncompat = footerIncompatBootstrapZstd
+	footerSupportedIncompat = footerIncompatBootstrapZstd | footerFlagRawDevice
 	// bootstrapOffsetField is the byte offset of the u64 bootstrap_offset field
 	// within the footer.
 	bootstrapOffsetField = 32
@@ -48,7 +53,7 @@ const (
 
 // NydusBlobFooterMagic is the 8 raw ASCII bytes at the start of the footer,
 // written as-is (same style as the "LPBLMETA" blob meta and "LPGRPMAP"
-// block group map sidecars).
+// chunk map sidecars).
 const NydusBlobFooterMagic = "LPFOOTER"
 
 // BlobMetaFile is a per-layer blob meta artifact packed into the bootstrap layer
@@ -77,7 +82,7 @@ func readFooter(ra io.ReaderAt, size int64) ([]byte, error) {
 	if string(footer[0:8]) != NydusBlobFooterMagic {
 		return nil, errors.Errorf("not a nydus blob: bad footer magic %q", footer[0:8])
 	}
-	if incompat := binary.LittleEndian.Uint32(footer[12:16]) & footerIncompatMask; incompat&^footerSupportedIncompat != 0 {
+	if incompat := binary.LittleEndian.Uint32(footer[footerFlagsField:footerFlagsField+4]) & footerIncompatMask; incompat&^footerSupportedIncompat != 0 {
 		return nil, errors.Errorf("unsupported nydus footer incompat flags %#x", incompat)
 	}
 	return footer, nil
@@ -140,13 +145,29 @@ func StageNydusMetadata(ra io.ReaderAt, size int64, digestHex, dir string) (stri
 	return dst, nil
 }
 
+// IsRawDeviceBlob reports whether a nydus full blob is a native EROFS layer:
+// its data region is the raw device and it carries no blob meta (footer
+// RAW_DEVICE flag). Such layers are never served on demand by the nydus
+// daemons; they are mounted through the kernel or read from a local store.
+func IsRawDeviceBlob(ra io.ReaderAt, size int64) (bool, error) {
+	footer, err := readFooter(ra, size)
+	if err != nil {
+		return false, err
+	}
+	return binary.LittleEndian.Uint32(footer[footerFlagsField:footerFlagsField+4])&footerFlagRawDevice != 0, nil
+}
+
 // ExtractBlobMeta reads the blob meta region of a nydus full blob, locating it
 // via the trailing footer. The returned bytes are the exact
-// `<full_blob_sha256>.blob.meta` artifact produced by `nydus build`.
+// `<full_blob_sha256>.blob.meta` artifact produced by `nydus build`. A native
+// layer (footer RAW_DEVICE flag, no blob meta region) yields nil bytes.
 func ExtractBlobMeta(ra io.ReaderAt, size int64) ([]byte, error) {
 	footer, err := readFooter(ra, size)
 	if err != nil {
 		return nil, err
+	}
+	if binary.LittleEndian.Uint32(footer[footerFlagsField:footerFlagsField+4])&footerFlagRawDevice != 0 {
+		return nil, nil
 	}
 	blobMetaOffset := int64(binary.LittleEndian.Uint64(footer[blobMetaOffsetField : blobMetaOffsetField+8]))
 	blobMetaSize := int64(binary.LittleEndian.Uint32(footer[blobMetaBlocksField:blobMetaBlocksField+4])) * NydusBlockSize

@@ -10,15 +10,27 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
@@ -131,5 +143,220 @@ func push(ctx context.Context, store content.Store, resolver remotes.Resolver, d
 	if err != nil {
 		return errors.Wrapf(err, "create pusher for %q", pushRef)
 	}
-	return remotes.PushContent(ctx, pusher, desc, store, nil, platformMC, nil)
+	return remotes.PushContent(ctx, &retryPusher{pusher: pusher}, desc, store, nil, platformMC, nil)
+}
+
+// pushRetries bounds upload attempts, including containerd's in-session resets.
+const pushRetries = 5
+
+// retryPusher deliberately exposes only Pusher, not Ingester: Push can replace
+// an incomplete upload, whereas OpenWriter may wait on a stale active tracker.
+type retryPusher struct {
+	pusher remotes.Pusher
+	locks  sync.Map
+}
+
+func (pusher *retryPusher) Push(ctx context.Context, desc ocispec.Descriptor) (content.Writer, error) {
+	entry, _ := pusher.locks.LoadOrStore(remotes.MakeRefKey(ctx, desc), make(chan struct{}, 1))
+	lock := entry.(chan struct{})
+	select {
+	case lock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	writer := &retryPushWriter{pusher: pusher.pusher, ctx: ctx, desc: desc, unlock: func() { <-lock }}
+	if err := writer.open(); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	return writer, nil
+}
+
+// retryPushWriter returns ErrReset after replacing a failed remote writer so
+// content.Copy rewinds its SectionReader. Source reads remain outside retries.
+type retryPushWriter struct {
+	content.Writer
+	pusher   remotes.Pusher
+	ctx      context.Context
+	desc     ocispec.Descriptor
+	cancel   context.CancelFunc
+	unlock   func()
+	attempts int
+	exists   bool
+	closed   bool
+}
+
+func (writer *retryPushWriter) open() error {
+	for {
+		if err := writer.ctx.Err(); err != nil {
+			return err
+		}
+		writer.attempts++
+		ctx, cancel := context.WithCancel(writer.ctx)
+		remoteWriter, err := writer.pusher.Push(ctx, writer.desc)
+		if err == nil {
+			writer.Writer, writer.cancel = remoteWriter, cancel
+			return nil
+		}
+		cancel()
+		if err := writer.waitRetry(err); err != nil {
+			return err
+		}
+	}
+}
+
+func (writer *retryPushWriter) waitRetry(err error) error {
+	if ctxErr := writer.ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if writer.attempts >= pushRetries || !isTransientPushError(err) {
+		return err
+	}
+	logrus.Warnf("push %s attempt %d/%d failed, retrying: %v", writer.desc.Digest, writer.attempts, pushRetries, err)
+	timer := time.NewTimer(time.Duration(writer.attempts) * 500 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-writer.ctx.Done():
+		return writer.ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (writer *retryPushWriter) reset(err error) error {
+	if ctxErr := writer.ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, content.ErrReset) {
+		if writer.attempts >= pushRetries {
+			return errors.New("push reset retry limit exceeded")
+		}
+		writer.attempts++
+		return content.ErrReset
+	}
+	if !isTransientPushError(err) || writer.attempts >= pushRetries {
+		return err
+	}
+	if closeErr := writer.release(); closeErr != nil {
+		return errors.Wrap(closeErr, "close failed push writer")
+	}
+	if err := writer.waitRetry(err); err != nil {
+		return err
+	}
+	if err := writer.open(); err != nil {
+		if !errdefs.IsAlreadyExists(err) {
+			return err
+		}
+		writer.exists = true
+	}
+	return content.ErrReset
+}
+
+func (writer *retryPushWriter) Write(data []byte) (int, error) {
+	if writer.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if err := writer.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if writer.exists {
+		return len(data), nil
+	}
+	written, err := writer.Writer.Write(data)
+	if err != nil {
+		return written, writer.reset(err)
+	}
+	return written, nil
+}
+
+func (writer *retryPushWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
+	if writer.closed {
+		return io.ErrClosedPipe
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := writer.ctx.Err(); err != nil {
+		return err
+	}
+	if writer.exists {
+		return nil
+	}
+	if err := writer.Writer.Commit(ctx, size, expected, opts...); err != nil {
+		return writer.reset(err)
+	}
+	return nil
+}
+
+func (writer *retryPushWriter) Status() (content.Status, error) {
+	if writer.closed {
+		return content.Status{}, io.ErrClosedPipe
+	}
+	if err := writer.ctx.Err(); err != nil {
+		return content.Status{}, err
+	}
+	if writer.exists {
+		return content.Status{Offset: writer.desc.Size, Total: writer.desc.Size}, nil
+	}
+	return writer.Writer.Status()
+}
+
+func (writer *retryPushWriter) release() error {
+	if writer.cancel == nil {
+		return nil
+	}
+	writer.cancel()
+	writer.cancel = nil
+	return writer.Writer.Close()
+}
+
+func (writer *retryPushWriter) Close() error {
+	if writer.closed {
+		return nil
+	}
+	writer.closed = true
+	defer writer.unlock()
+	return writer.release()
+}
+
+func isTransientPushError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errdefs.IsAlreadyExists(err) {
+		return false
+	}
+	var status remoteserrors.ErrUnexpectedStatus
+	if errors.As(err, &status) {
+		switch status.StatusCode {
+		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+			http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		case http.StatusNotFound:
+			requestURL, parseErr := url.Parse(status.RequestURL)
+			if parseErr != nil || status.RequestMethod != http.MethodPut || !strings.Contains(requestURL.Path, "/blobs/uploads/") {
+				return false
+			}
+			var response struct {
+				Errors []struct{ Code string } `json:"errors"`
+			}
+			if json.Unmarshal(status.Body, &response) != nil {
+				return false
+			}
+			for _, registryErr := range response.Errors {
+				if registryErr.Code == "BLOB_UPLOAD_INVALID" || registryErr.Code == "BLOB_UPLOAD_UNKNOWN" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsTemporary {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE)
 }

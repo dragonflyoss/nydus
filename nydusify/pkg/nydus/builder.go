@@ -26,20 +26,22 @@ const DefaultBuilder = "nydus"
 const DefaultLogLevel = "info"
 
 // BuildOption describes a single `nydus build` invocation that converts a
-// directory tree into a nydus full blob.
+// directory tree or tar stream into a nydus full blob.
 type BuildOption struct {
 	// BuilderPath is the path (or PATH-resolvable name) of the nydus binary.
 	BuilderPath string
-	// SourceDir is the directory tree to build the layer from.
+	// SourceDir is the source path, a directory or tar stream according to SourceType.
 	SourceDir string
+	// SourceType is dir (default) or tar.
+	SourceType string
+	// Stdin supplies a tar stream when SourceDir is /dev/stdin.
+	Stdin io.Reader
 	// BlobPath is the output blob path. It may be a FIFO so the blob can be
 	// streamed directly into a content store without staging on disk.
 	BlobPath string
-	// ChunkSize is the file chunk size in bytes.
+	// ChunkSize is the chunk (and chunk group) size in bytes; zero selects the default.
 	ChunkSize uint32
-	// BlockGroupSize is the group uncompressed size in bytes (a multiple of 1MiB).
-	BlockGroupSize uint32
-	// Compressor is the chunk data compression algorithm ("none" or "zstd").
+	// Compressor selects a supported data layout/algorithm; zero values default to zstd.
 	Compressor string
 	// LogLevel is the log level passed to `nydus build` (trace/debug/info/warn/
 	// error). Defaults to "info" when empty.
@@ -83,27 +85,44 @@ type ExportOption struct {
 // The blob is written strictly sequentially (data -> bootstrap -> blob meta ->
 // footer) which makes opt.BlobPath safe to point at a FIFO for streaming.
 func RunNydusBuild(ctx context.Context, opt BuildOption) error {
+	args, err := opt.args()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
+	cmd.Stdin = opt.Stdin
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return errors.Wrapf(err, "nydus build: %s", stderr.String())
+	}
+	return nil
+}
+
+func (opt BuildOption) args() ([]string, error) {
+	sourceType := cmp.Or(opt.SourceType, "dir")
+	if sourceType != "dir" && sourceType != "tar" {
+		return nil, errors.Errorf("unsupported build source type %q", sourceType)
+	}
+	if sourceType == "tar" && len(opt.Excludes) != 0 {
+		return nil, errors.New("tar sources do not support path exclusions")
+	}
+	defaults := PackOption{ChunkSize: opt.ChunkSize, Compressor: opt.Compressor}
+	defaults.applyDefaults()
 	args := []string{
 		"build",
 		opt.SourceDir,
+		"--source-type", sourceType,
 		"--blob", opt.BlobPath,
-		"--chunk-size", strconv.FormatUint(uint64(opt.ChunkSize), 10),
-		"--block-group-size", strconv.FormatUint(uint64(opt.BlockGroupSize), 10),
-		"--compressor", opt.Compressor,
+		"--chunk-size", strconv.FormatUint(uint64(defaults.ChunkSize), 10),
+		"--compressor", defaults.Compressor,
 		"--log-level", cmp.Or(opt.LogLevel, DefaultLogLevel),
 	}
 	for _, excl := range opt.Excludes {
 		args = append(args, "--exclude", excl)
 	}
 
-	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return errors.Wrapf(err, "nydus build: %s", stderr.String())
-	}
-
-	return nil
+	return args, nil
 }
 
 // RunNydusMerge executes `nydus merge` to overlay opt.SourcePaths into a
