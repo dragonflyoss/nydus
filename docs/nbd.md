@@ -7,6 +7,11 @@ is exposed as a read-only block device through the Linux Network Block Device
 driver, the kernel socket protocol the daemon serves, the ioctl session setup,
 and the mount lifecycle.
 
+See the [documentation index](../README.md#documentation) and
+[kernel/format requirements](nydus.md#kernel-compatibility-and-format-limits).
+The NBD wire protocol is unchanged by chunk-table `.blob.meta` v1. This
+flattened EROFS layout requires flatdev support (Linux 6.4+).
+
 The service uses the classic NBD kernel transport: a Unix socket pair per
 connection, configured over ioctls on `/dev/nbdX`. There is no TCP listener
 and no NBD newstyle negotiation; the daemon is the only peer the kernel talks
@@ -18,6 +23,9 @@ The NBD service supports hosts that mount EROFS directly from a block device.
 The daemon attaches `/dev/nbdX`, programs its geometry from the flattened
 image, and serves the kernel's read requests from the bootstrap and decoded
 blob cache files, fetching missing blob ranges on demand.
+
+Chunk-based payloads are dense on the backend and scattered into padded plain
+cache blocks. Native `erofs-*` layers carry no blob meta and are not served on demand by this frontend; they are mounted through the kernel from a block device or a local store. NBD is a block-copy transport, not guest DAX.
 
 ```text
 EROFS mount of /dev/nbdX
@@ -63,9 +71,11 @@ device offset 0
 
 - The bootstrap starts at offset `0` and is served byte-for-byte, device
   table included.
-- Every non-redirect blob starts at the `mapped_offset` recorded by its EROFS
-  device slot; its length is the decoded cache file size.
-- Gaps, redirect-blob slots, and not-yet-fetched ranges read as zeros.
+- Every blob (the "ondemand" blob of an optimized image included) starts at
+  the `mapped_offset` recorded by its EROFS device slot; its length is the
+  decoded cache file size.
+- Gaps outside mapped blobs are zero-filled. Cold ranges must be fetched and
+  validated before replying; a fetch failure returns an error, not zero data.
 - The device size is the flattened image size; it is a multiple of the 4096-
   byte EROFS block size.
 
@@ -125,8 +135,8 @@ Read validation, in order:
 3. Fetch + read failure (backend error, range past the device end): reply
    `EIO`.
 
-Successful read replies are always full-length; holes and unfetched ranges
-are zero-filled. The reply header and data payload are written with one
+Successful read replies are always full-length; logical holes and padding
+are zero-filled, while source data is fetched before completion. The reply header and data payload are written with one
 `writev`.
 
 ## Device Setup and Session

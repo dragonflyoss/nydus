@@ -10,6 +10,16 @@ The protocol version described here is version `1`. The protocol is local to a
 host: it uses an `AF_UNIX` stream socket and passes file descriptors with
 `SCM_RIGHTS`.
 
+See the [documentation index](../README.md#documentation) and
+[kernel/format requirements](nydus.md#kernel-compatibility-and-format-limits).
+This UFFD protocol version is independent of the private `.blob.meta` version
+(v1) and the OCI fs-version annotation (`7`).
+
+Decoded chunk groups are written into their slots of the padded plain cache
+file before their file ranges are mapped or copied. Native `erofs-*` layers carry no blob meta and are not served on demand by this frontend; they are mounted through the kernel from a block device or a local store. Guest DAX requires suitable
+EROFS layout, mount settings,
+page alignment and a DAX-capable device; UFFD zerocopy alone does not enable it.
+
 ## Overview
 
 The UFFD service supports microVMs that mount EROFS inside the guest. The
@@ -71,9 +81,11 @@ device offset 0
 Layout rules:
 
 - The bootstrap starts at device offset `0` and occupies its file size.
-- Every non-redirect blob starts at the `mapped_offset` recorded by its EROFS
-  device slot. Blob order is not used to infer offsets.
-- Blob length is the decoded cache file size.
+- Every blob (the "ondemand" blob of an optimized image included) starts at
+  the `mapped_offset` recorded by its EROFS device slot. Blob order is not
+  used to infer offsets.
+- Blob length is the kernel-visible cache size: the padded plain chunks of a
+  chunk-based image.
 - Gaps between mapped parts are holes backed by `/dev/zero`.
 - Parts must not overlap.
 - The final device size is the maximum part end rounded up to the service's
@@ -82,8 +94,9 @@ Layout rules:
   non-empty, aligned to the block size reported by `STAT`, and contained in
   the device.
 
-The bootstrap and blob cache files are read-only backing files. A blob range is
-fetched, decoded, and validated before its file descriptor is returned.
+The client maps bootstrap and cache files read-only. A cold blob range is
+fetched, decoded, validated and populated at its cache offsets before its file
+descriptor is returned. The daemon still writes the cache during population.
 
 ## Transport and Framing
 
@@ -259,8 +272,8 @@ return its complete FD mapping. It has no connection state and carries no FDs.
 | 0 | 8 | `u64` | `offset` | Block-aligned device byte offset |
 | 8 | 8 | `u64` | `len` | Nonzero, block-aligned byte length |
 
-Nydus downloads and decodes missing blob block groups, then returns one or more
-`RANGE_RESPONSE` frames. The returned ranges cover the complete requested
+Nydus downloads and decodes the missing chunk groups (with their fetch
+windows), then returns one or more `RANGE_RESPONSE` frames. The returned ranges cover the complete requested
 interval without gaps; holes are represented by `/dev/zero` ranges. The client
 receives through the RANGE_RESPONSE with `NEXT=0`, then verifies that the
 accumulated ranges cover `[offset, offset + len)`.
