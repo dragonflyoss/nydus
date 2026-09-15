@@ -1,15 +1,16 @@
-//! The `optimize` pipeline: turning a recorded block group access trace into an
-//! "ondemand" redirect blob plus a rewritten bootstrap that prefetches it.
+//! The `optimize` pipeline: turning a recorded chunk group access trace into
+//! an "ondemand" blob plus a rewritten bootstrap that prefetches it first.
 //!
 //! This is a top-level pipeline composing the read stack ([`nydus_core::reader`],
 //! `nydus-storage`) with the builder ([`crate::build`]): access patterns
 //! come from the apiserver `/trace` endpoint of a running `nydus fuse` mount
 //! ([`load_patterns_from_apiserver`]) or from a saved JSON trace document
-//! ([`load_patterns_from_file`]); [`build_ondemand_blob`] then pulls the
-//! accessed block groups through the regular blob cache and assembles the ondemand
-//! artifact and bootstrap in memory.
+//! ([`load_patterns_from_file`]); [`build_ondemand_blob`] then copies the
+//! accessed chunk groups out of the source blobs, byte for byte, into a
+//! REDIRECT blob in access order, and assembles the ondemand artifact and
+//! bootstrap in memory.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -17,28 +18,29 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use crate::build::assemble_ondemand_artifact;
-use crate::build::blob_chunk::compression_is_worthwhile;
 use crate::build::merge::rewrite_bootstrap_with_ondemand_blob;
 use crate::parse_unix_address;
-use nydus_backend::BlobBackend;
+use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor, BlobMetadataDigester,
-    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+    BlobFooter, BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigester,
+    BlobMetadataRedirect,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
-use nydus_storage::cache::LocalBlobCache;
+use nydus_storage::cache::{decode_chunk_group_from_window, LocalBlobCache};
+
+/// Longest contiguous run of source chunk groups fetched in one backend
+/// read while copying them into the ondemand blob.
+const COPY_READ_SIZE: u64 = 16 * 1024 * 1024;
 
 /// The result of [`build_ondemand_blob`]: the assembled ondemand artifact and
 /// the rewritten bootstrap, ready to be written out by the caller.
 pub struct OndemandBlob {
-    /// The ondemand artifact bytes `[block_group data][blob.meta][footer]`.
+    /// The ondemand artifact bytes `[chunk groups][blob.meta][footer]`.
     pub artifact: Vec<u8>,
     /// SHA256 of the whole artifact (the ondemand blob's name).
     pub full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
@@ -47,26 +49,35 @@ pub struct OndemandBlob {
     /// The parent bootstrap rewritten so the runtime prefetches the ondemand
     /// blob first.
     pub bootstrap: Vec<u8>,
-    /// Total uncompressed size of the ondemand blob in blocks.
+    /// Total size of the ondemand blob's address space in blocks.
     pub uncompressed_blocks: u64,
-    /// Number of distinct source blobs the accessed block groups were pulled from.
+    /// Number of distinct source blobs the accessed chunk groups came from.
     pub source_blob_count: usize,
 }
 
-/// One validated block group reference from the trace: a [`TraceEntry`] narrowed
-/// to the device-table index width, deduplicated and order-preserving.
+/// One validated chunk group reference from the trace: a [`TraceEntry`]
+/// narrowed to the device-table index width, deduplicated and
+/// order-preserving.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct BlockGroupRef {
+pub struct ChunkGroupRef {
     pub blob_index: u16,
-    pub block_group_index: u32,
+    /// The chunk group's index within the source blob.
+    pub chunk_group_index: u32,
 }
 
-/// Build an "ondemand" redirect blob from a `/trace` access pattern and rewrite
-/// the bootstrap so the runtime prefetches it first, warming the source blobs'
-/// caches in recorded access order before on-demand reads arrive.
+/// Build an "ondemand" REDIRECT blob from a `/trace` access pattern and
+/// rewrite the bootstrap so the runtime prefetches it first, landing the
+/// access-ordered hot set in the source blobs' caches before on-demand reads
+/// arrive.
+///
+/// Every traced chunk group's encoded payload is read from its source blob
+/// (and decoded once to validate it), then appended verbatim to the new
+/// blob in access order together with its chunk lengths and digests; the
+/// redirect table names the source of every copy. The bootstrap keeps every
+/// chunk index as it was: the ondemand blob is never read through it.
 pub fn build_ondemand_blob(
     parent_bootstrap: &Path,
-    patterns: &[BlockGroupRef],
+    patterns: &[ChunkGroupRef],
     backend: Arc<dyn BlobBackend>,
     cache_dir: &Path,
 ) -> Result<OndemandBlob> {
@@ -83,104 +94,183 @@ pub fn build_ondemand_blob(
         .collect();
     drop(reader);
 
-    // Pull each accessed block group's decoded bytes through the regular blob cache:
-    // warm block groups are served from the cache directory, cold block groups are fetched
-    // from the backend, and CRC validation happens on every path.
-    let mut source_caches: HashMap<u16, LocalBlobCache> = HashMap::new();
-    let mut ondemand_data = Vec::new();
-    let mut ondemand_block_groups = Vec::new();
-    let mut next_block_offset = 0u64;
-
-    for BlockGroupRef {
-        blob_index,
-        block_group_index,
-    } in patterns
-    {
-        let info = infos_by_index.get(blob_index).ok_or_else(|| {
-            Error::InvalidParameter(format!("pattern references unknown blob {blob_index}"))
-        })?;
-        let cache = match source_caches.entry(*blob_index) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                LocalBlobCache::open(info.blob_id, *blob_index as u32, cache_dir, backend.clone())
-                    .with_context(|| format!("failed to open source blob: {blob_index}"))?,
-            ),
-        };
-        if cache.blob_metadata().is_redirect() {
-            return Err(Error::InvalidImage(format!(
-                "source blob {blob_index} is already an ondemand blob; refusing to optimize"
+    // Open every source blob the trace names, for its blob meta. The copies
+    // are byte-exact, so every source must share the ondemand blob's chunk
+    // size and compressor; plain-stored groups fit under any compressor.
+    let mut sources: HashMap<u16, LocalBlobCache> = HashMap::new();
+    let mut wanted: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+    for reference in patterns {
+        let blob_index = reference.blob_index;
+        if let std::collections::hash_map::Entry::Vacant(slot) = sources.entry(blob_index) {
+            let info = infos_by_index.get(&blob_index).ok_or_else(|| {
+                Error::InvalidParameter(format!("pattern references unknown blob {blob_index}"))
+            })?;
+            let cache =
+                LocalBlobCache::open(info.blob_id, blob_index as u32, cache_dir, backend.clone())
+                    .with_context(|| format!("failed to open source blob: {blob_index}"))?;
+            if cache.blob_metadata().is_redirect() {
+                return Err(Error::InvalidImage(format!(
+                    "source blob {blob_index} is already an ondemand blob; refusing to optimize"
+                )));
+            }
+            slot.insert(cache);
+        }
+        let meta = sources[&blob_index].blob_metadata();
+        if reference.chunk_group_index as usize >= meta.chunk_group_count() {
+            return Err(Error::InvalidParameter(format!(
+                "pattern references chunk group {} of blob {blob_index}, which has {} chunk groups",
+                reference.chunk_group_index,
+                meta.chunk_group_count()
             )));
         }
+        wanted
+            .entry(blob_index)
+            .or_default()
+            .insert(reference.chunk_group_index);
+    }
+    let mut chunk_block_count = None;
+    let mut compressor = BlobMetadataCompressor::None;
+    let mut digester = BlobMetadataDigester::Blake3;
+    for (blob_index, cache) in &sources {
+        let meta = cache.blob_metadata();
+        match chunk_block_count {
+            None => chunk_block_count = Some(meta.chunk_block_count()),
+            Some(blocks) if blocks != meta.chunk_block_count() => {
+                return Err(Error::InvalidImage(format!(
+                    "source blob {blob_index} uses a {} byte chunk size, the other traced blobs {}",
+                    meta.chunk_size(),
+                    blocks * nydus_format::erofs::EROFS_BLOCK_SIZE
+                )));
+            }
+            Some(_) => {}
+        }
+        match (compressor, meta.compressor()) {
+            (_, BlobMetadataCompressor::None) => {}
+            (BlobMetadataCompressor::None, source) => compressor = source,
+            (current, source) if current != source => {
+                return Err(Error::InvalidImage(format!(
+                    "source blob {blob_index} is compressed with {source}, the other traced blobs with {current}"
+                )));
+            }
+            _ => {}
+        }
+        if meta.digester() == BlobMetadataDigester::None {
+            digester = BlobMetadataDigester::None;
+        }
+    }
+    let Some(chunk_block_count) = chunk_block_count else {
+        return Err(Error::InvalidParameter(
+            "the trace names no chunk groups".to_string(),
+        ));
+    };
 
-        let block_group = *cache
-            .blob_metadata()
-            .block_group(*block_group_index as usize)
-            .ok_or_else(|| {
-                Error::InvalidParameter(format!(
-                    "pattern references block group {block_group_index} out of range for blob {blob_index}"
-                ))
-            })?;
-
-        // Fetch the block group's decoded bytes straight from the backend at
-        // block group granularity: the redirect fill on the runtime side works
-        // per source block group.
-        let decoded = cache
-            .fetch_block_group(*block_group_index as usize)
-            .with_context(|| {
-                format!("failed to fetch block group {block_group_index} of blob {blob_index}")
-            })?;
-
-        // Recompress the decoded bytes for the ondemand artifact, storing them
-        // plain when compression is not worthwhile (same policy as build).
-        let compressed = zstd::bulk::compress(&decoded, 0)
-            .context("failed to compress ondemand block group with zstd")?;
-        let encoded: &[u8] = if compression_is_worthwhile(compressed.len(), decoded.len()) {
-            &compressed
-        } else {
-            &decoded
-        };
-
-        let compressed_offset = ondemand_data.len() as u64;
-        ondemand_data.extend_from_slice(encoded);
-        ondemand_block_groups.push(BlobMetadataBlockGroup::new(
-            next_block_offset,
-            block_group.uncompressed_block_count(),
-            compressed_offset,
-            u32::try_from(encoded.len()).map_err(|err| {
-                Error::Overflow(format!(
-                    "ondemand block group compressed size exceeds u32: {err}"
-                ))
-            })?,
-            block_group.crc32(),
-            *blob_index,
-            *block_group_index,
-            true,
-        )?);
-        next_block_offset += block_group.uncompressed_block_count() as u64;
+    // Fetch the encoded groups blob by blob, consecutive groups in one
+    // backend read, and decode each once to validate the copy.
+    let mut encoded: HashMap<ChunkGroupRef, Vec<u8>> = HashMap::with_capacity(patterns.len());
+    for (blob_index, indexes) in &wanted {
+        let cache = &sources[blob_index];
+        let meta = cache.blob_metadata();
+        let blob_id = infos_by_index[blob_index].blob_id;
+        let indexes: Vec<u32> = indexes.iter().copied().collect();
+        let mut start = 0;
+        while start < indexes.len() {
+            let first = meta.chunk_group(indexes[start] as usize).unwrap();
+            let mut end = start + 1;
+            while end < indexes.len() && indexes[end] == indexes[end - 1] + 1 {
+                let next = meta.chunk_group(indexes[end] as usize).unwrap();
+                if next.compressed_range().end - first.compressed_offset() > COPY_READ_SIZE {
+                    break;
+                }
+                end += 1;
+            }
+            let last = meta.chunk_group(indexes[end - 1] as usize).unwrap();
+            let len = usize::try_from(last.compressed_range().end - first.compressed_offset())
+                .map_err(|err| Error::Overflow(format!("copy read exceeds usize: {err}")))?;
+            let mut window = vec![0u8; len];
+            let ctx = ReadContext::chunk_group(
+                ReadKind::Prefetch,
+                first.uncompressed_offset(),
+                last.uncompressed_range().end - first.uncompressed_offset(),
+            );
+            backend
+                .read_range_into(&blob_id, first.compressed_offset(), &mut window, ctx)
+                .with_context(|| {
+                    format!(
+                        "failed to read chunk groups {}..={} of blob {blob_index}",
+                        indexes[start],
+                        indexes[end - 1]
+                    )
+                })?;
+            let mut scratch = Vec::new();
+            for &index in &indexes[start..end] {
+                let group = meta.chunk_group(index as usize).unwrap();
+                decode_chunk_group_from_window(
+                    meta,
+                    &backend,
+                    &group,
+                    first.compressed_offset(),
+                    &window,
+                    &mut scratch,
+                )
+                .with_context(|| {
+                    format!("chunk group {index} of blob {blob_index} failed validation")
+                })?;
+                let range = group.compressed_range();
+                let at = (range.start - first.compressed_offset()) as usize;
+                encoded.insert(
+                    ChunkGroupRef {
+                        blob_index: *blob_index,
+                        chunk_group_index: index,
+                    },
+                    window[at..at + group.compressed_size() as usize].to_vec(),
+                );
+            }
+            start = end;
+        }
     }
 
-    let mut data_hasher = Sha256::new();
-    data_hasher.update(&ondemand_data);
-    let mut data_digest = [0u8; EROFS_BLOB_ID_SIZE];
-    data_digest.copy_from_slice(&data_hasher.finalize());
-
+    // Lay the copies out in access order.
+    let mut data = Vec::new();
+    let mut chunk_groups = Vec::with_capacity(patterns.len());
+    let mut chunks = Vec::new();
+    let mut digests = Vec::new();
+    for reference in patterns {
+        let meta = sources[&reference.blob_index].blob_metadata();
+        let group = meta
+            .chunk_group(reference.chunk_group_index as usize)
+            .expect("validated above");
+        let payload = &encoded[reference];
+        data.extend_from_slice(payload);
+        chunk_groups.push(BlobMetadataChunkGroup::new(
+            group.compressed_size(),
+            group.chunk_count(),
+            group.crc32(),
+            Some(BlobMetadataRedirect::new(
+                reference.blob_index,
+                reference.chunk_group_index,
+            )?),
+        )?);
+        chunks.extend_from_slice(&meta.chunks()[group.chunk_range()]);
+        if digester == BlobMetadataDigester::Blake3 {
+            digests.extend_from_slice(&meta.digests()[group.chunk_range()]);
+        }
+    }
     let blob_metadata = BlobMetadata::new(
-        BlobMetadataCompressor::Zstd,
-        BlobMetadataDigester::Blake3,
-        DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
-        Vec::new(),
-        ondemand_block_groups,
-        true,
+        compressor,
+        digester,
+        chunk_block_count,
+        chunk_groups,
+        chunks,
+        digests,
     )
     .context("failed to assemble ondemand blob meta")?;
-
-    let (artifact, full_blob_digest, footer) =
-        assemble_ondemand_artifact(&ondemand_data, &blob_metadata)?;
+    let uncompressed_blocks = blob_metadata.uncompressed_block_count();
+    let (artifact, full_blob_digest, footer) = assemble_ondemand_artifact(&data, &blob_metadata)?;
 
     let bootstrap = rewrite_bootstrap_with_ondemand_blob(
         parent_bootstrap,
         &full_blob_digest,
-        next_block_offset,
+        uncompressed_blocks,
     )
     .context("failed to rewrite bootstrap with ondemand device")?;
 
@@ -190,14 +280,14 @@ pub fn build_ondemand_blob(
         blob_metadata,
         footer,
         bootstrap,
-        uncompressed_blocks: next_block_offset,
-        source_blob_count: source_caches.len(),
+        uncompressed_blocks,
+        source_blob_count: sources.len(),
     })
 }
 
 /// Fetch the `/trace` JSON from a running mount's apiserver and return the
-/// deduplicated [`BlockGroupRef`] list in first-access order.
-pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<BlockGroupRef>> {
+/// deduplicated [`ChunkGroupRef`] list in first-access order.
+pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<ChunkGroupRef>> {
     let raw = fetch_trace(apiserver)
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
     parse_trace_document(&raw)
@@ -207,7 +297,7 @@ pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<BlockGroupRef
 /// Load access patterns from a versioned JSON trace document
 /// (`{"version":1,"patterns":[...]}`), exactly as produced by the
 /// apiserver `/trace` endpoint.
-pub fn load_patterns_from_file(path: &Path) -> Result<Vec<BlockGroupRef>> {
+pub fn load_patterns_from_file(path: &Path) -> Result<Vec<ChunkGroupRef>> {
     let raw =
         fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
     parse_trace_document(&raw)
@@ -215,7 +305,7 @@ pub fn load_patterns_from_file(path: &Path) -> Result<Vec<BlockGroupRef>> {
 }
 
 /// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
-fn parse_trace_document(raw: &[u8]) -> Result<Vec<BlockGroupRef>> {
+fn parse_trace_document(raw: &[u8]) -> Result<Vec<ChunkGroupRef>> {
     let envelope: TraceDocument = serde_json::from_slice(raw)?;
     if envelope.version != TRACE_DOCUMENT_VERSION {
         return Err(Error::Unsupported(format!(
@@ -226,9 +316,10 @@ fn parse_trace_document(raw: &[u8]) -> Result<Vec<BlockGroupRef>> {
     dedup_patterns(envelope.entries)
 }
 
-/// Deduplicate `(blob_index, block_group_index)` pairs while preserving first-access
-/// order, validating that every blob index fits in a non-zero `u16`.
-fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<BlockGroupRef>> {
+/// Deduplicate `(blob_index, chunk_group_index)` pairs while preserving
+/// first-access order, validating that every blob index fits in a non-zero
+/// `u16`.
+fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<ChunkGroupRef>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for pattern in patterns {
@@ -243,12 +334,12 @@ fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<BlockGroupRef>> {
                 "pattern blob index must be non-zero".to_string(),
             ));
         }
-        let block_group = BlockGroupRef {
+        let group = ChunkGroupRef {
             blob_index,
-            block_group_index: pattern.block_group_index,
+            chunk_group_index: pattern.chunk_group_index,
         };
-        if seen.insert(block_group) {
-            ordered.push(block_group);
+        if seen.insert(group) {
+            ordered.push(group);
         }
     }
     Ok(ordered)
@@ -298,20 +389,20 @@ mod tests {
     #[test]
     fn parse_trace_document_accepts_versioned_envelope_only() {
         let doc = br#"{"version":1,"patterns":[
-            {"blob_index":1,"block_group_index":4},
-            {"blob_index":1,"block_group_index":4},
-            {"blob_index":2,"block_group_index":7}]}"#;
+            {"blob_index":1,"chunk_group_index":4},
+            {"blob_index":1,"chunk_group_index":4},
+            {"blob_index":2,"chunk_group_index":7}]}"#;
         let patterns = parse_trace_document(doc).unwrap();
         assert_eq!(
             patterns,
             vec![
-                BlockGroupRef {
+                ChunkGroupRef {
                     blob_index: 1,
-                    block_group_index: 4
+                    chunk_group_index: 4,
                 },
-                BlockGroupRef {
+                ChunkGroupRef {
                     blob_index: 2,
-                    block_group_index: 7
+                    chunk_group_index: 7,
                 }
             ]
         );

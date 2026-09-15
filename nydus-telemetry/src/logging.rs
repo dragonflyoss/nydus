@@ -1,14 +1,26 @@
 use rolling_file::*;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use tracing::{info, Level};
 pub use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder};
 use tracing_subscriber::{
     filter::LevelFilter,
     fmt::{time::ChronoLocal, Layer},
     prelude::*,
     EnvFilter, Registry,
 };
+
+/// Lines queued per appender before the writer thread drains them. The
+/// crate default of 128k lines pins about 4 MiB per appender at startup.
+const QUEUED_LOG_LINES: usize = 8192;
+
+fn non_blocking<T: Write + Send + 'static>(writer: T) -> (NonBlocking, WorkerGuard) {
+    NonBlockingBuilder::default()
+        .buffered_lines_limit(QUEUED_LOG_LINES)
+        .finish(writer)
+}
 
 /// Initializes the tracing system for the service, which logs to both stdout
 /// and hourly-rolling files under `log_dir`.
@@ -22,7 +34,7 @@ pub fn init_tracing(
     let mut guards = vec![];
 
     // Setup stdout layer.
-    let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
+    let (stdout_writer, stdout_guard) = non_blocking(std::io::stdout());
     guards.push(stdout_guard);
 
     // Initialize stdout layer.
@@ -51,7 +63,7 @@ pub fn init_tracing(
     )
     .expect("failed to create rolling file appender");
 
-    let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
+    let (rolling_writer, rolling_writer_guard) = non_blocking(rolling_appender);
     guards.push(rolling_writer_guard);
 
     let file_logging_layer = Layer::new()
@@ -92,7 +104,7 @@ pub fn init_command_tracing(log_level: Level, console: bool) -> Vec<WorkerGuard>
     let mut guards = vec![];
 
     // Setup console layer.
-    let (console_writer, console_guard) = tracing_appender::non_blocking(std::io::stderr());
+    let (console_writer, console_guard) = non_blocking(std::io::stderr());
     guards.push(console_guard);
 
     // Initialize console layer.

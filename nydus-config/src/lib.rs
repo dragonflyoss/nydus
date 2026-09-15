@@ -43,7 +43,7 @@ pub fn default_log_dir() -> PathBuf {
 }
 
 /// Returns the default per-request timeout of the registry backend. Kept
-/// short because a read holds the block group's fetch claim for its whole duration,
+/// short because a read holds the chunk group's fetch claim for its whole duration,
 /// and the readers waiting behind that claim are FUSE worker threads.
 #[inline]
 fn default_registry_http_timeout() -> Duration {
@@ -64,7 +64,7 @@ pub fn default_prefetch_concurrent_blob_count() -> usize {
 }
 
 /// Returns the default per-blob prefetch timeout. Generous, because a blob
-/// prefetch downloads every block group of the blob in the background; the bound
+/// prefetch downloads every chunk group of the blob in the background; the bound
 /// only exists to unwedge a stalled blob.
 #[inline]
 pub fn default_prefetch_timeout() -> Duration {
@@ -108,7 +108,7 @@ fn default_dragonfly_fallback_interval() -> Duration {
     Duration::from_secs(1)
 }
 
-/// Returns the default for skipping decoded block group checksum
+/// Returns the default for skipping decoded chunk group checksum
 /// verification.
 #[inline]
 fn default_storage_skip_verify_checksums() -> bool {
@@ -192,8 +192,8 @@ pub struct RegistryConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     /// The per-request timeout (connect + read), e.g. `5s` or `1m`; `0s`
-    /// disables the timeout. A request fetches one chunk block group, so this
-    /// bounds a single block group download.
+    /// disables the timeout. A request fetches one chunk group, so this
+    /// bounds a single chunk group download.
     #[serde(default = "default_registry_http_timeout", with = "humantime_serde")]
     pub timeout: Duration,
 
@@ -328,11 +328,24 @@ pub struct StorageConfig {
     #[serde(default)]
     pub dir: Option<PathBuf>,
 
-    /// Skip verifying decoded block groups against their stored checksums
+    /// Skip verifying decoded chunk groups against their stored checksums
     /// before they are served (the default). Set to `false` to verify every
-    /// decoded block group when the transport is not trusted end to end.
+    /// decoded chunk group when the transport is not trusted end to end.
     #[serde(default = "default_storage_skip_verify_checksums")]
     pub skip_verify_checksums: bool,
+
+    /// Compressed bytes one on-demand backend read covers: the chunk groups
+    /// whose compressed ranges overlap the fetch-size-aligned cell holding the
+    /// missed group, trimmed at groups already cached or being fetched.
+    /// Larger sizes make fewer, larger requests (better over high latency),
+    /// smaller sizes transfer fewer unused bytes (better over limited
+    /// bandwidth). Zero fetches the missed group alone. Default 2 MiB.
+    #[serde(default = "default_storage_fetch_size")]
+    pub fetch_size: u64,
+}
+
+fn default_storage_fetch_size() -> u64 {
+    2 * 1024 * 1024
 }
 
 /// Implement Default for StorageConfig.
@@ -341,6 +354,7 @@ impl Default for StorageConfig {
         Self {
             dir: None,
             skip_verify_checksums: default_storage_skip_verify_checksums(),
+            fetch_size: default_storage_fetch_size(),
         }
     }
 }
@@ -354,13 +368,13 @@ pub struct PrefetchConfig {
     pub concurrent_blob_count: usize,
 
     /// The per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching
-    /// one whole blob may take, while `http.timeout` bounds each block group
+    /// one whole blob may take, while `http.timeout` bounds each chunk group
     /// request within it; `0s` disables the bound.
     #[serde(default = "default_prefetch_timeout", with = "humantime_serde")]
     pub timeout: Duration,
 
-    /// The scope of blob prefetch: nothing, only the "ondemand" redirect blob
-    /// (the default), or all blobs.
+    /// The scope of blob prefetch: nothing, only the "ondemand" blob (the
+    /// default), or all blobs.
     #[serde(default)]
     pub scope: PrefetchScope,
 
@@ -383,10 +397,10 @@ pub enum PrefetchScope {
     /// Disable prefetch: nothing is pulled ahead of demand.
     None,
 
-    /// Pull only the "ondemand" redirect blob (produced by `nydus optimize`),
-    /// which warms the hot working set in recorded access order without
-    /// pulling the whole image. On an image without a redirect blob nothing
-    /// is prefetched.
+    /// Pull only the "ondemand" blob (produced by `nydus optimize`), which
+    /// holds the recorded working set in access order, without pulling the
+    /// whole image. On an image without an ondemand blob nothing is
+    /// prefetched.
     #[default]
     Ondemand,
 

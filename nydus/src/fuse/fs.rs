@@ -462,6 +462,7 @@ impl Filesystem for ErofsFs {
             {
                 Ok(_) => reply.data(&buf),
                 Err(err) => {
+                    tracing::warn!(nid, offset, size, "read failed: {err}");
                     m.fail();
                     reply.error(io_errno(&err));
                 }
@@ -749,7 +750,7 @@ mod tests {
     use super::*;
     use crate::build::blob_chunk::BlobWriter;
     use crate::build::bootstrap::render_bootstrap;
-    use crate::build::inode::build_tree;
+    use crate::build::inode::{build_tree, resolve_chunk_addrs};
     use nydus_format::erofs::{XattrEntry, EROFS_BLOCK_SIZE, EROFS_XATTR_INDEX_USER};
     use std::collections::HashSet;
     use std::fs;
@@ -760,9 +761,14 @@ mod tests {
         let source = directory.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("child"), b"").unwrap();
-        let mut writer = BlobWriter::new(&directory.path().join("data"), EROFS_BLOCK_SIZE).unwrap();
+        let mut writer = BlobWriter::plain(
+            fs::File::create(directory.path().join("data")).unwrap(),
+            EROFS_BLOCK_SIZE,
+        );
         let mut inodes =
             build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        writer.finish().unwrap();
+        resolve_chunk_addrs(&mut inodes, &writer).unwrap();
         let bootstrap = directory.path().join("bootstrap");
 
         for (name_index, suffix, value, expected) in [

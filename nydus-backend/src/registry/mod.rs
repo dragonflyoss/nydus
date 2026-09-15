@@ -1080,6 +1080,12 @@ impl Registry {
         )?;
         let footer = BlobFooter::from_bytes(&footer_bytes)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
+        if footer.is_raw_device() {
+            return Err(RegistryError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "native EROFS layers are not served from a registry; mount them through the kernel",
+            )));
+        }
 
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             RegistryError::Io(io::Error::new(

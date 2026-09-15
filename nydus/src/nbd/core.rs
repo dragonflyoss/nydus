@@ -2,7 +2,7 @@
 //!
 //! The core exposes the whole image as one flattened device view: the
 //! bootstrap at the head, then each blob at its `mapped_offset`, with gaps
-//! (and any redirect blob) reported as `/dev/zero`. [`NbdCore`] wraps that
+//! reported as `/dev/zero`. [`NbdCore`] wraps that
 //! view with a synchronous `read` that fetches the covering ranges and copies
 //! bytes out of the resolved fds; the pwrite/dedup/fsync I/O lives in (and is
 //! tested by) `nydus-core`.
@@ -63,8 +63,8 @@ impl NbdCore {
     }
 
     /// Fetch `[offset, offset + buf.len())` of the flattened device view and
-    /// copy the resident bytes into `buf`, serving holes, redirect slots, and
-    /// gaps as zeros. Both `offset` and `buf.len()` must be block-aligned (the
+    /// copy the resident bytes into `buf`, serving holes and gaps as zeros.
+    /// Both `offset` and `buf.len()` must be block-aligned (the
     /// NBD protocol guarantees this for valid requests). On success every byte
     /// of `buf` has been written.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {

@@ -31,9 +31,9 @@ backend:
     # Dragonfly SDK requests.
     http:
       # Per-request timeout (connect + read), e.g. `5s` or `1m`; `0s` disables
-      # it. Default: 5s. Kept short because a read holds the block group's fetch
-      # claim for its whole duration, and the readers waiting behind that
-      # claim are FUSE worker threads.
+      # it. Default: 5s. Kept short because a read holds its chunk group's
+      # fetch claim for its whole duration, and the readers waiting behind
+      # that claim are FUSE worker threads.
       timeout: 5s
 
       # Maximum number of retry attempts per request, applied by the HTTP
@@ -79,20 +79,30 @@ storage:
   # written to disk. Kernel-served modes (fanotify/nbd/ublk/uffd) and
   # `nydus optimize` require a directory.
   dir: /var/lib/nydus/cache
-  # Skip verifying decoded block groups against their stored checksums
-  # before they are served. Default: true. Set to false to verify every
-  # decoded block group when the transport is not trusted end to end.
+  # Skip verifying decoded chunks against their BLAKE3 digests before they
+  # are served. Default: true. Every fetched chunk group is always checked
+  # against its crc32c; set this to false to also verify each chunk when the
+  # transport is not trusted end to end.
   # skip_verify_checksums: true
+  # Compressed bytes one on-demand backend read covers: the chunk groups
+  # whose compressed ranges overlap the fetch-size-aligned cell holding the
+  # missed group, trimmed at groups already cached or being fetched. Larger
+  # sizes make fewer, larger requests (better over high per-request
+  # latency); smaller sizes transfer fewer unused bytes (better over
+  # limited bandwidth). 0 fetches the missed group alone. Independent of the
+  # image's chunk size. Default: 2097152 (2 MiB).
+  # fetch_size: 2097152
 
 prefetch:
   # Number of concurrently prefetched blobs.
   concurrent_blob_count: 10
   # Per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching one
-  # whole blob may take, while `http.timeout` bounds each block group request
+  # whole blob may take, while `http.timeout` bounds each backend request
   # within it. `0s` disables the bound. Default: 1h.
   timeout: 1h
   # Which blobs to pull: `none` disables prefetch; `ondemand` (default)
-  # prefetches only the "ondemand" redirect blob, warming the access-ordered
-  # hot set without pulling the whole image; `all` prefetches every blob, so
-  # the entire image ends up in the local cache.
+  # prefetches only the "ondemand" blob produced by `nydus optimize`, which
+  # holds the recorded hot set in access order, without pulling the whole
+  # image; `all` prefetches every blob, so the entire image ends up in the
+  # local cache.
   scope: ondemand

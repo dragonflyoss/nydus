@@ -26,9 +26,11 @@ const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// 1. Prefetch the blobs declared in the root `trusted.nydus.prefetch.blobs`
 ///    xattr sequentially, in the declared priority order (single thread).
 /// 2. When the scope is [`PrefetchScope::All`], prefetch the remaining blobs
-///    concurrently with a worker pool; otherwise stop after the priority blobs so the
+///    concurrently with a worker pool; otherwise only open every blob's cache
+///    (blob meta, sparse files) in the background, alongside step 1, so the
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
-///    optimized image's "ondemand" redirect blob).
+///    optimized image's "ondemand" blob) while no later read pays the
+///    metadata round trips.
 /// 3. Blobs whose prefetch the backend throttled (Dragonfly `429`, detected
 ///    via [`is_backend_throttled`]) are rescheduled after a random delay in
 ///    the configured window and re-attempted until they stop being throttled
@@ -99,6 +101,46 @@ impl BlobPrefetcher {
         self.stop.load(Ordering::Relaxed)
     }
 
+    /// Open every blob's cache on a small worker pool, priority blobs first,
+    /// so the blob meta round trips overlap each other and the priority
+    /// prefetch instead of being paid one blob at a time — by the phase 1
+    /// `is_redirect` checks (an optimized image lists every blob in its
+    /// prefetch xattr) or by the first reads. Returns the workers' handles.
+    fn spawn_blob_openers(&self) -> Vec<JoinHandle<()>> {
+        // Popped from the back, so reverse to hand out the priority blobs first.
+        let mut queue: Vec<u16> = self.priority.iter().chain(&self.rest).copied().collect();
+        queue.reverse();
+        let worker_count = self.threads.min(queue.len());
+        let queue = Arc::new(Mutex::new(queue));
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let blobs = self.caches.clone();
+            let queue = queue.clone();
+            let stop = self.stop.clone();
+            let handle = thread::Builder::new()
+                .name("nydus_blob_open".to_string())
+                .spawn(move || loop {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let blob_index = queue.lock().unwrap().pop();
+                    match blob_index {
+                        Some(blob_index) => {
+                            if let Err(err) = blobs.cache(blob_index) {
+                                warn!("failed to open blob {} cache: {}", blob_index, err);
+                            }
+                        }
+                        None => break,
+                    }
+                });
+            match handle {
+                Ok(handle) => handles.push(handle),
+                Err(err) => warn!("failed to spawn blob open worker: {}", err),
+            }
+        }
+        handles
+    }
+
     /// Spawn a background thread that drives the whole prefetch workflow. The
     /// returned handle may be detached by the caller.
     pub fn spawn(self) -> io::Result<JoinHandle<()>> {
@@ -120,11 +162,25 @@ impl BlobPrefetcher {
         // Blobs the backend throttled, awaiting a delayed retry.
         let mut throttled: Vec<u16> = Vec::new();
 
+        // Under the "ondemand" scope the non-ondemand blobs are not pulled,
+        // but every cache is opened in the background (blob meta fetched and
+        // validated, sparse files created) so nothing pays those round trips
+        // serially later: neither the phase 1 checks below nor block-device
+        // frontends, which probe many blobs right after the device appears.
+        // The openers run alongside the priority prefetch and are joined once
+        // it is done.
+        let openers = if self.scope != PrefetchScope::All {
+            self.spawn_blob_openers()
+        } else {
+            Vec::new()
+        };
+
         // Phase 1: priority blobs, sequential, in declared order. Under the
-        // default "ondemand" scope only the redirect blob is warmed (it
-        // streams the access-ordered hot set into the source caches);
-        // non-redirect priority blobs are skipped so the backend bandwidth is
-        // not spent pulling whole source blobs.
+        // default "ondemand" scope only the ondemand blob is warmed (the
+        // REDIRECT blob `nydus optimize` packed from the access-ordered hot
+        // set, streamed into the source blobs' caches); other priority blobs
+        // are skipped so the backend bandwidth is not spent pulling whole
+        // source blobs.
         for blob_index in &self.priority {
             let blob_index = *blob_index;
             if self.stopped() {
@@ -155,6 +211,10 @@ impl BlobPrefetcher {
                 }
                 Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
+        }
+
+        for handle in openers {
+            let _ = handle.join();
         }
 
         // Phase 2: remaining blobs, concurrent worker pool. Skipped unless the
@@ -278,10 +338,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use nydus_backend::{throttled_error, BlobBackend, Local, ReadContext};
-    use nydus_format::blob::{
-        BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-        BlobMetadataDigester,
-    };
+    use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor};
     use nydus_format::utils::{write_minimal_full_blob, SHA256_DIGEST_SIZE};
     use tempfile::tempdir;
 
@@ -358,18 +415,12 @@ mod tests {
 
     fn test_payload() -> (Vec<u8>, BlobMetadata) {
         let payload = vec![0xabu8; 4096];
-        let meta = BlobMetadata::new(
+        let (_, meta) = crate::cache::test_util::encode_blob(
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
             1,
-            vec![BlobMetadataChunk::new(*blake3::hash(&payload).as_bytes(), 0, 1).unwrap()],
-            vec![
-                BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(&payload), 0, 0, false)
-                    .unwrap(),
-            ],
+            &[vec![payload.clone()]],
             false,
-        )
-        .unwrap();
+        );
         (payload, meta)
     }
 

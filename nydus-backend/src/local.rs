@@ -18,8 +18,10 @@ struct ResolvedSource {
     data_offset: u64,
     data_size: u64,
     /// Byte region of the embedded blob metadata inside a full blob, absent
-    /// for bare data sources.
+    /// for bare data sources and for raw device blobs.
     blob_metadata_region: Option<EmbeddedRegion>,
+    /// The data region is a raw EROFS device (footer RAW_DEVICE flag).
+    raw_device: bool,
 }
 
 /// A byte region embedded in a larger file.
@@ -142,7 +144,7 @@ impl Local {
             // dominant part of ublk/fanotify mount-ready and FUSE/NBD
             // first-read latency). The store is populated by digest-verified
             // downloads, and runtime corruption is caught by the mandatory
-            // per-block-group CRC32C on every data read and the CRC32 over
+            // per-chunk-group CRC32C on every data read and the CRC32 over
             // the blob meta.
             let source = probe_full_blob_source(&exact, *blob_id)?.ok_or_else(|| {
                 io::Error::new(
@@ -167,6 +169,15 @@ impl Local {
     }
 
     fn read_blob_metadata_bytes(&self, source: &ResolvedSource) -> io::Result<Vec<u8>> {
+        if source.raw_device {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "native EROFS layer has no blob meta: {}",
+                    source.path.display()
+                ),
+            ));
+        }
         let blob_metadata_path = self.blob_metadata_path_for_source(&source.path)?;
         if blob_metadata_path.is_file() {
             return fs::read(&blob_metadata_path);
@@ -199,6 +210,10 @@ impl BlobBackend for Local {
         let source = self.resolved_source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&source)?;
         BlobMetadata::from_bytes(&data, false).map_err(io::Error::other)
+    }
+
+    fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
+        Ok(self.resolved_source(blob_id)?.raw_device)
     }
 
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
@@ -246,10 +261,11 @@ fn probe_full_blob_source(
         cache_key,
         data_offset: footer.compressed_data_offset(),
         data_size: footer.compressed_data_size(),
-        blob_metadata_region: Some(EmbeddedRegion {
+        blob_metadata_region: (!footer.is_raw_device()).then_some(EmbeddedRegion {
             offset: footer.blob_metadata_offset(),
             size: footer.blob_metadata_size(),
         }),
+        raw_device: footer.is_raw_device(),
     }))
 }
 
@@ -258,7 +274,7 @@ mod tests {
     use super::*;
     use crate::ReadKind;
     use nydus_format::blob::{
-        BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataDigester,
+        BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest, BlobMetadataDigester,
     };
     use nydus_format::utils::sha256_bytes;
     use tempfile::tempdir;
@@ -268,12 +284,9 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
             1,
-            vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
-            vec![
-                BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload), 0, 0, false)
-                    .unwrap(),
-            ],
-            false,
+            vec![BlobMetadataChunkGroup::new(4096, 1, crc32c::crc32c(payload), None).unwrap()],
+            vec![4096],
+            vec![BlobMetadataDigest::new(*blake3::hash(payload).as_bytes())],
         )
         .unwrap()
     }

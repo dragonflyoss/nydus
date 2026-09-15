@@ -4,8 +4,9 @@ use nydus::error::{Error, Result};
 use nydus_config::{BackendConfig, Config};
 use nydus_format::erofs::{
     ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
-    EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
-    EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+    EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER,
+    EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+    EROFS_FEATURE_INCOMPAT_FRAGMENTS, EROFS_FEATURE_INCOMPAT_ZERO_PADDING,
 };
 use nydus_format::utils::hex_string;
 use std::collections::{BTreeMap, BTreeSet};
@@ -352,6 +353,14 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
         flat_inline_files: String,
         #[tabled(rename = "OTHER LAYOUT FILES")]
         other_layout_files: String,
+        #[tabled(rename = "Z_EROFS FILES")]
+        z_compressed_files: String,
+        #[tabled(rename = "Z_EROFS FRAGMENT FILES")]
+        z_fragment_files: String,
+        #[tabled(rename = "Z_EROFS TAIL FRAGMENT FILES")]
+        z_tail_fragment_files: String,
+        #[tabled(rename = "Z_EROFS PCLUSTERS OUT OF RANGE")]
+        z_pclusters_out_of_range: String,
         #[tabled(rename = "XATTR ENTRIES")]
         xattr_entries: String,
         #[tabled(rename = "HARDLINK INODES")]
@@ -389,6 +398,10 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
         flat_plain_files: stats.flat_plain_files.to_string(),
         flat_inline_files: stats.flat_inline_files.to_string(),
         other_layout_files: stats.other_layout_files.to_string(),
+        z_compressed_files: stats.z_compressed_files.to_string(),
+        z_fragment_files: stats.z_fragment_files.to_string(),
+        z_tail_fragment_files: stats.z_tail_fragment_files.to_string(),
+        z_pclusters_out_of_range: stats.z_pclusters_out_of_range.to_string(),
         xattr_entries: stats.xattr_entries.to_string(),
         hardlink_inodes: stats.hardlink_inodes.to_string(),
         hardlink_paths: stats.hardlink_paths.to_string(),
@@ -432,16 +445,25 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         declared_uncompressed_size: String,
         #[tabled(rename = "SLOT DIGEST KIND")]
         slot_digest_kind: String,
+        verified: String,
         #[tabled(rename = "DATA BLOB DIGEST")]
         data_blob_digest: String,
         #[tabled(rename = "FULL BLOB DIGEST")]
         full_blob_digest: String,
         #[tabled(rename = "CHUNK SIZE")]
         chunk_size: String,
-        #[tabled(rename = "BLOCK GROUP COUNT")]
-        block_group_count: String,
+        #[tabled(rename = "CHUNK GROUP COUNT")]
+        chunk_group_count: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
         chunk_compressor: String,
+        #[tabled(rename = "BLOB META CHUNKS")]
+        blob_meta_chunks: String,
+        #[tabled(rename = "BLOB META DIGESTS")]
+        blob_meta_digests: String,
+        #[tabled(rename = "BLOB META REDIRECTS")]
+        blob_meta_redirects: String,
+        #[tabled(rename = "BLOB PAYLOAD SIZE")]
+        blob_payload_size: String,
         #[tabled(rename = "BLOB COMPRESSED SIZE")]
         blob_compressed_size: String,
         #[tabled(rename = "BLOB UNCOMPRESSED SIZE")]
@@ -466,11 +488,20 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             declared_blocks: blob.declared_blocks.to_string(),
             declared_uncompressed_size: blob.declared_data_size.to_string(),
             slot_digest_kind: blob.slot_sha256_kind.as_str().to_string(),
+            verified: match blob.resolved_path {
+                Some(_) if blob.verified => "yes".to_string(),
+                Some(_) => "no".to_string(),
+                None => "<unresolved>".to_string(),
+            },
             data_blob_digest: data_blob_digest(blob),
             full_blob_digest: optional_digest(blob.blob_sha256),
             chunk_size: blob_metadata_field(blob, |meta| meta.chunk_size),
-            block_group_count: blob_metadata_field(blob, |meta| meta.block_group_count),
+            chunk_group_count: blob_metadata_field(blob, |meta| meta.chunk_group_count),
             chunk_compressor: blob_metadata_field(blob, |meta| meta.compressor),
+            blob_meta_chunks: blob_metadata_field(blob, |meta| meta.chunk_count),
+            blob_meta_digests: blob_metadata_field(blob, |meta| meta.digest_count),
+            blob_meta_redirects: blob_metadata_field(blob, |meta| meta.redirect_count),
+            blob_payload_size: blob_metadata_field(blob, |meta| meta.total_payload_size),
             blob_compressed_size: blob_metadata_field_or(
                 blob,
                 |meta| meta.total_compressed_size,
@@ -559,11 +590,21 @@ fn compat_features(bits: u32) -> String {
 
 fn incompat_features(bits: u32) -> String {
     let mut features = Vec::new();
+    if bits & EROFS_FEATURE_INCOMPAT_ZERO_PADDING != 0 {
+        features.push("zero_padding");
+    }
+    // BIG_PCLUSTER and COMPR_CFGS share one bit.
+    if bits & EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER != 0 {
+        features.push("big_pcluster+compr_cfgs");
+    }
     if bits & EROFS_FEATURE_INCOMPAT_CHUNKED_FILE != 0 {
         features.push("chunked_file");
     }
     if bits & EROFS_FEATURE_INCOMPAT_DEVICE_TABLE != 0 {
         features.push("device_table");
+    }
+    if bits & EROFS_FEATURE_INCOMPAT_FRAGMENTS != 0 {
+        features.push("fragments");
     }
     if features.is_empty() {
         "none".to_string()

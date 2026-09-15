@@ -1,5 +1,6 @@
 pub(crate) mod data;
 mod metadata;
+mod z_cache;
 
 use std::collections::HashSet;
 use std::fs;
@@ -12,9 +13,9 @@ use memmap2::Mmap;
 use nydus_backend::{BlobBackend, Local};
 use nydus_format::blob::BlobFooter;
 use nydus_format::erofs::{
-    cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOB_ID_SIZE,
-    EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE,
-    EROFS_SUPER_OFFSET,
+    cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs,
+    EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE,
+    EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
 use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
@@ -55,13 +56,14 @@ fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
         .collect()
 }
 
-/// EROFS image reader — lock-free, zero-copy.
+/// EROFS metadata reader with blob caches and bounded decoded-pcluster reuse.
 ///
 /// Both the image and blob device are memory-mapped for zero-copy access.
 /// On-disk structs are cast directly from the mapped memory.
 pub struct ErofsReader {
     pub(crate) mmap: Mmap,
     blobs: Arc<BlobCaches>,
+    z_pclusters: z_cache::PclusterCache,
     /// Memoised device table. Pre-populated by the open paths that already
     /// parse it; metadata-only readers fill it on first use.
     blob_infos: OnceLock<Vec<RawBlobInfo>>,
@@ -88,6 +90,7 @@ impl ErofsReader {
         Ok(Self {
             mmap,
             blobs: Arc::new(BlobCaches::empty()),
+            z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::new(),
             image_offset,
             sb_offset,
@@ -97,7 +100,7 @@ impl ErofsReader {
     /// Open a self-contained full blob (`payload + bootstrap + blob meta +
     /// footer`): everything is served from the file itself, no remote
     /// backend is involved. `cache_dir`, when given, caches the decoded
-    /// block groups so repeat reads skip re-decoding from the blob.
+    /// chunk groups so repeat reads skip re-decoding from the blob.
     pub fn open_blob(blob_path: &Path, cache_dir: Option<&Path>) -> io::Result<Self> {
         let mmap = Self::mmap_file(blob_path, false)?;
         let (mmap, image_offset) = match Self::unpack_embedded_image(mmap)? {
@@ -139,6 +142,7 @@ impl ErofsReader {
         Ok(Self {
             mmap,
             blobs: Arc::new(blobs),
+            z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::from(blob_infos),
             image_offset,
             sb_offset,
@@ -147,7 +151,7 @@ impl ErofsReader {
 
     /// Open a standalone bootstrap whose blob data is served by `backend`
     /// through per-blob caches under `cache_dir` (a temporary directory when
-    /// `None`). `trace_recorder`, when given, records on-demand block group
+    /// `None`). `trace_recorder`, when given, records on-demand chunk group
     /// accesses for `nydus optimize`.
     pub fn open_bootstrap(
         bootstrap_path: &Path,
@@ -174,25 +178,28 @@ impl ErofsReader {
         Ok(Self {
             mmap,
             blobs: Arc::new(blobs),
+            z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::from(blob_infos),
             image_offset: 0,
             sb_offset,
         })
     }
 
-    fn mmap_file(path: &Path, populate: bool) -> io::Result<Mmap> {
+    fn mmap_file(path: &Path, readahead: bool) -> io::Result<Mmap> {
         let file = fs::File::open(path)?;
-        // Populate is only for standalone bootstraps: a few MiB that every
-        // metadata operation resolves against, so paying the read up front
-        // (milliseconds) removes a page fault per cold folio. Full blobs must
-        // NOT be populated — they carry the entire data region, and faulting
-        // in a multi-GiB blob just to read its metadata tail multiplies RSS
-        // by the blob size (as `nydus merge` over large layers showed).
-        let mut options = memmap2::MmapOptions::new();
-        if populate {
-            options.populate();
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }?;
+        // Readahead is only for standalone bootstraps: a few MiB that every
+        // metadata operation resolves against, so the read is started up front
+        // and a cold folio costs a minor fault instead of disk I/O. WILLNEED
+        // fills the page cache without mapping the pages, so unlike populate
+        // only the metadata actually touched counts toward RSS. Full blobs
+        // must NOT be read ahead — they carry the entire data region, and
+        // pulling in a multi-GiB blob just to read its metadata tail is
+        // wasted I/O (as `nydus merge` over large layers showed).
+        if readahead {
+            let _ = mmap.advise(memmap2::Advice::WillNeed);
         }
-        unsafe { options.map(&file) }
+        Ok(mmap)
     }
 
     /// Resolve the EROFS image inside `mmap`: `(mmap, None)` for a bare
@@ -300,6 +307,22 @@ impl ErofsReader {
         cast_ref::<ErofsSuperblock>(&self.mmap[self.sb_offset..])
     }
 
+    /// The z_erofs compression configs (COMPR_CFGS records after the
+    /// superblock), or `None` for images without compressed data.
+    pub fn z_compr_cfgs(&self) -> io::Result<Option<ZComprCfgs>> {
+        let algs = self.superblock().available_compr_algs();
+        if algs == 0 {
+            return Ok(None);
+        }
+        let bytes = self.mmap_slice(
+            EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE,
+            ZComprCfgs::MAX_SIZE,
+        )?;
+        let (cfgs, _) = ZComprCfgs::parse(algs, bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(Some(cfgs))
+    }
+
     pub fn blob_infos(&self) -> io::Result<&[RawBlobInfo]> {
         if let Some(infos) = self.blob_infos.get() {
             return Ok(infos);
@@ -324,24 +347,22 @@ impl ErofsReader {
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
-    /// redirect blob (produced by `nydus optimize`). Opens the blob cache,
-    /// which reads the local blob meta but performs no data prefetch.
+    /// blob (a REDIRECT blob produced by `nydus optimize`). Opens the blob
+    /// cache, which reads the local blob meta but performs no data prefetch.
     pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
         self.blobs.is_redirect(blob_index)
     }
 
-    /// Prefetch every block group of the blob identified by `blob_index`. An
-    /// "ondemand" redirect blob is dispatched block group by block group into the source
-    /// blobs' caches instead of building its own cache file, fetching its
-    /// segments concurrently with up to `threads` workers. A non-zero
-    /// `timeout` bounds the whole blob's prefetch.
+    /// Prefetch every chunk group of the blob identified by `blob_index`
+    /// with up to `workers` concurrent batch fetches. A non-zero `timeout`
+    /// bounds the whole blob's prefetch.
     pub fn prefetch_blob(
         &self,
         blob_index: u16,
-        threads: usize,
+        workers: usize,
         timeout: std::time::Duration,
     ) -> io::Result<()> {
-        self.blobs.prefetch_blob(blob_index, threads, timeout)
+        self.blobs.prefetch_blob(blob_index, workers, timeout)
     }
 
     /// Build the blob prefetch plan: blobs listed in the root prefetch xattr (in

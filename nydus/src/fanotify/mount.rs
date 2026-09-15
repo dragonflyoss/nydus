@@ -113,7 +113,6 @@ mod tests {
         BlobDevice::for_test(
             index,
             BlobId::from_str(&format!("{index:064x}")).unwrap(),
-            false,
             PathBuf::from(path),
             4096,
         )

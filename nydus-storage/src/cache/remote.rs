@@ -1,19 +1,22 @@
-//! Diskless blob access: every read fetches, decodes, and validates its
-//! block groups from the backend directly, holding the bytes only in memory.
-//! Selected when no storage directory is configured. Repeated reads of the
-//! same block group fetch it again — the kernel page cache above the mount is the
-//! only reuse layer. Modes that hand a cache file to the kernel (fanotify,
-//! NBD, ublk, userfaultfd, virtio-pmem) cannot run diskless and reject this
-//! mode through the file-oriented [`BlobCache`] defaults.
+//! Diskless blob access: every read fetches, decodes, and validates the
+//! chunk groups it touches from the backend directly, holding the bytes
+//! only in memory. Selected when no storage directory is configured.
+//! Repeated reads of the same group fetch it again — the kernel page cache
+//! above the mount is the only reuse layer. Modes that hand a cache file to
+//! the kernel (fanotify, NBD, ublk, userfaultfd, virtio-pmem) cannot run
+//! diskless and reject this mode through the file-oriented [`BlobCache`]
+//! defaults.
 
 use std::io;
 use std::sync::Arc;
 
-use nydus_backend::{BlobBackend, ReadKind};
+use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-use super::{fetch_decode_validate_block_group_into, BlobCache, BlockGroupBuffers};
+use super::{
+    decode_chunk_group_into, validate_chunk_group_with_metrics, BlobCache, ChunkGroupBuffers,
+};
 
 /// A diskless blob cache: reads are served straight from the backend with
 /// nothing written to disk.
@@ -23,7 +26,6 @@ pub struct RemoteBlobCache {
     backend: Arc<dyn BlobBackend>,
 }
 
-/// Implement RemoteBlobCache.
 impl RemoteBlobCache {
     /// Open the blob's metadata from the backend; no local file is created.
     pub fn open(
@@ -39,73 +41,78 @@ impl RemoteBlobCache {
     }
 }
 
-/// Implement the BlobCache trait for RemoteBlobCache. Only the dense read
-/// path is supported; every file-oriented operation keeps the trait's
-/// `Unsupported` default.
+/// Only the dense read path is supported; every file-oriented operation
+/// keeps the trait's `Unsupported` default.
 impl BlobCache for RemoteBlobCache {
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()> {
         if dst.is_empty() {
             return Ok(());
         }
-        // Redirect (ondemand) blobs have a non-uniform block group layout and no
-        // dense readable address space, exactly as in the local cache.
-        if self.blob_metadata.is_redirect() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "redirect blob has no dense readable address space",
-            ));
-        }
-
         let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
+        let not_found = || io::Error::new(io::ErrorKind::NotFound, "blob chunk group not found");
+        let meta = &self.blob_metadata;
+        let first = meta.chunk_group_index_of(offset).ok_or_else(not_found)?;
+        let last = meta.chunk_group_index_of(end - 1).ok_or_else(not_found)?;
+        let head = meta.chunk_group(first).expect("group within the table");
+        let tail = meta.chunk_group(last).expect("group within the table");
 
-        let first = self
-            .blob_metadata
-            .block_group_index_from_uncompressed_offset(offset)
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
-            })?;
-        let last = self
-            .blob_metadata
-            .block_group_index_from_uncompressed_offset(end - 1)
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "blob meta block group not found")
-            })?;
-
-        let mut buffers = BlockGroupBuffers::default();
-        for block_group_index in first..=last {
-            let block_group = *self
-                .blob_metadata
-                .block_group(block_group_index)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "blob meta block group not found",
-                    )
-                })?;
-            let decoded = fetch_decode_validate_block_group_into(
-                &self.blob_id,
-                &self.blob_metadata,
-                &self.backend,
-                &block_group,
-                &mut buffers,
+        // The touched groups are consecutive in the blob: one read covers
+        // them all, then each decodes on its own.
+        let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
+            .map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "group span exceeds usize")
+        })?;
+        let decoded_len = usize::try_from(head.uncompressed_size())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk group exceeds usize"))?;
+        let mut buffers = ChunkGroupBuffers::default();
+        let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
+        self.backend.read_range_into(
+            &self.blob_id,
+            head.compressed_offset(),
+            encoded,
+            ReadContext::chunk_group(
                 ReadKind::OnDemand,
-            )?;
+                head.uncompressed_offset(),
+                tail.uncompressed_range().end - head.uncompressed_offset(),
+            ),
+        )?;
 
-            // Copy the overlap between this block group's span and the request.
-            let block_group_start = block_group.uncompressed_offset();
-            let copy_start = offset.max(block_group_start);
-            let copy_end = end.min(block_group_start + block_group.uncompressed_size());
-            let source = &decoded[(copy_start - block_group_start) as usize..]
-                [..(copy_end - copy_start) as usize];
-            let dst_start = (copy_start - offset) as usize;
-            dst[dst_start..dst_start + source.len()].copy_from_slice(source);
+        dst.fill(0);
+        for index in first..=last {
+            let group = meta.chunk_group(index).expect("group within the table");
+            let start = (group.compressed_offset() - head.compressed_offset()) as usize;
+            let stop = start + group.compressed_size() as usize;
+            let payload: &[u8] = if meta.is_plain(&group) {
+                &encoded[start..stop]
+            } else {
+                let out = &mut decoded[..meta.payload_size(&group) as usize];
+                decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
+                out
+            };
+            validate_chunk_group_with_metrics(&self.backend, meta, &group, payload)?;
+            meta.for_each_decoded_chunk(index, payload, &mut |chunk_offset, bytes| {
+                let copy_start = offset.max(chunk_offset);
+                let copy_end = end.min(chunk_offset + bytes.len() as u64);
+                if copy_start < copy_end {
+                    let source_start = (copy_start - chunk_offset) as usize;
+                    let target_start = (copy_start - offset) as usize;
+                    let length = (copy_end - copy_start) as usize;
+                    dst[target_start..target_start + length]
+                        .copy_from_slice(&bytes[source_start..source_start + length]);
+                }
+                Ok(())
+            })?;
         }
         Ok(())
     }
 
-    fn prefetch_all(&self, _deadline: Option<std::time::Instant>) -> io::Result<()> {
+    fn prefetch_all(
+        &self,
+        _workers: usize,
+        _deadline: Option<std::time::Instant>,
+    ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "prefetch requires a storage directory: diskless reads have no cache to warm",
@@ -119,35 +126,24 @@ impl BlobCache for RemoteBlobCache {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_util::{encode_blob, padded_image};
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::{
-        BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataDigester,
-    };
+    use nydus_format::blob::BlobMetadataCompressor;
     use nydus_format::utils::write_minimal_full_blob;
     use tempfile::tempdir;
-
-    fn blob_metadata(payload: &[u8]) -> BlobMetadata {
-        BlobMetadata::new(
-            BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
-            1,
-            vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
-            vec![
-                BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload), 0, 0, false)
-                    .unwrap(),
-            ],
-            false,
-        )
-        .unwrap()
-    }
 
     #[test]
     fn remote_blob_cache_reads_without_touching_disk() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let meta = blob_metadata(&payload);
-        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
+        let (data, meta) = encode_blob(
+            BlobMetadataCompressor::None,
+            1,
+            &[vec![payload.clone()]],
+            false,
+        );
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
@@ -167,11 +163,36 @@ mod tests {
     }
 
     #[test]
+    fn remote_reads_dense_chunks_and_padding_across_groups() {
+        let backend_dir = tempdir().unwrap();
+        // Two zstd groups in 16 KiB slots with sub-block chunks, so reads
+        // cross chunk padding, a slot tail and a group boundary.
+        let groups = vec![
+            vec![vec![0xabu8; 100], vec![0xcdu8; 5000], vec![0xefu8; 1]],
+            vec![vec![0x12u8; 4097]],
+        ];
+        let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 4, &groups, true);
+        let image = padded_image(4, &groups);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
+        let backend = Arc::new(Local::new(backend_dir.path().to_path_buf()));
+        let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
+        let mut all = vec![0xffu8; image.len()];
+        remote.read_at(0, &mut all).unwrap();
+        assert_eq!(all, image);
+        let mut bytes = [0xff; 3];
+        remote.read_at(16384 - 1, &mut bytes).unwrap();
+        assert_eq!(bytes, [0, 0x12, 0x12]);
+        remote.read_at(99, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xab, 0, 0]);
+        assert!(remote.read_at(image.len() as u64 - 1, &mut bytes).is_err());
+    }
+
+    #[test]
     fn remote_blob_cache_rejects_file_oriented_operations() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0x11u8; 4096];
-        let meta = blob_metadata(&payload);
-        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
+        let (data, meta) = encode_blob(BlobMetadataCompressor::None, 1, &[vec![payload]], false);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
@@ -185,8 +206,9 @@ mod tests {
             io::ErrorKind::Unsupported
         );
         assert_eq!(
-            remote.prefetch_all(None).unwrap_err().kind(),
+            remote.prefetch_all(1, None).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
+        assert!(!remote.is_redirect());
     }
 }
