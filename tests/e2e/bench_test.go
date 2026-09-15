@@ -6,7 +6,7 @@ package e2e
 // disabled, separate cache dirs), so the comparison isolates the read
 // transport:
 //
-//	FUSE:      page-cache miss -> FUSE request -> daemon block group map check +
+//	FUSE:      page-cache miss -> FUSE request -> daemon chunk map check +
 //	           pread cache file -> FUSE reply. Every metadata call is a
 //	           userspace round trip.
 //	NBD:       page-cache miss -> EROFS -> block layer -> NBD socket ->
@@ -74,7 +74,6 @@ package e2e
 //	NYDUSFS_PERF_COLD_RAND_IO_SIZE       Bytes read by the cold random-read pass (default 16MiB).
 //	NYDUSFS_BENCH_MODES                    Comma-separated mode names to run; others are skipped.
 //	NYDUSFS_BENCH_WARM                     Also run and print the steady-state fio/metadata rows.
-//	NYDUSFS_BENCH_NOCDC_FUSE               Add the fuse-nocdc column (image built with --deduplicator none).
 //	NYDUSFS_BENCH_FILEIO_NOWARM            Add the fileio-nowarm column (fileio without the FUSE_NOTIFY_STORE prewarm).
 //	NYDUSFS_BENCH_V2_NYDUSD, NYDUSFS_BENCH_V2_IMAGE_BIN  Paths to nydus v2 binaries; both set adds the v2-fuse column.
 
@@ -125,11 +124,6 @@ type benchEnv struct {
 	bootstrap string
 	blobPath  string // single blob produced by the build, for erofsfuse --device
 	nbdDev    string // free /dev/nbdX picked for the NBD mode
-
-	// Optional fuse-nocdc comparison column (--deduplicator none image),
-	// enabled by the NYDUSFS_BENCH_NOCDC_FUSE environment variable.
-	nocdcBootstrap string
-	nocdcBlobDir   string
 
 	// Optional nydus v2 (rafs v6) comparison column, enabled by the
 	// NYDUSFS_BENCH_V2_NYDUSD and NYDUSFS_BENCH_V2_IMAGE_BIN environment variables.
@@ -208,14 +202,6 @@ func TestBench(t *testing.T) {
 	corpus.MakePerfCorpus(t, corpusDir)
 	t.Log("Building NydusFS image (chunksize=1MiB)...")
 	e.blobPath = buildNydusFSImageToDir(t, e.nydusBin, e.bootstrap, e.blobDir, corpusDir, 1024*1024)
-
-	if os.Getenv("NYDUSFS_BENCH_NOCDC_FUSE") != "" {
-		t.Log("Building NydusFS image with --deduplicator none...")
-		e.nocdcBlobDir = filepath.Join(e.workDir, "nocdc-blobs")
-		e.nocdcBootstrap = filepath.Join(e.workDir, "nocdc.boot")
-		buildNydusFSImageToDir(t, e.nydusBin, e.nocdcBootstrap, e.nocdcBlobDir, corpusDir, 1024*1024,
-			"--deduplicator", "none")
-	}
 
 	e.v2Nydusd = os.Getenv("NYDUSFS_BENCH_V2_NYDUSD")
 	e.v2ImageBin = os.Getenv("NYDUSFS_BENCH_V2_IMAGE_BIN")
@@ -456,16 +442,6 @@ func (e *benchEnv) buildModes(t *testing.T) []*benchMode {
 	fuse := newMode("fuse", e.startFuse)
 	fuse.skip = subOK("fuse")
 
-	// Same fuse serving path, but the image was built with --deduplicator
-	// none (chunkless blob meta): isolates the CDC lookup/dedup cost.
-	nocdc := newMode("fuse-nocdc", e.startFuseNocdc)
-	if nocdc.skip = subOK("fuse"); nocdc.skip == "" && e.nocdcBootstrap == "" {
-		nocdc.skip = "set NYDUSFS_BENCH_NOCDC_FUSE=1 to enable the fuse-nocdc column"
-	}
-	if nocdc.skip == "" {
-		e.writeConfig(t, "fuse-nocdc", e.nocdcBlobDir, nocdc.cache)
-	}
-
 	nbd := newMode("nbd", e.startNbd)
 	if nbd.skip = subOK("nbd"); nbd.skip == "" {
 		if !erofsSupported() {
@@ -537,7 +513,7 @@ func (e *benchEnv) buildModes(t *testing.T) []*benchMode {
 		v2.skip = "set NYDUSFS_BENCH_V2_NYDUSD and NYDUSFS_BENCH_V2_IMAGE_BIN to enable the v2 column"
 	}
 
-	return []*benchMode{v2, fuse, nocdc, nbd, ublk, fan, fileio, fileioNoWarm, fileioBuffered, cerofs}
+	return []*benchMode{v2, fuse, nbd, ublk, fan, fileio, fileioNoWarm, fileioBuffered, cerofs}
 }
 
 func (e *benchEnv) startV2Fuse(t *testing.T) func() {
@@ -602,7 +578,7 @@ func (e *benchEnv) apiSocket(name string) string {
 // backendReadMiB sums the backend_*_read_bytes counters from the daemon's
 // metrics endpoint: bytes actually pulled from the backend, as opposed to
 // cache-file disk allocation, which a 4 KiB block per tiny record inflates
-// (a decoded block group publishes its records at block-aligned logical
+// (a decoded chunk group publishes its records at block-aligned logical
 // offsets, so `du` reports about 3x the real transfer on this corpus).
 // Returns -1 when the socket is absent or unreadable.
 func backendReadMiB(socket string) float64 {
@@ -697,10 +673,6 @@ func terminateDaemon(cmd *exec.Cmd, exited chan struct{}) {
 
 func (e *benchEnv) startFuse(t *testing.T) func() {
 	return e.startFuseNamed(t, "fuse", e.bootstrap)
-}
-
-func (e *benchEnv) startFuseNocdc(t *testing.T) func() {
-	return e.startFuseNamed(t, "fuse-nocdc", e.nocdcBootstrap)
 }
 
 func (e *benchEnv) startFuseNamed(t *testing.T, name, bootstrap string) func() {

@@ -88,7 +88,7 @@ FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 NBD_TEST_PKG = .
 BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-nydusify test-e2e test-tooci test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -107,6 +107,10 @@ nydusify:
 
 test:
 	$(CARGO) test --workspace
+
+test-nydusify:
+	$(CARGO) build -p nydus --features cli
+	cd nydusify && NYDUS_TEST_BUILDER="$(abspath $(or $(CARGO_TARGET_DIR),target))/debug/nydus" $(GO_BIN) test -race -count=1 ./...
 
 # Run end-to-end integration tests (requires root, builds release first).
 # Runs roundtrip and automatic no-xattr tests with their shared helpers.

@@ -349,9 +349,6 @@ func buildNydusFSImageToDir(t *testing.T, nydusBin, imagePath, blobDir, srcDir s
 	before := listFilesInDir(t, blobDir)
 
 	args := []string{"build", "--blob-dir", blobDir, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
-	if gs := os.Getenv("NYDUSFS_PERF_BLOCK_GROUP_SIZE"); gs != "" {
-		args = append(args, "--block-group-size", gs)
-	}
 	if imagePath != "" {
 		args = append(args, "--bootstrap", imagePath)
 	}
