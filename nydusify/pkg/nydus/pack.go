@@ -21,17 +21,11 @@ import (
 type PackOption struct {
 	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
 	BuilderPath string
-	// WorkDir is a scratch directory used for layer extraction and FIFOs.
-	// Defaults to os.TempDir().
+	// WorkDir holds temporary FIFOs and sidecars; defaults to os.TempDir().
 	WorkDir string
-	// ChunkSize is the nydus file chunk size in bytes. Defaults to
-	// DefaultChunkSize.
+	// ChunkSize is the chunk (and chunk group) size; zero selects DefaultChunkSize.
 	ChunkSize uint32
-	// BlockGroupSize is the nydus block group uncompressed size in bytes (a
-	// multiple of 1MiB). Defaults to DefaultBlockGroupSize.
-	BlockGroupSize uint32
-	// Compressor is the chunk data compressor ("none" or "zstd"). Defaults to
-	// DefaultCompressor.
+	// Compressor selects a supported data layout/algorithm; defaults to DefaultCompressor.
 	Compressor string
 	// LogLevel is the log level forwarded to `nydus build` (trace/debug/info/
 	// warn/error). Defaults to "info" when empty.
@@ -39,81 +33,47 @@ type PackOption struct {
 }
 
 func (opt *PackOption) applyDefaults() {
-	if opt.ChunkSize == 0 {
-		opt.ChunkSize = DefaultChunkSize
-	}
-	if opt.BlockGroupSize == 0 {
-		opt.BlockGroupSize = DefaultBlockGroupSize
-	}
 	if opt.Compressor == "" {
 		opt.Compressor = DefaultCompressor
 	}
+	if opt.ChunkSize == 0 {
+		opt.ChunkSize = DefaultChunkSize
+	}
 }
 
-// Pack converts an uncompressed OCI diff tar stream into a nydus full blob.
-//
-// The returned io.WriteCloser receives the diff tar stream. The stream is
-// extracted into a scratch rootfs directory (preserving OCI whiteouts), and on
-// Close `nydus build` streams the resulting full blob through a FIFO into
-// dest. Close blocks until the blob is fully written to dest and returns any
-// extraction or build error.
-//
-// Extraction requires root privileges to preserve file ownership, device nodes
-// and privileged xattrs.
+// Pack streams an OCI diff tar into nydus build without extracting a rootfs.
+// Close waits for the build and output copy; neither requires root privileges.
 func Pack(ctx context.Context, dest io.Writer, opt PackOption) (io.WriteCloser, error) {
 	opt.applyDefaults()
-
-	layerDir, err := os.MkdirTemp(opt.WorkDir, "nydus-pack-")
-	if err != nil {
-		return nil, errors.Wrap(err, "create scratch dir")
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
-	sourceDir := filepath.Join(layerDir, "rootfs")
-	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
-		_ = os.RemoveAll(layerDir)
-		return nil, errors.Wrap(err, "create rootfs dir")
-	}
-
+	ctx, cancel := context.WithCancel(ctx)
 	pr, pw := io.Pipe()
 	pack := &packWriter{
-		pw:         pw,
-		extractErr: make(chan error, 1),
-		build: func(ctx context.Context) error {
-			return BuildBlob(ctx, dest, sourceDir, opt)
-		},
-		cleanup: func() { _ = os.RemoveAll(layerDir) },
-		ctx:     ctx,
+		pw:     pw,
+		done:   make(chan error, 1),
+		cancel: cancel,
 	}
-
+	stop := context.AfterFunc(ctx, func() {
+		_ = pr.CloseWithError(ctx.Err())
+		_ = pw.CloseWithError(ctx.Err())
+	})
 	go func() {
-		err := ExtractTar(ctx, pr, sourceDir)
-		if err != nil {
-			// Unblock the writer side on extraction failure.
-			pr.CloseWithError(err)
-		} else {
-			// The tar reader stops at the end-of-archive marker and does not
-			// consume what follows. Streams written with the traditional
-			// blocking factor (GNU tar pads the archive to a multiple of
-			// 10240 bytes) therefore still hold trailing zero blocks. Drain
-			// them, otherwise closing the pipe here makes the writer side
-			// fail with "io: read/write on closed pipe" even though the
-			// extraction succeeded.
-			_, _ = io.Copy(io.Discard, pr)
-			_ = pr.Close()
-		}
-		pack.extractErr <- err
+		err := buildBlob(ctx, dest, "/dev/stdin", pr, opt)
+		stop()
+		_ = pr.CloseWithError(err)
+		pack.done <- err
 	}()
-
 	return pack, nil
 }
 
 type packWriter struct {
-	pw         *io.PipeWriter
-	extractErr chan error
-	build      func(context.Context) error
-	cleanup    func()
-	ctx        context.Context
-	closed     bool
+	pw        *io.PipeWriter
+	done      chan error
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (p *packWriter) Write(b []byte) (int, error) {
@@ -121,22 +81,12 @@ func (p *packWriter) Write(b []byte) (int, error) {
 }
 
 func (p *packWriter) Close() error {
-	if p.closed {
-		return nil
-	}
-	p.closed = true
-	defer p.cleanup()
-
-	if err := p.pw.Close(); err != nil {
-		return errors.Wrap(err, "close extract pipe")
-	}
-	if err := <-p.extractErr; err != nil {
-		return errors.Wrap(err, "extract layer tar")
-	}
-	if err := p.build(p.ctx); err != nil {
-		return errors.Wrap(err, "build nydus blob")
-	}
-	return nil
+	p.closeOnce.Do(func() {
+		defer p.cancel()
+		_ = p.pw.Close()
+		p.closeErr = <-p.done
+	})
+	return p.closeErr
 }
 
 // BuildBlob runs `nydus build` on sourceDir, streaming the resulting full blob
@@ -148,7 +98,17 @@ func (p *packWriter) Close() error {
 // once the build process has exited. This makes the stream robust regardless of
 // the order in which the build process opens and closes its own write end.
 func BuildBlob(ctx context.Context, dest io.Writer, sourceDir string, opt PackOption) error {
+	return buildBlob(ctx, dest, sourceDir, nil, opt)
+}
+
+func buildBlob(ctx context.Context, dest io.Writer, sourcePath string, input *io.PipeReader, opt PackOption) error {
 	opt.applyDefaults()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if input != nil {
+		stop := context.AfterFunc(ctx, func() { _ = input.CloseWithError(ctx.Err()) })
+		defer stop()
+	}
 
 	fifoDir, err := os.MkdirTemp(opt.WorkDir, "nydus-fifo-")
 	if err != nil {
@@ -175,33 +135,62 @@ func BuildBlob(ctx context.Context, dest io.Writer, sourceDir string, opt PackOp
 	}
 
 	buildDone := make(chan error, 1)
-	var closeOnce sync.Once
 	go func() {
+		sourceType := "dir"
+		var stdin io.Reader
+		var inputDone chan error
+		var sourceFile *os.File
+		if input != nil {
+			sourceType = "tar"
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				_ = keepAlive.Close()
+				buildDone <- err
+				return
+			}
+			sourceFile = reader
+			stdin = reader
+			inputDone = make(chan error, 1)
+			go func() {
+				_, err := io.Copy(writer, input)
+				_ = writer.Close()
+				inputDone <- err
+			}()
+		}
 		berr := RunNydusBuild(ctx, BuildOption{
-			BuilderPath:    opt.BuilderPath,
-			SourceDir:      sourceDir,
-			BlobPath:       fifoPath,
-			ChunkSize:      opt.ChunkSize,
-			BlockGroupSize: opt.BlockGroupSize,
-			Compressor:     opt.Compressor,
-			LogLevel:       opt.LogLevel,
+			BuilderPath: opt.BuilderPath,
+			SourceDir:   sourcePath,
+			SourceType:  sourceType,
+			Stdin:       stdin,
+			BlobPath:    fifoPath,
+			ChunkSize:   opt.ChunkSize,
+			Compressor:  opt.Compressor,
+			LogLevel:    opt.LogLevel,
 		})
+		if input != nil {
+			_ = sourceFile.Close()
+			_ = input.CloseWithError(berr)
+			if inputErr := <-inputDone; berr == nil && inputErr != nil {
+				berr = inputErr
+			}
+		}
 		// Closing the keep-alive write end lets the reader drain to EOF.
-		closeOnce.Do(func() { _ = keepAlive.Close() })
+		_ = keepAlive.Close()
 		buildDone <- berr
 	}()
 
 	buf := make([]byte, 1<<20)
 	_, copyErr := io.CopyBuffer(dest, rf, buf)
+	if copyErr != nil {
+		cancel()
+		_ = rf.Close()
+	}
 
 	buildErr := <-buildDone
-	if buildErr != nil {
-		return buildErr
-	}
 	if copyErr != nil {
 		return errors.Wrap(copyErr, "stream blob to writer")
 	}
-	return nil
+	return buildErr
 }
 
 // openFifoRead opens the read end of a FIFO without blocking on a writer, then

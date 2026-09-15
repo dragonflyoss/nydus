@@ -161,3 +161,59 @@ func copyFile(src, dst string) error {
 	committed = true
 	return nil
 }
+
+// HasNativeLayers reports whether any nydus blob layer of img is a native
+// EROFS layer (raw device, no blob meta), which the nydus daemons cannot serve
+// on demand from a registry. The blob layers must be in the content store.
+func HasNativeLayers(ctx context.Context, cs content.Store, img *Image) (bool, error) {
+	for _, desc := range img.Manifest.Layers {
+		if !nydus.IsBlob(desc) {
+			continue
+		}
+		ra, err := cs.ReaderAt(ctx, desc)
+		if err != nil {
+			return false, errors.Wrapf(err, "open blob layer %s", desc.Digest)
+		}
+		native, err := nydus.IsRawDeviceBlob(ra, ra.Size())
+		_ = ra.Close()
+		if err != nil {
+			return false, errors.Wrapf(err, "inspect blob layer %s", desc.Digest)
+		}
+		if native {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// MaterializeBlobLayers writes every nydus blob layer of img from the content
+// store into blobDir, named by its digest as a local nydus store expects.
+func MaterializeBlobLayers(ctx context.Context, cs content.Store, img *Image, blobDir string) error {
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		return errors.Wrap(err, "create blob dir")
+	}
+	for _, desc := range img.Manifest.Layers {
+		if !nydus.IsBlob(desc) {
+			continue
+		}
+		ra, err := cs.ReaderAt(ctx, desc)
+		if err != nil {
+			return errors.Wrapf(err, "open blob layer %s", desc.Digest)
+		}
+		dst, err := os.Create(filepath.Join(blobDir, desc.Digest.Encoded()))
+		if err != nil {
+			_ = ra.Close()
+			return errors.Wrapf(err, "create blob %s", desc.Digest)
+		}
+		_, copyErr := io.Copy(dst, io.NewSectionReader(ra, 0, ra.Size()))
+		closeErr := dst.Close()
+		_ = ra.Close()
+		if copyErr != nil {
+			return errors.Wrapf(copyErr, "write blob %s", desc.Digest)
+		}
+		if closeErr != nil {
+			return errors.Wrapf(closeErr, "close blob %s", desc.Digest)
+		}
+	}
+	return nil
+}

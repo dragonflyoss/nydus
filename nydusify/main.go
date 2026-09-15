@@ -29,6 +29,7 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/internal/optimizer"
 	"github.com/dragonflyoss/nydus/nydusify/internal/pipeline"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
 func main() {
@@ -75,17 +76,11 @@ func convertCommand() *cli.Command {
 			},
 			&cli.UintFlag{
 				Name:  "chunk-size",
-				Usage: "nydus file chunk size in bytes",
-				Value: 1 << 20,
-			},
-			&cli.UintFlag{
-				Name:  "block-group-size",
-				Usage: "nydus block group uncompressed size in bytes (must be a multiple of 1MiB)",
-				Value: 4 << 20,
+				Usage: "chunk size in bytes (power of two, >=4KiB; default 1MiB): the largest file chunk and the size of every chunk group; ignored for erofs-lz4 and erofs-zstd",
 			},
 			&cli.StringFlag{
 				Name:  "compressor",
-				Usage: "OCI to nydus: chunk data compressor, none or zstd. nydus to OCI: oci-gzip, oci-zstd or oci-tar, selecting the layer compression of the rebuilt OCI image",
+				Usage: "OCI to nydus: none, zstd or lz4 (chunk-based layouts served on demand), erofs-none, erofs-lz4 or erofs-zstd (native EROFS layers without blob meta). nydus to OCI: oci-gzip, oci-zstd or oci-tar",
 				Value: "zstd",
 			},
 			&cli.StringFlag{
@@ -167,8 +162,11 @@ func runConvert(c *cli.Context) error {
 	// instead of silently running the wrong one.
 	compressor := c.String("compressor")
 	toOCI := pipeline.IsOCICompressor(compressor)
-	if !toOCI && compressor != "none" && compressor != "zstd" {
-		return errors.Errorf("unsupported --compressor %q, expected none, zstd, oci-gzip, oci-zstd or oci-tar", compressor)
+	if !toOCI && !nydus.IsNydusCompressor(compressor) {
+		return errors.Errorf("unsupported --compressor %q, expected none, zstd, lz4, erofs-none, erofs-lz4, erofs-zstd, oci-gzip, oci-zstd or oci-tar", compressor)
+	}
+	if uint64(c.Uint("chunk-size")) > uint64(^uint32(0)) {
+		return errors.New("chunk-size must fit uint32")
 	}
 
 	// Detect whether --source is a local directory (instead of an OCI image
@@ -272,7 +270,6 @@ func runConvert(c *cli.Context) error {
 			BuilderPath:       c.String("builder"),
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
-			BlockGroupSize:    uint32(c.Uint("block-group-size")),
 			Compressor:        compressor,
 			LogLevel:          c.String("log-level"),
 			Platform:          platform,
@@ -288,7 +285,6 @@ func runConvert(c *cli.Context) error {
 			BuilderPath:       c.String("builder"),
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
-			BlockGroupSize:    uint32(c.Uint("block-group-size")),
 			Compressor:        compressor,
 			LogLevel:          c.String("log-level"),
 			SourceDir:         source,
@@ -310,13 +306,12 @@ func runConvert(c *cli.Context) error {
 		// push then skips the blobs that already landed.
 		var eagerPush errgroup.Group
 		newDesc, err = pipeline.Convert(ctx, provider.ContentStore(), srcDesc, pipeline.Option{
-			BuilderPath:    c.String("builder"),
-			WorkDir:        scratchDir,
-			ChunkSize:      uint32(c.Uint("chunk-size")),
-			BlockGroupSize: uint32(c.Uint("block-group-size")),
-			Compressor:     c.String("compressor"),
-			LogLevel:       c.String("log-level"),
-			PlatformMC:     platformMC,
+			BuilderPath: c.String("builder"),
+			WorkDir:     scratchDir,
+			ChunkSize:   uint32(c.Uint("chunk-size")),
+			Compressor:  c.String("compressor"),
+			LogLevel:    c.String("log-level"),
+			PlatformMC:  platformMC,
 			OnBlobConverted: func(desc ocispec.Descriptor) {
 				eagerPush.Go(func() error {
 					if err := provider.PushBlob(ctx, desc, target); err != nil {

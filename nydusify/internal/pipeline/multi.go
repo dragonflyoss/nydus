@@ -50,11 +50,9 @@ type MultiSourceOption struct {
 	BuilderPath string
 	// WorkDir is a scratch directory for builds, staging and merging.
 	WorkDir string
-	// ChunkSize is the nydus file chunk size in bytes.
+	// ChunkSize is the file chunk size (and chunk group size) in bytes.
 	ChunkSize uint32
-	// BlockGroupSize is the nydus block group uncompressed size in bytes.
-	BlockGroupSize uint32
-	// Compressor is the chunk data compressor ("none" or "zstd").
+	// Compressor selects the builder's chunk-based or native-z data layout.
 	Compressor string
 	// LogLevel is forwarded to the `nydus` subprocesses.
 	LogLevel string
@@ -83,9 +81,6 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	}
 	if opt.ChunkSize == 0 {
 		opt.ChunkSize = nydus.DefaultChunkSize
-	}
-	if opt.BlockGroupSize == 0 {
-		opt.BlockGroupSize = nydus.DefaultBlockGroupSize
 	}
 	if opt.Platform.OS == "" {
 		opt.Platform = platforms.DefaultSpec()
@@ -258,14 +253,13 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 	// Rust side resolves each path against the source directory and
 	// canonicalizes it, so files outside the source are simply ignored.
 	if err := nydus.RunNydusBuild(ctx, nydus.BuildOption{
-		BuilderPath:    opt.BuilderPath,
-		SourceDir:      dir,
-		BlobPath:       blobPath,
-		ChunkSize:      opt.ChunkSize,
-		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:     opt.Compressor,
-		LogLevel:       opt.LogLevel,
-		Excludes:       opt.AppendInBootstrap,
+		BuilderPath: opt.BuilderPath,
+		SourceDir:   dir,
+		BlobPath:    blobPath,
+		ChunkSize:   opt.ChunkSize,
+		Compressor:  opt.Compressor,
+		LogLevel:    opt.LogLevel,
+		Excludes:    opt.AppendInBootstrap,
 	}); err != nil {
 		return ocispec.Descriptor{}, err
 	}
@@ -285,12 +279,11 @@ func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	platformMC := platforms.Only(opt.Platform)
 
 	layerFn := LayerConvertFunc(nydus.PackOption{
-		BuilderPath:    opt.BuilderPath,
-		WorkDir:        opt.WorkDir,
-		ChunkSize:      opt.ChunkSize,
-		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:     opt.Compressor,
-		LogLevel:       opt.LogLevel,
+		BuilderPath: opt.BuilderPath,
+		WorkDir:     opt.WorkDir,
+		ChunkSize:   opt.ChunkSize,
+		Compressor:  opt.Compressor,
+		LogLevel:    opt.LogLevel,
 	})
 	// Convert layers only: no post-convert hook, so no per-image bootstrap
 	// merge happens here. The caller merges the blobs of all sources at once.
