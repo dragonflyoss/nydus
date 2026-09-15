@@ -229,7 +229,7 @@ func buildCoreFixture(t *testing.T, nydusBin, root string) *coreFixture {
 
 	files := map[string][]byte{
 		"file1.bin": deterministicBytes(1<<20+4096, 1),
-		// Large enough to span several block groups: with only one block group per blob a
+		// Large enough to span several chunk groups: with only one chunk group per blob a
 		// per-process refetch would barely register in the fill counter.
 		"shared.bin": deterministicBytes(12<<20, 2),
 		"file3.bin":  deterministicBytes(1<<20+2048, 3),
@@ -366,7 +366,7 @@ func sumMetric(t *testing.T, mounts []*coreMount, name string) float64 {
 
 // TestCoreConcurrentColdReadIsConsistent covers the baseline guarantee:
 // however much duplicate work the processes do, they all observe the same
-// bytes and the cache never serves a torn block group.
+// bytes and the cache never serves a torn chunk group.
 func TestCacheSharingConcurrentColdReadIsConsistent(t *testing.T) {
 	skipUnlessRoot(t)
 
@@ -394,7 +394,7 @@ func TestCacheSharingConcurrentColdReadIsConsistent(t *testing.T) {
 
 // TestCoreConcurrentColdReadAmplification measures how much duplicate
 // fetching the processes do, calibrated against a single process doing the
-// same read so the assertion does not depend on the blob's block group count.
+// same read so the assertion does not depend on the blob's chunk group count.
 func TestCacheSharingConcurrentColdReadAmplification(t *testing.T) {
 	skipUnlessRoot(t)
 
@@ -411,9 +411,9 @@ func TestCacheSharingConcurrentColdReadAmplification(t *testing.T) {
 		mnt:       filepath.Join(root, "mnt-solo"),
 	})
 	readConcurrently(t, []*coreMount{solo}, "shared.bin")
-	soloFill := solo.metrics(t)["cache_ondemand_fill_block_group"]
+	soloFill := solo.metrics(t)["cache_ondemand_fill_chunk_group"]
 	require.Greater(t, soloFill, 1.0,
-		"the read must span several block groups for the comparison below to mean anything")
+		"the read must span several chunk groups for the comparison below to mean anything")
 
 	// Contended: the same read, from a cold cache, by several processes.
 	sharedCache := filepath.Join(root, "cache-shared")
@@ -427,17 +427,17 @@ func TestCacheSharingConcurrentColdReadAmplification(t *testing.T) {
 		})
 	}
 	readConcurrently(t, mounts, "shared.bin")
-	totalFill := sumMetric(t, mounts, "cache_ondemand_fill_block_group")
+	totalFill := sumMetric(t, mounts, "cache_ondemand_fill_chunk_group")
 
-	t.Logf("cold read amplification: solo=%.0f block groups, %d processes=%.0f block groups (%.2fx)",
+	t.Logf("cold read amplification: solo=%.0f chunk groups, %d processes=%.0f chunk groups (%.2fx)",
 		soloFill, coreProcs, totalFill, totalFill/soloFill)
 
-	// Whoever wins a block group's fetch right publishes it, and the processes that
+	// Whoever wins a chunk group's fetch right publishes it, and the processes that
 	// waited find it ready instead of fetching it again, so the total should
-	// match a single process doing the same read. One block group of slack covers a
+	// match a single process doing the same read. One chunk group of slack covers a
 	// filesystem that cannot provide the lock and falls back to refetching.
 	require.LessOrEqual(t, totalFill, soloFill+1,
-		"concurrent cold reads should not refetch the same block groups per process")
+		"concurrent cold reads should not refetch the same chunk groups per process")
 }
 
 // TestCoreConcurrentPrefetchDeduplicates checks the path that already has
@@ -459,11 +459,15 @@ func TestCacheSharingConcurrentPrefetchDeduplicates(t *testing.T) {
 		prefetch:     true,
 		fullPrefetch: true,
 	})
+	// Prefetch runs in the background, so wait for it to settle rather than
+	// sampling a partial total.
 	var soloFill float64
 	require.Eventually(t, func() bool {
-		soloFill = solo.metrics(t)["cache_fill_block_group"]
-		return soloFill > 0
-	}, 60*time.Second, 200*time.Millisecond, "solo prefetch never filled a block group")
+		current := solo.metrics(t)["cache_fill_chunk_group"]
+		settled := current == soloFill && current > 0
+		soloFill = current
+		return settled
+	}, 60*time.Second, 500*time.Millisecond, "solo prefetch never settled")
 
 	sharedCache := filepath.Join(root, "cache-shared")
 	mounts := make([]*coreMount, coreProcs)
@@ -478,17 +482,15 @@ func TestCacheSharingConcurrentPrefetchDeduplicates(t *testing.T) {
 		})
 	}
 
-	// Prefetch runs in the background, so wait for it to settle rather than
-	// sampling a partial total.
 	var totalFill float64
 	require.Eventually(t, func() bool {
-		current := sumMetric(t, mounts, "cache_fill_block_group")
+		current := sumMetric(t, mounts, "cache_fill_chunk_group")
 		settled := current == totalFill && current > 0
 		totalFill = current
 		return settled
-	}, 60*time.Second, 500*time.Millisecond, "prefetch never settled")
+	}, 60*time.Second, 500*time.Millisecond, "shared prefetch never settled")
 
-	t.Logf("prefetch amplification: solo=%.0f block groups, %d processes=%.0f block groups",
+	t.Logf("prefetch amplification: solo=%.0f chunk groups, %d processes=%.0f chunk groups",
 		soloFill, coreProcs, totalFill)
 	require.LessOrEqual(t, totalFill, soloFill*1.5,
 		"the per-blob prefetch lock should keep all but one process from refetching")
@@ -570,13 +572,13 @@ func TestCacheSharingPrefetchAndOnDemandConcurrent(t *testing.T) {
 	// Re-read once the prefetch has had time to finish, covering the handover
 	// from "filled by my own read" to "filled by the other process".
 	require.Eventually(t, func() bool {
-		return prefetcher.metrics(t)["cache_fill_block_group"] > 0
+		return prefetcher.metrics(t)["cache_fill_chunk_group"] > 0
 	}, 60*time.Second, 200*time.Millisecond, "prefetch never made progress")
 	require.Equal(t, want, sha256File(t, filepath.Join(reader.mnt, "shared.bin")))
 }
 
 // TestCoreSurvivesPeerCrash kills one process mid-flight; the survivors
-// must still complete their reads. Once per-block-group locks land this also covers
+// must still complete their reads. Once per-chunk-group locks land this also covers
 // a dead lock holder being taken over.
 func TestCacheSharingSurvivesPeerCrash(t *testing.T) {
 	skipUnlessRoot(t)
@@ -625,7 +627,7 @@ func TestCacheSharingSurvivesPeerCrash(t *testing.T) {
 // live mount. The readiness bitmap has to be reset, but every process must end
 // up on the same bitmap file: if the reset swaps the inode, a live process
 // keeps publishing readiness that newcomers can never see.
-func TestCacheSharingStaleBlockGroupMapKeepsInode(t *testing.T) {
+func TestCacheSharingStaleChunkMapKeepsInode(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
@@ -643,11 +645,11 @@ func TestCacheSharingStaleBlockGroupMapKeepsInode(t *testing.T) {
 		sha256File(t, filepath.Join(first.mnt, "shared.bin")))
 
 	sharedKey := sha256File(t, fixture.blobB)
-	blockGroupMap := filepath.Join(cacheDir, sharedKey+".group.map")
+	chunkMap := filepath.Join(cacheDir, sharedKey+".group.map")
 	blobData := filepath.Join(cacheDir, sharedKey+".blob.data")
-	require.FileExists(t, blockGroupMap)
+	require.FileExists(t, chunkMap)
 	require.FileExists(t, blobData)
-	before := cacheFileInode(t, blockGroupMap)
+	before := cacheFileInode(t, chunkMap)
 
 	// Simulate an external reclaimer that removes only the data file while the
 	// first mount is still running.
@@ -662,12 +664,12 @@ func TestCacheSharingStaleBlockGroupMapKeepsInode(t *testing.T) {
 	require.Equal(t, sha256Bytes(fixture.files["shared.bin"]),
 		sha256File(t, filepath.Join(second.mnt, "shared.bin")))
 
-	after := cacheFileInode(t, blockGroupMap)
-	t.Logf("block group map inode before=%d after=%d", before, after)
+	after := cacheFileInode(t, chunkMap)
+	t.Logf("chunk map inode before=%d after=%d", before, after)
 
 	// The bitmap is reset in place, so both processes keep observing the same
 	// file. Replacing it would split them onto separate inodes and each would
 	// publish readiness the other can never see.
 	require.Equal(t, before, after,
-		"the stale block group map must be reset in place, not replaced")
+		"the stale chunk map must be reset in place, not replaced")
 }

@@ -115,7 +115,7 @@ func TestErofsKernelCompatibility(t *testing.T) {
 		bootstrap := filepath.Join(root, fmt.Sprintf("layer%d.bootstrap", layerIndex))
 		before := listFilesInDir(t, blobDir)
 		out, err := exec.Command(nydusBin, "build", "--blob-dir", blobDir,
-			"--bootstrap", bootstrap, "--chunk-size", "4096", "--block-group-size", "1048576",
+			"--bootstrap", bootstrap, "--chunk-size", "4096",
 			"--compressor", "none", source).CombinedOutput()
 		require.NoError(t, err, "build: %s", out)
 		var blob string
@@ -135,8 +135,49 @@ func TestErofsKernelCompatibility(t *testing.T) {
 		require.NoError(t, err)
 		decodedSize := int(blocks) * 4096
 		require.Less(t, decodedSize, 1048576)
-		require.GreaterOrEqual(t, len(fullBlob), decodedSize)
-		decoded := fullBlob[:decodedSize]
+		// Decode the plain (uncompressed) blob meta layout by hand: header,
+		// chunk group table (with terminator), chunk length table. Group i owns
+		// the slot [i*S, (i+1)*S) of the device; its chunks are packed back to
+		// back, block aligned, from the slot start.
+		metadata, err := os.ReadFile(blob + ".blob.meta")
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(metadata), 32)
+		require.Equal(t, "LPBLMETA", string(metadata[:8]))
+		require.Equal(t, uint32(1), binary.LittleEndian.Uint32(metadata[8:]), "blob meta version")
+		flags := binary.LittleEndian.Uint32(metadata[12:])
+		require.Zero(t, flags&0x3, "compressor none")
+		slotSize := 4096 << metadata[20]
+		groupCount := int(binary.LittleEndian.Uint32(metadata[24:]))
+		chunkCount := int(binary.LittleEndian.Uint32(metadata[28:]))
+		groupTable := 32
+		chunkTable := groupTable + (groupCount+1)*16
+		require.GreaterOrEqual(t, len(metadata), chunkTable+chunkCount*4)
+		require.Equal(t, decodedSize, groupCount*slotSize, "device blocks cover the group slots")
+		group := func(i int) (compressedOffset int, firstChunk int) {
+			entry := metadata[groupTable+i*16:]
+			return int(binary.LittleEndian.Uint64(entry)), int(binary.LittleEndian.Uint32(entry[8:]))
+		}
+		decoded := make([]byte, decodedSize)
+		for g := 0; g < groupCount; g++ {
+			sourceOffset, firstChunk := group(g)
+			sourceEnd, lastChunk := group(g + 1)
+			require.Less(t, firstChunk, lastChunk, "group %d holds chunks", g)
+			targetOffset := g * slotSize
+			for chunk := firstChunk; chunk < lastChunk; chunk++ {
+				length := int(binary.LittleEndian.Uint32(metadata[chunkTable+chunk*4:]))
+				require.Positive(t, length)
+				require.LessOrEqual(t, length, 4096)
+				require.LessOrEqual(t, sourceOffset+length, sourceEnd, "group %d payload", g)
+				require.LessOrEqual(t, targetOffset+length, (g+1)*slotSize, "group %d slot", g)
+				copy(decoded[targetOffset:targetOffset+length], fullBlob[sourceOffset:sourceOffset+length])
+				sourceOffset += length
+				targetOffset += (length + 4095) / 4096 * 4096
+			}
+			require.Equal(t, sourceEnd, sourceOffset, "group %d is plain (payload == compressed size)", g)
+		}
+		compressedEnd, terminatorChunk := group(groupCount)
+		require.Equal(t, chunkCount, terminatorChunk)
+		require.LessOrEqual(t, compressedEnd, len(fullBlob))
 		require.NoError(t, os.WriteFile(filepath.Join(decodedDir, filepath.Base(blob)), decoded, 0644))
 		if layerIndex == 0 {
 			firstDecoded = append([]byte(nil), decoded...)
@@ -151,7 +192,7 @@ func TestErofsKernelCompatibility(t *testing.T) {
 	config := filepath.Join(root, "config.yaml")
 	writeLocalStorageConfig(t, config, blobDir, filepath.Join(root, "cache"))
 	trace := filepath.Join(root, "trace.json")
-	require.NoError(t, os.WriteFile(trace, []byte(`{"version":1,"patterns":[{"blob_index":1,"block_group_index":0}]}`), 0644))
+	require.NoError(t, os.WriteFile(trace, []byte(`{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":0}]}`), 0644))
 	optimized := filepath.Join(root, "optimized.bootstrap")
 	out, err := exec.Command(nydusBin, "optimize", "--parent-bootstrap", merged,
 		"--bootstrap", optimized, "--blob-dir", blobDir, "--config", config, "--trace-file", trace).CombinedOutput()
@@ -161,11 +202,79 @@ func TestErofsKernelCompatibility(t *testing.T) {
 	require.Len(t, devices, 3)
 	require.NoError(t, os.WriteFile(strings.TrimPrefix(devices[2], "--device="), firstDecoded, 0644))
 	t.Run("Optimize", func(t *testing.T) { verifyNativeErofsTree(t, optimized, decodedDir, expected) })
+
+	// Native layers need no decoding: the full blob in the store is the device
+	// itself (data at offset 0), carries no blob meta and gets no sidecar.
+	for _, compressor := range []string{"erofs-none", "erofs-lz4", "erofs-zstd"} {
+		t.Run("Native/"+compressor, func(t *testing.T) {
+			if compressor == "erofs-zstd" && !kernelAtLeast(t, 6, 10) {
+				t.Skip("erofs-zstd needs Linux 6.10+")
+			}
+			verify := verifyNativeErofsTree
+			if compressor != "erofs-none" {
+				verify = verifyKernelMountTree
+			}
+			nativeBlobDir := filepath.Join(root, compressor, "blobs")
+			require.NoError(t, os.MkdirAll(nativeBlobDir, 0755))
+			var nativeSources []string
+			for layerIndex := 0; layerIndex < 2; layerIndex++ {
+				source := filepath.Join(root, fmt.Sprintf("layer%d", layerIndex))
+				bootstrap := filepath.Join(root, compressor, fmt.Sprintf("layer%d.bootstrap", layerIndex))
+				before := listFilesInDir(t, nativeBlobDir)
+				out, err := exec.Command(nydusBin, "build", "--blob-dir", nativeBlobDir,
+					"--bootstrap", bootstrap, "--chunk-size", "4096", "--compressor", compressor,
+					"--erofs-data-alignment", "16384", source).CombinedOutput()
+				require.NoError(t, err, "build: %s", out)
+				var blob string
+				for path := range listFilesInDir(t, nativeBlobDir) {
+					if _, existed := before[path]; !existed {
+						require.True(t, sha256FilenamePattern.MatchString(filepath.Base(path)), "unexpected output %s", path)
+						require.Empty(t, blob)
+						blob = path
+					}
+				}
+				require.NotEmpty(t, blob)
+				require.NoFileExists(t, blob+".blob.meta")
+				fullBlob, err := os.ReadFile(blob)
+				require.NoError(t, err)
+				footer := fullBlob[len(fullBlob)-4096:]
+				require.Equal(t, "LPFOOTER", string(footer[:8]))
+				require.NotZero(t, binary.LittleEndian.Uint32(footer[12:])&(1<<1), "RAW_DEVICE flag")
+				require.Zero(t, binary.LittleEndian.Uint32(footer[60:]), "no blob meta blocks")
+				nativeSources = append(nativeSources, blob)
+				verify(t, bootstrap, nativeBlobDir, source)
+			}
+			merged := filepath.Join(root, compressor, "merged.bootstrap")
+			mergeNydusBootstrap(t, nydusBin, merged, nativeSources...)
+			verify(t, merged, nativeBlobDir, expected)
+		})
+	}
+}
+
+// kernelAtLeast reports whether the running kernel is at least major.minor.
+func kernelAtLeast(t *testing.T, major, minor int) bool {
+	t.Helper()
+	release, err := exec.Command("uname", "-r").Output()
+	require.NoError(t, err)
+	var haveMajor, haveMinor int
+	_, err = fmt.Sscanf(strings.TrimSpace(string(release)), "%d.%d", &haveMajor, &haveMinor)
+	require.NoError(t, err)
+	return haveMajor > major || (haveMajor == major && haveMinor >= minor)
 }
 
 func verifyNativeErofsTree(t *testing.T, bootstrap, decodedDir, expected string) {
 	t.Helper()
 	fsckErofsImage(t, bootstrap, decodedDir)
+	verifyKernelMountTree(t, bootstrap, decodedDir, expected)
+}
+
+// verifyKernelMountTree mounts the image through the kernel EROFS driver and
+// diffs it against expected, without the fsck.erofs data extraction. The
+// compressed native layers need it: erofs-utils 1.7.1 (the host package) has
+// no zstd support and cannot decode the LZ4 packed inode the kernel reads
+// fine, so the kernel is the oracle for their data.
+func verifyKernelMountTree(t *testing.T, bootstrap, decodedDir, expected string) {
+	t.Helper()
 	deviceArgs, err := erofsDeviceArgs(bootstrap, decodedDir)
 	require.NoError(t, err)
 	devicePaths := make([]string, 0, len(deviceArgs))
@@ -643,7 +752,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 	require.NoError(t, err)
 
 	var dataCount int
-	var blockGroupMapCount int
+	var chunkMapCount int
 	var blobMetaCount int
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -655,7 +764,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 		case strings.HasSuffix(name, ".blob.data"):
 			dataCount++
 		case strings.HasSuffix(name, ".group.map"):
-			blockGroupMapCount++
+			chunkMapCount++
 		case strings.HasSuffix(name, ".blob.meta"):
 			blobMetaCount++
 		}
@@ -663,7 +772,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 
 	blobCount := len(blobs)
 	assert.Equal(t, blobCount, dataCount, "unexpected cached blob.data count")
-	assert.Equal(t, blobCount, blockGroupMapCount, "unexpected cached block group map count")
+	assert.Equal(t, blobCount, chunkMapCount, "unexpected cached group map count")
 	assert.Equal(t, blobCount, blobMetaCount, "unexpected cached blob_meta count")
 
 	for _, blob := range blobs {
@@ -682,15 +791,15 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 //  2. Mount the nydus image WITHOUT prefetch, replay a read workload, and
 //     verify the baseline metrics show on-demand backend reads. Save the
 //     recorded /trace pattern to a file and run `nydusify optimize
-//     --pattern` to build the ondemand (redirect) blob from it and push the
-//     optimized image.
+//     --pattern` to repack the traced chunks into the ondemand blob and push
+//     the optimized image.
 //  3. Mount the optimized image WITH prefetch on a cold cache, wait for
 //     prefetch to quiesce, replay the same workload, and verify:
-//     - the ondemand blob was fetched (backend_redirect_read_count > 0),
-//     - every traced block group was filled into its source blob's cache through
-//     the redirect path (cache_redirect_fill_block_group == trace size, no skips),
+//     - the ondemand blob was prefetched (backend_prefetch_read_count > 0,
+//     cache_fill_group > 0) without on-demand reads,
 //     - the workload triggered zero on-demand backend reads
-//     (backend_ondemand_read_count == 0), proving the optimization works,
+//     (backend_ondemand_read_count == 0): the traced chunks now live in the
+//     prefetched ondemand blob,
 //     - file contents are byte-identical to the corpus.
 func TestNydusifyOptimize(t *testing.T) {
 	if os.Getuid() != 0 {
@@ -702,8 +811,8 @@ func TestNydusifyOptimize(t *testing.T) {
 	nydusBin := mustLookupExecutable(t, "nydus")
 	nydusifyBin := mustLookupExecutable(t, "nydusify")
 
-	// Corpus: four ~1.2-1.5 MiB pseudo-random files so each spans more than
-	// one 1 MiB blob meta group and the trace covers multiple groups.
+	// Corpus: four ~1.06-1.25 MiB pseudo-random files so each spans more than
+	// one 1 MiB chunk and the trace covers multiple chunks.
 	tmpDir := t.TempDir()
 	corpusDir := filepath.Join(tmpDir, "corpus")
 	require.NoError(t, os.MkdirAll(corpusDir, 0755))
@@ -754,13 +863,12 @@ func TestNydusifyOptimize(t *testing.T) {
 		metrics := fetchMetrics(t, socket)
 		require.Greater(t, metricValue(metrics, "backend_ondemand_read_count"), 0.0,
 			"baseline workload must trigger on-demand backend reads")
-		require.Zero(t, metricValue(metrics, "backend_redirect_read_count"))
-		require.Zero(t, metricValue(metrics, "cache_redirect_fill_block_group"))
-		require.Zero(t, metricValue(metrics, "cache_fill_block_group"),
+		require.Zero(t, metricValue(metrics, "backend_prefetch_read_count"))
+		require.Zero(t, metricValue(metrics, "cache_fill_chunk_group"),
 			"baseline mount must not prefetch")
 		traceCount = saveTrace(t, socket, filepath.Join(tmpDir, "pattern.json"))
-		require.Greater(t, traceCount, 1, "trace must cover multiple groups")
-		t.Logf("baseline: ondemand_reads=%v trace_block_groups=%d",
+		require.Greater(t, traceCount, 1, "trace must cover multiple chunk groups")
+		t.Logf("baseline: ondemand_reads=%v trace_chunk_groups=%d",
 			metricValue(metrics, "backend_ondemand_read_count"), traceCount)
 
 		t.Log("Optimizing with the saved trace pattern...")
@@ -782,25 +890,26 @@ func TestNydusifyOptimize(t *testing.T) {
 		waitPrefetchQuiesce(t, socket)
 
 		metrics := fetchMetrics(t, socket)
-		require.Greater(t, metricValue(metrics, "backend_redirect_read_count"), 0.0,
-			"prefetch must fetch the ondemand (redirect) blob from the backend")
-		require.Equal(t, float64(traceCount), metricValue(metrics, "cache_redirect_fill_block_group"),
-			"every traced group must be filled into its source cache via redirect")
-		require.Zero(t, metricValue(metrics, "cache_redirect_skip_block_group"),
-			"no redirect group may be skipped")
+		require.Greater(t, metricValue(metrics, "backend_prefetch_read_count"), 0.0,
+			"prefetch must fetch the ondemand blob from the backend")
+		fills := metricValue(metrics, "cache_redirect_fill_chunk_group")
+		require.EqualValues(t, traceCount, fills,
+			"prefetch must fill every traced chunk group into its source blob's cache")
+		require.Zero(t, metricValue(metrics, "cache_redirect_skip_chunk_group"),
+			"no redirect chunk group may be skipped on a cold cache")
+		require.Zero(t, metricValue(metrics, "cache_fill_chunk_group"),
+			"the ondemand blob fills the source caches, never its own")
 		require.Zero(t, metricValue(metrics, "backend_ondemand_read_count"),
 			"prefetch warmup must not issue on-demand reads")
-		t.Logf("optimized after prefetch: redirect_reads=%v redirect_fills=%v regular_fills=%v",
-			metricValue(metrics, "backend_redirect_read_count"),
-			metricValue(metrics, "cache_redirect_fill_block_group"),
-			metricValue(metrics, "cache_fill_block_group"))
+		t.Logf("optimized after prefetch: prefetch_reads=%v redirect_fills=%v",
+			metricValue(metrics, "backend_prefetch_read_count"), fills)
 
 		workload(optMnt)
 
 		metrics = fetchMetrics(t, socket)
 		require.Zero(t, metricValue(metrics, "backend_ondemand_read_count"),
 			"the traced workload must be served entirely from the warmed cache")
-		require.Greater(t, metricValue(metrics, "cache_hit_block_group"), 0.0)
+		require.Greater(t, metricValue(metrics, "cache_hit_chunk_group"), 0.0)
 
 		// Full content verification against the corpus.
 		for _, name := range corpusFiles {
@@ -812,7 +921,7 @@ func TestNydusifyOptimize(t *testing.T) {
 		}
 	}()
 
-	// The ondemand blob holds a rearranged copy of the other blobs and no
+	// The ondemand blob holds copies of the other blobs' chunk groups and no
 	// filesystem tree, so the reverse conversion must skip it and still
 	// reproduce the original layers.
 	t.Log("Converting the optimized image back to OCI...")

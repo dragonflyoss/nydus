@@ -284,7 +284,7 @@ func TestProxyErrorSimulation(t *testing.T) {
 	_, stopProxy := newInjectableProxy(t, strings.TrimPrefix(proxyControlURL, "http://"))
 	defer stopProxy()
 
-	// The 403 case runs first while dfdaemon's piece cache is still cold, so
+	// The 403 case runs first while dfdaemon's chunk cache is still cold, so
 	// its back-to-source fetches are guaranteed to see the injected failure.
 	// It injects with no budget: every origin blob GET (Dragonfly
 	// back-to-source and the direct fallback path alike) is denied, so the
