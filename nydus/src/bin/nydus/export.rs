@@ -106,7 +106,6 @@ mod tests {
         let options = BuildImageOptions::new(
             source.to_path_buf(),
             EROFS_BLOCK_SIZE,
-            1 << 20,
             BlobMetadataCompressor::Zstd,
             HashSet::new(),
             false,

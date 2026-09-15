@@ -81,11 +81,6 @@ pub struct BlobInfo {
     pub cache_size: u64,
     /// Host path of the sparse cache data file backing the pmem device.
     pub cache_path: PathBuf,
-    /// True when this is an "ondemand" redirect blob produced by
-    /// `nydus optimize`. Its data file is never read by the guest (no chunk
-    /// index points at it); it only feeds the phase-0 prefetch that warms the
-    /// source blobs' caches.
-    pub is_redirect: bool,
 }
 
 /// Blob table and decoded-cache preparation/fetch APIs.
@@ -133,14 +128,13 @@ impl Blobs {
                     blocks: info.blocks,
                     cache_size,
                     cache_path,
-                    is_redirect: cache.is_redirect(),
                 })
             })
             .collect()
     }
 
     /// Describe the blobs that back the flattened single-device address
-    /// space, sorted by `mapped_offset` and with redirect blobs removed.
+    /// space, sorted by `mapped_offset`.
     ///
     /// The layout is fixed for the lifetime of the core, so it is computed
     /// once and memoised: block-device style workloads resolve ranges on every
@@ -162,7 +156,6 @@ impl Blobs {
             return Ok(layout);
         }
         let mut blobs = self.prepare_all()?;
-        blobs.retain(|blob| !blob.is_redirect);
         blobs.sort_by_key(|blob| blob.mapped_offset);
         let _ = self.flat_layout.set(blobs);
         Ok(self
@@ -188,9 +181,9 @@ impl Blobs {
 
     /// Ensure `[offset, offset + len)` of the blob's dense uncompressed
     /// address space is decoded, CRC-validated, and written to its cache data
-    /// file, fetching missing block groups through the backend. Both `offset` and
+    /// file, fetching missing chunk groups through the backend. Both `offset` and
     /// `len` must be 4 KiB block aligned; the fetch rounds outward to whole
-    /// blob meta block groups. Idempotent and safe to call concurrently.
+    /// blob meta chunk groups. Idempotent and safe to call concurrently.
     pub fn fetch(&self, id: &BlobId, offset: u64, len: u64) -> Result<()> {
         let block_size = EROFS_BLOCK_SIZE as u64;
         if offset % block_size != 0 || len % block_size != 0 {
@@ -209,7 +202,7 @@ impl Blobs {
     }
 
     /// Return cache-ready byte intervals overlapping `[offset, offset + len)`
-    /// without triggering a backend fetch. The block_group_map remains authoritative.
+    /// without triggering a backend fetch. The chunk map remains authoritative.
     pub fn ready_ranges(
         &self,
         id: &BlobId,
@@ -225,7 +218,7 @@ impl Blobs {
         })
     }
 
-    /// O(1) fast-path probe: true when every block group of the blob is already
+    /// O(1) fast-path probe: true when every chunk group of the blob is already
     /// decoded into its local cache (a single shared-flag load, no bitmap
     /// scan). On-demand services (uffd, fanotify, FUSE) can consult this per
     /// event — or once per blob, since the answer is sticky — to bypass range

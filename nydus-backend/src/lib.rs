@@ -34,7 +34,7 @@ pub(crate) use registry::Registry;
 pub use nydus_telemetry::metrics::ReadKind;
 
 /// The uncompressed span a backend read decodes to, when it maps to
-/// blob-metadata block groups.
+/// blob-metadata chunk groups.
 #[derive(Debug, Clone, Copy)]
 pub struct UncompressedSpan {
     pub offset: u64,
@@ -42,7 +42,7 @@ pub struct UncompressedSpan {
 }
 
 /// Diagnostic context for a backend read: its kind plus the uncompressed
-/// span it decodes to, when the read maps to blob-meta block groups. Raw reads
+/// span it decodes to, when the read maps to blob-meta chunk groups. Raw reads
 /// (e.g. the blob footer or blob meta region) carry `None`.
 #[derive(Debug, Clone, Copy)]
 pub struct ReadContext {
@@ -51,8 +51,8 @@ pub struct ReadContext {
 }
 
 impl ReadContext {
-    /// Context for a read that decodes to a known uncompressed block group span.
-    pub fn block_group(kind: ReadKind, uncompressed_offset: u64, uncompressed_size: u64) -> Self {
+    /// Context for a read that decodes to a known uncompressed chunk group span.
+    pub fn chunk_group(kind: ReadKind, uncompressed_offset: u64, uncompressed_size: u64) -> Self {
         Self {
             kind,
             uncompressed: Some(UncompressedSpan {
@@ -62,7 +62,7 @@ impl ReadContext {
         }
     }
 
-    /// Context for a raw read with no associated uncompressed block group span.
+    /// Context for a raw read with no associated uncompressed chunk group span.
     pub fn raw(kind: ReadKind) -> Self {
         Self {
             kind,
@@ -146,6 +146,14 @@ pub trait BlobBackend: Send + Sync {
 
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
 
+    /// Whether the blob is a raw EROFS device without blob meta (a native
+    /// `erofs-*` layer): its bytes are read as-is and never cached or
+    /// decoded by nydus. Backends that cannot serve such blobs report an
+    /// error instead of `Ok(true)`.
+    fn is_raw_device(&self, _blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
+        Ok(false)
+    }
+
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
         let blob_metadata = self.blob_metadata(blob_id)?;
         blob_metadata.save(dst).map_err(io::Error::other)
@@ -214,6 +222,10 @@ impl BlobBackend for MeteredBackend {
 
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         self.inner.blob_metadata(blob_id)
+    }
+
+    fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
+        self.inner.is_raw_device(blob_id)
     }
 
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {

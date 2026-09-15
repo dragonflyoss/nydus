@@ -89,8 +89,8 @@ impl NydusCore {
     ///
     /// Unless `config.prefetch.scope` is `none`, a background prefetch worker is
     /// spawned before returning: for an optimized image it streams the
-    /// "ondemand" redirect blob first (priority) to warm the source blobs'
-    /// caches in recorded access order, then prefetches the remaining blobs.
+    /// "ondemand" blob first (priority), which holds the recorded working set
+    /// in access order, then prefetches the remaining blobs.
     /// Dropping the core raises the worker's stop flag so it winds down
     /// instead of retrying throttled prefetches forever.
     /// The worker shares the reader's blob cache set, so callers that want
@@ -123,6 +123,7 @@ impl NydusCore {
         let prefetch_retry_delay_min = config.prefetch.retry_delay_min;
         let prefetch_retry_delay_max = config.prefetch.retry_delay_max;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
+        nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
         // The multi-device model hands each blob's cache file to the kernel
         // (as an EROFS device or fill target), so diskless mode cannot apply.
@@ -259,12 +260,12 @@ impl NydusCore {
         self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
 
-    /// Return a stable snapshot of this core's on-demand block group trace.
+    /// Return a stable snapshot of this core's on-demand chunk group trace.
     pub fn trace_snapshot(&self) -> TraceDocument {
         self.trace_recorder.snapshot()
     }
 
-    /// Serialize this core's on-demand block group trace as optimize-compatible JSON.
+    /// Serialize this core's on-demand chunk group trace as optimize-compatible JSON.
     pub fn trace_json(&self) -> String {
         self.trace_recorder.encode_json()
     }

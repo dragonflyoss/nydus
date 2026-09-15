@@ -3,13 +3,13 @@
 //! from `BlobMetadataFlags` and encoded back via `flag`.
 
 use crate::blob::metadata::BlobMetadataFlags;
-use crate::error::{Error, Result};
 use std::fmt;
 
-/// The block group payload compressor a blob meta declares. `None` is the
+/// The chunk group payload compressor a blob meta declares. `None` is the
 /// absent-flag state: payloads are stored raw.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlobMetadataCompressor {
+    #[default]
     None,
     Zstd,
     Lz4Block,
@@ -33,7 +33,7 @@ impl fmt::Display for BlobMetadataCompressor {
         f.write_str(match self {
             Self::None => "none",
             Self::Zstd => "zstd",
-            Self::Lz4Block => "lz4-block",
+            Self::Lz4Block => "lz4",
         })
     }
 }
@@ -52,18 +52,23 @@ impl From<BlobMetadataFlags> for BlobMetadataCompressor {
     }
 }
 
-/// The chunk digest algorithm a blob meta declares, always explicit (see
-/// the `TryFrom` below).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The chunk digest algorithm a blob meta declares. `None` is the
+/// absent-flag state and records zero digests: the chunk table is still
+/// addressable but carries no integrity information, for blobs built from
+/// content that was already verified upstream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlobMetadataDigester {
+    #[default]
     Blake3,
+    None,
 }
 
 impl BlobMetadataDigester {
-    /// The flag bit encoding this digester.
+    /// The flag bit encoding this digester, empty for `None`.
     pub fn flag(self) -> BlobMetadataFlags {
         match self {
             Self::Blake3 => BlobMetadataFlags::DIGESTER_BLAKE3,
+            Self::None => BlobMetadataFlags::empty(),
         }
     }
 }
@@ -74,22 +79,19 @@ impl fmt::Display for BlobMetadataDigester {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Blake3 => "blake3",
+            Self::None => "none",
         })
     }
 }
 
-/// Fallible: every blob meta must declare its digester, so an absent flag
-/// is a corrupt file rather than a default.
-impl TryFrom<BlobMetadataFlags> for BlobMetadataDigester {
-    type Error = Error;
-
-    fn try_from(value: BlobMetadataFlags) -> Result<Self> {
+/// Infallible, like the compressor: an absent digester flag is the valid
+/// undigested state.
+impl From<BlobMetadataFlags> for BlobMetadataDigester {
+    fn from(value: BlobMetadataFlags) -> Self {
         if value.contains(BlobMetadataFlags::DIGESTER_BLAKE3) {
-            Ok(Self::Blake3)
+            Self::Blake3
         } else {
-            Err(Error::InvalidImage(
-                "blob meta digester flag is missing".to_string(),
-            ))
+            Self::None
         }
     }
 }

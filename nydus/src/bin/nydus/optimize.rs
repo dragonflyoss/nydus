@@ -1,7 +1,7 @@
 use clap::Parser;
 use nydus::error::{Context, Error, Result};
 use nydus::optimize::{
-    build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, BlockGroupRef,
+    build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, ChunkGroupRef,
 };
 use nydus_backend::{build_backend, BlobBackend};
 use nydus_config::Config;
@@ -30,7 +30,7 @@ pub struct OptimizeCommand {
         long,
         conflicts_with = "apiserver",
         env = "NYDUS_OPTIMIZE_TRACE_FILE",
-        help = "Specify the path to a JSON trace file containing access patterns: the versioned `{\"version\":1,\"patterns\":[{\"blob_index\":..,\"block_group_index\":..}]}` document, exactly as produced by the apiserver `/trace` endpoint. Mutually exclusive with `--apiserver`"
+        help = "Specify the path to a JSON trace file containing access patterns: the versioned `{\"version\":1,\"patterns\":[{\"blob_index\":..,\"chunk_group_index\":..}]}` document, exactly as produced by the apiserver `/trace` endpoint. Mutually exclusive with `--apiserver`"
     )]
     trace_file: Option<PathBuf>,
 
@@ -114,8 +114,8 @@ impl OptimizeCommand {
 
     /// Lowers the raw CLI flags into the optimize inputs: the access patterns
     /// from the trace source, the blob backend, and the local cache directory
-    /// the source block groups are pulled through.
-    fn prepare(&self) -> Result<(Vec<BlockGroupRef>, Arc<dyn BlobBackend>, PathBuf)> {
+    /// the source blobs' metadata is loaded through.
+    fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn BlobBackend>, PathBuf)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
             (Some(path), _) => load_patterns_from_file(path)?,
             (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
@@ -123,7 +123,7 @@ impl OptimizeCommand {
         };
         if patterns.is_empty() {
             return Err(Error::InvalidParameter(
-                "no block group accesses found in the access trace (exercise the workload before optimizing)"
+                "no chunk group accesses found in the access trace (exercise the workload before optimizing)"
                     .to_string(),
             ));
         }
@@ -132,11 +132,11 @@ impl OptimizeCommand {
         let storage_config = Config::load(&self.config)?;
         let backend =
             build_backend(&storage_config.backend).context("failed to build blob backend")?;
-        // Source block groups are pulled through the local blob cache, so diskless mode
-        // cannot apply.
+        // Source chunks are read through the local blob cache's backend, so
+        // diskless mode cannot apply.
         let Some(cache_dir) = storage_config.storage.dir else {
             return Err(Error::InvalidConfig(
-                "optimize requires storage.dir: source block groups are pulled through the local blob cache"
+                "optimize requires storage.dir: source chunks are read through the local blob cache"
                     .to_string(),
             ));
         };
@@ -148,7 +148,7 @@ impl OptimizeCommand {
     /// blob, its metadata, and the rewritten bootstrap, and prints the summary.
     fn run(
         &self,
-        patterns: &[BlockGroupRef],
+        patterns: &[ChunkGroupRef],
         backend: Arc<dyn BlobBackend>,
         cache_dir: &Path,
     ) -> Result<()> {
@@ -181,7 +181,7 @@ impl OptimizeCommand {
         })?;
 
         info!(
-            "optimized {} block groups from {} source blobs into ondemand blob",
+            "optimized {} chunk groups from {} source blobs into ondemand blob",
             patterns.len(),
             ondemand.source_blob_count
         );
@@ -198,8 +198,8 @@ impl OptimizeCommand {
             blob_metadata_path: String,
             #[tabled(rename = "BOOTSTRAP PATH")]
             bootstrap_path: String,
-            #[tabled(rename = "BLOCK GROUP COUNT")]
-            block_group_count: String,
+            #[tabled(rename = "CHUNK GROUP COUNT")]
+            chunk_group_count: String,
             #[tabled(rename = "COMPRESSED DATA SIZE")]
             compressed_data_size: String,
             #[tabled(rename = "UNCOMPRESSED DATA SIZE")]
@@ -211,7 +211,7 @@ impl OptimizeCommand {
             ondemand_blob_path: blob_path.display().to_string(),
             blob_metadata_path: blob_metadata_path.display().to_string(),
             bootstrap_path: self.bootstrap.display().to_string(),
-            block_group_count: patterns.len().to_string(),
+            chunk_group_count: patterns.len().to_string(),
             compressed_data_size: ondemand.footer.compressed_data_size().to_string(),
             uncompressed_data_size: (ondemand.uncompressed_blocks * EROFS_BLOCK_SIZE as u64)
                 .to_string(),

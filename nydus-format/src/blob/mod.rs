@@ -17,9 +17,8 @@ pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
-    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk,
-    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_BLOCK_COUNT,
-    DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataFlags,
+    BlobMetadataRedirect, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
     DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
 };
 
@@ -35,26 +34,28 @@ pub use metadata::{
 /// └─────────────────┴───┴───────────────────────┴──────────────────┴────────┘
 /// 0                     bootstrap_offset        blob_metadata_offset      EOF
 ///
-/// compressed data  the block group payloads, packed back to back and
+/// compressed data  the chunk group payloads, packed back to back and
 ///                  byte-exact (compressed_data_size bytes), mapped by the
-///                  blob meta block group table
+///                  blob meta chunk group table
 /// pad              zeros up to the 4 KiB aligned bootstrap_offset
 /// bootstrap        one zstd frame of the metadata-only EROFS image
 ///                  (bootstrap_compressed_size bytes), zero tail up to
 ///                  bootstrap_blocks × 4 KiB, absent for an ondemand blob
-/// blob meta        the LPBLMETA bytes (header, chunk table, block group
-///                  table), already block-padded, ending exactly at the
-///                  footer offset
+/// blob meta        the LPBLMETA bytes (header, chunk group table, chunk
+///                  table, digest table), already block-padded, ending
+///                  exactly at the footer offset
 /// footer           the sealed LPFOOTER block, fixed 4 KiB at the tail
 /// ```
 ///
 /// An empty `bootstrap` yields the ondemand layout (no bootstrap region,
-/// zero bootstrap blocks).
+/// zero bootstrap blocks). `blob_metadata: None` yields the raw device
+/// layout of native `erofs-*` layers: no blob meta region, the footer's
+/// RAW_DEVICE flag set, and a bootstrap required.
 pub fn finish_full_blob(
     writer: &mut dyn Write,
     compressed_data_size: u64,
     bootstrap: &[u8],
-    blob_metadata: &BlobMetadata,
+    blob_metadata: Option<&BlobMetadata>,
 ) -> Result<BlobFooter> {
     let compressed_bootstrap = compress_bootstrap(bootstrap)?;
     let blob_footer = new_blob_footer(compressed_data_size, &compressed_bootstrap, blob_metadata)?;
@@ -81,7 +82,7 @@ fn compress_bootstrap(bootstrap: &[u8]) -> Result<Vec<u8>> {
 fn new_blob_footer(
     compressed_data_size: u64,
     compressed_bootstrap: &[u8],
-    blob_metadata: &BlobMetadata,
+    blob_metadata: Option<&BlobMetadata>,
 ) -> Result<BlobFooter> {
     let bootstrap_compressed_size = compressed_bootstrap.len() as u64;
     let bootstrap_size = align_up_u64(bootstrap_compressed_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
@@ -98,7 +99,7 @@ fn new_blob_footer(
         bootstrap_offset,
         bytes_to_blocks(bootstrap_size)?,
         blob_metadata_offset,
-        bytes_to_blocks(blob_metadata.padded_size())?,
+        blob_metadata.map_or(Ok(0), |meta| bytes_to_blocks(meta.padded_size()))?,
         (!compressed_bootstrap.is_empty()).then_some(bootstrap_compressed_size),
     )
 }
@@ -110,7 +111,7 @@ fn write_blob_tail(
     writer: &mut dyn Write,
     footer: &BlobFooter,
     compressed_bootstrap: &[u8],
-    blob_metadata: &BlobMetadata,
+    blob_metadata: Option<&BlobMetadata>,
 ) -> Result<()> {
     write_zeros(
         writer,
@@ -122,9 +123,11 @@ fn write_blob_tail(
 
     let bootstrap_end = footer.bootstrap_offset() + compressed_bootstrap.len() as u64;
     write_zeros(writer, footer.blob_metadata_offset() - bootstrap_end)?;
-    blob_metadata
-        .write_to(writer)
-        .context("failed to write blob meta")?;
+    if let Some(blob_metadata) = blob_metadata {
+        blob_metadata
+            .write_to(writer)
+            .context("failed to write blob meta")?;
+    }
 
     footer
         .write_to(writer)

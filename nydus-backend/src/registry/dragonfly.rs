@@ -2,7 +2,7 @@
 //!
 //! Routes a blob `GET` through the Dragonfly client SDK using a scheduler
 //! endpoint, returning a streaming response. This bypasses plain HTTP and lets
-//! Dragonfly schedule P2P piece distribution directly; it is selected for blob
+//! Dragonfly schedule P2P chunk distribution directly; it is selected for blob
 //! `GET`s when a scheduler endpoint is configured, while every other request
 //! goes directly to the origin. SDK errors are classified into the
 //! load-shedding policy's failure classes here; retries are owned by the

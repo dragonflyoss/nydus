@@ -157,6 +157,14 @@ pub enum Command {
 
 /// Implement the execute for Command.
 impl Command {
+    /// True for the long-running mount services, as opposed to one-shot tools.
+    fn is_daemon(&self) -> bool {
+        !matches!(
+            self,
+            Self::Build(_) | Self::Export(_) | Self::Check(_) | Self::Merge(_) | Self::Optimize(_)
+        )
+    }
+
     pub fn execute(self) -> Result<()> {
         match self {
             Self::Build(cmd) => cmd.execute(),
@@ -182,6 +190,10 @@ impl Command {
 fn main() -> std::process::ExitCode {
     // Parse command line arguments.
     let args = Args::parse();
+
+    if args.command.is_daemon() {
+        tune_daemon_allocator();
+    }
 
     // Execute the command.
     match args.command.execute() {
@@ -220,6 +232,38 @@ fn print_error(err: &nydus::Error) {
         }
     }
 }
+
+/// Cap glibc malloc at two arenas and pin its mmap/trim thresholds for the
+/// mount services. By default every worker thread grows its own arena and the
+/// dynamic mmap threshold keeps freed multi-hundred-KiB buffers inside those
+/// arenas, which measured as roughly 11 MiB of idle RSS. The fixed threshold
+/// stays above hyper's ~408 KiB HTTP read buffer, which is reallocated several
+/// times per response and must be recycled rather than mapped each time.
+/// Explicit `MALLOC_*` or `GLIBC_TUNABLES` settings in the environment take
+/// precedence. Must run before worker threads exist, since arenas are assigned
+/// on first use.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_daemon_allocator() {
+    const EXPLICIT: [&str; 4] = [
+        "MALLOC_ARENA_MAX",
+        "MALLOC_MMAP_THRESHOLD_",
+        "MALLOC_TRIM_THRESHOLD_",
+        "GLIBC_TUNABLES",
+    ];
+    if EXPLICIT.iter().any(|name| std::env::var_os(name).is_some()) {
+        return;
+    }
+    // SAFETY: mallopt only updates allocator parameters and has no memory-safety
+    // preconditions; a rejected value returns 0 and leaves the default in place.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 512 * 1024);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 1024 * 1024);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn tune_daemon_allocator() {}
 
 /// Returns the default worker parallelism: the available CPU count clamped to
 /// `[min, max]`.

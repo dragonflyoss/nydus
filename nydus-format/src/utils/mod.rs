@@ -39,7 +39,7 @@ pub fn write_minimal_full_blob(
         &mut full_blob,
         payload.len() as u64,
         &bootstrap,
-        blob_metadata,
+        Some(blob_metadata),
     )
     .unwrap();
     let full_blob_id = sha256_bytes(&full_blob);

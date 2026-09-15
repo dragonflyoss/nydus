@@ -9,15 +9,15 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use crc32c::crc32c_append;
-use nydus::build::blob_chunk::BlobWriter;
+use nydus::build::blob_chunk::{BlobLayout, BlobWriter};
 use nydus::build::bootstrap::{
     render_bootstrap, render_flattened_bootstrap, FLATTENED_BLOB_ALIGNMENT,
 };
-use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
+use nydus::build::inode::{build_tree, resolve_chunk_addrs, set_root_prefetch_blobs_xattr};
 use nydus_config::Config;
 use nydus_core::ErofsReader;
 use nydus_core::{BlobId, FileType, NydusCore};
-use nydus_format::blob::BlobMetadataCompressor;
+use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::ErofsDeviceSlot;
 use nydus_format::erofs::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_format::utils::hex_string;
@@ -47,7 +47,18 @@ fn build_duplicate_corpus_test_image(
     [u8; EROFS_BLOB_ID_SIZE],
     HashMap<String, Vec<u8>>,
 ) {
-    build_test_image_full(root, false, true)
+    build_test_image_full(root, false, true, false)
+}
+
+fn build_small_files_test_image(
+    root: &Path,
+) -> (
+    PathBuf,
+    Config,
+    [u8; EROFS_BLOB_ID_SIZE],
+    HashMap<String, Vec<u8>>,
+) {
+    build_test_image_full(root, true, true, true)
 }
 
 fn build_flattened_test_image(
@@ -70,13 +81,14 @@ fn build_test_image_with_layout(
     [u8; EROFS_BLOB_ID_SIZE],
     HashMap<String, Vec<u8>>,
 ) {
-    build_test_image_full(root, flattened, false)
+    build_test_image_full(root, flattened, false, false)
 }
 
 fn build_test_image_full(
     root: &Path,
     flattened: bool,
     dedup_corpus: bool,
+    small_files: bool,
 ) -> (
     PathBuf,
     Config,
@@ -86,7 +98,7 @@ fn build_test_image_full(
     let corpus_dir = root.join("corpus");
     fs::create_dir_all(&corpus_dir).unwrap();
     // Two ~1.1 MiB incompressible-ish files so the blob spans multiple
-    // 1 MiB block groups.
+    // 1 MiB chunk groups.
     let mut corpus = HashMap::new();
     for seed in 1u64..=2 {
         let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -122,17 +134,36 @@ fn build_test_image_full(
         fs::write(corpus_dir.join("holey"), &holey).unwrap();
         corpus.insert("holey".to_string(), holey);
     }
+    if small_files {
+        // Many small files of assorted sizes so chunks of every size land
+        // around chunk group cuts.
+        fs::create_dir_all(corpus_dir.join("small")).unwrap();
+        let mut state = 0xdead_beef_u64;
+        for i in 0..200u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = 1 + (state % 20_000) as usize;
+            let data: Vec<u8> = (0..len).map(|j| (j as u32 * 31 + i) as u8).collect();
+            let name = format!("small/f{i:03}");
+            fs::write(corpus_dir.join(&name), &data).unwrap();
+            corpus.insert(name, data);
+        }
+        // A small file that is all zero stays a hole.
+        fs::write(corpus_dir.join("small/zeros"), vec![0u8; 3000]).unwrap();
+        corpus.insert("small/zeros".to_string(), vec![0u8; 3000]);
+    }
 
     let blob_dir = root.join("blobs");
     fs::create_dir_all(&blob_dir).unwrap();
     let staging = blob_dir.join("staging");
-    // Block group size pinned to 1 MiB (the chunk size) so the corpus above
-    // actually spans several block groups.
-    let mut writer = BlobWriter::from_writer(
+    let mut writer = BlobWriter::new(
         fs::File::create(&staging).unwrap(),
         nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
-        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
+        BlobMetadataDigester::Blake3,
+        true,
+        BlobLayout::ChunkGroups,
     )
     .unwrap();
     let mut inodes = build_tree(
@@ -143,9 +174,10 @@ fn build_test_image_full(
     )
     .unwrap();
     writer.finish().unwrap();
+    resolve_chunk_addrs(&mut inodes, &writer).unwrap();
 
-    let data_blob_id = writer.data_digest();
-    let blob_metadata = writer.blob_metadata(0).unwrap();
+    let data_blob_id = writer.data_digest().unwrap();
+    let blob_metadata = writer.blob_metadata().unwrap();
     let blocks = writer.total_blocks();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
     let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id).unwrap()];
@@ -212,7 +244,6 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     let descriptor = &blobs[0];
     assert_eq!(descriptor.index, 1);
     assert_eq!(descriptor.id, blob_id);
-    assert!(!descriptor.is_redirect);
     assert_eq!(
         descriptor.cache_size,
         descriptor.blocks * EROFS_BLOCK_SIZE as u64
@@ -240,7 +271,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(bootstrap_ranges[0].source_offset, 0);
     assert_eq!(bootstrap_ranges[0].len, EROFS_BLOCK_SIZE as u64);
 
-    // Fetch a block-aligned range spanning more than one block group's worth
+    // Fetch a block-aligned range spanning more than one chunk group's worth
     // of data; the cache file should be populated for that range and a second
     // fetch is idempotent. The dense blob address space is independent of
     // path order, so exact file content is covered by the static read API
@@ -263,18 +294,19 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(core.probe_flat_ranges(offset, len).unwrap(), fd_ranges);
 
     // Idempotent re-fetch and zero-length fetch are fine.
-    core.blobs.fetch(&blob_id, offset, len).unwrap();
+    core.blobs.fetch(&blob_id, blob_offset, len).unwrap();
     core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
+    // The fetched range touched chunk groups of blob 1 in address order,
+    // each recorded once.
     let trace = core.trace_snapshot();
-    assert_eq!(trace.entries.len(), 2);
+    assert!(!trace.entries.is_empty());
     assert!(trace.entries.iter().all(|entry| entry.blob_index == 1));
-    assert_eq!(trace.entries[0].block_group_index, 0);
-    assert_eq!(trace.entries[1].block_group_index, 1);
-    assert_eq!(
-        core.trace_json(),
-        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"block_group_index\":0},{\"blob_index\":1,\"block_group_index\":1}]}"
-    );
+    assert!(trace
+        .entries
+        .windows(2)
+        .all(|pair| pair[0].chunk_group_index < pair[1].chunk_group_index));
+    assert_eq!(core.trace_json(), serde_json::to_string(&trace).unwrap());
 
     // Unaligned ranges and unknown blobs are rejected.
     assert!(core.blobs.fetch(&blob_id, 1, block).is_err());
@@ -305,12 +337,13 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let blob_dir = dir.path().join("second-blobs");
     fs::create_dir_all(&blob_dir).unwrap();
     let staging = blob_dir.join("staging");
-    // Same pinned 1 MiB block group geometry as build_test_image_with_layout.
-    let mut writer = BlobWriter::from_writer(
+    let mut writer = BlobWriter::new(
         fs::File::create(&staging).unwrap(),
         nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
-        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
+        BlobMetadataDigester::Blake3,
+        true,
+        BlobLayout::ChunkGroups,
     )
     .unwrap();
     let mut inodes = build_tree(
@@ -321,8 +354,9 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     )
     .unwrap();
     writer.finish().unwrap();
+    resolve_chunk_addrs(&mut inodes, &writer).unwrap();
 
-    let second_blob_id = writer.data_digest();
+    let second_blob_id = writer.data_digest().unwrap();
     let device_slots = [
         ErofsDeviceSlot::with_blob_id(blob_infos[0].blocks, &blob_id).unwrap(),
         ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id).unwrap(),
@@ -496,4 +530,78 @@ fn core_reads_back_duplicate_corpus_image() {
     let file1_entry = core.fs.open("file1").unwrap();
     file1_entry.fetch(12345, 4097).unwrap();
     assert!(!file1_entry.probe_ranges(12345, 4097).unwrap().is_empty());
+}
+
+/// Small files: every file is its own chunk on its own padded block, the
+/// chunk groups span a variable number of blocks, and every file reads back
+/// through the padded cache exactly as built (whole, at random offsets and
+/// via the fetch API the DAX path uses).
+#[test]
+fn core_reads_back_small_files_image() {
+    let dir = tempdir().unwrap();
+    let (bootstrap, config, blob_id, corpus) = build_small_files_test_image(dir.path());
+
+    let blob_metadata = nydus_format::blob::BlobMetadata::from_path(
+        &dir.path()
+            .join("blobs")
+            .join(format!("{}.blob.meta", hex_string(&blob_id))),
+        true,
+    )
+    .unwrap();
+    // One chunk per small file (zeros is a hole) plus the chunks of the
+    // large files; every chunk carries a digest.
+    let small_chunks = blob_metadata
+        .chunks()
+        .iter()
+        .filter(|len| **len <= 20_000)
+        .count();
+    assert_eq!(small_chunks, 202);
+    assert_eq!(blob_metadata.digest_count(), blob_metadata.chunk_count());
+    let groups: Vec<_> = blob_metadata.chunk_groups().collect();
+    assert!(groups.len() > 1);
+    assert!(groups
+        .iter()
+        .all(|group| blob_metadata.payload_size(group) <= group.uncompressed_size()));
+    assert!(groups
+        .iter()
+        .any(|group| blob_metadata.payload_size(group) < group.uncompressed_size()));
+    assert!(blob_metadata.payload_total() < blob_metadata.uncompressed_size());
+
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+    for (name, expected) in &corpus {
+        let entry = core.fs.open(name).unwrap();
+        let all = entry.read().unwrap();
+        assert_eq!(
+            &all[..expected.len()],
+            expected.as_slice(),
+            "content mismatch for {name}"
+        );
+        assert!(
+            all[expected.len()..].iter().all(|byte| *byte == 0),
+            "tail padding not zero for {name}"
+        );
+    }
+
+    let entry = core.fs.open("file1_shifted").unwrap();
+    let mut buf = vec![0u8; 100_000];
+    let read = entry.read_at(123_457, &mut buf).unwrap();
+    assert_eq!(read, buf.len());
+    assert_eq!(&buf, &corpus["file1_shifted"][123_457..123_457 + read]);
+
+    // The cache mirrors the padded address space: a small file's fetch
+    // range maps straight into the cache file at its own block.
+    let small = core.fs.open("small/f001").unwrap();
+    let ranges = small
+        .fetch_ranges(0, corpus["small/f001"].len() as u64)
+        .unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].offset % EROFS_BLOCK_SIZE as u64, 0);
+    assert_ne!(ranges[0].fd, core.zero_fd());
+    let blobs = core.blobs.prepare_all().unwrap();
+    let cache = fs::read(&blobs[0].cache_path).unwrap();
+    let start = ranges[0].offset as usize;
+    assert_eq!(
+        &cache[start..start + corpus["small/f001"].len()],
+        corpus["small/f001"].as_slice()
+    );
 }

@@ -1,42 +1,661 @@
 use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor,
-    BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest,
+    BlobMetadataDigester,
 };
-use nydus_format::erofs::{ErofsChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
-use nydus_format::utils::align_up_usize;
+use nydus_format::erofs::{
+    ErofsChunkAddr, ZAlgorithm, ZComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
+    Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
+};
+use nydus_format::utils::write_zeros;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-/// Manages writing chunk data to a separate blob device. Chunk bytes
-/// (tail-block padding included) stream straight into block groups, so the
-/// group stream equals the logical space and blob meta carries only the
-/// block group table.
+/// Manages writing chunk data to a separate blob device. Every file is cut
+/// into chunks of at most the chunk size, and every chunk group owns one
+/// chunk-sized slot of the padded address space the EROFS chunk indexes
+/// address: a chunk that fills a slot is a group of its own, smaller chunks
+/// are bin-packed into shared groups (see [`Self::append_chunk`]). Each
+/// chunk starts on its own block of its slot, while the group payload
+/// carries the chunks' bytes back to back without the block padding. The
+/// blob meta records the groups, the chunk lengths and digests (see
+/// `nydus_format::blob::BlobMetadata`).
+///
+/// Because a chunk's slot is only known once its group closes, the chunk
+/// addresses handed out by [`Self::write_reader_chunks`] are placeholders
+/// until [`Self::finish`]; [`Self::resolve_chunk_addr`] turns them into
+/// block addresses afterwards (see `inode::resolve_chunk_addrs`). Raw
+/// device mode places chunks immediately and needs no resolution.
 pub struct BlobWriter<W> {
     writer: W,
     file_chunk_size: u32,
-    block_group_size: u32,
     compressor: BlobMetadataCompressor,
+    digester: BlobMetadataDigester,
+    // Raw device mode: the next block of the padded device. Chunk mode: the
+    // number of groups closed so far times the slot size, once finished.
     next_blkaddr: u64,
     next_compressed_offset: u64,
-    data_hasher: Sha256,
-    block_group_block_offset: u64,
-    block_group_buffer: Vec<u8>,
-    blob_metadata_chunks: Vec<BlobMetadataChunk>,
-    blob_metadata_block_groups: Vec<BlobMetadataBlockGroup>,
+    // `None` when the caller names the blob itself (`--blob-id`), so no
+    // sha256 pass over the data region is needed.
+    data_hasher: Option<Sha256>,
+    // Groups under construction: small chunks are packed first-fit into
+    // the open bins, at most `MAX_OPEN_BINS` of them.
+    open_bins: Vec<Bin>,
+    // The final block address of every placed chunk, indexed by the
+    // placement id handed out as its placeholder address; `PENDING` until
+    // the chunk's group closes.
+    placements: Vec<u64>,
+    // Groups closed so far (the next group's index), chunk byte lengths and
+    // digests in group order, and the sealed groups in group order.
+    next_group: u64,
+    chunks: Vec<u32>,
+    digests: Vec<BlobMetadataDigest>,
+    blob_metadata_chunk_groups: Vec<BlobMetadataChunkGroup>,
     // Reused per-file read buffer: a fresh 1 MiB Vec per file costs an
     // mmap/munmap plus page faults for every source file.
     chunk_buf: Vec<u8>,
-    // Lazily started background crc32+zstd pipeline for block groups.
-    encoder: Option<BlockGroupEncoder>,
+    // Lazily started background crc32+zstd pipeline for chunk groups.
+    encoder: Option<ChunkGroupEncoder>,
+    // Raw device mode (native uncompressed layers): every chunk is written
+    // to `writer` at its padded address, tail padding included, so the
+    // output is the padded address space itself. No chunk groups, blob meta
+    // or digests are produced.
+    raw_device: bool,
+    // Native modes only: when non-zero, files of at least
+    // `data_alignment_threshold` bytes start on a `data_alignment`-byte
+    // boundary of the device data, so fixed-offset block dedup (e.g. cloud
+    // disks chunking volumes at a fixed granularity) sees identical blocks
+    // for identical files regardless of their neighbours. The gap is
+    // zero-filled and nothing references it.
+    data_alignment: u32,
+    data_alignment_threshold: u64,
+    // z_erofs LZ4 mode: when non-zero, regular-file data is compressed into
+    // pclusters of at most this many bytes and written straight to `writer`,
+    // addressed from `z_next_blkaddr` in the final (single-device) image.
+    // `z_base_blkaddr` is where the device starts in that space, so
+    // `z_next_blkaddr - z_base_blkaddr` is the offset within the device data.
+    z_pcluster: u32,
+    z_algorithm: ZAlgorithm,
+    z_base_blkaddr: u64,
+    z_next_blkaddr: u64,
+    // Lazily started z_erofs compression pipeline (see `ZPipeline`) and the
+    // inodes whose segments are in flight, in submission order.
+    z_pipeline: Option<ZPipeline>,
+    z_open_files: VecDeque<ZAccum>,
+    // z_erofs fragments: regular files of at most `z_frag_threshold` bytes are
+    // appended to one packed stream, compressed segment by segment as it
+    // fills, instead of getting their own pclusters; `finish_z_packed`
+    // flushes it as the packed inode, so neighbouring small files share
+    // pclusters and one read serves many of them. Zero disables fragments.
+    z_frag_threshold: u64,
+    z_packed: Option<ZPackedStream>,
+}
+
+/// A chunk group under construction: the chunks packed so far, their
+/// lengths, digests and placement ids, and the slot blocks they occupy.
+struct Bin {
+    data: Vec<u8>,
+    lens: Vec<u32>,
+    digests: Vec<BlobMetadataDigest>,
+    placements: Vec<usize>,
+    blocks: u64,
+}
+
+/// Most groups kept open for first-fit packing. Small chunks fill the
+/// oldest bin they fit; a chunk fitting none opens a new bin, closing the
+/// fullest one first when the limit is reached, so the slack a closed slot
+/// leaves is at most what the smallest pending chunk could not fill.
+const MAX_OPEN_BINS: usize = 8;
+
+/// Placeholder value of a chunk whose group has not closed yet.
+const PENDING: u64 = u64::MAX;
+
+struct ZPackedStream {
+    buf: Vec<u8>,
+    size: u64,
+    accum: ZAccum,
+}
+
+/// A z_erofs inode being assembled from committed segments: its tail (map
+/// header + full lcluster indexes so far) and compressed block count, and
+/// the handle its metadata is published through once the last segment lands.
+struct ZAccum {
+    tail: Vec<u8>,
+    blocks: u64,
+    handle: ZFileRef,
+}
+
+impl ZAccum {
+    fn new(algorithm: ZAlgorithm, handle: ZFileRef) -> Self {
+        Self {
+            tail: z_map_header(algorithm),
+            blocks: 0,
+            handle,
+        }
+    }
+
+    fn into_meta(self) -> Result<ZFileMeta> {
+        let compressed_blocks = u32::try_from(self.blocks).map_err(|err| {
+            Error::Overflow(format!("z_erofs compressed block count exceeds u32: {err}"))
+        })?;
+        Ok(ZFileMeta {
+            tail: self.tail,
+            compressed_blocks,
+        })
+    }
+}
+
+/// Map header of a z_erofs inode: `h_advise = BIG_PCLUSTER_1`, the HEAD1
+/// algorithm in the low nibble of `h_algorithmtype`, lclusterbits ==
+/// blkszbits, followed by the 8 reserved bytes; full lcluster indexes start
+/// right after (the legacy layout).
+fn z_map_header(algorithm: ZAlgorithm) -> Vec<u8> {
+    use nydus_format::erofs::{Z_EROFS_ADVISE_BIG_PCLUSTER_1, Z_EROFS_MAP_HEADER_SIZE};
+    let mut tail = Vec::with_capacity(Z_EROFS_MAP_HEADER_SIZE + 8 + 64);
+    tail.extend_from_slice(&[0u8; 4]);
+    tail.extend_from_slice(&Z_EROFS_ADVISE_BIG_PCLUSTER_1.to_le_bytes());
+    tail.push(algorithm.as_type());
+    tail.push(0);
+    tail.extend_from_slice(&[0u8; 8]);
+    tail
+}
+
+/// The z_erofs metadata of one file, published when its last segment is
+/// committed. Handles are cheap to clone (hardlinks share one) and resolve
+/// only after [`BlobWriter::finish`]; the tree keeps them until then.
+#[derive(Clone)]
+pub struct ZFileRef(Rc<RefCell<Option<ZFileMeta>>>);
+
+impl ZFileRef {
+    fn pending() -> Self {
+        Self(Rc::new(RefCell::new(None)))
+    }
+
+    fn ready(meta: ZFileMeta) -> Self {
+        Self(Rc::new(RefCell::new(Some(meta))))
+    }
+
+    fn set(&self, meta: ZFileMeta) {
+        *self.0.borrow_mut() = Some(meta);
+    }
+
+    /// The published metadata; an error while the file is still in flight.
+    pub fn resolve(&self) -> Result<ZFileMeta> {
+        self.0.borrow().clone().ok_or_else(|| {
+            Error::Runtime("z_erofs file metadata read before the blob was finished".to_string())
+        })
+    }
+}
+
+/// Source bytes handed to one z_erofs compression job. Pcluster boundaries
+/// are forced at segment ends, which costs at most one under-filled
+/// pcluster per segment; 4MiB keeps that under 1% while bounding the memory
+/// of a job (its source plus output) and letting a single large file spread
+/// over every worker.
+const Z_SEGMENT_SIZE: usize = 4 << 20;
+/// Jobs in flight per worker before the producer commits one; bounds peak
+/// memory to about `2 * workers * 2 * Z_SEGMENT_SIZE`.
+const Z_MAX_IN_FLIGHT_PER_WORKER: usize = 2;
+
+struct ZJob {
+    seq: u64,
+    src: Vec<u8>,
+    /// Whether the segment ends its inode: only then may the last pcluster
+    /// take a partial lcluster.
+    at_eof: bool,
+}
+
+/// One compressed segment: the pclusters back to back (payloads zero padded
+/// as on disk), their full lcluster indexes with block addresses relative to
+/// the segment start, and the physical block count. `src` circulates back.
+struct ZSegment {
+    data: Vec<u8>,
+    indexes: Vec<u8>,
+    phys_blocks: u32,
+    src: Vec<u8>,
+}
+
+/// What a committed segment belongs to and how to place it.
+struct ZPending {
+    target: ZTarget,
+    at_eof: bool,
+    /// Block alignment of the device data the segment must start on (0: none).
+    align_blocks: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ZTarget {
+    /// The front of `BlobWriter::z_open_files`.
+    File,
+    Packed,
+}
+
+/// Compresses z_erofs segments on background threads while the producer
+/// keeps reading source data. Results are committed strictly in submission
+/// order (the next segment's addresses depend on the previous one's size),
+/// so the output stays deterministic: it depends only on the source bytes
+/// and the segment size, never on scheduling.
+struct ZPipeline {
+    tx: Option<mpsc::Sender<ZJob>>,
+    done_rx: mpsc::Receiver<(u64, ZSegment)>,
+    reordered: BTreeMap<u64, ZSegment>,
+    next_seq_in: u64,
+    next_seq_out: u64,
+    pending: VecDeque<ZPending>,
+    free_buffers: Vec<Vec<u8>>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl ZPipeline {
+    fn new(algorithm: ZAlgorithm, pcluster: usize) -> Self {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8);
+        let (tx, rx) = mpsc::channel::<ZJob>();
+        let (done_tx, done_rx) = mpsc::channel();
+        let rx = Arc::new(Mutex::new(rx));
+        let workers = (0..threads)
+            .map(|_| {
+                let rx = Arc::clone(&rx);
+                let done_tx = done_tx.clone();
+                std::thread::spawn(move || {
+                    let mut compressor = ZCompressor::new(algorithm, pcluster);
+                    loop {
+                        let job = match rx.lock().unwrap_or_else(|p| p.into_inner()).recv() {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        };
+                        let segment =
+                            z_compress_segment(job.src, job.at_eof, pcluster, &mut compressor);
+                        if done_tx.send((job.seq, segment)).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        Self {
+            tx: Some(tx),
+            done_rx,
+            reordered: BTreeMap::new(),
+            next_seq_in: 0,
+            next_seq_out: 0,
+            pending: VecDeque::new(),
+            free_buffers: Vec::new(),
+            workers,
+        }
+    }
+
+    fn max_in_flight(&self) -> usize {
+        self.workers.len() * Z_MAX_IN_FLIGHT_PER_WORKER
+    }
+
+    fn in_flight(&self) -> usize {
+        (self.next_seq_in - self.next_seq_out) as usize
+    }
+
+    fn submit(&mut self, src: Vec<u8>, pending: ZPending) -> Result<()> {
+        let job = ZJob {
+            seq: self.next_seq_in,
+            src,
+            at_eof: pending.at_eof,
+        };
+        self.next_seq_in += 1;
+        self.pending.push_back(pending);
+        self.tx
+            .as_ref()
+            .expect("pipeline is alive until dropped")
+            .send(job)
+            .map_err(|_| Error::Runtime("z_erofs compression threads exited early".to_string()))
+    }
+
+    /// The next completed segment in submission order, with its placement.
+    fn recv_next(&mut self) -> Result<(ZSegment, ZPending)> {
+        let placement = self
+            .pending
+            .pop_front()
+            .ok_or_else(|| Error::Runtime("no z_erofs segment in flight".to_string()))?;
+        loop {
+            if let Some(segment) = self.reordered.remove(&self.next_seq_out) {
+                self.next_seq_out += 1;
+                return Ok((segment, placement));
+            }
+            let (seq, segment) = self.done_rx.recv().map_err(|_| {
+                Error::Runtime("z_erofs compression threads exited early".to_string())
+            })?;
+            self.reordered.insert(seq, segment);
+        }
+    }
+
+    fn take_buffer(&mut self) -> Vec<u8> {
+        self.free_buffers
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(Z_SEGMENT_SIZE))
+    }
+
+    fn recycle_buffer(&mut self, mut buf: Vec<u8>) {
+        if self.free_buffers.len() < self.max_in_flight() {
+            buf.clear();
+            self.free_buffers.push(buf);
+        }
+    }
+}
+
+impl Drop for ZPipeline {
+    fn drop(&mut self) {
+        self.tx.take();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// zstd window log for z_erofs pclusters: 512KiB, what erofs-utils picks
+/// for 64KiB pclusters (`min(1MiB, 8 * pcluster)`), recorded in the
+/// superblock's zstd config so the kernel sizes its decompression streams.
+pub const Z_ZSTD_WINDOWLOG: u8 = 19;
+/// zstd compression level for z_erofs pclusters (the zstd default).
+const Z_ZSTD_LEVEL: i32 = 3;
+
+/// One worker's compressor state: the algorithm and its scratch output
+/// buffer (plus the zstd context, which is expensive to recreate).
+enum ZCompressor {
+    Lz4 {
+        dst: Vec<u8>,
+    },
+    Zstd {
+        cctx: zstd::bulk::Compressor<'static>,
+        dst: Vec<u8>,
+        best: Vec<u8>,
+    },
+}
+
+impl ZCompressor {
+    fn new(algorithm: ZAlgorithm, pcluster: usize) -> Self {
+        match algorithm {
+            ZAlgorithm::Lz4 => Self::Lz4 {
+                dst: vec![0u8; lz4_compress_bound(Z_SEGMENT_SIZE)],
+            },
+            ZAlgorithm::Zstd => {
+                let mut cctx =
+                    zstd::bulk::Compressor::new(Z_ZSTD_LEVEL).expect("zstd compression context");
+                cctx.set_parameter(zstd::zstd_safe::CParameter::WindowLog(
+                    Z_ZSTD_WINDOWLOG as u32,
+                ))
+                .expect("zstd window log within bounds");
+                Self::Zstd {
+                    // Slack past the pcluster tells "just over" apart from
+                    // a hard failure, as erofs-utils does.
+                    dst: vec![0u8; pcluster + 32],
+                    best: vec![0u8; pcluster + 32],
+                    cctx,
+                }
+            }
+        }
+    }
+
+    /// Picks the next pcluster from `pending`: how many source bytes it
+    /// covers (a whole number of lclusters unless `at_eof` lets the final
+    /// partial one in) and the compressed size, `usize::MAX` when the head
+    /// must be stored raw. The compressed bytes are left at the start of
+    /// the returned scratch buffer. `suggested_len` seeds the zstd search;
+    /// bounds and fitting checks still determine the accepted prefix. Zstd
+    /// stops searching once a frame fills at least 98% of the pcluster budget.
+    fn fit_pcluster(
+        &mut self,
+        pending: &[u8],
+        at_eof: bool,
+        pcluster: usize,
+        suggested_len: usize,
+    ) -> (usize, usize, &[u8]) {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        match self {
+            Self::Lz4 { dst } => {
+                // Greedy pass: how much source fits into one pcluster.
+                let (consumed, greedy_len) = lz4_compress_dest_size(pending, &mut dst[..pcluster]);
+                if at_eof && consumed == pending.len() {
+                    return (consumed, greedy_len, dst);
+                }
+                let mut take = consumed / block_size * block_size;
+                if take == 0 {
+                    // Incompressible head: fall back to one raw lcluster.
+                    return (pending.len().min(block_size), usize::MAX, dst);
+                }
+                // Re-compress the aligned prefix so the pcluster still
+                // starts on an lcluster boundary (clusterofs stays 0).
+                // Rarely it compresses worse than the greedy pass; shrink
+                // until it fits the pcluster, else store it raw.
+                loop {
+                    match lz4_compress(&pending[..take], dst) {
+                        Some(len) if len <= pcluster => return (take, len, dst),
+                        _ if take > block_size => take -= block_size,
+                        _ => return (take, usize::MAX, dst),
+                    }
+                }
+            }
+            Self::Zstd { cctx, dst, best } => {
+                // zstd has no destSize mode: search the largest lcluster
+                // count whose frame fits, steering by the measured ratio
+                // (erofs-utils' fitblk). Candidates are whole lclusters;
+                // at eof the final partial one is a candidate too.
+                let candidates = if at_eof {
+                    pending.len().div_ceil(block_size)
+                } else {
+                    pending.len() / block_size
+                };
+                if candidates == 0 {
+                    return (pending.len(), usize::MAX, dst);
+                }
+                let len_of = |k: usize| (k * block_size).min(pending.len());
+                let mut fits = 0usize; // largest candidate that fits
+                let mut fits_len = usize::MAX;
+                let mut fails = candidates + 1; // smallest that does not
+                let mut k = (suggested_len / block_size).clamp(1, candidates);
+                loop {
+                    k = k.clamp(fits + 1, fails - 1);
+                    match cctx.compress_to_buffer(&pending[..len_of(k)], &mut dst[..]) {
+                        Ok(csize) if csize <= pcluster => {
+                            fits = k;
+                            fits_len = csize;
+                            if fails <= fits + 1 || csize >= pcluster * 98 / 100 {
+                                break;
+                            }
+                            best[..csize].copy_from_slice(&dst[..csize]);
+                            k = (pcluster * k / csize).max(k + 1);
+                        }
+                        _ => {
+                            fails = k;
+                            if fails <= fits + 1 {
+                                break;
+                            }
+                            k = (fits + fails) / 2;
+                        }
+                    }
+                }
+                if fits == 0 {
+                    return (pending.len().min(block_size), usize::MAX, dst);
+                }
+                if k != fits {
+                    mem::swap(dst, best);
+                }
+                (len_of(fits), fits_len, dst)
+            }
+        }
+    }
+}
+
+/// Compresses one segment into z_erofs pclusters. Pclusters are packed
+/// greedily: each consumes as much source as compresses into one pcluster,
+/// rounded down to the lcluster boundary so every pcluster starts on an
+/// lcluster (clusterofs 0); at `at_eof` the final partial lcluster is taken
+/// whole. Windows that cannot save a block are stored as per-lcluster
+/// PLAIN. Compressed payloads are tail-aligned in their pcluster
+/// (ZERO_PADDING). Index block addresses are relative to the segment; the
+/// committer adds the segment's position.
+fn z_compress_segment(
+    src: Vec<u8>,
+    at_eof: bool,
+    pcluster: usize,
+    compressor: &mut ZCompressor,
+) -> ZSegment {
+    use nydus_format::erofs::{
+        Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
+        Z_EROFS_LI_D0_CBLKCNT,
+    };
+    let block_size = EROFS_BLOCK_SIZE as usize;
+    let mut data = Vec::with_capacity(src.len() / 2 + pcluster);
+    let mut indexes = Vec::with_capacity(src.len() / block_size * Z_EROFS_LCLUSTER_INDEX_SIZE);
+    let mut rel_blk: u32 = 0;
+    let mut pos = 0;
+    let mut suggested_len = 4 * pcluster;
+    while pos < src.len() {
+        let pending = &src[pos..];
+        let (take, compressed_len, dst) =
+            compressor.fit_pcluster(pending, at_eof, pcluster, suggested_len);
+        suggested_len = take;
+
+        let lclusters = take.div_ceil(block_size);
+        let compressed_pblks = if compressed_len == usize::MAX {
+            usize::MAX
+        } else {
+            compressed_len.div_ceil(block_size)
+        };
+        let (head_type, phys_blocks) = if compressed_pblks < lclusters {
+            (Z_EROFS_LCLUSTER_TYPE_HEAD1, compressed_pblks)
+        } else {
+            (Z_EROFS_LCLUSTER_TYPE_PLAIN, lclusters)
+        };
+        // A pcluster never exceeds `pcluster` (< CBLKCNT blocks) bytes.
+        let cblkcnt = phys_blocks as u16;
+
+        // Lcluster indexes for this pcluster. An incompressible window
+        // becomes per-lcluster single-block PLAIN pclusters (the layout
+        // mkfs.erofs emits); multi-block raw pclusters are avoided.
+        if head_type == Z_EROFS_LCLUSTER_TYPE_PLAIN {
+            for i in 0..lclusters {
+                indexes.extend_from_slice(&Z_EROFS_LCLUSTER_TYPE_PLAIN.to_le_bytes());
+                indexes.extend_from_slice(&0u16.to_le_bytes());
+                indexes.extend_from_slice(&(rel_blk + i as u32).to_le_bytes());
+            }
+        } else {
+            for i in 0..lclusters {
+                if i == 0 {
+                    indexes.extend_from_slice(&head_type.to_le_bytes());
+                    indexes.extend_from_slice(&0u16.to_le_bytes()); // clusterofs
+                    indexes.extend_from_slice(&rel_blk.to_le_bytes());
+                } else {
+                    let delta0 = if i == 1 {
+                        Z_EROFS_LI_D0_CBLKCNT | cblkcnt
+                    } else {
+                        i as u16
+                    };
+                    let delta1 = (lclusters - 1 - i) as u16;
+                    indexes.extend_from_slice(&Z_EROFS_LCLUSTER_TYPE_NONHEAD.to_le_bytes());
+                    indexes.extend_from_slice(&0u16.to_le_bytes());
+                    indexes.extend_from_slice(&delta0.to_le_bytes());
+                    indexes.extend_from_slice(&delta1.to_le_bytes());
+                }
+            }
+        }
+
+        // Pcluster payload: compressed data tail-aligned (ZERO_PADDING),
+        // raw data head-aligned with tail-block zero padding.
+        if head_type == Z_EROFS_LCLUSTER_TYPE_HEAD1 {
+            data.resize(data.len() + phys_blocks * block_size - compressed_len, 0);
+            data.extend_from_slice(&dst[..compressed_len]);
+        } else {
+            data.extend_from_slice(&pending[..take]);
+            data.resize(data.len() + phys_blocks * block_size - take, 0);
+        }
+
+        rel_blk += phys_blocks as u32;
+        pos += take;
+    }
+    ZSegment {
+        data,
+        indexes,
+        phys_blocks: rel_blk,
+        src,
+    }
+}
+
+/// Greedily compress as much of `src` as fits in `dst` (liblz4
+/// `LZ4_compress_destSize`). Returns (consumed source bytes, produced output
+/// bytes); (0, 0) when not even the first byte fits.
+fn lz4_compress_dest_size(src: &[u8], dst: &mut [u8]) -> (usize, usize) {
+    use std::os::raw::{c_char, c_int};
+    extern "C" {
+        // In the liblz4 static library that lz4-sys links but missing from
+        // its Rust bindings.
+        fn LZ4_compress_destSize(
+            src: *const c_char,
+            dst: *mut c_char,
+            src_size: *mut c_int,
+            target_dst_size: c_int,
+        ) -> c_int;
+    }
+    let mut src_size = src.len().min(i32::MAX as usize) as c_int;
+    // SAFETY: both pointers reference live slices of the given sizes;
+    // LZ4_compress_destSize writes at most `dst.len()` bytes and updates
+    // `src_size` to the number of source bytes consumed.
+    let written = unsafe {
+        LZ4_compress_destSize(
+            src.as_ptr() as *const c_char,
+            dst.as_mut_ptr() as *mut c_char,
+            &mut src_size,
+            dst.len() as c_int,
+        )
+    };
+    if written <= 0 {
+        (0, 0)
+    } else {
+        (src_size as usize, written as usize)
+    }
+}
+
+/// Compress all of `src` into `dst` (liblz4 `LZ4_compress_default`), returning
+/// the output size or `None` when it does not fit.
+fn lz4_compress(src: &[u8], dst: &mut [u8]) -> Option<usize> {
+    use std::os::raw::{c_char, c_int};
+    let src_size = c_int::try_from(src.len()).ok()?;
+    let dst_size = c_int::try_from(dst.len()).ok()?;
+    // SAFETY: both pointers reference live slices of the given sizes and
+    // LZ4_compress_default writes at most `dst_size` bytes.
+    let written = unsafe {
+        lz4_sys::LZ4_compress_default(
+            src.as_ptr() as *const c_char,
+            dst.as_mut_ptr() as *mut c_char,
+            src_size,
+            dst_size,
+        )
+    };
+    (written > 0).then_some(written as usize)
+}
+
+/// Worst-case LZ4 block output size for `len` input bytes.
+fn lz4_compress_bound(len: usize) -> usize {
+    // SAFETY: pure arithmetic on the argument.
+    unsafe { lz4_sys::LZ4_compressBound(len as std::os::raw::c_int) as usize }
+}
+
+/// Per-file z_erofs metadata produced by [`BlobWriter::write_reader_z`]:
+/// the inode tail (map header plus full lcluster indexes) and the file's
+/// compressed block count for the inode `i_u` field.
+#[derive(Clone, Debug)]
+pub struct ZFileMeta {
+    pub tail: Vec<u8>,
+    pub compressed_blocks: u32,
 }
 
 const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
@@ -45,41 +664,53 @@ const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
 /// allocating; padding never exceeds a single EROFS block.
 const ZERO_BLOCK: [u8; EROFS_BLOCK_SIZE as usize] = [0u8; EROFS_BLOCK_SIZE as usize];
 
-/// Number of background block-group encoder threads. Encoding (crc32 + zstd)
+/// Number of background chunk-group encoder threads. Encoding (crc32 + zstd)
 /// runs well ahead of the single-threaded produce side, so two workers fully
 /// hide it; more would only grow the in-flight memory.
 const ENCODE_WORKERS: usize = 2;
 /// Maximum encode jobs in flight before the producer drains one; bounds the
-/// extra peak memory to a couple of block groups (in + encoded out each).
+/// extra peak memory to a couple of chunk groups (in + encoded out each).
 const ENCODE_MAX_IN_FLIGHT: usize = 2;
 
 struct EncodeJob {
     seq: u64,
     data: Vec<u8>,
+    chunk_count: u32,
 }
 
-struct EncodedBlockGroup {
+struct EncodedChunkGroup {
     data: Vec<u8>,
+    chunk_count: u32,
     crc32: u32,
     /// `Some` when compression met the format's worthwhile threshold.
     compressed: Option<Vec<u8>>,
 }
 
-/// Offloads per-block-group crc32 + zstd to background threads while the
+/// Encode one group payload with `compressor`; `None` for the plain
+/// compressor or when encoding fails.
+fn encode_payload(compressor: BlobMetadataCompressor, data: &[u8]) -> Option<Vec<u8>> {
+    match compressor {
+        BlobMetadataCompressor::None => None,
+        BlobMetadataCompressor::Zstd => zstd::bulk::compress(data, 0).ok(),
+        BlobMetadataCompressor::Lz4Block => Some(lz4_flex::block::compress(data)),
+    }
+}
+
+/// Offloads per-chunk-group crc32 + zstd to background threads while the
 /// caller keeps producing. Results are drained strictly in submission order
 /// so the written stream and metadata tables stay deterministic; input
 /// buffers circulate back for reuse.
-struct BlockGroupEncoder {
+struct ChunkGroupEncoder {
     tx: Option<mpsc::Sender<EncodeJob>>,
-    encoded_rx: mpsc::Receiver<(u64, EncodedBlockGroup)>,
-    pending: BTreeMap<u64, EncodedBlockGroup>,
+    encoded_rx: mpsc::Receiver<(u64, EncodedChunkGroup)>,
+    pending: BTreeMap<u64, EncodedChunkGroup>,
     next_seq_in: u64,
     next_seq_out: u64,
     free_buffers: Vec<Vec<u8>>,
     workers: Vec<JoinHandle<()>>,
 }
 
-impl BlockGroupEncoder {
+impl ChunkGroupEncoder {
     fn new(compressor: BlobMetadataCompressor) -> Self {
         let (tx, rx) = mpsc::channel::<EncodeJob>();
         let (encoded_tx, encoded_rx) = mpsc::channel();
@@ -94,19 +725,11 @@ impl BlockGroupEncoder {
                         Err(_) => break,
                     };
                     let crc32 = crc32c(&job.data);
-                    let compressed = match compressor {
-                        BlobMetadataCompressor::None => None,
-                        BlobMetadataCompressor::Zstd => zstd::bulk::compress(&job.data, 0)
-                            .ok()
-                            .filter(|c| compression_is_worthwhile(c.len(), job.data.len())),
-                        BlobMetadataCompressor::Lz4Block => {
-                            let compressed = lz4_flex::block::compress(&job.data);
-                            compression_is_worthwhile(compressed.len(), job.data.len())
-                                .then_some(compressed)
-                        }
-                    };
-                    let encoded = EncodedBlockGroup {
+                    let compressed = encode_payload(compressor, &job.data)
+                        .filter(|c| compression_is_worthwhile(c.len(), job.data.len()));
+                    let encoded = EncodedChunkGroup {
                         data: job.data,
+                        chunk_count: job.chunk_count,
                         crc32,
                         compressed,
                     };
@@ -127,17 +750,18 @@ impl BlockGroupEncoder {
         }
     }
 
-    fn submit(&mut self, data: Vec<u8>) -> Result<()> {
+    fn submit(&mut self, data: Vec<u8>, chunk_count: u32) -> Result<()> {
         let job = EncodeJob {
             seq: self.next_seq_in,
             data,
+            chunk_count,
         };
         self.next_seq_in += 1;
         self.tx
             .as_ref()
             .expect("encoder is alive until finish")
             .send(job)
-            .map_err(|_| Error::Runtime("block group encoder threads exited early".to_string()))
+            .map_err(|_| Error::Runtime("chunk group encoder threads exited early".to_string()))
     }
 
     fn in_flight(&self) -> usize {
@@ -145,14 +769,14 @@ impl BlockGroupEncoder {
     }
 
     /// Receive the next completed group in submission order.
-    fn recv_next(&mut self) -> Result<EncodedBlockGroup> {
+    fn recv_next(&mut self) -> Result<EncodedChunkGroup> {
         loop {
             if let Some(encoded) = self.pending.remove(&self.next_seq_out) {
                 self.next_seq_out += 1;
                 return Ok(encoded);
             }
             let (seq, encoded) = self.encoded_rx.recv().map_err(|_| {
-                Error::Runtime("block group encoder threads exited early".to_string())
+                Error::Runtime("chunk group encoder threads exited early".to_string())
             })?;
             self.pending.insert(seq, encoded);
         }
@@ -170,7 +794,7 @@ impl BlockGroupEncoder {
     }
 }
 
-impl Drop for BlockGroupEncoder {
+impl Drop for ChunkGroupEncoder {
     fn drop(&mut self) {
         self.tx.take();
         for worker in self.workers.drain(..) {
@@ -179,146 +803,519 @@ impl Drop for BlockGroupEncoder {
     }
 }
 
-impl BlobWriter<File> {
-    pub fn new(path: &Path, chunk_size: u32) -> Result<Self> {
-        Self::new_with_compressor(path, chunk_size, BlobMetadataCompressor::None)
-    }
+/// How a [`BlobWriter`] lays out and encodes file data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobLayout {
+    /// Compressed chunk groups described by blob meta: the layout the nydus
+    /// daemons fetch on demand.
+    ChunkGroups,
+    /// The padded address space written as-is: a native uncompressed EROFS
+    /// device the kernel mounts directly (`erofs-none`). No chunk groups,
+    /// blob meta or digests are produced. When `data_alignment` is non-zero,
+    /// files of at least `data_alignment_threshold` bytes start on a
+    /// `data_alignment`-byte boundary of the device data.
+    RawDevice {
+        data_alignment: u32,
+        data_alignment_threshold: u64,
+    },
+    /// Native z_erofs pclusters of at most `pcluster` bytes (a power-of-two
+    /// multiple of the block size) compressed with `algorithm`, addressed
+    /// from `base_blkaddr` in the final single-device image. Regular files
+    /// of at most `fragment_threshold` bytes (zero: none) are packed into the
+    /// shared fragment inode. Alignment as for [`Self::RawDevice`].
+    ZErofs {
+        algorithm: ZAlgorithm,
+        pcluster: u32,
+        base_blkaddr: u64,
+        fragment_threshold: u64,
+        data_alignment: u32,
+        data_alignment_threshold: u64,
+    },
+}
 
-    pub fn new_with_compressor(
-        path: &Path,
-        file_chunk_size: u32,
-        compressor: BlobMetadataCompressor,
-    ) -> Result<Self> {
-        if file_chunk_size < EROFS_BLOCK_SIZE {
-            return Err(Error::InvalidParameter(
-                "blob writer file chunk size must be at least one EROFS block".to_string(),
-            ));
-        }
-        if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
-            return Err(Error::InvalidParameter(
-                "blob writer file chunk size must be power-of-two and block-aligned".to_string(),
-            ));
-        }
-
-        let file = File::create(path)
-            .with_context(|| format!("failed to create blob device: {}", path.display()))?;
-        let block_group_size = file_chunk_size.max(DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE);
-        Self::from_writer(file, file_chunk_size, block_group_size, compressor)
+#[cfg(test)]
+impl<W: Write> BlobWriter<W> {
+    /// A plain chunk-group writer with BLAKE3 digests, for tests.
+    pub(crate) fn plain(writer: W, chunk_size: u32) -> Self {
+        Self::new(
+            writer,
+            chunk_size,
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
+            true,
+            BlobLayout::ChunkGroups,
+        )
+        .expect("valid test writer")
     }
 }
 
 impl<W: Write> BlobWriter<W> {
-    pub fn from_writer(
+    /// A writer over `writer` cutting files into `chunk_size` chunks (a
+    /// block-aligned power of two, the slot of every chunk group), encoding
+    /// groups with `compressor` and recording a `digester` digest per chunk,
+    /// laid out per `layout`. With `hash_data` the data region is SHA256
+    /// hashed as it is written ([`Self::data_digest`]); a caller naming the
+    /// blob itself (`--blob-id`) skips that pass.
+    pub fn new(
         writer: W,
-        file_chunk_size: u32,
-        block_group_size: u32,
+        chunk_size: u32,
         compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        hash_data: bool,
+        layout: BlobLayout,
     ) -> Result<Self> {
-        if file_chunk_size < EROFS_BLOCK_SIZE {
+        if chunk_size < EROFS_BLOCK_SIZE
+            || !chunk_size.is_power_of_two()
+            || chunk_size % EROFS_BLOCK_SIZE != 0
+        {
             return Err(Error::InvalidParameter(
-                "blob writer file chunk size must be at least one EROFS block".to_string(),
+                "blob writer chunk size must be a block-aligned power of two of at least one block"
+                    .to_string(),
             ));
         }
-        if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
-            return Err(Error::InvalidParameter(
-                "blob writer file chunk size must be power-of-two and block-aligned".to_string(),
-            ));
-        }
-        if block_group_size < file_chunk_size {
-            return Err(Error::InvalidParameter(
-                "blob writer block_group size must be at least the file chunk size".to_string(),
-            ));
-        }
-        // The blob meta header stores the block group's block count as a log2
-        // exponent (`block_group_block_count_bits`), so it must be a power of
-        // two; being a power of two >= the (block-aligned) chunk size also
-        // makes it block aligned by construction.
-        if !block_group_size.is_power_of_two() {
-            return Err(Error::InvalidParameter(
-                "blob writer block_group size must be a power of two".to_string(),
-            ));
-        }
-
-        Ok(Self {
+        let alignment = |alignment: u32| -> Result<u32> {
+            if alignment != 0 && (!alignment.is_power_of_two() || alignment % EROFS_BLOCK_SIZE != 0)
+            {
+                return Err(Error::InvalidParameter(
+                    "data alignment must be a power of two and block-aligned".to_string(),
+                ));
+            }
+            Ok(alignment)
+        };
+        let mut writer = Self {
             writer,
-            file_chunk_size,
-            block_group_size,
+            file_chunk_size: chunk_size,
             compressor,
+            digester,
             next_blkaddr: 0,
             next_compressed_offset: 0,
-            data_hasher: Sha256::new(),
-            block_group_block_offset: 0,
-            block_group_buffer: Vec::with_capacity(block_group_size as usize),
-            blob_metadata_chunks: Vec::new(),
-            blob_metadata_block_groups: Vec::new(),
-            chunk_buf: vec![0u8; file_chunk_size as usize],
+            data_hasher: hash_data.then(Sha256::new),
+            open_bins: Vec::new(),
+            placements: Vec::new(),
+            next_group: 0,
+            chunks: Vec::new(),
+            digests: Vec::new(),
+            blob_metadata_chunk_groups: Vec::new(),
+            chunk_buf: vec![0u8; chunk_size as usize],
             encoder: None,
-        })
+            raw_device: false,
+            data_alignment: 0,
+            data_alignment_threshold: 0,
+            z_pcluster: 0,
+            z_algorithm: ZAlgorithm::Lz4,
+            z_base_blkaddr: 0,
+            z_next_blkaddr: 0,
+            z_pipeline: None,
+            z_open_files: VecDeque::new(),
+            z_frag_threshold: 0,
+            z_packed: None,
+        };
+        match layout {
+            BlobLayout::ChunkGroups => {}
+            BlobLayout::RawDevice {
+                data_alignment,
+                data_alignment_threshold,
+            } => {
+                writer.raw_device = true;
+                writer.digester = BlobMetadataDigester::None;
+                writer.data_alignment = alignment(data_alignment)?;
+                writer.data_alignment_threshold = data_alignment_threshold;
+            }
+            BlobLayout::ZErofs {
+                algorithm,
+                pcluster,
+                base_blkaddr,
+                fragment_threshold,
+                data_alignment,
+                data_alignment_threshold,
+            } => {
+                if !pcluster.is_power_of_two()
+                    || pcluster % EROFS_BLOCK_SIZE != 0
+                    || pcluster > 1024 * 1024
+                {
+                    return Err(Error::InvalidParameter(
+                        "z_erofs pcluster size must be a block-aligned power of two up to 1 MiB"
+                            .to_string(),
+                    ));
+                }
+                writer.z_pcluster = pcluster;
+                writer.z_algorithm = algorithm;
+                writer.z_base_blkaddr = base_blkaddr;
+                writer.z_next_blkaddr = base_blkaddr;
+                writer.z_frag_threshold = fragment_threshold;
+                if fragment_threshold != 0 {
+                    writer.z_packed = Some(ZPackedStream {
+                        buf: Vec::new(),
+                        size: 0,
+                        accum: ZAccum::new(algorithm, ZFileRef::pending()),
+                    });
+                }
+                writer.data_alignment = alignment(data_alignment)?;
+                writer.data_alignment_threshold = data_alignment_threshold;
+            }
+        }
+        Ok(writer)
     }
 
+    /// Whether the writer is in raw device mode (see [`BlobLayout::RawDevice`]).
+    pub fn is_raw_device(&self) -> bool {
+        self.raw_device
+    }
+
+    /// Blocks of the padded address space: in chunk mode, the closed groups'
+    /// slots (final once [`Self::finish`] returned); in raw device mode, the
+    /// blocks written so far.
     pub fn total_blocks(&self) -> u64 {
         self.next_blkaddr
+    }
+
+    pub fn z_erofs_enabled(&self) -> bool {
+        self.z_pcluster != 0
+    }
+
+    /// The superblock compression config this writer's pclusters need.
+    pub fn z_compr_cfgs(&self) -> ZComprCfgs {
+        match self.z_algorithm {
+            ZAlgorithm::Lz4 => ZComprCfgs {
+                lz4_max_pclusterblks: Some((self.z_pcluster / EROFS_BLOCK_SIZE) as u16),
+                zstd_windowlog: None,
+            },
+            ZAlgorithm::Zstd => ZComprCfgs {
+                lz4_max_pclusterblks: None,
+                zstd_windowlog: Some(Z_ZSTD_WINDOWLOG),
+            },
+        }
+    }
+
+    /// Appends a small file to the packed stream (submitting every full
+    /// segment that results) and returns its inode tail: just the 8-byte
+    /// fragment header (offset | flag), no lcluster indexes.
+    fn write_reader_fragment(&mut self, reader: &mut dyn Read, file_size: u64) -> Result<ZFileRef> {
+        let packed = self
+            .z_packed
+            .as_mut()
+            .expect("fragments enabled implies a packed stream");
+        let offset = packed.size;
+        if offset & Z_EROFS_FRAGMENT_INODE_FLAG != 0 {
+            return Err(Error::Overflow(
+                "fragment offset exceeds 63 bits".to_string(),
+            ));
+        }
+        let start = packed.buf.len();
+        packed.buf.resize(start + file_size as usize, 0);
+        if let Err(error) = reader.read_exact(&mut packed.buf[start..]) {
+            packed.buf.truncate(start);
+            return Err(error).context("failed to read source data");
+        }
+        packed.size += file_size;
+        // Committing may land packed segments, so the stream stays in place
+        // while full segments are submitted.
+        loop {
+            let packed = self.z_packed.as_mut().expect("checked above");
+            if packed.buf.len() < Z_SEGMENT_SIZE {
+                break;
+            }
+            let rest = packed.buf.split_off(Z_SEGMENT_SIZE);
+            let segment = mem::replace(&mut packed.buf, rest);
+            self.z_submit(segment, ZTarget::Packed, false, 0)?;
+        }
+        Ok(ZFileRef::ready(ZFileMeta {
+            tail: (offset | Z_EROFS_FRAGMENT_INODE_FLAG)
+                .to_le_bytes()
+                .to_vec(),
+            compressed_blocks: 0,
+        }))
+    }
+
+    /// Flushes the packed inode's last pclusters and returns its metadata plus
+    /// uncompressed size, or `None` when no file was packed. Must be called
+    /// once, after all files were written; it commits every segment still in
+    /// flight. The stream is zero-padded to a whole number of blocks first so
+    /// `merge` can concatenate the packed inodes of several layers on the
+    /// lcluster grid.
+    pub fn finish_z_packed(&mut self) -> Result<Option<(ZFileMeta, u64)>> {
+        let Some(mut packed) = self.z_packed.take() else {
+            return Ok(None);
+        };
+        self.z_frag_threshold = 0;
+        if packed.size == 0 {
+            return Ok(None);
+        }
+        let padded = packed.size.next_multiple_of(EROFS_BLOCK_SIZE as u64);
+        packed
+            .buf
+            .resize(packed.buf.len() + (padded - packed.size) as usize, 0);
+        packed.size = padded;
+        // Segments are committed into the packed accumulator, so it must be
+        // in place while the pipeline drains.
+        let final_segment = mem::take(&mut packed.buf);
+        self.z_packed = Some(packed);
+        if !final_segment.is_empty() {
+            self.z_submit(final_segment, ZTarget::Packed, true, 0)?;
+        }
+        self.z_drain_all()?;
+        let packed = self.z_packed.take().expect("packed stream restored above");
+        Ok(Some((packed.accum.into_meta()?, packed.size)))
+    }
+
+    /// End of the compressed data region (absolute block address). Only
+    /// final once every segment was committed (after `finish`).
+    pub fn z_end_blkaddr(&self) -> u64 {
+        self.z_next_blkaddr
+    }
+
+    /// [`Self::write_reader_z`] for a file on disk.
+    pub fn write_file_z(&mut self, path: &Path, file_size: u64) -> Result<ZFileRef> {
+        let mut f = File::open(path)
+            .with_context(|| format!("failed to open source file: {}", path.display()))?;
+        self.write_reader_z(&mut f, file_size)
+            .with_context(|| format!("failed to compress source file: {}", path.display()))
+    }
+
+    /// Compresses exactly `file_size` bytes from `reader` into z_erofs LZ4
+    /// pclusters: the data is cut into [`Z_SEGMENT_SIZE`] segments handed to
+    /// the compression workers, and committed to the output in order as the
+    /// caller keeps producing. The returned handle resolves to the inode
+    /// tail (map header + full lcluster indexes) and compressed block count
+    /// once the blob is finished. Files up to the fragment threshold are
+    /// packed instead (see [`Self::write_reader_fragment`]).
+    pub fn write_reader_z(&mut self, reader: &mut dyn Read, file_size: u64) -> Result<ZFileRef> {
+        if self.z_frag_threshold != 0 && file_size > 0 && file_size <= self.z_frag_threshold {
+            return self.write_reader_fragment(reader, file_size);
+        }
+        let handle = ZFileRef::pending();
+        if file_size == 0 {
+            let meta = ZAccum::new(self.z_algorithm, handle.clone()).into_meta()?;
+            handle.set(meta);
+            return Ok(handle);
+        }
+        // Aligned placement (dedup phase): the committer pads the compressed
+        // stream with zero blocks so large files start on a `data_alignment`
+        // boundary of the device data (not of the image: the device is its
+        // own file on the volume, and merge may map it anywhere), keeping
+        // their pclusters on the volume dedup grid.
+        let align_blocks = if self.data_alignment != 0 && file_size >= self.data_alignment_threshold
+        {
+            (self.data_alignment / EROFS_BLOCK_SIZE) as u64
+        } else {
+            0
+        };
+        self.z_open_files
+            .push_back(ZAccum::new(self.z_algorithm, handle.clone()));
+        let mut left = file_size;
+        let mut first = true;
+        while left > 0 {
+            let len = left.min(Z_SEGMENT_SIZE as u64) as usize;
+            let mut src = self.z_pipeline().take_buffer();
+            src.resize(len, 0);
+            reader
+                .read_exact(&mut src)
+                .context("failed to read source data")?;
+            left -= len as u64;
+            self.z_submit(
+                src,
+                ZTarget::File,
+                left == 0,
+                if first { align_blocks } else { 0 },
+            )?;
+            first = false;
+        }
+        Ok(handle)
+    }
+
+    fn z_pipeline(&mut self) -> &mut ZPipeline {
+        let pcluster = self.z_pcluster as usize;
+        let algorithm = self.z_algorithm;
+        self.z_pipeline
+            .get_or_insert_with(|| ZPipeline::new(algorithm, pcluster))
+    }
+
+    /// Segments the pipeline holds before the producer must commit one.
+    #[cfg(test)]
+    pub(crate) fn z_max_in_flight(&mut self) -> usize {
+        self.z_pipeline().max_in_flight()
+    }
+
+    /// Hands a segment to the workers, committing finished ones first when
+    /// too many are in flight.
+    fn z_submit(
+        &mut self,
+        src: Vec<u8>,
+        target: ZTarget,
+        at_eof: bool,
+        align_blocks: u64,
+    ) -> Result<()> {
+        while self.z_pipeline().in_flight() >= self.z_pipeline().max_in_flight() {
+            self.z_commit_next()?;
+        }
+        self.z_pipeline().submit(
+            src,
+            ZPending {
+                target,
+                at_eof,
+                align_blocks,
+            },
+        )
+    }
+
+    /// Commits every segment in flight.
+    fn z_drain_all(&mut self) -> Result<()> {
+        while self.z_pipeline.as_ref().is_some_and(|p| p.in_flight() > 0) {
+            self.z_commit_next()?;
+        }
+        Ok(())
+    }
+
+    /// Commits the next segment in submission order: pads for alignment,
+    /// writes its pclusters at the current address, rebases its lcluster
+    /// indexes onto that address and appends them to the owning inode, and
+    /// publishes the inode's metadata when this was its last segment.
+    fn z_commit_next(&mut self) -> Result<()> {
+        use nydus_format::erofs::{Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LI_LCLUSTER_TYPE_MASK};
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let (mut segment, placement) = self.z_pipeline().recv_next()?;
+        if placement.align_blocks != 0 {
+            let offset = self.z_next_blkaddr - self.z_base_blkaddr;
+            let gap = offset.next_multiple_of(placement.align_blocks) - offset;
+            if gap > 0 {
+                self.write_z_padding(gap as usize * block_size)?;
+                self.z_next_blkaddr += gap;
+            }
+        }
+        let base = u32::try_from(self.z_next_blkaddr).map_err(|err| {
+            Error::Overflow(format!("z_erofs pcluster address exceeds u32: {err}"))
+        })?;
+        for index in segment
+            .indexes
+            .chunks_exact_mut(Z_EROFS_LCLUSTER_INDEX_SIZE)
+        {
+            let advise = u16::from_le_bytes([index[0], index[1]]);
+            if advise & Z_EROFS_LI_LCLUSTER_TYPE_MASK == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+                continue;
+            }
+            let rel = u32::from_le_bytes(index[4..8].try_into().expect("4-byte blkaddr"));
+            let abs = base.checked_add(rel).ok_or_else(|| {
+                Error::Overflow("z_erofs pcluster address exceeds u32".to_string())
+            })?;
+            index[4..8].copy_from_slice(&abs.to_le_bytes());
+        }
+        self.writer
+            .write_all(&segment.data)
+            .context("failed to write z_erofs pclusters")?;
+        self.z_next_blkaddr += segment.phys_blocks as u64;
+
+        let accum = match placement.target {
+            ZTarget::File => self
+                .z_open_files
+                .front_mut()
+                .ok_or_else(|| Error::Runtime("z_erofs segment without an inode".to_string()))?,
+            ZTarget::Packed => {
+                &mut self
+                    .z_packed
+                    .as_mut()
+                    .ok_or_else(|| Error::Runtime("packed segment after finish".to_string()))?
+                    .accum
+            }
+        };
+        accum.tail.extend_from_slice(&segment.indexes);
+        accum.blocks += segment.phys_blocks as u64;
+        if placement.at_eof && placement.target == ZTarget::File {
+            let accum = self.z_open_files.pop_front().expect("checked above");
+            let handle = accum.handle.clone();
+            handle.set(accum.into_meta()?);
+        }
+        let src = mem::take(&mut segment.src);
+        self.z_pipeline().recycle_buffer(src);
+        Ok(())
+    }
+
+    fn write_z_padding(&mut self, padding: usize) -> Result<()> {
+        write_zeros(&mut self.writer, padding as u64).context("failed to write z_erofs padding")
     }
 
     pub fn data_size(&self) -> u64 {
         self.next_compressed_offset
     }
 
-    pub fn data_digest(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+    pub fn data_digest(&self) -> Option<[u8; EROFS_BLOB_ID_SIZE]> {
+        let hasher = self.data_hasher.as_ref()?;
         let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-        digest.copy_from_slice(&self.data_hasher.clone().finalize());
-        digest
+        digest.copy_from_slice(&hasher.clone().finalize());
+        Some(digest)
     }
 
-    pub fn into_parts(self) -> (W, Sha256) {
+    pub fn into_parts(self) -> (W, Option<Sha256>) {
         (self.writer, self.data_hasher)
     }
 
-    pub fn blob_metadata_chunks(&self) -> &[BlobMetadataChunk] {
-        &self.blob_metadata_chunks
+    /// Chunk byte lengths in group order, of the groups closed so far.
+    pub fn blob_metadata_chunks(&self) -> &[u32] {
+        &self.chunks
     }
 
-    pub fn blob_metadata_block_groups(&self) -> &[BlobMetadataBlockGroup] {
-        &self.blob_metadata_block_groups
+    /// The sealed groups so far, in group order.
+    pub fn blob_metadata_chunk_groups(&self) -> &[BlobMetadataChunkGroup] {
+        &self.blob_metadata_chunk_groups
     }
 
-    pub fn blob_metadata(&self, source_offset_bias: u64) -> Result<BlobMetadata> {
-        let mut block_groups = Vec::with_capacity(self.blob_metadata_block_groups.len());
-        for block_group in &self.blob_metadata_block_groups {
-            block_groups.push(block_group.checked_add_compressed_offset(source_offset_bias)?);
+    /// The blob meta describing everything written; call after
+    /// [`Self::finish`].
+    pub fn blob_metadata(&self) -> Result<BlobMetadata> {
+        if self.raw_device {
+            return Err(Error::InvalidParameter(
+                "a raw device blob carries no blob meta".to_string(),
+            ));
         }
-
         Ok(BlobMetadata::new(
             self.compressor,
-            BlobMetadataDigester::Blake3,
+            self.digester,
             self.file_chunk_size / EROFS_BLOCK_SIZE,
-            self.blob_metadata_chunks.clone(),
-            block_groups,
-            false,
+            self.blob_metadata_chunk_groups.clone(),
+            self.chunks.clone(),
+            self.digests.clone(),
         )?)
     }
 
-    pub fn write_blob_metadata(&mut self, path: &Path, source_offset_bias: u64) -> Result<()> {
+    pub fn write_blob_metadata(&mut self, path: &Path) -> Result<()> {
         self.finish()?;
-        Ok(self.blob_metadata(source_offset_bias)?.save(path)?)
+        Ok(self.blob_metadata()?.save(path)?)
     }
 
+    /// Closes every open group, drains the encoders and flushes the output.
+    /// Chunk addresses are final afterwards (see
+    /// [`Self::resolve_chunk_addr`]).
     pub fn finish(&mut self) -> Result<()> {
-        // The data stream is byte granular, so the tail block group must be
-        // zero padded to a whole block before it is flushed (block groups
-        // always describe whole uncompressed blocks).
-        if !self.block_group_buffer.is_empty() {
-            let padded =
-                align_up_usize(self.block_group_buffer.len(), EROFS_BLOCK_SIZE as usize)
-                    .ok_or_else(|| Error::Overflow("block group padding overflow".to_string()))?;
-            self.block_group_buffer.resize(padded, 0);
+        while !self.open_bins.is_empty() {
+            self.close_bin(0)?;
         }
-        self.flush_block_group()?;
         self.drain_all_encoded()?;
+        self.z_drain_all()?;
         self.writer.flush().context("failed to flush blob device")
     }
 
-    /// Process a regular file: read it in chunk-sized pieces and append every
+    /// Replace the placeholder block address of a chunk handed out by
+    /// [`Self::write_reader_chunks`] with its final address; a no-op for
+    /// holes, raw device chunks and other devices' chunks. Only valid after
+    /// [`Self::finish`].
+    pub fn resolve_chunk_addr(&self, addr: &mut ErofsChunkAddr) -> Result<()> {
+        if self.raw_device || addr.device_id != 1 || addr.blkaddr == EROFS_NULL_ADDR {
+            return Ok(());
+        }
+        let resolved = usize::try_from(addr.blkaddr)
+            .ok()
+            .and_then(|id| self.placements.get(id).copied())
+            .filter(|blkaddr| *blkaddr != PENDING)
+            .ok_or_else(|| {
+                Error::Runtime(format!(
+                    "chunk placement {} is unknown or still pending; finish the blob first",
+                    addr.blkaddr
+                ))
+            })?;
+        addr.blkaddr = resolved;
+        Ok(())
+    }
+
+    /// Process a regular file: read it in chunk-sized chunks and append every
     /// chunk to the blob device.
     pub fn write_file_chunks(
         &mut self,
@@ -331,21 +1328,42 @@ impl<W: Write> BlobWriter<W> {
 
         let mut f = File::open(path)
             .with_context(|| format!("failed to open source file: {}", path.display()))?;
+        self.write_reader_chunks(&mut f, file_size)
+            .with_context(|| format!("failed to chunk source file: {}", path.display()))
+    }
+
+    /// Process exactly `file_size` bytes from `reader` (e.g. a tar entry) in
+    /// chunk-sized chunks and append every chunk to the blob device. In
+    /// chunk mode the returned block addresses are placeholders until
+    /// [`Self::finish`] (see [`Self::resolve_chunk_addr`]).
+    pub fn write_reader_chunks(
+        &mut self,
+        reader: &mut dyn Read,
+        file_size: u64,
+    ) -> Result<Vec<ErofsChunkAddr>> {
+        if file_size == 0 {
+            return Ok(Vec::new());
+        }
 
         let chunk_size = self.file_chunk_size as u64;
         let chunk_count = file_size.div_ceil(chunk_size);
-        let mut indexes = Vec::with_capacity(chunk_count as usize);
+        let mut indexes = Vec::with_capacity(chunk_count.min(1024) as usize);
+        if self.raw_device && self.data_alignment != 0 && file_size >= self.data_alignment_threshold
+        {
+            self.align_raw_device()?;
+        }
         let mut chunk_buf = mem::take(&mut self.chunk_buf);
         if chunk_buf.len() < self.file_chunk_size as usize {
             chunk_buf = vec![0u8; self.file_chunk_size as usize];
         }
+
         for i in 0..chunk_count {
             let remaining = file_size - i * chunk_size;
             let to_read = remaining.min(chunk_size) as usize;
 
-            if let Err(err) = f
+            if let Err(err) = reader
                 .read_exact(&mut chunk_buf[..to_read])
-                .with_context(|| format!("failed to read source file: {}", path.display()))
+                .context("failed to read source data")
             {
                 self.chunk_buf = chunk_buf;
                 return Err(err);
@@ -355,9 +1373,9 @@ impl<W: Write> BlobWriter<W> {
             // and so does zero-filled data) is not stored at all: it gets a
             // null chunk index (all 48 address bits set on disk), which every
             // read path already decodes as a hole and satisfies with zeros.
-            // No blob data, no blob-meta chunk entry, and no blob cache
-            // traffic is ever spent on it — native EROFS mounts handle the
-            // null address the same way in-kernel.
+            // No blob data, no blob-meta chunk, and no blob cache traffic is
+            // ever spent on it — native EROFS mounts handle the null address
+            // the same way in-kernel.
             if chunk_buf[..to_read].iter().all(|&byte| byte == 0) {
                 indexes.push(ErofsChunkAddr {
                     blkaddr: EROFS_NULL_ADDR,
@@ -366,13 +1384,7 @@ impl<W: Write> BlobWriter<W> {
                 continue;
             }
 
-            // Pad only up to the last block of the chunk's real data, not to the
-            // full file chunk size. A full chunk is already block-aligned, while
-            // a partial (tail) chunk keeps zero padding confined to its final
-            // block so block groups pack dense real blocks instead of large zero runs.
-            let write_len =
-                align_up_usize(to_read, EROFS_BLOCK_SIZE as usize).expect("alignment overflowed");
-            let blkaddr = match self.append_chunk(&chunk_buf[..to_read], write_len) {
+            let blkaddr = match self.append_chunk(&chunk_buf[..to_read]) {
                 Ok(blkaddr) => blkaddr,
                 Err(err) => {
                     self.chunk_buf = chunk_buf;
@@ -390,74 +1402,176 @@ impl<W: Write> BlobWriter<W> {
         Ok(indexes)
     }
 
-    fn append_chunk(&mut self, data: &[u8], write_len: usize) -> Result<u64> {
-        let addr = self.next_blkaddr;
-        let block_count = u32::try_from(write_len / EROFS_BLOCK_SIZE as usize).map_err(|err| {
-            Error::Overflow(format!("blob meta chunk block count exceeds u32: {err}"))
-        })?;
-
-        let next_blkaddr = addr
-            .checked_add(block_count as u64)
-            .filter(|count| *count <= u32::MAX as u64)
-            .ok_or_else(|| {
-                Error::Overflow(format!(
-                "decoded blob exceeds 32-bit block count: start {addr}, chunk blocks {block_count}"
-            ))
-            })?;
-        self.next_blkaddr = next_blkaddr;
-
-        // Record the chunk by its absolute block position; chunks are tracked
-        // independently of block groups as a digest index only. The digest
-        // covers the block-aligned payload (real bytes plus tail-block zero
-        // padding), hashed in place to avoid materialising a padded copy.
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(data);
-        if write_len > data.len() {
-            hasher.update(&ZERO_BLOCK[..write_len - data.len()]);
-        }
-        let chunk = BlobMetadataChunk::new(*hasher.finalize().as_bytes(), addr, block_count)?;
-        self.blob_metadata_chunks.push(chunk);
-
-        // The group stream mirrors the logical space one-to-one, so the
-        // tail-block padding must be stored physically.
-        self.append_to_block_group_stream(data)?;
-        if write_len > data.len() {
-            self.append_to_block_group_stream(&ZERO_BLOCK[..write_len - data.len()])?;
-        }
-        Ok(addr)
+    /// Pads the raw device with zero blocks so the next chunk starts on the
+    /// configured data alignment.
+    fn align_raw_device(&mut self) -> Result<()> {
+        let align_blocks = u64::from(self.data_alignment / EROFS_BLOCK_SIZE);
+        let target = self.next_blkaddr.next_multiple_of(align_blocks);
+        let gap = (target - self.next_blkaddr) as usize * EROFS_BLOCK_SIZE as usize;
+        self.write_raw_padding(gap)?;
+        self.next_blkaddr = target;
+        Ok(())
     }
 
-    /// Append data to the current block group, flushing whenever it fills to
-    /// the block group size, so block groups are pure block runs of exactly
-    /// `block_group_size` (except the last).
-    fn append_to_block_group_stream(&mut self, mut data: &[u8]) -> Result<()> {
-        let block_group_size = self.block_group_size as usize;
-        while !data.is_empty() {
-            let space = block_group_size - self.block_group_buffer.len();
-            let take = space.min(data.len());
-            self.block_group_buffer.extend_from_slice(&data[..take]);
-            data = &data[take..];
-            if self.block_group_buffer.len() == block_group_size {
-                self.flush_block_group()?;
+    /// Writes `padding` zero bytes to the raw device, hashing them like data.
+    fn write_raw_padding(&mut self, mut padding: usize) -> Result<()> {
+        while padding > 0 {
+            let chunk = padding.min(ZERO_BLOCK.len());
+            self.writer
+                .write_all(&ZERO_BLOCK[..chunk])
+                .context("failed to write device padding")?;
+            if let Some(hasher) = self.data_hasher.as_mut() {
+                hasher.update(&ZERO_BLOCK[..chunk]);
             }
+            self.next_compressed_offset += chunk as u64;
+            padding -= chunk;
         }
         Ok(())
     }
 
-    fn flush_block_group(&mut self) -> Result<()> {
-        if self.block_group_buffer.is_empty() {
-            return Ok(());
+    /// Append one chunk (a whole small file, or one chunk of a larger one).
+    /// In raw device mode the padded chunk is written straight to the
+    /// device and its block address returned. Otherwise the chunk's length
+    /// and digest are recorded and its bytes go into a group: a chunk that
+    /// fills a whole slot closes as a group of its own; a smaller one is
+    /// packed first-fit into an open bin (opening one, after closing the
+    /// fullest when too many are open, when none fits), and a bin that
+    /// fills its slot exactly closes at once. Returns the chunk's placement
+    /// id, the placeholder [`Self::resolve_chunk_addr`] resolves.
+    fn append_chunk(&mut self, data: &[u8]) -> Result<u64> {
+        let blocks = data.len().div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
+        if self.raw_device {
+            let addr = self.next_blkaddr;
+            let next_blkaddr = addr
+                .checked_add(blocks)
+                .filter(|count| *count <= u32::MAX as u64)
+                .ok_or_else(|| {
+                    Error::Overflow(format!(
+                        "device exceeds 32-bit block count: start {addr}, chunk blocks {blocks}"
+                    ))
+                })?;
+            self.writer
+                .write_all(data)
+                .context("failed to write to blob device")?;
+            if let Some(hasher) = self.data_hasher.as_mut() {
+                hasher.update(data);
+            }
+            self.next_compressed_offset += data.len() as u64;
+            let padded = blocks as usize * EROFS_BLOCK_SIZE as usize;
+            self.write_raw_padding(padded - data.len())?;
+            self.next_blkaddr = next_blkaddr;
+            return Ok(addr);
+        }
+        let len = u32::try_from(data.len())
+            .map_err(|err| Error::Overflow(format!("blob meta chunk length exceeds u32: {err}")))?;
+        let digest = match self.digester {
+            BlobMetadataDigester::Blake3 => {
+                Some(BlobMetadataDigest::new(*blake3::hash(data).as_bytes()))
+            }
+            BlobMetadataDigester::None => None,
+        };
+        let placement = self.placements.len();
+        self.placements.push(PENDING);
+        let slot_blocks = self.slot_blocks();
+
+        if blocks == slot_blocks {
+            let bin = Bin {
+                data: data.to_vec(),
+                lens: vec![len],
+                digests: digest.into_iter().collect(),
+                placements: vec![placement],
+                blocks,
+            };
+            self.submit_bin(bin)?;
+            return Ok(placement as u64);
         }
 
-        if self.encoder.is_none() {
-            self.encoder = Some(BlockGroupEncoder::new(self.compressor));
+        let mut target = self
+            .open_bins
+            .iter()
+            .position(|bin| bin.blocks + blocks <= slot_blocks);
+        if target.is_none() {
+            if self.open_bins.len() >= MAX_OPEN_BINS {
+                // The oldest of the fullest bins, so ties keep chunk order.
+                let fullest = self
+                    .open_bins
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .max_by_key(|(_, bin)| bin.blocks)
+                    .map(|(index, _)| index)
+                    .expect("bins are open");
+                self.close_bin(fullest)?;
+            }
+            let buffer = self
+                .encoder
+                .as_mut()
+                .and_then(ChunkGroupEncoder::take_buffer)
+                .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
+            self.open_bins.push(Bin {
+                data: buffer,
+                lens: Vec::new(),
+                digests: Vec::new(),
+                placements: Vec::new(),
+                blocks: 0,
+            });
+            target = Some(self.open_bins.len() - 1);
         }
-        let encoder = self.encoder.as_mut().expect("encoder initialised above");
-        let replacement = encoder
-            .take_buffer()
-            .unwrap_or_else(|| Vec::with_capacity(self.block_group_size as usize));
-        let uncompressed = mem::replace(&mut self.block_group_buffer, replacement);
-        encoder.submit(uncompressed)?;
+        let index = target.expect("a bin was found or opened");
+        let bin = &mut self.open_bins[index];
+        bin.data.extend_from_slice(data);
+        bin.lens.push(len);
+        bin.digests.extend(digest);
+        bin.placements.push(placement);
+        bin.blocks += blocks;
+        if bin.blocks == slot_blocks {
+            self.close_bin(index)?;
+        }
+        Ok(placement as u64)
+    }
+
+    fn slot_blocks(&self) -> u64 {
+        u64::from(self.file_chunk_size / EROFS_BLOCK_SIZE)
+    }
+
+    /// Close open bin `index` as the next group.
+    fn close_bin(&mut self, index: usize) -> Result<()> {
+        let bin = self.open_bins.remove(index);
+        self.submit_bin(bin)
+    }
+
+    /// Seal `bin` as the next group: assign its slot, resolve its chunks'
+    /// addresses, record their lengths and digests, and hand the payload to
+    /// the encoders.
+    fn submit_bin(&mut self, bin: Bin) -> Result<()> {
+        let group = self.next_group;
+        let slot_blocks = self.slot_blocks();
+        let first_block = group.checked_mul(slot_blocks).ok_or_else(|| {
+            Error::Overflow(format!("blob address space overflows at group {group}"))
+        })?;
+        let end_block = first_block + slot_blocks;
+        if end_block > u32::MAX as u64 {
+            return Err(Error::Overflow(format!(
+                "blob exceeds 32-bit block count: group {group} ends at block {end_block}"
+            )));
+        }
+        let mut block = first_block;
+        for (&len, &placement) in bin.lens.iter().zip(&bin.placements) {
+            self.placements[placement] = block;
+            block += u64::from(len).div_ceil(u64::from(EROFS_BLOCK_SIZE));
+        }
+        let chunk_count = u32::try_from(bin.lens.len())
+            .map_err(|_| Error::Overflow("chunk group holds too many chunks".to_string()))?;
+        self.chunks.extend_from_slice(&bin.lens);
+        self.digests.extend(bin.digests);
+        self.next_group = group + 1;
+        self.next_blkaddr = end_block;
+
+        let compressor = self.compressor;
+        let encoder = self
+            .encoder
+            .get_or_insert_with(|| ChunkGroupEncoder::new(compressor));
+        encoder.submit(bin.data, chunk_count)?;
         while self
             .encoder
             .as_ref()
@@ -470,45 +1584,36 @@ impl<W: Write> BlobWriter<W> {
         Ok(())
     }
 
-    /// Write out the next completed block group, in submission order.
+    /// Write out the next completed chunk group, in submission order.
     fn drain_one_encoded(&mut self) -> Result<()> {
         let group = self
             .encoder
             .as_mut()
             .expect("drain is only called with a live encoder")
             .recv_next()?;
-        let uncompressed_len = group.data.len();
         let encoded: &[u8] = group.compressed.as_deref().unwrap_or(&group.data);
 
-        // Encoded block group payloads are packed back-to-back in the data region.
-        // No block padding is inserted between compressed block groups; they are read
-        // by byte range, and only the data region as a whole is later aligned
-        // (by the build assembler) so the embedded bootstrap starts on a block.
-        let compressed_offset = self.next_compressed_offset;
+        // Encoded chunk group payloads are packed back-to-back in the data
+        // region. No block padding is inserted between them; they are read
+        // by byte range, and only the data region as a whole is later
+        // aligned (by the build assembler) so the embedded bootstrap starts
+        // on a block.
         self.writer
             .write_all(encoded)
             .context("failed to write to blob device")?;
-        self.data_hasher.update(encoded);
-        self.next_compressed_offset = compressed_offset + encoded.len() as u64;
-
-        let block_count =
-            u32::try_from(uncompressed_len / EROFS_BLOCK_SIZE as usize).map_err(|err| {
-                Error::Overflow(format!(
-                    "blob meta block group uncompressed block count exceeds u32: {err}"
-                ))
-            })?;
-        let entry = BlobMetadataBlockGroup::new(
-            self.block_group_block_offset,
-            block_count,
-            compressed_offset,
-            encoded.len() as u32,
-            group.crc32,
-            0,
-            0,
-            false,
-        )?;
-        self.blob_metadata_block_groups.push(entry);
-        self.block_group_block_offset += block_count as u64;
+        if let Some(hasher) = self.data_hasher.as_mut() {
+            hasher.update(encoded);
+        }
+        self.next_compressed_offset += encoded.len() as u64;
+        self.blob_metadata_chunk_groups
+            .push(BlobMetadataChunkGroup::new(
+                u32::try_from(encoded.len()).map_err(|err| {
+                    Error::Overflow(format!("encoded chunk group exceeds u32: {err}"))
+                })?,
+                group.chunk_count,
+                group.crc32,
+                None,
+            )?);
 
         self.encoder
             .as_mut()
@@ -529,9 +1634,10 @@ impl<W: Write> BlobWriter<W> {
     }
 }
 
-/// Format-compatibility policy shared by build and `nydus optimize`: a block group
-/// is stored compressed only when it saves at least 30% — both paths must
-/// agree or an optimized blob would encode block groups differently from its source.
+/// Format-compatibility policy shared by build and `nydus optimize`: a
+/// chunk group is stored compressed only when it saves at least 30% — both
+/// paths must agree, and since a stored encoding is then always smaller
+/// than its payload, equal sizes unambiguously mean "stored plain".
 pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
     (compressed_len as u128) * 100 <= (uncompressed_len as u128) * MAX_COMPRESSED_SIZE_PERCENT
 }
@@ -539,158 +1645,253 @@ pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE;
+
+    /// Geometry the layout assertions below are written against: 64 KiB
+    /// chunks (16-block slots), independent of the CLI defaults.
+    const TEST_CHUNK_SIZE: u32 = 64 * 1024;
+    const TEST_SLOT_BLOCKS: u64 = (TEST_CHUNK_SIZE / EROFS_BLOCK_SIZE) as u64;
     use std::fs;
     use tempfile::tempdir;
-    #[test]
-    fn blob_metadata_block_group_round_trips_minimal_fields() {
-        let payload = vec![0u8; 0x3000];
-        // Compressed byte offset is a plain byte position (not block aligned).
-        let entry =
-            BlobMetadataBlockGroup::new(2, 3, 0x12345, 0x400, crc32c(&payload), 0, 0, false)
-                .unwrap();
 
-        assert_eq!(entry.uncompressed_block_offset(), 2);
-        assert_eq!(entry.uncompressed_block_count(), 3);
-        assert_eq!(entry.uncompressed_offset(), 0x2000);
-        assert_eq!(entry.uncompressed_size(), 0x3000);
-        assert_eq!(entry.compressed_offset(), 0x12345);
-        assert_eq!(entry.compressed_size(), 0x400);
-        assert_eq!(entry.crc32(), crc32c(&payload));
+    fn plain_writer(chunk_size: u32) -> BlobWriter<Vec<u8>> {
+        BlobWriter::plain(Vec::new(), chunk_size)
+    }
+
+    fn writer(
+        chunk_size: u32,
+        compressor: BlobMetadataCompressor,
+        layout: BlobLayout,
+    ) -> BlobWriter<Vec<u8>> {
+        BlobWriter::new(
+            Vec::new(),
+            chunk_size,
+            compressor,
+            BlobMetadataDigester::Blake3,
+            true,
+            layout,
+        )
+        .unwrap()
+    }
+
+    fn file_writer(path: &Path, chunk_size: u32) -> BlobWriter<File> {
+        BlobWriter::plain(File::create(path).unwrap(), chunk_size)
+    }
+
+    /// Write `bytes` as one file and return its resolved-later addresses.
+    fn write(writer: &mut BlobWriter<Vec<u8>>, bytes: &[u8]) -> Vec<ErofsChunkAddr> {
+        writer
+            .write_reader_chunks(&mut &bytes[..], bytes.len() as u64)
+            .unwrap()
+    }
+
+    fn resolve(writer: &BlobWriter<Vec<u8>>, addrs: &mut [ErofsChunkAddr]) -> Vec<u64> {
+        for addr in addrs.iter_mut() {
+            writer.resolve_chunk_addr(addr).unwrap();
+        }
+        addrs.iter().map(|addr| addr.blkaddr).collect()
+    }
+
+    /// Rebuild the padded address space from the written data region and
+    /// the blob meta, group by group.
+    fn scatter(writer: &BlobWriter<Vec<u8>>) -> Vec<u8> {
+        let meta = writer.blob_metadata().unwrap();
+        let data = &writer.writer;
+        let mut padded = vec![0u8; meta.uncompressed_size() as usize];
+        for group in meta.chunk_groups() {
+            let range = group.compressed_range();
+            let encoded = &data[range.start as usize..range.end as usize];
+            let payload = if meta.is_plain(&group) {
+                encoded.to_vec()
+            } else {
+                zstd::bulk::decompress(encoded, meta.payload_size(&group) as usize).unwrap()
+            };
+            assert_eq!(crc32c(&payload), group.crc32());
+            meta.for_each_decoded_chunk(group.index() as usize, &payload, &mut |offset, bytes| {
+                padded[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+        }
+        padded
+    }
+
+    #[test]
+    fn blob_writer_handles_single_chunk_groups_and_untrusted_sizes() {
+        let mut writer = plain_writer(EROFS_BLOCK_SIZE);
+        assert!(writer
+            .write_reader_chunks(&mut std::io::empty(), u64::MAX)
+            .is_err());
+        let mut addrs = Vec::new();
+        for bytes in [vec![1], vec![2; EROFS_BLOCK_SIZE as usize]] {
+            addrs.extend(write(&mut writer, &bytes));
+        }
+        writer.finish().unwrap();
+        assert_eq!(resolve(&writer, &mut addrs), vec![0, 1]);
+        let metadata = writer.blob_metadata().unwrap();
+        assert_eq!(metadata.chunk_group_count(), 2);
+        assert_eq!(metadata.chunk_group_index_of(0), Some(0));
+        assert_eq!(metadata.chunk_group_index_of(4096), Some(1));
+        for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+            assert!(BlobWriter::new(
+                Vec::new(),
+                EROFS_BLOCK_SIZE,
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::None,
+                false,
+                BlobLayout::ZErofs {
+                    algorithm,
+                    pcluster: 8 * 1024 * 1024,
+                    base_blkaddr: 0,
+                    fragment_threshold: 0,
+                    data_alignment: 0,
+                    data_alignment_threshold: 0,
+                },
+            )
+            .is_err());
+        }
+        assert!(BlobWriter::new(
+            Vec::new(),
+            EROFS_BLOCK_SIZE,
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::None,
+            false,
+            BlobLayout::RawDevice {
+                data_alignment: 3 * EROFS_BLOCK_SIZE,
+                data_alignment_threshold: 0,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn blob_writer_packs_small_chunks_first_fit_and_resolves_addresses() {
+        let mut writer = plain_writer(TEST_CHUNK_SIZE);
+        let files: Vec<Vec<u8>> = [
+            (10_000usize, b'1'),
+            (40_000, b'2'),
+            (20_000, b'3'),
+            (8_000, b'4'),
+            (4_000, b'5'),
+        ]
+        .iter()
+        .map(|(len, byte)| vec![*byte; *len])
+        .collect();
+        let mut addrs = Vec::new();
+        for file in &files {
+            addrs.extend(write(&mut writer, file));
+        }
+        // Files 1, 2 fill 13 of slot 0's 16 blocks; file 3 (5 blocks) opens
+        // slot 1; files 4 and 5 (2 + 1 blocks) still fit slot 0, which then
+        // closes as group 0; finish closes slot 1 as group 1.
+        assert_eq!(writer.open_bins.len(), 1);
+        assert_eq!(writer.next_group, 1);
+        assert!(addrs
+            .iter()
+            .any(|addr| writer.resolve_chunk_addr(&mut addr.clone()).is_err()));
+        writer.finish().unwrap();
+        assert_eq!(writer.total_blocks(), 2 * TEST_SLOT_BLOCKS);
+        assert_eq!(
+            resolve(&writer, &mut addrs),
+            vec![0, 3, TEST_SLOT_BLOCKS, 13, 15]
+        );
+        assert_eq!(
+            writer.blob_metadata_chunks(),
+            &[10_000, 40_000, 8_000, 4_000, 20_000]
+        );
+        let groups = writer.blob_metadata_chunk_groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].chunk_count(), 4);
+        assert_eq!(groups[0].compressed_size(), 62_000);
+        assert_eq!(groups[1].chunk_count(), 1);
+        assert_eq!(groups[1].compressed_size(), 20_000);
+        // The data region holds the payloads back to back in group order.
+        let expected: Vec<u8> = [0usize, 1, 3, 4, 2]
+            .iter()
+            .flat_map(|index| files[*index].clone())
+            .collect();
+        assert_eq!(writer.writer, expected);
+        assert_eq!(writer.data_size(), expected.len() as u64);
+
+        let padded = scatter(&writer);
+        let block = EROFS_BLOCK_SIZE as usize;
+        assert_eq!(&padded[..10_000], &files[0][..]);
+        assert_eq!(&padded[3 * block..3 * block + 40_000], &files[1][..]);
+        assert_eq!(&padded[13 * block..13 * block + 8_000], &files[3][..]);
+        assert_eq!(&padded[15 * block..15 * block + 4_000], &files[4][..]);
+        let slot1 = TEST_SLOT_BLOCKS as usize * block;
+        assert_eq!(&padded[slot1..slot1 + 20_000], &files[2][..]);
+        assert!(padded[slot1 + 20_000..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn blob_writer_closes_full_chunks_as_their_own_groups() {
+        let mut writer = plain_writer(TEST_CHUNK_SIZE);
+        let big = vec![b'x'; TEST_CHUNK_SIZE as usize * 5 / 2];
+        let small = vec![b's'; 100];
+        let mut addrs = write(&mut writer, &big);
+        addrs.extend(write(&mut writer, &small));
+        // Both full chunks closed at once; the half chunk waits in a bin
+        // that the small file joins.
+        assert_eq!(writer.next_group, 2);
+        assert_eq!(writer.open_bins.len(), 1);
+        assert_eq!(writer.open_bins[0].lens, vec![TEST_CHUNK_SIZE / 2, 100]);
+        writer.finish().unwrap();
+        assert_eq!(
+            resolve(&writer, &mut addrs),
+            vec![
+                0,
+                TEST_SLOT_BLOCKS,
+                2 * TEST_SLOT_BLOCKS,
+                2 * TEST_SLOT_BLOCKS + TEST_SLOT_BLOCKS / 2
+            ]
+        );
+        assert_eq!(writer.blob_metadata_chunk_groups().len(), 3);
+        assert_eq!(
+            writer.blob_metadata_chunks(),
+            &[TEST_CHUNK_SIZE, TEST_CHUNK_SIZE, TEST_CHUNK_SIZE / 2, 100]
+        );
+        assert_eq!(writer.digests.len(), 4);
+        assert_eq!(writer.digests[0].digest(), writer.digests[1].digest());
+        assert_ne!(writer.digests[0].digest(), writer.digests[2].digest());
+        let meta = writer.blob_metadata().unwrap();
+        assert_eq!(meta.uncompressed_block_count(), 3 * TEST_SLOT_BLOCKS);
+        assert_eq!(meta.compressed_end(), big.len() as u64 + 100);
+    }
+
+    #[test]
+    fn blob_writer_closes_the_fullest_bin_when_too_many_are_open() {
+        let mut writer = plain_writer(TEST_CHUNK_SIZE);
+        // Nine-block chunks never share a 16-block slot, so every one opens
+        // a bin; the ninth exceeds the limit and closes the first (the
+        // oldest of equally full bins), then finish closes the rest in
+        // order, so chunk i lands in group i.
+        let chunk = vec![b'n'; 9 * EROFS_BLOCK_SIZE as usize];
+        let mut addrs = Vec::new();
+        for _ in 0..MAX_OPEN_BINS + 1 {
+            addrs.extend(write(&mut writer, &chunk));
+        }
+        assert_eq!(writer.next_group, 1);
+        assert_eq!(writer.open_bins.len(), MAX_OPEN_BINS);
+        writer.finish().unwrap();
+        let expected: Vec<u64> = (0..=MAX_OPEN_BINS as u64)
+            .map(|group| group * TEST_SLOT_BLOCKS)
+            .collect();
+        assert_eq!(resolve(&writer, &mut addrs), expected);
+        assert!(writer.open_bins.is_empty());
     }
 
     #[test]
     fn blob_writer_rejects_block_count_overflow_before_mutation() {
-        let mut writer = BlobWriter::from_writer(
-            Vec::new(),
-            EROFS_BLOCK_SIZE,
-            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE,
-            BlobMetadataCompressor::None,
-        )
-        .unwrap();
-        writer.next_blkaddr = u32::MAX as u64 - 1;
+        let mut writer = plain_writer(EROFS_BLOCK_SIZE);
+        writer.next_group = u32::MAX as u64 - 1;
         let data = [1; EROFS_BLOCK_SIZE as usize];
-        assert_eq!(
-            writer.append_chunk(&data, data.len()).unwrap(),
-            u32::MAX as u64 - 1
-        );
+        let placement = writer.append_chunk(&data).unwrap();
+        assert_eq!(writer.placements[placement as usize], u32::MAX as u64 - 1);
         assert_eq!(writer.next_blkaddr, u32::MAX as u64);
-        let buffer = writer.block_group_buffer.clone();
-        let chunks = writer.blob_metadata_chunks.len();
-        assert!(writer.append_chunk(&data, data.len()).is_err());
+        let chunks = writer.chunks.len();
+        assert!(writer.append_chunk(&data).is_err());
         assert_eq!(writer.next_blkaddr, u32::MAX as u64);
-        assert_eq!(writer.blob_metadata_chunks.len(), chunks);
-        assert_eq!(writer.block_group_buffer, buffer);
-        assert!(writer.writer.is_empty());
-        assert!(writer.encoder.is_none());
-    }
-
-    #[test]
-    fn blob_writer_tracks_unique_blob_metadata_chunks() {
-        let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob.data");
-        let file_a = dir.path().join("a.bin");
-        let file_b = dir.path().join("b.bin");
-
-        let mut content_a = vec![b'a'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
-        content_a.extend(vec![b'b'; EROFS_BLOCK_SIZE as usize]);
-        fs::write(&file_a, &content_a).unwrap();
-        fs::write(
-            &file_b,
-            vec![b'a'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize],
-        )
-        .unwrap();
-
-        // Pin the block group size to the chunk size so the 513-block layout
-        // below packs across several block groups.
-        let mut writer = BlobWriter::from_writer(
-            File::create(&blob_path).unwrap(),
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
-            BlobMetadataCompressor::None,
-        )
-        .unwrap();
-        let indexes_a = writer
-            .write_file_chunks(&file_a, content_a.len() as u64)
-            .unwrap();
-        let indexes_b = writer
-            .write_file_chunks(&file_b, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64)
-            .unwrap();
-        writer.finish().unwrap();
-
-        assert_eq!(indexes_a.len(), 2);
-        assert_eq!(indexes_b.len(), 1);
-        assert_eq!(indexes_a[0].blkaddr, 0);
-        assert_eq!(indexes_a[1].blkaddr, 256);
-        // Dense logical packing: file_a's 4KiB tail chunk occupies a single
-        // block, so file_b starts right after it instead of being padded to a
-        // full chunk.
-        assert_eq!(indexes_b[0].blkaddr, 257);
-        assert_eq!(writer.total_blocks(), 513);
-
-        let entries = writer.blob_metadata_chunks();
-        let block_groups = writer.blob_metadata_block_groups();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(block_groups.len(), 3);
-        // Chunks record absolute block offsets, independent of block groups.
-        assert_eq!(entries[0].uncompressed_block_offset(), 0);
-        assert_eq!(entries[0].uncompressed_block_count(), 256);
-        assert_eq!(entries[1].uncompressed_block_offset(), 256);
-        assert_eq!(entries[1].uncompressed_block_count(), 1);
-        assert_eq!(entries[2].uncompressed_block_offset(), 257);
-        assert_eq!(entries[2].uncompressed_block_count(), 256);
-        // Block groups pack whole blocks up to the block group size (256 blocks) regardless
-        // of chunk boundaries: file_a's tail block and file_b's leading blocks
-        // share block group 1, and the remainder spills into block group 2.
-        assert_eq!(block_groups[0].uncompressed_block_offset(), 0);
-        assert_eq!(block_groups[0].uncompressed_block_count(), 256);
-        assert_eq!(block_groups[0].compressed_offset(), 0);
-        assert_eq!(
-            block_groups[0].compressed_size(),
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE
-        );
-        assert_eq!(block_groups[1].uncompressed_block_offset(), 256);
-        assert_eq!(block_groups[1].uncompressed_block_count(), 256);
-        assert_eq!(
-            block_groups[1].compressed_offset(),
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64
-        );
-        assert_eq!(
-            block_groups[1].compressed_size(),
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE
-        );
-        assert_eq!(block_groups[2].uncompressed_block_offset(), 512);
-        assert_eq!(block_groups[2].uncompressed_block_count(), 1);
-        // Block groups pack back-to-back in the data region with no inter-block group padding.
-        assert_eq!(
-            block_groups[2].compressed_offset(),
-            2 * DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64
-        );
-        assert_eq!(block_groups[2].compressed_size(), EROFS_BLOCK_SIZE);
-    }
-
-    #[test]
-    fn blob_writer_allows_small_file_chunks_with_default_size_blob_metadata_block_groups() {
-        let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob.data");
-        let input_path = dir.path().join("input.bin");
-        let mut content = vec![b'a'; EROFS_BLOCK_SIZE as usize];
-        content.extend(vec![b'b'; EROFS_BLOCK_SIZE as usize]);
-        fs::write(&input_path, &content).unwrap();
-
-        let mut writer = BlobWriter::new(&blob_path, EROFS_BLOCK_SIZE).unwrap();
-        let indexes = writer
-            .write_file_chunks(&input_path, content.len() as u64)
-            .unwrap();
-        writer.finish().unwrap();
-        let blob_metadata = writer.blob_metadata(0).unwrap();
-
-        assert_eq!(indexes.len(), 2);
-        assert_eq!(indexes[0].blkaddr, 0);
-        assert_eq!(indexes[1].blkaddr, 1);
-        assert_eq!(blob_metadata.header().chunk_size(), EROFS_BLOCK_SIZE);
-        assert_eq!(blob_metadata.block_groups().len(), 1);
-        assert_eq!(blob_metadata.block_groups()[0].uncompressed_size(), 8192);
+        assert_eq!(writer.chunks.len(), chunks);
     }
 
     #[test]
@@ -704,22 +1905,29 @@ mod tests {
         content.extend(vec![b'c'; 100]);
         fs::write(&input_path, &content).unwrap();
 
-        let mut writer = BlobWriter::new(&blob_path, EROFS_BLOCK_SIZE).unwrap();
-        let indexes = writer
+        let mut writer = file_writer(&blob_path, EROFS_BLOCK_SIZE);
+        let mut indexes = writer
             .write_file_chunks(&input_path, content.len() as u64)
             .unwrap();
         writer.finish().unwrap();
+        for index in indexes.iter_mut() {
+            writer.resolve_chunk_addr(index).unwrap();
+        }
 
         // The all-zero chunk becomes a hole: a null chunk index with no blob
-        // reference, no blob-meta chunk entry, and no bytes in the data region.
+        // reference, no blob-meta chunk, and no bytes in the data region.
+        // The tail chunk is stored without padding.
         assert_eq!(indexes.len(), 3);
         assert_eq!(indexes[0].blkaddr, 0);
         assert_eq!(indexes[1].blkaddr, EROFS_NULL_ADDR);
+        assert_eq!(indexes[1].device_id, 0);
         assert_eq!(indexes[2].blkaddr, 1);
         assert_eq!(writer.total_blocks(), 2);
+        assert_eq!(writer.blob_metadata_chunks(), &[EROFS_BLOCK_SIZE, 100]);
         let data = fs::read(&blob_path).unwrap();
-        assert_eq!(data.len(), 2 * EROFS_BLOCK_SIZE as usize);
+        assert_eq!(data.len(), EROFS_BLOCK_SIZE as usize + 100);
         assert!(!data[..EROFS_BLOCK_SIZE as usize].iter().any(|&b| b != b'a'));
+        assert!(data[EROFS_BLOCK_SIZE as usize..].iter().all(|&b| b == b'c'));
 
         // The on-disk null index encodes the all-ones sentinel.
         let raw =
@@ -730,158 +1938,128 @@ mod tests {
 
     #[test]
     fn blob_writer_handles_fully_zero_file() {
-        let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob.data");
-        let input_path = dir.path().join("input.bin");
+        let mut writer = plain_writer(EROFS_BLOCK_SIZE);
         let content = vec![0u8; 2 * EROFS_BLOCK_SIZE as usize];
-        fs::write(&input_path, &content).unwrap();
-
-        let mut writer = BlobWriter::new(&blob_path, EROFS_BLOCK_SIZE).unwrap();
-        let indexes = writer
-            .write_file_chunks(&input_path, content.len() as u64)
-            .unwrap();
+        let indexes = write(&mut writer, &content);
         writer.finish().unwrap();
 
         // Every chunk is a hole: nothing lands in the blob at all.
         assert_eq!(indexes.len(), 2);
         assert!(indexes.iter().all(|ci| ci.blkaddr == EROFS_NULL_ADDR));
-        assert!(writer.blob_metadata_block_groups().is_empty());
+        assert!(writer.blob_metadata_chunk_groups().is_empty());
         assert_eq!(writer.total_blocks(), 0);
-        assert_eq!(fs::read(&blob_path).unwrap().len(), 0);
+        assert!(writer.writer.is_empty());
+        assert_eq!(writer.blob_metadata().unwrap().chunk_group_count(), 0);
     }
 
     #[test]
     fn blob_writer_stores_uncompressed_when_zstd_saves_too_little() {
-        let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob.data");
-        let input_path = dir.path().join("input.bin");
-        let content = pseudo_random_bytes(DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize);
-        fs::write(&input_path, &content).unwrap();
-
-        let mut writer = BlobWriter::new_with_compressor(
-            &blob_path,
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        let mut writer = writer(
+            TEST_CHUNK_SIZE,
             BlobMetadataCompressor::Zstd,
-        )
-        .unwrap();
-        writer
-            .write_file_chunks(&input_path, content.len() as u64)
-            .unwrap();
+            BlobLayout::ChunkGroups,
+        );
+        let noise = pseudo_random_bytes(TEST_CHUNK_SIZE as usize);
+        let text = vec![b't'; TEST_CHUNK_SIZE as usize];
+        write(&mut writer, &noise);
+        write(&mut writer, &text);
         writer.finish().unwrap();
+        let meta = writer.blob_metadata().unwrap();
+        let groups: Vec<_> = meta.chunk_groups().collect();
+        assert_eq!(groups.len(), 2);
+        assert!(meta.is_plain(&groups[0]));
+        assert_eq!(groups[0].compressed_size(), TEST_CHUNK_SIZE);
+        assert!(!meta.is_plain(&groups[1]));
+        assert!(groups[1].compressed_size() < TEST_CHUNK_SIZE / 10);
+        let padded = scatter(&writer);
+        assert_eq!(&padded[..noise.len()], &noise[..]);
+        assert_eq!(&padded[TEST_CHUNK_SIZE as usize..], &text[..]);
+    }
 
-        let block_groups = writer.blob_metadata_block_groups();
-        assert_eq!(block_groups.len(), 1);
-        assert_eq!(block_groups[0].uncompressed_block_count(), 256);
-        assert_eq!(
-            block_groups[0].uncompressed_size(),
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64
+    #[test]
+    fn blob_writer_compresses_packed_groups_and_scatters_back() {
+        let mut writer = writer(
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::Zstd,
+            BlobLayout::ChunkGroups,
         );
-        assert_eq!(
-            u64::from(block_groups[0].compressed_size()),
-            block_groups[0].uncompressed_size()
-        );
-        assert_eq!(fs::read(&blob_path).unwrap(), content);
+        let files: Vec<Vec<u8>> = (0..40u8)
+            .map(|index| vec![b'a' + index % 26; 1_000 + 500 * index as usize])
+            .collect();
+        let mut addrs = Vec::new();
+        for file in &files {
+            addrs.extend(write(&mut writer, file));
+        }
+        writer.finish().unwrap();
+        let addrs = resolve(&writer, &mut addrs);
+        let meta = writer.blob_metadata().unwrap();
+        assert!(meta.chunk_group_count() > 1);
+        assert_eq!(meta.chunk_count(), files.len());
+        assert!(meta.chunk_groups().all(|group| !meta.is_plain(&group)));
+        let padded = scatter(&writer);
+        for (file, addr) in files.iter().zip(addrs) {
+            let offset = addr as usize * EROFS_BLOCK_SIZE as usize;
+            assert_eq!(&padded[offset..offset + file.len()], &file[..]);
+        }
+        // Every chunk's digest names its bytes.
+        for (index, (chunk, offset, len)) in (0..meta.chunk_group_count())
+            .flat_map(|group| meta.chunk_group_chunks(group))
+            .enumerate()
+        {
+            assert_eq!(chunk, index);
+            let bytes = &padded[offset as usize..offset as usize + len as usize];
+            assert_eq!(
+                meta.digest(chunk).unwrap().digest(),
+                blake3::hash(bytes).as_bytes()
+            );
+        }
     }
 
     #[test]
     fn blob_writer_writes_blob_metadata_file() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
-        let blob_metadata_path = dir.path().join("blob.blob.meta");
-        let input_path = dir.path().join("input.bin");
-        fs::write(&input_path, vec![b'x'; 4096]).unwrap();
-
-        let mut writer =
-            BlobWriter::new(&blob_path, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE).unwrap();
-        writer.write_file_chunks(&input_path, 4096).unwrap();
-        writer
-            .write_blob_metadata(&blob_metadata_path, 8192)
-            .unwrap();
-
-        let raw = fs::read(&blob_metadata_path).unwrap();
-        // 4 KiB header block + one block group, padded to a block.
-        assert_eq!(raw.len(), 8192);
-
-        let blob_metadata = BlobMetadata::from_path(&blob_metadata_path, false).unwrap();
-        assert_eq!(blob_metadata.header().chunk_count(), 1);
-        assert_eq!(blob_metadata.header().block_group_count(), 1);
-        assert_eq!(blob_metadata.header().chunk_table_size(), 48);
-        assert_eq!(blob_metadata.header().block_group_table_size(), 40);
-        assert_eq!(blob_metadata.header().padded_size(), 8192);
-        assert_eq!(blob_metadata.chunks()[0].uncompressed_block_offset(), 0);
-        assert_eq!(blob_metadata.block_groups()[0].compressed_offset(), 8192);
-    }
-    #[test]
-    fn blob_writer_stores_duplicate_content_verbatim() {
-        let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob.data");
-        let file_a = dir.path().join("a.bin");
-        let file_b = dir.path().join("b.bin");
-        let body = pseudo_random_bytes((1 << 20) + 100);
-        fs::write(&file_a, &body).unwrap();
-        fs::write(&file_b, &body).unwrap();
-
-        let mut writer = BlobWriter::new_with_compressor(
-            &blob_path,
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        let meta_path = dir.path().join("blob.meta");
+        let mut writer = BlobWriter::new(
+            File::create(&blob_path).unwrap(),
+            TEST_CHUNK_SIZE,
             BlobMetadataCompressor::None,
+            BlobMetadataDigester::None,
+            true,
+            BlobLayout::ChunkGroups,
         )
         .unwrap();
         writer
-            .write_file_chunks(&file_a, body.len() as u64)
+            .write_reader_chunks(&mut &[7u8; 5000][..], 5000)
             .unwrap();
-        writer
-            .write_file_chunks(&file_b, body.len() as u64)
-            .unwrap();
-        writer.finish().unwrap();
-
-        let padded = align_up_usize(body.len(), EROFS_BLOCK_SIZE as usize)
-            .expect("alignment overflowed") as u64;
-        assert_eq!(writer.data_size(), 2 * padded);
-        assert_eq!(writer.total_blocks() * EROFS_BLOCK_SIZE as u64, 2 * padded);
-
-        let blob_metadata = writer.blob_metadata(0).unwrap();
-        assert_eq!(blob_metadata.header().chunk_count(), 4);
-        assert_eq!(blob_metadata.uncompressed_size(), 2 * padded);
-
-        let data = fs::read(&blob_path).unwrap();
-        assert_eq!(data.len() as u64, 2 * padded);
-        assert_eq!(&data[..body.len()], &body[..]);
-        assert!(data[body.len()..padded as usize].iter().all(|b| *b == 0));
-        assert_eq!(
-            &data[padded as usize..padded as usize + body.len()],
-            &body[..]
-        );
+        writer.write_blob_metadata(&meta_path).unwrap();
+        let meta = BlobMetadata::from_path(&meta_path, true).unwrap();
+        assert_eq!(meta.chunk_count(), 1);
+        assert_eq!(meta.digest_count(), 0);
+        assert_eq!(meta.chunk_size(), TEST_CHUNK_SIZE);
+        assert_eq!(meta.compressed_end(), 5000);
+        assert_eq!(meta.uncompressed_size(), TEST_CHUNK_SIZE as u64);
     }
 
     #[test]
-    fn blob_writer_keeps_zero_chunk_elision_and_stores_tail_padding() {
-        let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob.data");
-        let input_path = dir.path().join("input.bin");
-        let mut content = vec![b'a'; EROFS_BLOCK_SIZE as usize];
-        content.extend(vec![0u8; EROFS_BLOCK_SIZE as usize]);
-        content.extend(vec![b'c'; 100]);
-        fs::write(&input_path, &content).unwrap();
-
-        let mut writer = BlobWriter::new(&blob_path, EROFS_BLOCK_SIZE).unwrap();
-        let indexes = writer
-            .write_file_chunks(&input_path, content.len() as u64)
-            .unwrap();
+    fn raw_device_writes_padded_chunks_in_place() {
+        let mut writer = writer(
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            BlobLayout::RawDevice {
+                data_alignment: 0,
+                data_alignment_threshold: 0,
+            },
+        );
+        let file = vec![b'r'; 5000];
+        let mut addrs = write(&mut writer, &file);
+        addrs.extend(write(&mut writer, &file));
         writer.finish().unwrap();
-
-        assert_eq!(indexes.len(), 3);
-        assert_eq!(indexes[0].blkaddr, 0);
-        assert_eq!(indexes[1].blkaddr, EROFS_NULL_ADDR);
-        assert_eq!(indexes[2].blkaddr, 1);
-        assert_eq!(writer.total_blocks(), 2);
-
-        let data = fs::read(&blob_path).unwrap();
-        assert_eq!(data.len(), 2 * EROFS_BLOCK_SIZE as usize);
-        assert!(data[..EROFS_BLOCK_SIZE as usize].iter().all(|b| *b == b'a'));
-        let tail = &data[EROFS_BLOCK_SIZE as usize..];
-        assert!(tail[..100].iter().all(|b| *b == b'c'));
-        assert!(tail[100..].iter().all(|b| *b == 0));
+        // Addresses are immediate and resolution leaves them alone.
+        assert_eq!(resolve(&writer, &mut addrs), vec![0, 2]);
+        assert_eq!(writer.total_blocks(), 4);
+        assert_eq!(writer.writer.len(), 4 * EROFS_BLOCK_SIZE as usize);
+        assert!(writer.blob_metadata().is_err());
     }
 
     fn pseudo_random_bytes(len: usize) -> Vec<u8> {
@@ -894,5 +2072,500 @@ mod tests {
                 value as u8
             })
             .collect()
+    }
+
+    // ---- z_erofs LZ4 mode ----
+
+    use nydus_format::erofs::{
+        Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_HEAD1,
+        Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT,
+        Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
+    };
+
+    const Z_BASE: u64 = 16;
+    const BLOCK: usize = EROFS_BLOCK_SIZE as usize;
+
+    fn z_writer() -> BlobWriter<Vec<u8>> {
+        z_writer_with(ZAlgorithm::Lz4)
+    }
+
+    fn z_writer_with(algorithm: ZAlgorithm) -> BlobWriter<Vec<u8>> {
+        z_writer_configured(algorithm, 0, 0, 0)
+    }
+
+    fn z_writer_configured(
+        algorithm: ZAlgorithm,
+        fragment_threshold: u64,
+        data_alignment: u32,
+        data_alignment_threshold: u64,
+    ) -> BlobWriter<Vec<u8>> {
+        BlobWriter::new(
+            Vec::new(),
+            EROFS_BLOCK_SIZE,
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::None,
+            true,
+            BlobLayout::ZErofs {
+                algorithm,
+                pcluster: 16 * EROFS_BLOCK_SIZE,
+                base_blkaddr: Z_BASE,
+                fragment_threshold,
+                data_alignment,
+                data_alignment_threshold,
+            },
+        )
+        .unwrap()
+    }
+
+    /// Full lcluster indexes of a tail as (type, clusterofs, blkaddr or
+    /// delta0|delta1) triples.
+    fn lclusters(tail: &[u8]) -> Vec<(u16, u16, u32)> {
+        tail[Z_EROFS_MAP_HEADER_SIZE + 8..]
+            .chunks_exact(Z_EROFS_LCLUSTER_INDEX_SIZE)
+            .map(|index| {
+                (
+                    u16::from_le_bytes([index[0], index[1]]) & Z_EROFS_LI_LCLUSTER_TYPE_MASK,
+                    u16::from_le_bytes([index[2], index[3]]),
+                    u32::from_le_bytes(index[4..8].try_into().unwrap()),
+                )
+            })
+            .collect()
+    }
+
+    /// Decodes a COMPRESSED_FULL file the way the kernel does: PLAIN lclusters
+    /// are raw blocks, HEAD1 pclusters span the following NONHEAD lclusters,
+    /// take their physical size from the first NONHEAD's CBLKCNT (one block
+    /// when there is none) and hold LZ4 data tail-aligned behind zero padding.
+    fn decode_z_file(data: &[u8], tail: &[u8], size: usize) -> Vec<u8> {
+        let indexes = lclusters(tail);
+        assert_eq!(indexes.len(), size.div_ceil(BLOCK));
+        let mut out = Vec::with_capacity(size);
+        let mut i = 0;
+        while i < indexes.len() {
+            let (kind, clusterofs, blkaddr) = indexes[i];
+            assert_eq!(clusterofs, 0);
+            let phys = |blkaddr: u32| (blkaddr as u64 - Z_BASE) as usize * BLOCK;
+            let remaining = size - i * BLOCK;
+            match kind {
+                Z_EROFS_LCLUSTER_TYPE_PLAIN => {
+                    let start = phys(blkaddr);
+                    out.extend_from_slice(&data[start..start + remaining.min(BLOCK)]);
+                    i += 1;
+                }
+                Z_EROFS_LCLUSTER_TYPE_HEAD1 => {
+                    let mut j = i + 1;
+                    while j < indexes.len() && indexes[j].0 == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+                        j += 1;
+                    }
+                    let lclusters = j - i;
+                    assert!(lclusters >= 2, "a compressed pcluster spans >= 2 lclusters");
+                    let delta0 = indexes[i + 1].2 as u16;
+                    assert_ne!(delta0 & Z_EROFS_LI_D0_CBLKCNT, 0);
+                    let cblkcnt = (delta0 & !Z_EROFS_LI_D0_CBLKCNT) as usize;
+                    for k in 2..lclusters {
+                        let delta0 = indexes[i + k].2 as u16;
+                        let delta1 = (indexes[i + k].2 >> 16) as u16;
+                        assert_eq!((delta0 as usize, delta1 as usize), (k, lclusters - 1 - k));
+                    }
+                    let start = phys(blkaddr);
+                    let pcluster = &data[start..start + cblkcnt * BLOCK];
+                    let payload_start = pcluster.iter().position(|b| *b != 0).unwrap();
+                    let logical = remaining.min(lclusters * BLOCK);
+                    let payload = &pcluster[payload_start..];
+                    let decoded = match ZAlgorithm::from_type(tail[6] & 0x0f).unwrap() {
+                        ZAlgorithm::Lz4 => lz4_flex::block::decompress(payload, logical).unwrap(),
+                        ZAlgorithm::Zstd => zstd::bulk::decompress(payload, logical).unwrap(),
+                    };
+                    assert_eq!(decoded.len(), logical);
+                    out.extend_from_slice(&decoded);
+                    i = j;
+                }
+                other => panic!("unexpected lcluster type {other}"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn z_erofs_zstd_stops_fitting_a_nearly_full_pcluster() {
+        let pcluster = 16 * BLOCK;
+        let mut source = pseudo_random_bytes(2 * pcluster);
+        source[..1280].fill(0);
+        source[pcluster..].fill(0);
+        let mut compressor = ZCompressor::new(ZAlgorithm::Zstd, pcluster);
+        let (take, size, compressed) = compressor.fit_pcluster(&source, true, pcluster, pcluster);
+        assert_eq!(take, pcluster);
+        assert!((pcluster * 98 / 100..=pcluster).contains(&size));
+        assert_eq!(
+            zstd::bulk::decompress(&compressed[..size], take).unwrap(),
+            source[..take]
+        );
+    }
+
+    #[test]
+    fn z_erofs_zstd_hints_handle_entropy_changes_and_worker_reuse() {
+        let pcluster = 16 * BLOCK;
+        let mut source = pseudo_random_bytes(1 << 20);
+        source[..256 << 10].fill(0);
+        source[512 << 10..768 << 10].fill(0x33);
+        source.extend_from_slice(&pseudo_random_bytes(BLOCK + 37));
+        let mut writer = z_writer_with(ZAlgorithm::Zstd);
+        let handle = writer
+            .write_reader_z(&mut &source[..], source.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+        let meta = handle.resolve().unwrap();
+        let (data, _) = writer.into_parts();
+        assert_eq!(decode_z_file(&data, &meta.tail, source.len()), source);
+
+        for at_eof in [false, true] {
+            let mut input = source.clone();
+            if !at_eof {
+                input.truncate(input.len() / BLOCK * BLOCK);
+            }
+            let mut compressor = ZCompressor::new(ZAlgorithm::Zstd, pcluster);
+            let first = z_compress_segment(input.clone(), at_eof, pcluster, &mut compressor);
+            z_compress_segment(vec![0; Z_SEGMENT_SIZE], false, pcluster, &mut compressor);
+            z_compress_segment(
+                pseudo_random_bytes(Z_SEGMENT_SIZE),
+                false,
+                pcluster,
+                &mut compressor,
+            );
+            let repeated = z_compress_segment(input, at_eof, pcluster, &mut compressor);
+            assert_eq!(first.data, repeated.data);
+            assert_eq!(first.indexes, repeated.indexes);
+            assert_eq!(first.phys_blocks, repeated.phys_blocks);
+        }
+
+        let mut compressor = ZCompressor::new(ZAlgorithm::Zstd, pcluster);
+        for suggested_len in [0, 1, pcluster, usize::MAX] {
+            let (take, size, compressed) =
+                compressor.fit_pcluster(&source, true, pcluster, suggested_len);
+            assert!(take > 0 && take <= source.len());
+            assert!(take == source.len() || take % BLOCK == 0);
+            assert!(size <= pcluster);
+            assert_eq!(
+                zstd::bulk::decompress(&compressed[..size], take).unwrap(),
+                source[..take]
+            );
+        }
+    }
+
+    #[test]
+    fn z_erofs_zstd_pclusters_round_trip_and_declare_the_algorithm() {
+        let mut writer = z_writer_with(ZAlgorithm::Zstd);
+        assert_eq!(
+            writer.z_compr_cfgs(),
+            ZComprCfgs {
+                lz4_max_pclusterblks: None,
+                zstd_windowlog: Some(Z_ZSTD_WINDOWLOG),
+            }
+        );
+        // Noise (PLAIN), a compressible run (multi-block pclusters), and a
+        // file past the segment size so several segments are joined.
+        let noise = pseudo_random_bytes(2 * BLOCK + 17);
+        let mut mixed = pseudo_random_bytes(1 << 20);
+        for block in mixed.chunks_exact_mut(BLOCK) {
+            block[BLOCK / 8..].fill(0x33);
+        }
+        let mut long = Vec::with_capacity(Z_SEGMENT_SIZE + BLOCK);
+        while long.len() < Z_SEGMENT_SIZE + BLOCK {
+            long.extend_from_slice(&pseudo_random_bytes(3 * BLOCK)[..BLOCK]);
+            long.extend(std::iter::repeat_n(0x7eu8, 5 * BLOCK));
+        }
+        long.truncate(Z_SEGMENT_SIZE + BLOCK + 99);
+        let handles = [&noise, &mixed, &long].map(|src| {
+            writer
+                .write_reader_z(&mut &src[..], src.len() as u64)
+                .unwrap()
+        });
+        writer.finish().unwrap();
+        let metas = handles.map(|h| h.resolve().unwrap());
+        let (data, _) = writer.into_parts();
+
+        for meta in &metas {
+            assert_eq!(meta.tail[6], ZAlgorithm::Zstd.as_type());
+        }
+        let noise_indexes = lclusters(&metas[0].tail);
+        assert!(noise_indexes
+            .iter()
+            .all(|(kind, ..)| *kind == Z_EROFS_LCLUSTER_TYPE_PLAIN));
+        let heads = lclusters(&metas[1].tail)
+            .iter()
+            .filter(|(kind, ..)| *kind == Z_EROFS_LCLUSTER_TYPE_HEAD1)
+            .count();
+        assert!(heads > 1 && heads < 256, "{heads} zstd pclusters");
+        assert!(
+            metas[1].compressed_blocks < 128,
+            "compressed to less than half"
+        );
+        let total: u32 = metas.iter().map(|m| m.compressed_blocks).sum();
+        assert_eq!(data.len(), total as usize * BLOCK);
+        assert_eq!(decode_z_file(&data, &metas[0].tail, noise.len()), noise);
+        assert_eq!(decode_z_file(&data, &metas[1].tail, mixed.len()), mixed);
+        assert_eq!(decode_z_file(&data, &metas[2].tail, long.len()), long);
+    }
+
+    #[test]
+    fn z_erofs_incompressible_data_becomes_per_block_plain_lclusters() {
+        let mut writer = z_writer();
+        let src = pseudo_random_bytes(3 * BLOCK + 100);
+        let meta = writer
+            .write_reader_z(&mut &src[..], src.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+        let meta = meta.resolve().unwrap();
+        let (data, _) = writer.into_parts();
+
+        let indexes = lclusters(&meta.tail);
+        assert_eq!(indexes.len(), 4);
+        for (i, &(kind, _, blkaddr)) in indexes.iter().enumerate() {
+            assert_eq!(kind, Z_EROFS_LCLUSTER_TYPE_PLAIN);
+            assert_eq!(blkaddr as u64, Z_BASE + i as u64);
+        }
+        assert_eq!(meta.compressed_blocks, 4);
+        assert_eq!(data.len(), 4 * BLOCK);
+        assert_eq!(decode_z_file(&data, &meta.tail, src.len()), src);
+        assert!(
+            data[3 * BLOCK + 100..].iter().all(|b| *b == 0),
+            "tail block zero padded"
+        );
+    }
+
+    #[test]
+    fn z_erofs_compressible_data_packs_big_pclusters_with_cblkcnt() {
+        let mut writer = z_writer();
+        // A quarter noise, the rest zeros per block: roughly 4:1 (LZ4 stores
+        // the noise as literals), so 1MiB needs several multi-block
+        // pclusters.
+        let mut src = pseudo_random_bytes(1 << 20);
+        for block in src.chunks_exact_mut(BLOCK) {
+            block[BLOCK / 4..].fill(0);
+        }
+        let meta = writer
+            .write_reader_z(&mut &src[..], src.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+        let meta = meta.resolve().unwrap();
+        let (data, _) = writer.into_parts();
+
+        let indexes = lclusters(&meta.tail);
+        assert_eq!(indexes.len(), 256);
+        assert_eq!(indexes[0].0, Z_EROFS_LCLUSTER_TYPE_HEAD1);
+        let heads = indexes
+            .iter()
+            .filter(|(kind, ..)| *kind == Z_EROFS_LCLUSTER_TYPE_HEAD1)
+            .count();
+        assert!(
+            heads > 1 && heads < 256,
+            "{heads} pclusters for 256 lclusters"
+        );
+        assert_eq!(data.len(), meta.compressed_blocks as usize * BLOCK);
+        assert!(
+            meta.compressed_blocks < 256 / 2,
+            "compressed to less than half"
+        );
+        assert_eq!(decode_z_file(&data, &meta.tail, src.len()), src);
+    }
+
+    #[test]
+    fn z_erofs_files_larger_than_the_window_buffer_round_trip() {
+        let mut writer = z_writer();
+        // 5MiB mixes compressible runs and noise so the window compacts
+        // several times and both pcluster kinds occur.
+        let mut src = Vec::with_capacity(5 << 20);
+        for i in 0..(5 << 20) / BLOCK {
+            if i % 3 == 0 {
+                src.extend(pseudo_random_bytes(BLOCK).iter().skip(i % 17));
+                src.resize((i + 1) * BLOCK, 0x5a);
+            } else {
+                src.extend(std::iter::repeat_n((i % 200) as u8, BLOCK));
+            }
+        }
+        src.truncate((5 << 20) - 1234);
+        let meta = writer
+            .write_reader_z(&mut &src[..], src.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+        let meta = meta.resolve().unwrap();
+        let (data, _) = writer.into_parts();
+        assert_eq!(data.len(), meta.compressed_blocks as usize * BLOCK);
+        assert_eq!(decode_z_file(&data, &meta.tail, src.len()), src);
+    }
+
+    #[test]
+    fn z_erofs_alignment_pads_files_at_or_above_the_threshold() {
+        let mut writer =
+            z_writer_configured(ZAlgorithm::Lz4, 0, 8 * EROFS_BLOCK_SIZE, 2 * BLOCK as u64);
+        let small = pseudo_random_bytes(BLOCK);
+        let big = pseudo_random_bytes(3 * BLOCK);
+        let small_meta = writer
+            .write_reader_z(&mut &small[..], small.len() as u64)
+            .unwrap();
+        let big_meta = writer
+            .write_reader_z(&mut &big[..], big.len() as u64)
+            .unwrap();
+        let again = writer
+            .write_reader_z(&mut &small[..], small.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+        let (small_meta, big_meta, again) = (
+            small_meta.resolve().unwrap(),
+            big_meta.resolve().unwrap(),
+            again.resolve().unwrap(),
+        );
+        let (data, _) = writer.into_parts();
+
+        assert_eq!(lclusters(&small_meta.tail)[0].2 as u64, Z_BASE);
+        // The big file starts on the next 8-block boundary of the device
+        // data (offset 8, not of the image address space).
+        assert_eq!(lclusters(&big_meta.tail)[0].2 as u64, Z_BASE + 8);
+        assert!(
+            data[BLOCK..8 * BLOCK].iter().all(|b| *b == 0),
+            "gap is zero"
+        );
+        // Small files are not aligned, they follow immediately.
+        assert_eq!(lclusters(&again.tail)[0].2 as u64, Z_BASE + 11);
+        assert_eq!(writer_end(&data), 12);
+        assert_eq!(decode_z_file(&data, &big_meta.tail, big.len()), big);
+    }
+
+    fn writer_end(data: &[u8]) -> usize {
+        data.len() / BLOCK
+    }
+
+    #[test]
+    fn z_erofs_fragments_pack_small_files_into_a_block_padded_packed_inode() {
+        let mut writer = z_writer_configured(ZAlgorithm::Lz4, BLOCK as u64, 0, 0);
+        let a = b"first small file".to_vec();
+        let b = pseudo_random_bytes(BLOCK);
+        let c = b"third".to_vec();
+        let big = pseudo_random_bytes(BLOCK + 1);
+        let empty: Vec<u8> = Vec::new();
+        let ma = writer.write_reader_z(&mut &a[..], a.len() as u64).unwrap();
+        let mb = writer.write_reader_z(&mut &b[..], b.len() as u64).unwrap();
+        let mbig = writer
+            .write_reader_z(&mut &big[..], big.len() as u64)
+            .unwrap();
+        let mc = writer.write_reader_z(&mut &c[..], c.len() as u64).unwrap();
+        let mempty = writer.write_reader_z(&mut &empty[..], 0).unwrap();
+        let (packed, packed_size) = writer.finish_z_packed().unwrap().unwrap();
+        assert!(writer.finish_z_packed().unwrap().is_none(), "flushed once");
+        writer.finish().unwrap();
+        let (ma, mb, mbig, mc, mempty) = (
+            ma.resolve().unwrap(),
+            mb.resolve().unwrap(),
+            mbig.resolve().unwrap(),
+            mc.resolve().unwrap(),
+            mempty.resolve().unwrap(),
+        );
+        let (data, _) = writer.into_parts();
+
+        // Fragment tails: 8 bytes, bit 63 set, offset into the packed inode.
+        let fragment_offset = |meta: &ZFileMeta| {
+            assert_eq!(meta.tail.len(), Z_EROFS_MAP_HEADER_SIZE);
+            assert_eq!(meta.compressed_blocks, 0);
+            let head = u64::from_le_bytes(meta.tail[..].try_into().unwrap());
+            assert_ne!(head & Z_EROFS_FRAGMENT_INODE_FLAG, 0);
+            head ^ Z_EROFS_FRAGMENT_INODE_FLAG
+        };
+        assert_eq!(fragment_offset(&ma), 0);
+        assert_eq!(fragment_offset(&mb), a.len() as u64);
+        assert_eq!(fragment_offset(&mc), (a.len() + b.len()) as u64);
+        // Above the threshold: its own pclusters. Empty: a plain z tail with
+        // no lclusters.
+        assert_eq!(lclusters(&mbig.tail).len(), 2);
+        assert_eq!(mempty.tail.len(), Z_EROFS_MAP_HEADER_SIZE + 8);
+        assert_eq!(mempty.compressed_blocks, 0);
+
+        let logical = a.len() + b.len() + c.len();
+        assert_eq!(packed_size as usize, logical.next_multiple_of(BLOCK));
+        let decoded = decode_z_file(&data, &packed.tail, packed_size as usize);
+        assert_eq!(&decoded[..a.len()], &a[..]);
+        assert_eq!(&decoded[a.len()..a.len() + b.len()], &b[..]);
+        assert_eq!(&decoded[a.len() + b.len()..logical], &c[..]);
+        assert!(decoded[logical..].iter().all(|b| *b == 0));
+        assert_eq!(decode_z_file(&data, &mbig.tail, big.len()), big);
+    }
+
+    #[test]
+    fn z_erofs_fragments_recover_from_a_short_read_and_keep_content_in_order() {
+        for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+            let mut writer = z_writer_configured(algorithm, 64 << 10, 0, 0);
+            let content = pseudo_random_bytes(64 << 10);
+            let mut distinct = content.clone();
+            for index in 0..(Z_SEGMENT_SIZE * 2 / content.len()) {
+                distinct[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                writer
+                    .write_reader_z(&mut &distinct[..], distinct.len() as u64)
+                    .unwrap();
+            }
+            let size_before = writer.z_packed.as_ref().unwrap().size;
+            assert!(writer
+                .write_reader_z(&mut &content[..100], content.len() as u64)
+                .is_err());
+            assert_eq!(writer.z_packed.as_ref().unwrap().size, size_before);
+            let first = writer
+                .write_reader_z(&mut &content[..], content.len() as u64)
+                .unwrap();
+            // Identical content is stored again at its own offset.
+            let second = writer
+                .write_reader_z(&mut &content[..], content.len() as u64)
+                .unwrap();
+            assert_ne!(
+                first.resolve().unwrap().tail,
+                second.resolve().unwrap().tail
+            );
+            let (packed, packed_size) = writer.finish_z_packed().unwrap().unwrap();
+            writer.finish().unwrap();
+            let (data, _) = writer.into_parts();
+            let decoded = decode_z_file(&data, &packed.tail, packed_size as usize);
+            let mut chunks = decoded.chunks_exact(content.len());
+            for index in 0..(Z_SEGMENT_SIZE * 2 / content.len()) {
+                distinct[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                assert_eq!(chunks.next().unwrap(), &distinct);
+            }
+            assert_eq!(chunks.next().unwrap(), &content);
+            assert_eq!(chunks.next().unwrap(), &content);
+            assert_eq!(
+                packed_size as usize,
+                ((Z_SEGMENT_SIZE * 2 / content.len() + 2) * content.len()).next_multiple_of(BLOCK)
+            );
+        }
+    }
+
+    #[test]
+    fn z_erofs_fragments_beyond_the_pipeline_depth_commit_while_packing() {
+        let mut writer = z_writer_configured(ZAlgorithm::Lz4, 64 << 10, 0, 0);
+        // Enough small files to fill more segments than the pipeline holds,
+        // so submitting a packed segment has to commit an earlier packed one
+        // while the packed stream is being appended to.
+        let segments = writer.z_max_in_flight() + 2;
+        let mut file = pseudo_random_bytes(64 << 10);
+        let count = segments * Z_SEGMENT_SIZE / file.len();
+        let handles = (0..count)
+            .map(|index| {
+                file[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                writer
+                    .write_reader_z(&mut &file[..], file.len() as u64)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let (packed, packed_size) = writer.finish_z_packed().unwrap().unwrap();
+        writer.finish().unwrap();
+        let (data, _) = writer.into_parts();
+
+        assert_eq!(packed_size as usize, count * file.len());
+        for (i, handle) in handles.iter().enumerate() {
+            let meta = handle.resolve().unwrap();
+            let head = u64::from_le_bytes(meta.tail[..].try_into().unwrap());
+            assert_eq!(head ^ Z_EROFS_FRAGMENT_INODE_FLAG, (i * file.len()) as u64);
+        }
+        let decoded = decode_z_file(&data, &packed.tail, packed_size as usize);
+        for (index, chunk) in decoded.chunks_exact(file.len()).enumerate() {
+            file[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            assert_eq!(chunk, &file);
+        }
     }
 }

@@ -1,19 +1,22 @@
-mod block_group_lock;
 mod caches;
+mod chunk_group_lock;
 pub mod local;
+pub mod raw;
 pub mod remote;
 
 use std::io;
-use std::io::Cursor;
 use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::{BlobBackend, ReadContext, ReadKind};
-use nydus_format::blob::{BlobMetadata, BlobMetadataBlockGroup, BlobMetadataCompressor};
-use nydus_format::utils::SHA256_DIGEST_SIZE;
+use nydus_backend::BlobBackend;
+use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor};
+
+/// Default on-demand fetch size: the compressed bytes one backend read
+/// covers around a missed chunk group (see [`set_fetch_size`]). 2 MiB.
+pub const DEFAULT_FETCH_SIZE: u64 = 2 * 1024 * 1024;
 
 /// Fail with [`io::ErrorKind::TimedOut`] once a blob-level prefetch deadline
 /// has passed. Checked between batches, so the overshoot is bounded by one
@@ -30,6 +33,7 @@ pub(crate) fn check_prefetch_deadline(deadline: Option<Instant>) -> io::Result<(
 
 pub use caches::BlobCaches;
 pub use local::LocalBlobCache;
+pub use raw::RawDeviceBlobCache;
 pub use remote::RemoteBlobCache;
 
 pub trait BlobCache: Send + Sync {
@@ -52,12 +56,13 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
-    /// Fetch, decode, validate, cache, and mark ready every block group of this blob.
-    /// Used by blob-level prefetch after a filesystem is mounted. Aborts with
+    /// Fetch, decode, validate, cache, and mark ready every chunk group of
+    /// this blob. Used by blob-level prefetch after a filesystem is mounted.
+    /// Up to `workers` batches are fetched concurrently. Aborts with
     /// [`io::ErrorKind::TimedOut`] when `deadline` passes between batches.
-    fn prefetch_all(&self, deadline: Option<Instant>) -> io::Result<()>;
+    fn prefetch_all(&self, workers: usize, deadline: Option<Instant>) -> io::Result<()>;
 
-    /// Create (or open) this blob's cache data file sized to the dense
+    /// Create (or open) this blob's cache data file sized to the padded
     /// uncompressed address space and return its path. The file mirrors the
     /// decoded block address space, so it can directly back a virtio-pmem
     /// device whose guest reads land at `block * 4096`.
@@ -68,7 +73,7 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
-    /// Ensure every block group overlapping `[offset, offset + len)` of the dense
+    /// Ensure every chunk group overlapping `[offset, offset + len)` of the
     /// uncompressed address space is decoded, validated, and written to the
     /// cache data file. Idempotent and safe to call concurrently.
     fn ensure_range(&self, _offset: u64, _len: u64) -> io::Result<()> {
@@ -87,10 +92,53 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
-    /// True when this blob is an "ondemand" redirect blob whose block groups carry
-    /// data belonging to other source blob devices.
+    /// True when this blob is an `optimize` output: a REDIRECT blob whose
+    /// chunk groups copy other blobs' groups, which `prefetch.scope:
+    /// ondemand` streams into those source blobs' caches first.
     fn is_redirect(&self) -> bool {
         false
+    }
+
+    /// Whether chunk group `chunk_group_index` is already decoded into the
+    /// local cache, per the shared chunk group map; `false` for caches
+    /// without one. Never fetches.
+    fn is_chunk_group_ready(&self, _chunk_group_index: usize) -> bool {
+        false
+    }
+
+    /// Stream a REDIRECT blob's chunk groups: fetch them in batches of the
+    /// fetch size through up to `workers` threads, decode and validate each
+    /// against this blob's metadata, and hand the payload to `cb` in blob
+    /// order. Groups `skip` accepts are not fetched (a batch made entirely
+    /// of them costs no backend read); a group that fails to decode is
+    /// logged and skipped, while an error from `cb` aborts the stream.
+    fn for_each_redirect_chunk_group(
+        &self,
+        _workers: usize,
+        _deadline: Option<Instant>,
+        _skip: &(dyn Fn(&BlobMetadataChunkGroup) -> bool + Sync),
+        _cb: &(dyn Fn(&BlobMetadataChunkGroup, &[u8]) -> io::Result<()> + Sync),
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "for_each_redirect_chunk_group is not supported by this blob cache",
+        ))
+    }
+
+    /// Write the decoded payload of this blob's chunk group
+    /// `chunk_group_index`, obtained from a REDIRECT blob, into the local
+    /// cache and mark the group ready. The payload is validated against this
+    /// blob's own metadata first, so a stale or corrupt redirect copy never
+    /// reaches the cache. A no-op when the group is already ready.
+    fn fill_chunk_group_from_redirect(
+        &self,
+        _chunk_group_index: usize,
+        _payload: &[u8],
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "fill_chunk_group_from_redirect is not supported by this blob cache",
+        ))
     }
 
     /// Acquire the cross-process prefetch lock for this blob, blocking until
@@ -103,95 +151,49 @@ pub trait BlobCache: Send + Sync {
         None
     }
 
-    /// True when the block group at `block_group_index` is already decoded and resident in
-    /// this blob's cache. Reflects updates from other processes sharing the
-    /// same cache directory.
-    fn is_block_group_ready(&self, _block_group_index: usize) -> bool {
-        false
-    }
-
-    /// True when every block group of this blob is already decoded into the local
-    /// cache. Implementations must answer in O(1) (a single shared-flag load,
-    /// no bitmap scan), so per-event handlers — uffd page faults, fanotify
-    /// pre-content events, FUSE reads — can consult it on every request and
-    /// skip readiness bookkeeping entirely once the blob is fully warmed.
-    /// Sticky: once true it stays true, since ready block groups are never evicted
-    /// within a cache generation.
+    /// True when every chunk group of this blob is already decoded into the
+    /// local cache. Implementations must answer in O(1) (a single shared-flag
+    /// load, no bitmap scan), so per-event handlers — uffd page faults,
+    /// fanotify pre-content events, FUSE reads — can consult it on every
+    /// request and skip readiness bookkeeping entirely once the blob is fully
+    /// warmed. Sticky: once true it stays true, since ready chunk groups are
+    /// never evicted within a cache generation.
     fn is_all_ready(&self) -> bool {
         false
     }
-
-    /// Stream every block group of a redirect blob: fetch, decode, and validate
-    /// each block group, then hand `(block_group, decoded_bytes)` to `cb`. This never
-    /// touches the blob's own cache file. The block groups are split into
-    /// fixed-size batches and fetched/decoded concurrently with up to
-    /// `threads` worker threads. A blob small enough to fit in a single batch
-    /// (or `threads <= 1`) is streamed sequentially, since batching would
-    /// add registry connections without overlapping any work. Segments whose
-    /// block groups are all reported done by `skip` are not fetched at all, so a
-    /// process re-running the warmup behind another one's progress does close
-    /// to zero backend work. `cb` must be callable concurrently (it fills
-    /// distinct source-blob caches, which is safe); block groups that fail decode
-    /// or CRC validation are skipped with a warning so a single bad block group
-    /// cannot poison the whole redirect prefetch, and the first `cb` or
-    /// backend error aborts the stream. Aborts with
-    /// [`io::ErrorKind::TimedOut`] when `deadline` passes between batches.
-    fn for_each_redirect_block_group(
-        &self,
-        _threads: usize,
-        _deadline: Option<Instant>,
-        _skip: &(dyn Fn(&BlobMetadataBlockGroup) -> bool + Sync),
-        _cb: &(dyn Fn(&BlobMetadataBlockGroup, &[u8]) -> io::Result<()> + Sync),
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "redirect stream is not supported by this blob cache",
-        ))
-    }
-
-    /// Fill one block group of this blob's cache with decoded bytes provided by a
-    /// redirect blob. Validates length and CRC against this blob's own block group
-    /// metadata before writing, and is a no-op when the block group is already
-    /// ready.
-    fn fill_block_group_from_redirect(
-        &self,
-        _block_group_index: usize,
-        _decoded: &[u8],
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "redirect fill is not supported by this blob cache",
-        ))
-    }
 }
 
-/// Target uncompressed size of one redirect-prefetch batch. The ondemand
-/// (redirect) blob's block groups are split into batches of about this size and
-/// fetched concurrently by [`BlobCache::for_each_redirect_block_group`]; a blob that
-/// fits within a single batch is streamed sequentially instead.
-pub const REDIRECT_PREFETCH_BATCH_SIZE: u64 = 16 * 1024 * 1024;
-
-/// Number of earliest (access-ordered) block groups the parallel redirect prefetch
-/// fetches one-per-batch instead of bundling into full batches. These are
-/// the most latency-critical block groups — the workload faults them first — so a
-/// small, single-block group read lands them within roughly one round trip in the
-/// first wave of workers, rather than waiting for a whole batch-sized read.
-pub const REDIRECT_PREFETCH_RAMP_BLOCK_GROUPS: usize = 16;
-
-/// Block group together consecutive block groups whose accumulated uncompressed size reaches
-/// `target_uncompressed`, so each batch can be fetched with a single contiguous
-/// read. Each batch always contains at least one block group.
+/// Batch consecutive chunk groups of `blob_metadata` so each batch's
+/// compressed bytes reach `target_compressed` (one contiguous backend read
+/// each). Every batch holds at least one group; a zero target yields one
+/// group per batch. The first `ramp` groups are one batch each, so a worker
+/// pool lands the blob's head — the first-accessed data of an ondemand blob —
+/// within one round trip before the full-size batches stream the rest.
 pub fn plan_prefetch_batches(
-    block_groups: &[BlobMetadataBlockGroup],
-    target_uncompressed: u64,
+    blob_metadata: &BlobMetadata,
+    target_compressed: u64,
+    ramp: usize,
 ) -> Vec<Range<usize>> {
+    let count = blob_metadata.chunk_group_count();
     let mut batches = Vec::new();
     let mut start = 0usize;
-    while start < block_groups.len() {
+    while start < count && start < ramp {
+        batches.push(start..start + 1);
+        start += 1;
+    }
+    while start < count {
+        let base = blob_metadata
+            .chunk_group(start)
+            .expect("group index within the table")
+            .compressed_offset();
         let mut end = start + 1;
-        let mut accumulated = block_groups[start].uncompressed_size();
-        while end < block_groups.len() && accumulated < target_uncompressed {
-            accumulated = accumulated.saturating_add(block_groups[end].uncompressed_size());
+        while end < count {
+            let group = blob_metadata
+                .chunk_group(end)
+                .expect("group index within the table");
+            if group.compressed_range().end - base > target_compressed {
+                break;
+            }
             end += 1;
         }
         batches.push(start..end);
@@ -200,131 +202,110 @@ pub fn plan_prefetch_batches(
     batches
 }
 
-/// Plan the batches for a parallel redirect prefetch: the first `ramp_block_groups`
-/// access-ordered block groups are emitted one per batch (small, fast reads that
-/// land the earliest block groups within a single round trip), and the remaining
-/// block groups are bundled into `target_uncompressed`-sized batches for throughput.
-pub fn plan_redirect_batches(
-    block_groups: &[BlobMetadataBlockGroup],
-    target_uncompressed: u64,
-    ramp_block_groups: usize,
-) -> Vec<Range<usize>> {
-    let ramp = ramp_block_groups.min(block_groups.len());
-    let mut batches: Vec<Range<usize>> = (0..ramp).map(|i| i..i + 1).collect();
-    if ramp < block_groups.len() {
-        for batch in plan_prefetch_batches(&block_groups[ramp..], target_uncompressed) {
-            batches.push((ramp + batch.start)..(ramp + batch.end));
-        }
-    }
-    batches
-}
-
-/// Decode and validate a single block group from an in-memory window of compressed
-/// bytes that starts at blob offset `window_base_offset`, writing the validated
-/// uncompressed bytes into `decoded`. CRC failures are attributed to `backend`,
-/// which served the window.
-pub fn decode_block_group_from_window(
+/// Decode and validate chunk group `group` from an in-memory window of
+/// compressed bytes that starts at blob offset `window_base_offset`.
+/// Stored-plain groups borrow the window; compressed groups decode into
+/// `decoded` as scratch storage. The returned slice contains validated
+/// payload bytes. Checksum failures are attributed to `backend`, which
+/// served the window.
+pub fn decode_chunk_group_from_window<'a>(
     blob_metadata: &BlobMetadata,
     backend: &Arc<dyn BlobBackend>,
-    block_group: &BlobMetadataBlockGroup,
+    group: &BlobMetadataChunkGroup,
     window_base_offset: u64,
-    window_bytes: &[u8],
-    decoded: &mut Vec<u8>,
-) -> io::Result<()> {
-    let relative_start = block_group
+    window_bytes: &'a [u8],
+    decoded: &'a mut Vec<u8>,
+) -> io::Result<&'a [u8]> {
+    let relative_start = group
         .compressed_offset()
         .checked_sub(window_base_offset)
         .and_then(|start| usize::try_from(start).ok())
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "blob meta block group offset outside prefetch window",
+                "blob meta chunk group offset outside the fetched window",
             )
         })?;
-    let relative_end = relative_start + block_group.compressed_size() as usize;
+    let relative_end = relative_start + group.compressed_size() as usize;
     let encoded = window_bytes
         .get(relative_start..relative_end)
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "blob meta block group range outside prefetch window",
+                "blob meta chunk group range outside the fetched window",
             )
         })?;
-
-    let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
+    let payload_len = usize::try_from(blob_metadata.payload_size(group)).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "blob meta block group uncompressed size exceeds usize",
+            "blob meta chunk group payload size exceeds usize",
         )
     })?;
 
-    decoded.clear();
-    if is_stored_plain_block_group(blob_metadata, block_group) {
-        decoded.extend_from_slice(encoded);
+    let payload = if blob_metadata.is_plain(group) {
+        encoded
     } else {
-        decode_block_group(blob_metadata, encoded, decoded_len, decoded)?;
-    }
+        decoded.clear();
+        decoded.resize(payload_len, 0);
+        decode_chunk_group_into(blob_metadata.compressor(), encoded, decoded)?;
+        decoded.as_slice()
+    };
 
-    validate_block_group_with_metrics(backend, block_group, decoded)
+    validate_chunk_group_with_metrics(backend, blob_metadata, group, payload)?;
+    Ok(payload)
 }
 
+/// Job-owned fetch buffers. Large allocations are unmapped when the job ends.
 #[derive(Default)]
-pub struct BlockGroupBuffers {
-    encoded: Vec<u8>,
-    decoded: Vec<u8>,
+pub struct ChunkGroupBuffers {
+    encoded: ChunkGroupBuffer,
+    decoded: ChunkGroupBuffer,
 }
 
-pub fn fetch_decode_validate_block_group_into<'a>(
-    blob_id: &[u8; SHA256_DIGEST_SIZE],
-    blob_metadata: &BlobMetadata,
-    backend: &Arc<dyn BlobBackend>,
-    block_group: &BlobMetadataBlockGroup,
-    buffers: &'a mut BlockGroupBuffers,
-    kind: ReadKind,
-) -> io::Result<&'a [u8]> {
-    let ctx = ReadContext::block_group(
-        kind,
-        block_group.uncompressed_offset(),
-        block_group.uncompressed_size(),
-    );
-    let decoded_len = usize::try_from(block_group.uncompressed_size()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "blob meta block group uncompressed size exceeds usize",
-        )
-    })?;
-    if is_stored_plain_block_group(blob_metadata, block_group) {
-        buffers.decoded.resize(decoded_len, 0);
-        backend.read_range_into(
-            blob_id,
-            block_group.compressed_offset(),
-            &mut buffers.decoded,
-            ctx,
-        )?;
-        validate_block_group_with_metrics(backend, block_group, &buffers.decoded)?;
-        return Ok(&buffers.decoded);
+impl ChunkGroupBuffers {
+    /// Both buffers sized to `encoded_len` and `decoded_len`, borrowed
+    /// together so a caller can decode from one into the other.
+    pub(crate) fn resize_pair(
+        &mut self,
+        encoded_len: usize,
+        decoded_len: usize,
+    ) -> io::Result<(&mut [u8], &mut [u8])> {
+        let encoded = self.encoded.resize(encoded_len)?;
+        let decoded = self.decoded.resize(decoded_len)?;
+        Ok((encoded, decoded))
     }
+}
 
-    buffers
-        .encoded
-        .resize(block_group.compressed_size() as usize, 0);
-    backend.read_range_into(
-        blob_id,
-        block_group.compressed_offset(),
-        &mut buffers.encoded,
-        ctx,
-    )?;
+/// Large transient buffers bypass heap arenas and advise huge pages on Linux.
+#[derive(Default)]
+struct ChunkGroupBuffer {
+    heap: Vec<u8>,
+    mapping: Option<memmap2::MmapMut>,
+}
 
-    buffers.decoded.clear();
-    decode_block_group(
-        blob_metadata,
-        &buffers.encoded,
-        decoded_len,
-        &mut buffers.decoded,
-    )?;
-
-    validate_block_group_with_metrics(backend, block_group, &buffers.decoded)?;
-    Ok(&buffers.decoded)
+impl ChunkGroupBuffer {
+    fn resize(&mut self, len: usize) -> io::Result<&mut [u8]> {
+        if len >= 1024 * 1024 {
+            if self
+                .mapping
+                .as_ref()
+                .map_or(true, |mapping| mapping.len() < len)
+            {
+                let mapping = memmap2::MmapMut::map_anon(len)?;
+                #[cfg(target_os = "linux")]
+                if len >= 2 * 1024 * 1024 {
+                    let _ = mapping.advise(memmap2::Advice::HugePage);
+                }
+                self.mapping = Some(mapping);
+            }
+            self.heap = Vec::new();
+            Ok(&mut self.mapping.as_mut().expect("mapping allocated above")[..len])
+        } else {
+            self.mapping = None;
+            self.heap.resize(len, 0);
+            Ok(&mut self.heap)
+        }
+    }
 }
 
 /// Read `[offset, offset + len)` through `cache.read_at` into a per-thread
@@ -351,52 +332,59 @@ fn write_data_via_scratch<C: BlobCache + ?Sized>(
     })
 }
 
-/// Decompress one encoded block group into `decoded` (cleared by the caller)
-/// according to the compressor the blob meta header declares.
-fn decode_block_group(
-    blob_metadata: &BlobMetadata,
+/// Decompress one encoded chunk group payload into `decoded`, which must be
+/// exactly the payload's length.
+pub(crate) fn decode_chunk_group_into(
+    compressor: BlobMetadataCompressor,
     encoded: &[u8],
-    decoded_len: usize,
-    decoded: &mut Vec<u8>,
+    decoded: &mut [u8],
 ) -> io::Result<()> {
-    match blob_metadata.compressor() {
+    let decoded_len = decoded.len();
+    match compressor {
         BlobMetadataCompressor::Zstd => {
-            decoded.reserve(decoded_len);
-            zstd::stream::copy_decode(&mut Cursor::new(encoded), &mut *decoded)
+            let written = zstd::bulk::Decompressor::new()
+                .and_then(|mut decoder| decoder.decompress_to_buffer(encoded, decoded))
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            if written != decoded_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "zstd chunk group decompressed to an unexpected size",
+                ));
+            }
         }
         BlobMetadataCompressor::Lz4Block => {
-            decoded.resize(decoded_len, 0);
             let written = lz4_flex::block::decompress_into(encoded, decoded)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
             if written != decoded_len {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "lz4 block group decompressed to an unexpected size",
+                    "lz4 chunk group decompressed to an unexpected size",
                 ));
             }
         }
         BlobMetadataCompressor::None => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "blob meta declares no compressor but the block group is stored compressed",
+                "blob meta declares no compressor but the chunk group is stored compressed",
             ));
         }
     }
     Ok(())
 }
 
-/// Validate a decoded block group and, on CRC failure, attribute a CRC error metric to
-/// the backend that served the bytes. A read diverted from the backend's
-/// static target (e.g. a Dragonfly fallback to the origin) is attributed to
-/// the side that actually served it, via [`nydus_backend::last_read_served_by`].
-pub fn validate_block_group_with_metrics(
+/// Validate a decoded chunk group and, on a checksum failure, attribute a
+/// CRC error metric to the backend that served the bytes. A read diverted
+/// from the backend's static target (e.g. a Dragonfly fallback to the
+/// origin) is attributed to the side that actually served it, via
+/// [`nydus_backend::last_read_served_by`].
+pub fn validate_chunk_group_with_metrics(
     backend: &Arc<dyn BlobBackend>,
-    block_group: &BlobMetadataBlockGroup,
+    blob_metadata: &BlobMetadata,
+    group: &BlobMetadataChunkGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
-    if let Err(err) = validate_decoded_block_group(block_group, decoded) {
-        if is_block_group_crc_mismatch(&err) {
+    if let Err(err) = validate_decoded_chunk_group(blob_metadata, group, decoded) {
+        if is_chunk_group_crc_mismatch(&err) {
             let target =
                 nydus_backend::last_read_served_by().unwrap_or_else(|| backend.backend_target());
             nydus_telemetry::metrics::record_backend_crc_error(target);
@@ -406,132 +394,453 @@ pub fn validate_block_group_with_metrics(
     Ok(())
 }
 
-fn is_stored_plain_block_group(
+/// Expand a decoded chunk group into its slot: the chunks scattered onto
+/// their blocks with zero padding between them and after the last one.
+pub fn inflate_decoded_chunk_group(
     blob_metadata: &BlobMetadata,
-    block_group: &BlobMetadataBlockGroup,
-) -> bool {
-    blob_metadata.compressor() == BlobMetadataCompressor::None
-        || u64::from(block_group.compressed_size()) == block_group.uncompressed_size()
+    group: &BlobMetadataChunkGroup,
+    decoded: &[u8],
+) -> io::Result<Vec<u8>> {
+    let span = usize::try_from(group.uncompressed_size()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "blob meta chunk group slot exceeds usize",
+        )
+    })?;
+    let base = group.uncompressed_offset();
+    let mut padded = vec![0u8; span];
+    blob_metadata.for_each_decoded_chunk(
+        group.index() as usize,
+        decoded,
+        &mut |offset, bytes| {
+            let start = (offset - base) as usize;
+            padded[start..start + bytes.len()].copy_from_slice(bytes);
+            Ok(())
+        },
+    )?;
+    Ok(padded)
 }
 
-pub fn validate_decoded_block_group(
-    block_group: &BlobMetadataBlockGroup,
+/// Check a decoded chunk group: its length against the chunk table, its
+/// crc32c against the group entry (always — a crc32c over a group is
+/// cheap), and, unless checksum verification is skipped, every chunk's
+/// BLAKE3 digest when the blob carries digests.
+pub fn validate_decoded_chunk_group(
+    blob_metadata: &BlobMetadata,
+    group: &BlobMetadataChunkGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
-    let expected = block_group.uncompressed_size();
+    let expected = blob_metadata.payload_size(group);
     if decoded.len() as u64 != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "decoded blob meta block group length mismatch: expected {}, got {}",
+                "decoded blob meta chunk group length mismatch: expected {}, got {}",
                 expected,
                 decoded.len()
             ),
         ));
     }
-
-    if skip_verify_checksums() {
-        return Ok(());
-    }
-    let crc32 = crc32c::crc32c(decoded);
-    if crc32 != block_group.crc32() {
+    if crc32c::crc32c(decoded) != group.crc32() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            BlockGroupCrcMismatch,
+            ChunkGroupCrcMismatch,
         ));
     }
-
+    if skip_verify_checksums() || blob_metadata.digest_count() == 0 {
+        return Ok(());
+    }
+    let chunks = blob_metadata.chunks();
+    let mut at = 0usize;
+    for chunk in group.chunk_range() {
+        let len = chunks[chunk] as usize;
+        let digest = blob_metadata
+            .digest(chunk)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk digest missing"))?;
+        if blake3::hash(&decoded[at..at + len]).as_bytes() != digest.digest() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("blob chunk {chunk} digest mismatch"),
+            ));
+        }
+        at += len;
+    }
     Ok(())
 }
 
-/// Process-wide switch skipping block group checksum verification (the
-/// default), set at service startup from `storage.skip_verify_checksums`. A
-/// process serves one mount, so a per-cache flag would only thread the same
-/// value through every call site.
+/// Process-wide switch skipping per-chunk digest verification (the
+/// default), set at service startup from `storage.skip_verify_checksums`.
+/// The per-group crc32c is always checked. A process serves one mount, so a
+/// per-cache flag would only thread the same value through every call site.
 static SKIP_VERIFY_CHECKSUMS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
-/// Skip (or re-enable) block group checksum verification for this process.
+/// Skip (or re-enable) per-chunk digest verification for this process.
 pub fn set_skip_verify_checksums(skip: bool) {
     SKIP_VERIFY_CHECKSUMS.store(skip, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn skip_verify_checksums() -> bool {
+pub(crate) fn skip_verify_checksums() -> bool {
     SKIP_VERIFY_CHECKSUMS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Marker error wrapped in an [`io::Error`] when a decoded block group fails CRC
-/// validation, so callers with backend context can attribute the failure to the
-/// origin or a proxy via [`is_block_group_crc_mismatch`].
-#[derive(Debug)]
-struct BlockGroupCrcMismatch;
+/// Compressed bytes one on-demand backend read covers: the fetch-size-aligned
+/// cell of the blob's data region holding the missed chunk group, extended
+/// to whole groups and trimmed at groups already cached or in flight. Set
+/// at service startup from `storage.fetch_size`; zero means the missed
+/// group alone.
+static FETCH_SIZE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(DEFAULT_FETCH_SIZE);
 
-impl std::fmt::Display for BlockGroupCrcMismatch {
+/// Set the on-demand fetch size, in compressed bytes.
+pub fn set_fetch_size(bytes: u64) {
+    FETCH_SIZE.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn fetch_size() -> u64 {
+    FETCH_SIZE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Marker error wrapped in an [`io::Error`] when a decoded chunk group fails
+/// CRC validation, so callers with backend context can attribute the failure
+/// to the origin or a proxy via [`is_chunk_group_crc_mismatch`].
+#[derive(Debug)]
+struct ChunkGroupCrcMismatch;
+
+impl std::fmt::Display for ChunkGroupCrcMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "blob meta block group crc32 mismatch")
+        write!(f, "blob meta chunk group crc32 mismatch")
     }
 }
 
-impl std::error::Error for BlockGroupCrcMismatch {}
+impl std::error::Error for ChunkGroupCrcMismatch {}
 
-/// Whether an error denotes a block group CRC validation failure.
-pub fn is_block_group_crc_mismatch(err: &io::Error) -> bool {
+/// Whether an error denotes a chunk group CRC validation failure.
+pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
     err.get_ref()
-        .is_some_and(|inner| inner.is::<BlockGroupCrcMismatch>())
+        .is_some_and(|inner| inner.is::<ChunkGroupCrcMismatch>())
+}
+
+#[cfg(test)]
+pub(crate) mod test_util {
+    use nydus_format::blob::{
+        BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest,
+        BlobMetadataDigester,
+    };
+
+    /// Encode `groups` (each a list of chunks) with `compressor` into a data
+    /// region and the blob meta describing it, with `chunk_blocks`-block
+    /// slots and BLAKE3 digests when `digests` is set. Every group is stored
+    /// compressed when that shrinks it, plain otherwise.
+    pub(crate) fn encode_blob(
+        compressor: BlobMetadataCompressor,
+        chunk_blocks: u32,
+        groups: &[Vec<Vec<u8>>],
+        digests: bool,
+    ) -> (Vec<u8>, BlobMetadata) {
+        let mut data = Vec::new();
+        let mut specs = Vec::new();
+        let mut chunks = Vec::new();
+        let mut digest_table = Vec::new();
+        for group in groups {
+            let payload: Vec<u8> = group.concat();
+            let encoded = match compressor {
+                BlobMetadataCompressor::None => None,
+                BlobMetadataCompressor::Zstd => Some(zstd::bulk::compress(&payload, 0).unwrap()),
+                BlobMetadataCompressor::Lz4Block => Some(lz4_flex::block::compress(&payload)),
+            }
+            .filter(|encoded| encoded.len() < payload.len());
+            let stored = encoded.as_deref().unwrap_or(&payload);
+            data.extend_from_slice(stored);
+            specs.push(
+                BlobMetadataChunkGroup::new(
+                    stored.len() as u32,
+                    group.len() as u32,
+                    crc32c::crc32c(&payload),
+                    None,
+                )
+                .unwrap(),
+            );
+            for chunk in group {
+                chunks.push(chunk.len() as u32);
+                digest_table.push(BlobMetadataDigest::new(*blake3::hash(chunk).as_bytes()));
+            }
+        }
+        if !digests {
+            digest_table.clear();
+        }
+        let meta = BlobMetadata::new(
+            compressor,
+            if digests {
+                BlobMetadataDigester::Blake3
+            } else {
+                BlobMetadataDigester::None
+            },
+            chunk_blocks,
+            specs,
+            chunks,
+            digest_table,
+        )
+        .unwrap();
+        (data, meta)
+    }
+
+    /// The padded address space `groups` occupy with `chunk_blocks`-block
+    /// slots: what a fully filled cache file holds.
+    pub(crate) fn padded_image(chunk_blocks: u32, groups: &[Vec<Vec<u8>>]) -> Vec<u8> {
+        let slot = chunk_blocks as usize * 4096;
+        let mut image = vec![0u8; slot * groups.len()];
+        for (index, group) in groups.iter().enumerate() {
+            let mut at = index * slot;
+            for chunk in group {
+                image[at..at + chunk.len()].copy_from_slice(chunk);
+                at += chunk.len().div_ceil(4096) * 4096;
+            }
+        }
+        image
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_util::{encode_blob, padded_image};
     use super::*;
-    use nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE;
+    use nydus_backend::ReadContext;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
-
-    fn block_group(
-        uncompressed_block_offset: u64,
-        uncompressed_block_count: u32,
-    ) -> BlobMetadataBlockGroup {
-        BlobMetadataBlockGroup::new(
-            uncompressed_block_offset,
-            uncompressed_block_count,
-            uncompressed_block_offset * EROFS_BLOCK_SIZE as u64,
-            uncompressed_block_count * EROFS_BLOCK_SIZE,
-            0,
-            0,
-            0,
-            false,
-        )
-        .unwrap()
-    }
+    use nydus_format::utils::SHA256_DIGEST_SIZE;
 
     #[test]
-    fn plan_prefetch_batches_keeps_one_block_group_per_window_at_default_target() {
-        let blocks = DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE / EROFS_BLOCK_SIZE;
-        let block_groups = vec![
-            block_group(0, blocks),
-            block_group(blocks as u64, blocks),
-            block_group(2 * blocks as u64, blocks),
-        ];
-        let batches = plan_prefetch_batches(
-            &block_groups,
-            DEFAULT_NYDUS_BLOB_METADATA_BLOCK_GROUP_SIZE as u64,
+    fn group_buffer_reuses_and_releases_large_mappings() {
+        let mut buffer = ChunkGroupBuffer::default();
+        assert!(buffer.resize(0).unwrap().is_empty());
+        buffer.resize(4096).unwrap().fill(1);
+        assert!(buffer.mapping.is_none());
+        let large = buffer.resize(2 * 1024 * 1024).unwrap();
+        assert!(large.iter().all(|byte| *byte == 0));
+        large.fill(2);
+        let address = large.as_ptr();
+        let smaller = buffer.resize(1024 * 1024).unwrap();
+        assert_eq!(smaller.as_ptr(), address);
+        assert!(smaller.iter().all(|byte| *byte == 2));
+        assert_eq!(buffer.heap.capacity(), 0);
+        assert_eq!(
+            buffer.resize(3 * 1024 * 1024).unwrap().len(),
+            3 * 1024 * 1024
         );
-        assert_eq!(batches, vec![0..1, 1..2, 2..3]);
+        assert_eq!(buffer.resize(4096).unwrap(), &[0; 4096]);
+        assert!(buffer.mapping.is_none());
     }
 
     #[test]
-    fn plan_prefetch_batches_merges_small_block_groups_and_keeps_tail() {
-        let block_groups = vec![block_group(0, 1), block_group(1, 1), block_group(2, 1)];
-        // Target equal to two blocks: first two block groups merge, last is its own batch.
-        let target = 2 * EROFS_BLOCK_SIZE as u64;
-        let batches = plan_prefetch_batches(&block_groups, target);
-        assert_eq!(batches, vec![0..2, 2..3]);
+    fn group_buffer_preserves_contents_around_huge_page_size() {
+        let mut buffer = ChunkGroupBuffer::default();
+        for len in [
+            2 * 1024 * 1024 - 1,
+            2 * 1024 * 1024,
+            2 * 1024 * 1024 + 1,
+            4 * 1024 * 1024,
+        ] {
+            let bytes = buffer.resize(len).unwrap();
+            assert!(bytes.iter().all(|byte| *byte == 0));
+            bytes.fill(0xa5);
+            let address = bytes.as_ptr();
+            let bytes = buffer.resize(len).unwrap();
+            assert_eq!(bytes.as_ptr(), address);
+            assert!(bytes.iter().all(|byte| *byte == 0xa5));
+            buffer.resize(0).unwrap();
+            assert!(buffer.mapping.is_none());
+        }
     }
 
     #[test]
-    fn plan_prefetch_batches_isolates_block_group_larger_than_target() {
-        let block_groups = vec![block_group(0, 4), block_group(4, 1)];
-        let batches = plan_prefetch_batches(&block_groups, EROFS_BLOCK_SIZE as u64);
-        assert_eq!(batches, vec![0..1, 1..2]);
+    fn mapped_output_decodes_and_recovers_after_errors() {
+        let payload = vec![0x5a; 2 * 1024 * 1024];
+        let mut buffer = ChunkGroupBuffer::default();
+        for compressor in [
+            BlobMetadataCompressor::Zstd,
+            BlobMetadataCompressor::Lz4Block,
+        ] {
+            let encoded = match compressor {
+                BlobMetadataCompressor::Zstd => zstd::bulk::compress(&payload, 0).unwrap(),
+                BlobMetadataCompressor::Lz4Block => lz4_flex::block::compress(&payload),
+                BlobMetadataCompressor::None => unreachable!(),
+            };
+            for declared in [payload.len() - 1, payload.len() + 1, payload.len()] {
+                let output = buffer.resize(declared).unwrap();
+                output.fill(0xa5);
+                let result = decode_chunk_group_into(compressor, &encoded, output);
+                assert_eq!(result.is_ok(), declared == payload.len());
+                if result.is_ok() {
+                    assert_eq!(output, payload);
+                }
+            }
+            let output = buffer.resize(payload.len()).unwrap();
+            assert!(
+                decode_chunk_group_into(compressor, &encoded[..encoded.len() / 2], output).is_err()
+            );
+            decode_chunk_group_into(compressor, &encoded, output).unwrap();
+            assert_eq!(output, payload);
+        }
+    }
+
+    #[test]
+    fn window_decode_borrows_plain_payload_and_preserves_validation() {
+        let backend: Arc<dyn BlobBackend> = Arc::new(StaticTargetBackend);
+        let payload = vec![0x5a; 4096];
+        for compressor in [
+            BlobMetadataCompressor::None,
+            BlobMetadataCompressor::Zstd,
+            BlobMetadataCompressor::Lz4Block,
+        ] {
+            let (data, metadata) = encode_blob(compressor, 1, &[vec![payload.clone()]], false);
+            let group = metadata.chunk_group(0).unwrap();
+            // The window starts 37 bytes before the group.
+            let mut window = vec![0; 37];
+            window.extend_from_slice(&data);
+            let mut scratch = Vec::new();
+            let result = decode_chunk_group_from_window(
+                &metadata,
+                &backend,
+                &group,
+                0,
+                &window[37..],
+                &mut scratch,
+            )
+            .unwrap();
+            assert_eq!(result, payload);
+            if metadata.is_plain(&group) {
+                assert_eq!(compressor, BlobMetadataCompressor::None);
+                assert_eq!(result.as_ptr(), window[37..].as_ptr());
+                assert_eq!(scratch.capacity(), 0);
+            } else {
+                assert_eq!(scratch, payload);
+            }
+            // A window that does not reach the group's end is rejected.
+            assert!(decode_chunk_group_from_window(
+                &metadata,
+                &backend,
+                &group,
+                0,
+                &data[..data.len() - 1],
+                &mut scratch,
+            )
+            .is_err());
+            // A window starting past the group's offset is rejected.
+            assert!(decode_chunk_group_from_window(
+                &metadata,
+                &backend,
+                &group,
+                1,
+                &data,
+                &mut scratch,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn group_decode_is_bounded_by_the_declared_payload() {
+        let mut decoded = vec![0; 4096];
+        for size in [4096, 4095, 1024 * 1024] {
+            let encoded = zstd::bulk::compress(&vec![0x5a; size], 0).unwrap();
+            let result =
+                decode_chunk_group_into(BlobMetadataCompressor::Zstd, &encoded, &mut decoded);
+            assert_eq!(result.is_ok(), size == 4096);
+        }
+    }
+
+    #[test]
+    fn digests_are_checked_when_verification_is_on() {
+        set_skip_verify_checksums(false);
+        let chunks = vec![vec![1u8; 100], vec![2u8; 5000]];
+        let (data, metadata) = encode_blob(BlobMetadataCompressor::None, 4, &[chunks], true);
+        let group = metadata.chunk_group(0).unwrap();
+        validate_decoded_chunk_group(&metadata, &group, &data).unwrap();
+
+        // Same payload and crc, one wrong digest: the digest check fires and
+        // is not a crc mismatch.
+        let mut digests: Vec<_> = metadata.digests().to_vec();
+        digests[1] = nydus_format::blob::BlobMetadataDigest::new([0; 32]);
+        let wrong = BlobMetadata::new(
+            BlobMetadataCompressor::None,
+            nydus_format::blob::BlobMetadataDigester::Blake3,
+            4,
+            vec![nydus_format::blob::BlobMetadataChunkGroup::new(
+                data.len() as u32,
+                2,
+                group.crc32(),
+                None,
+            )
+            .unwrap()],
+            metadata.chunks().to_vec(),
+            digests,
+        )
+        .unwrap();
+        let wrong_group = wrong.chunk_group(0).unwrap();
+        let err = validate_decoded_chunk_group(&wrong, &wrong_group, &data).unwrap_err();
+        assert!(err.to_string().contains("chunk 1 digest mismatch"));
+        assert!(!is_chunk_group_crc_mismatch(&err));
+
+        // A corrupted payload fails the crc before any digest is consulted.
+        let mut corrupted = data.clone();
+        corrupted[0] ^= 0xff;
+        let err = validate_decoded_chunk_group(&metadata, &group, &corrupted).unwrap_err();
+        assert!(is_chunk_group_crc_mismatch(&err));
+        // A short payload fails the length check.
+        assert!(validate_decoded_chunk_group(&metadata, &group, &data[1..]).is_err());
+    }
+
+    #[test]
+    fn inflate_scatters_chunks_onto_their_blocks() {
+        let groups = vec![vec![vec![7u8; 100], vec![8u8; 4097]], vec![vec![9u8; 1]]];
+        let (data, metadata) = encode_blob(BlobMetadataCompressor::None, 4, &groups, false);
+        let image = padded_image(4, &groups);
+        let group0 = metadata.chunk_group(0).unwrap();
+        let group1 = metadata.chunk_group(1).unwrap();
+        let payload0 = &data[..group0.compressed_size() as usize];
+        let payload1 = &data[group0.compressed_size() as usize..];
+        assert_eq!(
+            inflate_decoded_chunk_group(&metadata, &group0, payload0).unwrap(),
+            image[..4 * 4096]
+        );
+        assert_eq!(
+            inflate_decoded_chunk_group(&metadata, &group1, payload1).unwrap(),
+            image[4 * 4096..]
+        );
+    }
+
+    #[test]
+    fn prefetch_batches_follow_the_compressed_target() {
+        let groups: Vec<Vec<Vec<u8>>> = (0..5u8).map(|i| vec![vec![i; 4096]]).collect();
+        let (_, metadata) = encode_blob(BlobMetadataCompressor::None, 1, &groups, false);
+        assert_eq!(
+            plan_prefetch_batches(&metadata, 0, 0),
+            vec![0..1, 1..2, 2..3, 3..4, 4..5]
+        );
+        assert_eq!(
+            plan_prefetch_batches(&metadata, 4096, 0),
+            vec![0..1, 1..2, 2..3, 3..4, 4..5]
+        );
+        assert_eq!(
+            plan_prefetch_batches(&metadata, 8192, 0),
+            vec![0..2, 2..4, 4..5]
+        );
+        assert_eq!(plan_prefetch_batches(&metadata, u64::MAX, 0), vec![0..5]);
+        // The ramp peels single groups off the head, then batches resume.
+        assert_eq!(
+            plan_prefetch_batches(&metadata, u64::MAX, 2),
+            vec![0..1, 1..2, 2..5]
+        );
+        assert_eq!(
+            plan_prefetch_batches(&metadata, 8192, 3),
+            vec![0..1, 1..2, 2..3, 3..5]
+        );
+        assert_eq!(
+            plan_prefetch_batches(&metadata, u64::MAX, 9),
+            vec![0..1, 1..2, 2..3, 3..4, 4..5]
+        );
+        let (_, empty) = encode_blob(BlobMetadataCompressor::None, 1, &[], false);
+        assert!(plan_prefetch_batches(&empty, 4096, 4).is_empty());
     }
 
     /// A backend whose reads are never exercised; only its static target matters.
@@ -562,22 +871,43 @@ mod tests {
 
     #[test]
     fn crc_failure_is_attributed_to_the_static_target_without_an_override() {
-        set_skip_verify_checksums(false);
         use nydus_telemetry::metrics::BackendTarget;
 
         let backend: Arc<dyn BlobBackend> = Arc::new(StaticTargetBackend);
+        let payload = vec![0u8; EROFS_BLOCK_SIZE as usize];
         // A zeroed block has crc32c != 0, so a group declaring crc 0 mismatches.
-        let block_group = block_group(0, 1);
-        let decoded = vec![0u8; EROFS_BLOCK_SIZE as usize];
+        let metadata = BlobMetadata::new(
+            BlobMetadataCompressor::None,
+            nydus_format::blob::BlobMetadataDigester::None,
+            1,
+            vec![
+                nydus_format::blob::BlobMetadataChunkGroup::new(EROFS_BLOCK_SIZE, 1, 0, None)
+                    .unwrap(),
+            ],
+            vec![EROFS_BLOCK_SIZE],
+            vec![],
+        )
+        .unwrap();
+        let group = metadata.chunk_group(0).unwrap();
         assert!(nydus_backend::last_read_served_by().is_none());
 
         let proxy_before = nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy);
-        let err = validate_block_group_with_metrics(&backend, &block_group, &decoded)
+        let err = validate_chunk_group_with_metrics(&backend, &metadata, &group, &payload)
             .expect_err("crc must mismatch");
-        assert!(is_block_group_crc_mismatch(&err));
+        assert!(is_chunk_group_crc_mismatch(&err));
         assert_eq!(
             nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy),
             proxy_before + 1
+        );
+        let mut scratch = Vec::new();
+        let err =
+            decode_chunk_group_from_window(&metadata, &backend, &group, 0, &payload, &mut scratch)
+                .expect_err("borrowed payload must still be validated");
+        assert!(is_chunk_group_crc_mismatch(&err));
+        assert_eq!(scratch.capacity(), 0);
+        assert_eq!(
+            nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy),
+            proxy_before + 2
         );
     }
 }
