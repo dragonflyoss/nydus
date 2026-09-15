@@ -6,6 +6,14 @@ This document describes the current `nydus fanotify` daemon, which serves a
 real kernel EROFS mount on demand through fanotify pre-content hooks.
 Requires Linux 6.15+.
 
+See the [documentation index](../README.md#documentation) and
+[current format contract](nydus.md#blob-meta-region-layout). The fanotify event
+ABI is independent of the chunk-table `.blob.meta` version (currently 1).
+
+Chunk-based groups decode to dense bytes and are scattered into padded cache
+blocks before `FAN_ALLOW`. Native `erofs-*` layers carry no blob meta and are not served on demand by this frontend; they are mounted through the kernel from a block device or a local store. This transport does not itself
+provide guest DAX.
+
 ## Overview
 
 The daemon serves a **multi-device** EROFS image. The bootstrap is a real local
@@ -33,7 +41,7 @@ nydus fanotify
       | fstat(fd) -> (dev, ino) -> blob device
       | Blobs::fetch(id, offset, count):
       |   backend fetch + decode + CRC validate
-      |   write decoded data to the blob's cache file
+      |   scatter chunks (or copy a z-device window) into the cache file
       v
 write(fan_fd, {fd, FAN_ALLOW}); close(fd)
       |
@@ -44,7 +52,7 @@ kernel resumes the blocked read -> EROFS returns bytes
 The kernel EROFS driver is unmodified. The filled cache file *is* the file the
 kernel reads, so no separate copy step is needed. A marked file faults on
 **every** read (a pre-content mark also disables readahead on it), so repeat
-reads of a filled range still generate events — but the block group map fast path
+reads of a filled range still generate events — but the chunk map fast path
 answers them immediately with no backend I/O.
 
 ## Multi-Device Model
@@ -58,11 +66,10 @@ Layout rules:
 - The **bootstrap** is a local EROFS file, mounted directly as the mount source.
   It is never marked and never served through fanotify.
 - Each **blob** is one EROFS `device=` slot, in device-table order. Its backing
-  file is the core's decoded cache file (`BlobInfo::cache_path`), sized to
-  the blob's decoded length.
-- Device slots keep their original 1-based index, including **redirect** slots,
-  so the EROFS `device=` index is never renumbered. A read routed to a redirect
-  slot is an invariant violation and is denied.
+  file is the core's cache file (`BlobInfo::cache_path`), sized to the
+  kernel-visible device of padded plain bytes.
+- Device slots keep their original 1-based index, so the EROFS `device=`
+  index is never renumbered.
 - A blob device is identified at fault time by the event fd's `(st_dev, st_ino)`,
   taken from the same descriptor that was confirmed to be a regular file of the
   expected size at startup (closes the path-stat/mark/open race).
@@ -97,11 +104,11 @@ decides a response purely from the parsed event, then admits the fetch:
 1. **Decide.** A non-`FAN_PRE_ACCESS` mask, or a missing/zero RANGE record, is a
    `FAN_DENY` (without an offset the fetch cannot be bounded).
 2. **Resolve device.** `fstat` the event fd for `(dev, ino)` and look up the
-   blob device. An unknown device, or a redirect slot, is denied.
+   blob device. An unknown device is denied.
 3. **Align.** The RANGE is aligned outward to 4 KiB EROFS blocks and clamped to
    the device size (the core requires block-aligned arguments). The device
    size is the fetch bound; there is no per-event byte cap.
-4. **Fast path.** If the authoritative block group map already covers the aligned range,
+4. **Fast path.** If the authoritative chunk map already covers the aligned range,
    the event is allowed immediately with no backend I/O.
 5. **Coalesce or admit.** If an identical `(blob, aligned range)` fetch is
    already in flight, the event attaches to it and is answered by that one
@@ -110,7 +117,7 @@ decides a response purely from the parsed event, then admits the fetch:
    fetch thread pool (`--fetch-concurrency`), which queues tasks (backpressure)
    rather than denying.
 6. **Fetch.** `Blobs::fetch(id, offset, count)` runs on a fetch worker
-   thread; it decodes, CRC-validates, dedups (idempotent, block-group-granular) and
+   thread; it decodes, CRC-validates, dedups (idempotent, chunk-group-granular) and
    writes the blob's cache file in place. The work is wrapped in `catch_unwind`.
 7. **Respond.** On completion the event is answered `FAN_ALLOW` on success, or
    `FAN_DENY` on a backend/range failure or a worker panic. A fetch in flight
@@ -123,9 +130,9 @@ decides a response purely from the parsed event, then admits the fetch:
 Duplicate work is removed at two layers. The event loop coalesces events sharing
 an identical `(blob, aligned range)` key, so a burst of readers faulting the same
 range dispatches a single fetch. Below that, the core de-duplicates at
-blob-meta block group granularity (single-flight), so faults for different ranges in
-the same block group also join one fetch. Distinct block groups fetch concurrently up to the
-fetch thread pool size (`max(ncpu, 64)`); a saturated pool queues tasks rather
+chunk group granularity (single-flight, one flight per fetch), so faults
+for different ranges in the same group or fetch also join one fetch. Distinct
+fetches run concurrently up to the fetch thread pool size (`max(ncpu, 64)`); a saturated pool queues tasks rather
 than denying reads.
 
 ### Response protocol
@@ -144,7 +151,6 @@ closing, so a reader is never left blocked.
 |---|---|
 | `InvalidRange` | missing/zero/out-of-device/overflow range, or non-pre-access mask |
 | `UnknownDevice` | event fd's `(dev, ino)` matched no known blob device |
-| `RedirectRead` | a read targeted a redirect slot the guest must not read |
 | `BackendFailure` | backend fetch, decode, CRC, or cache write failed |
 
 Overload is **not** a deny reason: admission is unbounded (the pending table
@@ -167,8 +173,8 @@ unbounded admission from exhausting file descriptors — each in-flight cold rea
 pins a dup'd event fd — the daemon raises its `RLIMIT_NOFILE` soft limit to the
 hard limit at startup.
 
-Per-event denies (`InvalidRange`, `UnknownDevice`, `RedirectRead`,
-`BackendFailure`) surface as `EPERM` to the offending `read()`. Most
+Per-event denies (`InvalidRange`, `UnknownDevice`, `BackendFailure`)
+surface as `EPERM` to the offending `read()`. Most
 applications do not retry `EPERM`, but these only fire on a malformed event or
 a backend failure, not on overload — admission is unbounded and the fetch pool
 backpressures readers rather than denying them.
@@ -271,21 +277,23 @@ core builds unless explicitly enabled.
 
 ## Constraints
 
-- The blob-meta block group (build-time `--block-group-size`, default 4 MiB) is the fetch and
-  cache-population unit, so one fault warms every chunk in the enclosing block group.
-  There is no runtime read-ahead knob; the tuning dial is the build-time block group
-  size.
+- The chunk group (one chunk-size slot, 1 MiB by default) is the
+  cache-population unit for chunk-based images and the runtime
+  `storage.fetch_size` (default 2 MiB of compressed bytes) the fetch unit:
+  one fault warms every group whose compressed range overlaps the missed
+  group's fetch-size-aligned cell, so the small files packed into the same
+  group and the neighbours in the same cell come along. The fetch size is
+  the read-ahead knob and is independent of the build-time chunk size.
 - A burst of concurrent faults is bounded by the fetch pool
   (`--fetch-concurrency`, default `max(ncpu, 64)`): a saturated pool queues
   fetches (the reader waits) rather than denying — no application-visible
   EPERM.
-- Fills persist in the on-disk cache file and its block group map. A daemon restart
-  re-serves already-fetched block groups with no backend traffic. A cold restart must
+- Fills persist in the on-disk cache file and its group map. A daemon restart
+  re-serves already-fetched groups with no backend traffic. A cold restart must
   remove all per-blob artifacts (`*.blob.data`, `*.blob.meta`, `*.group.map`,
-  `*.prefetch.lock`, `*.flight.lock`) together. Removing the data file alone is
-  detected — the block group map is reset in place so every process sharing it agrees
-  the blob is cold — but leaving a lock file behind while its blob is replaced
-  drops the cross-process fetch coordination for that blob.
+  `*.prefetch.lock`) together. Removing the data file alone is detected — the
+  group map is reset in place so every process sharing it agrees the blob is
+  cold.
 
 ## Known Limitations
 
@@ -313,7 +321,7 @@ core builds unless explicitly enabled.
 
   **Upstream fix proposed.** Ibrahim Jirdeh (Meta) posted a patch series
   ([v3, April 2026](https://lore.kernel.org/linux-fsdevel/20260416194844.3874004-1-ibrahimjirdeh@meta.com/))
-  adding two pieces:
+  adding two chunks:
   - `FAN_RESTARTABLE_EVENTS` — an opt-in `fanotify_init` flag that makes the
     group **fail-close**: on fd drop, pending permission events are *not*
     auto-allowed; they stay queued. This is the missing flag the current API

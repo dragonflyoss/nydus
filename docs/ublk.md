@@ -6,8 +6,11 @@ This document describes the `nydus ublk` target: how a Nydus image is exposed
 as a read-only `/dev/ublkbN` block device, how the kernel EROFS driver mounts
 it, and the operational constraints of running the daemon.
 
-The target is feature-gated behind the `ublk` Cargo feature and requires Linux
-6.0 or newer with the `ublk_drv` module loaded.
+The target is feature-gated behind the `ublk` Cargo feature. The driver requires
+Linux 6.0+; the flattened EROFS device-table mapping used here requires Linux
+6.4+.
+See [kernel requirements](nydus.md#kernel-compatibility-and-format-limits) and
+the [documentation index](../README.md#documentation).
 
 ## Overview
 
@@ -16,6 +19,10 @@ The target is feature-gated behind the `ublk` Cargo feature and requires Linux
 driver. The daemon registers a block device with the driver, receives I/O
 descriptors over `io_uring`, and answers them from the bootstrap file and the
 decoded blob cache files.
+
+For chunk-based images, `.blob.meta` v1 maps dense payloads to padded plain
+cache blocks. Native `erofs-*` layers carry no blob meta and are not served on demand by this frontend; they are mounted through the kernel from a block device or a local store. ublk copies block responses; it is not a guest
+DAX mapping transport.
 
 ```text
 mount -t erofs /dev/ublkbN /mnt
@@ -63,12 +70,11 @@ Layout rules:
 
 - The bootstrap starts at device offset `0` and occupies its file size. The
   EROFS superblock therefore sits where the kernel expects it.
-- Every non-redirect blob starts at the `mapped_offset` recorded by its EROFS
-  device slot. Blob order in the table is not used to infer offsets.
+- Every blob (the "ondemand" blob of an optimized image included) starts at
+  the `mapped_offset` recorded by its EROFS device slot. Blob order in the
+  table is not used to infer offsets.
 - Blob length is the decoded cache file size (`blocks * 4096`).
 - Gaps between mapped parts are holes served from `/dev/zero`.
-- Redirect ("ondemand") blobs produced by `nydus optimize` are excluded: no
-  chunk index points at them, and they only feed the phase-0 prefetch.
 - The device size is the maximum part end rounded up to the logical block
   size.
 
@@ -113,7 +119,7 @@ A block read is served in three steps:
 1. **Resolve.** `NydusCore::fetch_flat_ranges` maps the requested device
    range onto a list of `(fd, offset, length)` ranges over the bootstrap file,
    the blob cache files, and `/dev/zero`. Ranges backed by a blob are fetched,
-   decoded and CRC-validated before the descriptor is handed back, so a cache
+  decoded, CRC-validated and scattered to their cache offsets before the descriptor is handed back, so a cache
    miss is resolved inline.
 2. **Copy.** Each range is copied into the request buffer out of a
    `MAP_SHARED`/`PROT_READ` mapping of its backing file. Mappings are created
@@ -135,9 +141,10 @@ thread's CPU. Copying out of a shared mapping of the same page cache costs
 about half as much per 4 KiB (464 ns vs 977 ns measured on the benchmark host),
 which translates directly into IOPS.
 
-The mappings are safe to hold because the backing files never shrink: the
-bootstrap is opened read-only, and a blob cache file is sized to the blob's
-dense address space when it is prepared. There is no `SIGBUS` window.
+The service assumes backing files are not replaced or truncated while mapped.
+Cache files are sized to their kernel-visible device before serving. External
+truncation violates that contract and can cause `SIGBUS`; do not clear a live
+daemon's cache.
 
 ## Startup and Shutdown
 
@@ -152,7 +159,8 @@ printed. That means:
 The daemon prints the device path to stdout as a single line so callers can
 script against it. Structured logs go to the log directory (and to stdout when
 `--console` is set), so consumers should match the `/dev/ublkb` prefix rather
-than assuming the path is the first line.
+than assuming the path is the first line. Device-node creation by udev can lag
+the announcement; wait for that exact node before mounting.
 
 On `SIGTERM`, `SIGINT` or `SIGHUP` the daemon stops the queues and deletes the
 device. **Unmount before stopping the daemon**: the kernel cannot delete a
@@ -184,7 +192,8 @@ Teardown:
 
 ```bash
 sudo umount /mnt/nydus
-sudo pkill -f 'nydus ublk'
+# Set NYDUS_PID to the PID of this daemon only.
+sudo kill -TERM "$NYDUS_PID"
 ```
 
 Options:
@@ -219,7 +228,7 @@ scattered one.
 | Kernel interface | block device | FUSE | EROFS multi-device + fanotify | userfaultfd |
 | Filesystem | kernel EROFS | userspace | kernel EROFS | guest EROFS |
 | Per-file-op round trip | no | yes | no | no |
-| Kernel requirement | 6.0 (`ublk_drv`) | any | 6.15 | 5.x + virtio-pmem |
+| Kernel requirement | driver 6.0; EROFS flatdev 6.4 | FUSE support | 6.15 | host UFFD + guest EROFS flatdev 6.4; DAX configuration separately |
 | Writable | no (stack overlayfs) | no | no | no |
 | Typical use | host mount, snapshotter rootfs | development, portability | host mount on new kernels | microVM guests |
 
@@ -236,7 +245,7 @@ cargo test --features cli,ublk -p nydus ublk
 
 # End-to-end: build an image, serve it, mount it with the kernel EROFS driver,
 # and compare the tree against a FUSE mount of the same image.
-# Requires root and Linux 6.0+ with ublk_drv; skips itself otherwise.
+# Requires root, ublk_drv, and an EROFS kernel with flatdev support.
 make test-ublk
 ```
 
@@ -248,5 +257,5 @@ make test-ublk
 - One device per daemon process.
 - User recovery (`UBLK_F_USER_RECOVERY`) is not implemented: if the daemon
   dies, in-flight and subsequent I/O to the device fails.
-- No `dm-verity` integration; integrity comes from the per-block-group CRC32C
+- No `dm-verity` integration; integrity comes from the per-chunk-group CRC32C
   validation on the fetch path.

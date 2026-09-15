@@ -1,5 +1,11 @@
 # Nydus Design
 
+Current contract for this branch. Start at the
+[documentation index](../README.md#documentation) for the EROFS format and
+transport guides.
+The private `.blob.meta` chunk-table layout is version **1**; older development
+layouts are unsupported even when their version field is also 1.
+
 ## Status
 
 This document describes the current nydus artifact model, blob meta format and
@@ -8,6 +14,7 @@ runtime read path.
 The user-facing commands are:
 
 - `nydus build`
+- `nydus export`
 - `nydus check`
 - `nydus merge`
 - `nydus optimize`
@@ -28,15 +35,18 @@ encoded ranges in the stored data region.
 - Allow an optional standalone `bootstrap` artifact for remote metadata-only use.
 - Make `fuse` support either a direct blob path or a bootstrap plus blob-dir.
 - Persist a stable blob identifier inside bootstrap metadata.
-- Keep EROFS file chunk indexes logical and map a block to its compression block group
-	in O(1) via constant-sized block groups.
+- Keep EROFS file chunk indexes logical and map a block to its compression chunk
+	group by a shift: every group owns one chunk-size slot of the address space,
+	so no index is derived at open and no lookup scans.
 - Support compressed blob data while preserving a plain decoded cache artifact
 	for EROFS compatibility and repeated reads.
 
 ## Non-goals
 
 - Preserve on-disk compatibility with earlier Nydus image formats (RAFS v5/v6).
-- Introduce cross-layer global deduplication beyond the current single-build dedup.
+- Introduce chunk-content or cross-layer global deduplication.
+- Lazily load native `erofs-*` layers through the nydus daemons: they are
+	block-device artifacts the kernel mounts directly.
 - Rework the full EROFS on-disk layout to match every upstream variant.
 
 ## Kernel Compatibility and Format Limits
@@ -162,7 +172,7 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus` | boundary | The five mount services (`fuse/`, `fanotify/`, `nbd/`, `ublk/`, `uffd/`), the build/optimize/check/export pipelines, and the CLI binary | each service's `core.rs` converts `Error` ↔ `errno` explicitly |
 | `nydus-core` | both | Image runtime facade: `NydusCore`, `ErofsReader`, path walk (`entry`), flattened device view (`extent`), blob table (`blob`) | `Error` for assembly/queries, `io::Result` on the read path |
 | `nydus-config` | control | Loads the YAML config file and converts it into the plain config structs owned by the crates below | `Error` |
-| `nydus-storage` | data | Local cache and reuse: `LocalBlobCache` (block group decode, CRC, on-demand fill), `BlobCaches`, block group ready-bitmaps, prefetch, access tracing | `io::Result` only |
+| `nydus-storage` | data | Local cache and reuse: `LocalBlobCache` (chunk group decode, CRC, on-demand fill), `BlobCaches`, chunk group ready-bitmaps, prefetch, access tracing | `io::Result` only |
 | `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
@@ -212,12 +222,14 @@ A nydus image exists in exactly two on-disk layouts, and the `--blob`,
 
 `nydus build <--blob <BLOB>|--blob-dir <BLOB_DIR>> [OPTIONS] <SOURCE>`
 
-The `nydus build` command builds a source directory into the nydus EROFS
-format, in either image layout: `--blob` writes the single-file image,
-`--blob-dir` deposits the full blob into a store (see Image layouts above),
-and `--bootstrap` additionally emits the standalone metadata-only entry point.
-The reverse direction — turning a nydus full blob back into an OCI layer tar
-stream — is `nydus export` (see below).
+The `nydus build` command builds a source into the nydus EROFS format, in
+either image layout: `--blob` writes the single-file image, `--blob-dir`
+deposits the full blob into a store (see Image layouts above), and
+`--bootstrap` additionally emits the standalone metadata-only entry point.
+The source is a directory (`--source-type dir`, the default) or one OCI layer
+tarball (`--source-type tar`), see [Sources](#sources) below. The reverse
+direction — turning a nydus full blob back into an OCI layer tar stream — is
+`nydus export` (see below).
 
 Current CLI help:
 
@@ -228,25 +240,33 @@ Build a nydus filesystem image
 Usage: nydus build [OPTIONS] <--blob <BLOB>|--blob-dir <BLOB_DIR>> <SOURCE>
 
 Arguments:
-	<SOURCE>  Specify the source directory to build the nydus image from
+	<SOURCE>  Specify the source to build the nydus image from: a directory (--source-type dir) or one OCI layer tarball, gzip or plain (--source-type tar)
 
 Options:
+	--source-type <SOURCE_TYPE>
+		Specify the source type. tar stream-converts one OCI layer tarball: file data is written to the blob as the tar is read, no rootfs is staged on disk, and whiteout entries are kept for the merge subcommand [env: NYDUS_BUILD_SOURCE_TYPE=] [default: dir] [possible values: dir, tar]
 	--blob <BLOB>
 		Specify the file path to save the image as a single self-contained full blob; if the path is an existing FIFO the blob is streamed into it [env: NYDUS_BUILD_BLOB=]
 	--blob-dir <BLOB_DIR>
 		Specify the content-addressed store directory to save the full blob into, named by its SHA256, so mounts resolve it through the bootstrap and images share the store [env: NYDUS_BUILD_BLOB_DIR=]
+	--erofs-data-alignment <EROFS_DATA_ALIGNMENT>
+		With an erofs-* compressor, start files of at least this size on this boundary of the layer data (a power of two multiple of 4KiB), so block-level dedup and snapshots of the volume see identical files at stable offsets, e.g. 2mib for cloud disks deduplicating at 2MiB; 0 (the default) packs files back to back [env: NYDUS_BUILD_EROFS_DATA_ALIGNMENT=] [default: 0]
 	--bootstrap <BOOTSTRAP>
 		Specify the file path to save the standalone bootstrap: the store layout's entry point, whose device table records each blob's SHA256 [env: NYDUS_BUILD_BOOTSTRAP=]
 	--chunk-size <CHUNK_SIZE>
-		Specify the file chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned). The value needs to be set with human readable format, for example: 4kib, 1mib [env: NYDUS_BUILD_CHUNK_SIZE=] [default: 1MiB]
-	--block-group-size <BLOCK_GROUP_SIZE>
-		Specify the uncompressed size of each block group, the unit of compression and of a single backend read (must be a power of two, >= 1MiB, and >= the chunk size). The value needs to be set with human readable format, for example: 4mib, 16mib [env: NYDUS_BUILD_BLOCK_GROUP_SIZE=] [default: 4MiB]
+		Specify the chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned; default 1MiB): the largest chunk a file is cut into for the chunk-based layouts (none, zstd, lz4, erofs-none), and the size of every chunk group (the unit of compression, on-demand fetch and cache readiness): a chunk that fills a group is a group of its own, smaller chunks are packed into shared groups. It does not apply to erofs-lz4 and erofs-zstd, whose files are pclusters. The value needs to be set with human readable format, for example: 512kib, 1mib, 2mib [env: NYDUS_BUILD_CHUNK_SIZE=]
 	--compressor <COMPRESSOR>
-		Specify the algorithm to compress data chunks [env: NYDUS_BUILD_COMPRESSOR=] [default: zstd] [possible values: none, zstd]
+		Specify the data layout and compression. zstd, lz4 and none build chunk groups the nydus daemon fetches on demand and decodes, described by the blob meta. The erofs-* values instead build a native EROFS layer without blob meta: the full blob's data region is the raw layer device, so the store file serves as a device= of a kernel block-device mount and the nydus daemons never fetch it on demand. erofs-none stores the chunks uncompressed at their block addresses; erofs-lz4 and erofs-zstd compress file data into native LZ4 or zstd pclusters the kernel decompresses (64KiB pclusters, files up to 64KiB packed into the shared fragment inode; kernel mounts need 6.1+ for erofs-lz4 and 6.10+ for erofs-zstd). --digester does not apply to the erofs-* values [env: NYDUS_BUILD_COMPRESSOR=] [default: zstd] [possible values: none, zstd, lz4, erofs-none, erofs-lz4, erofs-zstd]
+	--digester <DIGESTER>
+		Specify the chunk digest algorithm recorded in the blob meta, one digest per chunk; "none" records no digests and skips hashing, for content already verified upstream [env: NYDUS_BUILD_DIGESTER=] [default: blake3] [possible values: blake3, none]
+	--blob-id <BLOB_ID>
+		Name the blob with this 64-hex id (e.g. the OCI layer digest) instead of its SHA256, skipping the data and full-blob hashing; with --blob-dir an existing entry of that name is replaced. Only local stores resolve such blobs (the id is the file name under --blob-dir); a registry serves blobs by their real digest [env: NYDUS_BUILD_BLOB_ID=]
 	--exclude <EXCLUDE>
 		Specify the absolute or current-working-directory-relative paths to exclude. May be specified multiple times. Entries inside the source tree are omitted from the blob and the resulting filesystem tree entirely
 	-l, --log-level <LOG_LEVEL>
 		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_BUILD_LOG_LEVEL=] [default: info]
+	-h, --help
+		Print help (see more with '--help')
 ```
 
 Current implementation notes:
@@ -254,35 +274,139 @@ Current implementation notes:
 - Exactly one of `--blob` or `--blob-dir` is required (enforced at parse time).
 - `--bootstrap` is optional and emits a standalone metadata-only artifact.
 - `--chunk-size` defaults to `1MiB`, accepts human readable sizes (e.g. `4kib`,
-	`1mib`) or plain byte counts, and controls EROFS file chunk
-	indexes (the unit of file splitting and per-chunk BLAKE3 digests). Chunks are
-	independent of compression block groups and may straddle block group boundaries, so a
-	smaller chunk size does not fragment blob_meta into tiny compression units.
-- `--block-group-size` defaults to `4MiB` (same size formats) and sets the uncompressed size
-	of each blob_meta block group (the unit of compression and of a single backend
-	read). Block groups are formed by packing whole decoded blocks up to this size
-	regardless of chunk boundaries, so every block group but the last is exactly this
-	many blocks. Like `--chunk-size` it must be a power of two (the blob meta
-	header stores both sizes as log2 exponents); it must also be at least 1 MiB
-	and at least `--chunk-size`. Raising `--chunk-size` above 1 MiB requires
-	raising `--block-group-size` to match or exceed it.
+	`1mib`) or plain byte counts, and sets two things at once: the unit files
+	are split into *chunks* at for the EROFS chunk indexes (a file of at most
+	the chunk size is one chunk), and the size of every blob meta *chunk
+	group* — the unit of compression, of an on-demand read, of cache
+	readiness and of the ondemand blob. A chunk that fills a group is a group
+	of its own; smaller chunks (files under the chunk size, file tails) are
+	packed into shared groups, see [Chunk groups](#chunk-groups). It must be
+	a power of two of at least 4 KiB (the blob meta header stores it as a
+	log2 block count).
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
 - `--blob-dir` stores the full blob under `<blob-dir>/<full_blob_sha256>` and a
 	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
-- `--compressor zstd` attempts to compress each blob_meta block group as one
-	unit. If the compressed bytes are larger than 70% of the uncompressed block group,
-	the block group is stored plain and its blob_meta block group entry has
-	`compressed_size == uncompressed_block_count * 4096`.
-- `--compressor none` writes every block group plain.
+- `--compressor zstd` (or `lz4`) compresses each chunk group on its own. If
+	the compressed group is larger than 70% of its payload, the group is
+	stored plain and its blob_meta entry has `compressed_size == payload_size`
+	(its chunks then sit at their dense offsets).
+- `--compressor none` writes every chunk group plain.
 - `--exclude <path>` omits paths inside the source tree from the blob and the
 	resulting filesystem tree entirely. It accepts absolute or
 	current-working-directory-relative paths and may be repeated.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
-	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_count`,
-	`block_group_count`, `chunk_digester`, `chunk_compressor`,
-	compressed/uncompressed totals, and full blob region offsets and block counts.
+	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_group_count`,
+	`chunk_count`, `digest_count`, `chunk_compressor`, payload/compressed/
+	uncompressed totals, and full blob region offsets and block counts.
+
+#### Sources
+
+- `--source-type dir` (default) walks a directory tree. Whiteouts present in an
+	unpacked layer directory (OCI `.wh.` files or overlayfs character devices)
+	are stored as they are; `nydus merge` applies them.
+- `--source-type tar` stream-converts exactly one OCI layer tarball. The source
+	is sniffed for the gzip magic and may be plain tar or gzip, and it may be a
+	FIFO: nothing is seeked, so a layer can be piped in as it downloads. File
+	data is chunked into the blob the moment each tar entry is read and only the
+	directory tree (names, attributes, chunk indexes) is kept in memory, so no
+	rootfs is ever unpacked to disk. Hardlinks resolve to the already seen
+	target, PAX `SCHILY.xattr.*` records become EROFS xattrs, and `.wh.`
+	whiteout entries are kept as empty regular files for `merge`. The result is
+	one single-layer image per tarball; stack the layers with `nydus merge`.
+	Entry types nydus cannot represent (GNU sparse, volume headers) fail the
+	build rather than being dropped silently.
+- `--exclude` applies to directory sources only.
+
+#### Build speed knobs
+
+The default build hashes every chunk with BLAKE3 and the output with SHA256
+(data region, full blob). Two flags trade those guarantees for speed when the
+caller already trusts the content:
+
+- `--digester none` records no chunk digests and skips BLAKE3 (by default
+	every chunk gets one). The blob meta header then carries no digester bit
+	and an empty digest table. No mount path verifies chunk digests today;
+	`nydus check` reports the digester and the digest count.
+- `--blob-id <64-hex>` (optionally prefixed `sha256:`) names the blob up front,
+	e.g. with the OCI layer digest, and skips both SHA256 passes. The id is
+	written to the device slot tag, used as the file name under `--blob-dir`
+	(replacing an existing entry) and reported as both digests. Because it is
+	not a digest of the bytes, only local stores can resolve such a blob by
+	name; a registry serves blobs under their real digest, so do not use
+	`--blob-id` for images that will be pushed. `nydus check` reports these
+	slots as `named` and unverified.
+- `sha2` is built with its `asm` feature (SHA2 instructions on aarch64) and
+	gzip layers are inflated by zlib-ng.
+
+#### Chunk groups
+
+Chunk groups do not store the padded address space byte for
+byte. Every regular file is cut into *chunks* of at most `--chunk-size`
+bytes, each chunk starts on its own 4KiB block of the address space the
+EROFS chunk indexes point into (so the bootstrap, DAX and the 5.16+ kernel
+requirement are exactly as before), but the encoded stream carries the
+chunks' bytes back to back, without the tail-block padding after each file
+(see [Blob meta region layout](#blob-meta-region-layout)):
+
+- Every chunk group owns one chunk-size *slot* of the address space: group
+	`i` covers the blocks `[i * S, (i + 1) * S)` where `S` is `--chunk-size`
+	in 4 KiB blocks, so an address names its group by division and the group
+	table needs no address column. A chunk that fills a slot (a whole chunk of
+	a large file) is a group of its own; smaller chunks — files under the
+	chunk size and file tails — are bin-packed into shared groups, each chunk
+	whole and block aligned inside the slot. The builder keeps up to 8 groups
+	open, places a chunk into the first open group with room, opens a new
+	group when none has, and closes the fullest open group once the limit is
+	reached, so a run of small files fills its groups densely. Groups are
+	emitted in index order; a chunk's block address is only known once its
+	group closes, so the builder resolves the inode chunk indexes when the
+	data region is complete, before the bootstrap is rendered.
+- The group is the unit of compression, of an on-demand read (see
+	[Bootstrap plus blob-dir mount](#bootstrap-plus-blob-dir-mount)), of
+	cache readiness and of the ondemand blob `nydus optimize` assembles: a
+	reader fetches and decodes one group and nothing else of the blob.
+- An all-zero chunk-sized chunk (a hole) is not stored at all and gets the
+	EROFS null chunk index.
+- On fill the daemon writes a decoded group back onto its slot's padded
+	blocks (gathering the chunks into `pwritev` runs), so the cache file,
+	`read_at` and the pmem/DAX extents are a mirror of the address space; only
+	the fetch side sees the dense stream.
+- The blob meta records one 16-byte entry per group (compressed offset,
+	first chunk, crc32c), one 4-byte length per chunk and one 32-byte BLAKE3
+	digest per chunk (the digest table is dense: entry `i` digests chunk `i`,
+	or no digests with `--digester none`).
+
+The chunk size therefore trades compression and table size against read
+granularity: larger groups compress a run of small files better and need
+fewer entries, smaller groups let a read of one small file fetch and decode
+less and let the ondemand blob copy less around the traced chunks. The
+on-demand fetch size (`storage.fetch_size`) is independent of it and is
+the read-ahead knob. `nydus check` reports the group, chunk, digest and
+redirect counts and the payload size per blob.
+
+#### Native EROFS output
+
+`--compressor erofs-none`, `erofs-lz4` or `erofs-zstd` switches the data
+region from chunk groups to a native EROFS layer device: the
+bytes the kernel reads at offset 0 of a `device=` of a block-device mount.
+`erofs-none` writes the chunks uncompressed at their block addresses (the
+padded address space itself, tail padding included); `erofs-lz4` and
+`erofs-zstd` build a z_erofs layer, see [z_erofs Layers](#z_erofs-layers). All
+three work with both source types and with both image layouts: the output is
+still a full blob, `--blob-dir` deposits it under its SHA256 and `--bootstrap`
+optionally emits the standalone bootstrap, exactly like a chunk-based build.
+
+A native full blob is `[layer data][bootstrap][footer]`: it carries **no blob
+meta** and no `.blob.meta` sidecar, and the footer sets the `RAW_DEVICE`
+incompat flag with a zero blob meta block count. There is no lazy loading of
+native layers: the nydus daemons never fetch them on demand from a registry
+(the registry backend rejects them), `nydus optimize` refuses them, and a
+mount reads them as-is from a local store or, through the kernel, from the
+block device. `--chunk-size` cuts `erofs-none` files; `--erofs-data-alignment`
+(default `0`) aligns large files inside the layer data for block-level dedup;
+`--digester` describes the chunk-based blob and is ignored.
 
 ### Export
 
@@ -321,7 +445,7 @@ tar entry per inode, streaming file data straight out of the blob:
 - Hard links reuse the first path visited. That entry is a regular file and
 	every later path for the same inode becomes a tar hard link pointing at it.
 - Sockets cannot be represented in tar and are skipped with a warning.
-- OCI whiteouts need no special handling. `nydusify` extracts `.wh.*` markers
+- OCI whiteouts need no special handling. The tar builder retains `.wh.*` markers
 	verbatim when it builds a layer, so they are ordinary inodes in the blob and
 	round-trip as ordinary tar entries.
 
@@ -350,9 +474,11 @@ nydus export layer.blob --output layer.tar
 `nydus merge [OPTIONS] <SOURCE>...`
 
 The `nydus merge` command merges multiple layer blobs in order into a single
-overlaid bootstrap in EROFS metadata format. Each source path must be a full
-blob file whose file name is its SHA256. Merge validates that invariant before
-loading metadata. The emitted merged bootstrap records each source layer's
+overlaid bootstrap in EROFS metadata format. Full-blob source paths are named
+by their expected SHA256; nydusify may stage only their metadata tails in sparse
+files. Merge validates the name and metadata layout, not the full data digest.
+The content store or registry must have verified content identity before staging.
+The emitted merged bootstrap records each source layer's
 full-blob SHA256 in the device table and applies OCI whiteout
 semantics so the final bootstrap reflects the merged filesystem view after
 deletions and opaque-directory masking.
@@ -366,7 +492,7 @@ Merge multiple nydus layers into an overlaid bootstrap
 Usage: nydus merge [OPTIONS] --bootstrap <BOOTSTRAP> <SOURCES>...
 
 Arguments:
-	<SOURCES>...  Specify the nydus layer blob paths named by their SHA256
+	<SOURCES>...  Specify the layers to stack, lower to upper: the layers' full blob paths named by their SHA256 (chunk-based or z_erofs, all of one kind); a z_erofs layer's standalone bootstrap from build --bootstrap is accepted too
 
 Options:
 	--bootstrap <BOOTSTRAP>
@@ -380,24 +506,41 @@ Options:
 Current implementation notes:
 
 - Merge requires source blob file names to be 64-character SHA256 hex strings.
-- Merge verifies each source file's content SHA256 against its file name.
+- Merge trusts the parsed source ID; use `nydus check` with complete blobs to
+	verify their data/full-blob digests. Sparse metadata staging cannot prove
+	the full-blob hash.
 - Merge rebuilds an overlaid bootstrap by loading each source into an in-memory
 	metadata tree, applying OCI whiteout rules, and emitting a new device table.
 - Merge records each source full-blob SHA256, rather than the data-region
 	digest stored in its embedded bootstrap, so the store/backend can resolve it.
-- Merge currently assumes source regular files use the nydus chunk-based data
-	layout and preserves each file's original chunkbits.
+- Chunk-based merges preserve each file's original chunkbits. Native-z layers
+	use the separate relocation path described below.
+- When the first source is a z_erofs layer (`nydus build --compressor erofs-*`),
+	every source must be one. Sources are the layers' full blobs named by their
+	SHA256 like chunk-based layers (a standalone bootstrap written with
+	`--bootstrap` is accepted too; its slot already carries that digest). The
+	output is a multi-device bootstrap whose device `i + 1` is layer `i`'s blob;
+	see [Merging z_erofs layers](#merging-z_erofs-layers).
+- Mixed chunk-based/z_erofs inputs are rejected in either order. When z_erofs
+	layers contain packed inodes, their packed compression algorithms must match;
+	merging LZ4 and zstd packed streams requires reencoding and is not supported.
 
 ### Optimize
 
 `nydus optimize [OPTIONS]`
 
 The `nydus optimize` command builds a compact "ondemand" blob from a recorded
-block group access pattern and rewrites the bootstrap so the runtime prefetches that
-blob first. The ondemand blob carries copies of the hot block groups (in first-access
-order); at mount time the phase-0 prefetch streams it and redirects each decoded
-block group into the source blob's cache, so early on-demand reads hit warm cache
-instead of issuing scattered registry range reads.
+chunk group access pattern and rewrites the bootstrap so the runtime
+prefetches it first. The ondemand blob is a **redirect** blob: the traced
+chunk groups, in first-access order, copied byte for byte out of their
+source blobs — encoded payload, chunk lengths and digests — with a redirect
+table naming the source blob and chunk group of every copy. Nothing is
+decoded or recompressed, and the bootstrap keeps every chunk index pointing
+at the source blobs: the ondemand blob is never read through the filesystem.
+At mount time the phase-0 prefetch streams it in one sequential pass,
+decodes each copy and writes it into the *source* blob's cache at the
+source group's slot, so the workload's early reads hit warm cache instead of
+issuing scattered registry range reads.
 
 Supported forms:
 
@@ -424,29 +567,38 @@ Current implementation notes:
 - `--apiserver` is the apiserver address of a **running** `nydus fuse` mount
 	(the same `unix:///path` form as `nydus fuse --apiserver`). Optimize fetches
 	the access patterns live from its `GET /trace` endpoint
-	(`{"version":1,"patterns":[{"blob_index":1,"block_group_index":4},...]}`);
-	entries are deduplicated preserving first-access order. Run the workload
-	against the mount before invoking optimize so the trace is populated.
+	(`{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4},...]}`,
+	one entry per chunk group read); entries are deduplicated preserving
+	first-access order. Run the workload against the mount before invoking
+	optimize so the trace is populated.
 - `--trace-file` is the offline alternative to `--apiserver` (the two are
 	mutually exclusive; one of them is required). It accepts the same versioned
 	trace document as produced by the `/trace` endpoint, so a trace captured
 	from a pmem/core mount can be replayed without a live apiserver.
 - `--parent-bootstrap` is the merged bootstrap to optimize; it is read-only, so
 	optimize can be re-run against the same parent with new patterns.
-- `--bootstrap` is the rewritten bootstrap output: the parent's inode tree with
-	an appended ondemand device slot and the root `trusted.nydus.prefetch.blobs`
-	xattr updated to list the ondemand device id first.
+- `--bootstrap` is the rewritten bootstrap output: the parent's inode tree
+	and chunk indexes unchanged, an appended ondemand device slot, and the
+	root `trusted.nydus.prefetch.blobs` xattr updated to list the ondemand
+	device id first.
 - `--blob-dir` receives the ondemand blob (named by its full SHA256) and its
 	`<digest>.blob.meta` sidecar; the digest is printed in the summary table as
-	`ONDEMAND BLOB DIGEST`.
-- `--config` is the same storage config as `nydus fuse --config`: source block group
-	bytes are pulled through the regular blob cache, so block groups already decoded in
-	`storage.dir` are served from disk and cold block groups are fetched from the
-	backend (with CRC validation on every path).
-- The ondemand artifact layout is `[block group data][blob meta][footer]` with
-	`bootstrap_blocks = 0` (no embedded bootstrap) and an empty chunk table. Each
-	block group entry is a redirect: it stores the source device id and source block group
-	index, and its `crc32c` equals the source block group's decoded CRC.
+	`ONDEMAND BLOB DIGEST`, next to the `CHUNK GROUP COUNT` it copied.
+- `--config` is the same storage config as `nydus fuse --config`: it names
+	the backend the source blobs are read from. Consecutive traced groups of
+	one blob are read in one range request, and every copy is decoded once to
+	validate it (CRC32C and, when the source carries digests, BLAKE3) before
+	it is appended.
+- Every source blob the trace names must share one chunk size and one
+	compressor (plain-stored groups fit under any compressor), because the
+	copies are byte-exact; a source that is itself an ondemand blob is
+	refused. Sources without digests (`--digester none`) make the ondemand
+	blob digest-free too.
+- The ondemand artifact layout is `[chunk groups][blob meta][footer]` with
+	`bootstrap_blocks = 0` (no embedded bootstrap); its blob meta sets the
+	`REDIRECT` flag and carries the redirect table, see
+	[Ondemand (redirect) blob layout](#ondemand-redirect-blob-layout). It is
+	fetched and checked like any blob but never builds a cache of its own.
 
 ### Check
 
@@ -475,12 +627,30 @@ Current implementation notes:
 	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
-	`chunk_size`, `chunk_count`, `block_group_count`, `chunk_digester`,
-	`chunk_compressor`, and compressed/uncompressed totals when the referenced
-	blob can be resolved.
+	`chunk_size`, `chunk_group_count`, `chunk_compressor`, the chunk, digest
+	and redirect counts (`BLOB META REDIRECTS` is non-zero only for an ondemand
+	blob), and payload/compressed/uncompressed totals when the referenced blob
+	can be resolved.
 - `--blob-dir` resolves by scanning full blob candidates. Device slots normally
 	store the data-region SHA256, while blob files are named by full blob SHA256
-	when produced by `--blob-dir`.
+	when produced by `--blob-dir`. A slot whose id matches no digest falls back
+	to the store entry of that file name (a blob built with `--blob-id`); it is
+	reported with `SLOT DIGEST KIND named` and counts as unverified.
+- Every blob entry carries a `VERIFIED` row: `yes` when the resolved file
+	reproduces the slot id, `no` when it was resolved by name only, and
+	`<unresolved>` when no candidate matched.
+- z_erofs images (superblock `COMPR OR DISTANCE` non-zero) are checked as
+	such: the incompat dump names `zero_padding`, `big_pcluster+compr_cfgs` and
+	`fragments`; the summary counts `Z_EROFS FILES`, `Z_EROFS FRAGMENT FILES`
+	and `Z_EROFS PCLUSTERS OUT OF RANGE` (HEAD/PLAIN lcluster addresses that no
+	device covers, always 0 for a sound image), and the packed inode is walked
+	too. Each device resolves to `<blob-dir>/<slot id>`, the layer's full blob
+	(`SLOT DIGEST KIND z_erofs_device`); it verifies when the footer's data
+	region spans the declared block count and the file's SHA256 equals the slot
+	id (a bare data file without a footer is accepted as well). `nydus check
+	--blob` on one z full blob verifies its data region like a chunk-based one.
+	`CHUNK REFS` / `UNIQUE CHUNKS` then count the pclusters addressing that
+	device.
 
 ### Fuse
 
@@ -543,7 +713,7 @@ Supported forms:
 
 The fuse command rejects mixed or partial combinations outside these forms.
 `--cache-dir` is optional; without it (and without a cache directory from
-`--config`), runtime fetches and validates requested blob_meta block groups using a
+`--config`), runtime fetches and validates requested blob_meta chunk groups using a
 temporary cache directory that is removed on exit. When `--config` is provided,
 `backend.config.dir` supplies the blob directory and `storage.dir` supplies
 the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
@@ -787,19 +957,30 @@ Fields:
 - `storage.dir` is the persistent directory storing each blob's decoded chunk
 	cache file (equivalent to `--cache-dir`). When unset (or the whole
 	`storage` section is omitted), reads run diskless: every read fetches,
-	decodes, and validates its block groups from the backend directly, and nothing is
-	written to disk — the kernel page cache above the mount is the only reuse
-	layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
+	decodes, and validates the chunk groups it touches from the backend directly,
+	and nothing is written to disk — the kernel page cache above the mount is
+	the only reuse layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
 	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`)
 	and `nydus optimize` require a directory and reject its absence at startup.
 - `storage.skip_verify_checksums` (default `true`) skips verifying decoded
-	block groups against their stored checksums before they are served. Set it
-	to `false` to verify every decoded block group when the transport is not
-	trusted end to end.
+	chunks against the blob meta's BLAKE3 digests before they are served.
+	Every fetched chunk group is always checked against its `crc32c`; set this
+	to `false` to also verify each chunk when the transport is not trusted end
+	to end.
+- `storage.fetch_size` (default `2097152`, 2 MiB) is how many compressed
+	bytes one on-demand backend read covers: the chunk groups whose compressed
+	ranges overlap the fetch-size-aligned cell holding the missed group,
+	trimmed at groups already cached or in flight, so one read never refetches
+	cached bytes. Larger fetches make fewer, larger requests and win over high
+	per-request latency; smaller fetches transfer fewer unused bytes and win
+	over limited bandwidth. `0` fetches the missed group alone. The fetch size
+	is independent of the image's `--chunk-size`: the same image serves every
+	fetch size. See [Bootstrap plus blob-dir mount](#bootstrap-plus-blob-dir-mount)
+	for the trade-off.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
 - `prefetch.timeout` (default `1h`) bounds how long prefetching one whole
-	blob may take, while `http.timeout` bounds each block group request within it;
+	blob may take, while `http.timeout` bounds each backend request within it;
 	`0s` disables the bound. A blob that exceeds it is aborted with a warning
 	and prefetch moves on.
 - `prefetch.retry_delay_min` / `prefetch.retry_delay_max` (defaults `6h` /
@@ -811,9 +992,9 @@ Fields:
 	failures are logged and skipped.
 - `prefetch.scope` (default `ondemand`) selects which blobs to pull. `none`
 	disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
-	(if any), warming the access-ordered hot set while leaving backend
-	bandwidth to on-demand reads; `all` prefetches every blob — priority blobs
-	first, then the rest. See [Blob prefetch](#blob-prefetch).
+	(if any), landing the access-ordered hot set in the source blobs' caches
+	while leaving backend bandwidth to on-demand reads; `all` prefetches every
+	blob — priority blobs first, then the rest. See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
@@ -869,7 +1050,7 @@ Fields under `backend.config`:
 	for Dragonfly reads are governed by the `dragonfly` policy knobs below.
 	- `timeout` (default `5s`): per-request timeout in humantime format (e.g.
 		`5s`, `1m`); `0s` disables it. Kept short because a read holds the
-		block group's cross-process fetch claim for its whole duration, and what
+		chunk group's cross-process fetch claim for its whole duration, and what
 		queues up behind that claim are reader threads in the other instances
 		sharing the cache directory.
 	- `max_retries` (default `3`): maximum number of retry attempts per
@@ -939,7 +1120,7 @@ Fields under `backend.config`:
 
 When `nydus fuse` is started with `--apiserver unix:///path/to/api.sock`, a
 small HTTP server is bound to that Unix socket and serves the Prometheus text
-exposition at `GET /metrics` and the recorded on-demand block group access order at
+exposition at `GET /metrics` and the recorded chunk access order at
 `GET /trace` (any other path returns `404`). The server is torn down and the
 socket unlinked when the mount exits. Scrape it with, e.g.:
 
@@ -949,10 +1130,12 @@ curl --unix-socket /run/nydus/api.sock http://localhost/trace
 ```
 
 `GET /trace` returns JSON like
-`{"patterns":[{"blob_index":1,"block_group_index":4},...]}` listing each `(blob,
-block group)` pair in first-access order, deduplicated. The blob index is the device
-id from the bootstrap device table. The trace feeds `nydus optimize` /
-`nydusify optimize`.
+`{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4},...]}`
+listing each chunk group the workload read as a `(blob, chunk group index)`
+pair in first-access order, deduplicated. Every group a read touches is
+recorded, hit or miss, so the trace names what was read rather than what a
+fetch pulled. The blob index is the device id from the bootstrap device
+table. The trace feeds `nydus optimize` / `nydusify optimize`.
 
 Each completed backend request is also logged at `debug` level after it returns,
 carrying the request source, transport, method, URL, request headers, response
@@ -1009,30 +1192,28 @@ Filesystem:
 Cache:
 
 - `cache_opened_files` — open blob data cache files (excludes the `.blob.meta`,
-	`.group.map` and `.lock` sidecars).
-- `cache_hit_block_group` — block groups served from cache without a backend read.
-- `cache_total_block_group` — total block groups across loaded blob metas, counted once per
-	blob however many caches are open on it.
-- `cache_fill_block_group` — block groups written into a blob's own cache by regular blob
-	prefetch.
-- `cache_ondemand_fill_block_group` — block groups written into a blob's own cache to
-	satisfy an on-demand read. Summing it across the instances sharing a cache
-	directory shows how much duplicate fetching they do.
-- `cache_redirect_fill_block_group` — block groups written into a **source** blob's cache
-	from a redirect (ondemand) blob during phase-0 prefetch.
-- `cache_redirect_skip_block_group` — redirect block groups skipped during ondemand
-	prefetch (decode/CRC failures, unknown source device, or failed fills);
-	normally zero.
+	`.group.map` and `.prefetch.lock` sidecars).
+- `cache_hit_chunk_group` — chunk groups served from cache without a backend
+	read.
+- `cache_total_chunk_group` — total chunk groups across loaded blob metas,
+	counted once per blob however many caches are open on it.
+- `cache_fill_chunk_group` — chunk groups written into a blob's own cache by
+	regular blob prefetch (`prefetch.scope: all`).
+- `cache_ondemand_fill_chunk_group` — chunk groups written into a blob's own
+	cache to satisfy an on-demand read. Summing it across the instances
+	sharing a cache directory shows how much duplicate fetching they do.
+- `cache_redirect_fill_chunk_group` — chunk groups written into a **source**
+	blob's cache from a redirect (ondemand) blob during phase-0 prefetch.
+- `cache_redirect_skip_chunk_group` — redirect chunk groups skipped during
+	ondemand prefetch (decode/CRC failures, unknown source blob, or failed
+	fills); normally zero. Groups whose source was already cached are not
+	fetched at all and count in neither.
 
-Redirect (ondemand blob) backend traffic:
-
-- `backend_redirect_read_count`, `backend_redirect_read_bytes` — backend reads
-	that fetched ondemand (redirect) blob data, a subset of the
-	`backend_prefetch_*` counters. Together with `cache_redirect_fill_block_group`
-	these attribute cache warmup to the optimize pipeline: after an optimized
-	mount's prefetch quiesces, `backend_redirect_read_count > 0` proves the
-	ondemand blob was fetched and `cache_redirect_fill_block_group` equals the number
-	of traced block groups written into the source caches.
+After an optimized mount's prefetch quiesces, `backend_prefetch_read_count > 0`
+with `cache_redirect_fill_chunk_group` equal to the number of traced groups
+shows the ondemand blob was pulled into the source caches, and a
+`backend_ondemand_read_count` that stays at zero through the workload shows
+the trace covered it.
 
 
 ## Artifact Model
@@ -1058,12 +1239,12 @@ The full blob is the primary layer artifact. Its byte layout is:
 2. Optional zero padding to the next 4 KiB boundary.
 3. Bootstrap region.
 4. Optional zero padding to the next 4 KiB boundary.
-5. Blob meta region.
+5. Blob meta region (absent for native `erofs-*` layers).
 6. Footer.
 
 The order matters: the file is `data + bootstrap + blob_meta + footer`, not
 `bootstrap + data`. The data region is first so build can append encoded chunk
-block groups directly into the final artifact without copying them behind metadata
+groups directly into the final artifact without copying them behind metadata
 later.
 
 ```text
@@ -1071,7 +1252,8 @@ full blob file: <full_blob_sha256>
 
 +-------------------------------+  byte 0
 | encoded data region           |
-| zstd or stored plain block_groups   |
+| chunk groups, each one zstd   |
+| frame or stored plain         |
 +-------------------------------+  byte = footer.compressed_data_offset + footer.compressed_data_size
 | padding to 4 KiB alignment    |
 +-------------------------------+  byte = footer.bootstrap_offset
@@ -1098,8 +1280,8 @@ full blob file: <full_blob_sha256>
 | padding to 4 KiB alignment    |
 +-------------------------------+  byte = footer.blob_meta_offset
 | blob meta                     |
-| 4 KiB header + chunk table    |
-| block_group table                   |
+| 32-byte header + tables       |
+| groups, chunks, digests       |
 | zero padding to 4 KiB         |
 +-------------------------------+  byte = footer.blob_meta_offset + footer.blob_meta_blocks * 4096
 | blob footer                   |
@@ -1126,14 +1308,14 @@ u64 bootstrap_offset
 u64 blob_meta_offset
 u64 compressed_data_size
 u32 bootstrap_blocks
-u32 blob_meta_blocks
+u32 blob_meta_blocks            zero exactly when the RAW_DEVICE flag is set
 u64 bootstrap_compressed_size   exact zstd frame bytes when the
                                 BOOTSTRAP_ZSTD flag is set, else 0
 u8  reserved1[4024]    compat area: writers zero, readers ignore
 ```
 
 The `magic + version + flags` header prefix matches the blob meta
-(`LPBLMETA`) and block_block_group_map (`LPGRPMAP`) sidecars.
+(`LPBLMETA`) and group map (`LPGRPMAP`) sidecars.
 
 Reader validation requires:
 
@@ -1157,6 +1339,12 @@ table is retargeted to the full-blob digest and flattened mapped addresses, and
 the superblock checksum is recomputed. The standalone file is therefore not
 byte-for-byte identical to the embedded bootstrap.
 
+A native `erofs-*` layer sets the incompat flag `RAW_DEVICE = 1 << 1`: its
+data region is the raw EROFS device the kernel reads, there is no blob meta
+region (`blob_meta_blocks` is zero) and a bootstrap is mandatory. Readers that
+do not know the flag reject the blob; readers that do never fetch it on
+demand.
+
 ### Bootstrap region details
 
 Within the bootstrap region:
@@ -1166,6 +1354,21 @@ Within the bootstrap region:
 - the metadata area starts at `superblock.meta_blkaddr` and contains inode
 	bodies, xattrs, chunk index arrays and directory data. This is block 1 for
 	up to 23 device slots; a larger device table occupies additional head blocks.
+- directories are laid out like `mkfs.erofs` does: the full 4KiB blocks of
+	dirent data go to the data area, and the partial last block is packed right
+	behind the inode header (`EROFS_INODE_FLAT_INLINE`, `i_size` is the exact
+	used length) whenever header + xattrs + tail fit in the inode's block. A
+	directory whose data ends on a block boundary, or whose tail does not fit,
+	stays `FLAT_PLAIN` with block-padded data. Looking a name up in a small
+	directory therefore costs one metadata block instead of two.
+- inodes are allocated breadth first: the root, then for each directory (in
+	that order) all of its children back to back, hardlinked inodes once under
+	their first parent, and inodes outside the tree (the z_erofs packed inode)
+	last. A directory's inline dirents and its children's inodes thus share a
+	few consecutive blocks, so listing or `stat`-ing siblings touches one or two
+	metadata blocks rather than one per child. Both rules shrink the merged
+	bootstrap several-fold and cut the metadata reads of a cold start; they apply
+	to every image nydus builds or merges.
 
 ### Automatic FUSE xattr optimization
 
@@ -1245,9 +1448,10 @@ first logical external data block starts at offset 0
 	logical byte offset = 0 * 4096
 
 blob_meta then maps that logical byte offset to a compressed range in the full
-blob's data region. The block is mapped to its block_group by
-`block_group_index = blkaddr >> block_group_block_count_bits`, and the block_group entry gives the
-encoded `compressed_offset` (for example 0 for the first encoded block_group).
+blob's data region. The block names its chunk group by a shift
+(`blkaddr >> chunk_block_count_bits`), and the chunk_group entry gives the
+encoded `compressed_offset` (for example 0 for the first encoded
+chunk_group).
 ```
 
 Blob identity is therefore attached to the device slot, not to the chunk index
@@ -1255,8 +1459,9 @@ and not to the superblock directly.
 
 ### Blob ID semantics
 
-The current implementation stores the SHA256 of the encoded data region in the
-device slot rather than the SHA256 of the whole full blob file.
+An embedded single-layer bootstrap stores the SHA256 of its encoded data
+region. Standalone and merged bootstraps instead name the full blobs used by
+the content store or registry.
 
 This avoids a self-reference problem:
 
@@ -1268,58 +1473,64 @@ At the same time:
 
 - the full blob file name written by `--blob-dir` is the SHA256 of the whole
 	full blob artifact;
-- the device slot blob id still refers to the data region SHA256.
+- only the embedded bootstrap's self-reference uses the data-region SHA256;
+	standalone and merged device slots use full-blob SHA256. An explicit
+	`--blob-id` override is supported only for local filename-based resolution.
 
 ### Blob meta region layout
 
 Whenever build emits a full blob, it writes one blob meta region before the
-footer. Blob meta is the canonical catalog for the external data blob. A blob
-meta chunk is a content-addressed entry (BLAKE3 digest + absolute block range)
-used for inspection and future deduplication; chunks are independent of block groups.
-A blob meta block group is the compression unit and cache population unit. EROFS inode
-chunk indexes point into the logical uncompressed external-device address space;
-blob meta maps a block offset to its block group by a single division and the cache
-file mirrors that decoded address space directly.
+footer. Blob meta is the canonical catalog for the external data blob: how
+the blob's **uncompressed address space** — what the EROFS chunk indexes
+point into and what the cache file mirrors — maps onto its **encoded
+payload**. The address space is padded: every *chunk* (a whole file of at most
+the chunk size, or one chunk-sized slice of a larger file) starts on its own
+4 KiB block. The encoded stream is dense: *chunk groups* hold the chunks'
+bytes back to back, without the tail-block padding, each group compressed on
+its own. The chunk group is the compression unit, the on-demand read unit,
+the cache readiness unit and the index unit: every group owns one chunk-size
+*slot* of the address space, so an address maps to its group by a shift.
 
-Current blob_meta on-disk shape:
+Current blob_meta on-disk shape (integers little-endian, every table 8-byte
+aligned, the whole region padded to 4 KiB):
 
 ```text
 embedded blob meta region
 
++-------------------------------+  offset 0
+| 32-byte header                |
+|  magic (8 bytes, "LPBLMETA")  |
+|  version (u32) = 1            |
+|  flags (u32)                  |
+|  crc32c (u32)                 |
+|  chunk_block_count_bits (u8)  |
+|  reserved (3 bytes)           |
+|  chunk_group_count (u32)      |
+|  chunk_count (u32)            |
++-------------------------------+  offset 32
+| chunk group table             |
+|  16 bytes each,               |
+|  chunk_group_count + 1 rows   |
+|  (the last is a terminator)   |
+|  compressed_offset (u64)      |
+|  first_chunk (u32)            |
+|  crc32c (u32)                 |
 +-------------------------------+
-| 4096-byte header (one block)  |
-| magic (8 bytes, "LPBLMETA")   |
-| version                       |
-| flags                         |
-| crc32c                        |
-| reserved0                     |
-| chunks_offset                 |
-| block_groups_offset                 |
-| chunk_count                   |
-| block_group_count                   |
-| chunk_block_count_bits (u8)         |
-| block_group_block_count_bits (u8 + pad)   |
-| reserved tail (compat area)   |
-+-------------------------------+
-| chunk entries                 |
-| 48 bytes each                 |
-|                               |
-| digest (BLAKE3)               |
-| uncompressed_block_offset     |
-| uncompressed_block_count      |
-| reserved                      |
-+-------------------------------+
-| block_group entries                 |
-| 40 bytes each                 |
-|                               |
-| uncompressed_block_offset     |
-| compressed_offset             |
-| uncompressed_block_count      |
-| compressed_size               |
-| crc32c                        |
-| source_block_group_index            |
-| source_blob_index               |
-| reserved (6 bytes)            |
+| chunk table                   |
+|  u32 byte length per chunk,   |
+|  in address order             |
++-------------------------------+  (8-byte aligned)
+| digest table                  |
+|  32 bytes each, one per chunk |
+|  in chunk order (or empty)    |
+|  digest (32 bytes)            |
++-------------------------------+  (8-byte aligned)
+| redirect table                |
+|  REDIRECT blobs only,         |
+|  8 bytes each, one per group  |
+|  source_blob_index (u16)      |
+|  reserved (u16) = 0           |
+|  source_chunk_group_index(u32)|
 +-------------------------------+
 | zero padding to 4 KiB         |
 +-------------------------------+
@@ -1328,183 +1539,193 @@ embedded blob meta region
 Header details:
 
 - `magic` is the 8 raw ASCII bytes `LPBLMETA`, written as-is (a hexdump of the
-	file starts with the readable string). Same magic style as the block_block_group_map
+	file starts with the readable string). Same magic style as the group map
 	sidecar (`LPGRPMAP`).
-- `version` is an informational format generation (currently 1). Readers do
-	not gate on it: compatibility is governed EROFS-style by the magic (a new
-	format family gets a new magic) and by the flag bits below.
+- `version` is `1`. Earlier experimental layouts are unsupported, even if they
+	used the same version number. Readers require this version and validate
+	the complete table layout.
 - `flags` is split EROFS-style: the low 16 bits are incompatible features — a
 	reader that does not know a set bit must reject the file (like
 	`feature_incompat`); the high 16 bits are compatible features — unknown
 	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`) or
-	`COMPRESSOR_LZ4` (`1 << 1`) names the blob's default compressor; no
-	compressor bit means stored plain. `DIGESTER_BLAKE3` (`1 << 2`) is mandatory
-	for chunk digests. `REDIRECT` (`1 << 3`) marks an ondemand blob whose block
-	groups are all redirect entries.
-	Entry-layout evolution (wider chunk/block group entries, new entry kinds) is
-	expressed as a new incompat bit — the same way EROFS gates compact vs
-	extended inodes — while header growth uses the reserved tail plus a compat
-	bit. The `magic + version + flags` header prefix is shared with the
-	block_block_group_map sidecar.
-- `crc32c` covers the full blob meta region with this field zeroed: the fixed
-	header, all chunk entries, all block group entries, and trailing zero padding. The cache layer
-	verifies this crc32c before mmaping a cached blob meta file for chunk lookup.
-- `chunks_offset` is fixed at the header size. `block_groups_offset` follows the dense
-	chunk table.
-- `chunk_count` is the number of chunk entries.
-- `block_group_count` is the number of compressed block group entries.
-- `chunk_block_count_bits` is log2 of the EROFS chunk size in 4 KiB blocks:
-	`chunk_size = 4096 << chunk_block_count_bits`, so the default 1 MiB chunk stores
-	8. Storing the exponent EROFS-style (the same quantity as `chunk_format &
-	EROFS_CHUNK_FORMAT_BLKBITS_MASK`) makes non-power-of-two chunk sizes
-	unrepresentable and feeds the shift-based offset math directly.
-- `block_group_block_count_bits` is log2 of the per-block group block count, same
-	representation as `chunk_block_count_bits` (the default 4 MiB block group stores 10).
-	Every block group except the last is exactly `1 << block_group_block_count_bits` blocks, so
-	the read path maps a block to its block group with
-	`block_group_index = block_id >> block_group_block_count_bits` in O(1). The two exponents
-	are adjacent `u8`s at offset 48; the six bytes after them are reserved.
-- The header is one EROFS block (4096 bytes): the chunk table starts block
-	aligned by construction, and everything between the last field and the end
-	of the header block is reserved for future compat fields — writers zero it,
-	readers ignore it (so a compat extension does not break old readers), and
-	corruption is caught by the region crc32c. Layout changes that old readers
-	cannot safely ignore (wider entries, new tables, moved offsets) must use an
-	incompat flag bit instead. The header intentionally does not
-	store total compressed size or total uncompressed size — totals are computed
-	from the block group entries — and the blob meta region is padded to a 4 KiB block
-	boundary.
+	`COMPRESSOR_LZ4` (`1 << 1`) names the blob's compressor; no compressor bit
+	means every group is stored plain. `DIGESTER_BLAKE3` (`1 << 2`) means
+	every chunk has a BLAKE3 digest in the digest table; no digester bit means
+	the table is empty (`nydus build --digester none`). `REDIRECT` (`1 << 3`)
+	marks the ondemand blob `nydus optimize` emits: every chunk group is a
+	byte-exact copy of a chunk group of another blob of the image, named by
+	the redirect table, and `prefetch.scope: ondemand` pulls only such blobs.
+	Entry-layout evolution is expressed as a new incompat bit while header
+	growth uses a compat bit. The `magic + version + flags` header prefix is
+	shared with the group map sidecar.
+- `crc32c` covers the full blob meta region with this field zeroed: the
+	header, every table and the trailing zero padding. The cache layer verifies
+	it before mmaping a cached blob meta file.
+- `chunk_block_count_bits` is log2 of the chunk size in 4 KiB blocks:
+	`chunk_size = 4096 << chunk_block_count_bits`, the largest chunk a file is
+	cut into (the default 1 MiB stores 8) and the size of every group's slot.
+	It is the same quantity as `chunk_format & EROFS_CHUNK_FORMAT_BLKBITS_MASK`.
+- The two counts size the tables; the tables' offsets are not stored, they
+	follow each other in the fixed order above. The digest table has
+	`chunk_count` entries with `DIGESTER_BLAKE3` and none without it; the
+	redirect table has `chunk_group_count` entries with `REDIRECT` and none
+	without it. The header does not store totals: the address space is
+	`chunk_group_count << chunk_block_count_bits` blocks, the compressed end
+	is the terminator's `compressed_offset`, the payload total is the sum of
+	the chunk lengths.
+
+Chunk group details:
+
+- Group `i` owns the slot `[i * chunk_size, (i + 1) * chunk_size)` of the
+	address space; the address space is exactly the slots, so a group's
+	position needs no table field. Its chunks are packed from the slot start,
+	each on its own block boundary, and the slot's unused tail (if any) reads
+	as zeros.
+- Group `i` holds chunks `[first_chunk(i), first_chunk(i + 1))` — at least
+	one, together at most one slot of blocks — and its encoded bytes occupy
+	`[compressed_offset(i), compressed_offset(i + 1))` of the data region.
+	Both come from the next row, which is why the table carries one extra
+	terminator row: `compressed_offset` = the data region size, `first_chunk`
+	= `chunk_count`, `crc32c` = 0. Group 0 starts at offset 0 and chunk 0;
+	offsets and first chunks strictly increase.
+- `crc32c` covers the group's decoded payload: its chunks' bytes back to
+	back. The runtime checks it on every fetch.
+- If the compressed size equals the payload size the group is stored plain
+	and runtime skips decompression even when the header names zstd; its
+	chunks then sit at their dense offsets in the data region. Otherwise the
+	compressed size is smaller than the payload (a group that zstd or LZ4 does
+	not shrink below 70% is stored plain instead). With no compressor bit every
+	group must be plain.
+- `compressed_offset` is the encoded payload's byte offset within the data
+	region (not inside the whole full blob file). Encoded chunk groups are
+	packed back to back with no inter-group padding, so this is a plain byte
+	position. Runtime backends add the data-region base offset before issuing
+	range reads.
 
 Chunk details:
 
-- Chunks are decoupled from block groups: a chunk may straddle a block group boundary, and a
-	block group may contain parts of several chunks. The chunk table is a digest index,
-	not a per-block group map.
-- `digest` is the BLAKE3 hash of the chunk's decoded, block-aligned bytes — the
-	deduplication key.
-- `uncompressed_block_offset` is the chunk's absolute 4 KiB block offset in the
-	dense decoded address space (chunks are stored back-to-back).
-- `uncompressed_block_count` is the chunk span in 4 KiB blocks. Only the chunk's
-	final block carries zero padding; full chunks are already block-aligned, so the
-	dense layout packs real blocks instead of large zero runs.
+- The chunk table is one `u32` byte length per chunk, non-zero and at most
+	the chunk size, in address order. Nothing else is stored per chunk: within
+	its group a chunk's dense offset is the prefix sum of the lengths before
+	it, and its block is the prefix sum of their block counts
+	(`ceil(len / 4096)`) from the slot start, so the table pins both positions
+	of every chunk.
+- Group boundaries fall between chunks: a group holds whole chunks and never
+	splits one. The reader validates that rule and that every group's chunks
+	fit its slot.
+- A hole (an all-zero chunk-sized chunk) has no chunk entry and no blocks:
+	the EROFS chunk index is the null address.
+- The digest table is dense: entry `i` is the BLAKE3 digest of chunk `i`'s
+	exact bytes (no padding), so every chunk — small files included — has a
+	content identity for deduplication, and the runtime checks decoded chunks
+	against it when `storage.skip_verify_checksums` is `false`.
 
-Block group details:
+Redirect details (REDIRECT blobs only):
 
-- Block groups are formed by packing whole decoded blocks up to `--block-group-size`
-	regardless of chunk boundaries, then compressing the batch as one unit. So
-	every block group but the last is exactly `1 << block_group_block_count_bits` blocks.
-- `uncompressed_block_offset` is the decoded cache 4 KiB block offset for the
-	block group. Block groups are dense and contiguous in the decoded address space.
-- `compressed_offset` is the encoded payload's byte offset within the data
-	region (not inside the whole full blob file). Encoded block groups are packed
-	back-to-back with no inter-block group padding, so this is a plain byte position and
-	is not block-aligned for compressed block groups. Runtime backends add the
-	data-region base offset before issuing range reads.
-- `uncompressed_block_count` describes the decoded block group size in 4 KiB blocks.
-- `compressed_size` is the actual encoded byte length. The next block group starts at
-	exactly the previous block group's `compressed_offset + compressed_size`.
-- `crc32c` is computed over the decoded block group. If `compressed_size` equals
-	`uncompressed_block_count * 4096`, runtime treats the block group as stored plain and
-	skips decompression even when the header compressor is zstd.
-- `source_blob_index` and `source_block_group_index` mark a redirect block group. They are
-	zero for normal block groups. A non-zero `source_blob_index` means the block group's data
-	belongs to that source blob (1-based device-table index) at
-	`source_block_group_index`; phase-0 prefetch writes the decoded bytes into the
-	source blob's cache instead of this blob's own cache. A blob containing any
-	redirect block group is an "ondemand" blob: its block groups may be non-uniform in size
-	(the uniformity invariant is relaxed) and `block_group_index_for_offset` is
-	never used on it. The redirect block group's `crc32c` equals the source block group's
-	decoded CRC so the fill is cross-checked before touching the source cache.
+- Entry `i` names the source of chunk group `i`: `source_blob_index` is the
+	device index of a blob of the same image (never zero, the bootstrap's own
+	slot) and `source_chunk_group_index` a chunk group within it; `reserved`
+	must be zero. Group `i`'s encoded bytes, chunk lengths, digests and
+	`crc32c` are those of the source group, copied verbatim, so the redirect
+	blob shares the sources' chunk size and compressor and is decoded with the
+	same code path.
+- The runtime never builds a cache for a redirect blob: each decoded group is
+	written into the source blob's cache at the source group's slot and marked
+	ready there. See [Ondemand (redirect) blob layout](#ondemand-redirect-blob-layout).
 
-The writer does not bias `compressed_offset` by the bootstrap size, and
-does not bias `uncompressed_block_offset`. Only the data region as a whole is
-padded to a 4 KiB boundary (so the embedded bootstrap that follows starts on a
-block); block groups themselves are not individually padded.
+Lookups are O(1) and need no derived index: `block >> chunk_block_count_bits`
+names the group of an address, the group row and its successor bound the
+backend range and the chunk run, and a chunk within the group is found by
+walking the run's lengths (at most a slot of them). The reader validates the
+tables once and then maps the region read-only; nothing is built in memory
+at open.
 
-### Blocks, chunks and block groups
+The writer does not bias `compressed_offset` by the bootstrap size. Only the
+data region as a whole is padded to a 4 KiB boundary (so the embedded
+bootstrap that follows starts on a block); chunk groups themselves are not
+individually padded.
 
-The three units live in two address spaces: blocks, chunks and block groups are
-defined on the **decoded** (uncompressed) external-device address space that
-EROFS chunk indexes point into, while only block groups exist in the **encoded**
-data region stored in the full blob. The figures below use the defaults
-(`--chunk-size` 1 MiB = 256 blocks, `--block-group-size` 4 MiB = 1024 blocks),
-so one block group spans four chunks.
+### Blocks, chunks and chunk groups
 
-Chunks are the deduplication unit and are split **per file**: every regular
-file is cut independently into `--chunk-size` pieces, and a file's final chunk
-keeps only its real block-aligned size instead of being padded to a full
-chunk:
+The units live in two address spaces: blocks and chunks are defined on the
+**decoded** (uncompressed, padded) external-device address space that EROFS
+chunk indexes point into, while chunk groups map fixed slots of it onto the
+**encoded** data region stored in the full blob. The figures below use the
+default 1 MiB chunks (256 blocks).
+
+Chunks are split **per file**: every regular file is cut independently into
+`--chunk-size` chunks, and a file's final chunk keeps only its real size
+instead of being padded to a full chunk:
 
 ```text
-           file A (448 blocks)     file B (512 blocks)      file C ..
-           +--------+------+    +--------+--------+    +--------
-           | A ch 0 |A ch 1|    | B ch 0 | B ch 1 |    | C ch 0
-           |256 blk |192blk|    |256 blk |256 blk |    | 256 blk
-           | BLAKE3 |BLAKE3|    | BLAKE3 | BLAKE3 |    | BLAKE3
-           +--------+------+    +--------+--------+    +--------
+           file A (1 MiB + 700 KiB)   file B (2 MiB)           file C (300 B)
+           +--------+------+    +--------+--------+    +---+
+           | A p0   | A p1 |    | B p0   | B p1   |    | C |
+           |1 MiB   |700KiB|    | 1 MiB  | 1 MiB  |    |300|
+           | BLAKE3 |BLAKE3|    | BLAKE3 | BLAKE3 |    |   |
+           +--------+------+    +--------+--------+    +---+
 ```
 
 A fully-zero chunk — a real filesystem hole reads back as zeros, and so does
 zero-filled data — is never stored: the builder emits the standard EROFS null
-chunk index (all 48 address bits set on disk) instead. Hole chunks occupy no
-bytes in the data region, get no blob meta chunk entry, and never touch the
-blob cache at runtime: the core read paths satisfy them with zeros
-directly, and native EROFS mounts decode the null address in-kernel the same
-way.
+chunk index (`startblk_lo == 0xffffffff`, unused high fields zero) instead. Hole chunks occupy no
+bytes in the data region, get no chunk entry, and never touch the blob cache
+at runtime: the core read paths satisfy them with zeros directly, and native
+EROFS mounts decode the null address in-kernel the same way.
 
-The per-file chunks are then packed densely, back-to-back, into the decoded
-external-device address space that EROFS chunk indexes point into; each
-chunk's BLAKE3 digest and absolute block range are recorded in the blob meta
-chunk table:
-
-```text
-blkaddr    0        256    448      704      960
-           |        |      |        |        |
-           +--------+------+--------+--------+--------+--
-           | A ch 0 |A ch 1| B ch 0 | B ch 1 | C ch 0 | ..
-           +--------+------+--------+--------+--------+--
-```
-
-Block groups aggregate **blocks**, not files or chunks: the block group builder packs
-whole decoded blocks up to `--block-group-size` and flushes, regardless of where
-files or chunks start and end — here the block group 0 boundary at block 1024 falls
-in the middle of `C ch 0`, so that chunk straddles two block groups:
+The chunks are then placed into chunk **groups**, each group one chunk-size
+slot of the decoded address space. A chunk that fills a slot — A p0, B p0,
+B p1 — is a group of its own. Smaller chunks are bin-packed: A p1 (700 KiB)
+opens a shared group, C (300 bytes, one block) and the small files after it
+join it, each starting on its own 4 KiB block, until no further chunk fits
+the slot. The builder keeps up to eight groups open at once and closes the
+fullest when it needs a ninth, so consecutive small files land together
+while a large file's tail does not force a group closed early. Groups are
+emitted in index order, and the chunk indexes take their block addresses
+from the finished layout:
 
 ```text
-blkaddr    0                                   1024
-           |                                   |
-           +--------+------+--------+--------+--------+--
-same space | A ch 0 |A ch 1| B ch 0 | B ch 1 | C ch 0 | ..
-           +--------+------+--------+--------+--------+--
-           |<------------ block_group 0 ------------>|<- block_group 1 ..
-           |       CRC32C(decoded bytes)       |   CRC32C ..
-           +-----------------------------------+-----------
+blkaddr    0        256      512      768      1024
+           |        |        |        |        |
+           +--------+--------+--------+--------+---
+           | A p0   | B p0   | B p1   |A p1|C|D|  ..
+           +--------+--------+--------+--------+---
+group      0        1        2        3
+chunk table: 1048576, 1048576, 1048576, 716800, 300, ..
 ```
 
-Each block group is the compression, backend-read and cache-fill unit, with a
-CRC32C computed over its decoded bytes.
-
-Block groups are then compressed independently and packed back-to-back into the
-encoded data region of the full blob:
+Within a slot the chunks' **bytes** are the group's payload, back to back
+with no tail padding (A p1's 700 KiB, then C's 300 bytes, then D, ...); the
+group is compressed as one zstd or LZ4 stream and the groups are packed back
+to back as the data region:
 
 ```text
-           block_group 0                      block_group 1
-              | zstd                       | zstd (stored plain when
-              v                            v  saving is less than 30%)
-+---------------------------+------------------+---
-| block_group 0 compressed bytes  | block_group 1 bytes    | ...
-+---------------------------+------------------+---
-^ compressed_offset(g0) = 0
-                            ^ compressed_offset(g1)
-                              = offset(g0) + compressed_size(g0)
+           group 0   group 1   group 2   group 3          group 4
+           | A p0    | B p0    | B p1    | A p1, C, D, .. |
+           v         v         v         v                v
++-----------+---------+---------+----------------+----------+---
+| zstd(A p0)|zstd(Bp0)|zstd(Bp1)|zstd(Ap1,C,D,..)| group 4  |
++-----------+---------+---------+----------------+----------+---
+^ compressed_offset(0) = 0                       ^ compressed_offset(4)
+group table: (0, chunk 0) (c1, 1) (c2, 2) (c3, 3) (c4, 6) ... terminator
 ```
+
+A group that does not shrink below 70% of its payload is stored plain
+instead, its chunks then sitting at their dense offsets. Every group carries
+a CRC32C over its decoded payload.
+
+The group is the compression, on-demand read and cache-fill unit: a read of C
+fetches and decodes group 3 (with the groups of its fetch-size cell) and
+nothing else of the blob, then writes the group's chunks onto their blocks
+of the slot, leaving the tail of each block zero.
 
 Hash and validation summary:
 
-- **BLAKE3 per chunk** (blob meta chunk table) — the deduplication key over
-	the chunk's decoded, block-aligned bytes.
-- **CRC32C per block group** (blob meta block group entry) — validated after every fetch
-	and decode, on both the on-demand and prefetch paths.
+- **BLAKE3 per chunk** (blob meta digest table, one entry per chunk) — the
+	deduplication key over the chunk's exact bytes, and what a read checks a
+	decoded chunk against when checksum verification is enabled.
+- **CRC32C per chunk group** (blob meta chunk group entry) — validated after
+	every fetch and decode, on demand and prefetch alike.
 - **SHA256 over the data region** — written into the bootstrap device slot as
 	the blob id.
 - **SHA256 over the whole full blob** — the artifact file name (`--blob-dir`)
@@ -1515,97 +1736,242 @@ Hash and validation summary:
 ### Ondemand (redirect) blob layout
 
 `nydus optimize` emits one extra "ondemand" blob and appends it to the image
-as a new layer. It reuses the full blob container format, but degenerates two
-regions: there is no embedded bootstrap (`bootstrap_blocks = 0`) and the blob
-meta chunk table is empty — the ondemand blob introduces no new filesystem
-data, it only re-hosts copies of hot block groups from the source blobs:
+as a new layer. It is a full blob without an embedded bootstrap
+(`bootstrap_blocks = 0`) whose blob meta sets the incompat flag `REDIRECT`:
+every chunk group is a byte-exact copy of a traced chunk group of a source
+blob — encoded payload, chunk lengths, digests and CRC32C — laid out in
+first-access order, and the redirect table names the source blob and chunk
+group of each copy. Nothing is decoded or recompressed at optimize time, so
+the blob shares the sources' chunk size and compressor and introduces no
+new filesystem addresses.
 
 ```text
 ondemand blob — named by SHA256(full blob), one new nydus layer
 
 +--------------------------------+  byte 0
-| block_group data                     |
-|  encoded copies of the traced  |
-|  source block_groups, packed in      |
-|  first-access order            |
+| chunk groups                   |
+|  verbatim copies of the traced |
+|  source groups, in first-access|
+|  order                         |
 +--------------------------------+
-| blob meta                      |
+| blob meta (flags: REDIRECT)    |
 |  header (crc32c)               |
-|  chunk table: empty            |
-|  block_group table: redirect entries |
+|  chunk group table             |
+|  chunk table                   |
+|  digest table                  |
+|  redirect table                |
+|   (source blob, source group)  |
 +--------------------------------+
 | footer (bootstrap_blocks = 0)  |
 +--------------------------------+
 ```
 
-Every block group entry in the ondemand blob is a **redirect**: instead of
-describing this blob's own decoded address space, it names the source block group
-it is a copy of. Block group sizes follow the source block groups, so the uniform-size
-invariant is relaxed and the O(1) `block >> block_group_block_count_bits` lookup is never
-used on an ondemand blob:
-
-```text
-redirect block_group entry (in the ondemand block_group table)
-
-  source_blob_index  = 2 --+
-  source_block_group_index = 7   +--> names source blob 2, block_group 7;
-  crc32c ------------------+    crc32c equals that block_group's decoded CRC
-
-  compressed_offset -------+
-  compressed_size ---------+--> locates the encoded copy inside
-                                the ondemand data region
-```
-
-At mount time the rewritten bootstrap lists the ondemand device first in the
-root inode's `trusted.nydus.prefetch.blobs` xattr, so phase-0 prefetch streams
-it and fans the decoded block groups out into the **source** blobs' caches:
+The rewritten bootstrap appends the ondemand blob as a new device slot and
+leaves every chunk index untouched: the filesystem keeps reading the source
+blobs, and the ondemand blob is never addressed through it. The root inode's
+`trusted.nydus.prefetch.blobs` xattr lists the ondemand device first, so
+phase-0 prefetch streams it in one sequential pass and writes each decoded
+group into the *source* blob's cache at the source group's slot, marking the
+source group ready:
 
 ```text
 phase-0 prefetch of the ondemand blob
 
-fetch block_group copy -> zstd decode -> CRC32C check (must equal the
-        |                          source block_group's decoded CRC)
-        v
-<source digest>.blob.data  at the source block_group's uncompressed offset
-+ source block_block_group_map bit set
+fetch groups -> decode -> CRC32C check -> <source digest>.blob.data at the
+                                          source group's slot
+                                          + source group map bit set
 ```
 
-The ondemand blob never builds a cache file of its own; a failed redirect
-(unknown source device, CRC mismatch, cache write error) is logged and
-skipped, so a bad block group can only lose warmup, never poison a source cache.
-See [Optimize](#optimize) for the CLI and [Blob prefetch](#blob-prefetch) for
-the scheduling details.
+The workload's reads of the traced groups are then cache hits on the source
+blobs; a source blob is only fetched for groups the trace did not cover.
+Source groups another process already cached are skipped without being
+fetched, so a node running several instances of the image streams each hot
+group once. The ondemand blob never builds a cache file of its own, and an
+ondemand blob is never itself a source for another `nydus optimize` run (the
+command refuses it). See [Optimize](#optimize) for the CLI and
+[Blob prefetch](#blob-prefetch) for the scheduling details.
 
 ### Merge output
 
 The merge command emits an overlaid standalone bootstrap that references one or
 more previously built full blobs.
 
+## z_erofs Layers
+
+The chunk-based format above keeps file data in nydus-defined chunk groups
+that a nydus daemon fetches on demand and decodes. `nydus build --compressor
+erofs-lz4` or `--compressor erofs-zstd` instead produces a native **z_erofs**
+layer: the data region is an EROFS device the kernel decompresses itself
+(`--compressor erofs-none` produces the uncompressed native counterpart, the
+padded chunk address space as a device). Native layers are made for block
+devices: a kernel mount reads the store file directly as a `device=` (a cloud
+disk such as EBS, a local volume, a virtio-blk image: no daemon, per-request
+charging, so the layout minimises read requests). They are never lazily
+loaded by the nydus daemons — the registry backend rejects them and the
+on-demand frontends have no cache file for them; `nydus fuse` and `nydus
+export` read them whole from a local store, decompressing pclusters in
+userspace, which is how `nydusify check` and the nydus-to-OCI conversion
+handle them on any kernel.
+
+### Layer layout
+
+A native layer is a full blob without the blob meta region (`[layer
+data][bootstrap][footer]`, see [Full blob byte layout](#full-blob-byte-layout)):
+
+- **Layer data**: the raw EROFS data region at offset 0, nothing else. For
+	z_erofs it is LZ4 or zstd pclusters of at most 64KiB plus the packed inode;
+	for `erofs-none` it is the padded chunk address space. It is an EROFS
+	*extra device*.
+- **Bootstrap**: a complete single-layer EROFS image (`[head | metadata]`)
+	whose device table has one slot mapping the layer data just past the
+	bootstrap, on a 512KiB boundary. The embedded copy names the data region by
+	its SHA256 (the file cannot contain its own digest); the standalone copy
+	written by `--bootstrap` names the full blob, i.e. the store file. Either
+	mounts on its own with `device=<layer data>`.
+- **Footer**: `RAW_DEVICE` incompat flag, `blob_metadata_blocks = 0`. There
+	is no blob meta and no `.blob.meta` sidecar: nothing describes fetch
+	granularity because nothing fetches the layer on demand.
+
+Inside the layer data:
+
+- Regular files larger than 64KiB become `COMPRESSED_FULL` inodes: full
+	lcluster indexes (8 bytes per 4KiB logical block) behind the inode header,
+	HEAD1 pclusters spanning several lclusters with `CBLKCNT` carrying the
+	physical size (`BIG_PCLUSTER`), compressed payload tail-aligned in its
+	pcluster (`ZERO_PADDING`), and per-lcluster PLAIN blocks whenever a window
+	does not shrink by a block (the `mkfs.erofs` layout). Pclusters are packed
+	greedily with `LZ4_compress_destSize`: each consumes as much source as
+	fits into 64KiB of output, rounded down to whole lclusters.
+- Regular files of at most 64KiB are **fragments**: their bytes are appended
+	to one packed stream, compressed as it fills into the **packed inode** (a
+	regular compressed file outside the tree, referenced by the superblock's
+	`packed_nid`, `FRAGMENTS` incompat, kernel 6.1+). The file's 8-byte map
+	header has bit 63 set and holds its offset in the packed inode. Neighbouring
+	small files thus share pclusters and one read serves many of them — this is
+	what cuts the request count for `node_modules`-style trees.
+- Empty files are `COMPRESSED_FULL` inodes with no lclusters.
+- With `--erofs-data-alignment N`, a file of at least `N` bytes starts on an
+	`N`-byte boundary **of the layer data** (zero-filled gap, no pcluster
+	references it). Identical large files then occupy identical blocks
+	regardless of their neighbours, so a volume that deduplicates or snapshots
+	at a fixed granularity (2MiB on common cloud disks) sees stable blocks.
+	Because the alignment is relative to the data file, not to the image
+	address space, `merge` may map the device anywhere. Put the store on a
+	filesystem that keeps file extents on that grid as well (e.g. XFS with
+	`su=2m` / `extsize 2m`).
+- The builder compresses on a worker pool: file data (and the packed
+	stream) is cut into 4MiB segments handed to `min(CPUs, 8)` threads, and
+	segments are committed to the blob strictly in submission order, so the
+	output depends only on the source bytes (deterministic, reproducible
+	digests), never on scheduling. A pcluster never spans a segment boundary
+	(at most one under-filled pcluster per 4MiB, well under 1% of size).
+	Inode metadata of a file is finalized when its last segment lands, so
+	the builder still streams: the tar is read once, no rootfs is staged, and
+	memory stays bounded regardless of layer size (16 segments in flight
+	plus their outputs).
+
+The superblock declares `ZERO_PADDING | BIG_PCLUSTER (= COMPR_CFGS) |
+CHUNKED_FILE | DEVICE_TABLE` plus `FRAGMENTS` when a packed inode exists, the
+algorithm bit in `available_compr_algs` (LZ4 = bit 0, zstd = bit 3), and the
+matching `COMPR_CFGS` records right after the superblock — LZ4 `{max_distance
+65535, max_pclusterblks 16}`, zstd `{format 0, windowlog 19 - 10}` (a 512KiB
+window, what erofs-utils picks for 64KiB pclusters) — so the device table
+starts at slot 10 (byte 1280) like `mkfs.erofs`. Each inode's map header
+names its algorithm in `h_algorithmtype`; `merge` declares the union of its
+layers' algorithms. Directory and symlink data blocks resolve through the
+device table like file data, which is why the layer device must be mapped
+past the bootstrap.
+
+zstd pclusters are independent standard frames (level 3), found by the same
+fitblk search erofs-utils uses (zstd has no `compress_destSize`), which costs
+several times the LZ4 build CPU for a noticeably smaller store. Kernel mounts
+need 6.10+ (`CONFIG_EROFS_FS_ZIP_ZSTD`); `nydus fuse` decodes either in
+userspace.
+
+The readers accept the `FRAGMENT_PCLUSTER` tail-fragment form `mkfs.erofs
+-Efragments` emits (a file's last extent in the packed inode) but the builder
+does not produce it: it did not reduce request count or start time on the
+images measured and read slightly more bytes.
+
+### Merging z_erofs layers
+
+`nydus merge --bootstrap out.img /store/<l0> /store/<l1> ...` takes the
+layers' full blobs (or their standalone bootstraps) and emits one multi-device
+bootstrap:
+
+- device `i + 1` is layer `i`'s blob, named by its SHA256 and placed back to
+	back in the mapped block space on 512KiB boundaries past the merged
+	bootstrap; every HEAD/PLAIN lcluster address in the copied inode tails is
+	shifted by the difference between the layer's and the merged mapping;
+- OCI whiteouts are applied and the k-way path merge is the same as for
+	chunk-based layers;
+- the layers' packed inodes are concatenated into one (each is block padded by
+	the builder so the lcluster grids line up) and every fragment offset is
+	shifted by the packed bytes of the layers below it.
+
+The blobs are untouched, so a store shared by many images keeps one copy of
+each layer, and the same merged bootstrap drives both mount paths below.
+
+### Mounting
+
+Kernel mounts read the store files as devices:
+
+```bash
+# One layer.
+mount -t erofs -o device=/store/<sha256> layer.meta /mnt
+
+# A merged image: one device= per slot, in device table order (nydus check
+# prints them as "Blobs" entries).
+mount -t erofs -o "device=/store/<l0>,device=/store/<l1>,..." out.img /mnt
+```
+
+The bootstrap and the devices can be block devices (kernel 6.1+ with
+fragments, 5.16+ without) or regular files on a filesystem (file-backed EROFS,
+kernel 6.12+; file-backed I/O is capped at 64KiB per request, one pcluster).
+The kernel only reads the leading data region of each store file.
+
+`nydus fuse` mounts a native image from a local store without any cache
+(`--blob-dir /store`), decompressing pclusters per read in userspace; this
+needs no z_erofs support from the kernel and is what `nydusify check` uses.
+The on-demand frontends (`ublk`, `nbd`, `fanotify`, `uffd`) and registry
+backends do not serve native layers.
+
+### Checking
+
+`nydus check --bootstrap out.img --blob-dir /store` resolves every device by
+its slot id, verifies size and SHA256 (see [Check](#check)), counts z inodes and
+fragments, and reports any pcluster address outside the device table.
+
 ## Build Pipeline
 
-The build pipeline now follows this sequence:
+The build pipeline follows this sequence:
 
 1. Walk the source directory and build the in-memory inode tree.
 2. Assign file chunk indexes into a logical uncompressed external-device address
-	space. Chunks are packed densely: each chunk advances by its real
-	block-aligned size, so only a chunk's final block carries zero padding (no
-	full-chunk zero runs).
-3. Record one blob_meta chunk entry per chunk (BLAKE3 digest + absolute block
-	range) and feed the decoded data stream into a block-oriented block group builder
-	that flushes a compression block group whenever it fills to `--block-group-size`,
-	regardless of chunk boundaries. A chunk may therefore span two block groups.
-4. Compute BLAKE3 digest over each uncompressed chunk and CRC32C over each
-	uncompressed block group.
-5. Compress each block group according to the blob_meta header compressor and append
-	the encoded bytes directly to the data region. Encoded block groups are packed
-	back-to-back with no inter-block group padding. For zstd, block groups that do not shrink
-	to at most 70% of their uncompressed size are stored plain and marked by
-	`compressed_size == uncompressed_block_count * 4096`.
+	space. Every chunk (a file of at most the chunk size, or one chunk of a
+	larger file) starts on its own block and advances by its real block-aligned
+	size, so only a chunk's final block carries zero padding (no full-chunk zero
+	runs).
+3. Record one blob_meta chunk length per chunk and feed the chunks' bytes
+	(without the tail padding) into the chunk group builder, which bin-packs
+	them into chunk-size slots: a slot-filling chunk is a group on its own,
+	smaller chunks go to the first of up to eight open groups with room, and
+	the fullest open group closes when a ninth would be needed. The chunk
+	index handed back for each chunk is a placeholder until its group closes.
+4. Compute BLAKE3 digests over every chunk and CRC32C over
+	each chunk group payload.
+5. Compress each chunk group according to the blob_meta header compressor and append
+	the encoded bytes directly to the data region, in group index order. Encoded
+	chunk groups are packed back-to-back with no inter-chunk group padding. For
+	zstd and LZ4, chunk groups that do not shrink to at most 70% of their payload
+	are stored plain and marked by `compressed_size == payload_size`.
 6. Compute SHA256 over the encoded data region as those bytes are written and
 	write it into the bootstrap device slot tag.
-7. Serialize the bootstrap bytes in memory. External chunk `blkaddr` values stay
-	logical and are not rebased by the bootstrap size. The bootstrap includes the
-	native EROFS superblock checksum.
+7. Close the remaining groups, resolve every placeholder chunk index to its
+	group's slot and block, and serialize the bootstrap bytes in memory.
+	External chunk `blkaddr` values stay logical and are not rebased by the
+	bootstrap size. The bootstrap includes the native EROFS superblock
+	checksum.
 8. Optionally persist the standalone bootstrap.
 9. Append `aligned bootstrap + aligned blob_meta + footer` after the data
 	region. Blob meta carries its own header crc32c. The full blob SHA256 continues
@@ -1638,8 +2004,8 @@ When mounting with `--blob`:
 3. Read device slots and resolve the full blob through the local backend.
 4. Use a temporary local cache for the mount lifetime. The cache downloads the
 	standalone blob meta into that cache, verifies its header crc32c, mmaps it for
-	chunk lookup, fetches encoded block groups from the data region, and validates each
-	decoded block group.
+	chunk group lookup, fetches encoded chunk groups from the data region, and
+	validates each decoded group.
 
 ### Bootstrap plus blob-dir mount
 
@@ -1655,18 +2021,69 @@ When mounting with `--bootstrap + --blob-dir`:
 6. Before chunk lookup, check the cache directory for `<full_blob_digest>.blob.meta`.
 	If it is absent, download the standalone blob meta from the local backend into
 	the cache directory. The cache verifies the blob meta header crc32c before
-	mmaping the cached file and using its chunk entries.
+	mmaping the cached file and using its tables.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
-	layer maps an offset to its block group in O(1) with `block >> block_group_block_count_bits`,
-	ensures every block group covering the requested range is fetched and decoded from
-	the data region (validating block group CRC32C), and then reads the bytes straight
-	out of the cache file. The cache file mirrors the dense decoded address space,
-	so once the covering block groups are ready the absolute offset indexes directly into
-	it for a single contiguous read — no chunk-level lookup is needed on the read
-	path.
+	layer names the chunk groups covering the requested range by shifting the
+	offsets (`offset >> log2(chunk_size)`), ensures each is fetched, decoded
+	from the data region (checking the group's CRC32C, and the chunks' BLAKE3
+	digests when checksum verification is on) and written onto its slot's
+	blocks, and then reads the bytes straight out of the cache file. The cache
+	file mirrors the padded decoded address space, so once the covering groups
+	are ready the absolute offset indexes directly into it for a single
+	contiguous read — no chunk-level lookup is needed on the read path.
 
-The runtime no longer reads external blob data by direct mmap offsets. External
-blob reads always go through the blob_meta-aware cache abstraction.
+A miss does not fetch its group alone. The cache splits the **compressed**
+data region into cells of `storage.fetch_size` bytes (default 2 MiB) and,
+on a miss, issues one range read for every group whose compressed range
+overlaps the missed group's cell — trimmed at groups that are already cached
+or already being fetched — then decodes each group as it comes and publishes
+it. The fetch size is a runtime choice, independent of the image's chunk
+size; groups tile the data region back to back, so a fetch is always one
+contiguous range, and because it is measured in compressed bytes it bounds
+the transfer rather than the decoded span. The fetch size sets the
+request/byte trade-off: the blobs compress several-fold, so a fetch of `W`
+compressed bytes decodes to a multiple of `W` in the cache, and every extra
+group a fetch pulls in is decoded onto the cache whether or not the workload
+reads it. Larger fetches cut the request count and help on high-latency
+links; smaller fetches transfer fewer unused bytes and help on
+bandwidth-bound links and small disks. The 2 MiB default takes about a third
+of the requests off the previous block-group format for a moderate byte and
+cache cost, where 4 MiB roughly doubles the cache. Deployments that are short
+on bandwidth or disk should lower `fetch_size`; latency-bound ones can
+raise it. Optimized images (see [Optimize](#optimize)) sidestep the trade-off:
+their ondemand blob is prefetched whole into the source caches, so the fetch
+size only governs the residual misses.
+
+Every chunk group a read touches is also recorded in the on-demand access
+trace, whether it hit or missed, so `/trace` names the groups the workload
+read and `nydus optimize` copies exactly those (see [Optimize](#optimize)).
+
+External blob reads always go through the blob_meta-aware cache abstraction;
+the runtime never reads external blob data by direct mmap offsets.
+
+On-demand and diskless group reads own their temporary input/output buffers.
+Buffers of at least 1 MiB use private anonymous mappings, which are unmapped
+when the buffer owner is dropped instead of remaining in allocator arenas.
+On Linux, mappings of at least 2 MiB also receive a best-effort transparent
+huge-page hint to reduce page faults during decoding. This neither requires
+reserved huge pages nor changes system-wide settings; allocation still works
+if the kernel cannot provide huge pages. The mapping lifetime is unchanged.
+Smaller buffers use ordinary vectors. Zstandard decodes directly into the
+declared-size output slice, and an unexpected decoded length remains an error.
+This changes temporary memory management, not the persistent data cache or
+fetch concurrency. Prefetch workers continue to reuse their fetch buffers.
+
+Three further measures keep the idle footprint of a mount service small. The
+standalone bootstrap is mapped with a read-ahead hint (`MADV_WILLNEED`) rather
+than pre-faulted, so the whole file is pulled into the page cache but only the
+metadata actually touched counts toward RSS. The asynchronous log writers queue
+at most 8192 lines each instead of the crate default of 128k, which alone
+pinned about 4 MiB per appender. On glibc, the `nydus` binary caps malloc at
+two arenas and fixes the mmap threshold at 512 KiB (trim threshold 1 MiB) for
+the long-running services only; build, check, merge, export and optimize keep
+the allocator defaults. Explicit `MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_`,
+`MALLOC_TRIM_THRESHOLD_` or `GLIBC_TUNABLES` in the environment disable this
+built-in tuning.
 
 The local backend opens source blob files lazily when read IO is first issued and
 caches the file descriptor for later `pread` calls. The persistent local cache
@@ -1677,110 +2094,119 @@ blob digest:
 - `<full_blob_digest>.blob.data` stores decoded uncompressed data.
 - `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
 	the local backend.
-- `<full_blob_digest>.group.map` records which blob_meta block groups have been decoded
-	(a shared readiness bitmap, see
-	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
+- `<full_blob_digest>.group.map` records which chunk groups have been decoded
+	(a shared readiness bitmap, one bit per group, see
+	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup));
+	byte `N` of the same file also carries the cross-process fetch claim for
+	group `N` (an OFD byte-range lock spanning the groups of one fetch; the
+	bytes' contents are unaffected).
 - `<full_blob_digest>.prefetch.lock` is the cross-process prefetch lock file
 	(empty; only its `flock` state matters).
-- `<full_blob_digest>.flight.lock` is the cross-process fetch lock file for
-	single block groups (empty; only its byte-range lock state matters, see
-	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 
-The cache data file mirrors the decoded address space one-to-one, so a block group's
-bytes land at `uncompressed_block_offset * 4096` and EROFS chunk `blkaddr`
-offsets index into it directly:
+The cache data file mirrors the decoded address space one-to-one, so a group's
+chunks land at their `blkaddr * 4096` and EROFS chunk `blkaddr` offsets index
+into it directly:
 
 ```text
 cache directory, artifacts named by SHA256(full blob) = <hex>
 
-<hex>.blob.data — decoded data, sparse; filled block_group by block_group
+<hex>.blob.data — decoded data, sparse; filled group by group
 +-----------+-----------+-----------+-----------+---
-|  block_group 0  |  (hole)   |  block_group 2  |  (hole)   | ...
+|  group 0  |  (hole)   | groups 2-5|  (hole)   | ...
 |  decoded  |           |  decoded  |           |
 +-----------+-----------+-----------+-----------+---
-^ byte offset = uncompressed_block_offset * 4096; a block_group is written
-  only after zstd decode + CRC32C validation succeeds
+^ byte offset = group index * chunk size; a group is written only after
+  decode + CRC32C (+ digest validation when enabled) succeeds
 
-<hex>.blob.meta — verified blob meta copy (mmap'd for chunk/block_group lookup)
-+--------+-------------------+-------------------+
-| header | chunk table       | block_group table       |
-| crc32c | BLAKE3 digests    | offsets + CRC32C  |
-+--------+-------------------+-------------------+
+<hex>.blob.meta — verified blob meta copy (mmap'd for group/chunk lookup)
++--------+-------------------+-------------+---------+-----------+
+| header | chunk_group table | chunk table | digests | redirects |
+| crc32c | offsets + CRC32C  | u32 lengths | BLAKE3  | (ondemand)|
++--------+-------------------+-------------+---------+-----------+
 
 <hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
 +---------------------------------+----------------------+
-| 4 KiB header (LPGRPMAP, version,| 1 bit per block_group ...  |
+| 4 KiB header (LPGRPMAP, version,| 1 bit per group ...  |
 | flags, count, ready count)      |                      |
 +---------------------------------+----------------------+
-  bit set only after the block_group's bytes are resident in .blob.data;
-  the ALL_READY header flag latches once every bit is set
+  bits set only after the group's bytes are resident in .blob.data;
+  the ALL_READY header flag latches once every bit is set;
+  byte N also carries the OFD lock claiming group N's fetch
 
 <hex>.prefetch.lock — empty; exclusive flock serializes prefetch owners
-
-<hex>.flight.lock — empty; byte N carries an OFD lock claiming block_group N,
-  so exactly one process fetches a cold block_group and the rest wait for it
 ```
 
 ### Blob prefetch
 
 After a successful mount, `nydus fuse` spawns a background prefetcher that warms
 the local cache so later on-demand reads hit decoded data instead of fetching and
-decoding block groups synchronously. Prefetch is **off by default**: enable it with the
+decoding chunk groups synchronously. Prefetch is **off by default**: enable it with the
 `--prefetch` flag, or through the storage config `prefetch.scope` (either one
 turns it on); the config's `prefetch` block also sizes the worker pool. See
 [Storage config](#storage-config).
 
-Per-blob prefetch streams block groups into the cache:
+Per-blob prefetch streams chunk groups into the cache:
 
-- The blob meta block groups are the compression/cache unit. Prefetch reads the data
-	region in windows that accumulate consecutive block groups up to the default block group
-	uncompressed size (4 MiB), so each window decode covers one or more block groups.
-- For each window it issues a single contiguous backend range read, then decodes
-	each contained block group (plain copy or zstd), validates length and CRC32C, writes
-	the decoded bytes to the cache file at the block group's uncompressed offset, and
-	marks the block group ready in the block_block_group_map.
-- Prefetch uses its own decode buffer and does not take the on-demand read
-	`fetch_lock`. The block_block_group_map bits are updated atomically and `set_ready` is
-	idempotent, so racing with a FUSE read at worst decodes the same block group twice
-	into identical bytes at the same offset. This keeps prefetch fully decoupled
-	from, and non-blocking to, the on-demand read path.
-- Block groups already marked ready (for example, fetched on demand or from a previous
-	run's persistent cache) are skipped.
+- Prefetch reads the data region in batches of consecutive chunk groups
+	whose compressed bytes add up to `storage.fetch_size` (default 2 MiB),
+	so prefetch and on-demand reads issue backend requests of the same size;
+	a zero fetch size reads group by group.
+- For each batch it issues a single contiguous backend range read, then
+	decodes each contained chunk group (plain copy, zstd or LZ4), validates
+	the group's length and CRC32C, writes the decoded bytes to the cache file
+	at the chunks' padded blocks, and marks the group ready in the group map.
+- A priority blob's batches are fetched by up to
+	`prefetch.concurrent_blob_count` workers (default 10), handed out in blob
+	order; the first batches are single groups (a "ramp") so the head of an
+	ondemand blob — the workload's first reads — lands within one round trip
+	while the rest streams in full batches. Blobs pulled by the phase-2 pool
+	use one worker each.
+- Prefetch uses its own decode buffer and takes no group locks. The group map
+	bits are updated atomically and `set_ready` is idempotent, so racing with a
+	FUSE read at worst decodes the same group twice into identical bytes at the
+	same offset. This keeps prefetch fully decoupled from, and non-blocking to,
+	the on-demand read path.
+- Chunk groups already marked ready (for example, fetched on demand or from a
+	previous run's persistent cache) are trimmed off the ends of a batch; a
+	batch that is entirely ready costs no backend read.
 
 Prefetch scheduling across blobs has two phases:
 
 1. Priority blobs are prefetched first, sequentially, in the order listed by the
 	root inode's `trusted.nydus.prefetch.blobs` xattr (a comma-separated list of
 	device ids). The list is deduplicated and filtered to existing devices. When
-	`prefetch.scope` is `ondemand` (the default), only redirect ("ondemand") priority
-	blobs are warmed; non-redirect priority blobs are skipped so backend
-	bandwidth is not spent pulling whole source blobs.
+	`prefetch.scope` is `ondemand` (the default), only the "ondemand" priority
+	blob (its blob meta carries the `REDIRECT` flag) is warmed; other priority
+	blobs are skipped so backend bandwidth is not spent pulling whole source
+	blobs.
 2. Only when `prefetch.scope` is `all`, the remaining blob devices are then
 	prefetched concurrently by a worker pool sized to
-	`min(prefetch.concurrent_blob_count, remaining)` (default `10`).
+	`min(prefetch.concurrent_blob_count, remaining)` (default `10`). Under
+	`ondemand` a pool of the same size instead opens every blob's cache
+	(fetches and validates the blob metas, creates the sparse files) without
+	pulling data, priority blobs first and running alongside phase 1 rather
+	than after it. An optimized image lists every blob in its prefetch xattr,
+	so without this the phase 1 `REDIRECT` checks alone would open the caches
+	one blob at a time; with it neither those checks, nor the redirect fills
+	into the source caches, nor a later first read of any blob, nor a
+	block-device frontend's probe of many blobs right after the device appears
+	pays the round trips serially.
 
-When a priority blob is an "ondemand" redirect blob (produced by `nydus
-optimize`, listed first in the xattr), its prefetch is dispatched differently:
-the block groups are streamed and decoded as usual, but each decoded block group is written
-into its **source** device's cache (validated against the source block group's length
-and CRC) and marked ready there. The ondemand blob never builds a cache file of
-its own. Per-block group failures — unknown source device, CRC mismatch, source cache
-errors — are logged and skipped, so a bad redirect can only lose warmup, never
-poison a source cache or abort the mount. Blob device caches are opened lazily
-on first read or prefetch, so a device fully covered by the ondemand warmup
-pays no extra metadata fetch at mount time.
-
-Redirect prefetch is itself parallelized when the ondemand blob is larger than
-one segment and more than one worker thread is configured. The block group list is
-split into segments of up to 16 MiB uncompressed each and fetched concurrently
-by the prefetch worker pool, with one twist: the earliest block groups are emitted as
-single-block group segments (a "ramp") so they land in the first wave of workers
-within a single round trip — ahead of the workload's first page faults — while
-the rest are bundled into full-size segments for throughput. A small ondemand
-blob (fitting in one segment) or a single-thread pool streams sequentially,
-since segmentation and extra registry connections would add overhead without
-overlapping any work. In a cold-registry container start benchmark this
-parallel ramped prefetch cut end-to-end start time from 32.6s to 25.0s.
+The ondemand blob (produced by `nydus optimize`, listed first in the xattr)
+is a `REDIRECT` blob: it is streamed in the order it was packed — the
+workload's first-access order — and every decoded group is written into its
+**source** blob's cache at the source group's slot (after the length and
+CRC32C checks) and marked ready there, so the earliest reads find their
+groups resident first; the ramp above puts its first groups on the wire in
+parallel before the bulk follows. The ondemand blob never builds a cache
+file of its own. Groups whose source is already cached — by another process
+sharing the directory, or by a previous run — are trimmed off the batches
+and not fetched. Per-group failures (decode or CRC errors, an unknown source
+blob, a failed fill) are logged, counted in `cache_redirect_skip_chunk_group`
+and skipped, so a bad copy can only lose warmup, never poison a source cache
+or abort the prefetch. The prefetch logs how long the ondemand blob took and
+how many groups it filled and skipped, so operators can tell whether the
+warmup outran the workload.
 
 ### Cross-process cache sharing and prefetch dedup
 
@@ -1788,18 +2214,18 @@ Many identical instances cold-starting on one node (for example, dozens of
 hypervisor-embedded cores mounting the same optimized image) all target the
 same cache directory, the same blobs, and the same access-ordered hot set.
 Without coordination each instance would stream the whole ondemand blob and
-decode every block group independently — N× the backend traffic, decode CPU, and
+decode every group independently — N× the backend traffic, decode CPU, and
 cache writes for identical bytes. Two mechanisms make the warmup effectively
 single-instance while leaving the on-demand read path untouched.
 
-**Shared block_block_group_map bitmap.** The `<digest>.group.map` file is a 4096-byte header
-followed by one readiness bit per blob_meta block group. The header carries the
+**Shared group map bitmap.** The `<digest>.group.map` file is a 4096-byte
+header followed by one readiness bit per chunk group. The header carries the
 8-byte ASCII magic `LPGRPMAP` (same raw-bytes style as the blob meta's
-`LPBLMETA`), an informational little-endian `u32` format generation (not gated
-on, like the other formats), a mutable `flags` word (the same
+`LPBLMETA`), an informational little-endian `u32` format generation (unlike
+the strictly checked blob meta version), a mutable `flags` word (the same
 `magic + version + flags` prefix as the blob meta header — but here the flags
 are runtime state bits, not format features, and unknown bits are ignored),
-the block group count, and a mutable ready-block group counter; the rest of the header
+the group count, and a mutable ready-group counter; the rest of the header
 page is reserved and zero. The whole file is mapped `MAP_SHARED`
 and every bit access goes through atomic operations (`Acquire` loads,
 `fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
@@ -1813,7 +2239,7 @@ crash safety:
 	maps a fully sized but still all-zero header is detected at open and healed
 	by rewriting the header; a non-zero header with a wrong magic is rejected as
 	corrupt instead of silently reinitialized.
-- Bits are set only after the decoded, CRC-validated block group bytes have been
+- Bits are set only after the decoded, validated group bytes have been
 	written to the cache data file, and persistence rides on regular kernel
 	writeback of the dirty mapping — there is no per-bit write syscall on the hot
 	path.
@@ -1823,7 +2249,7 @@ missing bit (tracked by the shared ready counter) latches the sticky
 `ALL_READY` flag in the header, and from then on a single atomic load answers
 "is this blob fully cached?" for every process. Per-event handlers — uffd page
 faults, FUSE reads — consult it before any
-per-block group bookkeeping (`ensure_range` and `ready_ranges` short-circuit on it),
+per-group bookkeeping (`ensure_range` and `ready_ranges` short-circuit on it),
 so a fully warmed blob costs one load per request instead of a bitmap walk.
 `check_all_ready()` falls back to scanning the shared bitmap (masking the partial
 final byte) when the flag is not yet set, and latches the flag when the scan
@@ -1840,9 +2266,9 @@ serialized across processes with an exclusive `flock` on
 (modeled on the nydus blob prefetcher):
 
 - The lock is polled non-blocking with a 1s sleep between attempts, so a waiter
-	can observe progress while it waits: a waiter on a regular blob gives up on
-	the lock as soon as the shared block_block_group_map reports every block group ready (its own
-	prefetch then reduces to a cheap all-ready scan).
+	can observe progress while it waits: a waiter gives up on the lock as soon
+	as the shared group map reports every group ready (its own prefetch then
+	reduces to a cheap all-ready scan).
 - Locking failures (unopenable lock file, unexpected errno) degrade to
 	prefetching without the lock — correctness never depends on it, only the
 	cross-process dedup guarantee does.
@@ -1850,51 +2276,58 @@ serialized across processes with an exclusive `flock` on
 	death — releases the lock, so a crashed owner is taken over by a waiter, and
 	the ready-skip logic resumes the warmup exactly where the crashed owner left
 	off.
-- **On-demand reads never touch the prefetch lock.** A cold block group hit by a page
-	fault is never queued behind a whole-blob warmup; it coordinates at block group
-	granularity instead, on its own lock file (below).
+- **On-demand reads never touch the prefetch lock.** A cold group hit by a page
+	fault is never queued behind a whole-blob warmup; it coordinates at group
+	granularity instead (below).
 
-**Per-block group fetch claim.** On-demand reads coordinate at block group granularity on
-`<digest>.flight.lock`, where byte `N` stands for block group `N` — one descriptor per
-blob however many block groups it has. A reader that finds a block group cold claims its
-byte, and readers in the other instances block until the claim is released,
-which the fetcher does immediately after publishing the block group in the shared
-block_block_group_map. Waiters therefore re-check readiness and almost always find the block group
-already there, so a cold block group costs one backend fetch per node rather than one
-per instance.
+**Per-group fetch claim.** On-demand reads coordinate at group granularity
+with byte-range locks on the `<digest>.group.map` file, where byte `N` stands
+for group `N` — one descriptor per blob however many groups it has, and no
+extra sidecar. A reader that finds a group cold claims the bytes of the
+whole fetch it plans (the missed group and the rest of its fetch-size cell),
+and readers in the other instances that miss on any group of that fetch
+block until the claim is released, which the fetcher does immediately after
+publishing the groups in the shared group map. Waiters therefore re-check
+readiness, trim their own fetch to what is still missing, and almost always
+find nothing left, so a cold group costs one backend fetch per node rather
+than one per instance.
 
 - The claims are **open file description locks**, so the kernel releases them
 	when the descriptor closes, including on process death. A fetcher that crashes
-	mid-flight hands the block group to a waiter instead of wedging it.
+	mid-flight hands the group to a waiter instead of wedging it.
 - Waiting blocks in the kernel rather than polling, so the handover follows the
 	release immediately. What bounds the wait is the fetcher, not the waiter:
 	every backend read carries a timeout (hence the short registry `timeout`
 	default), so a claim is always released. **A claim must never be held across
 	an operation that cannot time out** — what queues up behind it are reader
 	threads. The wait is interruptible, so shutdown still works.
-- The in-process fetch flight elects a single fetcher per block group before any of
-	this, which is what makes a descriptor-owned lock meaningful: two threads
-	locking the same byte through one descriptor would both succeed and neither
-	would wait.
+- The in-process fetch flight elects a single fetcher per group before any of
+	this (one flight covers every group of the fetch it issues, so threads
+	missing on neighbouring groups join it instead of fetching again), which is
+	what makes a descriptor-owned lock meaningful: two threads locking the same
+	bytes through one descriptor would both succeed and neither would wait.
 - A filesystem that cannot provide the lock degrades to fetching without
 	coordination, exactly as before this existed — a missing optimisation must
 	never fail a read.
 
-**Redirect segment skipping.** A waiter that eventually acquires the lock (or a
-restart replaying the warmup) must not re-download the ondemand blob just to
-discover every fill is a no-op: the parallel redirect stream accepts a `skip`
-predicate that consults the **source** blobs' shared block_block_group_maps, and any segment
-whose block groups are all already resident is not fetched at all. Partially-done
-segments are still fetched whole to keep backend reads contiguous.
+**Batch skipping.** A waiter that eventually acquires the prefetch lock (or a
+restart replaying the warmup) must not re-download the blob just to discover
+every fill is a no-op: each prefetch batch is trimmed to its groups that the
+shared group map does not already report ready, and a batch that is entirely
+ready is not fetched at all.
 
-Measured on one node with the shared cache directory (cold registry, optimized
-image): with 10 concurrent cold starts exactly one instance acquired the lock
-and streamed the ondemand blob (≈230 MB, 222 block groups filled) while the other
-nine did zero prefetch backend reads (only 0–5 MB of early on-demand faults
-each, thousands of shared-cache hits); with 50 concurrent cold starts the
-cache grew to the same ≈900 MB a single instance produces and end-to-end
-application readiness stayed at the single-instance baseline (24–27s across
-all 50, vs ≈25s for one).
+**What this buys.** With the claims in place the backend cost of a cold
+node is independent of how many instances share the cache: the end-to-end
+suite in `tests/e2e/cache_sharing_test.go` reads the same cold file from
+four processes at once and requires the summed
+`cache_ondemand_fill_chunk_group` to stay within one group of a single
+process doing the same read, requires
+four concurrent full prefetches to fill at most 1.5× the groups a single
+prefetch fills (the per-blob prefetch lock keeps all but one process from
+streaming the blob), and checks that a peer killed mid-fetch neither blocks
+nor corrupts the survivors. The same suite covers two images that reference
+one blob converging on a single set of cache files, which is what keeps a
+node running many images cheap.
 
 ## Core (virtio-pmem integration)
 
@@ -1911,7 +2344,7 @@ through `ublk_drv` over `io_uring`; see
 
 - The bootstrap is the EROFS primary device; each data blob is an external
 	device backed by its host cache data file (`{cache_dir}/{hex}.blob.data`),
-	which mirrors the dense decoded block address space — a guest read of block
+	which mirrors the padded kernel-visible block address space — a guest read of block
 	`N` lands at byte `N * 4096` of the backing file.
 - `NydusCore::new(bootstrap, Config)` parses the bootstrap and an already
 	loaded `nydus_config::Config` (same structure as `nydus fuse --config`) lazily;
@@ -1919,26 +2352,26 @@ through `ublk_drv` over `io_uring`; see
 	happens on first touch through `blobs.prepare_all()` or `blobs.fetch`.
 - Unless `config.prefetch.scope` is `none`, `new` spawns a background prefetch
 	worker before returning — the same two-phase workflow as `nydus fuse`
-	(redirect blob first, then the rest only under `prefetch.scope: all`). The worker
+	(ondemand blob first, then the rest only under `prefetch.scope: all`). The worker
 	thread inherits the network namespace active at construction time, so
 	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.
-- Access traces are recorded on actual backend fetches (not cache hits), and
+- Access traces record every chunk the guest reads, hit or miss, and
 	`nydus_telemetry::metrics::snapshot()` exposes runtime counters for embedding
 	into hypervisor stats endpoints; a saved trace JSON can be replayed offline
 	via `nydus optimize --trace-file`. See [Metrics](#metrics).
 - `BlobId` is the public blob digest type. It converts to/from 64-character
 	SHA256 hex strings and `[u8; 32]` bytes.
 - `blobs.prepare_all()` lists the device table in order as `BlobInfo` entries:
-	blob index, `BlobId`, block count, cache path, cache size, and whether the
-	blob is an ondemand redirect blob. Calling it prepares the sparse cache data
-	files, so `BlobInfo.cache_path` is immediately suitable as a virtio-pmem
-	backing file and `BlobInfo.cache_size` is `blocks * 4096`.
+	blob index, `BlobId`, mapped block address and offset, block count, cache
+	path and cache size. Calling it prepares the sparse cache data files, so
+	`BlobInfo.cache_path` is immediately suitable as a virtio-pmem backing file
+	and `BlobInfo.cache_size` is `blocks * 4096`.
 - `blobs.fetch(id, offset, len)` guarantees the 4 KiB-aligned range is decoded,
-	CRC-validated, and resident in the cache data file. It maps the range to
-	blob meta block groups with the O(1) division lookup and reuses the regular cache
-	chain (`ensure_block_group`), so it is idempotent, concurrency-safe, and shares
-	trace/metrics recording with the FUSE path. Redirect blobs are rejected.
+	validated, and resident in the cache data file. It maps the range to chunk
+	groups by a shift and reuses the regular cache chain (the fetch-size
+	fill), so it is idempotent, concurrency-safe, and shares trace/metrics
+	recording with the FUSE path.
 - `fs.open(path)` resolves a path once and returns a `Node`; use
 	`node.metadata()`, `node.read_dir()`, `node.read()`,
 	`node.read_at(...)`, `node.read_link()`, and `node.xattrs()` for
@@ -1964,13 +2397,12 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> nydus_error::Result
 	let blobs = core.blobs.prepare_all()?;
 	for blob in &blobs {
 		println!(
-			"blob index={} id={} blocks={} cache={} bytes={} redirect={}",
+			"blob index={} id={} blocks={} cache={} bytes={}",
 			blob.index,
 			blob.id,
 			blob.blocks,
 			blob.cache_path.display(),
 			blob.cache_size,
-			blob.is_redirect,
 		);
 
 		// Hypervisor wiring point:
@@ -1980,9 +2412,9 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> nydus_error::Result
 	}
 
 	// Prepare a range before the guest touches it. The range must be 4 KiB
-	// aligned; fetch expands to whole blob-meta block_groups internally and is
-	// safe to call repeatedly or concurrently.
-	if let Some(blob) = blobs.iter().find(|blob| !blob.is_redirect) {
+	// aligned; fetch expands to whole chunk groups (and its fetch-size cell)
+	// internally and is safe to call repeatedly or concurrently.
+	if let Some(blob) = blobs.first() {
 		core.blobs.fetch(&blob.id, 0, 4096 * 16)?;
 	}
 
@@ -2042,6 +2474,14 @@ EROFS compatibility is handled by exposing decoded cache data when running
 compatibility checks against C erofsfuse. Compressed full blobs are Nydus runtime
 artifacts and are not directly consumable as plain EROFS external devices.
 
+z_erofs layers (`nydus build --compressor erofs-lz4|erofs-zstd`) sit in
+between: their data region is a plain EROFS device the kernel mounts directly
+(5.16+ for the layout, 6.1+ for fragments, 6.10+ for zstd pclusters), and the
+full blob around it lets every nydus
+frontend serve the same file — the block frontends and fanotify hand the raw
+data to the kernel, `nydus fuse` decompresses pclusters in userspace (any
+kernel), and `check`, `merge` and `export` read them too.
+
 ## Image Conversion (nydusify)
 
 `nydus` operates on local directories, blobs and bootstraps. `nydusify` is the
@@ -2088,7 +2528,8 @@ nydus-aware snapshotters and tooling can consume it (see
   `containerd.io/snapshot/nydus-blob`. A nydus full blob is uncompressed at the
   layer level, so its diff id equals the blob digest.
 - One extra **bootstrap** layer is appended last as a gzip tarball containing
-  `image/image.boot`, annotated with `containerd.io/snapshot/nydus-bootstrap`.
+	`image/image.boot` and per-layer `image/<digest>.blob.meta` files, annotated
+	with `containerd.io/snapshot/nydus-bootstrap`.
 - The ondemand blob appended by `nydusify optimize` is a nydus blob layer that
   additionally carries `containerd.io/snapshot/nydus-blob-optimized`. It holds a
   rearranged copy of data already present in the other blobs and describes no
@@ -2100,7 +2541,7 @@ nydus-aware snapshotters and tooling can consume it (see
   runtime-relevant config fields (env, cmd, entrypoint, working dir, os,
   architecture) are preserved verbatim.
 
-Putting the pieces together, a converted nydus image looks like:
+Putting the chunks together, a converted nydus image looks like:
 
 ```text
 nydus image (OCI manifest, os.features: ["nydus.remoteimage.v1"])
@@ -2111,7 +2552,7 @@ nydus image (OCI manifest, os.features: ["nydus.remoteimage.v1"])
 | layer 1     nydus blob layer   ...nydus.blob.v1   <- OCI layer 1   |
 |  ...        (one full blob per source OCI layer                    |
 |             or per local directory source)                         |
-| layer N     bootstrap layer    gzip tar { image/image.boot }       |
+| layer N     bootstrap layer    gzip tar { image.boot, blob metas } |
 |             = merged overlaid bootstrap referencing layers 0..N-1  |
 +--------------------------------------------------------------------+
            |
@@ -2120,8 +2561,10 @@ nydus image (OCI manifest, os.features: ["nydus.remoteimage.v1"])
            v
 +--------------------+-------------+-----------+--------+
 | encoded data       | bootstrap   | blob meta | footer |  full blob
-| (zstd block_groups,      | (embedded   | (chunk +  | 4 KiB  |
-|  CRC32C each)      |  EROFS)     |  block_group)   |        |
+| (dense groups or   | (embedded  | chunk/group| 4 KiB  |
+|  native device)    |  EROFS)    | tables, or |        |
+|                    |            | absent for |        |
+|                    |            | erofs-*    |        |
 +--------------------+-------------+-----------+--------+
   SHA256(data region) -> device slot blob id in the bootstrap
 ```
@@ -2150,8 +2593,9 @@ above, so `nydusify` and `nydus` versions can be pinned together.
 `nydusify convert --source <oci-ref|dir> [--source <oci-ref|dir> ...] --target <ref> [OPTIONS]`
 
 Converts an image between OCI and nydus format and pushes it to the target
-reference. `--compressor` picks the direction: `none` and `zstd` are nydus chunk
-compressors and run the OCI to nydus conversion, while the `oci-` prefixed
+reference. `--compressor` picks the direction: `none`, `zstd`, `lz4`,
+`erofs-none`, `erofs-lz4` and `erofs-zstd` run the OCI to nydus conversion;
+the `oci-` prefixed
 values run the reverse and select the layer compression of the rebuilt OCI
 image. An unknown value is rejected up front rather than silently running the
 wrong direction.
@@ -2174,11 +2618,12 @@ Pipeline (single image source):
 
 1. Pull `--source` into a scratch content store
    (`internal/remote`, backed by containerd's local content store).
-2. For each OCI layer, extract its rootfs (decompressing gzip/zstd, resolving
-   whiteouts) and run `nydus build` with the configured `--chunk-size`,
-   `--block-group-size` and `--compressor`. The build output is streamed straight
-   into the content store through a FIFO, so the full blob is never staged on
-   disk twice (`internal/pipeline/layer.go`).
+2. Decompress each OCI layer (gzip/zstd/plain), then stream its tar directly
+	into `nydus build --source-type tar /dev/stdin`. PAX metadata and whiteout
+	markers are preserved without extracting a rootfs. `--chunk-size` and
+	`--compressor` are forwarded; output flows through
+	a FIFO into the content store (`internal/pipeline/layer.go`). Input/build
+	failures abort conversion; destination failures cancel the subprocess.
 3. A post-convert index hook runs `nydus merge` over the per-layer blobs to
    produce the overlaid bootstrap, which is written back as the final bootstrap
    layer (`internal/pipeline/hook.go`).
@@ -2197,6 +2642,16 @@ Pipeline (multiple and/or directory sources, `internal/pipeline/multi.go`):
    config (env, cmd, entrypoint, ...) is inherited from the uppermost image
    source when present; otherwise a minimal config is synthesized. Push to
    `--target`.
+
+Existing nydus layers are reused, not transcoded. All merged inputs must have
+compatible data layouts; chunk/z mixtures and differing packed-inode
+compression algorithms fail explicitly. Rebuild incompatible source layers
+with the selected compressor before stacking them.
+
+Go stages and packages `.blob.meta` using footer offsets, without parsing its
+chunk/group tables. Use matching `nydus` and `nydusify` builds; the Rust reader
+owns format validation. `optimize` likewise preserves source sidecars and adds
+the ondemand blob's sidecar rather than converting old experimental formats.
 
 #### nydus to OCI
 
@@ -2245,22 +2700,20 @@ Flags:
 | `--target`, `-t` | required | Target image reference to push. |
 | `--builder` | `nydus` | Path to the `nydus` binary (PATH-resolvable). |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
-| `--chunk-size` | `1048576` | Nydus file chunk size in bytes (1 MiB). Ignored when converting back to OCI. |
-| `--block-group-size` | `4194304` | Blob meta block group uncompressed size in bytes; a power of two, at least 1 MiB and at least `--chunk-size`. Ignored when converting back to OCI. |
-| `--compressor` | `zstd` | Direction and compression. `none`/`zstd`: chunk data compressor for OCI to nydus. `oci-gzip`/`oci-zstd`/`oci-tar`: layer compression of the rebuilt OCI image for nydus to OCI. |
+| `--chunk-size` | `0` (automatic) | Chunk size, 1MiB by default; explicit values are bytes (a power of two, at least 4KiB). The largest file chunk and the size of every chunk group. Not used by `erofs-lz4`/`erofs-zstd` and ignored when converting back to OCI. |
+| `--compressor` | `zstd` | `none`, `zstd`, `lz4`: chunk-based layouts served on demand; `erofs-none`, `erofs-lz4`, `erofs-zstd`: native EROFS layers without blob meta; `oci-gzip`, `oci-zstd`, `oci-tar`: reverse OCI conversion. |
 | `--platform` | all | Convert only the given platform (e.g. `linux/amd64`). |
 | `--append-in-bootstrap` | empty | Local file paths to bundle into the bootstrap layer tar alongside `image.boot`; files inside a directory source are excluded from that source's blob data region. |
-| `--insecure` | `false` | Skip TLS verification for the registry. |
-| `--plain-http` | `false` | Use plain HTTP to talk to the registry. |
+| `--source-insecure`, `--target-insecure` | `false` | Skip TLS verification independently for the selected source/target registry. |
+| `--source-plain-http`, `--target-plain-http` | `false` | Use plain HTTP independently for the selected source/target registry. |
 | `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. Forwarded to the `nydus build`/`merge` subprocesses. |
 
 Notes:
 
-- Converting an **OCI image** source requires **root privileges**. Layer
-  extraction must preserve original uid/gid, setuid/setgid/sticky bits, xattrs
-  and device/fifo nodes; these operations fail without root, and `nydusify`
-  treats such failures as fatal rather than silently producing a corrupted
-  image. Directory sources and already-nydus image sources do not need root.
+- OCI conversion does not need root: tar metadata is encoded directly, without
+	chown, mknod or privileged xattr writes on the host. Directory sources still
+	require permission to read their contents and metadata. Filesystem checking
+	against an extracted OCI rootfs and a mounted target has separate privileges.
 - Multiple sources are merged into one single-platform manifest, so image
   sources are resolved against exactly one platform: `--platform`, or the host
   platform when omitted.
@@ -2273,17 +2726,17 @@ Notes:
 Examples:
 
 ```bash
-# Whole-image conversion (requires root).
-sudo nydusify convert \
+# Whole-image conversion; the source registry keeps TLS enabled.
+nydusify convert \
   --source docker.io/library/mariadb:latest \
-  --target localhost:5000/mariadb-nydus \
-  --plain-http
+	--target localhost:5000/mariadb-nydus \
+	--target-plain-http
 
 # One-layer image from a local directory.
 nydusify convert \
   --source ./models/llama \
-  --target localhost:5000/llama-nydus \
-  --plain-http
+	--target localhost:5000/llama-nydus \
+	--target-plain-http
 
 # Stack a nydus base image and two directories into one image:
 # three blob layers plus one merged bootstrap layer.
@@ -2291,15 +2744,15 @@ nydusify convert \
   --source localhost:5000/base-nydus \
   --source ./layer-data \
   --source ./layer-config \
-  --target localhost:5000/app-nydus \
-  --plain-http
+	--target localhost:5000/app-nydus \
+	--source-plain-http --target-plain-http
 
 # Convert a nydus image back to a plain OCI image with gzip layers.
 nydusify convert \
   --compressor oci-gzip \
   --source localhost:5000/mariadb-nydus \
-  --target localhost:5000/mariadb-oci \
-  --plain-http
+	--target localhost:5000/mariadb-oci \
+	--source-plain-http --target-plain-http
 ```
 
 ### check
@@ -2350,8 +2803,8 @@ Flags:
 | `--builder` | `nydus` | Path to the `nydus` binary. |
 | `--work-dir` | temp dir | Scratch directory; created and removed when omitted. |
 | `--platform` | host | Check only the given platform; defaults to the host platform. |
-| `--insecure` | `false` | Skip TLS verification for the registry. |
-| `--plain-http` | `false` | Use plain HTTP to talk to the registry. |
+| `--source-insecure`, `--target-insecure` | `false` | Skip TLS verification for the respective registry. |
+| `--source-plain-http`, `--target-plain-http` | `false` | Use plain HTTP for the respective registry. |
 | `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. Forwarded to the `nydus fuse` subprocess (use `debug` to see per-request backend reads). |
 
 Example:
@@ -2359,8 +2812,8 @@ Example:
 ```bash
 sudo nydusify check \
   --source docker.io/library/mariadb:latest \
-  --target localhost:5000/mariadb-nydus \
-  --plain-http
+	--target localhost:5000/mariadb-nydus \
+	--target-plain-http
 ```
 
 A passing run logs `check passed`; any rule failure returns a non-zero exit code
@@ -2375,8 +2828,8 @@ Publishes an optimized copy of a nydus image from a recorded access pattern:
 1. Pull `--source` (must be a nydus image) and extract its bootstrap layer
 	(`image.boot` plus the per-layer blob metas, which seed the cache dir).
 2. Run `nydus optimize` against the bootstrap with `--trace-file`, using a
-	registry-backed storage config so source block group data is range-read from the
-	source registry on demand.
+	registry-backed storage config so the source chunk groups are range-read
+	from the source registry on demand.
 3. Assemble the optimized manifest: the original data layers are reused as-is,
 	the ondemand blob is appended as a new nydus data layer (annotated with
 	`containerd.io/snapshot/nydus-blob-optimized` so it is recognizable without
@@ -2387,31 +2840,56 @@ Publishes an optimized copy of a nydus image from a recorded access pattern:
 
 `--pattern` is a JSON access-pattern file in the same format served by a
 mount's `GET /trace` endpoint
-(`{"version":1,"patterns":[{"blob_index":1,"block_group_index":4},...]}`). It can be
+(`{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4},...]}`,
+one entry per chunk group read). It can be
 saved from the `/trace` endpoint of a `nydusify mount` apiserver, or exported
 offline from a pmem/core mount trace (e.g. a rund sandbox extendedstats
 snapshot). Record the pattern from a mount **without** prefetch so it captures
 the pure on-demand access pattern, exercise the workload, then save the trace.
-Mount the optimized image **with** `--prefetch` to get the phase-0 redirect
-warmup. Shared flags (`--builder`, `--work-dir`, `--platform`, `--insecure`,
-`--plain-http`, `--log-level`) behave as in `nydusify convert`. No root is
+Mount the optimized image **with** `--prefetch` to get the phase-0 ondemand
+blob warmup. Shared flags (`--builder`, `--work-dir`, `--platform`, source/target
+`--*-insecure` and `--*-plain-http`, `--log-level`) behave as in `nydusify convert`. No root is
 required: optimize never extracts OCI layers, it only rewrites metadata and
 appends the ondemand layer.
 
 Example:
 
 ```bash
-nydusify mount -t localhost:5000/app:nydus -m /mnt/app --work-dir /tmp/mnt &
+sudo nydusify mount -t localhost:5000/app:nydus -m /mnt/app --work-dir /tmp/mnt --target-plain-http &
 # ... run the workload against /mnt/app ...
 curl --unix-socket /tmp/mnt/apiserver.sock http://localhost/trace > /tmp/pattern.json
 nydusify optimize \
   --pattern /tmp/pattern.json \
   --source localhost:5000/app:nydus \
-  --target localhost:5000/app:nydus-optimized \
-  --plain-http
+	--target localhost:5000/app:nydus-optimized \
+	--source-plain-http --target-plain-http
 ```
 
 ## Validation Strategy
+
+Run the non-privileged contracts first from the repository root:
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --features cli
+cargo clippy --workspace --all-targets --features cli,fanotify,ublk,nbd -- -D warnings
+make test-nydusify
+```
+
+`make test-nydusify` builds the current Rust CLI and runs all Go packages with
+the race detector. `NYDUS_TEST_BUILDER` enables the real builder test when
+invoking Go directly. The test streams gzip OCI content through Pack, checks
+chunk-table version 1, stages metadata, merges, checks and exports each of
+`none`, `zstd`, `lz4`, `erofs-none`, `erofs-lz4` and `erofs-zstd` (the native
+layers carrying no blob meta). It verifies contents,
+PAX nanosecond timestamps, ownership, whiteouts and device metadata without
+mounting or creating host device nodes. Without that environment variable the
+real-builder test explicitly skips; unit success alone is not this gate.
+
+Registry/mount tests (`make test-e2e`, `make test-tooci`, `make test-ublk`,
+`make test-nbd`, `make test-fanotify`, `make test-uffd`) need their documented
+root, kernel and registry prerequisites. Run them only in an isolated test
+environment. Guest DAX and workload performance require separate measurements.
 
 The current validation surface is:
 

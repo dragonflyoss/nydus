@@ -25,17 +25,19 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
 - **Native EROFS format** — a fully standard EROFS layout compatible with
   erofs-utils and kernel mounting; filesystem and chunk metadata are fetched
   in bulk up front via the compact bootstrap, then file data loads on demand.
-- **Decoupled chunking and compression units** — `--chunk-size` sets the
-  file chunk granularity while `--compress-size` sets the compression and
-  read unit (zstd, default 4 MiB), no longer tied to file chunks: better
-  compression efficiency and less read amplification, with CRC32C
-  validation enforced on every read path.
+- **Fixed-size chunk groups, runtime fetch size** — `--chunk-size`
+  (default 1 MiB) sets both the file chunk granularity and the chunk group
+  that is compressed and verified as a unit (zstd or LZ4, CRC32C on every
+  read, BLAKE3 per chunk); how much one on-demand read covers is the
+  daemon's `storage.fetch_size` (default 2 MiB of compressed bytes), tuned
+  per deployment without rebuilding the image.
 - **On-demand loading** — file reads map to compressed groups through an O(1)
   logical-address lookup; only the touched groups are fetched, validated,
   decoded, and cached.
 - **Trace-driven prefetching** — `nydus optimize` turns a workload access
-  trace into a compact hot-data "ondemand" blob, converting scattered
-  cold-start range reads into a streaming prefetch. Concurrent instances on
+  trace into a compact hot-data "ondemand" blob of byte-exact chunk group
+  copies, converting scattered cold-start range reads into one streaming
+  prefetch that lands in the source blobs' caches. Concurrent instances on
   one node share the warmup through a shared cache readiness bitmap and a
   per-blob prefetch lock, so N cold starts cost one warmup.
 - **Native Dragonfly P2P support** — registry blobs are range-read directly,
@@ -142,10 +144,12 @@ the mean of 2 runs; run-to-run spread is < 5%.
 | fileio + optimize | 521 MiB | 0.72 s | 1.18 s | 1.51 s | 230 MiB |
 | fanotify + optimize | 521 MiB | **0.59 s** | **1.08 s** | **1.38 s** | 230 MiB |
 
-- Measured on Ubuntu 24.04 (arm64), Linux 7.0.0; image built with 1 MiB
-  chunks, 4 MiB block groups, zstd. The v2 row is the same rootfs as a
-  RAFS v6 zstd image served by the v2 `nydusd` from the same registry.
-  All rows are 2-run means from one session.
+- Measured on Ubuntu 24.04 (arm64), Linux 7.0.0, with an earlier v3 build
+  (1 MiB chunks in 4 MiB chunk groups, zstd; the current builder packs
+  1 MiB chunk groups and the daemon fetches 2 MiB compressed windows, which
+  changes the per-request size, not the ranking of the modes). The v2 row
+  is the same rootfs as a RAFS v6 zstd image served by the v2 `nydusd`
+  from the same registry. All rows are 2-run means from one session.
 - The "+ optimize" rows mount the same image after `nydus optimize` rewrote
   it from a recorded boot trace: mounts stream the 56 MiB hot-data
   "ondemand" blob over ONE connection (prefetch scope `ondemand`) instead
@@ -168,8 +172,9 @@ the mean of 2 runs; run-to-run spread is < 5%.
   Notably, v2 FUSE at +50 ms (8.64 s) is already no faster than the full
   pull — its per-chunk round trips eat the entire lazy-loading win, while
   v3's grouped fetches (and the optimize stream) keep it well ahead.
-- The gap grows with registry latency because v3 fetches data in 4 MiB
-  block groups — roughly a third of the HTTP round trips v2 needs — even
+- The gap grows with registry latency because v3 fetches data in
+  multi-megabyte units (4 MiB groups in that build, 2 MiB compressed windows
+  today) — roughly a third of the HTTP round trips v2 needs — even
   though it transfers more bytes (230 vs 197 MiB); on latency-bound paths
   request count dominates bytes.
 - The kernel-EROFS modes (NBD/ublk/fileio/fanotify) serve all metadata
@@ -187,7 +192,7 @@ cache) into an image, measured with `/usr/bin/time -v`, 3 runs each:
 | v3 `nydus build` (zstd) | **1.7–1.8 s** | **82 MiB** | **236 MiB** | **1.9 MiB** | **238 MiB** |
 
 - v3 builds 3.3× faster than v2: source reads stay on the produce thread
-  while per-block-group crc32 + zstd run on a small background pipeline
+  while per-chunk-group crc32 + zstd run on a small background pipeline
   drained in submission order, so the output remains byte-for-byte
   deterministic.
 - v3 output is 22% smaller end to end — the full blob stores its embedded
@@ -195,7 +200,7 @@ cache) into an image, measured with `/usr/bin/time -v`, 3 runs each:
   smaller than v2's (1.9 vs 7.5 MiB gzipped).
 - Peak memory is 52% lower than v2. The build is streaming end to end:
   read buffers are recycled, the encode pipeline is bounded to a couple of
-  in-flight block groups, the bootstrap is rendered in place inside the
+  in-flight chunk groups, the bootstrap is rendered in place inside the
   layout buffer (no assembly copy), the standalone bootstrap is patched
   from the embedded one instead of re-rendered, and the inode tree is
   freed as soon as rendering finishes.
@@ -236,8 +241,9 @@ Output image size across payload shapes (manifest layer totals):
 | `continuumio/anaconda3` (2 layers, Python distro) | 1067 MiB | 1123 MiB | **965 MiB** (-10% / -14%) |
 | `n8nio/n8n` (12 layers, node_modules-dense) | 359 MiB | 419 MiB | **320 MiB** (-11% / -24%) |
 
-- The gap widens on small-file-heavy payloads: v3's 4 MiB block groups
-  compress the small-file stream far better than v2's 1 MiB chunks, and
+- The gap widens on small-file-heavy payloads: v3 packs small files
+  densely into shared chunk groups, which compress far better than v2's
+  per-file chunks, and
   the per-layer embedded bootstraps (108 MiB of raw EROFS metadata on
   n8n's largest layer) shrink ~20× as zstd frames. v2 comes out larger
   than the OCI source on both images; v3 beats the source on both. v3
