@@ -6,6 +6,7 @@ backend:
   config:
     addr: http://127.0.0.1:5000
     repository: library/nydus-demo
+    digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     http:
       timeout: 30s

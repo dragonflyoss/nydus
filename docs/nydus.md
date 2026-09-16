@@ -1044,6 +1044,10 @@ Fields under `backend.config`:
 	selects between TLS and plain HTTP.
 - `repository` (required): image repository without tag/digest, e.g.
 	`library/ubuntu`.
+- `digest` (optional): immutable OCI manifest digest of the image that
+	provides the bootstrap and blobs, e.g. `sha256:<64-hex>`. This records the
+	image identity for parent-image tracking; blob reads continue to use the
+	digests stored in the bootstrap.
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
 	Omit for anonymous / token-only registries.
 - `http` (optional): the HTTP client settings — timeouts, retries, and TLS
