@@ -1151,11 +1151,19 @@ mod tests {
             build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
         blob_writer.finish().unwrap();
         resolve_chunk_addrs(&mut inodes, &blob_writer).unwrap();
-        // Fresh files carry sub-second mtimes, which force the extended inode
-        // layout; put every inode on the epoch so the children stay compact.
+        // Keep the fixture independent of the host's uid/gid and timestamps
+        // so regular children consistently use compact inodes.
         for inode in inodes.iter_mut() {
+            inode.uid = 1000;
+            inode.gid = 1000;
             inode.mtime = 1_700_000_000;
             inode.mtime_nsec = 0;
+            inode.is_extended = nydus_format::erofs::needs_erofs_extended_inode(
+                inode.size,
+                inode.uid,
+                inode.gid,
+                inode.nlink as u64,
+            );
         }
         let epoch = choose_epoch(&inodes);
         let bootstrap = render_flattened_bootstrap(&mut inodes, epoch, &[], &[0u8; 16]).unwrap();
