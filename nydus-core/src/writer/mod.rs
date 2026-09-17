@@ -69,7 +69,18 @@ impl Default for CreateFileOptions {
 #[derive(Default)]
 struct FileOverlay {
     replace: Option<Vec<u8>>,
-    chunks: BTreeMap<usize, DirtyChunk>,
+    chunks: BTreeMap<usize, ChunkOverlay>,
+}
+
+#[derive(Default)]
+struct ChunkOverlay {
+    source: Option<DirtyChunk>,
+    patches: Vec<ChunkPatch>,
+}
+
+struct ChunkPatch {
+    offset: usize,
+    source: DirtyChunk,
 }
 
 enum DirtyChunk {
@@ -100,6 +111,13 @@ impl DirtyChunk {
         }
     }
 
+    unsafe fn memory_range_slice<'a>(addr: usize, len: usize) -> &'a [u8] {
+        // SAFETY: callers only use this for `DirtyChunk::MemoryRange`, whose
+        // public write API requires the memory range to remain valid and
+        // immutable until seal or commit consumes it.
+        unsafe { std::slice::from_raw_parts(addr as *const u8, len) }
+    }
+
     fn read_into(&self, data: &mut [u8]) -> Result<()> {
         if data.len() != self.len() {
             return Err(Error::InvalidParameter(format!(
@@ -113,9 +131,8 @@ impl DirtyChunk {
             Self::Owned(source) => data.copy_from_slice(source),
             Self::FileRange { file, offset, .. } => read_exact_from_file_at(file, *offset, data)?,
             Self::MemoryRange { addr, len } => {
-                // SAFETY: `write_memory_range` requires callers to keep the
-                // memory range valid and immutable until commit consumes it.
-                let source = unsafe { std::slice::from_raw_parts(*addr as *const u8, *len) };
+                // SAFETY: upheld by the `DirtyChunk::MemoryRange` contract.
+                let source = unsafe { Self::memory_range_slice(*addr, *len) };
                 data.copy_from_slice(source);
             }
         }
@@ -123,12 +140,12 @@ impl DirtyChunk {
         Ok(())
     }
 
-    fn read_to_vec(&self) -> Result<Vec<u8>> {
+    fn into_vec(self) -> Result<Vec<u8>> {
         match self {
-            Self::Owned(data) => Ok(data.clone()),
-            Self::FileRange { .. } | Self::MemoryRange { .. } => {
-                let mut data = vec![0; self.len()];
-                self.read_into(&mut data)?;
+            Self::Owned(data) => Ok(data),
+            source @ (Self::FileRange { .. } | Self::MemoryRange { .. }) => {
+                let mut data = vec![0; source.len()];
+                source.read_into(&mut data)?;
                 Ok(data)
             }
         }
@@ -142,9 +159,9 @@ impl DirtyChunk {
 /// externally. Multiple independent writers may share the same parent reader,
 /// but they must use distinct output paths.
 ///
-/// Writes are staged in an in-memory overlay. Later writes to the same logical
-/// chunk replace earlier staged data for that chunk, and partial writes read the
-/// staged chunk first before falling back to the parent image. The parent
+/// Writes are staged in an in-memory overlay. Full-chunk writes replace the
+/// staged base for that chunk, while partial writes are recorded in order and
+/// applied when commit materializes the chunk. The parent
 /// `NydusCore` or `ErofsReader` remains read-only and does not observe staged
 /// changes; callers must open the committed bootstrap/blob as a new image to
 /// read the merged result.
@@ -166,6 +183,9 @@ pub struct IncrementalWriter {
     has_changes: bool,
     poisoned: bool,
     blob_writer: Option<BlobWriter<File>>,
+    // Inode/chunk indexes whose small packed group is still open. Full-slot
+    // chunks are resolved immediately and never enter this list.
+    pending_blob_chunks: Vec<(usize, usize)>,
     output_dir: PathBuf,
     upper_blob_temp_path: Option<PathBuf>,
     chunk_size: u32,
@@ -277,6 +297,7 @@ impl IncrementalWriter {
             has_changes: false,
             poisoned: false,
             blob_writer: None,
+            pending_blob_chunks: Vec::new(),
             output_dir: options.output_dir,
             upper_blob_temp_path: None,
             chunk_size: options.chunk_size,
@@ -350,7 +371,7 @@ impl IncrementalWriter {
             inodes,
             path_index,
             parent_nids,
-            parent_reader: keep_parent_reader.then_some(reader.clone()),
+            parent_reader: keep_parent_reader.then_some(reader),
             overlay: BTreeMap::new(),
             device_slots: parent_device_slots,
             parent_device_count,
@@ -358,6 +379,7 @@ impl IncrementalWriter {
             has_changes: false,
             poisoned: false,
             blob_writer: None,
+            pending_blob_chunks: Vec::new(),
             output_dir: options.output_dir,
             upper_blob_temp_path: None,
             chunk_size: options.chunk_size,
@@ -553,25 +575,23 @@ impl IncrementalWriter {
         let mut written = 0usize;
 
         while written < actual_len {
-            let (chunk_index, chunk_off, chunk_start, logical_chunk_len) =
+            let (chunk_index, chunk_off, logical_chunk_len) =
                 self.chunk_write_geometry(inode_index, offset, written)?;
             let step = (actual_len - written).min(logical_chunk_len - chunk_off);
 
             if chunk_off == 0 && step == logical_chunk_len {
-                self.record_chunk_owned(
+                self.record_chunk_source(
                     inode_index,
                     chunk_index,
-                    data[written..written + step].to_vec(),
+                    DirtyChunk::Owned(data[written..written + step].to_vec()),
                 )?;
             } else {
-                let mut chunk = self.read_current_chunk(
+                self.record_chunk_patch(
                     inode_index,
                     chunk_index,
-                    chunk_start,
-                    logical_chunk_len,
+                    chunk_off,
+                    DirtyChunk::Owned(data[written..written + step].to_vec()),
                 )?;
-                chunk[chunk_off..chunk_off + step].copy_from_slice(&data[written..written + step]);
-                self.record_chunk_owned(inode_index, chunk_index, chunk)?;
             }
             written += step;
         }
@@ -593,13 +613,20 @@ impl IncrementalWriter {
         let Some(actual_len) = self.clipped_write_len(inode_index, offset, data.len())? else {
             return Ok(0);
         };
-        let (_chunk_index, chunk_off, _chunk_start, logical_chunk_len) =
+        let (chunk_index, chunk_off, logical_chunk_len) =
             self.chunk_write_geometry(inode_index, offset, 0)?;
-        if chunk_off == 0 && actual_len == logical_chunk_len {
+        if actual_len <= logical_chunk_len - chunk_off {
             data.truncate(actual_len);
-            let chunk_index = usize::try_from(offset / self.chunk_size as u64)
-                .map_err(|err| Error::Overflow(format!("chunk index exceeds usize: {err}")))?;
-            self.record_chunk_owned(inode_index, chunk_index, data)?;
+            if chunk_off == 0 && actual_len == logical_chunk_len {
+                self.record_chunk_source(inode_index, chunk_index, DirtyChunk::Owned(data))?;
+            } else {
+                self.record_chunk_patch(
+                    inode_index,
+                    chunk_index,
+                    chunk_off,
+                    DirtyChunk::Owned(data),
+                )?;
+            }
             return Ok(actual_len);
         }
 
@@ -630,7 +657,7 @@ impl IncrementalWriter {
 
         let mut written = 0usize;
         while written < actual_len {
-            let (chunk_index, chunk_off, chunk_start, logical_chunk_len) =
+            let (chunk_index, chunk_off, logical_chunk_len) =
                 self.chunk_write_geometry(inode_index, dst_offset, written)?;
             let step = (actual_len - written).min(logical_chunk_len - chunk_off);
             let source_pos = source_offset
@@ -648,18 +675,16 @@ impl IncrementalWriter {
                     },
                 )?;
             } else {
-                let mut chunk = self.read_current_chunk(
+                self.record_chunk_patch(
                     inode_index,
                     chunk_index,
-                    chunk_start,
-                    logical_chunk_len,
+                    chunk_off,
+                    DirtyChunk::FileRange {
+                        file: source.clone(),
+                        offset: source_pos,
+                        len: step,
+                    },
                 )?;
-                read_exact_from_file_at(
-                    &source,
-                    source_pos,
-                    &mut chunk[chunk_off..chunk_off + step],
-                )?;
-                self.record_chunk_owned(inode_index, chunk_index, chunk)?;
             }
             written += step;
         }
@@ -689,7 +714,7 @@ impl IncrementalWriter {
 
         let mut written = 0usize;
         while written < actual_len {
-            let (chunk_index, chunk_off, chunk_start, logical_chunk_len) =
+            let (chunk_index, chunk_off, logical_chunk_len) =
                 self.chunk_write_geometry(inode_index, dst_offset, written)?;
             let step = (actual_len - written).min(logical_chunk_len - chunk_off);
             let addr = base
@@ -703,17 +728,12 @@ impl IncrementalWriter {
                     DirtyChunk::MemoryRange { addr, len: step },
                 )?;
             } else {
-                let mut chunk = self.read_current_chunk(
+                self.record_chunk_patch(
                     inode_index,
                     chunk_index,
-                    chunk_start,
-                    logical_chunk_len,
+                    chunk_off,
+                    DirtyChunk::MemoryRange { addr, len: step },
                 )?;
-                // SAFETY: the caller upholds the memory lifetime and immutability
-                // contract documented on write_memory_range/opened-file variant.
-                let source = unsafe { std::slice::from_raw_parts(addr as *const u8, step) };
-                chunk[chunk_off..chunk_off + step].copy_from_slice(source);
-                self.record_chunk_owned(inode_index, chunk_index, chunk)?;
             }
             written += step;
         }
@@ -846,16 +866,22 @@ impl IncrementalWriter {
         let device_id = self.current_device_id()?;
         let mut blob_writer = blob_writer;
         blob_writer.finish()?;
-        for inode in &mut self.inodes {
-            if let InodeData::RegularFile {
+        for (inode_index, chunk_index) in std::mem::take(&mut self.pending_blob_chunks) {
+            let InodeData::RegularFile {
                 chunk_index_entries,
                 ..
-            } = &mut inode.data
-            {
-                for entry in chunk_index_entries {
-                    blob_writer.resolve_chunk_addr_for_device(entry, device_id)?;
-                }
-            }
+            } = &mut self.inodes[inode_index].data
+            else {
+                return Err(Error::InvalidImage(
+                    "pending blob chunk refers to a non-regular inode".to_string(),
+                ));
+            };
+            let entry = chunk_index_entries.get_mut(chunk_index).ok_or_else(|| {
+                Error::InvalidImage(format!(
+                    "pending blob chunk index {chunk_index} is out of range"
+                ))
+            })?;
+            blob_writer.resolve_chunk_addr_for_device(entry, device_id)?;
         }
         let finished = finish_upper_blob(blob_writer)?;
         let temp_path = self
@@ -872,23 +898,6 @@ impl IncrementalWriter {
         Ok(())
     }
 
-    fn record_chunk_owned(
-        &mut self,
-        inode_index: usize,
-        chunk_index: usize,
-        mut data: Vec<u8>,
-    ) -> Result<()> {
-        let logical_len = self.logical_chunk_len(inode_index, chunk_index)?;
-        if data.len() < logical_len {
-            return Err(Error::InvalidParameter(format!(
-                "chunk data for index {chunk_index} is shorter than logical chunk length {logical_len}: {}",
-                data.len()
-            )));
-        }
-        data.truncate(logical_len);
-        self.record_chunk_source(inode_index, chunk_index, DirtyChunk::Owned(data))
-    }
-
     fn record_chunk_source(
         &mut self,
         inode_index: usize,
@@ -902,11 +911,59 @@ impl IncrementalWriter {
                 source.len()
             )));
         }
+        self.overlay.entry(inode_index).or_default().chunks.insert(
+            chunk_index,
+            ChunkOverlay {
+                source: Some(source),
+                patches: Vec::new(),
+            },
+        );
+        self.has_changes = true;
+        Ok(())
+    }
+
+    fn record_chunk_patch(
+        &mut self,
+        inode_index: usize,
+        chunk_index: usize,
+        offset: usize,
+        source: DirtyChunk,
+    ) -> Result<()> {
+        let logical_len = self.logical_chunk_len(inode_index, chunk_index)?;
+        let end = offset
+            .checked_add(source.len())
+            .ok_or_else(|| Error::Overflow("chunk patch range overflow".to_string()))?;
+        if end > logical_len {
+            return Err(Error::InvalidParameter(format!(
+                "chunk patch for index {chunk_index} exceeds logical chunk length {logical_len}: {offset}..{end}"
+            )));
+        }
+
+        let has_upper_base = self.overlay.get(&inode_index).is_some_and(|file_overlay| {
+            file_overlay.replace.is_some()
+                || file_overlay
+                    .chunks
+                    .get(&chunk_index)
+                    .is_some_and(|chunk| chunk.source.is_some())
+        });
+        if !has_upper_base
+            && self.chunk_base(inode_index, chunk_index)? == ChunkBase::Parent
+            && self.parent_reader.is_none()
+        {
+            return Err(Error::InvalidParameter(
+                "partial write requires a data-capable parent reader; use NydusCore::writer"
+                    .to_string(),
+            ));
+        }
+
         self.overlay
             .entry(inode_index)
             .or_default()
             .chunks
-            .insert(chunk_index, source);
+            .entry(chunk_index)
+            .or_default()
+            .patches
+            .push(ChunkPatch { offset, source });
         self.has_changes = true;
         Ok(())
     }
@@ -970,18 +1027,54 @@ impl IncrementalWriter {
         self.write_nonzero_upper_chunk(data)
     }
 
-    fn write_upper_source_chunk_addr(
-        &mut self,
-        source: &DirtyChunk,
-        scratch: &mut Vec<u8>,
-    ) -> Result<ErofsChunkAddr> {
+    fn write_upper_source_chunk_addr(&mut self, source: &DirtyChunk) -> Result<ErofsChunkAddr> {
         match source {
             DirtyChunk::Owned(data) => self.write_upper_chunk_addr(data),
-            DirtyChunk::FileRange { .. } | DirtyChunk::MemoryRange { .. } => {
-                scratch.resize(source.len(), 0);
-                source.read_into(scratch)?;
-                self.write_upper_chunk_addr(scratch)
+            DirtyChunk::FileRange { file, offset, len } => {
+                self.write_upper_chunk_addr_from_source(*len, true, |data| {
+                    read_exact_from_file_at(file, *offset, data)
+                })
             }
+            DirtyChunk::MemoryRange { addr, len } => {
+                // SAFETY: upheld by the `DirtyChunk::MemoryRange` contract.
+                let source = unsafe { DirtyChunk::memory_range_slice(*addr, *len) };
+                if source.iter().all(|&byte| byte == 0) {
+                    return Ok(ErofsChunkAddr {
+                        blkaddr: EROFS_NULL_ADDR,
+                        device_id: 0,
+                    });
+                }
+                self.write_upper_chunk_addr_from_source(*len, false, |data| {
+                    data.copy_from_slice(source);
+                    Ok(())
+                })
+            }
+        }
+    }
+
+    fn write_upper_chunk_addr_from_source<F>(
+        &mut self,
+        len: usize,
+        detect_zero: bool,
+        fill: F,
+    ) -> Result<ErofsChunkAddr>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        let device_id = self.current_device_id()?;
+        self.ensure_blob_writer()?;
+        let blob_writer = self.blob_writer.as_mut().expect("blob writer initialized");
+        let placement = if detect_zero {
+            blob_writer.write_nonzero_data_chunk_from_source(len, fill)?
+        } else {
+            Some(blob_writer.write_data_chunk_from_source(len, fill)?)
+        };
+        match placement {
+            Some(blkaddr) => Ok(ErofsChunkAddr { blkaddr, device_id }),
+            None => Ok(ErofsChunkAddr {
+                blkaddr: EROFS_NULL_ADDR,
+                device_id: 0,
+            }),
         }
     }
 
@@ -997,34 +1090,34 @@ impl IncrementalWriter {
 
     fn materialize_overlay(&mut self) -> Result<()> {
         let overlays = std::mem::take(&mut self.overlay);
-        let mut scratch = Vec::new();
         for (inode_index, overlay) in overlays {
-            self.materialize_file_overlay(inode_index, overlay, &mut scratch)?;
+            self.materialize_file_overlay(inode_index, overlay)?;
         }
         Ok(())
     }
 
-    fn materialize_file_overlay(
-        &mut self,
-        inode_index: usize,
-        overlay: FileOverlay,
-        scratch: &mut Vec<u8>,
-    ) -> Result<()> {
+    fn materialize_file_overlay(&mut self, inode_index: usize, overlay: FileOverlay) -> Result<()> {
         if let Some(data) = overlay.replace {
             let chunk_count = data.len().div_ceil(self.chunk_size as usize);
             let mut chunk_index_entries = Vec::with_capacity(chunk_count);
+            let mut chunks = overlay.chunks;
             for chunk_index in 0..chunk_count {
                 let start = chunk_index * self.chunk_size as usize;
                 let end = (start + self.chunk_size as usize).min(data.len());
-                match overlay.chunks.get(&chunk_index) {
+                let mut addr = match chunks.remove(&chunk_index) {
                     Some(chunk) => {
-                        chunk_index_entries
-                            .push(self.write_upper_source_chunk_addr(chunk, scratch)?);
+                        let source = self.materialize_chunk_overlay(
+                            inode_index,
+                            chunk_index,
+                            Some(&data[start..end]),
+                            chunk,
+                        )?;
+                        self.write_upper_source_chunk_addr(&source)?
                     }
-                    None => {
-                        chunk_index_entries.push(self.write_upper_chunk_addr(&data[start..end])?);
-                    }
-                }
+                    None => self.write_upper_chunk_addr(&data[start..end])?,
+                };
+                self.resolve_or_track_blob_chunk(inode_index, chunk_index, &mut addr)?;
+                chunk_index_entries.push(addr);
             }
             let inode = &mut self.inodes[inode_index];
             inode.size = data.len() as u64;
@@ -1042,13 +1135,15 @@ impl IncrementalWriter {
             } => chunk_index_entries.len(),
             _ => unreachable!(),
         };
-        for (chunk_index, dirty) in overlay.chunks {
+        for (chunk_index, chunk) in overlay.chunks {
             if chunk_index >= chunk_count {
                 return Err(Error::InvalidParameter(format!(
                     "chunk index {chunk_index} out of range {chunk_count}"
                 )));
             }
-            let addr = self.write_upper_source_chunk_addr(&dirty, scratch)?;
+            let source = self.materialize_chunk_overlay(inode_index, chunk_index, None, chunk)?;
+            let mut addr = self.write_upper_source_chunk_addr(&source)?;
+            self.resolve_or_track_blob_chunk(inode_index, chunk_index, &mut addr)?;
             let InodeData::RegularFile {
                 chunk_index_entries,
                 ..
@@ -1061,33 +1156,44 @@ impl IncrementalWriter {
         Ok(())
     }
 
-    // Internal read-after-write view used by partial writes. This intentionally
-    // does not update or consult the parent reader metadata after construction.
-    fn read_current_chunk(
+    fn materialize_chunk_overlay(
         &self,
         inode_index: usize,
         chunk_index: usize,
-        chunk_start: u64,
-        chunk_len: usize,
-    ) -> Result<Vec<u8>> {
-        if let Some(overlay) = self.overlay.get(&inode_index) {
-            if let Some(dirty) = overlay.chunks.get(&chunk_index) {
-                if dirty.len() != chunk_len {
-                    return Err(Error::InvalidImage(format!(
-                        "dirty chunk {chunk_index} length mismatch: got {}, expected {chunk_len}",
-                        dirty.len()
-                    )));
-                }
-                return dirty.read_to_vec();
-            }
-            if let Some(data) = &overlay.replace {
-                let start = usize::try_from(chunk_start)
-                    .map_err(|err| Error::Overflow(format!("chunk start exceeds usize: {err}")))?;
-                let end = (start + chunk_len).min(data.len());
-                return Ok(data[start..end].to_vec());
-            }
+        replacement: Option<&[u8]>,
+        chunk: ChunkOverlay,
+    ) -> Result<DirtyChunk> {
+        if chunk.patches.is_empty() {
+            return chunk.source.ok_or_else(|| {
+                Error::InvalidImage(format!(
+                    "dirty chunk {chunk_index} has neither a source nor patches"
+                ))
+            });
         }
-        self.materialize_base_chunk(inode_index, chunk_index, chunk_len)
+
+        let chunk_len = match replacement {
+            Some(data) => data.len(),
+            None => self.logical_chunk_len(inode_index, chunk_index)?,
+        };
+        let mut data = match chunk.source {
+            Some(source) => source.into_vec()?,
+            None => match replacement {
+                Some(data) => data.to_vec(),
+                None => self.materialize_base_chunk(inode_index, chunk_index, chunk_len)?,
+            },
+        };
+        if data.len() != chunk_len {
+            return Err(Error::InvalidImage(format!(
+                "dirty chunk {chunk_index} length mismatch: got {}, expected {chunk_len}",
+                data.len()
+            )));
+        }
+
+        for patch in chunk.patches {
+            let end = patch.offset + patch.source.len();
+            patch.source.read_into(&mut data[patch.offset..end])?;
+        }
+        Ok(DirtyChunk::Owned(data))
     }
 
     fn materialize_base_chunk(
@@ -1162,6 +1268,32 @@ impl IncrementalWriter {
             .map_err(|err| Error::Overflow(format!("upper blob device id overflow: {err}")))
     }
 
+    fn resolve_or_track_blob_chunk(
+        &mut self,
+        inode_index: usize,
+        chunk_index: usize,
+        addr: &mut ErofsChunkAddr,
+    ) -> Result<()> {
+        if addr.device_id == 0 {
+            return Ok(());
+        }
+        let device_id = self.current_device_id()?;
+        if addr.device_id != device_id {
+            return Err(Error::InvalidImage(format!(
+                "upper chunk uses device {}, expected {device_id}",
+                addr.device_id
+            )));
+        }
+        let blob_writer = self
+            .blob_writer
+            .as_ref()
+            .ok_or_else(|| Error::InvalidImage("upper blob writer is missing".to_string()))?;
+        if !blob_writer.try_resolve_chunk_addr_for_device(addr, device_id)? {
+            self.pending_blob_chunks.push((inode_index, chunk_index));
+        }
+        Ok(())
+    }
+
     fn ensure_healthy(&self) -> Result<()> {
         if self.poisoned {
             return Err(Error::InvalidParameter(
@@ -1202,7 +1334,7 @@ impl IncrementalWriter {
         inode_index: usize,
         offset: u64,
         written: usize,
-    ) -> Result<(usize, usize, u64, usize)> {
+    ) -> Result<(usize, usize, usize)> {
         let file_pos = offset
             .checked_add(written as u64)
             .ok_or_else(|| Error::Overflow("write offset overflow".to_string()))?;
@@ -1211,11 +1343,8 @@ impl IncrementalWriter {
             .map_err(|err| Error::Overflow(format!("chunk index exceeds usize: {err}")))?;
         let chunk_off = usize::try_from(file_pos % chunk_size)
             .map_err(|err| Error::Overflow(format!("chunk offset exceeds usize: {err}")))?;
-        let chunk_start = (chunk_index as u64)
-            .checked_mul(chunk_size)
-            .ok_or_else(|| Error::Overflow("chunk start overflow".to_string()))?;
         let logical_chunk_len = self.logical_chunk_len(inode_index, chunk_index)?;
-        Ok((chunk_index, chunk_off, chunk_start, logical_chunk_len))
+        Ok((chunk_index, chunk_off, logical_chunk_len))
     }
 
     fn current_file_size(&self, inode_index: usize) -> u64 {
@@ -1337,9 +1466,7 @@ fn finalize_digest_named_blob(
 fn finish_upper_blob<W: Write>(blob_writer: BlobWriter<W>) -> Result<FinishedUpperBlob> {
     let blob_blocks = blob_writer.total_blocks();
     let compressed_data_size = blob_writer.data_size();
-    let blob_metadata = blob_writer.incremental_blob_metadata()?;
-
-    let (blob_file, full_blob_hasher) = blob_writer.into_parts();
+    let (blob_file, full_blob_hasher, blob_metadata) = blob_writer.into_incremental_parts()?;
     let full_blob_hasher = full_blob_hasher
         .ok_or_else(|| Error::InvalidImage("upper blob data hashing is disabled".to_string()))?;
     let mut blob_writer_stream =

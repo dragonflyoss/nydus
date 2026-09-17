@@ -490,12 +490,7 @@ fn finish_image<W: Write>(
     drop(inodes);
 
     let compressed_data_size = blob_writer.data_size();
-    let blob_metadata = if blob_writer.is_raw_device() {
-        None
-    } else {
-        Some(blob_writer.blob_metadata()?)
-    };
-    let (writer, full_blob_hasher) = blob_writer.into_parts();
+    let (writer, full_blob_hasher, blob_metadata) = blob_writer.into_parts_with_metadata()?;
     let mut blob_writer_stream = HashingWriter::new(BufWriter::new(writer), full_blob_hasher);
 
     let footer = nydus_format::blob::finish_full_blob(

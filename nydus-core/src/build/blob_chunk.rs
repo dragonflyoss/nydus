@@ -1291,20 +1291,48 @@ impl<W: Write> BlobWriter<W> {
         )?)
     }
 
-    pub(crate) fn incremental_blob_metadata(&self) -> Result<BlobMetadata> {
+    /// Consume the finished writer and move its metadata tables into the
+    /// standard blob metadata representation. Raw-device blobs return no
+    /// metadata. Call [`Self::finish`] first so all open groups are sealed.
+    pub fn into_parts_with_metadata(self) -> Result<(W, Option<Sha256>, Option<BlobMetadata>)> {
+        self.into_parts_with_metadata_kind(false)
+    }
+
+    pub(crate) fn into_incremental_parts(self) -> Result<(W, Option<Sha256>, BlobMetadata)> {
+        let (writer, data_hasher, blob_metadata) = self.into_parts_with_metadata_kind(true)?;
+        let blob_metadata = blob_metadata.ok_or_else(|| {
+            Error::InvalidParameter("a raw device blob carries no blob meta".to_string())
+        })?;
+        Ok((writer, data_hasher, blob_metadata))
+    }
+
+    fn into_parts_with_metadata_kind(
+        self,
+        incremental: bool,
+    ) -> Result<(W, Option<Sha256>, Option<BlobMetadata>)> {
         if self.raw_device {
-            return Err(Error::InvalidParameter(
-                "a raw device blob carries no blob meta".to_string(),
-            ));
+            return Ok((self.writer, self.data_hasher, None));
         }
-        Ok(BlobMetadata::new_incremental(
-            self.compressor,
-            self.digester,
-            self.file_chunk_size / EROFS_BLOCK_SIZE,
-            self.blob_metadata_chunk_groups.clone(),
-            self.chunks.clone(),
-            self.digests.clone(),
-        )?)
+        let blob_metadata = if incremental {
+            BlobMetadata::new_incremental(
+                self.compressor,
+                self.digester,
+                self.file_chunk_size / EROFS_BLOCK_SIZE,
+                self.blob_metadata_chunk_groups,
+                self.chunks,
+                self.digests,
+            )?
+        } else {
+            BlobMetadata::new(
+                self.compressor,
+                self.digester,
+                self.file_chunk_size / EROFS_BLOCK_SIZE,
+                self.blob_metadata_chunk_groups,
+                self.chunks,
+                self.digests,
+            )?
+        };
+        Ok((self.writer, self.data_hasher, Some(blob_metadata)))
     }
 
     pub fn write_blob_metadata(&mut self, path: &Path) -> Result<()> {
@@ -1332,25 +1360,40 @@ impl<W: Write> BlobWriter<W> {
         self.resolve_chunk_addr_for_device(addr, 1)
     }
 
+    /// Resolve a placement whose group has already closed, returning `false`
+    /// when the group is still open. Invalid placement ids remain errors.
+    pub(crate) fn try_resolve_chunk_addr_for_device(
+        &self,
+        addr: &mut ErofsChunkAddr,
+        device_id: u16,
+    ) -> Result<bool> {
+        if self.raw_device || addr.device_id != device_id || addr.blkaddr == EROFS_NULL_ADDR {
+            return Ok(true);
+        }
+        let placement = usize::try_from(addr.blkaddr)
+            .ok()
+            .and_then(|id| self.placements.get(id).copied())
+            .ok_or_else(|| {
+                Error::Runtime(format!("chunk placement {} is unknown", addr.blkaddr))
+            })?;
+        if placement == PENDING {
+            return Ok(false);
+        }
+        addr.blkaddr = placement;
+        Ok(true)
+    }
+
     pub(crate) fn resolve_chunk_addr_for_device(
         &self,
         addr: &mut ErofsChunkAddr,
         device_id: u16,
     ) -> Result<()> {
-        if self.raw_device || addr.device_id != device_id || addr.blkaddr == EROFS_NULL_ADDR {
-            return Ok(());
+        if !self.try_resolve_chunk_addr_for_device(addr, device_id)? {
+            return Err(Error::Runtime(format!(
+                "chunk placement {} is still pending; finish the blob first",
+                addr.blkaddr
+            )));
         }
-        let resolved = usize::try_from(addr.blkaddr)
-            .ok()
-            .and_then(|id| self.placements.get(id).copied())
-            .filter(|blkaddr| *blkaddr != PENDING)
-            .ok_or_else(|| {
-                Error::Runtime(format!(
-                    "chunk placement {} is unknown or still pending; finish the blob first",
-                    addr.blkaddr
-                ))
-            })?;
-        addr.blkaddr = resolved;
         Ok(())
     }
 
@@ -1358,6 +1401,39 @@ impl<W: Write> BlobWriter<W> {
     pub fn write_data_chunk(&mut self, data: &[u8]) -> Result<u64> {
         self.validate_data_chunk_len(data.len())?;
         self.append_chunk(data)
+    }
+
+    /// Append one file chunk by filling a reusable source buffer.
+    pub fn write_data_chunk_from_source<F>(&mut self, len: usize, fill: F) -> Result<u64>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        self.write_chunk_from_source(len, false, fill)?
+            .ok_or_else(|| Error::Runtime("source chunk was unexpectedly elided".to_string()))
+    }
+
+    pub(crate) fn write_nonzero_data_chunk_from_source<F>(
+        &mut self,
+        len: usize,
+        fill: F,
+    ) -> Result<Option<u64>>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        self.write_chunk_from_source(len, true, fill)
+    }
+
+    fn write_chunk_from_source<F>(
+        &mut self,
+        len: usize,
+        skip_zero: bool,
+        fill: F,
+    ) -> Result<Option<u64>>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        self.validate_data_chunk_len(len)?;
+        self.append_chunk_from_source(len, skip_zero, fill)
     }
 
     fn validate_data_chunk_len(&self, len: usize) -> Result<()> {
@@ -1368,6 +1444,121 @@ impl<W: Write> BlobWriter<W> {
             )));
         }
         Ok(())
+    }
+
+    fn append_chunk_from_source<F>(
+        &mut self,
+        len: usize,
+        skip_zero: bool,
+        fill: F,
+    ) -> Result<Option<u64>>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        if self.raw_device || self.z_erofs_enabled() {
+            return Err(Error::InvalidParameter(
+                "source-backed chunks require chunk-group layout".to_string(),
+            ));
+        }
+
+        let blocks = len.div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
+        let slot_blocks = self.slot_blocks();
+        let len = u32::try_from(len)
+            .map_err(|err| Error::Overflow(format!("blob meta chunk length exceeds u32: {err}")))?;
+
+        if blocks == slot_blocks {
+            let mut data = self.take_source_buffer();
+            data.resize(len as usize, 0);
+            if let Err(err) = fill(&mut data) {
+                self.recycle_source_buffer(data);
+                return Err(err);
+            }
+            if skip_zero && data.iter().all(|byte| *byte == 0) {
+                self.recycle_source_buffer(data);
+                return Ok(None);
+            }
+            let digest = match self.digester {
+                BlobMetadataDigester::Blake3 => {
+                    vec![BlobMetadataDigest::new(*blake3::hash(&data).as_bytes())]
+                }
+                BlobMetadataDigester::None => Vec::new(),
+            };
+            let placement = self.placements.len();
+            self.placements.push(PENDING);
+            self.submit_bin(Bin {
+                data,
+                lens: vec![len],
+                digests: digest,
+                placements: vec![placement],
+                blocks,
+            })?;
+            return Ok(Some(placement as u64));
+        }
+
+        let mut target = self
+            .open_bins
+            .iter()
+            .position(|bin| bin.blocks + blocks <= slot_blocks);
+        if target.is_none() && self.open_bins.len() >= MAX_OPEN_BINS {
+            let fullest = self
+                .open_bins
+                .iter()
+                .enumerate()
+                .rev()
+                .max_by_key(|(_, bin)| bin.blocks)
+                .map(|(index, _)| index)
+                .expect("bins are open");
+            self.close_bin(fullest)?;
+        }
+        let opened = target.is_none();
+        if opened {
+            let buffer = self.take_source_buffer();
+            self.open_bins.push(Bin {
+                data: buffer,
+                lens: Vec::new(),
+                digests: Vec::new(),
+                placements: Vec::new(),
+                blocks: 0,
+            });
+            target = Some(self.open_bins.len() - 1);
+        }
+        let index = target.expect("a bin was found or opened");
+        let start = self.open_bins[index].data.len();
+        self.open_bins[index].data.resize(start + len as usize, 0);
+        if let Err(err) = fill(&mut self.open_bins[index].data[start..]) {
+            self.open_bins[index].data.truncate(start);
+            if opened {
+                let bin = self.open_bins.remove(index);
+                self.recycle_source_buffer(bin.data);
+            }
+            return Err(err);
+        }
+        let data = &self.open_bins[index].data[start..];
+        if skip_zero && data.iter().all(|byte| *byte == 0) {
+            self.open_bins[index].data.truncate(start);
+            if opened {
+                let bin = self.open_bins.remove(index);
+                self.recycle_source_buffer(bin.data);
+            }
+            return Ok(None);
+        }
+        let digest = match self.digester {
+            BlobMetadataDigester::Blake3 => {
+                Some(BlobMetadataDigest::new(*blake3::hash(data).as_bytes()))
+            }
+            BlobMetadataDigester::None => None,
+        };
+        let placement = self.placements.len();
+        self.placements.push(PENDING);
+        let bin = &mut self.open_bins[index];
+        bin.lens.push(len);
+        bin.digests.extend(digest);
+        bin.placements.push(placement);
+        bin.blocks += blocks;
+        if bin.blocks == slot_blocks {
+            self.close_bin(index)?;
+        }
+        Ok(Some(placement as u64))
     }
 
     /// Process a regular file: read it in chunk-sized chunks and append every
@@ -1409,7 +1600,7 @@ impl<W: Write> BlobWriter<W> {
         }
         let mut chunk_buf = mem::take(&mut self.chunk_buf);
         if chunk_buf.len() < self.file_chunk_size as usize {
-            chunk_buf = vec![0u8; self.file_chunk_size as usize];
+            chunk_buf.resize(self.file_chunk_size as usize, 0);
         }
 
         for i in 0..chunk_count {
@@ -1587,6 +1778,27 @@ impl<W: Write> BlobWriter<W> {
 
     fn slot_blocks(&self) -> u64 {
         u64::from(self.file_chunk_size / EROFS_BLOCK_SIZE)
+    }
+
+    fn take_source_buffer(&mut self) -> Vec<u8> {
+        let mut buffer = mem::take(&mut self.chunk_buf);
+        if buffer.capacity() == 0 {
+            buffer = self
+                .encoder
+                .as_mut()
+                .and_then(ChunkGroupEncoder::take_buffer)
+                .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
+        }
+        buffer
+    }
+
+    fn recycle_source_buffer(&mut self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        if self.chunk_buf.capacity() == 0 {
+            self.chunk_buf = buffer;
+        } else if let Some(encoder) = self.encoder.as_mut() {
+            encoder.recycle_buffer(buffer);
+        }
     }
 
     /// Close open bin `index` as the next group.
@@ -1911,6 +2123,84 @@ mod tests {
         let meta = writer.blob_metadata().unwrap();
         assert_eq!(meta.uncompressed_block_count(), 3 * TEST_SLOT_BLOCKS);
         assert_eq!(meta.compressed_end(), big.len() as u64 + 100);
+    }
+
+    #[test]
+    fn blob_writer_fills_source_chunks_without_an_intermediate_buffer() {
+        let mut writer = plain_writer(TEST_CHUNK_SIZE);
+        let mut zero_buffer_addresses = Vec::new();
+        for _ in 0..2 {
+            let zero = writer
+                .write_nonzero_data_chunk_from_source(TEST_CHUNK_SIZE as usize, |target| {
+                    zero_buffer_addresses.push(target.as_ptr() as usize);
+                    target.fill(0);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(zero, None);
+        }
+        assert_eq!(zero_buffer_addresses[0], zero_buffer_addresses[1]);
+        assert_eq!(writer.chunk_buf.capacity(), TEST_CHUNK_SIZE as usize);
+        assert!(writer.encoder.is_none());
+
+        let expected = vec![b'x'; TEST_CHUNK_SIZE as usize];
+        let placement = writer
+            .write_data_chunk_from_source(expected.len(), |target| {
+                target.copy_from_slice(&expected);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(placement, 0);
+        assert_eq!(writer.next_group, 1);
+
+        let zero = writer
+            .write_nonzero_data_chunk_from_source(100, |target| {
+                target.fill(0);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(zero, None);
+        assert!(writer.open_bins.is_empty());
+
+        let error = writer.write_data_chunk_from_source(100, |_target| {
+            Err(Error::Runtime("fill failed".to_string()))
+        });
+        assert!(error.is_err());
+        assert!(writer.open_bins.is_empty());
+
+        writer.finish().unwrap();
+        assert_eq!(writer.writer, expected);
+        assert_eq!(writer.placements, vec![0]);
+        assert_eq!(writer.blob_metadata_chunks(), &[TEST_CHUNK_SIZE]);
+    }
+
+    #[test]
+    fn blob_writer_resolves_closed_groups_before_finish() {
+        let mut writer = plain_writer(TEST_CHUNK_SIZE);
+        let full = vec![b'f'; TEST_CHUNK_SIZE as usize];
+        let full_placement = writer.write_data_chunk(&full).unwrap();
+        let mut full_addr = ErofsChunkAddr {
+            blkaddr: full_placement,
+            device_id: 7,
+        };
+        assert!(writer
+            .try_resolve_chunk_addr_for_device(&mut full_addr, 7)
+            .unwrap());
+        assert_eq!(full_addr.blkaddr, 0);
+
+        let partial_placement = writer.write_data_chunk(&[b'p'; 100]).unwrap();
+        let mut partial_addr = ErofsChunkAddr {
+            blkaddr: partial_placement,
+            device_id: 7,
+        };
+        assert!(!writer
+            .try_resolve_chunk_addr_for_device(&mut partial_addr, 7)
+            .unwrap());
+        writer.finish().unwrap();
+        assert!(writer
+            .try_resolve_chunk_addr_for_device(&mut partial_addr, 7)
+            .unwrap());
+        assert_eq!(partial_addr.blkaddr, TEST_SLOT_BLOCKS);
     }
 
     #[test]

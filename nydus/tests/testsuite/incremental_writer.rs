@@ -788,6 +788,45 @@ fn incremental_writer_encodes_zero_chunk_as_null_without_blob() {
 }
 
 #[test]
+fn incremental_writer_elides_zero_source_chunks_without_blob() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let parent_data = vec![b'L'; chunk_size * 2];
+    let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &parent_bootstrap);
+
+    let source_path = temp.path().join("zero-source");
+    fs::write(&source_path, vec![0; chunk_size]).unwrap();
+    let source = Arc::new(fs::File::open(&source_path).unwrap());
+    let mut memory = vec![0; chunk_size];
+    let ptr = NonNull::new(memory.as_mut_ptr()).unwrap();
+
+    assert_eq!(
+        writer
+            .write_file_range(Path::new("memory.bin"), 0, source, 0, chunk_size as u64)
+            .unwrap(),
+        chunk_size
+    );
+    let written = unsafe {
+        writer
+            .write_memory_range(Path::new("memory.bin"), chunk_size as u64, ptr, chunk_size)
+            .unwrap()
+    };
+    assert_eq!(written, chunk_size);
+
+    let commit = commit_upper_blob(&output_dir, writer);
+    assert!(commit.blob_path.is_none());
+    assert!(commit.blob_metadata_path.is_none());
+
+    let reader = ErofsReader::open_metadata_only(&commit.bootstrap_path).unwrap();
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+    assert_eq!(chunks[0].blkaddr, EROFS_NULL_ADDR);
+    assert_eq!(chunks[1].blkaddr, EROFS_NULL_ADDR);
+}
+
+#[test]
 fn incremental_writer_creates_upper_blob_only_on_commit() {
     let temp = tempfile::tempdir().unwrap();
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
@@ -852,9 +891,14 @@ fn incremental_writer_write_at_owned_moves_full_chunk() {
             .unwrap(),
         chunk_size
     );
+    writer
+        .write_at_owned(Path::new("memory.bin"), 7, vec![b'P'; 1])
+        .unwrap();
 
     let data = commit_and_read_memory(&temp, &output_dir, writer);
-    assert_eq!(data, vec![b'O'; chunk_size]);
+    let mut expected = vec![b'O'; chunk_size];
+    expected[7] = b'P';
+    assert_eq!(data, expected);
 }
 
 #[test]
@@ -1039,6 +1083,11 @@ fn incremental_writer_rejects_partial_metadata_only_write() {
         .write_at(Path::new("memory.bin"), 1, b"partial")
         .unwrap_err();
     assert!(err.to_string().contains("data-capable parent reader"));
+    assert!(writer
+        .commit()
+        .unwrap_err()
+        .to_string()
+        .contains("no changes"));
 }
 
 #[test]
@@ -1192,12 +1241,55 @@ fn incremental_writer_write_at_keeps_multiple_partial_writes_to_same_chunk() {
 }
 
 #[test]
-fn incremental_writer_write_at_patches_existing_dirty_full_chunk() {
+fn incremental_writer_applies_deferred_file_and_memory_patches_in_order() {
     let temp = tempfile::tempdir().unwrap();
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
     let parent_data = vec![b'A'; chunk_size];
     let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
     let (mut writer, output_dir) = open_data_writer(&temp, &parent_bootstrap);
+
+    let source_path = temp.path().join("partial-source");
+    fs::write(&source_path, b"FILE").unwrap();
+    let source = Arc::new(fs::File::open(&source_path).unwrap());
+    assert_eq!(
+        writer
+            .write_file_range(Path::new("memory.bin"), 100, source, 0, 4)
+            .unwrap(),
+        4
+    );
+
+    let mut memory = *b"MEM";
+    let ptr = NonNull::new(memory.as_mut_ptr()).unwrap();
+    assert_eq!(
+        unsafe {
+            writer
+                .write_memory_range(Path::new("memory.bin"), 102, ptr, memory.len())
+                .unwrap()
+        },
+        memory.len()
+    );
+    assert_eq!(
+        writer
+            .write_at(Path::new("memory.bin"), 103, b"XY")
+            .unwrap(),
+        2
+    );
+
+    let data = commit_and_read_memory(&temp, &output_dir, writer);
+    let mut expected = parent_data;
+    expected[100..104].copy_from_slice(b"FILE");
+    expected[102..105].copy_from_slice(b"MEM");
+    expected[103..105].copy_from_slice(b"XY");
+    assert_eq!(data, expected);
+}
+
+#[test]
+fn incremental_writer_write_at_patches_existing_dirty_full_chunk() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let parent_data = vec![b'A'; chunk_size];
+    let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &parent_bootstrap);
 
     writer
         .write_at(Path::new("memory.bin"), 0, &vec![b'C'; chunk_size])
@@ -1221,7 +1313,7 @@ fn incremental_writer_write_at_patches_replaced_file_data() {
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
     let parent_data = vec![b'A'; chunk_size];
     let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
-    let (mut writer, output_dir) = open_data_writer(&temp, &parent_bootstrap);
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &parent_bootstrap);
 
     let replacement = vec![b'R'; chunk_size / 2];
     writer
@@ -1244,7 +1336,7 @@ fn incremental_writer_write_at_patches_replaced_file_tail_chunk() {
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
     let parent_data = vec![b'A'; chunk_size * 2];
     let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
-    let (mut writer, output_dir) = open_data_writer(&temp, &parent_bootstrap);
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &parent_bootstrap);
 
     let mut replacement = vec![b'R'; chunk_size + chunk_size / 2];
     writer
