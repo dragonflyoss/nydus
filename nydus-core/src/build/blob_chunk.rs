@@ -139,6 +139,20 @@ struct Bin {
     blocks: u64,
 }
 
+enum ChunkInput<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl ChunkInput<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(data) => data,
+            Self::Owned(data) => data,
+        }
+    }
+}
+
 /// Content-defined pack boundaries, normalized around the chunk group
 /// minimum size: a pack spanning at least the minimum closes after a chunk whose digest's
 /// low `PACK_STRICT_MASK` bits are zero (one chunk in 64), one spanning at
@@ -1368,21 +1382,51 @@ impl<W: Write> BlobWriter<W> {
         )?)
     }
 
-    pub(crate) fn incremental_blob_metadata(&self) -> Result<BlobMetadata> {
+    /// Consume the finished writer and move its metadata tables into the
+    /// standard blob metadata representation. Raw-device blobs return no
+    /// metadata. Call finish first so all open groups are sealed.
+    pub fn into_parts_with_metadata(self) -> Result<(W, Option<Sha256>, Option<BlobMetadata>)> {
+        self.into_parts_with_metadata_kind(false)
+    }
+
+    pub(crate) fn into_incremental_parts(self) -> Result<(W, Option<Sha256>, BlobMetadata)> {
+        let (writer, data_hasher, blob_metadata) = self.into_parts_with_metadata_kind(true)?;
+        let blob_metadata = blob_metadata.ok_or_else(|| {
+            Error::InvalidParameter("a raw device blob carries no blob meta".to_string())
+        })?;
+        Ok((writer, data_hasher, blob_metadata))
+    }
+
+    fn into_parts_with_metadata_kind(
+        self,
+        incremental: bool,
+    ) -> Result<(W, Option<Sha256>, Option<BlobMetadata>)> {
         if self.raw_device {
-            return Err(Error::InvalidParameter(
-                "a raw device blob carries no blob meta".to_string(),
-            ));
+            return Ok((self.writer, self.data_hasher, None));
         }
-        Ok(BlobMetadata::new_incremental(
-            self.compressor,
-            self.digester,
-            self.group_span_blocks(),
-            self.chunk_group_min_size,
-            self.blob_metadata_chunk_groups.clone(),
-            self.members.clone(),
-            self.digests.clone(),
-        )?)
+        let group_span_blocks = self.group_span_blocks();
+        let blob_metadata = if incremental {
+            BlobMetadata::new_incremental(
+                self.compressor,
+                self.digester,
+                group_span_blocks,
+                self.chunk_group_min_size,
+                self.blob_metadata_chunk_groups,
+                self.members,
+                self.digests,
+            )?
+        } else {
+            BlobMetadata::new(
+                self.compressor,
+                self.digester,
+                group_span_blocks,
+                self.chunk_group_min_size,
+                self.blob_metadata_chunk_groups,
+                self.members,
+                self.digests,
+            )?
+        };
+        Ok((self.writer, self.data_hasher, Some(blob_metadata)))
     }
 
     pub fn write_blob_metadata(&mut self, path: &Path) -> Result<()> {
@@ -1408,25 +1452,38 @@ impl<W: Write> BlobWriter<W> {
         self.resolve_chunk_addr_for_device(addr, 1)
     }
 
+    pub(crate) fn try_resolve_chunk_addr_for_device(
+        &self,
+        addr: &mut ErofsChunkAddr,
+        device_id: u16,
+    ) -> Result<bool> {
+        if self.raw_device || addr.device_id != device_id || addr.blkaddr == EROFS_NULL_ADDR {
+            return Ok(true);
+        }
+        let placement = usize::try_from(addr.blkaddr)
+            .ok()
+            .and_then(|id| self.placements.get(id).copied())
+            .ok_or_else(|| {
+                Error::Runtime(format!("chunk placement {} is unknown", addr.blkaddr))
+            })?;
+        if placement == PENDING {
+            return Ok(false);
+        }
+        addr.blkaddr = placement;
+        Ok(true)
+    }
+
     pub(crate) fn resolve_chunk_addr_for_device(
         &self,
         addr: &mut ErofsChunkAddr,
         device_id: u16,
     ) -> Result<()> {
-        if self.raw_device || addr.device_id != device_id || addr.blkaddr == EROFS_NULL_ADDR {
-            return Ok(());
+        if !self.try_resolve_chunk_addr_for_device(addr, device_id)? {
+            return Err(Error::Runtime(format!(
+                "chunk placement {} is still pending; finish the blob first",
+                addr.blkaddr
+            )));
         }
-        let resolved = usize::try_from(addr.blkaddr)
-            .ok()
-            .and_then(|id| self.placements.get(id).copied())
-            .filter(|blkaddr| *blkaddr != PENDING)
-            .ok_or_else(|| {
-                Error::Runtime(format!(
-                    "chunk placement {} is unknown or still pending; finish the blob first",
-                    addr.blkaddr
-                ))
-            })?;
-        addr.blkaddr = resolved;
         Ok(())
     }
 
@@ -1434,6 +1491,65 @@ impl<W: Write> BlobWriter<W> {
     pub fn write_data_chunk(&mut self, data: &[u8]) -> Result<u64> {
         self.validate_data_chunk_len(data.len())?;
         self.append_chunk(data)
+    }
+
+    /// Append one owned file chunk without copying it into a staging buffer.
+    pub(crate) fn write_data_chunk_owned(&mut self, data: Vec<u8>) -> Result<u64> {
+        self.validate_data_chunk_len(data.len())?;
+        if self.raw_device || self.z_erofs_enabled() {
+            return Err(Error::InvalidParameter(
+                "owned chunks require chunk-group layout".to_string(),
+            ));
+        }
+        self.append_owned_chunk(data)
+    }
+
+    /// Append one file chunk by filling a reusable source buffer.
+    pub(crate) fn write_data_chunk_from_source<F>(&mut self, len: usize, fill: F) -> Result<u64>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        self.write_chunk_from_source(len, false, fill)?
+            .ok_or_else(|| Error::Runtime("source chunk was unexpectedly elided".to_string()))
+    }
+
+    pub(crate) fn write_nonzero_data_chunk_from_source<F>(
+        &mut self,
+        len: usize,
+        fill: F,
+    ) -> Result<Option<u64>>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        self.write_chunk_from_source(len, true, fill)
+    }
+
+    fn write_chunk_from_source<F>(
+        &mut self,
+        len: usize,
+        skip_zero: bool,
+        fill: F,
+    ) -> Result<Option<u64>>
+    where
+        F: FnOnce(&mut [u8]) -> Result<()>,
+    {
+        self.validate_data_chunk_len(len)?;
+        if self.raw_device || self.z_erofs_enabled() {
+            return Err(Error::InvalidParameter(
+                "source-backed chunks require chunk-group layout".to_string(),
+            ));
+        }
+        let mut data = self.take_source_buffer();
+        data.resize(len, 0);
+        if let Err(err) = fill(&mut data) {
+            self.recycle_source_buffer(data);
+            return Err(err);
+        }
+        if skip_zero && data.iter().all(|byte| *byte == 0) {
+            self.recycle_source_buffer(data);
+            return Ok(None);
+        }
+        self.append_owned_chunk(data).map(Some)
     }
 
     fn validate_data_chunk_len(&self, len: usize) -> Result<()> {
@@ -1596,6 +1712,21 @@ impl<W: Write> BlobWriter<W> {
             self.next_blkaddr = next_blkaddr;
             return Ok(addr);
         }
+        self.append_group_chunk(ChunkInput::Borrowed(data))
+    }
+
+    /// Append an owned chunk, moving a lone chunk or a new pack directly
+    /// into the encoder instead of copying through an intermediate buffer.
+    fn append_owned_chunk(&mut self, data: Vec<u8>) -> Result<u64> {
+        debug_assert!(!self.raw_device && !self.z_erofs_enabled());
+        self.append_group_chunk(ChunkInput::Owned(data))
+    }
+
+    /// Add a borrowed or owned chunk through the shared chunk-group state
+    /// machine. Owned buffers are moved into lone groups and new packs.
+    fn append_group_chunk(&mut self, input: ChunkInput<'_>) -> Result<u64> {
+        let data = input.as_slice();
+        let blocks = data.len().div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
         let len = u32::try_from(data.len())
             .map_err(|err| Error::Overflow(format!("blob meta chunk length exceeds u32: {err}")))?;
         let digest = match self.digester {
@@ -1606,16 +1737,19 @@ impl<W: Write> BlobWriter<W> {
         };
         let placement = self.placements.len();
         self.placements.push(PENDING);
-        let lone = || Bin {
-            data: data.to_vec(),
-            lens: vec![len],
-            digests: digest.into_iter().collect(),
-            placements: vec![placement],
-            blocks,
-        };
 
         if len >= self.chunk_group_min_size {
-            self.submit_bin(lone())?;
+            let data = match input {
+                ChunkInput::Borrowed(data) => data.to_vec(),
+                ChunkInput::Owned(data) => data,
+            };
+            self.submit_bin(Bin {
+                data,
+                lens: vec![len],
+                digests: digest.into_iter().collect(),
+                placements: vec![placement],
+                blocks,
+            })?;
             return Ok(placement as u64);
         }
 
@@ -1627,24 +1761,44 @@ impl<W: Write> BlobWriter<W> {
         }
         let cut_byte = digest.map(|digest| digest.digest()[31]);
         let (min_blocks, target_blocks) = (self.pack_min_blocks, self.pack_target_blocks);
-        let bin = match self.open_bin {
-            Some(ref mut bin) => bin,
-            None => {
-                let buffer = self
-                    .encoder
-                    .as_mut()
-                    .and_then(ChunkGroupEncoder::take_buffer)
-                    .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
-                self.open_bin.insert(Bin {
-                    data: buffer,
-                    lens: Vec::new(),
-                    digests: Vec::new(),
-                    placements: Vec::new(),
-                    blocks: 0,
-                })
+        let recycle = if let Some(bin) = self.open_bin.as_mut() {
+            match input {
+                ChunkInput::Borrowed(data) => {
+                    bin.data.extend_from_slice(data);
+                    None
+                }
+                ChunkInput::Owned(data) => {
+                    bin.data.extend_from_slice(&data);
+                    Some(data)
+                }
             }
+        } else {
+            let data = match input {
+                ChunkInput::Borrowed(data) => {
+                    let buffer = self
+                        .encoder
+                        .as_mut()
+                        .and_then(ChunkGroupEncoder::take_buffer)
+                        .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
+                    let mut buffer = buffer;
+                    buffer.extend_from_slice(data);
+                    buffer
+                }
+                ChunkInput::Owned(data) => data,
+            };
+            self.open_bin = Some(Bin {
+                data,
+                lens: Vec::new(),
+                digests: Vec::new(),
+                placements: Vec::new(),
+                blocks: 0,
+            });
+            None
         };
-        bin.data.extend_from_slice(data);
+        if let Some(data) = recycle {
+            self.recycle_source_buffer(data);
+        }
+        let bin = self.open_bin.as_mut().expect("pack was opened");
         bin.lens.push(len);
         bin.digests.extend(digest);
         bin.placements.push(placement);
@@ -1661,6 +1815,27 @@ impl<W: Write> BlobWriter<W> {
             self.close_open_bin()?;
         }
         Ok(placement as u64)
+    }
+
+    fn take_source_buffer(&mut self) -> Vec<u8> {
+        let mut buffer = mem::take(&mut self.chunk_buf);
+        if buffer.capacity() == 0 {
+            buffer = self
+                .encoder
+                .as_mut()
+                .and_then(ChunkGroupEncoder::take_buffer)
+                .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
+        }
+        buffer
+    }
+
+    fn recycle_source_buffer(&mut self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        if self.chunk_buf.capacity() == 0 {
+            self.chunk_buf = buffer;
+        } else if let Some(encoder) = self.encoder.as_mut() {
+            encoder.recycle_buffer(buffer);
+        }
     }
 
     /// Close the open pack, if any, as the next group.
