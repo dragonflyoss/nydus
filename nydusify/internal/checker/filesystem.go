@@ -158,10 +158,16 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 	if err != nil {
 		return "", nil, errors.Wrap(err, "inspect blob layers")
 	}
+	controlSocket, err := filepath.Abs(filepath.Join(dir, "control.sock"))
+	if err != nil {
+		return "", nil, errors.Wrap(err, "resolve nydus control socket")
+	}
+
 	args := []string{
 		"fuse",
 		"--bootstrap", bootstrapPath,
 		"--mountpoint", mountpoint,
+		"--control-socket", controlSocket,
 		"--log-level", "warn",
 		"--log-dir", filepath.Join(dir, "log"),
 	}
