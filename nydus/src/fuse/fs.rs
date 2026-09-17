@@ -173,16 +173,34 @@ impl ErofsFs {
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))
     }
 
-    /// Directory entries for a readdir(plus): through the handle when opendir
-    /// issued one, or straight from the inode for the kernel's no-opendir
-    /// dummy handle (fh 0).
-    fn dir_entries(&self, ino: INodeNo, fh: FileHandle) -> io::Result<Arc<Vec<RawDirEntry>>> {
+    /// Iterate a readdir(plus) page through an opened handle's cached entries,
+    /// or directly from the inode for the kernel's no-opendir dummy handle (fh 0).
+    /// Cookies are entry ordinals for opened handles and directory byte offsets
+    /// for dummy handles. The callback receives the next cookie; returning
+    /// `false` stops iteration, so callers only save cookies for accepted entries.
+    fn for_each_dir_entry<F>(
+        &self,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        mut cb: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(u64, u8, &[u8], u64) -> io::Result<bool>,
+    {
         if fh.0 != 0 {
-            return self.dir_handle(fh.0)?.entries(self);
+            let entries = self.dir_handle(fh.0)?.entries(self)?;
+            let start = usize::try_from(offset).unwrap_or(usize::MAX);
+            for (index, entry) in entries.iter().enumerate().skip(start) {
+                if !cb(entry.nid, entry.file_type, &entry.name, index as u64 + 1)? {
+                    break;
+                }
+            }
+            return Ok(());
         }
         let nid = self.ino_to_nid(ino.0);
         let vi = self.reader.inode(nid)?;
-        Ok(Arc::new(self.reader.read_dir(nid, &vi)?))
+        self.reader.for_each_dir_entry_from(nid, &vi, offset, cb)
     }
 }
 
@@ -535,22 +553,20 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectory,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdir);
-        let entries = match self.dir_entries(ino, fh) {
-            Ok(entries) => entries,
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-                return;
-            }
-        };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
-            let ino = self.nid_to_ino(entry.nid);
-            let kind = erofs_ft_to_kind(entry.file_type);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(INodeNo(ino), (index as u64) + 1, kind, name) {
-                break;
-            }
+        let result = self.for_each_dir_entry(
+            ino,
+            fh,
+            offset,
+            |entry_nid, file_type, name, next_offset| {
+                let ino = self.nid_to_ino(entry_nid);
+                let kind = erofs_ft_to_kind(file_type);
+                Ok(!reply.add(INodeNo(ino), next_offset, kind, OsStr::from_bytes(name)))
+            },
+        );
+        if let Err(err) = result {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
@@ -564,37 +580,28 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectoryPlus,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdirplus);
-        let entries = match self.dir_entries(ino, fh) {
-            Ok(entries) => entries,
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-                return;
-            }
-        };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
-            let child_inode = match self.reader.inode(entry.nid) {
-                Ok(vi) => vi,
-                Err(err) => {
-                    m.fail();
-                    reply.error(io_errno(&err));
-                    return;
-                }
-            };
-            let attr = self.make_attr(entry.nid, &child_inode);
-            let ino = self.nid_to_ino(entry.nid);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(
-                INodeNo(ino),
-                (index as u64) + 1,
-                name,
-                &EROFS_FUSE_TIMEOUT,
-                &attr,
-                Generation(0),
-            ) {
-                break;
-            }
+        let result = self.for_each_dir_entry(
+            ino,
+            fh,
+            offset,
+            |entry_nid, _file_type, name, next_offset| {
+                let child_inode = self.reader.inode(entry_nid)?;
+                let attr = self.make_attr(entry_nid, &child_inode);
+                let ino = self.nid_to_ino(entry_nid);
+                Ok(!reply.add(
+                    INodeNo(ino),
+                    next_offset,
+                    OsStr::from_bytes(name),
+                    &EROFS_FUSE_TIMEOUT,
+                    &attr,
+                    Generation(0),
+                ))
+            },
+        );
+        if let Err(err) = result {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
@@ -751,7 +758,10 @@ mod tests {
     use crate::build::blob_chunk::BlobWriter;
     use crate::build::bootstrap::render_bootstrap;
     use crate::build::inode::{build_tree, resolve_chunk_addrs};
-    use nydus_format::erofs::{XattrEntry, EROFS_BLOCK_SIZE, EROFS_XATTR_INDEX_USER};
+    use nydus_format::erofs::{
+        XattrEntry, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_INODE_FLAT_INLINE,
+        EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_INDEX_USER,
+    };
     use std::collections::HashSet;
     use std::fs;
 
@@ -824,5 +834,155 @@ mod tests {
             FUSE_ROOT_ID + 1,
             b"trusted.nydus.no_xattr"
         ));
+    }
+
+    #[test]
+    fn directory_pagination_preserves_entries_and_cookies() {
+        for (child_count, layout) in [
+            (0, EROFS_INODE_FLAT_INLINE),
+            (105, EROFS_INODE_FLAT_PLAIN),
+            (120, EROFS_INODE_FLAT_INLINE),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source");
+            fs::create_dir(&source).unwrap();
+            let mut names = vec![b".".to_vec(), b"..".to_vec()];
+            for index in 0..child_count {
+                let name = format!("{index:04}-{}", "n".repeat(60));
+                fs::write(source.join(&name), b"").unwrap();
+                names.push(name.into_bytes());
+            }
+            let mut writer = BlobWriter::plain(
+                fs::File::create(directory.path().join("data")).unwrap(),
+                EROFS_BLOCK_SIZE,
+            );
+            let mut inodes =
+                build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+            writer.finish().unwrap();
+            resolve_chunk_addrs(&mut inodes, &writer).unwrap();
+            let bootstrap = directory.path().join("bootstrap");
+            fs::write(
+                &bootstrap,
+                render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap(),
+            )
+            .unwrap();
+            let filesystem = ErofsFs::new(Arc::new(
+                ErofsReader::open_metadata_only(&bootstrap).unwrap(),
+            ))
+            .unwrap();
+            let nid = filesystem.reader.superblock().root_nid();
+            let inode = filesystem.reader.inode(nid).unwrap();
+            assert_eq!(inode.data_layout(), layout);
+            if child_count > 0 {
+                assert!(inode.size() > EROFS_BLOCK_SIZE as u64);
+            }
+            let expected: Vec<_> = filesystem
+                .reader
+                .read_dir(nid, &inode)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.nid, entry.file_type, entry.name))
+                .collect();
+            assert_eq!(
+                expected.iter().map(|entry| &entry.2).collect::<Vec<_>>(),
+                names.iter().collect::<Vec<_>>()
+            );
+            assert_eq!(expected[0], (nid, EROFS_FT_DIR, b".".to_vec()));
+            assert_eq!(expected[1], (nid, EROFS_FT_DIR, b"..".to_vec()));
+
+            let ino = INodeNo(FUSE_ROOT_ID);
+            let handle = filesystem.create_dir_handle(ino.0).unwrap();
+            for fh in [FileHandle(0), FileHandle(handle)] {
+                for capacity in [1, 2, 7, 53, 54, 55, 200] {
+                    let mut offset = 0;
+                    let mut seen = Vec::new();
+                    let mut cookies = Vec::new();
+                    loop {
+                        let mut accepted = 0;
+                        let mut calls = 0;
+                        filesystem
+                            .for_each_dir_entry(ino, fh, offset, |nid, ft, name, next| {
+                                calls += 1;
+                                if accepted == capacity {
+                                    return Ok(false);
+                                }
+                                // Exercise the same inode/attribute lookup as readdirplus.
+                                let child = filesystem.reader.inode(nid)?;
+                                let attr = filesystem.make_attr(nid, &child);
+                                assert_eq!(attr.kind, erofs_ft_to_kind(ft));
+                                assert!(next > offset);
+                                offset = next;
+                                cookies.push(next);
+                                seen.push((nid, ft, name.to_vec()));
+                                accepted += 1;
+                                Ok(true)
+                            })
+                            .unwrap();
+                        assert!(calls <= capacity + 1);
+                        assert!(seen.len() <= expected.len());
+                        if accepted == 0 {
+                            break;
+                        }
+                    }
+                    assert_eq!(
+                        seen, expected,
+                        "children={child_count}, fh={}, capacity={capacity}",
+                        fh.0
+                    );
+                    if fh.0 == 0 {
+                        assert_eq!(cookies[0], EROFS_DIRENT_SIZE as u64);
+                        assert_eq!(offset, inode.size());
+                        if child_count > 0 {
+                            // The first block holds dot, dotdot and 52 long names.
+                            assert_eq!(cookies[53], EROFS_BLOCK_SIZE as u64);
+                            assert_eq!(
+                                cookies[54],
+                                (EROFS_BLOCK_SIZE as usize + EROFS_DIRENT_SIZE) as u64
+                            );
+                        }
+                    } else {
+                        assert_eq!(cookies, (1..=expected.len() as u64).collect::<Vec<_>>());
+                    }
+                    // A saved cookie must also work after later pages have been read.
+                    for (index, cookie) in cookies.iter().copied().enumerate() {
+                        let mut next_entry = None;
+                        filesystem
+                            .for_each_dir_entry(ino, fh, cookie, |nid, ft, name, _| {
+                                next_entry = Some((nid, ft, name.to_vec()));
+                                Ok(false)
+                            })
+                            .unwrap();
+                        assert_eq!(next_entry.as_ref(), expected.get(index + 1));
+                    }
+                }
+
+                let mut calls = 0;
+                filesystem
+                    .for_each_dir_entry(ino, fh, 0, |_, _, name, _| {
+                        calls += 1;
+                        assert_eq!(name, b".");
+                        Ok(false)
+                    })
+                    .unwrap();
+                assert_eq!(calls, 1);
+                let err = filesystem
+                    .for_each_dir_entry(ino, fh, 0, |_, _, _, _| {
+                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    })
+                    .unwrap_err();
+                assert_eq!(err.raw_os_error(), Some(libc::EIO));
+                filesystem
+                    .for_each_dir_entry(ino, fh, u64::MAX, |_, _, _, _| {
+                        panic!("offset past EOF must not yield entries")
+                    })
+                    .unwrap();
+            }
+            let err = filesystem
+                .for_each_dir_entry(ino, FileHandle(u64::MAX), 0, |_, _, _, _| {
+                    panic!("invalid handle must not yield entries")
+                })
+                .unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+        }
     }
 }
