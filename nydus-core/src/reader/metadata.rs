@@ -31,6 +31,7 @@ impl ErofsReader {
     }
 
     /// Iterate directory entries without materializing the whole directory in memory.
+    /// Returning `false` from the callback stops iteration.
     pub fn for_each_dir_entry<F>(
         &self,
         nid: u64,
@@ -40,18 +41,61 @@ impl ErofsReader {
     where
         F: FnMut(u64, u8, &[u8]) -> io::Result<bool>,
     {
-        let dir_size = inode.size() as usize;
-        if dir_size == 0 {
+        self.for_each_dir_entry_from(nid, inode, 0, |entry_nid, file_type, name, _| {
+            cb(entry_nid, file_type, name)
+        })
+    }
+
+    /// Iterate from a logical directory byte offset, seeking directly to its block.
+    /// The callback receives the next dirent's offset (or the next block / EOF
+    /// after a block's last entry). Pass back the last accepted entry's offset
+    /// to resume; returning `false` stops iteration without consuming the entry.
+    pub fn for_each_dir_entry_from<F>(
+        &self,
+        nid: u64,
+        inode: &ErofsInode<'_>,
+        offset: u64,
+        mut cb: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(u64, u8, &[u8], u64) -> io::Result<bool>,
+    {
+        let dir_size = inode.size();
+        if offset >= dir_size {
             return Ok(());
         }
+        let block_size = EROFS_BLOCK_SIZE as u64;
+        let mut pos = offset / block_size * block_size;
+        let mut start = ((offset % block_size) as usize).div_ceil(EROFS_DIRENT_SIZE);
 
-        match self.read_flat_data(nid, inode, 0, dir_size) {
-            Ok(data) => Self::parse_dir_entries(data, dir_size, &mut cb),
-            Err(_) => {
-                let data = self.read_flat_data_vec(nid, inode, 0, dir_size)?;
-                Self::parse_dir_entries(&data, dir_size, &mut cb)
+        while pos < dir_size {
+            let block_len = (dir_size - pos).min(block_size) as usize;
+            // Reading one block at a time also keeps FLAT_INLINE tails zero-copy.
+            let data = self.read_flat_data(nid, inode, pos, block_len)?;
+            let (block_data, count) = Self::dir_block(data, block_len, 0)
+                .filter(|(_, count)| *count > 0)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid directory block")
+                })?;
+            for i in start..count {
+                let (entry_nid, name) =
+                    Self::dir_block_entry(block_data, count, i).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid directory entry")
+                    })?;
+                let de: &ErofsDirent = cast_ref(&block_data[i * EROFS_DIRENT_SIZE..]);
+                let next_offset = if i + 1 < count {
+                    pos + ((i + 1) * EROFS_DIRENT_SIZE) as u64
+                } else {
+                    pos + block_len as u64
+                };
+                if !cb(entry_nid, de.file_type(), name, next_offset)? {
+                    return Ok(());
+                }
             }
+            pos += block_len as u64;
+            start = 0;
         }
+        Ok(())
     }
 
     /// Read directory entries from a directory inode.
@@ -166,64 +210,6 @@ impl ErofsReader {
             }
         }
         None
-    }
-
-    fn parse_dir_entries<F>(data: &[u8], dir_size: usize, cb: &mut F) -> io::Result<()>
-    where
-        F: FnMut(u64, u8, &[u8]) -> io::Result<bool>,
-    {
-        let block_size = EROFS_BLOCK_SIZE as usize;
-        let mut pos = 0;
-
-        while pos < dir_size {
-            let block_end = std::cmp::min(pos + block_size, dir_size);
-            let block_data = &data[pos..block_end];
-            let block_len = block_end - pos;
-
-            if block_len < EROFS_DIRENT_SIZE {
-                break;
-            }
-
-            let first_de: &ErofsDirent = cast_ref(&block_data[..EROFS_DIRENT_SIZE]);
-            let first_nameoff = first_de.nameoff() as usize;
-            // Cap by the entries that physically fit in this block:
-            // `first_nameoff` comes from untrusted image data, and an
-            // inflated value would push the `i + 1` look-ahead below past
-            // the block end (`cast_ref` asserts on short slices).
-            let dirent_count =
-                (first_nameoff / EROFS_DIRENT_SIZE).min(block_len / EROFS_DIRENT_SIZE);
-
-            for i in 0..dirent_count {
-                let de_off = i * EROFS_DIRENT_SIZE;
-                if de_off + EROFS_DIRENT_SIZE > block_len {
-                    break;
-                }
-                let de: &ErofsDirent = cast_ref(&block_data[de_off..de_off + EROFS_DIRENT_SIZE]);
-                let nameoff = de.nameoff() as usize;
-
-                let name_end = if i + 1 < dirent_count {
-                    let next_de: &ErofsDirent =
-                        cast_ref(&block_data[(i + 1) * EROFS_DIRENT_SIZE..]);
-                    next_de.nameoff() as usize
-                } else {
-                    let mut end = nameoff;
-                    while end < block_len && block_data[end] != 0 {
-                        end += 1;
-                    }
-                    end
-                };
-
-                if nameoff >= block_len || name_end > block_len {
-                    break;
-                }
-                if !cb(de.nid(), de.file_type(), &block_data[nameoff..name_end])? {
-                    return Ok(());
-                }
-            }
-
-            pos += block_size;
-        }
-        Ok(())
     }
 
     /// Read flat data (FLAT_PLAIN / FLAT_INLINE) as an mmap slice.
@@ -392,5 +378,113 @@ impl ErofsReader {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nydus_format::erofs::{
+        ErofsInodeCompact, ErofsSuperblock, EROFS_FT_REG_FILE, EROFS_SUPER_OFFSET,
+    };
+    use std::io::Write;
+
+    fn directory_reader(data: &[u8]) -> ErofsReader {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let mut image = vec![0; 2 * block_size + data.len()];
+        let sb = ErofsSuperblock::new(
+            0,
+            0,
+            0,
+            1,
+            0,
+            image.len().div_ceil(block_size) as u64,
+            1,
+            0,
+            0,
+            &[0; 16],
+        )
+        .unwrap();
+        let sb_offset = EROFS_SUPER_OFFSET as usize;
+        image[sb_offset..sb_offset + sb.as_bytes().len()].copy_from_slice(sb.as_bytes());
+        let inode = ErofsInodeCompact::new(
+            0,
+            libc::S_IFDIR as u16 | 0o755,
+            2,
+            data.len() as u32,
+            0,
+            2,
+            0,
+            0,
+            0,
+        );
+        image[block_size..block_size + inode.as_bytes().len()].copy_from_slice(inode.as_bytes());
+        image[2 * block_size..].copy_from_slice(data);
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&image).unwrap();
+        ErofsReader::open_metadata_only(file.path()).unwrap()
+    }
+
+    #[test]
+    fn directory_iteration_seeks_past_previous_blocks_and_entries() {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let mut data = vec![0; block_size + 39];
+        // The preceding block is invalid, as is the first entry of this block.
+        // Resuming at the third entry must not parse either of them.
+        for (index, nameoff) in [37, 36, 38].into_iter().enumerate() {
+            let entry = ErofsDirent::new(index as u64 + 1, nameoff, EROFS_FT_REG_FILE);
+            let start = block_size + index * EROFS_DIRENT_SIZE;
+            data[start..start + EROFS_DIRENT_SIZE].copy_from_slice(entry.as_bytes());
+        }
+        data[block_size + 38] = b'z';
+        let reader = directory_reader(&data);
+        let inode = reader.inode(0).unwrap();
+        for offset in [0, block_size as u64] {
+            let err = reader
+                .for_each_dir_entry_from(0, &inode, offset, |_, _, _, _| {
+                    panic!("malformed entry must not reach the callback")
+                })
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+        let mut seen = Vec::new();
+        reader
+            .for_each_dir_entry_from(
+                0,
+                &inode,
+                (block_size + 2 * EROFS_DIRENT_SIZE) as u64,
+                |nid, ft, name, next| {
+                    seen.push((nid, ft, name.to_vec(), next));
+                    Ok(true)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            seen,
+            vec![(3, EROFS_FT_REG_FILE, b"z".to_vec(), inode.size())]
+        );
+    }
+
+    #[test]
+    fn directory_iteration_handles_empty_and_invalid_blocks() {
+        for data in [
+            vec![],
+            vec![0; EROFS_DIRENT_SIZE - 1],
+            vec![0; EROFS_DIRENT_SIZE],
+            ErofsDirent::new(1, u16::MAX, EROFS_FT_REG_FILE)
+                .as_bytes()
+                .to_vec(),
+        ] {
+            let reader = directory_reader(&data);
+            let inode = reader.inode(0).unwrap();
+            let result = reader.for_each_dir_entry_from(0, &inode, 0, |_, _, _, _| {
+                panic!("empty or invalid directory must not yield entries")
+            });
+            if data.is_empty() {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
+        }
     }
 }
