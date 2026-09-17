@@ -755,9 +755,8 @@ impl Filesystem for ErofsFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::blob_chunk::BlobWriter;
-    use crate::build::bootstrap::render_bootstrap;
-    use crate::build::inode::{build_tree, resolve_chunk_addrs};
+    use nydus_core::build::bootstrap::render_bootstrap;
+    use nydus_core::build::inode::{build_tree, resolve_chunk_addrs};
     use nydus_format::erofs::{
         XattrEntry, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_INODE_FLAT_INLINE,
         EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_INDEX_USER,
@@ -771,7 +770,7 @@ mod tests {
         let source = directory.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("child"), b"").unwrap();
-        let mut writer = BlobWriter::plain(
+        let mut writer = crate::build::plain_blob_writer(
             fs::File::create(directory.path().join("data")).unwrap(),
             EROFS_BLOCK_SIZE,
         );
@@ -852,7 +851,7 @@ mod tests {
                 fs::write(source.join(&name), b"").unwrap();
                 names.push(name.into_bytes());
             }
-            let mut writer = BlobWriter::plain(
+            let mut writer = crate::build::plain_blob_writer(
                 fs::File::create(directory.path().join("data")).unwrap(),
                 EROFS_BLOCK_SIZE,
             );

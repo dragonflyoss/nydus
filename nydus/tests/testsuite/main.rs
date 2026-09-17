@@ -9,4 +9,5 @@
 mod fixture;
 
 mod erofs_reader;
+mod incremental_writer;
 mod nydus_core;

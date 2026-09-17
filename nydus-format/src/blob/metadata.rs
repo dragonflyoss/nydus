@@ -71,8 +71,10 @@ const NYDUS_BLOB_METADATA_MAX_GROUP_SPAN_BLOCK_SHIFT: u8 = 19;
 /// Byte range of the crc32 field within the header.
 const NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD: Range<usize> = 16..20;
 
-/// No global incompatible feature is defined yet.
-const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = 0;
+/// The blob stores incremental upper data without an embedded bootstrap.
+const NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL: u32 = 1 << 0;
+
+const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL;
 
 /// No table-level incompatible feature is defined yet.
 const NYDUS_BLOB_METADATA_SUPPORTED_TABLE_INCOMPAT: u16 = 0;
@@ -139,6 +141,10 @@ impl BlobMetadataHeader {
     /// Number of tables following the header.
     pub fn table_count(&self) -> u16 {
         self.table_count
+    }
+
+    fn is_incremental(&self) -> bool {
+        self.feature_incompat & NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL != 0
     }
 }
 
@@ -694,6 +700,17 @@ pub struct BlobMetadata {
     total_blocks: u32,
 }
 
+struct BlobMetadataInput {
+    compressor: BlobMetadataCompressor,
+    digester: BlobMetadataDigester,
+    group_span: u32,
+    lookup_granule: u32,
+    chunk_groups: Vec<BlobMetadataChunkGroup>,
+    chunk_lengths: Vec<u32>,
+    digests: Vec<BlobMetadataDigest>,
+    feature_incompat: u32,
+}
+
 impl BlobMetadata {
     /// Creates validated metadata. `group_span` bounds the group span in
     /// bytes and `lookup_granule` is the lookup granule in bytes, both
@@ -713,6 +730,29 @@ impl BlobMetadata {
         chunk_lengths: Vec<u32>,
         digests: Vec<BlobMetadataDigest>,
     ) -> Result<Self> {
+        Self::new_from_input(BlobMetadataInput {
+            compressor,
+            digester,
+            group_span,
+            lookup_granule,
+            chunk_groups,
+            chunk_lengths,
+            digests,
+            feature_incompat: 0,
+        })
+    }
+
+    fn new_from_input(input: BlobMetadataInput) -> Result<Self> {
+        let BlobMetadataInput {
+            compressor,
+            digester,
+            group_span,
+            lookup_granule,
+            chunk_groups,
+            chunk_lengths,
+            digests,
+            feature_incompat,
+        } = input;
         let redirected = chunk_groups
             .iter()
             .filter(|group| group.redirect.is_some())
@@ -721,6 +761,11 @@ impl BlobMetadata {
         if is_redirect && redirected != chunk_groups.len() {
             return Err(Error::InvalidParameter(
                 "blob meta chunk groups must either all redirect or none".to_string(),
+            ));
+        }
+        if is_redirect && feature_incompat & NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL != 0 {
+            return Err(Error::InvalidParameter(
+                "redirect blob metadata cannot be incremental".to_string(),
             ));
         }
         let expected_digests = match digester {
@@ -866,7 +911,33 @@ impl BlobMetadata {
                 |out| redirects.iter().for_each(|redirect| redirect.write(out)),
             )?);
         }
-        Self::parse(BlobMetadataBytes::Owned(assemble(&tables)?))
+        Self::parse(BlobMetadataBytes::Owned(assemble_with_incompat(
+            &tables,
+            feature_incompat,
+        )?))
+    }
+
+    /// Create metadata for incremental upper data without an embedded
+    /// bootstrap.
+    pub fn new_incremental(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        group_span: u32,
+        lookup_granule: u32,
+        chunk_groups: Vec<BlobMetadataChunkGroup>,
+        chunk_lengths: Vec<u32>,
+        digests: Vec<BlobMetadataDigest>,
+    ) -> Result<Self> {
+        Self::new_from_input(BlobMetadataInput {
+            compressor,
+            digester,
+            group_span,
+            lookup_granule,
+            chunk_groups,
+            chunk_lengths,
+            digests,
+            feature_incompat: NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL,
+        })
     }
 
     /// Read blob metadata from an in-memory byte slice, verifying the header
@@ -1412,6 +1483,12 @@ impl BlobMetadata {
         self.redirects.is_some()
     }
 
+    /// Whether this blob contains incremental upper data without an embedded
+    /// bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.header.is_incremental()
+    }
+
     /// Total size of the uncompressed address space in 4KiB blocks: the
     /// groups' blocks back to back.
     pub fn uncompressed_block_count(&self) -> u64 {
@@ -1572,11 +1649,17 @@ fn encode_table(
 
 /// Lay out the header and the encoded `tables` in order, each at the next
 /// 8-byte boundary, zero-pad to a 4 KiB multiple and seal the crc32.
+#[cfg(test)]
 fn assemble(tables: &[Vec<u8>]) -> Result<Vec<u8>> {
+    assemble_with_incompat(tables, 0)
+}
+
+fn assemble_with_incompat(tables: &[Vec<u8>], feature_incompat: u32) -> Result<Vec<u8>> {
     let table_count = u16::try_from(tables.len())
         .map_err(|_| Error::Overflow("blob meta holds more than 65535 tables".to_string()))?;
     let mut out = vec![0u8; NYDUS_BLOB_METADATA_HEADER_SIZE];
     out[..8].copy_from_slice(&NYDUS_BLOB_METADATA_MAGIC);
+    write_u32_at(&mut out, 12, feature_incompat);
     write_u16_at(&mut out, 20, table_count);
     for table in tables {
         out.resize(out.len().next_multiple_of(8), 0);
@@ -1864,6 +1947,8 @@ mod tests {
             let mut compat = raw.clone();
             write_u32_at(&mut compat, 8, bit);
             assert!(BlobMetadata::from_bytes(&reseal(compat)).is_ok());
+        }
+        for bit in [1u32 << 1, 1 << 31] {
             let mut incompat = raw.clone();
             write_u32_at(&mut incompat, 12, bit);
             let err = BlobMetadata::from_bytes(&reseal(incompat)).unwrap_err();
@@ -2287,6 +2372,36 @@ mod tests {
         assert_eq!(loaded.granule_index_count(), 0);
         assert_eq!(loaded.chunk_group_index_of(0), None);
         assert_eq!(entries(&loaded).len(), 1);
+    }
+
+    #[test]
+    fn incremental_metadata_round_trips_and_is_not_redirect() {
+        let (source, _) = fixture();
+        let metadata = BlobMetadata::new_incremental(
+            source.compressor(),
+            source.digester(),
+            source.group_span(),
+            source.lookup_granule(),
+            source.chunk_groups().collect(),
+            (0..source.chunk_count())
+                .map(|index| source.chunk_len(index).unwrap())
+                .collect(),
+            source.digests(),
+        )
+        .unwrap();
+        assert!(metadata.is_incremental());
+        assert!(!metadata.is_redirect());
+
+        let mut raw = Vec::new();
+        metadata.write_to(&mut raw).unwrap();
+        let loaded = BlobMetadata::from_bytes(&raw).unwrap();
+        assert!(loaded.is_incremental());
+        assert!(!loaded.is_redirect());
+        assert_eq!(
+            loaded.chunk_groups().collect::<Vec<_>>(),
+            source.chunk_groups().collect::<Vec<_>>()
+        );
+        assert_eq!(loaded.digests(), source.digests());
     }
 
     #[test]

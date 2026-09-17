@@ -7,9 +7,11 @@
 //! consumed the tree is flattened through the same [`flatten_tree`] pass as
 //! the directory builder, so both sources render identical bootstraps.
 
-use crate::build::blob_chunk::{BlobWriter, ZFileRef};
-use crate::build::inode::{flatten_tree, InodeData, InodeInfo, NamedChildren, NodeAttrs, TreeNode};
 use flate2::read::MultiGzDecoder;
+use nydus_core::build::blob_chunk::{BlobWriter, ZFileRef};
+use nydus_core::build::inode::{
+    flatten_tree, InodeData, InodeInfo, NamedChildren, NodeAttrs, TreeNode,
+};
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{erofs_xattr_name_split, ErofsChunkAddr, XattrEntry};
 use std::collections::BTreeMap;
@@ -594,7 +596,7 @@ fn entry_meta<R: Read>(entry: &mut tar::Entry<R>) -> Result<(u16, u32, u32, u64,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::inode::ChildRef;
+    use nydus_core::build::inode::ChildRef;
     use nydus_format::erofs::{
         EROFS_BLOCK_SIZE, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
         EROFS_FT_SYMLINK, EROFS_XATTR_INDEX_SECURITY, EROFS_XATTR_INDEX_USER,
@@ -647,7 +649,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("layer.tar");
         std::fs::write(&path, tar_bytes).unwrap();
-        let mut blob_writer = BlobWriter::plain(Vec::new(), EROFS_BLOCK_SIZE);
+        let mut blob_writer = crate::build::plain_blob_writer(Vec::new(), EROFS_BLOCK_SIZE);
         build_tar_layer_tree(&path, &mut blob_writer, EROFS_BLOCK_SIZE)
     }
 

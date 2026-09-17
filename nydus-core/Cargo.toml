@@ -4,11 +4,14 @@ version = "3.0.0-beta.1"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
-description = "The nydus image reader: EROFS reading and path resolution over the data-plane crates, plus the NydusCore/Blobs runtime entry points the services drive."
+description = "Nydus EROFS image reading, incremental writing, and runtime data-plane entry points."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [dependencies]
+blake3 = "1"
+crc32c = "0.6"
+lz4-sys = "1"
 zstd = "0.13"
 lz4_flex = "0.11"
 libc = { workspace = true }
@@ -18,7 +21,9 @@ nydus-config = { version = "3.0.0-beta.1", path = "../nydus-config" }
 nydus-error = { version = "3.0.0-beta.1", path = "../nydus-error" }
 nydus-format = { version = "3.0.0-beta.1", path = "../nydus-format" }
 nydus-storage = { version = "3.0.0-beta.1", path = "../nydus-storage" }
+sha2 = { workspace = true }
 tracing = { workspace = true }
+xattr = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
