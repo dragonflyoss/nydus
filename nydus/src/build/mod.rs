@@ -1,18 +1,15 @@
-//! Building nydus images: chunking and compressing file data into blobs
-//! ([`blob_chunk`]), constructing the inode tree ([`inode`], [`dir`]), and
-//! rendering EROFS bootstraps ([`bootstrap`], [`image`]).
+//! Building nydus images: chunking and compressing file data into blobs,
+//! constructing the inode tree, and rendering EROFS bootstraps.
 //!
-//! [`build_image`] is the high-level entry point that converts a
-//! directory tree into a nydus full blob.
+//! [`build_image`] is the high-level entry point that converts a directory tree
+//! into a nydus full blob. Low-level chunk, inode and bootstrap helpers live in
+//! `nydus-core`; this crate keeps the historical CLI build entry points and
+//! CLI-only merge helpers.
 
-pub mod blob_chunk;
-pub mod bootstrap;
-pub mod dir;
-pub mod image;
-pub mod inode;
-pub mod layout;
 pub mod merge;
 pub mod tar;
+
+pub use nydus_core::build::save_blob_metadata_sidecar;
 
 use std::collections::HashSet;
 use std::io::{self, BufWriter, Write};
@@ -20,15 +17,26 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use blob_chunk::{BlobLayout, BlobWriter};
-use bootstrap::render_bootstrap;
-use inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
+use nydus_core::build::blob_chunk::{validate_chunk_size, BlobLayout, BlobWriter};
+use nydus_core::build::bootstrap::{flatten_bootstrap_in_place, render_bootstrap};
+use nydus_core::build::inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
+use nydus_core::build::{bootstrap, inode, HashingWriter};
 use nydus_error::{Context, Error, Result};
-use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester, NYDUS_BLOB_FOOTER_SIZE,
-};
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{ErofsDeviceSlot, ZAlgorithm, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
-use nydus_format::utils::sha256_bytes;
+
+#[cfg(test)]
+pub(crate) fn plain_blob_writer<W: Write>(writer: W, chunk_size: u32) -> BlobWriter<W> {
+    BlobWriter::new(
+        writer,
+        chunk_size,
+        BlobMetadataCompressor::None,
+        BlobMetadataDigester::Blake3,
+        true,
+        BlobLayout::ChunkGroups,
+    )
+    .unwrap()
+}
 
 /// Native EROFS output: the full blob's data region is the raw layer device
 /// the kernel reads at offset 0 (`device=` of a block-device mount), carries
@@ -53,9 +61,6 @@ pub struct BuildImageOptions {
     /// File chunk size in bytes (a power of two, >= the block size, and
     /// block-aligned).
     chunk_size: u32,
-    /// Chunk group uncompressed size in bytes (a power of two, >= 1MiB, and >= the
-    /// chunk size): the index unit of the address space and the most bytes one
-    /// prefetch read decodes at once.
     /// Algorithm to compress data chunks.
     compressor: BlobMetadataCompressor,
     /// Chunk digest algorithm recorded in the blob meta.
@@ -65,8 +70,8 @@ pub struct BuildImageOptions {
     blob_id: Option<[u8; EROFS_BLOB_ID_SIZE]>,
     /// Canonicalized paths inside `source` to omit from the image.
     excludes: HashSet<PathBuf>,
-    /// Also render the standalone bootstrap — its device slot references the
-    /// full blob digest — for the caller to persist.
+    /// Also render the standalone bootstrap: its device slot references the
+    /// full blob digest, for the caller to persist.
     render_standalone_bootstrap: bool,
     /// Native EROFS output instead of chunk groups (see
     /// [`NativeLayout`]). `compressor` and `digester` do not apply;
@@ -93,7 +98,6 @@ pub struct Image {
     pub standalone_bootstrap: Option<Vec<u8>>,
 }
 
-/// Implement BuildImageOptions.
 impl BuildImageOptions {
     /// Creates validated build options: the chunk geometry is checked here,
     /// so a constructed `BuildImageOptions` is valid by definition and
@@ -105,25 +109,7 @@ impl BuildImageOptions {
         excludes: HashSet<PathBuf>,
         render_standalone_bootstrap: bool,
     ) -> Result<Self> {
-        // Validate the chunk size: the largest chunk of a file and the slot
-        // every chunk group owns, so a power of two of whole blocks.
-        if chunk_size < EROFS_BLOCK_SIZE {
-            return Err(Error::InvalidParameter(format!(
-                "chunk size {chunk_size} must be >= block size {EROFS_BLOCK_SIZE}"
-            )));
-        }
-
-        if !chunk_size.is_power_of_two() {
-            return Err(Error::InvalidParameter(format!(
-                "chunk size {chunk_size} must be a power of two"
-            )));
-        }
-
-        if chunk_size % EROFS_BLOCK_SIZE != 0 {
-            return Err(Error::InvalidParameter(format!(
-                "chunk size {chunk_size} must be block aligned"
-            )));
-        }
+        validate_chunk_size(chunk_size)?;
 
         Ok(Self {
             source,
@@ -524,16 +510,16 @@ fn finish_image<W: Write>(
         .unwrap_or(blob_id);
 
     // The standalone bootstrap differs from the embedded one only in its
-    // device table (full-blob id, flattened mapped addresses), so the
-    // rendered buffer is retargeted in place instead of rendering a second
-    // 30+ MiB copy from the inode tree.
+    // device table (full-blob id, flattened mapped addresses), so the rendered
+    // buffer is retargeted in place instead of rendering a second large copy
+    // from the inode tree.
     let standalone_bootstrap = if options.render_standalone_bootstrap {
         let mut standalone = bootstrap_bytes;
         let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
             blob_blocks,
             &full_blob_digest,
         )?];
-        bootstrap::flatten_bootstrap_in_place(&mut standalone, &standalone_device_slots)?;
+        flatten_bootstrap_in_place(&mut standalone, &standalone_device_slots)?;
         Some(standalone)
     } else {
         drop(bootstrap_bytes);
@@ -547,65 +533,6 @@ fn finish_image<W: Write>(
         blob_footer: footer,
         standalone_bootstrap,
     })
-}
-
-/// Assemble an ondemand artifact `[chunk_group data][blob.meta][footer]` (no
-/// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
-pub(crate) fn assemble_ondemand_artifact(
-    data: &[u8],
-    blob_metadata: &BlobMetadata,
-) -> Result<(Vec<u8>, [u8; EROFS_BLOB_ID_SIZE], BlobFooter)> {
-    let mut artifact = Vec::with_capacity(
-        usize::try_from(data.len() as u64 + blob_metadata.padded_size())
-            .map_err(|err| Error::Overflow(format!("artifact exceeds usize: {err}")))?
-            + NYDUS_BLOB_FOOTER_SIZE,
-    );
-    artifact.extend_from_slice(data);
-    let footer = nydus_format::blob::finish_full_blob(
-        &mut artifact,
-        data.len() as u64,
-        &[],
-        Some(blob_metadata),
-    )?;
-
-    let digest = sha256_bytes(&artifact);
-    Ok((artifact, digest, footer))
-}
-
-/// A writer that hashes every byte it forwards to the inner writer, unless
-/// hashing was disabled by naming the blob explicitly.
-struct HashingWriter<W> {
-    inner: W,
-    hasher: Option<Sha256>,
-}
-
-impl<W: Write> HashingWriter<W> {
-    fn new(inner: W, hasher: Option<Sha256>) -> Self {
-        Self { inner, hasher }
-    }
-
-    fn finish(mut self) -> io::Result<Option<[u8; EROFS_BLOB_ID_SIZE]>> {
-        self.inner.flush()?;
-        Ok(self.hasher.map(|hasher| {
-            let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-            digest.copy_from_slice(&hasher.finalize());
-            digest
-        }))
-    }
-}
-
-impl<W: Write> Write for HashingWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let written = self.inner.write(buf)?;
-        if let Some(hasher) = self.hasher.as_mut() {
-            hasher.update(&buf[..written]);
-        }
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
 }
 
 #[cfg(test)]

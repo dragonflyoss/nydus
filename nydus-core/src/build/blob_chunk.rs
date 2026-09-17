@@ -21,6 +21,25 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+pub fn validate_chunk_size(chunk_size: u32) -> Result<()> {
+    if chunk_size < EROFS_BLOCK_SIZE {
+        return Err(Error::InvalidParameter(format!(
+            "chunk size {chunk_size} must be >= block size {EROFS_BLOCK_SIZE}"
+        )));
+    }
+    if !chunk_size.is_power_of_two() {
+        return Err(Error::InvalidParameter(format!(
+            "chunk size {chunk_size} must be a power of two"
+        )));
+    }
+    if chunk_size % EROFS_BLOCK_SIZE != 0 {
+        return Err(Error::InvalidParameter(format!(
+            "chunk size {chunk_size} must be block aligned"
+        )));
+    }
+    Ok(())
+}
+
 /// Manages writing chunk data to a separate blob device. Every file is cut
 /// into chunks of at most the chunk size, and every chunk group owns one
 /// chunk-sized slot of the padded address space the EROFS chunk indexes
@@ -864,15 +883,7 @@ impl<W: Write> BlobWriter<W> {
         hash_data: bool,
         layout: BlobLayout,
     ) -> Result<Self> {
-        if chunk_size < EROFS_BLOCK_SIZE
-            || !chunk_size.is_power_of_two()
-            || chunk_size % EROFS_BLOCK_SIZE != 0
-        {
-            return Err(Error::InvalidParameter(
-                "blob writer chunk size must be a block-aligned power of two of at least one block"
-                    .to_string(),
-            ));
-        }
+        validate_chunk_size(chunk_size)?;
         let alignment = |alignment: u32| -> Result<u32> {
             if alignment != 0 && (!alignment.is_power_of_two() || alignment % EROFS_BLOCK_SIZE != 0)
             {
@@ -1237,6 +1248,10 @@ impl<W: Write> BlobWriter<W> {
         self.next_compressed_offset
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.placements.is_empty()
+    }
+
     pub fn data_digest(&self) -> Option<[u8; EROFS_BLOB_ID_SIZE]> {
         let hasher = self.data_hasher.as_ref()?;
         let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
@@ -1276,6 +1291,22 @@ impl<W: Write> BlobWriter<W> {
         )?)
     }
 
+    pub(crate) fn incremental_blob_metadata(&self) -> Result<BlobMetadata> {
+        if self.raw_device {
+            return Err(Error::InvalidParameter(
+                "a raw device blob carries no blob meta".to_string(),
+            ));
+        }
+        Ok(BlobMetadata::new_incremental(
+            self.compressor,
+            self.digester,
+            self.file_chunk_size / EROFS_BLOCK_SIZE,
+            self.blob_metadata_chunk_groups.clone(),
+            self.chunks.clone(),
+            self.digests.clone(),
+        )?)
+    }
+
     pub fn write_blob_metadata(&mut self, path: &Path) -> Result<()> {
         self.finish()?;
         Ok(self.blob_metadata()?.save(path)?)
@@ -1298,7 +1329,15 @@ impl<W: Write> BlobWriter<W> {
     /// holes, raw device chunks and other devices' chunks. Only valid after
     /// [`Self::finish`].
     pub fn resolve_chunk_addr(&self, addr: &mut ErofsChunkAddr) -> Result<()> {
-        if self.raw_device || addr.device_id != 1 || addr.blkaddr == EROFS_NULL_ADDR {
+        self.resolve_chunk_addr_for_device(addr, 1)
+    }
+
+    pub(crate) fn resolve_chunk_addr_for_device(
+        &self,
+        addr: &mut ErofsChunkAddr,
+        device_id: u16,
+    ) -> Result<()> {
+        if self.raw_device || addr.device_id != device_id || addr.blkaddr == EROFS_NULL_ADDR {
             return Ok(());
         }
         let resolved = usize::try_from(addr.blkaddr)
@@ -1312,6 +1351,22 @@ impl<W: Write> BlobWriter<W> {
                 ))
             })?;
         addr.blkaddr = resolved;
+        Ok(())
+    }
+
+    /// Append one caller-provided file chunk as real blob data.
+    pub fn write_data_chunk(&mut self, data: &[u8]) -> Result<u64> {
+        self.validate_data_chunk_len(data.len())?;
+        self.append_chunk(data)
+    }
+
+    fn validate_data_chunk_len(&self, len: usize) -> Result<()> {
+        if len == 0 || len > self.file_chunk_size as usize {
+            return Err(Error::InvalidParameter(format!(
+                "chunk payload {len} must be between 1 and {} bytes",
+                self.file_chunk_size
+            )));
+        }
         Ok(())
     }
 

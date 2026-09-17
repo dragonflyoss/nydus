@@ -84,6 +84,8 @@ bitflags! {
         /// caches under `prefetch.scope: ondemand`. Incompatible: a reader
         /// that does not fill the sources from it gains nothing from it.
         const REDIRECT = 1 << 3;
+        /// Upper data produced by the incremental writer without an embedded bootstrap.
+        const INCREMENTAL = 1 << 4;
     }
 }
 
@@ -186,6 +188,11 @@ impl BlobMetadataHeader {
         }
         FeatureFlags::from_bits(self.flags)
             .validate_incompat(NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
+        if flags.contains(BlobMetadataFlags::REDIRECT | BlobMetadataFlags::INCREMENTAL) {
+            return Err(Error::InvalidImage(
+                "blob meta cannot be both redirect and incremental".to_string(),
+            ));
+        }
         if (self.chunk_group_count == 0) != (self.chunk_count == 0) {
             return Err(Error::InvalidImage(format!(
                 "blob meta has {} chunk groups for {} chunks",
@@ -225,6 +232,12 @@ impl BlobMetadataHeader {
     /// [`BlobMetadataFlags::REDIRECT`]).
     pub fn is_redirect(&self) -> bool {
         self.flags().contains(BlobMetadataFlags::REDIRECT)
+    }
+
+    /// Whether the blob stores incremental upper data without an embedded
+    /// bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.flags().contains(BlobMetadataFlags::INCREMENTAL)
     }
 
     /// log2 of the chunk's 4KiB blocks.
@@ -788,6 +801,35 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
+    /// Creates metadata for an incremental upper blob.
+    pub fn new_incremental(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        chunk_block_count: u32,
+        chunk_groups: Vec<BlobMetadataChunkGroup>,
+        chunks: Vec<u32>,
+        digests: Vec<BlobMetadataDigest>,
+    ) -> Result<Self> {
+        let mut blob_metadata = Self::new(
+            compressor,
+            digester,
+            chunk_block_count,
+            chunk_groups,
+            chunks,
+            digests,
+        )?;
+        if blob_metadata.is_redirect() {
+            return Err(Error::InvalidParameter(
+                "redirect blob metadata cannot be incremental".to_string(),
+            ));
+        }
+        blob_metadata.header.flags |= BlobMetadataFlags::INCREMENTAL.bits();
+        blob_metadata.header.validate()?;
+        blob_metadata.header.crc32 = 0;
+        blob_metadata.header.crc32 = blob_metadata.compute_crc32_from_parts();
+        Ok(blob_metadata)
+    }
+
     /// Read blob metadata from an in-memory byte slice, optionally verifying
     /// the header crc32 over the full metadata.
     pub fn from_bytes(bytes: &[u8], verify_crc32: bool) -> Result<Self> {
@@ -1205,6 +1247,12 @@ impl BlobMetadata {
         self.header.is_redirect()
     }
 
+    /// Whether the blob stores incremental upper data without an embedded
+    /// bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.header.is_incremental()
+    }
+
     /// Total size of the uncompressed address space in 4KiB blocks: one
     /// slot per group.
     pub fn uncompressed_block_count(&self) -> u64 {
@@ -1569,6 +1617,31 @@ mod tests {
         assert_eq!(loaded.compressed_end(), 0);
         assert_eq!(loaded.chunk_group_index_of(0), None);
         assert_eq!(loaded.chunk_group_entries().len(), 1);
+    }
+
+    #[test]
+    fn incremental_metadata_round_trips_and_is_not_redirect() {
+        let (source, _) = fixture();
+        let meta = BlobMetadata::new_incremental(
+            source.compressor(),
+            source.digester(),
+            source.chunk_block_count(),
+            source.chunk_groups().collect(),
+            source.chunks().to_vec(),
+            source.digests().to_vec(),
+        )
+        .unwrap();
+        assert!(meta.is_incremental());
+        assert!(!meta.is_redirect());
+
+        let mut raw = Vec::new();
+        meta.write_to(&mut raw).unwrap();
+        let loaded = BlobMetadata::from_bytes(&raw, true).unwrap();
+        assert!(loaded.is_incremental());
+        assert!(!loaded.is_redirect());
+        assert_eq!(loaded.chunk_group_entries(), source.chunk_group_entries());
+        assert_eq!(loaded.chunks(), source.chunks());
+        assert_eq!(loaded.digests(), source.digests());
     }
 
     #[test]
