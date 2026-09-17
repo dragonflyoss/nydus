@@ -28,9 +28,12 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
 - **Fixed-size chunk groups, runtime fetch size** — `--chunk-size`
   (default 1 MiB) sets both the file chunk granularity and the chunk group
   that is compressed and verified as a unit (zstd or LZ4, CRC32C on every
-  read, BLAKE3 per chunk); how much one on-demand read covers is the
-  daemon's `storage.fetch_size` (default 2 MiB of compressed bytes), tuned
-  per deployment without rebuilding the image.
+  read, BLAKE3 per chunk); `--chunk-group-threshold` (default 64 KiB) makes
+  every chunk at or above it a group of its own, so its compressed bytes
+  are one frame a content-addressed cache can serve by digest, while
+  smaller files are packed together for ratio; how much one on-demand read
+  covers is the daemon's `storage.fetch_size` (default 2 MiB of compressed
+  bytes), tuned per deployment without rebuilding the image.
 - **On-demand loading** — file reads map to compressed groups through an O(1)
   logical-address lookup; only the touched groups are fetched, validated,
   decoded, and cached.

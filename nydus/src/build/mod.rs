@@ -25,7 +25,8 @@ use bootstrap::render_bootstrap;
 use inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester, NYDUS_BLOB_FOOTER_SIZE,
+    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester,
+    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_GROUP_THRESHOLD, NYDUS_BLOB_FOOTER_SIZE,
 };
 use nydus_format::erofs::{ErofsDeviceSlot, ZAlgorithm, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_format::utils::sha256_bytes;
@@ -53,9 +54,12 @@ pub struct BuildImageOptions {
     /// File chunk size in bytes (a power of two, >= the block size, and
     /// block-aligned).
     chunk_size: u32,
-    /// Chunk group uncompressed size in bytes (a power of two, >= 1MiB, and >= the
-    /// chunk size): the index unit of the address space and the most bytes one
-    /// prefetch read decodes at once.
+    /// Chunk group threshold in bytes (a power of two of at most the chunk
+    /// size): a chunk of at least this size is a chunk group of its own, so
+    /// its encoded bytes are one frame addressable by its digest; smaller
+    /// chunks are packed into shared groups. Equal to the chunk size, only
+    /// full chunks stand alone.
+    chunk_group_threshold: u32,
     /// Algorithm to compress data chunks.
     compressor: BlobMetadataCompressor,
     /// Chunk digest algorithm recorded in the blob meta.
@@ -128,6 +132,8 @@ impl BuildImageOptions {
         Ok(Self {
             source,
             chunk_size,
+            chunk_group_threshold: DEFAULT_NYDUS_BLOB_METADATA_CHUNK_GROUP_THRESHOLD
+                .min(chunk_size),
             compressor,
             digester: BlobMetadataDigester::Blake3,
             blob_id: None,
@@ -137,6 +143,26 @@ impl BuildImageOptions {
             z_data_alignment: 0,
         })
     }
+
+    /// Sets the chunk group threshold: a power of two of at most the chunk
+    /// size (the default is 64 KiB, or the chunk size when smaller).
+    pub fn with_chunk_group_threshold(mut self, threshold: u32) -> Result<Self> {
+        if !threshold.is_power_of_two() || threshold > self.chunk_size {
+            return Err(Error::InvalidParameter(format!(
+                "chunk group threshold {threshold} must be a power of two of at most the {}-byte chunk size",
+                self.chunk_size
+            )));
+        }
+        self.chunk_group_threshold = threshold;
+        Ok(self)
+    }
+
+    /// The chunk group threshold in bytes (see
+    /// [`Self::with_chunk_group_threshold`]).
+    pub fn chunk_group_threshold(&self) -> u32 {
+        self.chunk_group_threshold
+    }
+
     /// Selects the chunk digest algorithm; `None` skips chunk hashing.
     pub fn with_digester(mut self, digester: BlobMetadataDigester) -> Self {
         self.digester = digester;
@@ -288,7 +314,9 @@ impl BuildImageOptions {
                 data_alignment_threshold: u64::from(self.z_data_alignment).saturating_add(1),
             }
         } else {
-            BlobLayout::ChunkGroups
+            BlobLayout::ChunkGroups {
+                chunk_group_threshold: self.chunk_group_threshold,
+            }
         };
         BlobWriter::new(
             writer,

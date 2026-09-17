@@ -72,9 +72,16 @@ pub struct BuildCommand {
     #[arg(
         long,
         env = "NYDUS_BUILD_CHUNK_SIZE",
-        help = "Specify the chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned; default 1MiB): the largest chunk a file is cut into for the chunk-based layouts (none, zstd, lz4, erofs-none), and the size of every chunk group (the unit of compression, on-demand fetch and cache readiness): a chunk that fills a group is a group of its own, smaller chunks are packed into shared groups. It does not apply to erofs-lz4 and erofs-zstd, whose files are pclusters. The value needs to be set with human readable format, for example: 512kib, 1mib, 2mib"
+        help = "Specify the chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned; default 1MiB): the largest chunk a file is cut into for the chunk-based layouts (none, zstd, lz4, erofs-none), and the size of every chunk group (the unit of compression, on-demand fetch and cache readiness): a chunk that fills a group or reaches --chunk-group-threshold is a group of its own, smaller chunks are packed into shared groups. It does not apply to erofs-lz4 and erofs-zstd, whose files are pclusters. The value needs to be set with human readable format, for example: 512kib, 1mib, 2mib"
     )]
     chunk_size: Option<ByteSize>,
+
+    #[arg(
+        long,
+        env = "NYDUS_BUILD_CHUNK_GROUP_THRESHOLD",
+        help = "Specify the chunk group threshold (a power of two of at most the chunk size; default 64KiB): a chunk of at least this size is a chunk group of its own, so its compressed bytes are one frame a content-addressed cache can serve by the chunk's digest alone, while smaller chunks (small files, file tails) are packed together into shared groups for compression ratio and request count. Equal to the chunk size, only full chunks stand alone. It does not apply to the erofs-* compressors. The value needs to be set with human readable format, for example: 16kib, 64kib, 256kib"
+    )]
+    chunk_group_threshold: Option<ByteSize>,
 
     #[arg(
         long,
@@ -399,6 +406,17 @@ impl BuildCommand {
         )?
         .with_digester(self.digester.into())
         .with_blob_id(self.blob_id);
+        let options = match self.chunk_group_threshold {
+            Some(threshold) => {
+                let threshold = u32::try_from(threshold.as_u64()).map_err(|_| {
+                    Error::InvalidParameter(format!(
+                        "chunk group threshold {threshold} exceeds the u32 range"
+                    ))
+                })?;
+                options.with_chunk_group_threshold(threshold)?
+            }
+            None => options,
+        };
         Ok(options)
     }
 
@@ -602,6 +620,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         data_layout: String,
         #[tabled(rename = "CHUNK SIZE")]
         chunk_size: String,
+        #[tabled(rename = "CHUNK GROUP THRESHOLD")]
+        chunk_group_threshold: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COUNT")]
@@ -653,6 +673,10 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
             None => "chunk-based".to_string(),
         },
         chunk_size: meta(|meta| meta.chunk_size().to_string()),
+        chunk_group_threshold: meta(|meta| {
+            meta.chunk_group_threshold()
+                .map_or_else(|| "-".to_string(), |threshold| threshold.to_string())
+        }),
         chunk_group_count: meta(|meta| meta.chunk_group_count().to_string()),
         chunk_count: meta(|meta| meta.chunk_count().to_string()),
         digest_count: meta(|meta| meta.digest_count().to_string()),
@@ -1221,6 +1245,38 @@ mod tests {
 
         let err = cmd.prepare().unwrap_err();
         assert!(err.to_string().contains("exceeds the u32 range"));
+    }
+
+    #[test]
+    fn prepare_applies_and_validates_the_chunk_group_threshold() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["build", source.to_str().unwrap(), "--blob", "/tmp/out.blob"];
+            args.extend_from_slice(extra);
+            BuildCommand::try_parse_from(args).unwrap().prepare()
+        };
+        assert_eq!(parse(&[]).unwrap().chunk_group_threshold(), 64 * 1024);
+        assert_eq!(
+            parse(&["--chunk-group-threshold", "256kib"])
+                .unwrap()
+                .chunk_group_threshold(),
+            256 * 1024
+        );
+        // A chunk size below the default caps the threshold at the chunk size.
+        assert_eq!(
+            parse(&["--chunk-size", "16kib"])
+                .unwrap()
+                .chunk_group_threshold(),
+            16 * 1024
+        );
+        for bad in ["3kib", "2mib"] {
+            assert!(parse(&["--chunk-group-threshold", bad])
+                .unwrap_err()
+                .to_string()
+                .contains("power of two of at most"));
+        }
     }
 
     #[test]

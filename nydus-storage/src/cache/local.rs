@@ -1306,6 +1306,7 @@ mod tests {
             BlobMetadataCompressor::Zstd,
             nydus_format::blob::BlobMetadataDigester::Blake3,
             4,
+            None,
             std::mem::take(&mut specs),
             meta.chunks().to_vec(),
             digests,
@@ -1749,6 +1750,7 @@ mod tests {
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
             1,
+            None,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 4096,
                 1,
