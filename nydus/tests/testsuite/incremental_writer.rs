@@ -14,6 +14,13 @@ use nydus_format::blob::{
 use nydus_format::erofs::{EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
 use nydus_format::utils::hex_string;
 
+#[test]
+fn incremental_writer_is_send() {
+    fn assert_send<T: Send>() {}
+
+    assert_send::<IncrementalWriter>();
+}
+
 fn find_path(reader: &ErofsReader, path: &str) -> u64 {
     let mut nid = reader.superblock().root_nid();
     for component in Path::new(path).components() {
