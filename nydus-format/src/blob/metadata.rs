@@ -86,6 +86,8 @@ bitflags! {
         /// caches under `prefetch.scope: ondemand`. Incompatible: a reader
         /// that does not fill the sources from it gains nothing from it.
         const REDIRECT = 1 << 3;
+        /// Upper data produced by the incremental writer without an embedded bootstrap.
+        const INCREMENTAL = 1 << 4;
     }
 }
 
@@ -212,6 +214,11 @@ impl BlobMetadataHeader {
         }
         FeatureFlags::from_bits(self.flags)
             .validate_incompat(NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT)?;
+        if flags.contains(BlobMetadataFlags::REDIRECT | BlobMetadataFlags::INCREMENTAL) {
+            return Err(Error::InvalidImage(
+                "blob meta cannot be both redirect and incremental".to_string(),
+            ));
+        }
         let empty = self.chunk_group_count == 0;
         if empty != (self.chunk_count == 0) || empty != (self.total_blocks == 0) {
             return Err(Error::InvalidImage(format!(
@@ -258,6 +265,12 @@ impl BlobMetadataHeader {
     /// [`BlobMetadataFlags::REDIRECT`]).
     pub fn is_redirect(&self) -> bool {
         self.flags().contains(BlobMetadataFlags::REDIRECT)
+    }
+
+    /// Whether the blob stores incremental upper data without an embedded
+    /// bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.flags().contains(BlobMetadataFlags::INCREMENTAL)
     }
 
     /// log2 of the most 4KiB blocks a chunk group spans.
@@ -1013,6 +1026,38 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
+    /// Creates metadata for an incremental upper blob using the same dense
+    /// group geometry as a regular data blob.
+    pub fn new_incremental(
+        compressor: BlobMetadataCompressor,
+        digester: BlobMetadataDigester,
+        group_span_blocks: u32,
+        lookup_granule: u32,
+        chunk_groups: Vec<BlobMetadataChunkGroup>,
+        chunk_lengths: Vec<u32>,
+        digests: Vec<BlobMetadataDigest>,
+    ) -> Result<Self> {
+        let mut blob_metadata = Self::new(
+            compressor,
+            digester,
+            group_span_blocks,
+            lookup_granule,
+            chunk_groups,
+            chunk_lengths,
+            digests,
+        )?;
+        if blob_metadata.is_redirect() {
+            return Err(Error::InvalidParameter(
+                "redirect blob metadata cannot be incremental".to_string(),
+            ));
+        }
+        blob_metadata.header.flags |= BlobMetadataFlags::INCREMENTAL.bits();
+        blob_metadata.header.validate()?;
+        blob_metadata.header.crc32 = 0;
+        blob_metadata.header.crc32 = blob_metadata.compute_crc32_from_parts();
+        Ok(blob_metadata)
+    }
+
     /// Build the on-disk GranuleIndexTable on the writer side only.
     fn build_granule_index(
         header: &BlobMetadataHeader,
@@ -1567,6 +1612,12 @@ impl BlobMetadata {
     /// other blobs' groups (see [`BlobMetadataFlags::REDIRECT`]).
     pub fn is_redirect(&self) -> bool {
         self.header.is_redirect()
+    }
+
+    /// Whether the blob stores incremental upper data without an embedded
+    /// bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.header.is_incremental()
     }
 
     /// Total size of the uncompressed address space in 4KiB blocks: the
@@ -2141,6 +2192,41 @@ mod tests {
         assert_eq!(loaded.granule_index_count(), 0);
         assert_eq!(loaded.chunk_group_index_of(0), None);
         assert_eq!(loaded.chunk_group_entries().len(), 1);
+    }
+
+    #[test]
+    fn incremental_metadata_round_trips_and_is_not_redirect() {
+        let (source, _) = fixture();
+        let meta = BlobMetadata::new_incremental(
+            source.compressor(),
+            source.digester(),
+            source.group_span_blocks(),
+            source.lookup_granule(),
+            source.chunk_groups().collect(),
+            (0..source.chunk_count())
+                .map(|index| source.chunk_len(index).unwrap())
+                .collect(),
+            source.digests().to_vec(),
+        )
+        .unwrap();
+        assert!(meta.is_incremental());
+        assert!(!meta.is_redirect());
+
+        let mut raw = Vec::new();
+        meta.write_to(&mut raw).unwrap();
+        let loaded = BlobMetadata::from_bytes(&raw, true).unwrap();
+        assert!(loaded.is_incremental());
+        assert!(!loaded.is_redirect());
+        assert_eq!(loaded.chunk_group_entries(), source.chunk_group_entries());
+        assert_eq!(
+            (0..loaded.chunk_count())
+                .map(|index| loaded.chunk_len(index).unwrap())
+                .collect::<Vec<_>>(),
+            (0..source.chunk_count())
+                .map(|index| source.chunk_len(index).unwrap())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(loaded.digests(), source.digests());
     }
 
     #[test]

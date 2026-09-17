@@ -475,7 +475,7 @@ fn write_zeros(writer: &mut impl Write, n: usize) -> Result<()> {
 /// addresses for the given slots and refresh the superblock checksum. The
 /// metadata region is device-slot independent, so a bootstrap rendered for
 /// one slot set can be retargeted in place instead of re-rendered.
-pub(crate) fn flatten_bootstrap_in_place(
+pub fn flatten_bootstrap_in_place(
     bootstrap: &mut [u8],
     device_slots: &[ErofsDeviceSlot],
 ) -> Result<()> {
@@ -532,10 +532,7 @@ fn set_flattened_mapped_blkaddrs(
 /// (same count as rendered) and refresh the superblock checksum. Addresses
 /// inside the metadata are left alone, so callers must keep each slot's
 /// mapped address unless the metadata was rendered independent of it.
-pub(crate) fn patch_device_slots(
-    bootstrap: &mut [u8],
-    device_slots: &[ErofsDeviceSlot],
-) -> Result<()> {
+pub fn patch_device_slots(bootstrap: &mut [u8], device_slots: &[ErofsDeviceSlot]) -> Result<()> {
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     if bootstrap.len() < sb_offset + EROFS_SB_BASE_SIZE {
         return Err(Error::InvalidImage(
@@ -778,7 +775,7 @@ mod tests {
     use super::*;
     use crate::build::blob_chunk::BlobWriter;
     use crate::build::inode::{build_tree, choose_epoch, resolve_chunk_addrs, ChildRef};
-    use nydus_core::ErofsReader;
+    use crate::ErofsReader;
     use nydus_format::erofs::{
         erofs_xattr_ibody_size, ErofsInode, XattrEntry, EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE,
         EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
