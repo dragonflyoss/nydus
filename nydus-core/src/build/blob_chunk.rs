@@ -10,15 +10,13 @@ use nydus_format::erofs::{
 };
 use nydus_format::utils::write_zeros;
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 pub fn validate_chunk_size(chunk_size: u32) -> Result<()> {
@@ -193,24 +191,26 @@ fn z_map_header(algorithm: ZAlgorithm) -> Vec<u8> {
 /// committed. Handles are cheap to clone (hardlinks share one) and resolve
 /// only after [`BlobWriter::finish`]; the tree keeps them until then.
 #[derive(Clone)]
-pub struct ZFileRef(Rc<RefCell<Option<ZFileMeta>>>);
+pub struct ZFileRef(Arc<OnceLock<ZFileMeta>>);
 
 impl ZFileRef {
     fn pending() -> Self {
-        Self(Rc::new(RefCell::new(None)))
+        Self(Arc::new(OnceLock::new()))
     }
 
     fn ready(meta: ZFileMeta) -> Self {
-        Self(Rc::new(RefCell::new(Some(meta))))
+        Self(Arc::new(OnceLock::from(meta)))
     }
 
-    fn set(&self, meta: ZFileMeta) {
-        *self.0.borrow_mut() = Some(meta);
+    fn set(&self, meta: ZFileMeta) -> Result<()> {
+        self.0
+            .set(meta)
+            .map_err(|_| Error::Runtime("z_erofs file metadata published twice".to_string()))
     }
 
     /// The published metadata; an error while the file is still in flight.
     pub fn resolve(&self) -> Result<ZFileMeta> {
-        self.0.borrow().clone().ok_or_else(|| {
+        self.0.get().cloned().ok_or_else(|| {
             Error::Runtime("z_erofs file metadata read before the blob was finished".to_string())
         })
     }
@@ -1097,7 +1097,7 @@ impl<W: Write> BlobWriter<W> {
         let handle = ZFileRef::pending();
         if file_size == 0 {
             let meta = ZAccum::new(self.z_algorithm, handle.clone()).into_meta()?;
-            handle.set(meta);
+            handle.set(meta)?;
             return Ok(handle);
         }
         // Aligned placement (dedup phase): the committer pads the compressed
@@ -1233,7 +1233,7 @@ impl<W: Write> BlobWriter<W> {
         if placement.at_eof && placement.target == ZTarget::File {
             let accum = self.z_open_files.pop_front().expect("checked above");
             let handle = accum.handle.clone();
-            handle.set(accum.into_meta()?);
+            handle.set(accum.into_meta()?)?;
         }
         let src = mem::take(&mut segment.src);
         self.z_pipeline().recycle_buffer(src);
