@@ -7,7 +7,11 @@ use memmap2::Mmap;
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
-use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor};
+use nydus_format::blob::footer::NYDUS_BLOB_FOOTER_MAGIC;
+use nydus_format::blob::metadata::{BlobMetadataHeader, NYDUS_BLOB_METADATA_HEADER_SIZE};
+use nydus_format::blob::{
+    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataFlags, NYDUS_BLOB_FOOTER_SIZE,
+};
 use nydus_format::erofs::{
     mode_to_erofs_file_type, ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
@@ -19,6 +23,7 @@ use nydus_format::erofs::{
 use nydus_format::utils::{hex_string, sha256_bytes};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 /// What kind of image file is being inspected.
@@ -154,6 +159,8 @@ pub struct BlobMetadataSummary {
     pub chunk_group_count: usize,
     pub chunk_size: u32,
     pub compressor: BlobMetadataCompressor,
+    pub is_redirect: bool,
+    pub is_incremental: bool,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
     /// Bytes the chunk groups decode to: the padded size minus the tail
@@ -193,6 +200,61 @@ impl SlotSha256Kind {
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// Reject blob artifacts that cannot be opened as standalone EROFS images.
+///
+/// Full blobs carry an embedded bootstrap and can be used with `--blob`.
+/// Redirect/ondemand and incremental blobs only carry data, blob metadata and
+/// a footer; they must be used through a bootstrap that provides the complete
+/// filesystem view.
+pub fn reject_non_standalone_blob(path: &Path) -> Result<()> {
+    let Some(flags) = read_embedded_blob_metadata_flags(path)? else {
+        return Ok(());
+    };
+
+    if flags.contains(BlobMetadataFlags::INCREMENTAL) {
+        return Err(Error::InvalidParameter(format!(
+            "incremental blob {} is not mountable as a standalone image; use --bootstrap with parent blobs",
+            path.display()
+        )));
+    }
+    if flags.contains(BlobMetadataFlags::REDIRECT) {
+        return Err(Error::InvalidParameter(format!(
+            "redirect blob {} is not mountable as a standalone image; use the rewritten bootstrap with source blobs",
+            path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn read_embedded_blob_metadata_flags(path: &Path) -> Result<Option<BlobMetadataFlags>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open blob candidate: {}", path.display()))?;
+    let file_size = file
+        .metadata()
+        .with_context(|| format!("failed to stat blob candidate: {}", path.display()))?
+        .len();
+    let footer_size = NYDUS_BLOB_FOOTER_SIZE as u64;
+    let Some(footer_offset) = file_size.checked_sub(footer_size) else {
+        return Ok(None);
+    };
+    let mut magic = [0u8; NYDUS_BLOB_FOOTER_MAGIC.len()];
+    file.read_exact_at(&mut magic, footer_offset)
+        .with_context(|| format!("failed to probe blob footer: {}", path.display()))?;
+    if magic != NYDUS_BLOB_FOOTER_MAGIC {
+        return Ok(None);
+    }
+
+    let footer = BlobFooter::from_blob_path(path)?;
+    if footer.is_raw_device() {
+        return Ok(None);
+    }
+    let mut header = [0u8; NYDUS_BLOB_METADATA_HEADER_SIZE];
+    file.read_exact_at(&mut header, footer.blob_metadata_offset())
+        .with_context(|| format!("failed to read blob metadata header: {}", path.display()))?;
+    Ok(Some(BlobMetadataHeader::from_bytes(&header)?.flags()))
 }
 
 /// Inspect the image at `path`, resolving and verifying referenced blobs from
@@ -662,6 +724,8 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
         chunk_group_count: blob_metadata.chunk_group_count(),
         chunk_size: blob_metadata.chunk_size(),
         compressor: blob_metadata.compressor(),
+        is_redirect: blob_metadata.is_redirect(),
+        is_incremental: blob_metadata.is_incremental(),
         total_uncompressed_size: blob_metadata.uncompressed_size(),
         total_compressed_size: blob_metadata.compressed_end(),
         total_payload_size: blob_metadata.payload_total(),
@@ -674,7 +738,10 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::{BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT};
+    use nydus_format::blob::{
+        BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataDigester, BlobMetadataRedirect,
+        DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -744,17 +811,114 @@ mod tests {
         assert!(!resolved.contains_key(&2));
     }
 
+    #[test]
+    fn resolve_blobs_reports_incremental_blob_metadata_flag() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("incremental-blob");
+
+        let (full_blob_digest, _) = write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
+
+        let blob_info = RawBlobInfo {
+            blob_index: 1,
+            blob_id: full_blob_digest,
+            blocks: 1,
+            mapped_blkaddr: 0,
+        };
+        let resolved = resolve_blobs(
+            ImageKind::Bootstrap,
+            Path::new("bootstrap.boot"),
+            Some(dir.path()),
+            &[blob_info],
+        )
+        .unwrap();
+        let blob_metadata = resolved.get(&1).unwrap().blob_metadata.as_ref().unwrap();
+
+        assert!(blob_metadata.is_incremental);
+        assert!(!blob_metadata.is_redirect);
+    }
+
+    #[test]
+    fn reject_non_standalone_blob_rejects_incremental_blob() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("incremental-blob");
+        write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
+
+        let err = reject_non_standalone_blob(&blob_path).unwrap_err();
+
+        assert!(err.to_string().contains("incremental blob"));
+    }
+
+    #[test]
+    fn reject_non_standalone_blob_rejects_redirect_blob() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("redirect-blob");
+        write_minimal_blob_with_kind(&blob_path, BlobKind::Redirect);
+
+        let err = reject_non_standalone_blob(&blob_path).unwrap_err();
+
+        assert!(err.to_string().contains("redirect blob"));
+    }
+
+    #[test]
+    fn reject_non_standalone_blob_ignores_files_without_a_footer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("plain-image");
+        fs::write(&path, vec![0u8; NYDUS_BLOB_FOOTER_SIZE]).unwrap();
+
+        reject_non_standalone_blob(&path).unwrap();
+    }
+
     fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
+        write_minimal_blob_with_kind(path, BlobKind::Full)
+    }
+
+    enum BlobKind {
+        Full,
+        Incremental,
+        Redirect,
+    }
+
+    fn write_minimal_blob_with_kind(
+        path: &Path,
+
+        blob_kind: BlobKind,
+    ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let data_digest = sha256_bytes(&data);
-        let blob_metadata = BlobMetadata::new(
-            BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+        let group = |redirect| {
+            vec![
+                BlobMetadataChunkGroup::new(data.len() as u32, 1, crc32c::crc32c(&data), redirect)
+                    .unwrap(),
+            ]
+        };
+        let chunks = || vec![data.len() as u32];
+        let digests = || vec![BlobMetadataDigest::new(*blake3::hash(&data).as_bytes())];
+        let blob_metadata = match blob_kind {
+            BlobKind::Full => BlobMetadata::new(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+                group(None),
+                chunks(),
+                digests(),
+            ),
+            BlobKind::Incremental => BlobMetadata::new_incremental(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+                group(None),
+                chunks(),
+                digests(),
+            ),
+            BlobKind::Redirect => BlobMetadata::new(
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+                group(Some(BlobMetadataRedirect::new(1, 0).unwrap())),
+                chunks(),
+                digests(),
+            ),
+        }
         .unwrap();
         let mut blob_metadata_bytes = Vec::new();
         blob_metadata.write_to(&mut blob_metadata_bytes).unwrap();

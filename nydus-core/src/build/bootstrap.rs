@@ -475,7 +475,7 @@ fn write_zeros(writer: &mut impl Write, n: usize) -> Result<()> {
 /// addresses for the given slots and refresh the superblock checksum. The
 /// metadata region is device-slot independent, so a bootstrap rendered for
 /// one slot set can be retargeted in place instead of re-rendered.
-pub(crate) fn flatten_bootstrap_in_place(
+pub fn flatten_bootstrap_in_place(
     bootstrap: &mut [u8],
     device_slots: &[ErofsDeviceSlot],
 ) -> Result<()> {
@@ -532,10 +532,7 @@ fn set_flattened_mapped_blkaddrs(
 /// (same count as rendered) and refresh the superblock checksum. Addresses
 /// inside the metadata are left alone, so callers must keep each slot's
 /// mapped address unless the metadata was rendered independent of it.
-pub(crate) fn patch_device_slots(
-    bootstrap: &mut [u8],
-    device_slots: &[ErofsDeviceSlot],
-) -> Result<()> {
+pub fn patch_device_slots(bootstrap: &mut [u8], device_slots: &[ErofsDeviceSlot]) -> Result<()> {
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     if bootstrap.len() < sb_offset + EROFS_SB_BASE_SIZE {
         return Err(Error::InvalidImage(
@@ -778,7 +775,7 @@ mod tests {
     use super::*;
     use crate::build::blob_chunk::BlobWriter;
     use crate::build::inode::{build_tree, choose_epoch, resolve_chunk_addrs, ChildRef};
-    use nydus_core::ErofsReader;
+    use crate::ErofsReader;
     use nydus_format::erofs::{
         erofs_xattr_ibody_size, ErofsInode, XattrEntry, EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE,
         EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
@@ -1154,11 +1151,19 @@ mod tests {
             build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
         blob_writer.finish().unwrap();
         resolve_chunk_addrs(&mut inodes, &blob_writer).unwrap();
-        // Fresh files carry sub-second mtimes, which force the extended inode
-        // layout; put every inode on the epoch so the children stay compact.
+        // Keep the fixture independent of the host's uid/gid and timestamps
+        // so regular children consistently use compact inodes.
         for inode in inodes.iter_mut() {
+            inode.uid = 1000;
+            inode.gid = 1000;
             inode.mtime = 1_700_000_000;
             inode.mtime_nsec = 0;
+            inode.is_extended = nydus_format::erofs::needs_erofs_extended_inode(
+                inode.size,
+                inode.uid,
+                inode.gid,
+                inode.nlink as u64,
+            );
         }
         let epoch = choose_epoch(&inodes);
         let bootstrap = render_flattened_bootstrap(&mut inodes, epoch, &[], &[0u8; 16]).unwrap();

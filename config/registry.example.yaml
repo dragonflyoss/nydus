@@ -21,6 +21,11 @@ backend:
     # Image repository (no tag/digest), e.g. "library/ubuntu".
     repository: library/nydus-demo
 
+    # Optional immutable OCI manifest digest of the image that provides this
+    # bootstrap and its blobs. This records image identity; blob reads remain
+    # addressed by the blob digests stored in the bootstrap.
+    # digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
     # Optional basic-auth credential: the base64-encoded `username:password`
     # string. Omit `auth` entirely for anonymous / token-only registries.
     # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk

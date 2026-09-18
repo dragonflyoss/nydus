@@ -166,6 +166,12 @@ pub struct RegistryConfig {
     /// The image repository (no tag or digest), e.g. `library/ubuntu`.
     pub repository: String,
 
+    /// The optional OCI image manifest digest, e.g. `sha256:<64-hex>`.
+    /// This identifies the image that provides the bootstrap and blobs; blob
+    /// reads themselves are still addressed by the digests in the bootstrap.
+    #[serde(default)]
+    pub digest: Option<String>,
+
     /// The optional credentials: base64-encoded `username:password` for HTTP
     /// Basic auth (the value sent verbatim after `Basic `).
     #[serde(default)]
@@ -533,6 +539,10 @@ mod tests {
         assert_eq!(registry.addr, "http://127.0.0.1:5000");
         assert_eq!(registry.repository, "library/nydus-demo");
         assert_eq!(
+            registry.digest.as_deref(),
+            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
             registry.auth.as_deref(),
             Some("dGVzdHVzZXI6dGVzdHBhc3N3b3Jk")
         );
@@ -586,6 +596,7 @@ type: registry
 config:
   addr: http://127.0.0.1:5000
   repository: library/ubuntu
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   auth: YWxpY2U6c2VjcmV0
   http:
     timeout: 30s
@@ -603,6 +614,10 @@ config:
         };
         assert_eq!(registry.addr, "http://127.0.0.1:5000");
         assert_eq!(registry.repository, "library/ubuntu");
+        assert_eq!(
+            registry.digest.as_deref(),
+            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
         assert_eq!(registry.auth.as_deref(), Some("YWxpY2U6c2VjcmV0"));
         assert_eq!(registry.http.timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
@@ -669,6 +684,7 @@ config:
         assert!(!registry.http.tls.skip_verify);
         assert!(registry.http.tls.ca_cert.is_none());
         assert!(registry.auth.is_none());
+        assert!(registry.digest.is_none());
         assert!(registry.dragonfly.is_none());
     }
 
