@@ -9,6 +9,7 @@
 //! policy loop in the parent module, so the SDK's internal retries are
 //! disabled to keep the policy's attempt counts exact.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -20,7 +21,7 @@ use dragonfly_client_request::{Body, Builder, GetRequest, Proxy, Request as _};
 use nydus_config::DragonflyConfig;
 
 use super::{
-    runtime, DragonflyError, DragonflyFailure, DragonflyTransport, Response, RetryableCause,
+    block_on_worker, DragonflyError, DragonflyFailure, DragonflyTransport, Response, RetryableCause,
 };
 use crate::ReadKind;
 
@@ -50,8 +51,9 @@ fn priority(kind: ReadKind) -> i32 {
 
 /// The Dragonfly SDK transport, wrapping a scheduler connection.
 pub(crate) struct Dragonfly {
-    /// The SDK client bound to the scheduler.
-    client: Proxy,
+    /// The SDK client bound to the scheduler. Shared so each request future
+    /// can own a handle while it runs on a runtime thread.
+    client: Arc<Proxy>,
 
     /// The per-request timeout.
     timeout: Duration,
@@ -65,24 +67,24 @@ impl Dragonfly {
     /// module owns retry counts, so they stay exact and observable.
     pub(crate) fn new(config: &DragonflyConfig, timeout: Duration) -> std::io::Result<Dragonfly> {
         let endpoint = config.scheduler_endpoint.clone();
-        let client = runtime()
-            .block_on(async move {
-                Builder::default()
-                    .scheduler_endpoint(endpoint)
-                    .max_retries(0)
-                    .build()
-                    .await
-            })
-            .map_err(|err| {
-                std::io::Error::other(format!("failed to build dragonfly client: {err}"))
-            })?;
+        let client = block_on_worker(async move {
+            Builder::default()
+                .scheduler_endpoint(endpoint)
+                .max_retries(0)
+                .build()
+                .await
+        })?
+        .map_err(|err| std::io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
         let timeout = if timeout.is_zero() {
             DEFAULT_TIMEOUT
         } else {
             timeout
         };
-        Ok(Dragonfly { client, timeout })
+        Ok(Dragonfly {
+            client: Arc::new(client),
+            timeout,
+        })
     }
 }
 
@@ -132,8 +134,19 @@ impl DragonflyTransport for Dragonfly {
             ..Default::default()
         };
 
+        let client = self.client.clone();
         let response: Result<dragonfly_client_request::GetResponse<Body>, Error> =
-            runtime().block_on(async { self.client.get(&request).await });
+            match block_on_worker(async move { client.get(&request).await }) {
+                Ok(response) => response,
+                // The runtime task itself failed, not the SDK: a transport
+                // failure like any other for the policy.
+                Err(err) => {
+                    return Err(DragonflyError {
+                        failure: DragonflyFailure::Retryable(RetryableCause::Other),
+                        message: err.to_string(),
+                    })
+                }
+            };
 
         match response {
             Ok(response) => Ok(Response {

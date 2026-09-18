@@ -19,11 +19,12 @@ mod dns;
 #[cfg(feature = "backend-dragonfly-proxy")]
 mod dragonfly;
 mod http;
+mod rt;
 
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
@@ -34,7 +35,6 @@ use reqwest::header::{
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::runtime::Runtime;
 use tokio_util::io::StreamReader;
 use tracing::debug;
 use url::Url;
@@ -45,6 +45,10 @@ use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_FOOTER_SIZE};
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
 use self::http::HTTP;
+use self::rt::{block_on_worker, runtime};
+pub use self::rt::{
+    configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
+};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use self::dragonfly::Dragonfly;
@@ -52,22 +56,6 @@ use self::dragonfly::Dragonfly;
 const CLIENT_ID: &str = "nydus-registry-client";
 const DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60;
 const TOKEN_REFRESH_MARGIN: u64 = 20;
-
-/// Shared runtime bridging the synchronous [`BlobBackend`] trait to the
-/// asynchronous network clients (direct HTTP and, when enabled, the Dragonfly
-/// SDK).
-static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("nydus-backend")
-        .enable_all()
-        .build()
-        .expect("failed to build backend tokio runtime")
-});
-
-/// Access the shared backend runtime.
-fn runtime() -> &'static Runtime {
-    &RUNTIME
-}
 
 /// Errors produced by the registry backend.
 #[derive(Debug, thiserror::Error)]
@@ -790,15 +778,15 @@ impl Registry {
         context: ReadContext,
     ) -> RegistryResult<Response> {
         let start = Instant::now();
-        let result = runtime().block_on(async {
-            self.http
-                .client()
-                .request(method.clone(), url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(io::Error::other)
-        });
+        // The builder owns a client handle, so the request future is 'static
+        // and can run on a runtime thread inside the configured netns.
+        let request = self
+            .http
+            .client()
+            .request(method.clone(), url)
+            .headers(headers.clone());
+        let result = block_on_worker(async move { request.send().await.map_err(io::Error::other) })
+            .and_then(|result| result);
         self.finish_http_request(method, url, headers, context, start, result)
     }
 
@@ -812,15 +800,13 @@ impl Registry {
         context: ReadContext,
     ) -> RegistryResult<Response> {
         let start = Instant::now();
-        let result = runtime().block_on(async {
-            self.http
-                .raw_client()
-                .request(method.clone(), url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(io::Error::other)
-        });
+        let request = self
+            .http
+            .raw_client()
+            .request(method.clone(), url)
+            .headers(headers.clone());
+        let result = block_on_worker(async move { request.send().await.map_err(io::Error::other) })
+            .and_then(|result| result);
         self.finish_http_request(method, url, headers, context, start, result)
     }
 
