@@ -15,7 +15,7 @@ See the [documentation index](../README.md#documentation) and
 This UFFD protocol version is independent of the private `.blob.meta` version
 (v1) and the OCI fs-version annotation (`7`).
 
-Decoded chunk groups are written into their slots of the padded plain cache
+Decoded chunk groups are written onto their blocks of the padded plain cache
 file before their file ranges are mapped or copied. Native `erofs-*` layers carry no blob meta and are not served on demand by this frontend; they are mounted through the kernel from a block device or a local store. Guest DAX requires suitable
 EROFS layout, mount settings,
 page alignment and a DAX-capable device; UFFD zerocopy alone does not enable it.

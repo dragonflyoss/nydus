@@ -228,8 +228,7 @@ impl LocalBlobCache {
             .expect("chunk group index within the blob meta")
     }
 
-    /// The groups overlapping `[offset, end)`, a shift per end since every
-    /// group owns one chunk-sized slot.
+    /// The groups overlapping `[offset, end)`, one blob meta lookup per end.
     fn chunk_group_span(&self, offset: u64, end: u64) -> io::Result<Range<usize>> {
         let not_found = || io::Error::new(io::ErrorKind::NotFound, "blob chunk group not found");
         let first = self
@@ -502,8 +501,9 @@ impl LocalBlobCache {
     }
 
     /// One backend read for the encoded payloads of the groups of `window`
-    /// into `buffers`: the encoded bytes, a decode scratch the size of one
-    /// slot, and the data-region offset the encoded bytes start at.
+    /// into `buffers`: the encoded bytes, a decode scratch the size of the
+    /// group span (no group's payload is larger), and the data-region offset
+    /// the encoded bytes start at.
     fn fetch_window<'b>(
         &self,
         window: &Range<usize>,
@@ -516,8 +516,7 @@ impl LocalBlobCache {
             .map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize")
         })?;
-        let decoded_len = usize::try_from(head.uncompressed_size())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk group exceeds usize"))?;
+        let decoded_len = self.blob_metadata.group_span() as usize;
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
         let ctx = ReadContext::chunk_group(
             kind,
@@ -1156,7 +1155,7 @@ mod tests {
     /// Chunk groups as lists of chunks.
     type Groups = Vec<Vec<Vec<u8>>>;
 
-    /// A one-group plain blob of one 4 KiB chunk in a 4 KiB slot.
+    /// A one-group plain blob of one 4 KiB chunk.
     fn blob_metadata(payload: &[u8]) -> BlobMetadata {
         encode_blob(
             BlobMetadataCompressor::None,
@@ -1167,10 +1166,11 @@ mod tests {
         .1
     }
 
-    /// Four zstd groups in 16 KiB slots: three 4 KiB chunks each (so every
-    /// slot has an unused 4 KiB tail), with BLAKE3 digests. Returns the data
-    /// region, the meta, the groups and the padded image (the fully filled
-    /// cache file).
+    /// Four zstd groups of 16 KiB chunks, each a pack of three 4 KiB chunks
+    /// and one 100 bytes short of a block (so every group ends in a zero
+    /// tail), with BLAKE3 digests. Returns the data region, the meta, the
+    /// groups and the padded image (the fully filled cache file), in which
+    /// group `i` spans `i * 16384..(i + 1) * 16384`.
     fn groups_blob() -> (Vec<u8>, BlobMetadata, Groups, Vec<u8>) {
         let groups: Groups = (0..4u8)
             .map(|group| {
@@ -1178,11 +1178,12 @@ mod tests {
                     vec![0x10 * (group + 1); 4096],
                     vec![0x10 * (group + 1) + 1; 4096],
                     vec![0x10 * (group + 1) + 2; 4096],
+                    vec![0x10 * (group + 1) + 3; 4096 - 100],
                 ]
             })
             .collect();
         let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 4, &groups, true);
-        let image = padded_image(4, &groups);
+        let image = padded_image(&groups);
         (data, meta, groups, image)
     }
 
@@ -1218,7 +1219,7 @@ mod tests {
         assert!(!cached.is_chunk_group_ready(0));
         assert!(!cached.is_chunk_group_ready(2));
 
-        // The slot's unused tail reads back as zeros without a fetch.
+        // The last chunk's zero tail reads back without a fetch.
         cached.read_at(16384 + 16383 - 99, &mut buf).unwrap();
         assert!(buf.iter().all(|b| *b == 0));
         assert_eq!(backend.reads(), 1);
@@ -1284,13 +1285,17 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let (data, meta, groups, _) = groups_blob();
         let mut digests = meta.digests().to_vec();
-        digests[5] = nydus_format::blob::BlobMetadataDigest::new([0u8; 32]);
-        let mut specs: Vec<_> = meta
+        digests[1] = nydus_format::blob::BlobMetadataDigest::new([0u8; 32]);
+        let members: Vec<u32> = (0..meta.chunk_count())
+            .map(|index| meta.chunk_len(index).unwrap())
+            .collect();
+        let specs: Vec<_> = meta
             .chunk_groups()
             .enumerate()
             .map(|(index, group)| {
                 nydus_format::blob::BlobMetadataChunkGroup::new(
                     group.compressed_size(),
+                    group.payload_size(),
                     group.chunk_count(),
                     if index == 2 {
                         group.crc32() ^ 1
@@ -1306,8 +1311,9 @@ mod tests {
             BlobMetadataCompressor::Zstd,
             nydus_format::blob::BlobMetadataDigester::Blake3,
             4,
-            std::mem::take(&mut specs),
-            meta.chunks().to_vec(),
+            4096,
+            specs,
+            members,
             digests,
         )
         .unwrap();
@@ -1319,7 +1325,7 @@ mod tests {
         let mut buf = vec![0u8; 100];
         let err = cached.read_at(16384, &mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("chunk 5 digest mismatch"));
+        assert!(err.to_string().contains("chunk group 1 digest mismatch"));
         assert!(!cached.is_chunk_group_ready(1));
         let err = cached.read_at(2 * 16384, &mut buf).unwrap_err();
         assert!(super::super::is_chunk_group_crc_mismatch(&err));
@@ -1395,12 +1401,12 @@ mod tests {
         .unwrap();
         super::super::set_fetch_size(1 << 20);
         let mut buf = vec![0u8; 8192];
-        // Chunks 4 and 5 of group 1 (slot offsets 4 KiB and 8 KiB).
+        // Chunks 5 and 6 of group 1 (group offsets 4 KiB and 8 KiB).
         cached.read_at(16384 + 4096, &mut buf).unwrap();
         assert_eq!(buf, image[16384 + 4096..16384 + 12288]);
         // A second read of the same bytes, now all ready, adds nothing.
         cached.read_at(16384 + 4096, &mut buf).unwrap();
-        // A read into another slot names that group, once.
+        // A read into another group names that group, once.
         cached.read_at(3 * 16384, &mut buf[..16]).unwrap();
         cached.read_at(3 * 16384 + 16, &mut buf[..16]).unwrap();
         let entries: Vec<(u32, u32)> = recorder
@@ -1749,7 +1755,9 @@ mod tests {
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
             1,
+            4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
+                4096,
                 4096,
                 1,
                 crc32c::crc32c(&payload).wrapping_add(1),

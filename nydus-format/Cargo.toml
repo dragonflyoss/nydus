@@ -9,6 +9,7 @@ repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [dependencies]
+blake3 = "1"
 zstd = "0.13"
 bitflags = "2"
 crc32c = "0.6"
@@ -18,5 +19,4 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-blake3 = "1"
 tempfile = { workspace = true }

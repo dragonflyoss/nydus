@@ -28,13 +28,15 @@ raw EROFS devices themselves.
 
 | Build compressor | File layout | Backend data | Kernel-visible cache |
 | --- | --- | --- | --- |
-| `none`, `zstd`, `lz4` | CHUNK_BASED | Dense chunk bytes packed into fixed-size chunk groups, each independently decodable and optionally compressed, described by the blob meta | Plain data with each chunk starting on its own 4KiB block |
+| `none`, `zstd`, `lz4` | CHUNK_BASED | Dense chunk bytes packed into chunk groups (a lone chunk, or a pack of small ones closed at content-defined boundaries), each independently decodable and optionally compressed, described by the blob meta | Plain data with each chunk starting on its own 4KiB block |
 | `erofs-none` | CHUNK_BASED | The padded chunk address space itself, no blob meta | The device, read as-is |
 | `erofs-lz4`, `erofs-zstd` | COMPRESSED_FULL | Native z_erofs pclusters and fragments, no blob meta | The device, read as-is; kernel EROFS decompresses it |
 
-The default is chunk-based zstd with 1MiB chunks. The chunk size is also the
-size of every *chunk group*: a chunk that fills a group is a group of its own,
-smaller chunks (small files, file tails) are bin-packed into shared groups. A
+The default is chunk-based zstd with 2MiB chunks. A chunk of at least the
+chunk group minimum size (2 MiB by default, independent of the chunk size)
+is a *chunk group* of its own. Smaller chunks, including full chunks when
+the chunk size is below the minimum, are packed in order into shared groups
+spanning at least that minimum, closed at content-defined boundaries. A
 small file is a chunk, not a special EROFS fragment; a nydus chunk group is a
 compression unit of the blob meta, unrelated to z_erofs fragments.
 
@@ -179,18 +181,19 @@ device_offset = index.block_address * 4096 + within_chunk
 ```
 
 For flatdev, add the selected slot's mapped offset. A group lookup then
-resolves this kernel-visible address to a backend range: the chunk group whose
-slot holds the address (`address / chunk_size`), and the groups of its
-fetch-size cell around it. A group holds whole chunks and can span many small
-files.
+resolves this kernel-visible address to a backend range: the chunk group
+holding the address (found through GranuleIndexTable in O(1)), and
+the groups of its fetch-size cell around it. A group holds whole chunks and
+can span many small files.
 
 ### What is and is not deduplicated
 
 The chunk-based writer stores repeated nonzero content again. Its BLAKE3
-chunk digests (one per chunk by default; `--digester none` omits them all)
-are an inspection/future-dedup index, **not an active chunk deduplication
-implementation**. All-zero chunks use holes and consume no blob data or chunk
-entry. Hardlinks reuse inodes/data by identity.
+group digests (one per chunk group by default; `--digester none` omits them
+all) are an inspection index and the identity a content-addressed cache keys
+groups by, **not an active chunk deduplication implementation**. All-zero
+chunks use holes and consume no blob data or chunk entry. Hardlinks reuse
+inodes/data by identity.
 
 Native z_erofs stores every small file's bytes again in the packed inode,
 even when identical to another file's; deduplication is left to the block
@@ -252,10 +255,17 @@ Sources: [build/mod.rs](../nydus/src/build/mod.rs),
 - **Dense transport, padded cache:** `100B, 5000B, 40B` consumes 5140 payload
   bytes but occupies four 4KiB cache blocks. Chunk lengths reconstruct both
   positions; `pwritev` fills contiguous cache runs in bounded batches.
-- **Fixed-size groups:** every group owns one chunk-size slot of the
-  address space, so an address maps to its group by division and a group
-  maps to its backend range by one table entry; there is no per-read scan
-  and no runtime index to build at open.
+- **Dense groups, O(1) lookup:** groups tile the address space back to
+  back, each spanning exactly its chunks' blocks, so the device is no larger
+  than the block-padded data (what a guest mapping it as pmem pays
+  `struct page` for). Version-1 blob metadata has a GranuleIndexTable
+  (four bytes per lookup granule, 2 MiB by default). One direct lookup and
+  at most one forward correction name the group; two adjacent GroupTable
+  entries give its backend range. There is no bitmap or binary search;
+  there is no per-read scan and no runtime index to build at open. A chunk
+  of at least the chunk group minimum size (2 MiB by default, independent
+  of the chunk size) is a group of
+  its own, so its encoded bytes are one frame addressable by its digest.
 - **DAX eligibility:** plain aligned cache pages preserve the prerequisites
   for guest mapping, but the guest kernel, filesystem mode and transport must
   also support DAX. Alignment alone does not enable it. Native compressed

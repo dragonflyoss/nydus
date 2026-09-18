@@ -59,13 +59,13 @@ impl BlobCache for RemoteBlobCache {
         let tail = meta.chunk_group(last).expect("group within the table");
 
         // The touched groups are consecutive in the blob: one read covers
-        // them all, then each decodes on its own.
+        // them all, then each decodes on its own (into a group-span-sized
+        // scratch, which no group's payload exceeds).
         let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
             .map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "group span exceeds usize")
         })?;
-        let decoded_len = usize::try_from(head.uncompressed_size())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk group exceeds usize"))?;
+        let decoded_len = meta.group_span() as usize;
         let mut buffers = ChunkGroupBuffers::default();
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
         self.backend.read_range_into(
@@ -165,14 +165,16 @@ mod tests {
     #[test]
     fn remote_reads_dense_chunks_and_padding_across_groups() {
         let backend_dir = tempdir().unwrap();
-        // Two zstd groups in 16 KiB slots with sub-block chunks, so reads
-        // cross chunk padding, a slot tail and a group boundary.
+        // Two zstd groups of sub-block chunks, so reads cross chunk padding,
+        // a group's zero tail and the group boundary (the first group's
+        // chunks take 1 + 2 + 1 blocks, so the second starts at block 4).
         let groups = vec![
             vec![vec![0xabu8; 100], vec![0xcdu8; 5000], vec![0xefu8; 1]],
             vec![vec![0x12u8; 4097]],
         ];
         let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 4, &groups, true);
-        let image = padded_image(4, &groups);
+        let image = padded_image(&groups);
+        assert_eq!(image.len(), 6 * 4096);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
         let backend = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
@@ -180,7 +182,7 @@ mod tests {
         remote.read_at(0, &mut all).unwrap();
         assert_eq!(all, image);
         let mut bytes = [0xff; 3];
-        remote.read_at(16384 - 1, &mut bytes).unwrap();
+        remote.read_at(4 * 4096 - 1, &mut bytes).unwrap();
         assert_eq!(bytes, [0, 0x12, 0x12]);
         remote.read_at(99, &mut bytes).unwrap();
         assert_eq!(bytes, [0xab, 0, 0]);

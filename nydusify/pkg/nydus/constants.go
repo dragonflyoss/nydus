@@ -65,8 +65,9 @@ const (
 // Default conversion parameters applied when the corresponding option is zero.
 const (
 	// DefaultChunkSize is the default nydus chunk size in bytes: the largest
-	// chunk a file is cut into and the size of every chunk group.
-	DefaultChunkSize = 1 << 20
+	// chunk a file is cut into. The builder's chunk group minimum size
+	// defaults independently to 2 MiB, even when this chunk size is smaller.
+	DefaultChunkSize = 2 << 20
 
 	// DefaultCompressor is the default chunk data compressor.
 	DefaultCompressor = "zstd"
