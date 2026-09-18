@@ -1071,6 +1071,21 @@ Fields under `backend.config`:
 		- `ca_cert` (optional): a CA certificate path with PEM format to trust
 			in addition to the system roots; the file may bundle multiple
 			certificates.
+	- `worker_threads` (default `0` = 2): async worker threads of the
+		process-wide runtime that drives the registry client's sockets. They
+		only move bytes for the connection pool (readers block on their own
+		threads), so two suffice for a node's worth of blob traffic; raise it
+		only if the backend metrics show the workers saturated.
+	- `max_blocking_threads` (default `0` = 8): upper bound on the runtime's
+		on-demand blocking threads, which serve DNS lookups and are released
+		after 10 s idle.
+
+		The runtime is shared by every registry backend in the process and is
+		built on the first read, so these two keys take effect only from the
+		first backend that reads; a later backend asking for different values
+		logs a warning and keeps the running runtime. Programs that embed the
+		backend (a VMM) may also fix the runtime's network namespace through the
+		`nydus_backend::configure_runtime` API; the config file cannot.
 - `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
 	(crate `dragonfly-client-request`) for P2P distribution, carrying a
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
