@@ -76,7 +76,7 @@ func convertCommand() *cli.Command {
 			},
 			&cli.UintFlag{
 				Name:  "chunk-size",
-				Usage: "chunk size in bytes (power of two, >=4KiB; default 1MiB): the largest file chunk and the size of every chunk group; ignored for erofs-lz4 and erofs-zstd",
+				Usage: "chunk size in bytes (power of two, >=4KiB; default 2MiB): the largest chunk a file is cut into; ignored for erofs-lz4 and erofs-zstd",
 			},
 			&cli.StringFlag{
 				Name:  "compressor",

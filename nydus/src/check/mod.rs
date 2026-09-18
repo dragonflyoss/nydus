@@ -152,7 +152,10 @@ struct BlobInspection {
 #[derive(Clone)]
 pub struct BlobMetadataSummary {
     pub chunk_group_count: usize,
-    pub chunk_size: u32,
+    /// The most bytes of the address space a chunk group spans.
+    pub group_span: u32,
+    /// Address granule covered by each GranuleIndexTable entry.
+    pub lookup_granule: u32,
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
@@ -660,7 +663,8 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
     let blob_metadata = BlobMetadata::from_bytes(data, false)?;
     Ok(BlobMetadataSummary {
         chunk_group_count: blob_metadata.chunk_group_count(),
-        chunk_size: blob_metadata.chunk_size(),
+        group_span: blob_metadata.group_span(),
+        lookup_granule: blob_metadata.lookup_granule(),
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.uncompressed_size(),
         total_compressed_size: blob_metadata.compressed_end(),
@@ -751,6 +755,7 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+            EROFS_BLOCK_SIZE,
             Vec::new(),
             Vec::new(),
             Vec::new(),

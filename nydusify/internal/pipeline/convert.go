@@ -28,7 +28,7 @@ type Option struct {
 	// soon as it is committed to the content store, so uploads can overlap
 	// with the remaining conversion work. Must be safe for concurrent calls.
 	OnBlobConverted func(desc ocispec.Descriptor)
-	// ChunkSize is the file chunk size (and chunk group size) in bytes.
+	// ChunkSize is the file chunk size in bytes.
 	ChunkSize uint32
 	// Compressor selects the builder's chunk-based or native-z data layout.
 	Compressor string

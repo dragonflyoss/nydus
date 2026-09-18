@@ -72,10 +72,16 @@ pub struct BuildCommand {
     #[arg(
         long,
         env = "NYDUS_BUILD_CHUNK_SIZE",
-        help = "Specify the chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned; default 1MiB): the largest chunk a file is cut into for the chunk-based layouts (none, zstd, lz4, erofs-none), and the size of every chunk group (the unit of compression, on-demand fetch and cache readiness): a chunk that fills a group is a group of its own, smaller chunks are packed into shared groups. It does not apply to erofs-lz4 and erofs-zstd, whose files are pclusters. The value needs to be set with human readable format, for example: 512kib, 1mib, 2mib"
+        help = "Specify the file chunk size (a power of two, >= 4KiB, and 4KiB-aligned; default 2MiB) for the chunk-based layouts (none, zstd, lz4, erofs-none). Chunk groups are sized independently by --chunk-group-minimum-size: when the chunk size is smaller, full chunks are packed together. It does not apply to erofs-lz4 and erofs-zstd, whose files are pclusters. The value needs to be set with human readable format, for example: 256kib, 1mib, 2mib"
     )]
     chunk_size: Option<ByteSize>,
 
+    #[arg(
+        long = "chunk-group-minimum-size",
+        env = "NYDUS_BUILD_CHUNK_GROUP_MINIMUM_SIZE",
+        help = "Specify the chunk group minimum size (a power of two between 4KiB and 512MiB; default 2MiB, independent of the chunk size): every chunk group but the last of a blob spans at least this much, the granularity a content-addressed cache deduplicates at. A chunk of at least this size is a group of its own, so its compressed bytes are one frame the cache can serve by the chunk's digest alone; smaller chunks, including full chunks when the chunk size is below this minimum, are packed in order into shared groups spanning one to four times it, closed at content-defined boundaries so that near-identical images share their packs. Larger values mean fewer, larger objects and slightly better compression, smaller ones less retransmission when a few files change between image versions. It does not apply to the erofs-* compressors. The value needs to be set with human readable format, for example: 256kib, 1mib, 2mib"
+    )]
+    chunk_group_min_size: Option<ByteSize>,
     #[arg(
         long,
         value_enum,
@@ -90,7 +96,7 @@ pub struct BuildCommand {
         value_enum,
         default_value_t = Digester::Blake3,
         env = "NYDUS_BUILD_DIGESTER",
-        help = "Specify the chunk digest algorithm recorded in the blob meta, one digest per chunk; \"none\" records no digests and skips hashing, for content already verified upstream"
+        help = "Specify the digest algorithm recorded in the blob meta, one digest per chunk group (a lone chunk's content digest, or a BLAKE3 derived from the member chunks' digests for a pack); \"none\" records no digests and skips hashing, for content already verified upstream"
     )]
     digester: Digester,
 
@@ -399,6 +405,18 @@ impl BuildCommand {
         )?
         .with_digester(self.digester.into())
         .with_blob_id(self.blob_id);
+        let options = match self.chunk_group_min_size {
+            Some(chunk_group_min_size) => {
+                let chunk_group_min_size =
+                    u32::try_from(chunk_group_min_size.as_u64()).map_err(|_| {
+                        Error::InvalidParameter(format!(
+                            "chunk group minimum size {chunk_group_min_size} exceeds the u32 range"
+                        ))
+                    })?;
+                options.with_chunk_group_min_size(chunk_group_min_size)?
+            }
+            None => options,
+        };
         Ok(options)
     }
 
@@ -600,8 +618,10 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         full_blob_digest: String,
         #[tabled(rename = "DATA LAYOUT")]
         data_layout: String,
-        #[tabled(rename = "CHUNK SIZE")]
-        chunk_size: String,
+        #[tabled(rename = "GROUP SPAN")]
+        group_span: String,
+        #[tabled(rename = "LOOKUP GRANULE")]
+        lookup_granule: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COUNT")]
@@ -652,7 +672,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
             Some(NativeLayout::Compressed(algorithm)) => format!("z_erofs {algorithm} device"),
             None => "chunk-based".to_string(),
         },
-        chunk_size: meta(|meta| meta.chunk_size().to_string()),
+        group_span: meta(|meta| meta.group_span().to_string()),
+        lookup_granule: meta(|meta| meta.lookup_granule().to_string()),
         chunk_group_count: meta(|meta| meta.chunk_group_count().to_string()),
         chunk_count: meta(|meta| meta.chunk_count().to_string()),
         digest_count: meta(|meta| meta.digest_count().to_string()),
@@ -742,6 +763,7 @@ mod tests {
         let cmd = BuildCommand::try_parse_from(["build", "/tmp/source", "--blob", "/tmp/out.blob"])
             .unwrap();
         assert_eq!(cmd.chunk_size, None);
+        assert_eq!(cmd.chunk_group_min_size, None);
         assert_eq!(cmd.compressor, Compressor::Zstd);
     }
 
@@ -1221,6 +1243,54 @@ mod tests {
 
         let err = cmd.prepare().unwrap_err();
         assert!(err.to_string().contains("exceeds the u32 range"));
+    }
+
+    #[test]
+    fn prepare_applies_and_validates_the_chunk_group_min_size() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["build", source.to_str().unwrap(), "--blob", "/tmp/out.blob"];
+            args.extend_from_slice(extra);
+            BuildCommand::try_parse_from(args).unwrap().prepare()
+        };
+        assert_eq!(parse(&[]).unwrap().chunk_group_min_size(), 2 * 1024 * 1024);
+        for chunk_size in ["4kib", "256kib", "1mib", "8mib"] {
+            assert_eq!(
+                parse(&["--chunk-size", chunk_size])
+                    .unwrap()
+                    .chunk_group_min_size(),
+                2 * 1024 * 1024
+            );
+        }
+        assert_eq!(
+            parse(&["--chunk-group-minimum-size", "128kib"])
+                .unwrap()
+                .chunk_group_min_size(),
+            128 * 1024
+        );
+        assert_eq!(
+            parse(&["--chunk-size", "8mib", "--chunk-group-minimum-size", "8mib"])
+                .unwrap()
+                .chunk_group_min_size(),
+            8 * 1024 * 1024
+        );
+        for minimum_size in ["4kib", "2mib", "4mib", "512mib"] {
+            assert!(parse(&[
+                "--chunk-size",
+                "256kib",
+                "--chunk-group-minimum-size",
+                minimum_size
+            ])
+            .is_ok());
+        }
+        for bad in ["0", "3kib", "2kib", "3mib", "1gib"] {
+            assert!(parse(&["--chunk-group-minimum-size", bad])
+                .unwrap_err()
+                .to_string()
+                .contains("power of two between"));
+        }
     }
 
     #[test]

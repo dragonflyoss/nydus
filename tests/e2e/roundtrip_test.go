@@ -135,10 +135,8 @@ func TestErofsKernelCompatibility(t *testing.T) {
 		require.NoError(t, err)
 		decodedSize := int(blocks) * 4096
 		require.Less(t, decodedSize, 1048576)
-		// Decode the plain (uncompressed) blob meta layout by hand: header,
-		// chunk group table (with terminator), chunk length table. Group i owns
-		// the slot [i*S, (i+1)*S) of the device; its chunks are packed back to
-		// back, block aligned, from the slot start.
+		// Decode version 1 independently: all chunks, including lone ones,
+		// have a four-byte length; the GroupTable terminator carries totals.
 		metadata, err := os.ReadFile(blob + ".blob.meta")
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(metadata), 32)
@@ -146,37 +144,66 @@ func TestErofsKernelCompatibility(t *testing.T) {
 		require.Equal(t, uint32(1), binary.LittleEndian.Uint32(metadata[8:]), "blob meta version")
 		flags := binary.LittleEndian.Uint32(metadata[12:])
 		require.Zero(t, flags&0x3, "compressor none")
-		slotSize := 4096 << metadata[20]
-		groupCount := int(binary.LittleEndian.Uint32(metadata[24:]))
-		chunkCount := int(binary.LittleEndian.Uint32(metadata[28:]))
+		groupCount := int(binary.LittleEndian.Uint32(metadata[20:]))
 		groupTable := 32
-		chunkTable := groupTable + (groupCount+1)*16
+		chunkTable := groupTable + (groupCount+1)*24
+		require.GreaterOrEqual(t, len(metadata), chunkTable)
+		terminatorOffset := groupTable + groupCount*24
+		chunkCount := int(binary.LittleEndian.Uint32(metadata[terminatorOffset+12:]))
+		totalBlocks := int(binary.LittleEndian.Uint32(metadata[terminatorOffset+8:]))
 		require.GreaterOrEqual(t, len(metadata), chunkTable+chunkCount*4)
-		require.Equal(t, decodedSize, groupCount*slotSize, "device blocks cover the group slots")
-		group := func(i int) (compressedOffset int, firstChunk int) {
-			entry := metadata[groupTable+i*16:]
-			return int(binary.LittleEndian.Uint64(entry)), int(binary.LittleEndian.Uint32(entry[8:]))
+		require.Equal(t, make([]byte, 6), metadata[26:32])
+		require.Equal(t, decodedSize, totalBlocks*4096, "device blocks cover the groups")
+		group := func(i int) (compressedOffset int, startBlock int, firstMember int, uncompressedSize int) {
+			entry := metadata[groupTable+i*24:]
+			return int(binary.LittleEndian.Uint64(entry)), int(binary.LittleEndian.Uint32(entry[8:])),
+				int(binary.LittleEndian.Uint32(entry[12:])), int(binary.LittleEndian.Uint32(entry[16:]))
 		}
+		chunkLen := func(index int) int {
+			entry := metadata[chunkTable+index*4:]
+			return int(binary.LittleEndian.Uint32(entry))
+		}
+		granuleBytes := uint64(1) << metadata[25]
+		require.GreaterOrEqual(t, granuleBytes, uint64(4096))
+		indexTable := (chunkTable + chunkCount*4 + 7) &^ 7
+		indexCount := (uint64(decodedSize) + granuleBytes - 1) / granuleBytes
+		require.GreaterOrEqual(t, uint64(len(metadata)), uint64(indexTable)+indexCount*4)
 		decoded := make([]byte, decodedSize)
 		for g := 0; g < groupCount; g++ {
-			sourceOffset, firstChunk := group(g)
-			sourceEnd, lastChunk := group(g + 1)
-			require.Less(t, firstChunk, lastChunk, "group %d holds chunks", g)
-			targetOffset := g * slotSize
-			for chunk := firstChunk; chunk < lastChunk; chunk++ {
-				length := int(binary.LittleEndian.Uint32(metadata[chunkTable+chunk*4:]))
+			sourceOffset, startBlock, firstMember, uncompressedSize := group(g)
+			sourceEnd, nextBlock, nextMember, _ := group(g + 1)
+			require.Equal(t, sourceEnd-sourceOffset, uncompressedSize, "group %d is plain (uncompressed size == compressed size)", g)
+			var lengths []int
+			require.Greater(t, nextMember, firstMember)
+			for chunk := firstMember; chunk < nextMember; chunk++ {
+				lengths = append(lengths, chunkLen(chunk))
+			}
+			for block := startBlock; block < nextBlock; block++ {
+				index := uint64(block*4096) / granuleBytes
+				candidate := int(binary.LittleEndian.Uint32(metadata[indexTable+int(index)*4:]))
+				require.Less(t, candidate, groupCount)
+				_, followingBlock, _, _ := group(candidate + 1)
+				if block >= followingBlock {
+					candidate++
+				}
+				require.Equal(t, g, candidate, "GranuleIndexTable lookup")
+			}
+			targetOffset := startBlock * 4096
+			for _, length := range lengths {
 				require.Positive(t, length)
 				require.LessOrEqual(t, length, 4096)
 				require.LessOrEqual(t, sourceOffset+length, sourceEnd, "group %d payload", g)
-				require.LessOrEqual(t, targetOffset+length, (g+1)*slotSize, "group %d slot", g)
+				require.LessOrEqual(t, targetOffset+length, nextBlock*4096, "group %d span", g)
 				copy(decoded[targetOffset:targetOffset+length], fullBlob[sourceOffset:sourceOffset+length])
 				sourceOffset += length
 				targetOffset += (length + 4095) / 4096 * 4096
 			}
-			require.Equal(t, sourceEnd, sourceOffset, "group %d is plain (payload == compressed size)", g)
+			require.Equal(t, sourceEnd, sourceOffset, "group %d payload is its chunks", g)
+			require.Equal(t, nextBlock*4096, targetOffset, "group %d spans its chunks' blocks", g)
 		}
-		compressedEnd, terminatorChunk := group(groupCount)
-		require.Equal(t, chunkCount, terminatorChunk)
+		compressedEnd, terminatorBlock, terminatorMember, _ := group(groupCount)
+		require.Equal(t, chunkCount, terminatorMember)
+		require.Equal(t, totalBlocks, terminatorBlock)
 		require.LessOrEqual(t, compressedEnd, len(fullBlob))
 		require.NoError(t, os.WriteFile(filepath.Join(decodedDir, filepath.Base(blob)), decoded, 0644))
 		if layerIndex == 0 {
@@ -811,14 +838,14 @@ func TestNydusifyOptimize(t *testing.T) {
 	nydusBin := mustLookupExecutable(t, "nydus")
 	nydusifyBin := mustLookupExecutable(t, "nydusify")
 
-	// Corpus: four ~1.06-1.25 MiB pseudo-random files so each spans more than
-	// one 1 MiB chunk and the trace covers multiple chunks.
+	// Corpus: four ~2.06-2.25 MiB pseudo-random files so each spans more than
+	// one 2 MiB chunk and the trace covers multiple chunks.
 	tmpDir := t.TempDir()
 	corpusDir := filepath.Join(tmpDir, "corpus")
 	require.NoError(t, os.MkdirAll(corpusDir, 0755))
 	corpusFiles := []string{"file1", "file2", "file3", "file4"}
 	for i, name := range corpusFiles {
-		size := 1<<20 + (i+1)*64*1024
+		size := 2<<20 + (i+1)*64*1024
 		require.NoError(t, os.WriteFile(filepath.Join(corpusDir, name), pseudoRandomTestBytes(size, uint64(i+1)), 0644))
 	}
 

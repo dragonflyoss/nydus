@@ -26,6 +26,12 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use tempfile::tempdir;
 
+/// Fixture geometry, pinned so the layouts asserted below do not move with
+/// the CLI defaults: 1 MiB chunks, medium chunks of at least 64 KiB standing
+/// alone.
+const FIXTURE_CHUNK_SIZE: u32 = 1 << 20;
+const FIXTURE_CHUNK_GROUP_THRESHOLD: u32 = 64 * 1024;
+
 /// Build a minimal single-blob nydus image (blob dir + bootstrap +
 /// config) and return (bootstrap, config, data blob id, expected file bytes).
 fn build_test_image(
@@ -159,17 +165,19 @@ fn build_test_image_full(
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new(
         fs::File::create(&staging).unwrap(),
-        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        FIXTURE_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
         BlobMetadataDigester::Blake3,
         true,
-        BlobLayout::ChunkGroups,
+        BlobLayout::ChunkGroups {
+            chunk_group_min_size: FIXTURE_CHUNK_GROUP_THRESHOLD,
+        },
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        FIXTURE_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
@@ -339,17 +347,19 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new(
         fs::File::create(&staging).unwrap(),
-        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        FIXTURE_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
         BlobMetadataDigester::Blake3,
         true,
-        BlobLayout::ChunkGroups,
+        BlobLayout::ChunkGroups {
+            chunk_group_min_size: FIXTURE_CHUNK_GROUP_THRESHOLD,
+        },
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
+        FIXTURE_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
@@ -549,14 +559,16 @@ fn core_reads_back_small_files_image() {
     )
     .unwrap();
     // One chunk per small file (zeros is a hole) plus the chunks of the
-    // large files; every chunk carries a digest.
-    let small_chunks = blob_metadata
-        .chunks()
-        .iter()
-        .filter(|len| **len <= 20_000)
+    // large files; every chunk group carries a digest.
+    let small_chunks = (0..blob_metadata.chunk_group_count())
+        .flat_map(|group| blob_metadata.chunk_group_chunks(group))
+        .filter(|(_, _, len)| *len <= 20_000)
         .count();
     assert_eq!(small_chunks, 202);
-    assert_eq!(blob_metadata.digest_count(), blob_metadata.chunk_count());
+    assert_eq!(
+        blob_metadata.digest_count(),
+        blob_metadata.chunk_group_count()
+    );
     let groups: Vec<_> = blob_metadata.chunk_groups().collect();
     assert!(groups.len() > 1);
     assert!(groups

@@ -50,7 +50,7 @@ type MultiSourceOption struct {
 	BuilderPath string
 	// WorkDir is a scratch directory for builds, staging and merging.
 	WorkDir string
-	// ChunkSize is the file chunk size (and chunk group size) in bytes.
+	// ChunkSize is the file chunk size in bytes.
 	ChunkSize uint32
 	// Compressor selects the builder's chunk-based or native-z data layout.
 	Compressor string

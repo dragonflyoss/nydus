@@ -25,15 +25,27 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
 - **Native EROFS format** — a fully standard EROFS layout compatible with
   erofs-utils and kernel mounting; filesystem and chunk metadata are fetched
   in bulk up front via the compact bootstrap, then file data loads on demand.
-- **Fixed-size chunk groups, runtime fetch size** — `--chunk-size`
-  (default 1 MiB) sets both the file chunk granularity and the chunk group
-  that is compressed and verified as a unit (zstd or LZ4, CRC32C on every
-  read, BLAKE3 per chunk); how much one on-demand read covers is the
-  daemon's `storage.fetch_size` (default 2 MiB of compressed bytes), tuned
-  per deployment without rebuilding the image.
+- **Content-defined chunk groups, runtime fetch size** — `--chunk-size`
+  (default 2 MiB) sets the file chunk granularity; chunk groups are
+  compressed and verified as a unit (zstd or LZ4, CRC32C on every read,
+  BLAKE3 per chunk group). `--chunk-group-minimum-size` (default 2 MiB,
+  independent of the file chunk size) is the least any group but a blob's last spans:
+  a chunk at or above it is a group of its own, so its compressed bytes
+  are one frame a content-addressed cache can serve by digest, while
+  smaller chunks, including full chunks below that minimum, are packed
+  together into groups of one to four times it,
+  closed at content-defined boundaries, so the packs of two
+  near-identical images match too; how much one on-demand read
+  covers is the daemon's `storage.fetch_size` (default 2 MiB of compressed
+  bytes), tuned per deployment without rebuilding the image.
 - **On-demand loading** — file reads map to compressed groups through an O(1)
   logical-address lookup; only the touched groups are fetched, validated,
   decoded, and cached.
+- **Simple blob metadata** — version 1 uses a 32-byte Header, GroupTable,
+  ChunkTable, GranuleIndexTable, and optional DigestTable and RedirectTable.
+  Every chunk has a four-byte length; a mapped direct granule index needs
+  no auxiliary runtime index. Images from older experimental layouts must
+  be rebuilt, even if their metadata also used version 1.
 - **Trace-driven prefetching** — `nydus optimize` turns a workload access
   trace into a compact hot-data "ondemand" blob of byte-exact chunk group
   copies, converting scattered cold-start range reads into one streaming
@@ -145,8 +157,9 @@ the mean of 2 runs; run-to-run spread is < 5%.
 | fanotify + optimize | 521 MiB | **0.59 s** | **1.08 s** | **1.38 s** | 230 MiB |
 
 - Measured on Ubuntu 24.04 (arm64), Linux 7.0.0, with an earlier v3 build
-  (1 MiB chunks in 4 MiB chunk groups, zstd; the current builder packs
-  1 MiB chunk groups and the daemon fetches 2 MiB compressed windows, which
+  (1 MiB chunks in 4 MiB chunk groups, zstd; the current builder emits
+  2 MiB lone chunks and 2–8 MiB packs of small files and the daemon fetches
+  2 MiB compressed windows, which
   changes the per-request size, not the ranking of the modes). The v2 row
   is the same rootfs as a RAFS v6 zstd image served by the v2 `nydusd`
   from the same registry. All rows are 2-run means from one session.

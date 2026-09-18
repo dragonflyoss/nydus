@@ -41,8 +41,9 @@ pub use metadata::{
 /// bootstrap        one zstd frame of the metadata-only EROFS image
 ///                  (bootstrap_compressed_size bytes), zero tail up to
 ///                  bootstrap_blocks × 4 KiB, absent for an ondemand blob
-/// blob meta        the LPBLMETA bytes (header, chunk group table, chunk
-///                  table, digest table), already block-padded, ending
+/// blob meta        LPBLMETA version 1 (Header, GroupTable, ChunkTable,
+///                  GranuleIndexTable, optional DigestTable/RedirectTable),
+///                  already block-padded, ending
 ///                  exactly at the footer offset
 /// footer           the sealed LPFOOTER block, fixed 4 KiB at the tail
 /// ```

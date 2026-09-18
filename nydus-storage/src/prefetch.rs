@@ -588,14 +588,16 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::None,
             1,
+            4096,
             vec![BlobMetadataChunkGroup::new(
                 group.compressed_size(),
+                group.payload_size(),
                 group.chunk_count(),
                 group.crc32(),
                 Some(BlobMetadataRedirect::new(1, 0).unwrap()),
             )
             .unwrap()],
-            plain_meta.chunks().to_vec(),
+            vec![group.payload_size()],
             Vec::new(),
         )
         .unwrap();

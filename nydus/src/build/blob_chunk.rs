@@ -22,16 +22,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// Manages writing chunk data to a separate blob device. Every file is cut
-/// into chunks of at most the chunk size, and every chunk group owns one
-/// chunk-sized slot of the padded address space the EROFS chunk indexes
-/// address: a chunk that fills a slot is a group of its own, smaller chunks
-/// are bin-packed into shared groups (see [`Self::append_chunk`]). Each
-/// chunk starts on its own block of its slot, while the group payload
-/// carries the chunks' bytes back to back without the block padding. The
-/// blob meta records the groups, the chunk lengths and digests (see
+/// into chunks of at most the chunk size, and the chunk groups tile the
+/// padded address space the EROFS chunk indexes address back to back, each
+/// spanning exactly its chunks' blocks: a chunk that reaches the chunk
+/// group minimum size is a group of its own, smaller chunks are
+/// packed in order into shared groups closed at content-defined boundaries
+/// (see [`Self::append_chunk`]). Each chunk starts on its own block, while
+/// the group payload carries the chunks' bytes back to back without the
+/// block padding. The blob meta records the groups, the packs' member
+/// lengths and one digest per group (see
 /// `nydus_format::blob::BlobMetadata`).
 ///
-/// Because a chunk's slot is only known once its group closes, the chunk
+/// Because a chunk's address is only known once its group closes, the chunk
 /// addresses handed out by [`Self::write_reader_chunks`] are placeholders
 /// until [`Self::finish`]; [`Self::resolve_chunk_addr`] turns them into
 /// block addresses afterwards (see `inode::resolve_chunk_addrs`). Raw
@@ -42,23 +44,32 @@ pub struct BlobWriter<W> {
     compressor: BlobMetadataCompressor,
     digester: BlobMetadataDigester,
     // Raw device mode: the next block of the padded device. Chunk mode: the
-    // number of groups closed so far times the slot size, once finished.
+    // block right after the last sealed group; groups tile the address
+    // space back to back, each spanning its chunks' block-rounded lengths.
     next_blkaddr: u64,
     next_compressed_offset: u64,
     // `None` when the caller names the blob itself (`--blob-id`), so no
     // sha256 pass over the data region is needed.
     data_hasher: Option<Sha256>,
-    // Groups under construction: small chunks are packed first-fit into
-    // the open bins, at most `MAX_OPEN_BINS` of them.
-    open_bins: Vec<Bin>,
+    /// The pack minimum, lone-chunk threshold and lookup granule in bytes.
+    chunk_group_min_size: u32,
+    // Chunk mode: the pack of small chunks under construction, closed at a
+    // content-defined boundary once it spans `pack_min_blocks` (see
+    // `PACK_STRICT_MASK`) or when the next chunk would take it past
+    // `pack_span_blocks`.
+    open_bin: Option<Bin>,
+    pack_min_blocks: u64,
+    pack_target_blocks: u64,
+    pack_span_blocks: u64,
     // The final block address of every placed chunk, indexed by the
     // placement id handed out as its placeholder address; `PENDING` until
     // the chunk's group closes.
     placements: Vec<u64>,
-    // Groups closed so far (the next group's index), chunk byte lengths and
-    // digests in group order, and the sealed groups in group order.
+    // Groups closed so far (the next group's index), the packs' chunk byte
+    // lengths in group order (lone chunks list none), one digest per sealed
+    // group, and the sealed groups in group order.
     next_group: u64,
-    chunks: Vec<u32>,
+    members: Vec<u32>,
     digests: Vec<BlobMetadataDigest>,
     blob_metadata_chunk_groups: Vec<BlobMetadataChunkGroup>,
     // Reused per-file read buffer: a fresh 1 MiB Vec per file costs an
@@ -102,7 +113,7 @@ pub struct BlobWriter<W> {
 }
 
 /// A chunk group under construction: the chunks packed so far, their
-/// lengths, digests and placement ids, and the slot blocks they occupy.
+/// lengths, digests and placement ids, and the blocks they span.
 struct Bin {
     data: Vec<u8>,
     lens: Vec<u32>,
@@ -111,11 +122,38 @@ struct Bin {
     blocks: u64,
 }
 
-/// Most groups kept open for first-fit packing. Small chunks fill the
-/// oldest bin they fit; a chunk fitting none opens a new bin, closing the
-/// fullest one first when the limit is reached, so the slack a closed slot
-/// leaves is at most what the smallest pending chunk could not fill.
-const MAX_OPEN_BINS: usize = 8;
+/// Content-defined pack boundaries, normalized around the chunk group
+/// minimum size: a pack spanning at least the minimum closes after a chunk whose digest's
+/// low `PACK_STRICT_MASK` bits are zero (one chunk in 64), one spanning at
+/// least `PACK_TARGET_MULTIPLE` times the minimum after a chunk with the
+/// low `PACK_LOOSE_MASK` bits zero (one in 32), and one that would grow past
+/// `PACK_SPAN_MULTIPLE` times the minimum closes regardless. Whether a
+/// chunk ends a pack then depends on that chunk alone, not on how the
+/// earlier chunks happened to fill the pack, so two builds of near-identical
+/// trees cut their packs at the same files past the first difference and
+/// the packs stay byte-identical for a content-addressed cache; the sparse
+/// boundaries below the target make that resynchronisation quick, the
+/// denser ones above it keep the packs from reaching the span, which would
+/// make the boundary depend on the pack's start again. The span is the
+/// blob meta's group span.
+const PACK_STRICT_MASK: u8 = 0x3f;
+const PACK_LOOSE_MASK: u8 = 0x1f;
+const PACK_TARGET_MULTIPLE: u64 = 2;
+const PACK_SPAN_MULTIPLE: u32 = 4;
+
+/// Default chunk group minimum size, the least address space any chunk
+/// group but a blob's last spans, independent of the chunk size: a chunk of at
+/// least this size stands alone, smaller ones are packed until the pack
+/// spans it. 2 MiB: the granularity a content-addressed cache deduplicates
+/// at, with packs of 2–8 MiB (~1.6× the minimum on average); a smaller
+/// minimum trades object count and compression ratio for less
+/// retransmission when a few files change (see
+/// `--chunk-group-minimum-size`).
+pub const DEFAULT_CHUNK_GROUP_MIN_SIZE: u32 = 2 * 1024 * 1024;
+
+/// The largest chunk group minimum size: four times it is the span the
+/// blob meta's group span field encodes at most (2 GiB).
+pub const MAX_CHUNK_GROUP_MIN_SIZE: u32 = 1 << 29;
 
 /// Placeholder value of a chunk whose group has not closed yet.
 const PENDING: u64 = u64::MAX;
@@ -807,8 +845,17 @@ impl Drop for ChunkGroupEncoder {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobLayout {
     /// Compressed chunk groups described by blob meta: the layout the nydus
-    /// daemons fetch on demand.
-    ChunkGroups,
+    /// daemons fetch on demand. A chunk of at least `chunk_group_min_size`
+    /// bytes (a power of two of at least one block) is a group of its
+    /// own, so its encoded bytes are one frame named by its digest; smaller
+    /// chunks are packed in order into shared groups spanning at least
+    /// `chunk_group_min_size` bytes of address space (a power of two of at
+    /// least one block) that close at content-defined boundaries (see
+    /// [`PACK_STRICT_MASK`]). The minimum is independent of the file chunk
+    /// size: when larger, even full chunks join packs. Every group but the
+    /// last spans at least the minimum, recorded as the blob meta's lookup
+    /// granule; the standalone-chunk threshold is a writer rule only.
+    ChunkGroups { chunk_group_min_size: u32 },
     /// The padded address space written as-is: a native uncompressed EROFS
     /// device the kernel mounts directly (`erofs-none`). No chunk groups,
     /// blob meta or digests are produced. When `data_alignment` is non-zero,
@@ -835,7 +882,9 @@ pub enum BlobLayout {
 
 #[cfg(test)]
 impl<W: Write> BlobWriter<W> {
-    /// A plain chunk-group writer with BLAKE3 digests, for tests.
+    /// A plain chunk-group writer with BLAKE3 digests that packs every
+    /// chunk smaller than half the chunk size with a chunk group minimum
+    /// size of half the chunk size (at least one block), for tests.
     pub(crate) fn plain(writer: W, chunk_size: u32) -> Self {
         Self::new(
             writer,
@@ -843,7 +892,9 @@ impl<W: Write> BlobWriter<W> {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
             true,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: (chunk_size / 2).max(EROFS_BLOCK_SIZE),
+            },
         )
         .expect("valid test writer")
     }
@@ -851,11 +902,11 @@ impl<W: Write> BlobWriter<W> {
 
 impl<W: Write> BlobWriter<W> {
     /// A writer over `writer` cutting files into `chunk_size` chunks (a
-    /// block-aligned power of two, the slot of every chunk group), encoding
-    /// groups with `compressor` and recording a `digester` digest per chunk,
-    /// laid out per `layout`. With `hash_data` the data region is SHA256
-    /// hashed as it is written ([`Self::data_digest`]); a caller naming the
-    /// blob itself (`--blob-id`) skips that pass.
+    /// block-aligned power of two), encoding groups with `compressor` and
+    /// recording a `digester` digest per chunk group, laid out per `layout`.
+    /// With `hash_data` the data region is SHA256 hashed as it is written
+    /// ([`Self::data_digest`]); a caller naming the blob itself (`--blob-id`)
+    /// skips that pass.
     pub fn new(
         writer: W,
         chunk_size: u32,
@@ -890,10 +941,14 @@ impl<W: Write> BlobWriter<W> {
             next_blkaddr: 0,
             next_compressed_offset: 0,
             data_hasher: hash_data.then(Sha256::new),
-            open_bins: Vec::new(),
+            chunk_group_min_size: DEFAULT_CHUNK_GROUP_MIN_SIZE,
+            open_bin: None,
+            pack_min_blocks: 0,
+            pack_target_blocks: 0,
+            pack_span_blocks: 0,
             placements: Vec::new(),
             next_group: 0,
-            chunks: Vec::new(),
+            members: Vec::new(),
             digests: Vec::new(),
             blob_metadata_chunk_groups: Vec::new(),
             chunk_buf: vec![0u8; chunk_size as usize],
@@ -911,7 +966,22 @@ impl<W: Write> BlobWriter<W> {
             z_packed: None,
         };
         match layout {
-            BlobLayout::ChunkGroups => {}
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size,
+            } => {
+                if !chunk_group_min_size.is_power_of_two()
+                    || !(EROFS_BLOCK_SIZE..=MAX_CHUNK_GROUP_MIN_SIZE)
+                        .contains(&chunk_group_min_size)
+                {
+                    return Err(Error::InvalidParameter(format!(
+                        "chunk group minimum size {chunk_group_min_size} must be a power of two between {EROFS_BLOCK_SIZE} and {MAX_CHUNK_GROUP_MIN_SIZE} bytes"
+                    )));
+                }
+                writer.chunk_group_min_size = chunk_group_min_size;
+                writer.pack_min_blocks = u64::from(chunk_group_min_size / EROFS_BLOCK_SIZE);
+                writer.pack_target_blocks = writer.pack_min_blocks * PACK_TARGET_MULTIPLE;
+                writer.pack_span_blocks = writer.pack_min_blocks * u64::from(PACK_SPAN_MULTIPLE);
+            }
             BlobLayout::RawDevice {
                 data_alignment,
                 data_alignment_threshold,
@@ -963,7 +1033,7 @@ impl<W: Write> BlobWriter<W> {
     }
 
     /// Blocks of the padded address space: in chunk mode, the closed groups'
-    /// slots (final once [`Self::finish`] returned); in raw device mode, the
+    /// spans (final once [`Self::finish`] returned); in raw device mode, the
     /// blocks written so far.
     pub fn total_blocks(&self) -> u64 {
         self.next_blkaddr
@@ -1248,14 +1318,24 @@ impl<W: Write> BlobWriter<W> {
         (self.writer, self.data_hasher)
     }
 
-    /// Chunk byte lengths in group order, of the groups closed so far.
-    pub fn blob_metadata_chunks(&self) -> &[u32] {
-        &self.chunks
+    /// Lengths of all sealed chunks in group order, including lone chunks.
+    pub fn blob_metadata_chunk_lengths(&self) -> &[u32] {
+        &self.members
     }
 
     /// The sealed groups so far, in group order.
     pub fn blob_metadata_chunk_groups(&self) -> &[BlobMetadataChunkGroup] {
         &self.blob_metadata_chunk_groups
+    }
+
+    /// The most a group spans: a lone chunk is at most a file chunk, a pack
+    /// at most `pack_span_blocks`.
+    fn group_span_blocks(&self) -> u32 {
+        u32::try_from(
+            self.pack_span_blocks
+                .max(u64::from(self.file_chunk_size / EROFS_BLOCK_SIZE)),
+        )
+        .expect("the pack span is bounded by MAX_CHUNK_GROUP_MIN_SIZE")
     }
 
     /// The blob meta describing everything written; call after
@@ -1269,9 +1349,10 @@ impl<W: Write> BlobWriter<W> {
         Ok(BlobMetadata::new(
             self.compressor,
             self.digester,
-            self.file_chunk_size / EROFS_BLOCK_SIZE,
+            self.group_span_blocks(),
+            self.chunk_group_min_size,
             self.blob_metadata_chunk_groups.clone(),
-            self.chunks.clone(),
+            self.members.clone(),
             self.digests.clone(),
         )?)
     }
@@ -1285,9 +1366,7 @@ impl<W: Write> BlobWriter<W> {
     /// Chunk addresses are final afterwards (see
     /// [`Self::resolve_chunk_addr`]).
     pub fn finish(&mut self) -> Result<()> {
-        while !self.open_bins.is_empty() {
-            self.close_bin(0)?;
-        }
+        self.close_open_bin()?;
         self.drain_all_encoded()?;
         self.z_drain_all()?;
         self.writer.flush().context("failed to flush blob device")
@@ -1433,11 +1512,14 @@ impl<W: Write> BlobWriter<W> {
     /// In raw device mode the padded chunk is written straight to the
     /// device and its block address returned. Otherwise the chunk's length
     /// and digest are recorded and its bytes go into a group: a chunk that
-    /// fills a whole slot closes as a group of its own; a smaller one is
-    /// packed first-fit into an open bin (opening one, after closing the
-    /// fullest when too many are open, when none fits), and a bin that
-    /// fills its slot exactly closes at once. Returns the chunk's placement
-    /// id, the placeholder [`Self::resolve_chunk_addr`] resolves.
+    /// reaches the chunk group minimum size closes
+    /// as a group of its own; a smaller one joins the open pack (closing it
+    /// first when the chunk would take it past the pack span), and the pack
+    /// closes when it reaches the span exactly or after a chunk whose digest
+    /// marks a boundary once the pack spans the minimum (see
+    /// [`PACK_STRICT_MASK`]; with no digester packs simply fill the span).
+    /// Returns the chunk's placement id, the placeholder
+    /// [`Self::resolve_chunk_addr`] resolves.
     fn append_chunk(&mut self, data: &[u8]) -> Result<u64> {
         let blocks = data.len().div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
         if self.raw_device {
@@ -1472,84 +1554,79 @@ impl<W: Write> BlobWriter<W> {
         };
         let placement = self.placements.len();
         self.placements.push(PENDING);
-        let slot_blocks = self.slot_blocks();
+        let lone = || Bin {
+            data: data.to_vec(),
+            lens: vec![len],
+            digests: digest.into_iter().collect(),
+            placements: vec![placement],
+            blocks,
+        };
 
-        if blocks == slot_blocks {
-            let bin = Bin {
-                data: data.to_vec(),
-                lens: vec![len],
-                digests: digest.into_iter().collect(),
-                placements: vec![placement],
-                blocks,
-            };
-            self.submit_bin(bin)?;
+        if len >= self.chunk_group_min_size {
+            self.submit_bin(lone())?;
             return Ok(placement as u64);
         }
 
-        let mut target = self
-            .open_bins
-            .iter()
-            .position(|bin| bin.blocks + blocks <= slot_blocks);
-        if target.is_none() {
-            if self.open_bins.len() >= MAX_OPEN_BINS {
-                // The oldest of the fullest bins, so ties keep chunk order.
-                let fullest = self
-                    .open_bins
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .max_by_key(|(_, bin)| bin.blocks)
-                    .map(|(index, _)| index)
-                    .expect("bins are open");
-                self.close_bin(fullest)?;
+        let span_blocks = self.pack_span_blocks;
+        if let Some(bin) = self.open_bin.as_ref() {
+            if bin.blocks + blocks > span_blocks {
+                self.close_open_bin()?;
             }
-            let buffer = self
-                .encoder
-                .as_mut()
-                .and_then(ChunkGroupEncoder::take_buffer)
-                .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
-            self.open_bins.push(Bin {
-                data: buffer,
-                lens: Vec::new(),
-                digests: Vec::new(),
-                placements: Vec::new(),
-                blocks: 0,
-            });
-            target = Some(self.open_bins.len() - 1);
         }
-        let index = target.expect("a bin was found or opened");
-        let bin = &mut self.open_bins[index];
+        let cut_byte = digest.map(|digest| digest.digest()[31]);
+        let (min_blocks, target_blocks) = (self.pack_min_blocks, self.pack_target_blocks);
+        let bin = match self.open_bin {
+            Some(ref mut bin) => bin,
+            None => {
+                let buffer = self
+                    .encoder
+                    .as_mut()
+                    .and_then(ChunkGroupEncoder::take_buffer)
+                    .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
+                self.open_bin.insert(Bin {
+                    data: buffer,
+                    lens: Vec::new(),
+                    digests: Vec::new(),
+                    placements: Vec::new(),
+                    blocks: 0,
+                })
+            }
+        };
         bin.data.extend_from_slice(data);
         bin.lens.push(len);
         bin.digests.extend(digest);
         bin.placements.push(placement);
         bin.blocks += blocks;
-        if bin.blocks == slot_blocks {
-            self.close_bin(index)?;
+        let cuts = cut_byte.is_some_and(|byte| {
+            let mask = if bin.blocks < target_blocks {
+                PACK_STRICT_MASK
+            } else {
+                PACK_LOOSE_MASK
+            };
+            bin.blocks >= min_blocks && byte & mask == 0
+        });
+        if bin.blocks == span_blocks || cuts {
+            self.close_open_bin()?;
         }
         Ok(placement as u64)
     }
 
-    fn slot_blocks(&self) -> u64 {
-        u64::from(self.file_chunk_size / EROFS_BLOCK_SIZE)
+    /// Close the open pack, if any, as the next group.
+    fn close_open_bin(&mut self) -> Result<()> {
+        match self.open_bin.take() {
+            Some(bin) => self.submit_bin(bin),
+            None => Ok(()),
+        }
     }
 
-    /// Close open bin `index` as the next group.
-    fn close_bin(&mut self, index: usize) -> Result<()> {
-        let bin = self.open_bins.remove(index);
-        self.submit_bin(bin)
-    }
-
-    /// Seal `bin` as the next group: assign its slot, resolve its chunks'
-    /// addresses, record their lengths and digests, and hand the payload to
-    /// the encoders.
+    /// Seal `bin` as the next group: place it right after the previous one
+    /// in the address space, resolve its chunks' addresses, record a pack's
+    /// member lengths and the group's digest, and hand the payload to the
+    /// encoders.
     fn submit_bin(&mut self, bin: Bin) -> Result<()> {
         let group = self.next_group;
-        let slot_blocks = self.slot_blocks();
-        let first_block = group.checked_mul(slot_blocks).ok_or_else(|| {
-            Error::Overflow(format!("blob address space overflows at group {group}"))
-        })?;
-        let end_block = first_block + slot_blocks;
+        let first_block = self.next_blkaddr;
+        let end_block = first_block + bin.blocks;
         if end_block > u32::MAX as u64 {
             return Err(Error::Overflow(format!(
                 "blob exceeds 32-bit block count: group {group} ends at block {end_block}"
@@ -1560,10 +1637,14 @@ impl<W: Write> BlobWriter<W> {
             self.placements[placement] = block;
             block += u64::from(len).div_ceil(u64::from(EROFS_BLOCK_SIZE));
         }
+        debug_assert_eq!(block, end_block);
+        self.members.extend_from_slice(&bin.lens);
         let chunk_count = u32::try_from(bin.lens.len())
             .map_err(|_| Error::Overflow("chunk group holds too many chunks".to_string()))?;
-        self.chunks.extend_from_slice(&bin.lens);
-        self.digests.extend(bin.digests);
+        // The chunk digests already computed for the boundary decision name
+        // the group; a single chunk's digest is reused as is.
+        let members: Vec<[u8; 32]> = bin.digests.iter().map(|digest| *digest.digest()).collect();
+        self.digests.extend(BlobMetadataDigest::of_group(&members));
         self.next_group = group + 1;
         self.next_blkaddr = end_block;
 
@@ -1610,6 +1691,9 @@ impl<W: Write> BlobWriter<W> {
                 u32::try_from(encoded.len()).map_err(|err| {
                     Error::Overflow(format!("encoded chunk group exceeds u32: {err}"))
                 })?,
+                u32::try_from(group.data.len()).map_err(|err| {
+                    Error::Overflow(format!("chunk group payload exceeds u32: {err}"))
+                })?,
                 group.chunk_count,
                 group.crc32,
                 None,
@@ -1647,9 +1731,13 @@ mod tests {
     use super::*;
 
     /// Geometry the layout assertions below are written against: 64 KiB
-    /// chunks (16-block slots), independent of the CLI defaults.
+    /// chunks (16 blocks) and a 32 KiB chunk group minimum size (what `plain`
+    /// picks), so
+    /// packs span at least 8 blocks, target 16 and hold at most 32,
+    /// independent of the CLI defaults.
     const TEST_CHUNK_SIZE: u32 = 64 * 1024;
-    const TEST_SLOT_BLOCKS: u64 = (TEST_CHUNK_SIZE / EROFS_BLOCK_SIZE) as u64;
+    const TEST_CHUNK_BLOCKS: u64 = (TEST_CHUNK_SIZE / EROFS_BLOCK_SIZE) as u64;
+    const TEST_GROUP_MIN_SIZE: u32 = TEST_CHUNK_SIZE / 2;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1675,6 +1763,45 @@ mod tests {
 
     fn file_writer(path: &Path, chunk_size: u32) -> BlobWriter<File> {
         BlobWriter::plain(File::create(path).unwrap(), chunk_size)
+    }
+
+    /// How a chunk's digest marks a pack boundary (see `PACK_STRICT_MASK`).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mark {
+        /// Ends no pack.
+        Plain,
+        /// Ends a pack that reached the target span (low five bits zero).
+        Loose,
+        /// Ends a pack that reached the minimum span (low six bits zero).
+        Strict,
+    }
+
+    fn mark_of(data: &[u8]) -> Mark {
+        let byte = blake3::hash(data).as_bytes()[31];
+        if byte & PACK_STRICT_MASK == 0 {
+            Mark::Strict
+        } else if byte & PACK_LOOSE_MASK == 0 {
+            Mark::Loose
+        } else {
+            Mark::Plain
+        }
+    }
+
+    /// `len` bytes of `seed` (its last byte varied, then the fill) whose
+    /// chunk carries the wanted boundary mark, so the tests choose their
+    /// boundaries.
+    fn filled(len: usize, seed: u8, mark: Mark) -> Vec<u8> {
+        (seed..=u8::MAX)
+            .chain(0..seed)
+            .flat_map(|byte| {
+                (0..=u8::MAX).map(move |last| {
+                    let mut data = vec![byte; len];
+                    *data.last_mut().expect("chunks are not empty") = last;
+                    data
+                })
+            })
+            .find(|data| mark_of(data) == mark)
+            .expect("some fill gives the wanted boundary")
     }
 
     /// Write `bytes` as one file and return its resolved-later addresses.
@@ -1726,7 +1853,9 @@ mod tests {
             addrs.extend(write(&mut writer, &bytes));
         }
         writer.finish().unwrap();
-        assert_eq!(resolve(&writer, &mut addrs), vec![0, 1]);
+        // The whole chunk is a group of its own the moment it arrives, ahead
+        // of the pack the one-byte chunk opened (packs may span two blocks).
+        assert_eq!(resolve(&writer, &mut addrs), vec![1, 0]);
         let metadata = writer.blob_metadata().unwrap();
         assert_eq!(metadata.chunk_group_count(), 2);
         assert_eq!(metadata.chunk_group_index_of(0), Some(0));
@@ -1764,134 +1893,216 @@ mod tests {
     }
 
     #[test]
-    fn blob_writer_packs_small_chunks_first_fit_and_resolves_addresses() {
+    fn blob_writer_packs_small_chunks_in_order_and_resolves_addresses() {
         let mut writer = plain_writer(TEST_CHUNK_SIZE);
         let files: Vec<Vec<u8>> = [
-            (10_000usize, b'1'),
-            (40_000, b'2'),
-            (20_000, b'3'),
-            (8_000, b'4'),
-            (4_000, b'5'),
+            (28_000usize, b'1'),
+            (28_000, b'2'),
+            (28_000, b'3'),
+            (28_000, b'4'),
+            (20_000, b'5'),
+            (8_000, b'6'),
+            (4_000, b'7'),
         ]
         .iter()
-        .map(|(len, byte)| vec![*byte; *len])
+        .map(|(len, seed)| filled(*len, *seed, Mark::Plain))
         .collect();
         let mut addrs = Vec::new();
         for file in &files {
             addrs.extend(write(&mut writer, file));
         }
-        // Files 1, 2 fill 13 of slot 0's 16 blocks; file 3 (5 blocks) opens
-        // slot 1; files 4 and 5 (2 + 1 blocks) still fit slot 0, which then
-        // closes as group 0; finish closes slot 1 as group 1.
-        assert_eq!(writer.open_bins.len(), 1);
+        // Files 1..4 fill 28 of a pack's 32-block span; file 5 (5 blocks)
+        // does not fit, so the pack closes as group 0 (28 blocks) and file 5
+        // opens the next, which files 6 and 7 (2 + 1 blocks) join; finish
+        // closes it as group 1 (8 blocks) right after group 0. No digest
+        // marks a boundary, so nothing closes early.
         assert_eq!(writer.next_group, 1);
+        assert_eq!(
+            writer.open_bin.as_ref().map(|bin| bin.lens.clone()),
+            Some(vec![20_000, 8_000, 4_000])
+        );
         assert!(addrs
             .iter()
             .any(|addr| writer.resolve_chunk_addr(&mut addr.clone()).is_err()));
         writer.finish().unwrap();
-        assert_eq!(writer.total_blocks(), 2 * TEST_SLOT_BLOCKS);
+        assert_eq!(writer.total_blocks(), 28 + 8);
+        assert_eq!(resolve(&writer, &mut addrs), vec![0, 7, 14, 21, 28, 33, 35]);
         assert_eq!(
-            resolve(&writer, &mut addrs),
-            vec![0, 3, TEST_SLOT_BLOCKS, 13, 15]
-        );
-        assert_eq!(
-            writer.blob_metadata_chunks(),
-            &[10_000, 40_000, 8_000, 4_000, 20_000]
+            writer.blob_metadata_chunk_lengths(),
+            &[28_000, 28_000, 28_000, 28_000, 20_000, 8_000, 4_000]
         );
         let groups = writer.blob_metadata_chunk_groups();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].chunk_count(), 4);
-        assert_eq!(groups[0].compressed_size(), 62_000);
-        assert_eq!(groups[1].chunk_count(), 1);
-        assert_eq!(groups[1].compressed_size(), 20_000);
-        // The data region holds the payloads back to back in group order.
-        let expected: Vec<u8> = [0usize, 1, 3, 4, 2]
-            .iter()
-            .flat_map(|index| files[*index].clone())
-            .collect();
+        assert_eq!(groups[0].compressed_size(), 112_000);
+        assert_eq!(groups[1].chunk_count(), 3);
+        assert_eq!(groups[1].compressed_size(), 32_000);
+        // The data region holds the payloads back to back in file order.
+        let expected: Vec<u8> = files.concat();
         assert_eq!(writer.writer, expected);
         assert_eq!(writer.data_size(), expected.len() as u64);
 
         let padded = scatter(&writer);
         let block = EROFS_BLOCK_SIZE as usize;
-        assert_eq!(&padded[..10_000], &files[0][..]);
-        assert_eq!(&padded[3 * block..3 * block + 40_000], &files[1][..]);
-        assert_eq!(&padded[13 * block..13 * block + 8_000], &files[3][..]);
-        assert_eq!(&padded[15 * block..15 * block + 4_000], &files[4][..]);
-        let slot1 = TEST_SLOT_BLOCKS as usize * block;
-        assert_eq!(&padded[slot1..slot1 + 20_000], &files[2][..]);
-        assert!(padded[slot1 + 20_000..].iter().all(|b| *b == 0));
+        assert_eq!(padded.len(), 36 * block);
+        for (file, addr) in files.iter().zip(&addrs) {
+            let offset = addr.blkaddr as usize * block;
+            assert_eq!(&padded[offset..offset + file.len()], &file[..]);
+            let end = offset + file.len().next_multiple_of(block);
+            assert!(padded[offset + file.len()..end]
+                .iter()
+                .all(|byte| *byte == 0));
+        }
     }
 
     #[test]
     fn blob_writer_closes_full_chunks_as_their_own_groups() {
         let mut writer = plain_writer(TEST_CHUNK_SIZE);
-        let big = vec![b'x'; TEST_CHUNK_SIZE as usize * 5 / 2];
-        let small = vec![b's'; 100];
+        // 2.25 chunks whose quarter-chunk tail does not mark a boundary, then a
+        // small file that does not either.
+        let tail = filled(TEST_CHUNK_SIZE as usize / 4, b'x', Mark::Plain);
+        let mut big = vec![tail[0]; TEST_CHUNK_SIZE as usize * 2];
+        big.extend_from_slice(&tail);
+        let small = filled(100, b's', Mark::Plain);
         let mut addrs = write(&mut writer, &big);
         addrs.extend(write(&mut writer, &small));
-        // Both full chunks closed at once; the half chunk waits in a bin
-        // that the small file joins.
+        // Both full chunks closed at once; the quarter chunk waits in the open
+        // pack that the small file joins.
         assert_eq!(writer.next_group, 2);
-        assert_eq!(writer.open_bins.len(), 1);
-        assert_eq!(writer.open_bins[0].lens, vec![TEST_CHUNK_SIZE / 2, 100]);
+        assert_eq!(
+            writer.open_bin.as_ref().map(|bin| bin.lens.clone()),
+            Some(vec![TEST_CHUNK_SIZE / 4, 100])
+        );
         writer.finish().unwrap();
+        // Two full chunks, then the pack right behind them.
         assert_eq!(
             resolve(&writer, &mut addrs),
             vec![
                 0,
-                TEST_SLOT_BLOCKS,
-                2 * TEST_SLOT_BLOCKS,
-                2 * TEST_SLOT_BLOCKS + TEST_SLOT_BLOCKS / 2
+                TEST_CHUNK_BLOCKS,
+                2 * TEST_CHUNK_BLOCKS,
+                2 * TEST_CHUNK_BLOCKS + TEST_CHUNK_BLOCKS / 4
             ]
         );
         assert_eq!(writer.blob_metadata_chunk_groups().len(), 3);
         assert_eq!(
-            writer.blob_metadata_chunks(),
-            &[TEST_CHUNK_SIZE, TEST_CHUNK_SIZE, TEST_CHUNK_SIZE / 2, 100]
+            writer.blob_metadata_chunk_lengths(),
+            &[TEST_CHUNK_SIZE, TEST_CHUNK_SIZE, TEST_CHUNK_SIZE / 4, 100]
         );
-        assert_eq!(writer.digests.len(), 4);
+        // One digest per group: the two full chunks are equal bytes and
+        // name their groups by their own digest; the pack's is derived.
+        assert_eq!(writer.digests.len(), 3);
         assert_eq!(writer.digests[0].digest(), writer.digests[1].digest());
-        assert_ne!(writer.digests[0].digest(), writer.digests[2].digest());
+        assert_eq!(
+            writer.digests[0].digest(),
+            blake3::hash(&big[..TEST_CHUNK_SIZE as usize]).as_bytes()
+        );
+        assert_eq!(
+            writer.digests[2],
+            BlobMetadataDigest::of_group(&[
+                *blake3::hash(&tail).as_bytes(),
+                *blake3::hash(&small).as_bytes()
+            ])
+            .unwrap()
+        );
         let meta = writer.blob_metadata().unwrap();
-        assert_eq!(meta.uncompressed_block_count(), 3 * TEST_SLOT_BLOCKS);
+        // 16 + 16 blocks for the full chunks, 4 + 1 for the pack.
+        assert_eq!(meta.uncompressed_block_count(), 2 * TEST_CHUNK_BLOCKS + 5);
         assert_eq!(meta.compressed_end(), big.len() as u64 + 100);
     }
 
     #[test]
-    fn blob_writer_closes_the_fullest_bin_when_too_many_are_open() {
+    fn blob_writer_closes_packs_at_content_defined_boundaries() {
+        // 64 KiB chunks: a pack spans at least 8 blocks, targets 16 and
+        // holds at most 32. One-block files: a strict mark ends a pack once
+        // it spans the minimum, a loose one once it spans the target, plain
+        // ones never do.
+        let plain = |seed| filled(EROFS_BLOCK_SIZE as usize, seed, Mark::Plain);
+        let loose = |seed| filled(EROFS_BLOCK_SIZE as usize, seed, Mark::Loose);
+        let strict = |seed| filled(EROFS_BLOCK_SIZE as usize, seed, Mark::Strict);
+        let mut files = vec![
+            strict(b'a'), // too early: the pack spans one block
+            plain(b'b'),
+            loose(b'c'), // too early as well
+            plain(b'd'),
+            plain(b'e'),
+            plain(b'f'),
+            plain(b'g'),
+            strict(b'h'), // 8 blocks and strict: closes {a..h}
+        ];
+        files.extend((0..8).map(|i| plain(b'i' + i))); // 8 blocks
+        files.push(loose(b'q')); // 9 blocks: past the minimum, under the target
+        files.extend((0..6).map(|i| plain(b'r' + i))); // 16 blocks
+        files.push(loose(b'x')); // 16 blocks and loose: closes {i..x}
+        files.push(plain(b'y'));
+        files.push(plain(b'z')); // finish closes {y, z}
         let mut writer = plain_writer(TEST_CHUNK_SIZE);
-        // Nine-block chunks never share a 16-block slot, so every one opens
-        // a bin; the ninth exceeds the limit and closes the first (the
-        // oldest of equally full bins), then finish closes the rest in
-        // order, so chunk i lands in group i.
-        let chunk = vec![b'n'; 9 * EROFS_BLOCK_SIZE as usize];
         let mut addrs = Vec::new();
-        for _ in 0..MAX_OPEN_BINS + 1 {
-            addrs.extend(write(&mut writer, &chunk));
+        for file in &files {
+            addrs.extend(write(&mut writer, file));
         }
-        assert_eq!(writer.next_group, 1);
-        assert_eq!(writer.open_bins.len(), MAX_OPEN_BINS);
+        assert_eq!(writer.next_group, 2);
         writer.finish().unwrap();
-        let expected: Vec<u64> = (0..=MAX_OPEN_BINS as u64)
-            .map(|group| group * TEST_SLOT_BLOCKS)
+        let meta = writer.blob_metadata().unwrap();
+        let runs: Vec<usize> = meta
+            .chunk_groups()
+            .map(|group| group.chunk_count() as usize)
             .collect();
-        assert_eq!(resolve(&writer, &mut addrs), expected);
-        assert!(writer.open_bins.is_empty());
+        assert_eq!(runs, vec![8, 16, 2]);
+        // One-block chunks back to back: the address space is dense.
+        assert_eq!(
+            resolve(&writer, &mut addrs),
+            (0..files.len() as u64).collect::<Vec<_>>()
+        );
+        assert_eq!(meta.uncompressed_block_count(), files.len() as u64);
+        assert_eq!(meta.group_span(), 2 * TEST_CHUNK_SIZE);
+
+        // The boundary depends on the chunk alone: a different prefix cuts
+        // at the same marked files, so the packs after it are identical.
+        let mut other = plain_writer(TEST_CHUNK_SIZE);
+        write(&mut other, &plain(b'0'));
+        write(&mut other, &plain(b'1'));
+        for file in &files[1..] {
+            write(&mut other, file);
+        }
+        other.finish().unwrap();
+        let other_meta = other.blob_metadata().unwrap();
+        // Group digests name the packs, so identical packs compare equal.
+        let (first, second) = (meta.digests(), other_meta.digests());
+        assert_ne!(first[0], second[0]);
+        assert_eq!(&first[1..], &second[1..]);
+
+        // Without digests packs simply fill the span.
+        let mut undigested = BlobWriter::new(
+            Vec::new(),
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::None,
+            true,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_GROUP_MIN_SIZE,
+            },
+        )
+        .unwrap();
+        for file in &files {
+            write(&mut undigested, file);
+        }
+        undigested.finish().unwrap();
+        assert_eq!(undigested.blob_metadata().unwrap().chunk_group_count(), 1);
     }
 
     #[test]
     fn blob_writer_rejects_block_count_overflow_before_mutation() {
         let mut writer = plain_writer(EROFS_BLOCK_SIZE);
-        writer.next_group = u32::MAX as u64 - 1;
+        writer.next_blkaddr = u32::MAX as u64 - 1;
         let data = [1; EROFS_BLOCK_SIZE as usize];
         let placement = writer.append_chunk(&data).unwrap();
         assert_eq!(writer.placements[placement as usize], u32::MAX as u64 - 1);
         assert_eq!(writer.next_blkaddr, u32::MAX as u64);
-        let chunks = writer.chunks.len();
+        let groups = writer.next_group;
         assert!(writer.append_chunk(&data).is_err());
         assert_eq!(writer.next_blkaddr, u32::MAX as u64);
-        assert_eq!(writer.chunks.len(), chunks);
+        assert_eq!(writer.next_group, groups);
     }
 
     #[test]
@@ -1923,7 +2134,18 @@ mod tests {
         assert_eq!(indexes[1].device_id, 0);
         assert_eq!(indexes[2].blkaddr, 1);
         assert_eq!(writer.total_blocks(), 2);
-        assert_eq!(writer.blob_metadata_chunks(), &[EROFS_BLOCK_SIZE, 100]);
+        assert_eq!(writer.blob_metadata_chunk_groups().len(), 2);
+        assert_eq!(
+            writer.blob_metadata_chunk_lengths(),
+            &[EROFS_BLOCK_SIZE, 100]
+        );
+        let meta = writer.blob_metadata().unwrap();
+        assert_eq!(
+            (0..2)
+                .flat_map(|group| meta.chunk_group_chunks(group))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, EROFS_BLOCK_SIZE), (0, 4096, 100)]
+        );
         let data = fs::read(&blob_path).unwrap();
         assert_eq!(data.len(), EROFS_BLOCK_SIZE as usize + 100);
         assert!(!data[..EROFS_BLOCK_SIZE as usize].iter().any(|&b| b != b'a'));
@@ -1953,11 +2175,259 @@ mod tests {
     }
 
     #[test]
+    fn blob_writer_isolates_chunks_at_or_above_the_group_minimum() {
+        // 64 KiB chunks, 16 KiB threshold: 4 KiB | 20 KiB | 8 KiB | 16 KiB | 64 KiB.
+        let minimum = 16 * 1024;
+        let mut writer = writer(
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::Zstd,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: minimum,
+            },
+        );
+        let files: Vec<Vec<u8>> = [4 * 1024, 20 * 1024, 8 * 1024, 16 * 1024, 64 * 1024]
+            .iter()
+            .enumerate()
+            .map(|(index, len)| filled(*len, b'a' + index as u8, Mark::Plain))
+            .collect();
+        let mut addrs = Vec::new();
+        for file in &files {
+            addrs.extend(write(&mut writer, file));
+        }
+        writer.finish().unwrap();
+        let addrs = resolve(&writer, &mut addrs);
+        let meta = writer.blob_metadata().unwrap();
+        assert_eq!(meta.lookup_granule(), minimum);
+        // Groups close in write order: {20K}, {16K}, {64K}, then the pack
+        // {4K, 8K} at finish; each starts where the previous one ends.
+        let runs: Vec<Vec<u32>> = (0..meta.chunk_group_count())
+            .map(|group| {
+                meta.chunk_group_chunks(group)
+                    .map(|(_, _, len)| len)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                vec![20 * 1024],
+                vec![16 * 1024],
+                vec![64 * 1024],
+                vec![4 * 1024, 8 * 1024]
+            ]
+        );
+        assert_eq!(meta.uncompressed_block_count(), 5 + 4 + 16 + 3);
+        assert_eq!(addrs, vec![25, 0, 26, 5, 9]);
+        let padded = scatter(&writer);
+        for (file, addr) in files.iter().zip(addrs) {
+            let offset = addr as usize * EROFS_BLOCK_SIZE as usize;
+            assert_eq!(&padded[offset..offset + file.len()], &file[..]);
+        }
+    }
+
+    #[test]
+    fn blob_writer_keeps_a_pack_under_the_minimum_open_for_a_chunk_that_does_not_fit() {
+        // Span = chunk size (the minimum a quarter of it): a
+        // chunk one block short of the span does not fit behind two 4 KiB
+        // files, yet a pack still under the minimum never closes short, so
+        // the chunk stands alone first and the pack waits.
+        let mut writer = writer(
+            4 * TEST_GROUP_MIN_SIZE,
+            BlobMetadataCompressor::None,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_GROUP_MIN_SIZE,
+            },
+        );
+        let tiny = filled(EROFS_BLOCK_SIZE as usize, b'y', Mark::Plain);
+        let long = filled(
+            (4 * TEST_GROUP_MIN_SIZE - EROFS_BLOCK_SIZE) as usize,
+            b'z',
+            Mark::Plain,
+        );
+        let mut addrs = write(&mut writer, &tiny);
+        addrs.extend(write(&mut writer, &tiny));
+        addrs.extend(write(&mut writer, &long));
+        assert_eq!(writer.next_group, 1);
+        assert_eq!(
+            writer.open_bin.as_ref().map(|bin| bin.lens.clone()),
+            Some(vec![EROFS_BLOCK_SIZE, EROFS_BLOCK_SIZE])
+        );
+        writer.finish().unwrap();
+        assert_eq!(resolve(&writer, &mut addrs), vec![31, 32, 0]);
+        let meta = writer.blob_metadata().unwrap();
+        let runs: Vec<Vec<u32>> = (0..meta.chunk_group_count())
+            .map(|group| {
+                meta.chunk_group_chunks(group)
+                    .map(|(_, _, len)| len)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                vec![long.len() as u32],
+                vec![EROFS_BLOCK_SIZE, EROFS_BLOCK_SIZE]
+            ]
+        );
+        assert_eq!(meta.lookup_granule(), TEST_GROUP_MIN_SIZE);
+        let padded = scatter(&writer);
+        assert_eq!(&padded[..long.len()], &long[..]);
+        let at = 31 * EROFS_BLOCK_SIZE as usize;
+        assert_eq!(&padded[at..at + tiny.len()], &tiny[..]);
+    }
+
+    #[test]
+    fn blob_writer_sizes_packs_by_the_chunk_group_min_size() {
+        let layout = |chunk_group_min_size| BlobLayout::ChunkGroups {
+            chunk_group_min_size,
+        };
+        // The minimum sets the group span (four times it, at least a chunk)
+        // and the lookup granule, even when larger than the chunk size.
+        for (chunk_group_min_size, span, granule) in [
+            (EROFS_BLOCK_SIZE, TEST_CHUNK_SIZE, EROFS_BLOCK_SIZE),
+            (TEST_CHUNK_SIZE, 4 * TEST_CHUNK_SIZE, TEST_CHUNK_SIZE),
+            (
+                DEFAULT_CHUNK_GROUP_MIN_SIZE,
+                4 * DEFAULT_CHUNK_GROUP_MIN_SIZE,
+                DEFAULT_CHUNK_GROUP_MIN_SIZE,
+            ),
+        ] {
+            let mut writer = writer(
+                TEST_CHUNK_SIZE,
+                BlobMetadataCompressor::None,
+                layout(chunk_group_min_size),
+            );
+            write(&mut writer, &filled(100, b'p', Mark::Plain));
+            writer.finish().unwrap();
+            let meta = writer.blob_metadata().unwrap();
+            assert_eq!(
+                meta.group_span(),
+                span,
+                "chunk group minimum size {chunk_group_min_size}"
+            );
+            assert_eq!(
+                meta.lookup_granule(),
+                granule,
+                "chunk group minimum size {chunk_group_min_size}"
+            );
+        }
+        // With the default minimum a pack of one-block files runs to the
+        // minimum before any boundary may close it: 512 plain files stay in
+        // one open pack, the 513th strict one closes it.
+        let mut writer = writer(
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            layout(DEFAULT_CHUNK_GROUP_MIN_SIZE),
+        );
+        let plain = filled(EROFS_BLOCK_SIZE as usize, b'q', Mark::Plain);
+        let strict = filled(EROFS_BLOCK_SIZE as usize, b'r', Mark::Strict);
+        write(&mut writer, &strict);
+        for _ in 1..(DEFAULT_CHUNK_GROUP_MIN_SIZE / EROFS_BLOCK_SIZE) {
+            write(&mut writer, &plain);
+        }
+        assert_eq!(writer.next_group, 0);
+        write(&mut writer, &plain);
+        assert_eq!(
+            writer.next_group, 0,
+            "a plain chunk past the minimum closes nothing"
+        );
+        write(&mut writer, &strict);
+        assert_eq!(writer.next_group, 1);
+        // Not a power of two, under a block, or over the span the blob meta
+        // can record: rejected up front.
+        for bad in [3 * 1024, EROFS_BLOCK_SIZE / 2, MAX_CHUNK_GROUP_MIN_SIZE * 2] {
+            assert!(BlobWriter::new(
+                Vec::new(),
+                TEST_CHUNK_SIZE,
+                BlobMetadataCompressor::None,
+                BlobMetadataDigester::Blake3,
+                true,
+                layout(bad),
+            )
+            .is_err());
+        }
+        assert!(BlobWriter::new(
+            Vec::new(),
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::Blake3,
+            true,
+            layout(MAX_CHUNK_GROUP_MIN_SIZE),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn blob_writer_packs_full_chunks_below_the_default_group_minimum() {
+        let chunk_size = 256 * 1024;
+        let minimum = DEFAULT_CHUNK_GROUP_MIN_SIZE;
+        for compressor in [BlobMetadataCompressor::None, BlobMetadataCompressor::Zstd] {
+            for (mark, digester, chunks_per_group) in [
+                (Mark::Strict, BlobMetadataDigester::Blake3, 8),
+                (Mark::Plain, BlobMetadataDigester::Blake3, 32),
+                (Mark::Strict, BlobMetadataDigester::None, 32),
+            ] {
+                let options = crate::build::BuildImageOptions::new(
+                    ".".into(),
+                    chunk_size,
+                    compressor,
+                    Default::default(),
+                    false,
+                )
+                .unwrap()
+                .with_digester(digester);
+                let mut writer = options.chunk_blob_writer(Vec::new()).unwrap();
+                let data = filled(chunk_size as usize, b'g', mark).repeat(33);
+                let tail = filled(123, b't', Mark::Strict);
+                let mut addrs = write(&mut writer, &data);
+                addrs.extend(write(&mut writer, &tail));
+                writer.finish().unwrap();
+
+                let meta = writer.blob_metadata().unwrap();
+                assert_eq!(meta.lookup_granule(), minimum);
+                assert_eq!(meta.header().lookup_granule_byte_shift(), 21);
+                assert_eq!(meta.group_span(), 4 * minimum);
+                assert_eq!(meta.chunk_count(), 34);
+                assert_eq!(meta.chunk_group_count(), 33 / chunks_per_group + 1);
+                for group in meta.chunk_groups() {
+                    if group.index() as usize + 1 < meta.chunk_group_count() {
+                        assert!(group.uncompressed_size() >= u64::from(minimum));
+                        assert!(group.uncompressed_size() <= u64::from(4 * minimum));
+                        assert_eq!(group.chunk_count() as usize, chunks_per_group);
+                    } else {
+                        assert!(group.uncompressed_size() < u64::from(minimum));
+                    }
+                    for offset in group
+                        .uncompressed_range()
+                        .step_by(EROFS_BLOCK_SIZE as usize)
+                    {
+                        assert_eq!(
+                            meta.chunk_group_index_of(offset),
+                            Some(group.index() as usize)
+                        );
+                    }
+                }
+                assert_eq!(
+                    resolve(&writer, &mut addrs),
+                    (0..34)
+                        .map(|index| index * u64::from(chunk_size / EROFS_BLOCK_SIZE))
+                        .collect::<Vec<_>>()
+                );
+                let padded = scatter(&writer);
+                assert_eq!(&padded[..data.len()], &data);
+                assert_eq!(&padded[data.len()..data.len() + tail.len()], &tail);
+            }
+        }
+    }
+
+    #[test]
     fn blob_writer_stores_uncompressed_when_zstd_saves_too_little() {
         let mut writer = writer(
             TEST_CHUNK_SIZE,
             BlobMetadataCompressor::Zstd,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_GROUP_MIN_SIZE,
+            },
         );
         let noise = pseudo_random_bytes(TEST_CHUNK_SIZE as usize);
         let text = vec![b't'; TEST_CHUNK_SIZE as usize];
@@ -1981,7 +2451,9 @@ mod tests {
         let mut writer = writer(
             TEST_CHUNK_SIZE,
             BlobMetadataCompressor::Zstd,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_GROUP_MIN_SIZE,
+            },
         );
         let files: Vec<Vec<u8>> = (0..40u8)
             .map(|index| vec![b'a' + index % 26; 1_000 + 500 * index as usize])
@@ -2001,16 +2473,18 @@ mod tests {
             let offset = addr as usize * EROFS_BLOCK_SIZE as usize;
             assert_eq!(&padded[offset..offset + file.len()], &file[..]);
         }
-        // Every chunk's digest names its bytes.
-        for (index, (chunk, offset, len)) in (0..meta.chunk_group_count())
-            .flat_map(|group| meta.chunk_group_chunks(group))
-            .enumerate()
-        {
-            assert_eq!(chunk, index);
-            let bytes = &padded[offset as usize..offset as usize + len as usize];
+        // Every group's digest derives from its chunks' bytes.
+        for group in meta.chunk_groups() {
+            let members: Vec<[u8; 32]> = meta
+                .chunk_group_chunks(group.index() as usize)
+                .map(|(_, offset, len)| {
+                    *blake3::hash(&padded[offset as usize..offset as usize + len as usize])
+                        .as_bytes()
+                })
+                .collect();
             assert_eq!(
-                meta.digest(chunk).unwrap().digest(),
-                blake3::hash(bytes).as_bytes()
+                meta.digest(group.index() as usize).unwrap(),
+                &BlobMetadataDigest::of_group(&members).unwrap()
             );
         }
     }
@@ -2026,7 +2500,9 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::None,
             true,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_GROUP_MIN_SIZE,
+            },
         )
         .unwrap();
         writer
@@ -2036,9 +2512,11 @@ mod tests {
         let meta = BlobMetadata::from_path(&meta_path, true).unwrap();
         assert_eq!(meta.chunk_count(), 1);
         assert_eq!(meta.digest_count(), 0);
-        assert_eq!(meta.chunk_size(), TEST_CHUNK_SIZE);
+        assert_eq!(meta.group_span(), 2 * TEST_CHUNK_SIZE);
         assert_eq!(meta.compressed_end(), 5000);
-        assert_eq!(meta.uncompressed_size(), TEST_CHUNK_SIZE as u64);
+        // The 5000-byte chunk spans two blocks, and the blob ends there.
+        assert_eq!(meta.uncompressed_size(), 2 * EROFS_BLOCK_SIZE as u64);
+        assert_eq!(meta.lookup_granule(), TEST_GROUP_MIN_SIZE);
     }
 
     #[test]

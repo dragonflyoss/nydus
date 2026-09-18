@@ -39,7 +39,7 @@ type BuildOption struct {
 	// BlobPath is the output blob path. It may be a FIFO so the blob can be
 	// streamed directly into a content store without staging on disk.
 	BlobPath string
-	// ChunkSize is the chunk (and chunk group) size in bytes; zero selects the default.
+	// ChunkSize is the file chunk size in bytes; zero selects the default.
 	ChunkSize uint32
 	// Compressor selects a supported data layout/algorithm; zero values default to zstd.
 	Compressor string

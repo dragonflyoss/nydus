@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use blob_chunk::{BlobLayout, BlobWriter};
+pub use blob_chunk::{DEFAULT_CHUNK_GROUP_MIN_SIZE, MAX_CHUNK_GROUP_MIN_SIZE};
 use bootstrap::render_bootstrap;
 use inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
 use nydus_error::{Context, Error, Result};
@@ -53,9 +54,13 @@ pub struct BuildImageOptions {
     /// File chunk size in bytes (a power of two, >= the block size, and
     /// block-aligned).
     chunk_size: u32,
-    /// Chunk group uncompressed size in bytes (a power of two, >= 1MiB, and >= the
-    /// chunk size): the index unit of the address space and the most bytes one
-    /// prefetch read decodes at once.
+    /// Chunk group minimum size in bytes (a power of two between one block
+    /// and [`MAX_CHUNK_GROUP_MIN_SIZE`]): the least address space any chunk
+    /// group but a blob's last spans. A chunk of at least this size is a group of its
+    /// own, so its encoded bytes are one frame addressable by its digest;
+    /// smaller chunks are packed into shared groups spanning one to four
+    /// times it, closed at content-defined boundaries.
+    chunk_group_min_size: u32,
     /// Algorithm to compress data chunks.
     compressor: BlobMetadataCompressor,
     /// Chunk digest algorithm recorded in the blob meta.
@@ -105,8 +110,7 @@ impl BuildImageOptions {
         excludes: HashSet<PathBuf>,
         render_standalone_bootstrap: bool,
     ) -> Result<Self> {
-        // Validate the chunk size: the largest chunk of a file and the slot
-        // every chunk group owns, so a power of two of whole blocks.
+        // Validate the file chunk size: a power of two of whole blocks.
         if chunk_size < EROFS_BLOCK_SIZE {
             return Err(Error::InvalidParameter(format!(
                 "chunk size {chunk_size} must be >= block size {EROFS_BLOCK_SIZE}"
@@ -128,6 +132,7 @@ impl BuildImageOptions {
         Ok(Self {
             source,
             chunk_size,
+            chunk_group_min_size: DEFAULT_CHUNK_GROUP_MIN_SIZE,
             compressor,
             digester: BlobMetadataDigester::Blake3,
             blob_id: None,
@@ -137,6 +142,31 @@ impl BuildImageOptions {
             z_data_alignment: 0,
         })
     }
+
+    /// Sets the chunk group minimum size: a power of two between one block
+    /// and [`MAX_CHUNK_GROUP_MIN_SIZE`] (the default is
+    /// [`DEFAULT_CHUNK_GROUP_MIN_SIZE`], 2 MiB, independent of the chunk size).
+    /// Every chunk group but a blob's last spans at least this much:
+    /// a chunk of at least this size stands
+    /// alone, smaller chunks are packed until the pack does.
+    pub fn with_chunk_group_min_size(mut self, chunk_group_min_size: u32) -> Result<Self> {
+        if !chunk_group_min_size.is_power_of_two()
+            || !(EROFS_BLOCK_SIZE..=MAX_CHUNK_GROUP_MIN_SIZE).contains(&chunk_group_min_size)
+        {
+            return Err(Error::InvalidParameter(format!(
+                "chunk group minimum size {chunk_group_min_size} must be a power of two between {EROFS_BLOCK_SIZE} and {MAX_CHUNK_GROUP_MIN_SIZE} bytes"
+            )));
+        }
+        self.chunk_group_min_size = chunk_group_min_size;
+        Ok(self)
+    }
+
+    /// The chunk group minimum size in bytes (see
+    /// [`Self::with_chunk_group_min_size`]).
+    pub fn chunk_group_min_size(&self) -> u32 {
+        self.chunk_group_min_size
+    }
+
     /// Selects the chunk digest algorithm; `None` skips chunk hashing.
     pub fn with_digester(mut self, digester: BlobMetadataDigester) -> Self {
         self.digester = digester;
@@ -288,7 +318,11 @@ impl BuildImageOptions {
                 data_alignment_threshold: u64::from(self.z_data_alignment).saturating_add(1),
             }
         } else {
-            BlobLayout::ChunkGroups
+            // One knob: a chunk of at least the minimum size stands alone,
+            // smaller ones are packed until the pack spans it.
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: self.chunk_group_min_size,
+            }
         };
         BlobWriter::new(
             writer,
@@ -628,6 +662,37 @@ mod tests {
         assert!(new(EROFS_BLOCK_SIZE * 3).is_err());
         assert!(new(EROFS_BLOCK_SIZE).is_ok());
         assert!(new(1 << 20).is_ok());
+
+        assert_eq!(new(256 << 10).unwrap().chunk_group_min_size(), 2 << 20);
+        assert_eq!(new(1 << 20).unwrap().chunk_group_min_size(), 2 << 20);
+        assert_eq!(new(8 << 20).unwrap().chunk_group_min_size(), 2 << 20);
+        assert!(new(1 << 20)
+            .unwrap()
+            .with_chunk_group_min_size(2 << 20)
+            .is_ok());
+        assert!(new(EROFS_BLOCK_SIZE)
+            .unwrap()
+            .with_chunk_group_min_size(MAX_CHUNK_GROUP_MIN_SIZE)
+            .is_ok());
+        for minimum in [
+            0,
+            EROFS_BLOCK_SIZE / 2,
+            3 << 20,
+            MAX_CHUNK_GROUP_MIN_SIZE * 2,
+        ] {
+            assert!(new(1 << 20)
+                .unwrap()
+                .with_chunk_group_min_size(minimum)
+                .is_err());
+        }
+        assert_eq!(
+            new(1 << 20)
+                .unwrap()
+                .with_chunk_group_min_size(64 * 1024)
+                .unwrap()
+                .chunk_group_min_size(),
+            64 * 1024
+        );
     }
 
     /// A z_erofs layer built from a directory: every regular file is a

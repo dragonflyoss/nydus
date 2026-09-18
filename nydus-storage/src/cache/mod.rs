@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nydus_backend::BlobBackend;
-use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor};
+use nydus_format::blob::{
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest,
+};
 
 /// Default on-demand fetch size: the compressed bytes one backend read
 /// covers around a missed chunk group (see [`set_fetch_size`]). 2 MiB.
@@ -394,8 +396,9 @@ pub fn validate_chunk_group_with_metrics(
     Ok(())
 }
 
-/// Expand a decoded chunk group into its slot: the chunks scattered onto
-/// their blocks with zero padding between them and after the last one.
+/// Expand a decoded chunk group onto its span of the address space: the
+/// chunks scattered onto their blocks with zero padding between them and
+/// after the last one.
 pub fn inflate_decoded_chunk_group(
     blob_metadata: &BlobMetadata,
     group: &BlobMetadataChunkGroup,
@@ -404,7 +407,7 @@ pub fn inflate_decoded_chunk_group(
     let span = usize::try_from(group.uncompressed_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "blob meta chunk group slot exceeds usize",
+            "blob meta chunk group span exceeds usize",
         )
     })?;
     let base = group.uncompressed_offset();
@@ -450,20 +453,23 @@ pub fn validate_decoded_chunk_group(
     if skip_verify_checksums() || blob_metadata.digest_count() == 0 {
         return Ok(());
     }
-    let chunks = blob_metadata.chunks();
+    let expected = blob_metadata
+        .digest(group.index() as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk group digest missing"))?;
+    // Members follow each other in the decoded payload; a lone chunk is the
+    // whole payload.
     let mut at = 0usize;
-    for chunk in group.chunk_range() {
-        let len = chunks[chunk] as usize;
-        let digest = blob_metadata
-            .digest(chunk)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk digest missing"))?;
-        if blake3::hash(&decoded[at..at + len]).as_bytes() != digest.digest() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("blob chunk {chunk} digest mismatch"),
-            ));
-        }
+    let mut members = Vec::with_capacity(group.chunk_count() as usize);
+    for (_, _, len) in blob_metadata.chunk_group_chunks(group.index() as usize) {
+        let len = len as usize;
+        members.push(*blake3::hash(&decoded[at..at + len]).as_bytes());
         at += len;
+    }
+    if BlobMetadataDigest::of_group(&members).as_ref() != Some(expected) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("blob chunk group {} digest mismatch", group.index()),
+        ));
     }
     Ok(())
 }
@@ -530,8 +536,10 @@ pub(crate) mod test_util {
 
     /// Encode `groups` (each a list of chunks) with `compressor` into a data
     /// region and the blob meta describing it, with `chunk_blocks`-block
-    /// slots and BLAKE3 digests when `digests` is set. Every group is stored
-    /// compressed when that shrinks it, plain otherwise.
+    /// chunks, a one-block lookup granule and BLAKE3 digests when `digests`
+    /// is set. Every group is stored compressed when that shrinks it, plain
+    /// otherwise. Groups tile the address space back to back, each chunk on
+    /// its own blocks.
     pub(crate) fn encode_blob(
         compressor: BlobMetadataCompressor,
         chunk_blocks: u32,
@@ -540,7 +548,7 @@ pub(crate) mod test_util {
     ) -> (Vec<u8>, BlobMetadata) {
         let mut data = Vec::new();
         let mut specs = Vec::new();
-        let mut chunks = Vec::new();
+        let mut members = Vec::new();
         let mut digest_table = Vec::new();
         for group in groups {
             let payload: Vec<u8> = group.concat();
@@ -552,19 +560,23 @@ pub(crate) mod test_util {
             .filter(|encoded| encoded.len() < payload.len());
             let stored = encoded.as_deref().unwrap_or(&payload);
             data.extend_from_slice(stored);
+            members.extend(group.iter().map(|chunk| chunk.len() as u32));
+            let chunk_count = group.len() as u32;
             specs.push(
                 BlobMetadataChunkGroup::new(
                     stored.len() as u32,
-                    group.len() as u32,
+                    payload.len() as u32,
+                    chunk_count,
                     crc32c::crc32c(&payload),
                     None,
                 )
                 .unwrap(),
             );
-            for chunk in group {
-                chunks.push(chunk.len() as u32);
-                digest_table.push(BlobMetadataDigest::new(*blake3::hash(chunk).as_bytes()));
-            }
+            let digests: Vec<[u8; 32]> = group
+                .iter()
+                .map(|chunk| *blake3::hash(chunk).as_bytes())
+                .collect();
+            digest_table.push(BlobMetadataDigest::of_group(&digests).unwrap());
         }
         if !digests {
             digest_table.clear();
@@ -577,25 +589,28 @@ pub(crate) mod test_util {
                 BlobMetadataDigester::None
             },
             chunk_blocks,
+            4096,
             specs,
-            chunks,
+            members,
             digest_table,
         )
         .unwrap();
         (data, meta)
     }
 
-    /// The padded address space `groups` occupy with `chunk_blocks`-block
-    /// slots: what a fully filled cache file holds.
-    pub(crate) fn padded_image(chunk_blocks: u32, groups: &[Vec<Vec<u8>>]) -> Vec<u8> {
-        let slot = chunk_blocks as usize * 4096;
-        let mut image = vec![0u8; slot * groups.len()];
-        for (index, group) in groups.iter().enumerate() {
-            let mut at = index * slot;
-            for chunk in group {
-                image[at..at + chunk.len()].copy_from_slice(chunk);
-                at += chunk.len().div_ceil(4096) * 4096;
-            }
+    /// The padded address space `groups` occupy: every chunk on its own
+    /// blocks, groups back to back — what a fully filled cache file holds.
+    pub(crate) fn padded_image(groups: &[Vec<Vec<u8>>]) -> Vec<u8> {
+        let blocks: usize = groups
+            .iter()
+            .flatten()
+            .map(|chunk| chunk.len().div_ceil(4096))
+            .sum();
+        let mut image = vec![0u8; blocks * 4096];
+        let mut at = 0;
+        for chunk in groups.iter().flatten() {
+            image[at..at + chunk.len()].copy_from_slice(chunk);
+            at += chunk.len().div_ceil(4096) * 4096;
         }
         image
     }
@@ -760,25 +775,27 @@ mod tests {
         // Same payload and crc, one wrong digest: the digest check fires and
         // is not a crc mismatch.
         let mut digests: Vec<_> = metadata.digests().to_vec();
-        digests[1] = nydus_format::blob::BlobMetadataDigest::new([0; 32]);
+        digests[0] = nydus_format::blob::BlobMetadataDigest::new([0; 32]);
         let wrong = BlobMetadata::new(
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::Blake3,
             4,
+            4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
+                data.len() as u32,
                 data.len() as u32,
                 2,
                 group.crc32(),
                 None,
             )
             .unwrap()],
-            metadata.chunks().to_vec(),
+            vec![100, 5000],
             digests,
         )
         .unwrap();
         let wrong_group = wrong.chunk_group(0).unwrap();
         let err = validate_decoded_chunk_group(&wrong, &wrong_group, &data).unwrap_err();
-        assert!(err.to_string().contains("chunk 1 digest mismatch"));
+        assert!(err.to_string().contains("chunk group 0 digest mismatch"));
         assert!(!is_chunk_group_crc_mismatch(&err));
 
         // A corrupted payload fails the crc before any digest is consulted.
@@ -794,18 +811,19 @@ mod tests {
     fn inflate_scatters_chunks_onto_their_blocks() {
         let groups = vec![vec![vec![7u8; 100], vec![8u8; 4097]], vec![vec![9u8; 1]]];
         let (data, metadata) = encode_blob(BlobMetadataCompressor::None, 4, &groups, false);
-        let image = padded_image(4, &groups);
+        let image = padded_image(&groups);
+        assert_eq!(image.len(), 4 * 4096);
         let group0 = metadata.chunk_group(0).unwrap();
         let group1 = metadata.chunk_group(1).unwrap();
         let payload0 = &data[..group0.compressed_size() as usize];
         let payload1 = &data[group0.compressed_size() as usize..];
         assert_eq!(
             inflate_decoded_chunk_group(&metadata, &group0, payload0).unwrap(),
-            image[..4 * 4096]
+            image[..3 * 4096]
         );
         assert_eq!(
             inflate_decoded_chunk_group(&metadata, &group1, payload1).unwrap(),
-            image[4 * 4096..]
+            image[3 * 4096..]
         );
     }
 
@@ -880,10 +898,15 @@ mod tests {
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
             1,
-            vec![
-                nydus_format::blob::BlobMetadataChunkGroup::new(EROFS_BLOCK_SIZE, 1, 0, None)
-                    .unwrap(),
-            ],
+            4096,
+            vec![nydus_format::blob::BlobMetadataChunkGroup::new(
+                EROFS_BLOCK_SIZE,
+                EROFS_BLOCK_SIZE,
+                1,
+                0,
+                None,
+            )
+            .unwrap()],
             vec![EROFS_BLOCK_SIZE],
             vec![],
         )

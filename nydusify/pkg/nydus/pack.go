@@ -23,7 +23,7 @@ type PackOption struct {
 	BuilderPath string
 	// WorkDir holds temporary FIFOs and sidecars; defaults to os.TempDir().
 	WorkDir string
-	// ChunkSize is the chunk (and chunk group) size; zero selects DefaultChunkSize.
+	// ChunkSize is the file chunk size; zero selects DefaultChunkSize.
 	ChunkSize uint32
 	// Compressor selects a supported data layout/algorithm; defaults to DefaultCompressor.
 	Compressor string

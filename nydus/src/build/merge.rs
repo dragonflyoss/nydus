@@ -1792,7 +1792,9 @@ mod tests {
         let scratch_blob = dir.path().join("scratch.blob");
         let mut blob_writer =
             BlobWriter::plain(fs::File::create(&scratch_blob).unwrap(), EROFS_BLOCK_SIZE);
-        let built = build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &excludes).unwrap();
+        let mut built = build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &excludes).unwrap();
+        blob_writer.finish().unwrap();
+        crate::build::inode::resolve_chunk_addrs(&mut built, &blob_writer).unwrap();
 
         // Path B: build the same tree into a full blob, then load it back as
         // a single merge layer and flatten it.
@@ -1805,6 +1807,9 @@ mod tests {
                 excludes.clone(),
                 false,
             )
+            .unwrap()
+            // The same pack geometry `BlobWriter::plain` picks for path A.
+            .with_chunk_group_min_size(EROFS_BLOCK_SIZE)
             .unwrap(),
             fs::File::create(&blob_path).unwrap(),
         )
