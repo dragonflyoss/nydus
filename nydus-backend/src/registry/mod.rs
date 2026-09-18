@@ -57,6 +57,28 @@ const CLIENT_ID: &str = "nydus-registry-client";
 const DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60;
 const TOKEN_REFRESH_MARGIN: u64 = 20;
 
+/// Apply the config file's thread bounds to the shared runtime. Only an
+/// explicit (non-zero) setting is forwarded, so a backend built with the
+/// defaults never seals the runtime ahead of an embedder that configures it
+/// itself (with a netns) after building its backend config. The config file
+/// cannot name a netns; that stays an embedder-only option.
+///
+/// The options are process-wide, so this runs only once the rest of the
+/// backend configuration has been accepted: a backend that is rejected must
+/// not seal the runtime for the ones that follow.
+fn apply_runtime_config(http: &nydus_config::HttpConfig) {
+    if http.worker_threads == 0 && http.max_blocking_threads == 0 {
+        return;
+    }
+    if let Err(err) = configure_runtime(RuntimeOptions {
+        worker_threads: http.worker_threads,
+        max_blocking_threads: http.max_blocking_threads,
+        netns: None,
+    }) {
+        tracing::warn!("registry backend: http.worker_threads/max_blocking_threads ignored: {err}");
+    }
+}
+
 /// Errors produced by the registry backend.
 #[derive(Debug, thiserror::Error)]
 enum RegistryError {
@@ -524,6 +546,21 @@ impl Registry {
     pub(crate) fn new(config: RegistryConfig) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
         let http = HTTP::new(&config.http)?;
+        #[cfg(not(feature = "backend-dragonfly-proxy"))]
+        if let Some(dragonfly_config) = &config.dragonfly {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "dragonfly.scheduler_endpoint is set ({}) but this build lacks \
+                     the `backend-dragonfly-proxy` feature",
+                    dragonfly_config.scheduler_endpoint
+                ),
+            ));
+        }
+
+        // Everything that can reject the config has run; Dragonfly::new
+        // below builds the runtime, so the options must be in before it.
+        apply_runtime_config(&config.http);
 
         #[cfg(feature = "backend-dragonfly-proxy")]
         let dragonfly: Option<Box<dyn DragonflyTransport>> = match &config.dragonfly {
@@ -534,19 +571,7 @@ impl Registry {
             None => None,
         };
         #[cfg(not(feature = "backend-dragonfly-proxy"))]
-        let dragonfly: Option<Box<dyn DragonflyTransport>> = match &config.dragonfly {
-            Some(dragonfly_config) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "dragonfly.scheduler_endpoint is set ({}) but this build lacks \
-                         the `backend-dragonfly-proxy` feature",
-                        dragonfly_config.scheduler_endpoint
-                    ),
-                ))
-            }
-            None => None,
-        };
+        let dragonfly: Option<Box<dyn DragonflyTransport>> = None;
 
         let dragonfly_policy = DragonflyPolicy::from_config(config.dragonfly.as_ref());
         let fallback_limiter = FallbackLimiter::new(
@@ -1345,6 +1370,35 @@ mod tests {
             registry.blob_url("abc123").unwrap(),
             "https://registry.example.com/v2/library/ubuntu/blobs/sha256:abc123"
         );
+    }
+
+    #[test]
+    fn config_thread_bounds_reach_the_shared_runtime() {
+        // A default http block must not touch the process-wide runtime
+        // config, so an embedder can still configure it (with a netns) after
+        // building its backend.
+        apply_runtime_config(&nydus_config::HttpConfig::default());
+
+        // An explicit request is forwarded. The runtime config is process
+        // global and another test in this binary may already have sealed it
+        // with different values, so accept either outcome, but the request
+        // must be visible as "applied" or "rejected as conflicting", never
+        // dropped: a second identical configure_runtime() call then either
+        // succeeds (ours took) or reports AlreadyExists (someone else's did).
+        let config: RegistryConfig = serde_yaml::from_str(
+            "addr: https://registry.example.com\nrepository: library/ubuntu\nhttp:\n  worker_threads: 3\n  max_blocking_threads: 5\n",
+        )
+        .unwrap();
+        assert_eq!(config.http.worker_threads, 3);
+        apply_runtime_config(&config.http);
+        match configure_runtime(RuntimeOptions {
+            worker_threads: 3,
+            max_blocking_threads: 5,
+            netns: None,
+        }) {
+            Ok(()) => {}
+            Err(err) => assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}"),
+        }
     }
 
     #[test]

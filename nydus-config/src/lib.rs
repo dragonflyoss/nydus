@@ -213,6 +213,21 @@ pub struct HttpConfig {
     /// The TLS configuration for connections to the registry.
     #[serde(default)]
     pub tls: TlsConfig,
+
+    /// The async worker threads of the process-wide runtime that drives the
+    /// registry client's sockets; `0` selects the backend's default (2). The
+    /// runtime is shared by every registry backend in the process, so only
+    /// the first backend constructed with a non-zero value can configure it;
+    /// a later, different value is logged and ignored.
+    #[serde(default)]
+    pub worker_threads: usize,
+
+    /// The upper bound on the runtime's on-demand blocking threads, which
+    /// serve DNS lookups and are released after 10 s idle; `0` selects the
+    /// backend's default (8). Shares the first-backend-wins rule of
+    /// [`worker_threads`](Self::worker_threads).
+    #[serde(default)]
+    pub max_blocking_threads: usize,
 }
 
 /// The proxy configuration for the registry backend's HTTP client.
@@ -233,6 +248,8 @@ impl Default for HttpConfig {
             max_retries: default_registry_http_max_retries(),
             proxy: None,
             tls: TlsConfig::default(),
+            worker_threads: 0,
+            max_blocking_threads: 0,
         }
     }
 }
@@ -680,8 +697,32 @@ config:
         assert!(registry.http.proxy.is_none());
         assert!(!registry.http.tls.skip_verify);
         assert!(registry.http.tls.ca_cert.is_none());
+        assert_eq!(registry.http.worker_threads, 0);
+        assert_eq!(registry.http.max_blocking_threads, 0);
         assert!(registry.auth.is_none());
         assert!(registry.dragonfly.is_none());
+    }
+
+    #[test]
+    fn deserialize_registry_http_runtime_threads() {
+        let yaml = r#"
+type: registry
+config:
+  addr: https://registry-1.docker.io
+  repository: library/ubuntu
+  http:
+    worker_threads: 4
+    max_blocking_threads: 16
+"#;
+
+        let backend: BackendConfig = serde_yaml::from_str(yaml).unwrap();
+        let BackendConfig::Registry(registry) = &backend else {
+            panic!("expected a registry backend, got {backend:?}");
+        };
+        assert_eq!(registry.http.worker_threads, 4);
+        assert_eq!(registry.http.max_blocking_threads, 16);
+        // The other http fields keep their defaults alongside the new keys.
+        assert_eq!(registry.http.timeout, default_registry_http_timeout());
     }
 
     #[test]

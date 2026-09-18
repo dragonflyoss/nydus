@@ -61,6 +61,16 @@ backend:
         #
         # ca_cert: /etc/nydus/certs/registry-ca.pem
 
+      # Thread bounds of the process-wide async runtime behind the registry
+      # client. Workers only move bytes for the connection pool (readers
+      # block on their own threads); the blocking pool serves DNS lookups
+      # and shrinks again after 10 s idle. 0 selects the defaults (2 and 8).
+      # The runtime is shared by every registry backend in the process, so
+      # only the first backend constructed with non-zero values applies.
+      #
+      # worker_threads: 2
+      # max_blocking_threads: 8
+
     # Optional Dragonfly block (requires the `backend-dragonfly-proxy`
     # feature). When set, blob GETs are routed through the Dragonfly client
     # SDK for P2P distribution, falling back to the origin registry when a
