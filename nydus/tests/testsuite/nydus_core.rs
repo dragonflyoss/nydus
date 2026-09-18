@@ -163,7 +163,10 @@ fn build_test_image_full(
         BlobMetadataCompressor::Zstd,
         BlobMetadataDigester::Blake3,
         true,
-        BlobLayout::ChunkGroups,
+        BlobLayout::ChunkGroups {
+            chunk_group_threshold:
+                nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_GROUP_THRESHOLD,
+        },
     )
     .unwrap();
     let mut inodes = build_tree(
@@ -343,7 +346,10 @@ fn flattened_bootstrap_records_mapped_device_slots() {
         BlobMetadataCompressor::Zstd,
         BlobMetadataDigester::Blake3,
         true,
-        BlobLayout::ChunkGroups,
+        BlobLayout::ChunkGroups {
+            chunk_group_threshold:
+                nydus_format::blob::DEFAULT_NYDUS_BLOB_METADATA_CHUNK_GROUP_THRESHOLD,
+        },
     )
     .unwrap();
     let mut inodes = build_tree(

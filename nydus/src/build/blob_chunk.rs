@@ -48,6 +48,10 @@ pub struct BlobWriter<W> {
     // `None` when the caller names the blob itself (`--blob-id`), so no
     // sha256 pass over the data region is needed.
     data_hasher: Option<Sha256>,
+    // Chunk mode: a chunk of at least this many bytes closes as a group of
+    // its own; smaller ones are packed. A power of two of at most the chunk
+    // size (equal to it: only full slots stand alone).
+    chunk_group_threshold: u32,
     // Groups under construction: small chunks are packed first-fit into
     // the open bins, at most `MAX_OPEN_BINS` of them.
     open_bins: Vec<Bin>,
@@ -807,8 +811,11 @@ impl Drop for ChunkGroupEncoder {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobLayout {
     /// Compressed chunk groups described by blob meta: the layout the nydus
-    /// daemons fetch on demand.
-    ChunkGroups,
+    /// daemons fetch on demand. A chunk of at least `chunk_group_threshold`
+    /// bytes (a power of two of at most the chunk size) is a group of its
+    /// own, so its encoded bytes are one frame named by its digest; smaller
+    /// chunks are packed into shared groups.
+    ChunkGroups { chunk_group_threshold: u32 },
     /// The padded address space written as-is: a native uncompressed EROFS
     /// device the kernel mounts directly (`erofs-none`). No chunk groups,
     /// blob meta or digests are produced. When `data_alignment` is non-zero,
@@ -835,7 +842,8 @@ pub enum BlobLayout {
 
 #[cfg(test)]
 impl<W: Write> BlobWriter<W> {
-    /// A plain chunk-group writer with BLAKE3 digests, for tests.
+    /// A plain chunk-group writer with BLAKE3 digests that packs every
+    /// partial chunk (threshold = chunk size), for tests.
     pub(crate) fn plain(writer: W, chunk_size: u32) -> Self {
         Self::new(
             writer,
@@ -843,7 +851,9 @@ impl<W: Write> BlobWriter<W> {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
             true,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_threshold: chunk_size,
+            },
         )
         .expect("valid test writer")
     }
@@ -890,6 +900,7 @@ impl<W: Write> BlobWriter<W> {
             next_blkaddr: 0,
             next_compressed_offset: 0,
             data_hasher: hash_data.then(Sha256::new),
+            chunk_group_threshold: chunk_size,
             open_bins: Vec::new(),
             placements: Vec::new(),
             next_group: 0,
@@ -911,7 +922,16 @@ impl<W: Write> BlobWriter<W> {
             z_packed: None,
         };
         match layout {
-            BlobLayout::ChunkGroups => {}
+            BlobLayout::ChunkGroups {
+                chunk_group_threshold,
+            } => {
+                if !chunk_group_threshold.is_power_of_two() || chunk_group_threshold > chunk_size {
+                    return Err(Error::InvalidParameter(format!(
+                        "chunk group threshold {chunk_group_threshold} must be a power of two of at most the {chunk_size}-byte chunk size"
+                    )));
+                }
+                writer.chunk_group_threshold = chunk_group_threshold;
+            }
             BlobLayout::RawDevice {
                 data_alignment,
                 data_alignment_threshold,
@@ -1270,6 +1290,7 @@ impl<W: Write> BlobWriter<W> {
             self.compressor,
             self.digester,
             self.file_chunk_size / EROFS_BLOCK_SIZE,
+            Some(self.chunk_group_threshold),
             self.blob_metadata_chunk_groups.clone(),
             self.chunks.clone(),
             self.digests.clone(),
@@ -1433,11 +1454,12 @@ impl<W: Write> BlobWriter<W> {
     /// In raw device mode the padded chunk is written straight to the
     /// device and its block address returned. Otherwise the chunk's length
     /// and digest are recorded and its bytes go into a group: a chunk that
-    /// fills a whole slot closes as a group of its own; a smaller one is
-    /// packed first-fit into an open bin (opening one, after closing the
-    /// fullest when too many are open, when none fits), and a bin that
-    /// fills its slot exactly closes at once. Returns the chunk's placement
-    /// id, the placeholder [`Self::resolve_chunk_addr`] resolves.
+    /// fills a whole slot or reaches the chunk group threshold closes as a
+    /// group of its own; a smaller one is packed first-fit into an open bin
+    /// (opening one, after closing the fullest when too many are open, when
+    /// none fits), and a bin that fills its slot exactly closes at once.
+    /// Returns the chunk's placement id, the placeholder
+    /// [`Self::resolve_chunk_addr`] resolves.
     fn append_chunk(&mut self, data: &[u8]) -> Result<u64> {
         let blocks = data.len().div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
         if self.raw_device {
@@ -1474,7 +1496,7 @@ impl<W: Write> BlobWriter<W> {
         self.placements.push(PENDING);
         let slot_blocks = self.slot_blocks();
 
-        if blocks == slot_blocks {
+        if blocks == slot_blocks || len >= self.chunk_group_threshold {
             let bin = Bin {
                 data: data.to_vec(),
                 lens: vec![len],
@@ -1953,11 +1975,86 @@ mod tests {
     }
 
     #[test]
+    fn blob_writer_isolates_chunks_at_or_above_the_group_threshold() {
+        // 64 KiB slots, 16 KiB threshold: 4 KiB | 20 KiB | 8 KiB | 16 KiB | 64 KiB.
+        let threshold = 16 * 1024;
+        let mut writer = writer(
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::Zstd,
+            BlobLayout::ChunkGroups {
+                chunk_group_threshold: threshold,
+            },
+        );
+        let files: Vec<Vec<u8>> = [4 * 1024, 20 * 1024, 8 * 1024, 16 * 1024, 64 * 1024]
+            .iter()
+            .enumerate()
+            .map(|(index, len)| vec![b'a' + index as u8; *len])
+            .collect();
+        let mut addrs = Vec::new();
+        for file in &files {
+            addrs.extend(write(&mut writer, file));
+        }
+        writer.finish().unwrap();
+        let addrs = resolve(&writer, &mut addrs);
+        let meta = writer.blob_metadata().unwrap();
+        assert_eq!(meta.chunk_group_threshold(), Some(threshold));
+        // Groups close in write order: {20K}, {16K}, {64K}, then the pack
+        // {4K, 8K} at finish.
+        let runs: Vec<Vec<u32>> = meta
+            .chunk_groups()
+            .map(|group| meta.chunks()[group.chunk_range()].to_vec())
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                vec![20 * 1024],
+                vec![16 * 1024],
+                vec![64 * 1024],
+                vec![4 * 1024, 8 * 1024]
+            ]
+        );
+        assert_eq!(
+            addrs,
+            vec![
+                3 * TEST_SLOT_BLOCKS,
+                0,
+                3 * TEST_SLOT_BLOCKS + 1,
+                TEST_SLOT_BLOCKS,
+                2 * TEST_SLOT_BLOCKS
+            ]
+        );
+        let padded = scatter(&writer);
+        for (file, addr) in files.iter().zip(addrs) {
+            let offset = addr as usize * EROFS_BLOCK_SIZE as usize;
+            assert_eq!(&padded[offset..offset + file.len()], &file[..]);
+        }
+
+        // Threshold = chunk size packs every partial chunk (the default of
+        // the test helpers); an oversized or non-power-of-two one is
+        // rejected up front.
+        for bad in [TEST_CHUNK_SIZE * 2, 3 * 1024] {
+            assert!(BlobWriter::new(
+                Vec::new(),
+                TEST_CHUNK_SIZE,
+                BlobMetadataCompressor::Zstd,
+                BlobMetadataDigester::Blake3,
+                true,
+                BlobLayout::ChunkGroups {
+                    chunk_group_threshold: bad,
+                },
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn blob_writer_stores_uncompressed_when_zstd_saves_too_little() {
         let mut writer = writer(
             TEST_CHUNK_SIZE,
             BlobMetadataCompressor::Zstd,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_threshold: TEST_CHUNK_SIZE,
+            },
         );
         let noise = pseudo_random_bytes(TEST_CHUNK_SIZE as usize);
         let text = vec![b't'; TEST_CHUNK_SIZE as usize];
@@ -1981,7 +2078,9 @@ mod tests {
         let mut writer = writer(
             TEST_CHUNK_SIZE,
             BlobMetadataCompressor::Zstd,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_threshold: TEST_CHUNK_SIZE,
+            },
         );
         let files: Vec<Vec<u8>> = (0..40u8)
             .map(|index| vec![b'a' + index % 26; 1_000 + 500 * index as usize])
@@ -2026,7 +2125,9 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::None,
             true,
-            BlobLayout::ChunkGroups,
+            BlobLayout::ChunkGroups {
+                chunk_group_threshold: TEST_CHUNK_SIZE,
+            },
         )
         .unwrap();
         writer

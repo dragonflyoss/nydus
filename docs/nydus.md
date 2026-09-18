@@ -254,7 +254,9 @@ Options:
 	--bootstrap <BOOTSTRAP>
 		Specify the file path to save the standalone bootstrap: the store layout's entry point, whose device table records each blob's SHA256 [env: NYDUS_BUILD_BOOTSTRAP=]
 	--chunk-size <CHUNK_SIZE>
-		Specify the chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned; default 1MiB): the largest chunk a file is cut into for the chunk-based layouts (none, zstd, lz4, erofs-none), and the size of every chunk group (the unit of compression, on-demand fetch and cache readiness): a chunk that fills a group is a group of its own, smaller chunks are packed into shared groups. It does not apply to erofs-lz4 and erofs-zstd, whose files are pclusters. The value needs to be set with human readable format, for example: 512kib, 1mib, 2mib [env: NYDUS_BUILD_CHUNK_SIZE=]
+		Specify the chunk size (must be a power of two, >= 4KiB, and 4KiB-aligned; default 1MiB): the largest chunk a file is cut into for the chunk-based layouts (none, zstd, lz4, erofs-none), and the size of every chunk group (the unit of compression, on-demand fetch and cache readiness): a chunk that fills a group or reaches --chunk-group-threshold is a group of its own, smaller chunks are packed into shared groups. It does not apply to erofs-lz4 and erofs-zstd, whose files are pclusters. The value needs to be set with human readable format, for example: 512kib, 1mib, 2mib [env: NYDUS_BUILD_CHUNK_SIZE=]
+	--chunk-group-threshold <CHUNK_GROUP_THRESHOLD>
+		Specify the chunk group threshold (a power of two of at most the chunk size; default 64KiB): a chunk of at least this size is a chunk group of its own, so its compressed bytes are one frame a content-addressed cache can serve by the chunk's digest alone, while smaller chunks (small files, file tails) are packed together into shared groups for compression ratio and request count. Equal to the chunk size, only full chunks stand alone. It does not apply to the erofs-* compressors. The value needs to be set with human readable format, for example: 16kib, 64kib, 256kib [env: NYDUS_BUILD_CHUNK_GROUP_THRESHOLD=]
 	--compressor <COMPRESSOR>
 		Specify the data layout and compression. zstd, lz4 and none build chunk groups the nydus daemon fetches on demand and decodes, described by the blob meta. The erofs-* values instead build a native EROFS layer without blob meta: the full blob's data region is the raw layer device, so the store file serves as a device= of a kernel block-device mount and the nydus daemons never fetch it on demand. erofs-none stores the chunks uncompressed at their block addresses; erofs-lz4 and erofs-zstd compress file data into native LZ4 or zstd pclusters the kernel decompresses (64KiB pclusters, files up to 64KiB packed into the shared fragment inode; kernel mounts need 6.1+ for erofs-lz4 and 6.10+ for erofs-zstd). --digester does not apply to the erofs-* values [env: NYDUS_BUILD_COMPRESSOR=] [default: zstd] [possible values: none, zstd, lz4, erofs-none, erofs-lz4, erofs-zstd]
 	--digester <DIGESTER>
@@ -278,11 +280,22 @@ Current implementation notes:
 	are split into *chunks* at for the EROFS chunk indexes (a file of at most
 	the chunk size is one chunk), and the size of every blob meta *chunk
 	group* — the unit of compression, of an on-demand read, of cache
-	readiness and of the ondemand blob. A chunk that fills a group is a group
-	of its own; smaller chunks (files under the chunk size, file tails) are
-	packed into shared groups, see [Chunk groups](#chunk-groups). It must be
-	a power of two of at least 4 KiB (the blob meta header stores it as a
-	log2 block count).
+	readiness and of the ondemand blob. A chunk that fills a group, or
+	reaches `--chunk-group-threshold`, is a group of its own; smaller chunks
+	(small files, file tails) are packed into shared groups, see
+	[Chunk groups](#chunk-groups). It must be a power of two of at least
+	4 KiB (the blob meta header stores it as a log2 block count).
+- `--chunk-group-threshold` defaults to `64KiB` (capped at the chunk size)
+	and decides which chunks stand alone: a chunk of at least the threshold is
+	a chunk group of its own, so its compressed bytes are one frame that a
+	content-addressed cache (a P2P tier deduplicating by chunk digest) can
+	locate and serve from the chunk's digest alone; chunks below it are packed
+	together, because compressing small files one by one costs ratio (on a
+	typical image the sub-64 KiB chunks are ~96% of the chunks but ~16% of the
+	bytes, and framed alone they inflate by 25–140%). It must be a power of
+	two of at most the chunk size; equal to the chunk size, only full chunks
+	stand alone. The header records it and `nydus check` verifies the groups
+	follow it.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
@@ -297,7 +310,8 @@ Current implementation notes:
 	resulting filesystem tree entirely. It accepts absolute or
 	current-working-directory-relative paths and may be repeated.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
-	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_group_count`,
+	`data_blob_digest`, `full_blob_digest`, `chunk_size`,
+	`chunk_group_threshold`, `chunk_group_count`,
 	`chunk_count`, `digest_count`, `chunk_compressor`, payload/compressed/
 	uncompressed totals, and full blob region offsets and block counts.
 
@@ -354,15 +368,20 @@ chunks' bytes back to back, without the tail-block padding after each file
 	`i` covers the blocks `[i * S, (i + 1) * S)` where `S` is `--chunk-size`
 	in 4 KiB blocks, so an address names its group by division and the group
 	table needs no address column. A chunk that fills a slot (a whole chunk of
-	a large file) is a group of its own; smaller chunks — files under the
-	chunk size and file tails — are bin-packed into shared groups, each chunk
-	whole and block aligned inside the slot. The builder keeps up to 8 groups
-	open, places a chunk into the first open group with room, opens a new
-	group when none has, and closes the fullest open group once the limit is
-	reached, so a run of small files fills its groups densely. Groups are
-	emitted in index order; a chunk's block address is only known once its
-	group closes, so the builder resolves the inode chunk indexes when the
-	data region is complete, before the bootstrap is rendered.
+	a large file) or reaches `--chunk-group-threshold` (64 KiB by default) is
+	a group of its own — its encoded bytes are one frame, addressable by the
+	chunk's digest — and the slot's tail past it is unused address space
+	(never stored: the blob is dense, the cache file is sparse and readiness
+	is tracked per group). Smaller chunks — small files and file tails — are
+	bin-packed into shared groups, each chunk whole and block aligned inside
+	the slot. The builder keeps up to 8 groups open, places a chunk into the
+	first open group with room, opens a new group when none has, and closes
+	the fullest open group once the limit is reached, so a run of small files
+	fills its groups densely; a large chunk arriving in between does not
+	interrupt the packs. Groups are emitted in index order; a chunk's block
+	address is only known once its group closes, so the builder resolves the
+	inode chunk indexes when the data region is complete, before the
+	bootstrap is rendered.
 - The group is the unit of compression, of an on-demand read (see
 	[Bootstrap plus blob-dir mount](#bootstrap-plus-blob-dir-mount)), of
 	cache readiness and of the ondemand blob `nydus optimize` assembles: a
@@ -1504,7 +1523,9 @@ embedded blob meta region
 |  flags (u32)                  |
 |  crc32c (u32)                 |
 |  chunk_block_count_bits (u8)  |
-|  reserved (3 bytes)           |
+|  chunk_group_threshold_bits   |
+|    (u8)                       |
+|  reserved (2 bytes)           |
 |  chunk_group_count (u32)      |
 |  chunk_count (u32)            |
 +-------------------------------+  offset 32
@@ -1565,6 +1586,13 @@ Header details:
 	`chunk_size = 4096 << chunk_block_count_bits`, the largest chunk a file is
 	cut into (the default 1 MiB stores 8) and the size of every group's slot.
 	It is the same quantity as `chunk_format & EROFS_CHUNK_FORMAT_BLKBITS_MASK`.
+- `chunk_group_threshold_bits` is log2 of the chunk group threshold in bytes
+	(the default 64 KiB stores 16; at most the chunk size), the packing rule
+	the groups follow: a chunk of at least `1 << bits` bytes is a group of its
+	own, and a group of several chunks holds only smaller ones. The reader
+	rejects a table that breaks the rule, so a consumer indexing groups by
+	chunk digest can trust that every chunk of at least the threshold is one
+	frame. Zero records no threshold (any packing goes).
 - The two counts size the tables; the tables' offsets are not stored, they
 	follow each other in the fixed order above. The digest table has
 	`chunk_count` entries with `DIGESTER_BLAKE3` and none without it; the
@@ -1582,8 +1610,10 @@ Chunk group details:
 	each on its own block boundary, and the slot's unused tail (if any) reads
 	as zeros.
 - Group `i` holds chunks `[first_chunk(i), first_chunk(i + 1))` — at least
-	one, together at most one slot of blocks — and its encoded bytes occupy
-	`[compressed_offset(i), compressed_offset(i + 1))` of the data region.
+	one, together at most one slot of blocks, and with a recorded threshold
+	either exactly one chunk or only chunks below it — and its encoded bytes
+	occupy `[compressed_offset(i), compressed_offset(i + 1))` of the data
+	region.
 	Both come from the next row, which is why the table carries one extra
 	terminator row: `compressed_offset` = the data region size, `first_chunk`
 	= `chunk_count`, `crc32c` = 0. Group 0 starts at offset 0 and chunk 0;
@@ -1675,39 +1705,42 @@ EROFS mounts decode the null address in-kernel the same way.
 
 The chunks are then placed into chunk **groups**, each group one chunk-size
 slot of the decoded address space. A chunk that fills a slot — A p0, B p0,
-B p1 — is a group of its own. Smaller chunks are bin-packed: A p1 (700 KiB)
-opens a shared group, C (300 bytes, one block) and the small files after it
-join it, each starting on its own 4 KiB block, until no further chunk fits
-the slot. The builder keeps up to eight groups open at once and closes the
-fullest when it needs a ninth, so consecutive small files land together
-while a large file's tail does not force a group closed early. Groups are
-emitted in index order, and the chunk indexes take their block addresses
-from the finished layout:
+B p1 — or reaches `--chunk-group-threshold` (64 KiB by default) — A p1,
+700 KiB — is a group of its own, its encoded bytes one frame that a
+content-addressed cache can serve by the chunk's digest; the rest of its
+slot is unused address space. Smaller chunks are bin-packed: C (300 bytes,
+one block) opens a shared group and the small files after it join it, each
+starting on its own 4 KiB block, until no further chunk fits the slot. The
+builder keeps up to eight groups open at once and closes the fullest when
+it needs a ninth, so consecutive small files land together, and a large
+chunk arriving in between closes as its own group without forcing a pack
+closed early. Groups are emitted in index order, and the chunk indexes
+take their block addresses from the finished layout:
 
 ```text
-blkaddr    0        256      512      768      1024
-           |        |        |        |        |
-           +--------+--------+--------+--------+---
-           | A p0   | B p0   | B p1   |A p1|C|D|  ..
-           +--------+--------+--------+--------+---
-group      0        1        2        3
+blkaddr    0        256      512      768      1024     1280
+           |        |        |        |        |        |
+           +--------+--------+--------+--------+--------+---
+           | A p0   | B p0   | B p1   | A p1   |C|D|..  |  ..
+           +--------+--------+--------+--------+--------+---
+group      0        1        2        3        4
 chunk table: 1048576, 1048576, 1048576, 716800, 300, ..
 ```
 
 Within a slot the chunks' **bytes** are the group's payload, back to back
-with no tail padding (A p1's 700 KiB, then C's 300 bytes, then D, ...); the
-group is compressed as one zstd or LZ4 stream and the groups are packed back
-to back as the data region:
+with no tail padding (C's 300 bytes, then D, ...); the group is compressed
+as one zstd or LZ4 stream and the groups are packed back to back as the
+data region:
 
 ```text
-           group 0   group 1   group 2   group 3          group 4
-           | A p0    | B p0    | B p1    | A p1, C, D, .. |
-           v         v         v         v                v
-+-----------+---------+---------+----------------+----------+---
-| zstd(A p0)|zstd(Bp0)|zstd(Bp1)|zstd(Ap1,C,D,..)| group 4  |
-+-----------+---------+---------+----------------+----------+---
-^ compressed_offset(0) = 0                       ^ compressed_offset(4)
-group table: (0, chunk 0) (c1, 1) (c2, 2) (c3, 3) (c4, 6) ... terminator
+           group 0   group 1   group 2   group 3   group 4        group 5
+           | A p0    | B p0    | B p1    | A p1    | C, D, ..     |
+           v         v         v         v         v              v
++-----------+---------+---------+---------+--------------+----------+---
+| zstd(A p0)|zstd(Bp0)|zstd(Bp1)|zstd(Ap1)|zstd(C,D,..)  | group 5  |
++-----------+---------+---------+---------+--------------+----------+---
+^ compressed_offset(0) = 0                               ^ compressed_offset(5)
+group table: (0, chunk 0) (c1, 1) (c2, 2) (c3, 3) (c4, 4) (c5, 7) ... terminator
 ```
 
 A group that does not shrink below 70% of its payload is stored plain
@@ -1715,7 +1748,7 @@ instead, its chunks then sitting at their dense offsets. Every group carries
 a CRC32C over its decoded payload.
 
 The group is the compression, on-demand read and cache-fill unit: a read of C
-fetches and decodes group 3 (with the groups of its fetch-size cell) and
+fetches and decodes group 4 (with the groups of its fetch-size cell) and
 nothing else of the blob, then writes the group's chunks onto their blocks
 of the slot, leaving the tail of each block zero.
 

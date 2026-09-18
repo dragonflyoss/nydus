@@ -577,6 +577,7 @@ pub(crate) mod test_util {
                 BlobMetadataDigester::None
             },
             chunk_blocks,
+            None,
             specs,
             chunks,
             digest_table,
@@ -765,6 +766,7 @@ mod tests {
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::Blake3,
             4,
+            None,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 data.len() as u32,
                 2,
@@ -880,6 +882,7 @@ mod tests {
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
             1,
+            None,
             vec![
                 nydus_format::blob::BlobMetadataChunkGroup::new(EROFS_BLOCK_SIZE, 1, 0, None)
                     .unwrap(),

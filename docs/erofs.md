@@ -255,7 +255,10 @@ Sources: [build/mod.rs](../nydus/src/build/mod.rs),
 - **Fixed-size groups:** every group owns one chunk-size slot of the
   address space, so an address maps to its group by division and a group
   maps to its backend range by one table entry; there is no per-read scan
-  and no runtime index to build at open.
+  and no runtime index to build at open. A chunk of at least the chunk
+  group threshold (64 KiB by default) is a group of its own, so its encoded
+  bytes are one frame addressable by its digest; the unused rest of its
+  slot costs nothing (the blob is dense, the cache sparse).
 - **DAX eligibility:** plain aligned cache pages preserve the prerequisites
   for guest mapping, but the guest kernel, filesystem mode and transport must
   also support DAX. Alignment alone does not enable it. Native compressed

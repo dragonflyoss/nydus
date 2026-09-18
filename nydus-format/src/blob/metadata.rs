@@ -52,6 +52,11 @@ pub const DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE: u32 = 1024 * 1024;
 pub const DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT: u32 =
     DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE / EROFS_BLOCK_SIZE;
 
+/// Default chunk group threshold: a chunk of at least this many bytes is a
+/// chunk group of its own (one compressed frame, addressable by its digest
+/// alone); smaller chunks are packed into shared groups. 64 KiB.
+pub const DEFAULT_NYDUS_BLOB_METADATA_CHUNK_GROUP_THRESHOLD: u32 = 64 * 1024;
+
 /// File-name suffix of a blob meta sidecar file (`<blob>.blob.meta`).
 pub const NYDUS_BLOB_METADATA_SUFFIX: &str = ".blob.meta";
 
@@ -63,6 +68,8 @@ const NYDUS_BLOB_METADATA_MAX_BLOCK_COUNT_BITS: u8 = 19;
 const NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD: Range<usize> = 16..20;
 
 const BLOCK: u64 = EROFS_BLOCK_SIZE as u64;
+/// log2 of the 4KiB block: chunk size bits are block count bits plus this.
+const EROFS_BLOCK_SIZE_BITS: u8 = EROFS_BLOCK_SIZE.trailing_zeros() as u8;
 
 bitflags! {
     /// Feature bits, split EROFS-style (see [`crate::blob::flag`]): the low
@@ -108,7 +115,14 @@ const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = BlobMetadataFlags::all().bit
 ///     20     1  chunk_block_count_bits  log2 of the chunk's 4KiB blocks:
 ///                                       the largest chunk of a file, and
 ///                                       the slot every group owns
-///     21     3  reserved                must be zero
+///     21     1  chunk_group_threshold_bits
+///                                       log2 of the chunk group threshold
+///                                       in bytes: a chunk of at least that
+///                                       size is a group of its own, a
+///                                       group of several chunks holds only
+///                                       smaller ones; 0 records no
+///                                       threshold
+///     22     2  reserved                must be zero
 ///     24     4  chunk_group_count
 ///     28     4  chunk_count
 /// ```
@@ -123,13 +137,14 @@ pub struct BlobMetadataHeader {
     flags: u32,
     crc32: u32,
     chunk_block_count_bits: u8,
+    chunk_group_threshold_bits: u8,
     chunk_group_count: u32,
     chunk_count: u32,
 }
 
 impl BlobMetadataHeader {
     fn from_bytes(bytes: &[u8; NYDUS_BLOB_METADATA_HEADER_SIZE]) -> Result<Self> {
-        if bytes[21..24] != [0, 0, 0] {
+        if bytes[22..24] != [0, 0] {
             return Err(Error::InvalidImage(
                 "blob meta header reserved field must be zero".to_string(),
             ));
@@ -140,6 +155,7 @@ impl BlobMetadataHeader {
             flags: read_u32_at(bytes, 12),
             crc32: read_u32_at(bytes, 16),
             chunk_block_count_bits: read_u8_at(bytes, 20),
+            chunk_group_threshold_bits: read_u8_at(bytes, 21),
             chunk_group_count: read_u32_at(bytes, 24),
             chunk_count: read_u32_at(bytes, 28),
         };
@@ -154,6 +170,7 @@ impl BlobMetadataHeader {
         write_u32_at(&mut data, 12, self.flags);
         write_u32_at(&mut data, 16, self.crc32);
         write_u8_at(&mut data, 20, self.chunk_block_count_bits);
+        write_u8_at(&mut data, 21, self.chunk_group_threshold_bits);
         write_u32_at(&mut data, 24, self.chunk_group_count);
         write_u32_at(&mut data, 28, self.chunk_count);
         data
@@ -176,6 +193,13 @@ impl BlobMetadataHeader {
             return Err(Error::InvalidImage(format!(
                 "blob meta chunk block count bits too large: {}",
                 self.chunk_block_count_bits
+            )));
+        }
+        if self.chunk_group_threshold_bits > self.chunk_block_count_bits + EROFS_BLOCK_SIZE_BITS {
+            return Err(Error::InvalidImage(format!(
+                "blob meta chunk group threshold bits {} exceed the {}-byte chunk size",
+                self.chunk_group_threshold_bits,
+                self.chunk_size()
             )));
         }
         let flags = BlobMetadataFlags::from_bits_truncate(self.flags);
@@ -241,6 +265,19 @@ impl BlobMetadataHeader {
     /// every chunk group owns in the address space.
     pub fn chunk_size(&self) -> u32 {
         EROFS_BLOCK_SIZE << self.chunk_block_count_bits
+    }
+
+    /// log2 of the chunk group threshold in bytes; 0 when none is recorded.
+    pub fn chunk_group_threshold_bits(&self) -> u8 {
+        self.chunk_group_threshold_bits
+    }
+
+    /// The chunk group threshold in bytes, when recorded: every chunk of at
+    /// least this size is a chunk group of its own (its encoded bytes are
+    /// one frame named by its digest), and a group of several chunks holds
+    /// only smaller ones.
+    pub fn chunk_group_threshold(&self) -> Option<u32> {
+        (self.chunk_group_threshold_bits != 0).then(|| 1u32 << self.chunk_group_threshold_bits)
     }
 
     /// Number of chunk groups (the table holds one more entry, the
@@ -668,7 +705,10 @@ enum BlobMetadataStorage {
 /// group of an address is a shift. Inside its slot a group's chunks (whole
 /// files of at most `S` bytes, or `S`-sized slices of larger files) sit
 /// back to back, each starting on its own 4KiB block; the slot's tail past
-/// the last chunk is unused. The encoded stream is dense: a group's payload
+/// the last chunk is unused. A group is either one chunk of at least the
+/// recorded chunk group threshold — so that chunk's encoded bytes are a
+/// frame of their own, addressable by its digest — or several chunks all
+/// below it, packed together. The encoded stream is dense: a group's payload
 /// is its chunks' bytes back to back without the block padding, compressed
 /// as one unit (or stored plain when compression does not shrink it, which
 /// the reader recognizes by `compressed_size == payload_size`). The chunk
@@ -694,16 +734,20 @@ pub struct BlobMetadata {
 impl BlobMetadata {
     /// Creates validated, sealed metadata. `chunk_block_count` is the chunk
     /// size in 4KiB blocks (the largest chunk of a file and the slot of
-    /// every group); `chunk_groups` are in order, their payloads packed
-    /// back to back from offset zero of the data region; `chunks` are the
-    /// chunk byte lengths in group order; `digests` hold one entry per
-    /// chunk, or none with `BlobMetadataDigester::None`. The blob is a
-    /// REDIRECT blob when every group names a redirect source, and a plain
-    /// blob when none does; a mix is rejected.
+    /// every group); `chunk_group_threshold` is the packing rule the groups
+    /// follow, if recorded (a power of two of at most the chunk size: a
+    /// chunk of at least that many bytes is a group of its own, a group of
+    /// several chunks holds only smaller ones); `chunk_groups` are in order,
+    /// their payloads packed back to back from offset zero of the data
+    /// region; `chunks` are the chunk byte lengths in group order; `digests`
+    /// hold one entry per chunk, or none with `BlobMetadataDigester::None`.
+    /// The blob is a REDIRECT blob when every group names a redirect source,
+    /// and a plain blob when none does; a mix is rejected.
     pub fn new(
         compressor: BlobMetadataCompressor,
         digester: BlobMetadataDigester,
         chunk_block_count: u32,
+        chunk_group_threshold: Option<u32>,
         chunk_groups: Vec<BlobMetadataChunkGroup>,
         chunks: Vec<u32>,
         digests: Vec<BlobMetadataDigest>,
@@ -735,12 +779,22 @@ impl BlobMetadata {
                 chunks.len()
             )));
         }
+        let chunk_group_threshold_bits = match chunk_group_threshold {
+            None => 0,
+            Some(threshold) if threshold.is_power_of_two() => threshold.trailing_zeros() as u8,
+            Some(threshold) => {
+                return Err(Error::InvalidParameter(format!(
+                    "blob meta chunk group threshold {threshold} must be a power of two"
+                )));
+            }
+        };
         let header = BlobMetadataHeader {
             magic: NYDUS_BLOB_METADATA_MAGIC,
             version: NYDUS_BLOB_METADATA_VERSION,
             flags: flags.bits(),
             crc32: 0,
             chunk_block_count_bits: block_count_to_bits(chunk_block_count)?,
+            chunk_group_threshold_bits,
             chunk_group_count: count(chunk_groups.len(), "chunk group")?,
             chunk_count: count(chunks.len(), "chunk")?,
         };
@@ -964,16 +1018,18 @@ impl BlobMetadata {
     /// Validate the tables against each other: groups pack their payloads
     /// back to back from offset zero and own consecutive, non-empty chunk
     /// runs that together cover the chunk table; every chunk is non-empty
-    /// and at most the chunk size; a group's chunks fit its slot; a payload
-    /// never grows when encoded, and a plain blob stores every payload
-    /// whole; the terminator carries zero crc; a redirect blob names a
-    /// non-zero source blob per group.
+    /// and at most the chunk size; a group's chunks fit its slot; a group of
+    /// several chunks holds only chunks below the recorded threshold; a
+    /// payload never grows when encoded, and a plain blob stores every
+    /// payload whole; the terminator carries zero crc; a redirect blob names
+    /// a non-zero source blob per group.
     fn validate_tables(header: &BlobMetadataHeader, storage: &BlobMetadataStorage) -> Result<()> {
         let entries = Self::entries_of(header, storage);
         let chunks = Self::chunks_of(header, storage);
         let redirects = Self::redirects_of(header, storage);
         let slot_blocks = header.chunk_block_count() as u64;
         let chunk_size = header.chunk_size();
+        let threshold = header.chunk_group_threshold();
         let Some(terminator) = entries.last() else {
             return Err(Error::InvalidImage(
                 "blob meta chunk group table lacks its terminator".to_string(),
@@ -1013,9 +1069,12 @@ impl BlobMetadata {
                     "blob meta chunk group {index} compressed size exceeds u32"
                 )));
             }
+            let run = &chunks[start.first_chunk as usize..end.first_chunk as usize];
+            // Only a group of several chunks is bound by the threshold.
+            let packed_limit = threshold.filter(|_| run.len() > 1).unwrap_or(u32::MAX);
             let mut payload = 0u64;
             let mut blocks = 0u64;
-            for &len in &chunks[start.first_chunk as usize..end.first_chunk as usize] {
+            for &len in run {
                 if len == 0 {
                     return Err(Error::InvalidImage(
                         "blob meta chunk lengths must be non-zero".to_string(),
@@ -1025,6 +1084,12 @@ impl BlobMetadata {
                     return Err(Error::InvalidImage(
                         "blob meta chunk length exceeds the chunk size".to_string(),
                     ));
+                }
+                if len >= packed_limit {
+                    return Err(Error::InvalidImage(format!(
+                        "blob meta chunk group {index} packs a {len}-byte chunk at or above \
+                         the {packed_limit}-byte chunk group threshold"
+                    )));
                 }
                 payload += len as u64;
                 blocks += (len as u64).div_ceil(BLOCK);
@@ -1187,6 +1252,14 @@ impl BlobMetadata {
     /// Bytes per chunk: the largest chunk of a file, and every group's slot.
     pub fn chunk_size(&self) -> u32 {
         self.header.chunk_size()
+    }
+
+    /// The chunk group threshold in bytes, when recorded: a chunk of at
+    /// least this size is a group of its own, so its encoded bytes are one
+    /// frame named by its digest; a group of several chunks holds only
+    /// smaller ones.
+    pub fn chunk_group_threshold(&self) -> Option<u32> {
+        self.header.chunk_group_threshold()
     }
 
     /// The chunk group payload compressor.
@@ -1409,6 +1482,7 @@ mod tests {
             BlobMetadataCompressor::None,
             digester,
             chunk_blocks,
+            None,
             groups,
             chunks,
             digests,
@@ -1598,6 +1672,7 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
             4,
+            None,
             groups,
             lens,
             digests,
@@ -1681,6 +1756,7 @@ mod tests {
             BlobMetadataCompressor::Zstd,
             BlobMetadataDigester::None,
             1,
+            None,
             vec![BlobMetadataChunkGroup::new(10, 1, crc32c(&payload), None).unwrap()],
             vec![100],
             vec![],
@@ -1698,6 +1774,81 @@ mod tests {
         let mut incompat = raw.clone();
         write_u32_at(&mut incompat, 12, meta.header().flags().bits() | 1 << 8);
         assert!(BlobMetadata::from_bytes(&incompat, false).is_err());
+    }
+
+    #[test]
+    fn chunk_group_threshold_is_recorded_and_enforced() {
+        // 16 KiB slots, 8 KiB threshold: chunks 100 | 5000 pack (both below),
+        // 9000 stands alone (at or above), 40 | 6000 | 1 pack.
+        let stream: Vec<u8> = vec![0u8; 20141];
+        let groups = vec![
+            plain_group(&stream[..5100], 2),
+            plain_group(&stream[..9000], 1),
+            plain_group(&stream[..6041], 3),
+        ];
+        let chunks = vec![100, 5000, 9000, 40, 6000, 1];
+        let build =
+            |threshold: Option<u32>, groups: Vec<BlobMetadataChunkGroup>, chunks: Vec<u32>| {
+                BlobMetadata::new(
+                    BlobMetadataCompressor::None,
+                    BlobMetadataDigester::None,
+                    4,
+                    threshold,
+                    groups,
+                    chunks,
+                    vec![],
+                )
+            };
+        let meta = build(Some(8192), groups.clone(), chunks.clone()).unwrap();
+        assert_eq!(meta.chunk_group_threshold(), Some(8192));
+        assert_eq!(meta.header().chunk_group_threshold_bits(), 13);
+        let mut raw = Vec::new();
+        meta.write_to(&mut raw).unwrap();
+        assert_eq!(raw[21], 13);
+        let loaded = BlobMetadata::from_bytes(&raw, true).unwrap();
+        assert_eq!(loaded.chunk_group_threshold(), Some(8192));
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.blob.meta");
+        meta.save(&path).unwrap();
+        assert_eq!(
+            BlobMetadata::from_path(&path, true)
+                .unwrap()
+                .chunk_group_threshold(),
+            Some(8192)
+        );
+
+        // No threshold recorded: any packing goes.
+        let free = build(None, groups.clone(), chunks.clone()).unwrap();
+        assert_eq!(free.chunk_group_threshold(), None);
+        assert_eq!(free.header().chunk_group_threshold_bits(), 0);
+        // A threshold equal to the chunk size only isolates full chunks; one
+        // above it, or not a power of two, is rejected.
+        assert!(build(Some(16384), groups.clone(), chunks.clone()).is_ok());
+        assert!(build(Some(32768), groups.clone(), chunks.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("exceed"));
+        assert!(build(Some(3000), groups.clone(), chunks.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("power of two"));
+
+        // A packed group holding a chunk at or above the threshold is
+        // rejected: 5000 >= 4096 in a two-chunk group.
+        assert!(build(Some(4096), groups.clone(), chunks.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("at or above"));
+        // A single chunk below the threshold in a group of its own is fine.
+        let lone = vec![plain_group(&stream[..100], 1)];
+        assert!(build(Some(8192), lone, vec![100]).is_ok());
+        // The reader enforces it on load too.
+        let mut tampered = raw.clone();
+        tampered[21] = 12;
+        assert!(BlobMetadata::from_bytes(&tampered, false)
+            .unwrap_err()
+            .to_string()
+            .contains("at or above"));
     }
 
     #[test]

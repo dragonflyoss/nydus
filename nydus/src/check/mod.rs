@@ -153,6 +153,8 @@ struct BlobInspection {
 pub struct BlobMetadataSummary {
     pub chunk_group_count: usize,
     pub chunk_size: u32,
+    /// The packing rule the groups follow, when the header records one.
+    pub chunk_group_threshold: Option<u32>,
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
@@ -661,6 +663,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
     Ok(BlobMetadataSummary {
         chunk_group_count: blob_metadata.chunk_group_count(),
         chunk_size: blob_metadata.chunk_size(),
+        chunk_group_threshold: blob_metadata.chunk_group_threshold(),
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.uncompressed_size(),
         total_compressed_size: blob_metadata.compressed_end(),
@@ -751,6 +754,7 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
             DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+            None,
             Vec::new(),
             Vec::new(),
             Vec::new(),

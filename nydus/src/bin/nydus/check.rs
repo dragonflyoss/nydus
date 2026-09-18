@@ -452,6 +452,8 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         full_blob_digest: String,
         #[tabled(rename = "CHUNK SIZE")]
         chunk_size: String,
+        #[tabled(rename = "CHUNK GROUP THRESHOLD")]
+        chunk_group_threshold: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
@@ -496,6 +498,10 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             data_blob_digest: data_blob_digest(blob),
             full_blob_digest: optional_digest(blob.blob_sha256),
             chunk_size: blob_metadata_field(blob, |meta| meta.chunk_size),
+            chunk_group_threshold: blob_metadata_field(blob, |meta| {
+                meta.chunk_group_threshold
+                    .map_or_else(|| "-".to_string(), |threshold| threshold.to_string())
+            }),
             chunk_group_count: blob_metadata_field(blob, |meta| meta.chunk_group_count),
             chunk_compressor: blob_metadata_field(blob, |meta| meta.compressor),
             blob_meta_chunks: blob_metadata_field(blob, |meta| meta.chunk_count),

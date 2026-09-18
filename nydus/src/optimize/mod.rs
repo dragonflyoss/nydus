@@ -131,8 +131,16 @@ pub fn build_ondemand_blob(
     let mut chunk_block_count = None;
     let mut compressor = BlobMetadataCompressor::None;
     let mut digester = BlobMetadataDigester::Blake3;
+    // The copied groups follow their sources' packing rule; record it only
+    // when every source agrees, else the ondemand blob records none.
+    let mut chunk_group_threshold: Option<Option<u32>> = None;
     for (blob_index, cache) in &sources {
         let meta = cache.blob_metadata();
+        chunk_group_threshold = Some(match chunk_group_threshold {
+            None => meta.chunk_group_threshold(),
+            Some(threshold) if threshold == meta.chunk_group_threshold() => threshold,
+            Some(_) => None,
+        });
         match chunk_block_count {
             None => chunk_block_count = Some(meta.chunk_block_count()),
             Some(blocks) if blocks != meta.chunk_block_count() => {
@@ -259,6 +267,7 @@ pub fn build_ondemand_blob(
         compressor,
         digester,
         chunk_block_count,
+        chunk_group_threshold.flatten(),
         chunk_groups,
         chunks,
         digests,

@@ -284,6 +284,7 @@ mod tests {
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
             1,
+            None,
             vec![BlobMetadataChunkGroup::new(4096, 1, crc32c::crc32c(payload), None).unwrap()],
             vec![4096],
             vec![BlobMetadataDigest::new(*blake3::hash(payload).as_bytes())],

@@ -942,7 +942,9 @@ fn reads_chunk_data_from_footer_based_full_blob() {
         BlobMetadataCompressor::None,
         BlobMetadataDigester::Blake3,
         true,
-        BlobLayout::ChunkGroups,
+        BlobLayout::ChunkGroups {
+            chunk_group_threshold: EROFS_BLOCK_SIZE,
+        },
     )
     .expect("blob writer");
     let mut inodes = build_tree(
