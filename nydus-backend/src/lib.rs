@@ -27,6 +27,14 @@ pub use local::Local;
 #[cfg(feature = "backend-registry")]
 pub(crate) use registry::Registry;
 
+/// The registry backend's shared tokio runtime is process-wide; an embedding
+/// process bounds its threads and pins their network namespace with
+/// [`configure_runtime`] before the first read.
+#[cfg(feature = "backend-registry")]
+pub use registry::{
+    configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
+};
+
 /// What kind of backend read this is, shared with the metrics layer. Policy
 /// (retry, throttling, Dragonfly priority) keys off it here; its definition
 /// lives in [`nydus_telemetry::metrics`] so that crate stays a dependency
