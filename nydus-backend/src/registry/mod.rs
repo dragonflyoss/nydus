@@ -19,11 +19,12 @@ mod dns;
 #[cfg(feature = "backend-dragonfly-proxy")]
 mod dragonfly;
 mod http;
+mod rt;
 
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
@@ -34,7 +35,6 @@ use reqwest::header::{
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::runtime::Runtime;
 use tokio_util::io::StreamReader;
 use tracing::debug;
 use url::Url;
@@ -45,6 +45,10 @@ use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_FOOTER_SIZE};
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
 use self::http::HTTP;
+use self::rt::runtime;
+pub use self::rt::{
+    configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
+};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use self::dragonfly::Dragonfly;
@@ -53,20 +57,22 @@ const CLIENT_ID: &str = "nydus-registry-client";
 const DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60;
 const TOKEN_REFRESH_MARGIN: u64 = 20;
 
-/// Shared runtime bridging the synchronous [`BlobBackend`] trait to the
-/// asynchronous network clients (direct HTTP and, when enabled, the Dragonfly
-/// SDK).
-static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("nydus-backend")
-        .enable_all()
-        .build()
-        .expect("failed to build backend tokio runtime")
-});
-
-/// Access the shared backend runtime.
-fn runtime() -> &'static Runtime {
-    &RUNTIME
+/// Apply the config file's thread bounds to the shared runtime. Only an
+/// explicit (non-zero) setting is forwarded, so a backend built with the
+/// defaults never seals the runtime ahead of an embedder that configures it
+/// itself (with a netns) after building its backend config. The config file
+/// cannot name a netns; that stays an embedder-only option.
+fn apply_runtime_config(http: &nydus_config::HttpConfig) {
+    if http.worker_threads == 0 && http.max_blocking_threads == 0 {
+        return;
+    }
+    if let Err(err) = configure_runtime(RuntimeOptions {
+        worker_threads: http.worker_threads,
+        max_blocking_threads: http.max_blocking_threads,
+        netns: None,
+    }) {
+        tracing::warn!("registry backend: http.worker_threads/max_blocking_threads ignored: {err}");
+    }
 }
 
 /// Errors produced by the registry backend.
@@ -535,6 +541,7 @@ impl Registry {
     /// Build a registry backend from its configuration.
     pub(crate) fn new(config: RegistryConfig) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
+        apply_runtime_config(&config.http);
         let http = HTTP::new(&config.http)?;
 
         #[cfg(feature = "backend-dragonfly-proxy")]
@@ -1359,6 +1366,35 @@ mod tests {
             registry.blob_url("abc123").unwrap(),
             "https://registry.example.com/v2/library/ubuntu/blobs/sha256:abc123"
         );
+    }
+
+    #[test]
+    fn config_thread_bounds_reach_the_shared_runtime() {
+        // A default http block must not touch the process-wide runtime
+        // config, so an embedder can still configure it (with a netns) after
+        // building its backend.
+        apply_runtime_config(&nydus_config::HttpConfig::default());
+
+        // An explicit request is forwarded. The runtime config is process
+        // global and another test in this binary may already have sealed it
+        // with different values, so accept either outcome, but the request
+        // must be visible as "applied" or "rejected as conflicting", never
+        // dropped: a second identical configure_runtime() call then either
+        // succeeds (ours took) or reports AlreadyExists (someone else's did).
+        let config: RegistryConfig = serde_yaml::from_str(
+            "addr: https://registry.example.com\nrepository: library/ubuntu\nhttp:\n  worker_threads: 3\n  max_blocking_threads: 5\n",
+        )
+        .unwrap();
+        assert_eq!(config.http.worker_threads, 3);
+        apply_runtime_config(&config.http);
+        match configure_runtime(RuntimeOptions {
+            worker_threads: 3,
+            max_blocking_threads: 5,
+            netns: None,
+        }) {
+            Ok(()) => {}
+            Err(err) => assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}"),
+        }
     }
 
     #[test]
