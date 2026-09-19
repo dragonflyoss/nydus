@@ -197,6 +197,87 @@ whole OCI images against a registry. It shares no code with the Rust side;
 the image format and the registry protocol are the only contracts between
 them.
 
+## Runtime Thread Model
+
+The data-plane APIs are synchronous. A thread that calls `ErofsReader`,
+`NydusCore`, `Blobs`, or `BlobBackend` remains responsible for that operation
+until it completes. The layers below may use helper threads for remote I/O or
+explicit prefetch, but they do not turn an ordinary read into a detached task.
+This means frontend concurrency is also read concurrency: for example, a FUSE
+worker that misses the cache stays blocked until the chunk group has been
+fetched, decoded, verified, and stored. Concurrent callers that miss the same
+chunk group are coalesced by the cache's per-group claim/wait state rather than
+downloading it more than once.
+
+### Backend thread pools
+
+`BlobBackend` itself does not own a general-purpose thread pool. The local
+backend performs file I/O directly on the caller. Remote registry and
+Dragonfly HTTP backends bridge their synchronous methods into one lazy,
+process-wide Tokio multi-thread runtime:
+
+| Pool | Default | Lifetime and work |
+| ---- | ------- | ----------------- |
+| Async workers | 2 threads | Created on the first remote read and retained for the process lifetime. They drive HTTP sockets, timers, and connection-pool futures; the synchronous frontend caller waits in `block_on`. |
+| Blocking workers | Up to 8 threads | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`). Idle threads are released after 10 seconds. Blob reads, decompression, verification, and cache writes do not run in this pool. |
+
+The registry `http.worker_threads` and `http.max_blocking_threads` settings
+override these defaults. The runtime is shared by every registry backend in a
+process, so configuration is first-writer-wins and must be applied before the
+first remote read. Repeating the same configuration is harmless; a conflicting
+late configuration is rejected and logged. Embedders may instead call
+`nydus_backend::configure_runtime` before first use, including an optional
+network namespace that every runtime worker enters. A process using only local
+blobs never creates this Tokio runtime.
+
+### `nydus-core` API
+
+`nydus-core` has no request executor or implicit read pool. Construction,
+metadata lookup, path walking, range probing, and on-demand fetch all execute
+synchronously on the calling thread. Callers choose the concurrency model by
+calling the shared `NydusCore`/`ErofsReader` from their own FUSE, NBD, ublk,
+fanotify, UFFD, or VMM workers. Internal locks protect shared lazy state and
+serialize publication of a chunk group without serializing unrelated groups.
+
+The exception is configured prefetch. `NydusCore::new` starts one detached
+`nydus_prefetch` coordinator when `prefetch.scope` is not `none`. Depending on
+the scope and image, that coordinator creates transient cache-open and fetch
+worker pools, each bounded by `prefetch.concurrent_blob_count`. Under ondemand
+prefetch the two pools can overlap, so this setting is a per-pool concurrency
+bound rather than a total thread cap. These workers are joined by the
+coordinator. The core keeps a stop flag rather than a join handle: dropping it
+requests a cooperative stop, so teardown does not wait for an in-flight
+backend request. The standalone FUSE path builds `ErofsReader` directly and
+starts the same prefetch workflow after mounting; its prefetch threads are
+independent of the FUSE request workers.
+
+### Nydus FUSE
+
+`nydus fuse` sets `fuser::Config::n_threads` from the hidden `--threads`
+option (or `NYDUS_FUSE_THREADS`). The default is the host's available
+parallelism clamped to 4 through 16. `fuser` then creates:
+
+- one `fuser-bg` session thread, which owns the background session and waits
+	for its event loops; and
+- exactly `n_threads` `fuser-N` request threads. Each thread reads from its
+	cloned FUSE file descriptor and executes the corresponding `ErofsFs`
+	callback synchronously. There is no additional callback queue or I/O pool.
+
+Consequently, at most `n_threads` FUSE callbacks can run at once, and a cold
+read occupies one of those workers while the synchronous cache/backend path
+completes. Metadata requests and cache hits use the same workers. The FUSE
+service also creates two lifecycle threads which are not request workers:
+`nydus_fuse_signal` waits synchronously for termination signals, while
+`nydus_fuse_controller` owns unmount and session join. The command's main
+thread waits for the controller result.
+
+Optional facilities add their own independent threads: enabled prefetch uses
+the model above, the metrics API server runs a current-thread Tokio runtime on
+one dedicated OS thread, and non-blocking tracing writers have their own drain
+workers. None of these increases FUSE callback concurrency. On non-Linux
+platforms, `fuser` supports only one request thread and rejects a larger
+`n_threads` value.
+
 ## CLI Contract
 
 ### Image layouts
