@@ -373,8 +373,9 @@ pub struct PrefetchConfig {
     #[serde(default = "default_prefetch_timeout", with = "humantime_serde")]
     pub timeout: Duration,
 
-    /// The scope of blob prefetch: nothing, only the "ondemand" blob (the
-    /// default), or all blobs.
+    /// The scope of blob prefetch: nothing, only the "ondemand" blob, all
+    /// blobs, or `auto` (the default): the "ondemand" blob when the image has
+    /// one, otherwise all blobs.
     #[serde(default)]
     pub scope: PrefetchScope,
 
@@ -394,19 +395,30 @@ pub struct PrefetchConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PrefetchScope {
-    /// Disable prefetch: nothing is pulled ahead of demand.
+    /// Disable prefetch: nothing is pulled ahead of demand, not even an
+    /// "ondemand" blob.
     None,
 
     /// Pull only the "ondemand" blob (produced by `nydus optimize`), which
     /// holds the recorded working set in access order, without pulling the
     /// whole image. On an image without an ondemand blob nothing is
     /// prefetched.
-    #[default]
     Ondemand,
 
-    /// Pull all blobs: the priority blobs first, in declared order, then
-    /// every remaining blob — the entire image ends up in the local cache.
+    /// Pull all blobs: the priority blobs first, in declared order (an
+    /// optimized image lists its ondemand blob first), then every remaining
+    /// blob — the entire image ends up in the local cache.
     All,
+
+    /// Decide per image once the blob metadata is available: [`Ondemand`]
+    /// when a priority blob is an ondemand blob, otherwise [`All`], so an
+    /// optimized image streams only its recorded working set while an
+    /// unoptimized one streams every blob like a classic nydusd mount.
+    ///
+    /// [`Ondemand`]: PrefetchScope::Ondemand
+    /// [`All`]: PrefetchScope::All
+    #[default]
+    Auto,
 }
 
 /// Implement Default for PrefetchConfig.
@@ -434,7 +446,7 @@ impl Default for PrefetchConfig {
 /// storage:
 ///   dir: /path/to/cache
 /// prefetch:
-///   scope: ondemand
+///   scope: auto
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -765,9 +777,28 @@ scope: all
             default_prefetch_concurrent_blob_count()
         );
         assert_eq!(prefetch.timeout, default_prefetch_timeout());
-        assert_eq!(prefetch.scope, PrefetchScope::Ondemand);
+        assert_eq!(prefetch.scope, PrefetchScope::Auto);
         assert_eq!(prefetch.retry_delay_min, default_prefetch_retry_delay_min());
         assert_eq!(prefetch.retry_delay_max, default_prefetch_retry_delay_max());
+    }
+
+    #[test]
+    fn prefetch_scope_accepts_every_spelling() {
+        for (yaml, scope) in [
+            ("scope: none\n", PrefetchScope::None),
+            ("scope: ondemand\n", PrefetchScope::Ondemand),
+            ("scope: all\n", PrefetchScope::All),
+            ("scope: auto\n", PrefetchScope::Auto),
+        ] {
+            let prefetch: PrefetchConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(prefetch.scope, scope, "{yaml}");
+        }
+        for yaml in ["scope: everything\n", "scope: opt\n"] {
+            assert!(
+                serde_yaml::from_str::<PrefetchConfig>(yaml).is_err(),
+                "{yaml}"
+            );
+        }
     }
 
     #[test]
@@ -854,7 +885,7 @@ storage:
             config.prefetch.concurrent_blob_count,
             default_prefetch_concurrent_blob_count()
         );
-        assert_eq!(config.prefetch.scope, PrefetchScope::Ondemand);
+        assert_eq!(config.prefetch.scope, PrefetchScope::Auto);
     }
 
     #[test]

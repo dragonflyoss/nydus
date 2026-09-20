@@ -23,15 +23,20 @@ const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///
 /// Workflow:
-/// 1. Prefetch the blobs declared in the root `trusted.nydus.prefetch.blobs`
-///    xattr sequentially, in the declared priority order (single thread).
-/// 2. When the scope is [`PrefetchScope::All`], prefetch the remaining blobs
+/// 1. Resolve [`PrefetchScope::Auto`] from the priority blobs' metadata:
+///    [`PrefetchScope::Ondemand`] when one of them is an "ondemand" (REDIRECT)
+///    blob, otherwise [`PrefetchScope::All`].
+/// 2. Prefetch the blobs declared in the root `trusted.nydus.prefetch.blobs`
+///    xattr sequentially (single thread): the ondemand blobs first; under
+///    `ondemand` nothing else, under `all` the other priority blobs follow in
+///    declared order.
+/// 3. When the scope is [`PrefetchScope::All`], prefetch the remaining blobs
 ///    concurrently with a worker pool; otherwise only open every blob's cache
-///    (blob meta, sparse files) in the background, alongside step 1, so the
+///    (blob meta, sparse files) in the background, alongside step 2, so the
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" blob) while no later read pays the
 ///    metadata round trips.
-/// 3. Blobs whose prefetch the backend throttled (Dragonfly `429`, detected
+/// 4. Blobs whose prefetch the backend throttled (Dragonfly `429`, detected
 ///    via [`is_backend_throttled`]) are rescheduled after a random delay in
 ///    the configured window and re-attempted until they stop being throttled
 ///    or the [stop flag](Self::stop_flag) is raised. Other failures are
@@ -150,10 +155,11 @@ impl BlobPrefetcher {
     }
 
     /// Drive the whole prefetch workflow synchronously on the calling thread:
-    /// priority blobs sequentially in declared order, then (only when the scope
-    /// is [`PrefetchScope::All`]) the remaining blobs through a worker pool,
-    /// then delayed retries of throttled blobs. Per-blob failures other than
-    /// backend throttling are logged and skipped.
+    /// ondemand priority blobs first, then (only when the scope resolves to
+    /// [`PrefetchScope::All`]) the other priority blobs in declared order and
+    /// the remaining blobs through a worker pool, then delayed retries of
+    /// throttled blobs. Per-blob failures other than backend throttling are
+    /// logged and skipped.
     pub fn run(mut self) {
         if self.scope == PrefetchScope::None {
             return;
@@ -162,39 +168,71 @@ impl BlobPrefetcher {
         // Blobs the backend throttled, awaiting a delayed retry.
         let mut throttled: Vec<u16> = Vec::new();
 
-        // Under the "ondemand" scope the non-ondemand blobs are not pulled,
-        // but every cache is opened in the background (blob meta fetched and
+        // Under the "ondemand" scope the non-ondemand blobs are not pulled, but
+        // every cache is opened in the background (blob meta fetched and
         // validated, sparse files created) so nothing pays those round trips
-        // serially later: neither the phase 1 checks below nor block-device
+        // serially later: neither the ondemand checks below nor block-device
         // frontends, which probe many blobs right after the device appears.
-        // The openers run alongside the priority prefetch and are joined once
-        // it is done.
+        // "auto" needs the same checks to pick its scope, so it starts the
+        // openers too. The openers run alongside the priority prefetch and
+        // are joined once it is done.
         let openers = if self.scope != PrefetchScope::All {
             self.spawn_blob_openers()
         } else {
             Vec::new()
         };
 
-        // Phase 1: priority blobs, sequential, in declared order. Under the
-        // default "ondemand" scope only the ondemand blob is warmed (the
-        // REDIRECT blob `nydus optimize` packed from the access-ordered hot
-        // set, streamed into the source blobs' caches); other priority blobs
-        // are skipped so the backend bandwidth is not spent pulling whole
-        // source blobs.
-        for blob_index in &self.priority {
-            let blob_index = *blob_index;
+        // Which priority blobs are ondemand (REDIRECT) blobs: needed to resolve
+        // `auto`, to pick the blobs `ondemand` pulls and to order phase 1 under
+        // `all`. A blob whose meta cannot be read is treated as a plain blob
+        // and logged.
+        let ondemand: Vec<bool> = self
+            .priority
+            .iter()
+            .map(|&blob_index| match self.caches.is_redirect(blob_index) {
+                Ok(redirect) => redirect,
+                Err(err) => {
+                    warn!("failed to inspect priority blob {}: {}", blob_index, err);
+                    false
+                }
+            })
+            .collect();
+        let scope = match self.scope {
+            PrefetchScope::Auto => {
+                let resolved = if ondemand.contains(&true) {
+                    PrefetchScope::Ondemand
+                } else {
+                    PrefetchScope::All
+                };
+                info!("prefetch scope auto resolved to {:?}", resolved);
+                resolved
+            }
+            scope => scope,
+        };
+        if self.stopped() {
+            return;
+        }
+
+        // Phase 1: priority blobs, sequential. Ondemand blobs go first (they
+        // stream the recorded working set into the source blobs' caches, so
+        // whole-blob pulls that follow skip the groups already filled); under
+        // "ondemand" they are the only blobs pulled, under "all" the other
+        // priority blobs follow in declared order.
+        let priority_with_flag = || self.priority.iter().copied().zip(ondemand.iter().copied());
+        let mut phase1: Vec<u16> = priority_with_flag()
+            .filter(|&(_, redirect)| redirect)
+            .map(|(index, _)| index)
+            .collect();
+        if scope == PrefetchScope::All {
+            phase1.extend(
+                priority_with_flag()
+                    .filter(|&(_, redirect)| !redirect)
+                    .map(|(index, _)| index),
+            );
+        }
+        for blob_index in phase1 {
             if self.stopped() {
                 return;
-            }
-            if self.scope != PrefetchScope::All {
-                match self.caches.is_redirect(blob_index) {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    Err(err) => {
-                        warn!("failed to inspect priority blob {}: {}", blob_index, err);
-                        continue;
-                    }
-                }
             }
             match self
                 .caches
@@ -218,8 +256,8 @@ impl BlobPrefetcher {
         }
 
         // Phase 2: remaining blobs, concurrent worker pool. Skipped unless the
-        // scope is "all".
-        if self.scope == PrefetchScope::All && !self.rest.is_empty() {
+        // scope resolved to "all".
+        if scope == PrefetchScope::All && !self.rest.is_empty() {
             let worker_count = self.threads.min(self.rest.len());
             let queue = Arc::new(Mutex::new(std::mem::take(&mut self.rest)));
             let throttled_shared = Arc::new(Mutex::new(Vec::new()));
@@ -504,5 +542,156 @@ mod tests {
 
         assert_eq!(backend.attempts(), 0);
         assert!(start.elapsed() < Duration::from_millis(30));
+    }
+
+    /// Records which blob every data read targets, in call order.
+    struct RecordingBackend {
+        inner: Local,
+        reads: Mutex<Vec<[u8; SHA256_DIGEST_SIZE]>>,
+    }
+
+    impl BlobBackend for RecordingBackend {
+        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
+            self.inner.blob_metadata(blob_id)
+        }
+
+        fn read_range_into(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            dst: &mut [u8],
+            ctx: ReadContext,
+        ) -> io::Result<()> {
+            self.reads.lock().unwrap().push(*blob_id);
+            self.inner.read_range_into(blob_id, offset, dst, ctx)
+        }
+    }
+
+    /// Two blobs in the backend dir: plain blob 1 and blob 2, an "ondemand"
+    /// (REDIRECT) blob whose single group redirects to blob 1's group 0.
+    /// Returns the backend, the cache set and the blob ids of (1, 2).
+    fn plain_and_redirect_blobs(
+        backend_dir: &Path,
+        cache_dir: &Path,
+    ) -> (
+        Arc<RecordingBackend>,
+        Arc<BlobCaches>,
+        [[u8; SHA256_DIGEST_SIZE]; 2],
+    ) {
+        use nydus_format::blob::{
+            BlobMetadataChunkGroup, BlobMetadataDigester, BlobMetadataRedirect,
+        };
+        let (payload, plain_meta) = test_payload();
+        let plain_id = write_minimal_full_blob(backend_dir, &payload, &plain_meta, true);
+        let group = plain_meta.chunk_group(0).unwrap();
+        let redirect_meta = BlobMetadata::new(
+            BlobMetadataCompressor::None,
+            BlobMetadataDigester::None,
+            1,
+            vec![BlobMetadataChunkGroup::new(
+                group.compressed_size(),
+                group.chunk_count(),
+                group.crc32(),
+                Some(BlobMetadataRedirect::new(1, 0).unwrap()),
+            )
+            .unwrap()],
+            plain_meta.chunks().to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(redirect_meta.is_redirect());
+        let redirect_id = write_minimal_full_blob(backend_dir, &payload, &redirect_meta, true);
+        let backend = Arc::new(RecordingBackend {
+            inner: Local::new(backend_dir.to_path_buf()),
+            reads: Mutex::new(Vec::new()),
+        });
+        let caches = Arc::new(
+            BlobCaches::new(
+                [(1u16, plain_id), (2u16, redirect_id)],
+                backend.clone(),
+                Some(cache_dir),
+                None,
+            )
+            .unwrap(),
+        );
+        (backend, caches, [plain_id, redirect_id])
+    }
+
+    /// Run a prefetcher with `scope` over `plan` and return the distinct blobs
+    /// read from the backend, in first-read order, as blob indexes.
+    fn blobs_read(scope: PrefetchScope, plan: PrefetchPlan) -> Vec<u16> {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let (backend, caches, ids) = plain_and_redirect_blobs(backend_dir.path(), cache_dir.path());
+        BlobPrefetcher::new(
+            caches,
+            plan,
+            2,
+            scope,
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .run();
+        let mut order = Vec::new();
+        for read in backend.reads.lock().unwrap().iter() {
+            let index = if *read == ids[0] { 1 } else { 2 };
+            if !order.contains(&index) {
+                order.push(index);
+            }
+        }
+        order
+    }
+
+    #[test]
+    fn scope_none_pulls_nothing_even_with_an_ondemand_blob() {
+        let plan = PrefetchPlan {
+            priority: vec![2, 1],
+            rest: Vec::new(),
+        };
+        assert!(blobs_read(PrefetchScope::None, plan).is_empty());
+    }
+
+    #[test]
+    fn scope_ondemand_streams_only_the_ondemand_blob() {
+        let plan = PrefetchPlan {
+            priority: vec![2, 1],
+            rest: Vec::new(),
+        };
+        // The redirect stream fills blob 1's cache from blob 2's data; blob 1
+        // itself is never read from the backend.
+        assert_eq!(blobs_read(PrefetchScope::Ondemand, plan), vec![2]);
+        let plan = PrefetchPlan {
+            priority: vec![1],
+            rest: vec![2],
+        };
+        // No ondemand blob among the priority blobs: nothing is pulled.
+        assert!(blobs_read(PrefetchScope::Ondemand, plan).is_empty());
+    }
+
+    #[test]
+    fn scope_all_streams_the_ondemand_blob_before_the_others() {
+        // Declared order puts the plain blob first; the ondemand blob is
+        // still streamed first, then the plain blob's remaining groups.
+        let plan = PrefetchPlan {
+            priority: vec![1, 2],
+            rest: Vec::new(),
+        };
+        let read = blobs_read(PrefetchScope::All, plan);
+        assert_eq!(read.first(), Some(&2), "reads: {read:?}");
+    }
+
+    #[test]
+    fn scope_auto_picks_ondemand_with_an_ondemand_blob_and_all_without() {
+        let plan = PrefetchPlan {
+            priority: vec![2, 1],
+            rest: Vec::new(),
+        };
+        assert_eq!(blobs_read(PrefetchScope::Auto, plan), vec![2]);
+        let plan = PrefetchPlan {
+            priority: vec![1],
+            rest: Vec::new(),
+        };
+        assert_eq!(blobs_read(PrefetchScope::Auto, plan), vec![1]);
     }
 }
