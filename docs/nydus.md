@@ -943,7 +943,7 @@ storage:
   dir: /var/lib/nydus/cache
 prefetch:
   concurrent_blob_count: 10
-  scope: ondemand
+  scope: auto
 ```
 
 Fields:
@@ -990,11 +990,15 @@ Fields:
 	spreads out instead of stampeding. `retry_delay_min` must not exceed
 	`retry_delay_max`. Only throttled failures are rescheduled; other prefetch
 	failures are logged and skipped.
-- `prefetch.scope` (default `ondemand`) selects which blobs to pull. `none`
-	disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
-	(if any), landing the access-ordered hot set in the source blobs' caches
-	while leaving backend bandwidth to on-demand reads; `all` prefetches every
-	blob — priority blobs first, then the rest. See [Blob prefetch](#blob-prefetch).
+- `prefetch.scope` (default `auto`) selects which blobs to pull. `none`
+        disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
+        `nydus optimize` emits (if any), landing the access-ordered hot set in the
+        source blobs' caches while leaving backend bandwidth to on-demand reads;
+        `all` prefetches every blob — the ondemand blob first, then the other
+        priority blobs, then the rest; `auto` behaves like `ondemand` when a
+        priority blob is an ondemand blob and like `all` otherwise, so an
+        unoptimized image is still streamed in the background.
+        See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
@@ -2170,23 +2174,31 @@ Per-blob prefetch streams chunk groups into the cache:
 	previous run's persistent cache) are trimmed off the ends of a batch; a
 	batch that is entirely ready costs no backend read.
 
-Prefetch scheduling across blobs has two phases:
+Prefetch scheduling across blobs has two phases; `prefetch.scope` picks what
+each phase covers. `auto` (the default) is resolved on the prefetch thread once
+the priority blobs' metas are known: it becomes `ondemand` when one of them is
+an ondemand blob and `all` otherwise, so an optimized image spends backend
+bandwidth only on its hot set while an unoptimized one is still streamed the
+way a classic nydusd mount would. The resolution is logged.
 
 1. Priority blobs are prefetched first, sequentially, in the order listed by the
-	root inode's `trusted.nydus.prefetch.blobs` xattr (a comma-separated list of
-	device ids). The list is deduplicated and filtered to existing devices. When
-	`prefetch.scope` is `ondemand` (the default), only the "ondemand" priority
-	blob (its blob meta carries the `REDIRECT` flag) is warmed; other priority
-	blobs are skipped so backend bandwidth is not spent pulling whole source
-	blobs.
+        root inode's `trusted.nydus.prefetch.blobs` xattr (a comma-separated list of
+        device ids). The list is deduplicated and filtered to existing devices. The
+        "ondemand" priority blobs (their blob meta carries the `REDIRECT` flag) are
+        always streamed first regardless of their position in the list. Under
+        `ondemand` they are the only blobs warmed; other priority blobs are skipped
+        so backend bandwidth is not spent pulling whole source blobs. Under `all` the
+        other priority blobs follow, and the groups the redirect stream already
+        filled in their caches are trimmed off their batches.
 2. Only when `prefetch.scope` is `all`, the remaining blob devices are then
-	prefetched concurrently by a worker pool sized to
-	`min(prefetch.concurrent_blob_count, remaining)` (default `10`). Under
-	`ondemand` a pool of the same size instead opens every blob's cache
-	(fetches and validates the blob metas, creates the sparse files) without
-	pulling data, priority blobs first and running alongside phase 1 rather
-	than after it. An optimized image lists every blob in its prefetch xattr,
-	so without this the phase 1 `REDIRECT` checks alone would open the caches
+        prefetched concurrently by a worker pool sized to
+        `min(prefetch.concurrent_blob_count, remaining)` (default `10`). Under
+        `ondemand` and `auto` a pool of the same size instead opens every blob's
+        cache (fetches and validates the blob metas, creates the sparse files)
+        without pulling data, priority blobs first and running alongside phase 1
+        rather than after it; the `auto` decision reuses those opens. An
+        optimized image lists every blob in its prefetch xattr, so without this
+        the phase 1 `REDIRECT` checks alone would open the caches
 	one blob at a time; with it neither those checks, nor the redirect fills
 	into the source caches, nor a later first read of any blob, nor a
 	block-device frontend's probe of many blobs right after the device appears
@@ -2352,7 +2364,8 @@ through `ublk_drv` over `io_uring`; see
 	happens on first touch through `blobs.prepare_all()` or `blobs.fetch`.
 - Unless `config.prefetch.scope` is `none`, `new` spawns a background prefetch
 	worker before returning — the same two-phase workflow as `nydus fuse`
-	(ondemand blob first, then the rest only under `prefetch.scope: all`). The worker
+	(ondemand blob first, then the rest only under `prefetch.scope: all`, or
+	under the default `auto` when the image has no ondemand blob). The worker
 	thread inherits the network namespace active at construction time, so
 	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.
