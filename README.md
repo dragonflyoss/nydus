@@ -27,20 +27,20 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
   in bulk up front via the compact bootstrap, then file data loads on demand.
 - **Content-defined chunk groups, runtime fetch size** — `--chunk-size`
   (default 2 MiB) sets the file chunk granularity; chunk groups are
-  compressed and verified as a unit (zstd or LZ4, CRC32C on every read,
-  BLAKE3 per chunk group). `--chunk-group-minimum-size` (default 2 MiB,
+  compressed and verified as a unit (zstd or LZ4, CRC32C on each decode,
+  optional BLAKE3 verification per chunk group). `--chunk-group-minimum-size` (default 2 MiB,
   independent of the file chunk size) is the least any group but a blob's last spans:
   a chunk at or above it is a group of its own, so its compressed bytes
   are one frame a content-addressed cache can serve by digest, while
   smaller chunks, including full chunks below that minimum, are packed
-  together into groups of one to four times it,
-  closed at content-defined boundaries, so the packs of two
-  near-identical images match too; how much one on-demand read
+  together into groups of one to four times it (the final group may be smaller).
+  Content-defined boundaries help near-identical images share packs,
+  without guaranteeing resynchronisation; how much one on-demand read
   covers is the daemon's `storage.fetch_size` (default 2 MiB of compressed
   bytes), tuned per deployment without rebuilding the image.
 - **On-demand loading** — file reads map to compressed groups through an O(1)
-  logical-address lookup; only the touched groups are fetched, validated,
-  decoded, and cached.
+  logical-address lookup; missing groups and optional fetch-window neighbors
+  are fetched, validated, decoded, and cached.
 - **Simple blob metadata** — version 1 uses a 32-byte Header, GroupTable,
   ChunkTable, GranuleIndexTable, and optional DigestTable and RedirectTable.
   Every chunk has a four-byte length; a mapped direct granule index needs
@@ -159,8 +159,9 @@ the mean of 2 runs; run-to-run spread is < 5%.
 - Measured on Ubuntu 24.04 (arm64), Linux 7.0.0, with an earlier v3 build
   (1 MiB chunks in 4 MiB chunk groups, zstd; the current builder emits
   2 MiB lone chunks and 2–8 MiB packs of small files and the daemon fetches
-  2 MiB compressed windows, which
-  changes the per-request size, not the ranking of the modes). The v2 row
+  2 MiB compressed windows). These historical results do not establish the
+  performance or ranking of the modes under the current grouping defaults.
+  The v2 row
   is the same rootfs as a RAFS v6 zstd image served by the v2 `nydusd`
   from the same registry. All rows are 2-run means from one session.
 - The "+ optimize" rows mount the same image after `nydus optimize` rewrote

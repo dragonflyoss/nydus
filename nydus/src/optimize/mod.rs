@@ -94,9 +94,8 @@ pub fn build_ondemand_blob(
         .collect();
     drop(reader);
 
-    // Open every source blob the trace names, for its blob meta. The copies
-    // are byte-exact, so every source must share the ondemand blob's chunk
-    // size and compressor; plain-stored groups fit under any compressor.
+    // Open each source's metadata. Compressed sources must agree on the
+    // compressor; plain-stored groups fit under any compressor.
     let mut sources: HashMap<u16, LocalBlobCache> = HashMap::new();
     let mut wanted: HashMap<u16, BTreeSet<u32>> = HashMap::new();
     for reference in patterns {
@@ -128,22 +127,12 @@ pub fn build_ondemand_blob(
             .or_default()
             .insert(reference.chunk_group_index);
     }
-    let mut group_span_blocks = None;
+    let mut group_span_blocks = 0;
     let mut compressor = BlobMetadataCompressor::None;
     let mut digester = BlobMetadataDigester::Blake3;
     for (blob_index, cache) in &sources {
         let meta = cache.blob_metadata();
-        match group_span_blocks {
-            None => group_span_blocks = Some(meta.group_span_blocks()),
-            Some(blocks) if blocks != meta.group_span_blocks() => {
-                return Err(Error::InvalidImage(format!(
-                    "source blob {blob_index} uses a {} byte group span, the other traced blobs {}",
-                    meta.group_span(),
-                    blocks * nydus_format::erofs::EROFS_BLOCK_SIZE
-                )));
-            }
-            Some(_) => {}
-        }
+        group_span_blocks = group_span_blocks.max(meta.group_span_blocks());
         match (compressor, meta.compressor()) {
             (_, BlobMetadataCompressor::None) => {}
             (BlobMetadataCompressor::None, source) => compressor = source,
@@ -158,11 +147,11 @@ pub fn build_ondemand_blob(
             digester = BlobMetadataDigester::None;
         }
     }
-    let Some(group_span_blocks) = group_span_blocks else {
+    if group_span_blocks == 0 {
         return Err(Error::InvalidParameter(
             "the trace names no chunk groups".to_string(),
         ));
-    };
+    }
 
     // Fetch the encoded groups blob by blob, consecutive groups in one
     // backend read, and decode each once to validate the copy.

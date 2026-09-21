@@ -375,20 +375,23 @@ Current implementation notes:
 	own, so its compressed bytes are one frame the cache can locate and serve
 	from the chunk's digest alone; smaller chunks are packed in order until
 	the pack spans the minimum, at content-defined boundaries, and packs span
-	at most four times it (~1.6× on average with the defaults). It defaults
+	at most four times it (~1.6× on average in the measured default sample). It defaults
 	to `2MiB` independently of the chunk size: passing only
 	`--chunk-size 256kib` packs full 256 KiB chunks into larger groups, and
 	nothing but a blob's last group spans under 2 MiB. Lowering the minimum
 	trades object count and compression ratio for
-	retransmission: on three sibling images that differ in a few hundred
-	files (2 MiB chunks; what the 2nd / 3rd image add), 2 MiB needs
+	retransmission: in a historical sweep of three swebench sibling images
+	(order 4021, 3947, 4182; 20 unique layers built independently with zstd
+	and 2 MiB chunks; additional compressed bytes keyed by group digest),
+	what the 2nd / 3rd image add with a 2 MiB minimum is
 	15.1 / 29.7 MiB of new groups from 1664 groups, 1 MiB 10.7 / 21.3 MiB
 	from 2409, 512 KiB 9.1 / 19.9 MiB from 3583, and 64 KiB 5.4 / 10.8 MiB
 	from 13945 (against ~200 MiB of new layers and a ~10 MiB floor for
 	per-chunk dedup), while the blobs grow 1.7%, 3.1% and 6.0% over the
 	2 MiB default, because compressing small files in small groups costs
-	ratio (on a typical image the sub-64 KiB chunks are ~96% of the chunks
-	but ~16% of the bytes, and framed alone they inflate by 25–140%). It
+	ratio. These are sample-specific results, not a guaranteed reduction
+	for other images; the original temporary benchmark artifacts are not
+	distributed with this repository. The minimum
 	must be a power of two between 4 KiB and 512 MiB, and may exceed the
 	chunk size. Build records it as the lookup granule; the file format does
 	not store the writer's lone-chunk threshold. Readers validate group spans
@@ -466,11 +469,11 @@ chunks' bytes back to back, without the tail-block padding after each file
 (see [Blob meta region layout](#blob-meta-region-layout)):
 
 - Chunk groups tile the address space back to back: group `i` starts at
-	the block where group `i - 1` ends (`start_block` in the group table) and
+	the block where group `i - 1` ends (`uncompressed_start_block` in GroupTable) and
 	spans exactly its chunks' blocks, each chunk whole and on its own 4 KiB
 	block boundary, so the address space is as large as the block-padded
-	data and nothing else (an image is ~1.09x its payload; a
-	guest mapping it as pmem pays `struct page` for that and no more). A
+	data and nothing else. Tail-padding overhead depends on the file-size
+	distribution; the layout introduces no fixed-size group slots. A
 	chunk of at least the *chunk group minimum size*
 	(`--chunk-group-minimum-size`: 2 MiB by default, independent of the chunk
 	size) is a group of its own:
@@ -482,16 +485,14 @@ chunks' bytes back to back, without the tail-block padding after each file
 	after any chunk whose BLAKE3 digest ends in six zero bits (one chunk in
 	64), once it spans twice the minimum after any chunk whose digest ends in
 	five zero bits (one in 32), and a chunk that would take it past four
-	times the minimum closes it regardless. A boundary depends on the chunk
-	alone, not on how the earlier chunks filled the pack, so two builds of
-	trees that differ in a few small files cut their packs at the same files
-	once past a difference and the packs stay byte-identical — a
-	content-addressed cache indexing groups by their digests then serves
-	them across the images; the sparse boundaries below the target make that
-	resynchronisation quick, the denser ones above it keep the packs from
-	reaching the span (which would tie the boundary to the pack's start
-	again): packs span 1–4× the minimum, ~1.6× on average. With `--digester
-	none` packs simply fill four times the minimum. Groups are emitted in
+	times the minimum closes it regardless. Digest marks depend on the chunk
+	content, but accepting a mark also depends on the accumulated pack span.
+	Shared marks help near-identical inputs resynchronise after a change, so
+	identical packs can share content-addressed cache entries. This is not
+	guaranteed: the minimum, target and forced span boundaries can keep cuts
+	misaligned. Packs span 1–4× the minimum, except the final pack may be smaller.
+	With `--digester none`, a pack closes when full or before the next chunk
+	would exceed four times the minimum. Groups are emitted in
 	index order; a chunk's block address is only known once its group
 	closes, so the builder resolves the inode chunk indexes when the data
 	region is complete, before the bootstrap is rendered.
@@ -504,7 +505,8 @@ chunks' bytes back to back, without the tail-block padding after each file
 - The group is the unit of compression, of an on-demand read (see
 	[Bootstrap plus blob-dir mount](#bootstrap-plus-blob-dir-mount)), of
 	cache readiness and of the ondemand blob `nydus optimize` assembles: a
-	reader fetches and decodes one group and nothing else of the blob.
+	reader decodes whole groups; `storage.fetch_size` can include neighboring
+	groups in the same backend read.
 - An all-zero chunk-sized chunk (a hole) is not stored at all and gets the
 	EROFS null chunk index.
 - On fill the daemon writes a decoded group back onto its blocks of the
@@ -730,9 +732,11 @@ Current implementation notes:
 	one blob are read in one range request, and every copy is decoded once to
 	validate it (CRC32C and, when the source carries digests, BLAKE3) before
 	it is appended.
-- Every source blob the trace names must share one chunk size and one
-	compressor (plain-stored groups fit under any compressor), because the
-	copies are byte-exact; a source that is itself an ondemand blob is
+- Sources may use different file chunk sizes and group minimums. The output
+	uses the largest source group-span bound and derives its lookup granule
+	from the copied groups. Compressed sources must share one compressor
+	(plain-stored groups fit under any compressor), because the copies are
+	byte-exact; a source that is itself an ondemand blob is
 	refused. Sources without digests (`--digester none`) make the ondemand
 	blob digest-free too.
 - The ondemand artifact layout is `[chunk groups][blob meta][footer]` with
@@ -1645,9 +1649,8 @@ Chunk-based blobs contain this metadata both as a `.blob.meta` sidecar and
 verbatim before the full blob's footer. Native `erofs-*` blobs omit it.
 **The format version remains 1 while the experimental layout evolves. Older
 layouts, including the previous 40-byte-header version 1, are unsupported:
-rebuild their chunk-based blobs, bootstraps and optimized artifacts.** Payload
-grouping, compression and group digest calculation are unchanged, but metadata
-and full-blob identities change.
+rebuild their chunk-based blobs, bootstraps and optimized artifacts.** The
+32-byte-header layout is not a compatibility extension of earlier experiments.
 
 The encoded payload contains tightly concatenated chunk bytes, while the
 cache address space starts every chunk on a 4096-byte boundary. Groups tile
@@ -1764,10 +1767,11 @@ consume page-cache memory when accessed.
 	chunks' digests in order: `blake3::derive_key("nydus blob meta chunk
 	group digest v1", d_0 ‖ d_1 ‖ … ‖ d_n-1)`. The builder already hashes
 	every chunk to decide the pack boundaries, so the group digest costs no
-	second pass over the bytes, and the derived key keeps a pack digest from
-	ever equalling a content digest. The table is 15–20× smaller than one
-	digest per chunk on typical images, and it is exactly the identity a
-	content-addressed cache keys its groups by.
+	second pass over the bytes. The context separates group hashing from plain
+	content hashing; collision resistance still relies on BLAKE3. The table
+	uses 32 bytes per group rather than per chunk, so its reduction depends
+	on the number of chunks per group. These digests are the identities a
+	content-addressed cache uses for groups.
 - The runtime checks a decoded group against its entry when
 	`storage.skip_verify_checksums` is `false`: it hashes each member chunk
 	of the decoded payload and recombines them the same way.
@@ -1779,8 +1783,8 @@ Redirect details (REDIRECT blobs only):
 	index range), and `source_group_index` a group within it.
 	Group `i`'s encoded bytes, payload size, chunk lengths,
 	digest and `crc32c` are those of the source group, copied verbatim, so
-	the redirect blob shares the sources' chunk size and compressor and is
-	decoded with the same code path. Its groups tile their own address space
+	the redirect blob preserves each source's chunk lengths and compatible
+	compressor and is decoded with the same code path. Its groups tile their own address space
 	in access order (the redirect blob's `uncompressed_start_block` values are its own), with
 	a power-of-two lookup granule no larger than any non-final copied group.
 - The runtime never builds a cache for a redirect blob: each decoded group is
@@ -2126,13 +2130,13 @@ The build pipeline follows this sequence:
 	size, so only a chunk's final block carries zero padding (no full-chunk zero
 	runs).
 3. Feed the chunks' bytes (without the tail padding) into the chunk group
-	builder, which lays the groups out back to back: a whole chunk or one that
+	builder, which lays the groups out back to back: a chunk that
 	reaches the chunk group minimum size is a group on its own, smaller chunks
 	join the one open pack in order, which closes at a content-defined
 	boundary (a digest with six low zero bits once the pack spans the pack
 	minimum, five once it spans twice that) or when a chunk would take it
-	past four times the minimum; a pack records its member lengths in the
-	blob meta. The chunk
+	past four times the minimum. Every chunk length, including lone chunks,
+	is recorded in ChunkTable. The chunk
 	index handed back for each chunk is a placeholder until its group closes.
 4. Compute BLAKE3 digests over every chunk and CRC32C over
 	each chunk group payload.
@@ -2292,15 +2296,16 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
 |  group 0  |  (hole)   | groups 2-5|  (hole)   | ...
 |  decoded  |           |  decoded  |           |
 +-----------+-----------+-----------+-----------+---
-^ byte offset = the group's start_block * 4096; a group is written only after
+^ byte offset = the group's uncompressed_start_block * 4096; written only after
   decode + CRC32C (+ digest validation when enabled) succeeds
 
 <hex>.blob.meta — verified blob meta copy (mmap'd for group/chunk lookup)
-+--------+-------------------+---------+---------+-------+-----------+
-| Header | GroupTable | ChunkTable | GranuleIndexTable | DigestTable | RedirectTable |
-| crc32c | offsets, starts,  | u16/u32 | BLAKE3  | O(1)  | (ondemand)|
-|        | payloads + CRC32C | lengths |         | index |           |
-+--------+-------------------+---------+---------+-------+-----------+
+Header            CRC32C, counts and address geometry
+GroupTable        data/block/chunk starts, payload sizes and CRC32C
+ChunkTable        u32 length for every stored chunk
+GranuleIndexTable u32 group index per lookup granule
+DigestTable       BLAKE3 per group, when enabled
+RedirectTable     source blob and group, for ondemand blobs only
 
 <hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
 +---------------------------------+----------------------+

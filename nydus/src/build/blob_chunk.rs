@@ -65,8 +65,8 @@ pub struct BlobWriter<W> {
     // placement id handed out as its placeholder address; `PENDING` until
     // the chunk's group closes.
     placements: Vec<u64>,
-    // Groups closed so far (the next group's index), the packs' chunk byte
-    // lengths in group order (lone chunks list none), one digest per sealed
+    // Groups closed so far (the next group's index), all chunk byte
+    // lengths in group order, including lone chunks, one digest per sealed
     // group, and the sealed groups in group order.
     next_group: u64,
     members: Vec<u32>,
@@ -127,15 +127,11 @@ struct Bin {
 /// low `PACK_STRICT_MASK` bits are zero (one chunk in 64), one spanning at
 /// least `PACK_TARGET_MULTIPLE` times the minimum after a chunk with the
 /// low `PACK_LOOSE_MASK` bits zero (one in 32), and one that would grow past
-/// `PACK_SPAN_MULTIPLE` times the minimum closes regardless. Whether a
-/// chunk ends a pack then depends on that chunk alone, not on how the
-/// earlier chunks happened to fill the pack, so two builds of near-identical
-/// trees cut their packs at the same files past the first difference and
-/// the packs stay byte-identical for a content-addressed cache; the sparse
-/// boundaries below the target make that resynchronisation quick, the
-/// denser ones above it keep the packs from reaching the span, which would
-/// make the boundary depend on the pack's start again. The span is the
-/// blob meta's group span.
+/// `PACK_SPAN_MULTIPLE` times the minimum closes regardless. Digest marks
+/// depend on each chunk's content, while accepting a mark also depends on
+/// the accumulated span. Shared marks can resynchronise near-identical
+/// inputs, enabling identical packs to share cache entries, but the minimum,
+/// target and forced span boundaries mean resynchronisation is not guaranteed.
 const PACK_STRICT_MASK: u8 = 0x3f;
 const PACK_LOOSE_MASK: u8 = 0x1f;
 const PACK_TARGET_MULTIPLE: u64 = 2;
@@ -145,7 +141,7 @@ const PACK_SPAN_MULTIPLE: u32 = 4;
 /// group but a blob's last spans, independent of the chunk size: a chunk of at
 /// least this size stands alone, smaller ones are packed until the pack
 /// spans it. 2 MiB: the granularity a content-addressed cache deduplicates
-/// at, with packs of 2–8 MiB (~1.6× the minimum on average); a smaller
+/// at, with non-final packs of 2–8 MiB; a smaller
 /// minimum trades object count and compression ratio for less
 /// retransmission when a few files change (see
 /// `--chunk-group-minimum-size`).
