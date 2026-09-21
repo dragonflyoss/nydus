@@ -743,8 +743,7 @@ pub struct BlobMetadataDigest {
 
 const _: () = assert!(size_of::<BlobMetadataDigest>() == NYDUS_BLOB_METADATA_DIGEST_ENTRY_SIZE);
 
-/// Context of the derive-key BLAKE3 that names a chunk group of several
-/// chunks; it keeps such a digest from colliding with any content digest.
+/// Context separating multi-chunk group digests from plain content digests.
 const NYDUS_BLOB_METADATA_GROUP_DIGEST_CONTEXT: &str = "nydus blob meta chunk group digest v1";
 
 impl BlobMetadataDigest {
@@ -759,8 +758,9 @@ impl BlobMetadataDigest {
     /// chunk's digest itself, so a content-addressed cache serves it by the
     /// chunk's content digest; a group of several chunks is named by a
     /// domain-separated BLAKE3 (`derive_key`) over the member digests, which
-    /// costs no second pass over the bytes and cannot collide with a content
-    /// digest. `None` for an empty slice.
+    /// costs no second pass over the bytes and separates group identity from
+    /// plain content hashing. Collision resistance relies on BLAKE3.
+    /// `None` for an empty slice.
     pub fn of_group(chunk_digests: &[[u8; 32]]) -> Option<Self> {
         match chunk_digests {
             [] => None,
@@ -1143,8 +1143,7 @@ impl BlobMetadata {
         }
     }
 
-    /// Member table entry `index`, a chunk byte length; the caller keeps
-    /// `index` within the header's member count.
+    /// ChunkTable entry `index`; the caller keeps the index below chunk_count.
     fn chunk_length_of(
         header: &BlobMetadataHeader,
         storage: &BlobMetadataStorage,
@@ -1453,8 +1452,7 @@ impl BlobMetadata {
         Self::entries_of(&self.header, &self.storage)
     }
 
-    /// Member table entry `index`: the byte length of a pack's chunk.
-    /// `None` past the table.
+    /// Byte length of a stored chunk, including lone chunks; `None` past ChunkTable.
     pub fn chunk_len(&self, index: usize) -> Option<u32> {
         (index < self.header.chunk_count as usize)
             .then(|| Self::chunk_length_of(&self.header, &self.storage, index))
@@ -1480,10 +1478,10 @@ impl BlobMetadata {
 
     /// The chunk group at `index`, `None` past the table.
     pub fn chunk_group(&self, index: usize) -> Option<BlobMetadataChunkGroup> {
-        let entries = self.chunk_group_entries();
-        if index + 1 >= entries.len() {
+        if index >= self.chunk_group_count() {
             return None;
         }
+        let entries = self.chunk_group_entries();
         let (start, end) = (entries[index], entries[index + 1]);
         Some(BlobMetadataChunkGroup {
             index: index as u32,
@@ -1522,7 +1520,7 @@ impl BlobMetadata {
         self.header.digest_count() as usize
     }
 
-    /// Number of lookup cell entries.
+    /// Number of GranuleIndexTable entries.
     pub fn granule_index_count(&self) -> usize {
         self.header.granule_index_count() as usize
     }
@@ -1897,6 +1895,7 @@ mod tests {
         assert_eq!(group.crc32(), crc32c(&chunks_data[2..5].concat()));
         assert!(group.redirect().is_none());
         assert!(loaded.chunk_group(5).is_none());
+        assert!(loaded.chunk_group(usize::MAX).is_none());
         assert_eq!(
             loaded.chunk_group_chunks(1).collect::<Vec<_>>(),
             vec![(0, 3 * BLOCK, 40), (1, 4 * BLOCK, 6000), (2, 6 * BLOCK, 1)]
@@ -1918,6 +1917,8 @@ mod tests {
         meta.save(&path).unwrap();
         let mapped = BlobMetadata::from_path(&path, true).unwrap();
         assert_eq!(mapped.chunk_group_entries(), meta.chunk_group_entries());
+        assert!(mapped.chunk_group(usize::MAX).is_none());
+        assert_eq!(mapped.chunk_group_chunks(usize::MAX).count(), 0);
         assert_eq!(
             (0..9)
                 .map(|i| mapped.chunk_len(i).unwrap())

@@ -279,7 +279,8 @@ core builds unless explicitly enabled.
 
 - The chunk group (a lone chunk of at most one chunk size, 2 MiB by
   default, or a pack of small ones spanning one to four times
-  `--chunk-group-minimum-size`, 2 MiB by default) is the
+  `--chunk-group-minimum-size`, 2 MiB by default, with a possibly smaller
+  final group) is the
   cache-population unit for chunk-based images and the runtime
   `storage.fetch_size` (default 2 MiB of compressed bytes) the fetch unit:
   one fault warms every group whose compressed range overlaps the missed

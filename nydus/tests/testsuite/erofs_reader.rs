@@ -835,6 +835,130 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
 }
 
 #[test]
+fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
+    use nydus::build::merge::{merge_sources_to_bootstrap_bytes, WhiteoutSpec};
+    use nydus::optimize::{build_ondemand_blob, ChunkGroupRef};
+
+    let directory = tempdir().unwrap();
+    let files = [
+        ("first", vec![42; 4096]),
+        ("second", vec![51; 3 * 4096 + 17]),
+    ];
+    let mut sources = Vec::new();
+    let mut metadata = Vec::new();
+    let mut encoded = Vec::new();
+    for (index, (name, content)) in files.iter().enumerate() {
+        let source = directory.path().join(name);
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join(name), content).unwrap();
+        let minimum = (2 << 20) << index;
+        let chunk_size = 4096 << index;
+        let options = BuildImageOptions::new(
+            source,
+            chunk_size,
+            BlobMetadataCompressor::Zstd,
+            HashSet::new(),
+            true,
+        )
+        .unwrap()
+        .with_chunk_group_min_size(minimum)
+        .unwrap();
+        let mut blob = Vec::new();
+        let image = build_image(&options, &mut blob).unwrap();
+        let meta = image.blob_metadata.unwrap();
+        assert_eq!(meta.group_span(), 4 * minimum);
+        assert_eq!(meta.chunk_group_count(), 1);
+        assert_eq!(
+            meta.chunk_count(),
+            content.len().div_ceil(chunk_size as usize)
+        );
+        encoded.push(blob[..meta.compressed_end() as usize].to_vec());
+        metadata.push(meta);
+        let path = directory.path().join(hex_string(&image.full_blob_digest));
+        fs::write(&path, blob).unwrap();
+        sources.push(path);
+    }
+    let parent = directory.path().join("parent");
+    fs::write(
+        &parent,
+        merge_sources_to_bootstrap_bytes(&sources, WhiteoutSpec::Oci).unwrap(),
+    )
+    .unwrap();
+    for order in [[1, 2], [2, 1]] {
+        let patterns: Vec<_> = order
+            .iter()
+            .map(|&blob_index| ChunkGroupRef {
+                blob_index,
+                chunk_group_index: 0,
+            })
+            .collect();
+        let optimized = build_ondemand_blob(
+            &parent,
+            &patterns,
+            Arc::new(Local::new(directory.path().to_path_buf())),
+            &directory.path().join("build-cache"),
+        )
+        .unwrap();
+        let meta = &optimized.blob_metadata;
+        assert_eq!(meta.group_span(), 16 << 20);
+        assert_eq!(meta.chunk_group_count(), 2);
+        let first_span = metadata[usize::from(order[0] - 1)].uncompressed_size();
+        assert_eq!(u64::from(meta.lookup_granule()), 1u64 << first_span.ilog2());
+        for (index, &source_index) in order.iter().enumerate() {
+            let source_meta = &metadata[usize::from(source_index - 1)];
+            let group = meta.chunk_group(index).unwrap();
+            let range = group.compressed_range();
+            assert_eq!(
+                &optimized.artifact[range.start as usize..range.end as usize],
+                encoded[usize::from(source_index - 1)].as_slice()
+            );
+            assert_eq!(meta.digest(index), source_meta.digest(0));
+            assert_eq!(
+                group.chunk_count(),
+                source_meta.chunk_group(0).unwrap().chunk_count()
+            );
+            assert_eq!(group.redirect().unwrap().source_blob_index(), source_index);
+            for offset in group.uncompressed_range().step_by(4096) {
+                assert_eq!(meta.chunk_group_index_of(offset), Some(index));
+            }
+        }
+        fs::write(
+            directory
+                .path()
+                .join(hex_string(&optimized.full_blob_digest)),
+            &optimized.artifact,
+        )
+        .unwrap();
+        let bootstrap = directory.path().join("optimized");
+        fs::write(&bootstrap, &optimized.bootstrap).unwrap();
+        let backend = Arc::new(CountingBackend {
+            local: Local::new(directory.path().to_path_buf()),
+            reads: AtomicUsize::new(0),
+            fail_next: AtomicBool::new(false),
+        });
+        let read_cache = directory.path().join(format!("read-cache-{}", order[0]));
+        let reader =
+            ErofsReader::open_bootstrap(&bootstrap, backend.clone(), Some(&read_cache), None)
+                .unwrap();
+        reader
+            .blob_caches()
+            .prefetch_blob(3, 2, std::time::Duration::from_secs(10))
+            .unwrap();
+        backend.fail_next.store(true, Ordering::Relaxed);
+        for (name, content) in &files {
+            let nid = z_fixture_nid(&reader, name.as_bytes());
+            let inode = reader.inode(nid).unwrap();
+            let mut actual = Vec::new();
+            reader
+                .write_file_data_to(nid, &inode, 0, content.len() as u32, &mut actual)
+                .unwrap();
+            assert_eq!(&actual, content);
+        }
+        assert!(backend.fail_next.load(Ordering::Relaxed));
+    }
+}
+
+#[test]
 fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
     let file_xattrs: Vec<XattrEntry> = (0..8)
         .map(|index| XattrEntry {
