@@ -15,7 +15,7 @@ use std::mem::{align_of, size_of};
 use std::ops::Range;
 use std::path::Path;
 
-/// On-disk magic: 8 raw ASCII bytes ("NDBLMETA" = NyDus BLob META), written
+/// On-disk magic: 8 raw ASCII bytes ("NDBLMETA" = Nydus BLob META), written
 /// as-is so a hexdump of the file starts with the readable string. Same
 /// style and `magic + version + flags` header prefix as the blob footer
 /// (`NDFOOTER`) and chunk group map (`NDGRPMAP`) sidecars.
