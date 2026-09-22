@@ -996,13 +996,13 @@ fn load_or_fetch_blob_metadata(
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
         backend.save_blob_metadata(&blob_id, tmp.path())?;
-        if let Err(err) = BlobMetadata::from_path(tmp.path(), true) {
+        if let Err(err) = BlobMetadata::from_path(tmp.path()) {
             return Err(io::Error::other(err));
         }
         tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
     }
 
-    BlobMetadata::from_path(blob_metadata_path, true).map_err(io::Error::other)
+    BlobMetadata::from_path(blob_metadata_path).map_err(io::Error::other)
 }
 
 /// Drop guard that ensures a leader always signals its flight and cleans up
@@ -1159,7 +1159,7 @@ mod tests {
     fn blob_metadata(payload: &[u8]) -> BlobMetadata {
         encode_blob(
             BlobMetadataCompressor::None,
-            1,
+            4096,
             &[vec![payload.to_vec()]],
             false,
         )
@@ -1182,7 +1182,7 @@ mod tests {
                 ]
             })
             .collect();
-        let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 4, &groups, true);
+        let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 16384, &groups, true);
         let image = padded_image(&groups);
         (data, meta, groups, image)
     }
@@ -1298,9 +1298,9 @@ mod tests {
                     group.payload_size(),
                     group.chunk_count(),
                     if index == 2 {
-                        group.crc32() ^ 1
+                        group.payload_crc32() ^ 1
                     } else {
-                        group.crc32()
+                        group.payload_crc32()
                     },
                     None,
                 )
@@ -1310,7 +1310,7 @@ mod tests {
         let meta = BlobMetadata::new(
             BlobMetadataCompressor::Zstd,
             nydus_format::blob::BlobMetadataDigester::Blake3,
-            4,
+            16384,
             4096,
             specs,
             members,
@@ -1754,7 +1754,7 @@ mod tests {
         let meta = BlobMetadata::new(
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
-            1,
+            4096,
             4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 4096,

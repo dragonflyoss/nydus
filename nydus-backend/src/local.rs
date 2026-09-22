@@ -209,7 +209,7 @@ impl BlobBackend for Local {
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let source = self.resolved_source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&source)?;
-        BlobMetadata::from_bytes(&data, false).map_err(io::Error::other)
+        BlobMetadata::from_bytes(&data).map_err(io::Error::other)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
@@ -283,7 +283,7 @@ mod tests {
         BlobMetadata::new(
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
-            1,
+            4096,
             4096,
             vec![
                 BlobMetadataChunkGroup::new(4096, 4096, 1, crc32c::crc32c(payload), None).unwrap(),

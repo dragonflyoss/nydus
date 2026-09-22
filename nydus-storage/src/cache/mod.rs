@@ -444,7 +444,7 @@ pub fn validate_decoded_chunk_group(
             ),
         ));
     }
-    if crc32c::crc32c(decoded) != group.crc32() {
+    if crc32c::crc32c(decoded) != group.payload_crc32() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             ChunkGroupCrcMismatch,
@@ -535,14 +535,14 @@ pub(crate) mod test_util {
     };
 
     /// Encode `groups` (each a list of chunks) with `compressor` into a data
-    /// region and the blob meta describing it, with `chunk_blocks`-block
-    /// chunks, a one-block lookup granule and BLAKE3 digests when `digests`
+    /// region and the blob meta describing it, with a `group_span`-byte
+    /// group span, a one-block lookup granule and BLAKE3 digests when `digests`
     /// is set. Every group is stored compressed when that shrinks it, plain
     /// otherwise. Groups tile the address space back to back, each chunk on
     /// its own blocks.
     pub(crate) fn encode_blob(
         compressor: BlobMetadataCompressor,
-        chunk_blocks: u32,
+        group_span: u32,
         groups: &[Vec<Vec<u8>>],
         digests: bool,
     ) -> (Vec<u8>, BlobMetadata) {
@@ -588,7 +588,7 @@ pub(crate) mod test_util {
             } else {
                 BlobMetadataDigester::None
             },
-            chunk_blocks,
+            group_span,
             4096,
             specs,
             members,
@@ -707,7 +707,7 @@ mod tests {
             BlobMetadataCompressor::Zstd,
             BlobMetadataCompressor::Lz4Block,
         ] {
-            let (data, metadata) = encode_blob(compressor, 1, &[vec![payload.clone()]], false);
+            let (data, metadata) = encode_blob(compressor, 4096, &[vec![payload.clone()]], false);
             let group = metadata.chunk_group(0).unwrap();
             // The window starts 37 bytes before the group.
             let mut window = vec![0; 37];
@@ -768,7 +768,7 @@ mod tests {
     fn digests_are_checked_when_verification_is_on() {
         set_skip_verify_checksums(false);
         let chunks = vec![vec![1u8; 100], vec![2u8; 5000]];
-        let (data, metadata) = encode_blob(BlobMetadataCompressor::None, 4, &[chunks], true);
+        let (data, metadata) = encode_blob(BlobMetadataCompressor::None, 16384, &[chunks], true);
         let group = metadata.chunk_group(0).unwrap();
         validate_decoded_chunk_group(&metadata, &group, &data).unwrap();
 
@@ -779,13 +779,13 @@ mod tests {
         let wrong = BlobMetadata::new(
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::Blake3,
-            4,
+            16384,
             4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 data.len() as u32,
                 data.len() as u32,
                 2,
-                group.crc32(),
+                group.payload_crc32(),
                 None,
             )
             .unwrap()],
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn inflate_scatters_chunks_onto_their_blocks() {
         let groups = vec![vec![vec![7u8; 100], vec![8u8; 4097]], vec![vec![9u8; 1]]];
-        let (data, metadata) = encode_blob(BlobMetadataCompressor::None, 4, &groups, false);
+        let (data, metadata) = encode_blob(BlobMetadataCompressor::None, 16384, &groups, false);
         let image = padded_image(&groups);
         assert_eq!(image.len(), 4 * 4096);
         let group0 = metadata.chunk_group(0).unwrap();
@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn prefetch_batches_follow_the_compressed_target() {
         let groups: Vec<Vec<Vec<u8>>> = (0..5u8).map(|i| vec![vec![i; 4096]]).collect();
-        let (_, metadata) = encode_blob(BlobMetadataCompressor::None, 1, &groups, false);
+        let (_, metadata) = encode_blob(BlobMetadataCompressor::None, 4096, &groups, false);
         assert_eq!(
             plan_prefetch_batches(&metadata, 0, 0),
             vec![0..1, 1..2, 2..3, 3..4, 4..5]
@@ -857,7 +857,7 @@ mod tests {
             plan_prefetch_batches(&metadata, u64::MAX, 9),
             vec![0..1, 1..2, 2..3, 3..4, 4..5]
         );
-        let (_, empty) = encode_blob(BlobMetadataCompressor::None, 1, &[], false);
+        let (_, empty) = encode_blob(BlobMetadataCompressor::None, 4096, &[], false);
         assert!(plan_prefetch_batches(&empty, 4096, 4).is_empty());
     }
 
@@ -897,7 +897,7 @@ mod tests {
         let metadata = BlobMetadata::new(
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
-            1,
+            4096,
             4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 EROFS_BLOCK_SIZE,

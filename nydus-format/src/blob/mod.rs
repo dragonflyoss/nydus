@@ -18,8 +18,7 @@ pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataFlags,
-    BlobMetadataRedirect, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
-    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+    BlobMetadataRedirect, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
 };
 
 /// Finish a full blob: append everything behind the data region to `writer`,

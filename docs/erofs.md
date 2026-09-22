@@ -3,9 +3,8 @@
 This document describes the EROFS structures emitted by this branch, not every
 upstream EROFS feature. The private chunk-table `.blob.meta` format is version
 **1**; its layout and cache translation belong in
-[Nydus Design](nydus.md#blob-meta-region-layout). Older development images must
-be rebuilt. See the [documentation index](../README.md#documentation) for
-transport guides.
+[Nydus Design](nydus.md#blob-meta-region-layout). See the
+[documentation index](../README.md#documentation) for transport guides.
 
 ## Table of Contents
 

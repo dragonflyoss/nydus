@@ -469,7 +469,7 @@ chunks' bytes back to back, without the tail-block padding after each file
 (see [Blob meta region layout](#blob-meta-region-layout)):
 
 - Chunk groups tile the address space back to back: group `i` starts at
-	the block where group `i - 1` ends (`uncompressed_start_block` in GroupTable) and
+	the block where group `i - 1` ends (`uncompressed_block_offset` in GroupTable) and
 	spans exactly its chunks' blocks, each chunk whole and on its own 4 KiB
 	block boundary, so the address space is as large as the block-padded
 	data and nothing else. Tail-padding overhead depends on the file-size
@@ -1463,7 +1463,7 @@ footer crc32c.
 BlobFooter
 
 u8  magic[8]           "NDFOOTER", raw ASCII bytes written as-is
-u32 version            informational format generation (currently 1)
+u32 version            format generation, 1; other generations are rejected
 u32 flags              low 16 bits incompat (unknown bits reject),
                        high 16 bits compat (unknown bits ignored)
 u32 crc32              crc32c over footer bytes with this field zeroed
@@ -1646,11 +1646,8 @@ At the same time:
 ### Blob meta region layout
 
 Chunk-based blobs contain this metadata both as a `.blob.meta` sidecar and
-verbatim before the full blob's footer. Native `erofs-*` blobs omit it.
-**The format version remains 1 while the experimental layout evolves. Older
-layouts, including the previous 40-byte-header version 1, are unsupported:
-rebuild their chunk-based blobs, bootstraps and optimized artifacts.** The
-32-byte-header layout is not a compatibility extension of earlier experiments.
+verbatim before the full blob's footer. Native `erofs-*` blobs omit it. The
+format version is 1; readers reject any other generation.
 
 The encoded payload contains tightly concatenated chunk bytes, while the
 cache address space starts every chunk on a 4096-byte boundary. Groups tile
@@ -1667,27 +1664,29 @@ Zero padding to a 4096-byte multiple
 ```
 
 All integers are unsigned and little-endian. Each table starts at an 8-byte
-boundary; all alignment bytes are zero. Table offsets are derived, not stored.
+boundary; writers zero the alignment and tail padding, readers ignore it
+(corruption there is caught by the crc32c). Table offsets are derived, not
+stored.
 
 #### Header
 
 | Offset | Field | Bytes | Meaning |
 |---:|---|---:|---|
 | 0 | `magic` | 8 | ASCII `NDBLMETA` |
-| 8 | `format_version` | 4 | `1` |
-| 12 | `feature_flags` | 4 | Compression, digest and redirect features |
-| 16 | `metadata_crc32c` | 4 | CRC32C of all metadata including padding, with this field zeroed |
-| 20 | `group_count` | 4 | Real groups, excluding the terminator |
-| 24 | `maximum_group_span_block_shift` | 1 | Maximum group span is `4096 << value` bytes; at most 19 |
-| 25 | `lookup_granule_byte_shift` | 1 | Lookup granule is `1 << value` bytes; from 12 through the maximum span's byte exponent |
-| 26 | `reserved` | 6 | Must be zero |
+| 8 | `version` | 4 | `1`; other generations are rejected |
+| 12 | `flags` | 4 | Compression, digest and redirect features |
+| 16 | `crc32` | 4 | CRC32C of all metadata including padding, with this field zeroed |
+| 20 | `chunk_group_count` | 4 | Real groups, excluding the terminator |
+| 24 | `group_span_shift` | 1 | Maximum group span is `1 << value` bytes; from 12 (one block) through 31 (2 GiB) |
+| 25 | `lookup_granule_shift` | 1 | Lookup granule is `1 << value` bytes; from 12 through `group_span_shift` |
+| 26 | `reserved` | 6 | Writers zero it, readers ignore it |
 
 Feature bits 0 and 1 select Zstandard and LZ4 respectively, and are mutually
 exclusive; neither means plain storage. Bit 2 enables BLAKE3; bit 3 marks a
 REDIRECT blob. Unknown low-16-bit features reject the file; unknown high-16-bit
-features are ignored. Header reserved bytes must remain zero regardless.
+features are ignored.
 
-The default maximum span is 8 MiB (shift 11), and lookup granule 2 MiB
+The default maximum span is 8 MiB (shift 23), and lookup granule 2 MiB
 (shift 21). Setting the group minimum to 4, 8 or 16 MiB writes lookup shifts
 22, 23 or 24 respectively. File chunk size and build-time grouping threshold
 are not recorded here. Optimized blobs derive their own granule from copied
@@ -1700,10 +1699,10 @@ Each entry is 24 bytes; offsets below are relative to its start.
 | Offset | Field | Bytes | Meaning |
 |---:|---|---:|---|
 | 0 | `compressed_offset` | 8 | Encoded group start relative to the blob data region |
-| 8 | `uncompressed_start_block` | 4 | Group start in the uncompressed cache address space, in 4096-byte blocks |
+| 8 | `uncompressed_block_offset` | 4 | Group start in the uncompressed cache address space, in 4096-byte blocks |
 | 12 | `first_chunk_index` | 4 | First entry of this group's run in ChunkTable |
-| 16 | `uncompressed_size` | 4 | Sum of actual chunk lengths, excluding block padding; not the cache address span |
-| 20 | `uncompressed_crc32` | 4 | CRC32C of the decoded, tightly packed payload |
+| 16 | `payload_size` | 4 | Sum of actual chunk lengths, excluding block padding; not the cache address span |
+| 20 | `payload_crc32` | 4 | CRC32C of the decoded, tightly packed payload |
 
 Subtract the current entry from the next to obtain encoded length, cache
 block count and chunk count. All three starts increase strictly for real
@@ -1742,7 +1741,7 @@ For a checked cache byte offset:
 ```text
 granule_index = cache_byte_offset / lookup_granule
 group_index = GranuleIndexTable[granule_index]
-if cache_byte_offset >= GroupTable[group_index + 1].uncompressed_start_block * 4096:
+if cache_byte_offset >= GroupTable[group_index + 1].uncompressed_block_offset * 4096:
     group_index += 1
 ```
 
@@ -1780,12 +1779,12 @@ Redirect details (REDIRECT blobs only):
 
 - Entry `i` consists of two four-byte integers: `source_blob_index` is the
 	nonzero device index of a source blob (validated against the EROFS device
-	index range), and `source_group_index` a group within it.
+	index range), and `source_chunk_group_index` a group within it.
 	Group `i`'s encoded bytes, payload size, chunk lengths,
 	digest and `crc32c` are those of the source group, copied verbatim, so
 	the redirect blob preserves each source's chunk lengths and compatible
 	compressor and is decoded with the same code path. Its groups tile their own address space
-	in access order (the redirect blob's `uncompressed_start_block` values are its own), with
+	in access order (the redirect blob's `uncompressed_block_offset` values are its own), with
 	a power-of-two lookup granule no larger than any non-final copied group.
 - The runtime never builds a cache for a redirect blob: each decoded group is
 	written into the source blob's cache at the source group's blocks and
@@ -1863,8 +1862,8 @@ blkaddr    0        256      512      768      943 944  ..
            | A p0   | B p0   | B p1   | A p1   |C|D|..| ..
            +--------+--------+--------+--------+---+-+-+---
 group      0        1        2        3        4
-GroupTable: uncompressed_start_block 0, 256, 512, 768, 943, ..;
-			uncompressed_size 1048576, 1048576, 1048576, 716800, |C|+|D|+..;
+GroupTable: uncompressed_block_offset 0, 256, 512, 768, 943, ..;
+			payload_size 1048576, 1048576, 1048576, 716800, |C|+|D|+..;
 			first_chunk_index 0, 1, 2, 3, 4, 7 (group 4 holds three chunks)
 ChunkTable: 1048576, 1048576, 1048576, 716800, 300, |D|, ..
 ```
@@ -2296,7 +2295,7 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
 |  group 0  |  (hole)   | groups 2-5|  (hole)   | ...
 |  decoded  |           |  decoded  |           |
 +-----------+-----------+-----------+-----------+---
-^ byte offset = the group's uncompressed_start_block * 4096; written only after
+^ byte offset = the group's uncompressed_block_offset * 4096; written only after
   decode + CRC32C (+ digest validation when enabled) succeeds
 
 <hex>.blob.meta — verified blob meta copy (mmap'd for group/chunk lookup)
