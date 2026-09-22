@@ -15,11 +15,11 @@ use std::mem::{align_of, size_of};
 use std::ops::Range;
 use std::path::Path;
 
-/// On-disk magic: 8 raw ASCII bytes ("LPBLMETA" = LePton BLob META), written
+/// On-disk magic: 8 raw ASCII bytes ("NDBLMETA" = NyDus BLob META), written
 /// as-is so a hexdump of the file starts with the readable string. Same
 /// style and `magic + version + flags` header prefix as the blob footer
-/// (`LPFOOTER`) and chunk group map (`LPGRPMAP`) sidecars.
-pub const NYDUS_BLOB_METADATA_MAGIC: [u8; 8] = *b"LPBLMETA";
+/// (`NDFOOTER`) and chunk group map (`NDGRPMAP`) sidecars.
+pub const NYDUS_BLOB_METADATA_MAGIC: [u8; 8] = *b"NDBLMETA";
 
 /// Format version of the dense-group layout; earlier experimental layouts
 /// are unsupported.
@@ -103,7 +103,7 @@ const NYDUS_BLOB_METADATA_SUPPORTED_INCOMPAT: u32 = BlobMetadataFlags::all().bit
 ///
 /// ```text
 /// offset  size  field
-///      0     8  magic                   b"LPBLMETA"
+///      0     8  magic                   b"NDBLMETA"
 ///      8     4  version                 1; other generations are rejected
 ///     12     4  flags                   low 16 incompat / high 16 compat
 ///     16     4  crc32                   crc32c of the whole serialized
@@ -1829,7 +1829,7 @@ mod tests {
         let (meta, _) = fixture();
         let mut raw = Vec::new();
         meta.write_to(&mut raw).unwrap();
-        assert_eq!(&raw[..8], b"LPBLMETA");
+        assert_eq!(&raw[..8], b"NDBLMETA");
         assert_eq!(read_u32_at(&raw, 8), 1);
         assert_eq!(read_u32_at(&raw, 20), 5);
         assert_eq!(&raw[24..32], &[4, 12, 0, 0, 0, 0, 0, 0]);

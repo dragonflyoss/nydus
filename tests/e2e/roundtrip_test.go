@@ -140,7 +140,7 @@ func TestErofsKernelCompatibility(t *testing.T) {
 		metadata, err := os.ReadFile(blob + ".blob.meta")
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(metadata), 32)
-		require.Equal(t, "LPBLMETA", string(metadata[:8]))
+		require.Equal(t, "NDBLMETA", string(metadata[:8]))
 		require.Equal(t, uint32(1), binary.LittleEndian.Uint32(metadata[8:]), "blob meta version")
 		flags := binary.LittleEndian.Uint32(metadata[12:])
 		require.Zero(t, flags&0x3, "compressor none")
@@ -265,7 +265,7 @@ func TestErofsKernelCompatibility(t *testing.T) {
 				fullBlob, err := os.ReadFile(blob)
 				require.NoError(t, err)
 				footer := fullBlob[len(fullBlob)-4096:]
-				require.Equal(t, "LPFOOTER", string(footer[:8]))
+				require.Equal(t, "NDFOOTER", string(footer[:8]))
 				require.NotZero(t, binary.LittleEndian.Uint32(footer[12:])&(1<<1), "RAW_DEVICE flag")
 				require.Zero(t, binary.LittleEndian.Uint32(footer[60:]), "no blob meta blocks")
 				nativeSources = append(nativeSources, blob)

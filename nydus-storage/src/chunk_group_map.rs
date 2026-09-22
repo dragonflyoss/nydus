@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use memmap2::MmapRaw;
 
-/// On-disk magic: 8 raw ASCII bytes ("LPGRPMAP" = LePton GRouP MAP), written
+/// On-disk magic: 8 raw ASCII bytes ("NDGRPMAP" = NyDus GRouP MAP), written
 /// as-is so a hexdump of the file starts with the readable string. Same magic
-/// style as the blob meta header (`LPBLMETA`); the format version is a
+/// style as the blob meta header (`NDBLMETA`); the format version is a
 /// separate field instead of being baked into the magic.
-const CHUNK_GROUP_MAP_MAGIC: [u8; 8] = *b"LPGRPMAP";
+const CHUNK_GROUP_MAP_MAGIC: [u8; 8] = *b"NDGRPMAP";
 /// On-disk format generation, informational only: readers do not gate on it.
 /// A chunk_group_map is local mutable state — its `flags` word carries runtime state
 /// bits (not format features), and unknown state bits are simply ignored.
