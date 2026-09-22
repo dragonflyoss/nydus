@@ -1462,7 +1462,7 @@ footer crc32c.
 ```text
 BlobFooter
 
-u8  magic[8]           "LPFOOTER", raw ASCII bytes written as-is
+u8  magic[8]           "NDFOOTER", raw ASCII bytes written as-is
 u32 version            informational format generation (currently 1)
 u32 flags              low 16 bits incompat (unknown bits reject),
                        high 16 bits compat (unknown bits ignored)
@@ -1480,7 +1480,7 @@ u8  reserved1[4024]    compat area: writers zero, readers ignore
 ```
 
 The `magic + version + flags` header prefix matches the blob meta
-(`LPBLMETA`) and group map (`LPGRPMAP`) sidecars.
+(`NDBLMETA`) and group map (`NDGRPMAP`) sidecars.
 
 Reader validation requires:
 
@@ -1673,7 +1673,7 @@ boundary; all alignment bytes are zero. Table offsets are derived, not stored.
 
 | Offset | Field | Bytes | Meaning |
 |---:|---|---:|---|
-| 0 | `magic` | 8 | ASCII `LPBLMETA` |
+| 0 | `magic` | 8 | ASCII `NDBLMETA` |
 | 8 | `format_version` | 4 | `1` |
 | 12 | `feature_flags` | 4 | Compression, digest and redirect features |
 | 16 | `metadata_crc32c` | 4 | CRC32C of all metadata including padding, with this field zeroed |
@@ -2309,7 +2309,7 @@ RedirectTable     source blob and group, for ondemand blobs only
 
 <hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
 +---------------------------------+----------------------+
-| 4 KiB header (LPGRPMAP, version,| 1 bit per group ...  |
+| 4 KiB header (NDGRPMAP, version,| 1 bit per group ...  |
 | flags, count, ready count)      |                      |
 +---------------------------------+----------------------+
   bits set only after the group's bytes are resident in .blob.data;
@@ -2411,8 +2411,8 @@ single-instance while leaving the on-demand read path untouched.
 
 **Shared group map bitmap.** The `<digest>.group.map` file is a 4096-byte
 header followed by one readiness bit per chunk group. The header carries the
-8-byte ASCII magic `LPGRPMAP` (same raw-bytes style as the blob meta's
-`LPBLMETA`), an informational little-endian `u32` format generation (unlike
+8-byte ASCII magic `NDGRPMAP` (same raw-bytes style as the blob meta's
+`NDBLMETA`), an informational little-endian `u32` format generation (unlike
 the strictly checked blob meta version), a mutable `flags` word (the same
 `magic + version + flags` prefix as the blob meta header — but here the flags
 are runtime state bits, not format features, and unknown bits are ignored),

@@ -81,7 +81,7 @@ func TestStreamingLayerWithRealBuilder(t *testing.T) {
 			switch {
 			case native && meta != nil:
 				t.Fatal("native layer must carry no blob meta")
-			case !native && (len(meta) < 32 || string(meta[:8]) != "LPBLMETA" || binary.LittleEndian.Uint32(meta[8:12]) != 1):
+			case !native && (len(meta) < 32 || string(meta[:8]) != "NDBLMETA" || binary.LittleEndian.Uint32(meta[8:12]) != 1):
 				t.Fatal("not blob metadata version 1")
 			}
 			stage := filepath.Join(work, "stage")

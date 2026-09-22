@@ -11,9 +11,9 @@ use std::path::Path;
 
 /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
 /// footer starts with the readable string. Same style and `magic + version +
-/// flags` header prefix as the blob meta (`LPBLMETA`) and chunk map
-/// (`LPCHKMAP`) sidecars.
-pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"LPFOOTER";
+/// flags` header prefix as the blob meta (`NDBLMETA`) and chunk map
+/// (`NDGRPMAP`) sidecars.
+pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"NDFOOTER";
 
 /// On-disk format generation, informational only: readers do not gate on it.
 /// Compatibility is governed EROFS-style by the magic and the incompat half
@@ -58,7 +58,7 @@ const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
 ///
 /// ```text
 /// offset  size  field
-///      0     8  magic                   b"LPFOOTER"
+///      0     8  magic                   b"NDFOOTER"
 ///      8     4  version                 informational, never gated on
 ///     12     4  flags                   low 16 incompat / high 16 compat
 ///     16     4  crc32                   crc32c of these 4096 bytes with
