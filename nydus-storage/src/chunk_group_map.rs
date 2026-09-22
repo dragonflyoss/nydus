@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use memmap2::MmapRaw;
 
-/// On-disk magic: 8 raw ASCII bytes ("NDGRPMAP" = NyDus GRouP MAP), written
+/// On-disk magic: 8 raw ASCII bytes ("NDGRPMAP" = Nydus GRouP MAP), written
 /// as-is so a hexdump of the file starts with the readable string. Same magic
 /// style as the blob meta header (`NDBLMETA`); the format version is a
 /// separate field instead of being baked into the magic.
