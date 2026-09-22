@@ -139,7 +139,7 @@ mod tests {
         let payload = vec![0xabu8; 4096];
         let (data, meta) = encode_blob(
             BlobMetadataCompressor::None,
-            1,
+            4096,
             &[vec![payload.clone()]],
             false,
         );
@@ -172,7 +172,7 @@ mod tests {
             vec![vec![0xabu8; 100], vec![0xcdu8; 5000], vec![0xefu8; 1]],
             vec![vec![0x12u8; 4097]],
         ];
-        let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 4, &groups, true);
+        let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 16384, &groups, true);
         let image = padded_image(&groups);
         assert_eq!(image.len(), 6 * 4096);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
@@ -193,7 +193,7 @@ mod tests {
     fn remote_blob_cache_rejects_file_oriented_operations() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0x11u8; 4096];
-        let (data, meta) = encode_blob(BlobMetadataCompressor::None, 1, &[vec![payload]], false);
+        let (data, meta) = encode_blob(BlobMetadataCompressor::None, 4096, &[vec![payload]], false);
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));

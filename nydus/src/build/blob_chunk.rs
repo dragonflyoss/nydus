@@ -1324,14 +1324,12 @@ impl<W: Write> BlobWriter<W> {
         &self.blob_metadata_chunk_groups
     }
 
-    /// The most a group spans: a lone chunk is at most a file chunk, a pack
-    /// at most `pack_span_blocks`.
-    fn group_span_blocks(&self) -> u32 {
-        u32::try_from(
-            self.pack_span_blocks
-                .max(u64::from(self.file_chunk_size / EROFS_BLOCK_SIZE)),
-        )
-        .expect("the pack span is bounded by MAX_CHUNK_GROUP_MIN_SIZE")
+    /// The most bytes a group spans: a lone chunk is at most a file chunk, a
+    /// pack at most `pack_span_blocks`.
+    fn group_span(&self) -> u32 {
+        u32::try_from(self.pack_span_blocks * u64::from(EROFS_BLOCK_SIZE))
+            .expect("the pack span is bounded by MAX_CHUNK_GROUP_MIN_SIZE")
+            .max(self.file_chunk_size)
     }
 
     /// The blob meta describing everything written; call after
@@ -1345,7 +1343,7 @@ impl<W: Write> BlobWriter<W> {
         Ok(BlobMetadata::new(
             self.compressor,
             self.digester,
-            self.group_span_blocks(),
+            self.group_span(),
             self.chunk_group_min_size,
             self.blob_metadata_chunk_groups.clone(),
             self.members.clone(),
@@ -1828,7 +1826,7 @@ mod tests {
             } else {
                 zstd::bulk::decompress(encoded, meta.payload_size(&group) as usize).unwrap()
             };
-            assert_eq!(crc32c(&payload), group.crc32());
+            assert_eq!(crc32c(&payload), group.payload_crc32());
             meta.for_each_decoded_chunk(group.index() as usize, &payload, &mut |offset, bytes| {
                 padded[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
                 Ok(())
@@ -2381,7 +2379,7 @@ mod tests {
 
                 let meta = writer.blob_metadata().unwrap();
                 assert_eq!(meta.lookup_granule(), minimum);
-                assert_eq!(meta.header().lookup_granule_byte_shift(), 21);
+                assert_eq!(meta.header().lookup_granule_shift(), 21);
                 assert_eq!(meta.group_span(), 4 * minimum);
                 assert_eq!(meta.chunk_count(), 34);
                 assert_eq!(meta.chunk_group_count(), 33 / chunks_per_group + 1);
@@ -2505,7 +2503,7 @@ mod tests {
             .write_reader_chunks(&mut &[7u8; 5000][..], 5000)
             .unwrap();
         writer.write_blob_metadata(&meta_path).unwrap();
-        let meta = BlobMetadata::from_path(&meta_path, true).unwrap();
+        let meta = BlobMetadata::from_path(&meta_path).unwrap();
         assert_eq!(meta.chunk_count(), 1);
         assert_eq!(meta.digest_count(), 0);
         assert_eq!(meta.group_span(), 2 * TEST_CHUNK_SIZE);

@@ -127,12 +127,12 @@ pub fn build_ondemand_blob(
             .or_default()
             .insert(reference.chunk_group_index);
     }
-    let mut group_span_blocks = 0;
+    let mut group_span = 0;
     let mut compressor = BlobMetadataCompressor::None;
     let mut digester = BlobMetadataDigester::Blake3;
     for (blob_index, cache) in &sources {
         let meta = cache.blob_metadata();
-        group_span_blocks = group_span_blocks.max(meta.group_span_blocks());
+        group_span = group_span.max(meta.group_span());
         match (compressor, meta.compressor()) {
             (_, BlobMetadataCompressor::None) => {}
             (BlobMetadataCompressor::None, source) => compressor = source,
@@ -147,7 +147,7 @@ pub fn build_ondemand_blob(
             digester = BlobMetadataDigester::None;
         }
     }
-    if group_span_blocks == 0 {
+    if group_span == 0 {
         return Err(Error::InvalidParameter(
             "the trace names no chunk groups".to_string(),
         ));
@@ -223,7 +223,7 @@ pub fn build_ondemand_blob(
     let mut chunk_groups = Vec::with_capacity(patterns.len());
     let mut members = Vec::new();
     let mut digests = Vec::new();
-    let mut least_blocks = group_span_blocks;
+    let mut least_blocks = group_span / nydus_format::erofs::EROFS_BLOCK_SIZE;
     for reference in patterns {
         let meta = sources[&reference.blob_index].blob_metadata();
         let group = meta
@@ -238,7 +238,7 @@ pub fn build_ondemand_blob(
             group.compressed_size(),
             group.payload_size(),
             group.chunk_count(),
-            group.crc32(),
+            group.payload_crc32(),
             Some(BlobMetadataRedirect::new(
                 reference.blob_index,
                 reference.chunk_group_index,
@@ -258,7 +258,7 @@ pub fn build_ondemand_blob(
     let blob_metadata = BlobMetadata::new(
         compressor,
         digester,
-        group_span_blocks,
+        group_span,
         lookup_granule,
         chunk_groups,
         members,

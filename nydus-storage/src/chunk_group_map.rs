@@ -134,8 +134,8 @@ impl ChunkGroupMap {
                 ));
             }
         } else {
-            // `version` (offset 8) is informational and not gated on, matching
-            // the other sidecar formats.
+            // `version` (offset 8) is informational and not gated on: the map
+            // is local mutable state, not a distributed format.
             let existing = u32::from_le_bytes(
                 header[GROUP_MAP_CHUNK_COUNT_OFFSET..GROUP_MAP_CHUNK_COUNT_OFFSET + 4]
                     .try_into()

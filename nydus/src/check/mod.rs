@@ -660,7 +660,7 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 }
 
 fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> {
-    let blob_metadata = BlobMetadata::from_bytes(data, false)?;
+    let blob_metadata = BlobMetadata::from_bytes(data)?;
     Ok(BlobMetadataSummary {
         chunk_group_count: blob_metadata.chunk_group_count(),
         group_span: blob_metadata.group_span(),
@@ -678,7 +678,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::{BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT};
+    use nydus_format::blob::{BlobMetadataDigester, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE};
     use std::fs;
     use tempfile::tempdir;
 
@@ -754,7 +754,7 @@ mod tests {
         let blob_metadata = BlobMetadata::new(
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
-            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_BLOCK_COUNT,
+            DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE,
             EROFS_BLOCK_SIZE,
             Vec::new(),
             Vec::new(),

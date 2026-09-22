@@ -455,7 +455,7 @@ mod tests {
         let payload = vec![0xabu8; 4096];
         let (_, meta) = crate::cache::test_util::encode_blob(
             BlobMetadataCompressor::None,
-            1,
+            4096,
             &[vec![payload.clone()]],
             false,
         );
@@ -587,13 +587,13 @@ mod tests {
         let redirect_meta = BlobMetadata::new(
             BlobMetadataCompressor::None,
             BlobMetadataDigester::None,
-            1,
+            4096,
             4096,
             vec![BlobMetadataChunkGroup::new(
                 group.compressed_size(),
                 group.payload_size(),
                 group.chunk_count(),
-                group.crc32(),
+                group.payload_crc32(),
                 Some(BlobMetadataRedirect::new(1, 0).unwrap()),
             )
             .unwrap()],

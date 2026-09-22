@@ -555,7 +555,6 @@ fn core_reads_back_small_files_image() {
         &dir.path()
             .join("blobs")
             .join(format!("{}.blob.meta", hex_string(&blob_id))),
-        true,
     )
     .unwrap();
     // One chunk per small file (zeros is a hole) plus the chunks of the

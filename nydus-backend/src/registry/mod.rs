@@ -1091,6 +1091,9 @@ impl Registry {
         )?;
         let footer = BlobFooter::from_bytes(&footer_bytes)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
+        footer
+            .validate_layout(footer_offset)
+            .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
         if footer.is_raw_device() {
             return Err(RegistryError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -1112,7 +1115,7 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
         )?;
 
-        BlobMetadata::from_bytes(&blob_metadata_bytes, false)
+        BlobMetadata::from_bytes(&blob_metadata_bytes)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))
     }
 

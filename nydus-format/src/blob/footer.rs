@@ -15,9 +15,9 @@ use std::path::Path;
 /// (`NDGRPMAP`) sidecars.
 pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"NDFOOTER";
 
-/// On-disk format generation, informational only: readers do not gate on it.
-/// Compatibility is governed EROFS-style by the magic and the incompat half
-/// of `flags` (unknown incompat bits reject the footer).
+/// On-disk format generation: the layout of the fixed fields. Other
+/// generations are rejected; features within a generation are governed by
+/// the incompat half of `flags` (unknown incompat bits reject the footer).
 pub const NYDUS_BLOB_FOOTER_VERSION: u32 = 1;
 
 /// The footer's fixed on-disk size: one EROFS block at the blob's tail.
@@ -59,7 +59,7 @@ const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
 /// ```text
 /// offset  size  field
 ///      0     8  magic                   b"NDFOOTER"
-///      8     4  version                 informational, never gated on
+///      8     4  version                 1; other generations are rejected
 ///     12     4  flags                   low 16 incompat / high 16 compat
 ///     16     4  crc32                   crc32c of these 4096 bytes with
 ///                                       this field treated as zero
@@ -147,9 +147,9 @@ impl BlobFooter {
     ///
     /// The declared region offsets are not anchored against the blob's actual
     /// size here. The whole-blob entry points ([`Self::from_blob_bytes`],
-    /// [`Self::from_blob_path`]) do that anchoring themselves. Callers
-    /// parsing an isolated footer (e.g. a registry range read) must treat the
-    /// offsets as untrusted hints whose reads are bounds-checked downstream.
+    /// [`Self::from_blob_path`]) do that anchoring themselves; a caller
+    /// parsing an isolated footer (e.g. a registry range read) anchors it
+    /// with [`Self::validate_layout`] before trusting any offset.
     pub fn from_bytes(bytes: &[u8; NYDUS_BLOB_FOOTER_SIZE]) -> Result<Self> {
         let footer = Self {
             magic: bytes[0..8].try_into().unwrap(),
@@ -253,16 +253,21 @@ impl BlobFooter {
     /// fields themselves. Run once per entry point: by [`Self::from_bytes`]
     /// on the read side and by [`Self::new`] on the write side.
     ///
-    /// Deliberately not checked: `version` is informational (compatibility
-    /// is governed by the magic and the incompat flag bits), `reserved0` and
-    /// the reserved tail may carry a newer writer's compat fields (corruption
-    /// is caught by the crc32), and `bootstrap_blocks` may be zero (an
-    /// ondemand redirect blob embeds no bootstrap image).
+    /// Deliberately not checked: `reserved0` and the reserved tail may carry
+    /// a newer writer's compat fields (corruption is caught by the crc32),
+    /// and `bootstrap_blocks` may be zero (an ondemand redirect blob embeds
+    /// no bootstrap image).
     fn validate(&self) -> Result<()> {
         if self.magic != NYDUS_BLOB_FOOTER_MAGIC {
             return Err(Error::InvalidImage(
                 "invalid nydus footer magic".to_string(),
             ));
+        }
+        if self.version != NYDUS_BLOB_FOOTER_VERSION {
+            return Err(Error::InvalidImage(format!(
+                "unsupported nydus footer version {} (expected {NYDUS_BLOB_FOOTER_VERSION})",
+                self.version
+            )));
         }
 
         let raw_device = self.flags.contains(NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE);
@@ -307,7 +312,7 @@ impl BlobFooter {
     /// actual position (an external fact the footer cannot fake): the
     /// regions must tile the blob back to back (alignment gaps allowed) and
     /// end exactly where the footer sits.
-    fn validate_layout(&self, offset: u64) -> Result<()> {
+    pub fn validate_layout(&self, offset: u64) -> Result<()> {
         let regions = [
             (
                 "compressed data",
@@ -511,10 +516,10 @@ mod tests {
     fn resealed_header_mutations_follow_the_compat_rules() {
         let cases: [(&str, usize, [u8; 4], Option<&str>); 4] = [
             (
-                "future version is readable",
+                "another version rejects",
                 8,
                 (NYDUS_BLOB_FOOTER_VERSION + 1).to_le_bytes(),
-                None,
+                Some("version"),
             ),
             (
                 "unknown compat flag is ignored",
