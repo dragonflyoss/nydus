@@ -450,7 +450,16 @@ pub fn validate_decoded_chunk_group(
             ChunkGroupCrcMismatch,
         ));
     }
-    if skip_verify_checksums() || blob_metadata.digest_count() == 0 {
+    if skip_verify_checksums() {
+        return Ok(());
+    }
+    if let Some(algorithm) = blob_metadata.unsupported_digest_algorithm() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("cannot verify chunk groups digested with unsupported algorithm {algorithm}"),
+        ));
+    }
+    if blob_metadata.digest_count() == 0 {
         return Ok(());
     }
     let expected = blob_metadata
@@ -465,7 +474,7 @@ pub fn validate_decoded_chunk_group(
         members.push(*blake3::hash(&decoded[at..at + len]).as_bytes());
         at += len;
     }
-    if BlobMetadataDigest::of_group(&members).as_ref() != Some(expected) {
+    if BlobMetadataDigest::of_group(&members) != Some(expected) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("blob chunk group {} digest mismatch", group.index()),
@@ -805,6 +814,26 @@ mod tests {
         assert!(is_chunk_group_crc_mismatch(&err));
         // A short payload fails the length check.
         assert!(validate_decoded_chunk_group(&metadata, &group, &data[1..]).is_err());
+
+        // A DigestTable algorithm this reader does not know fails verification
+        // instead of skipping it.
+        let mut raw = Vec::new();
+        metadata.write_to(&mut raw).unwrap();
+        let digest_table = metadata
+            .tables()
+            .iter()
+            .find(|table| table.table_type() == 4)
+            .unwrap()
+            .range();
+        raw[digest_table.start + 16] = 9;
+        raw[16..20].fill(0);
+        let crc = crc32c::crc32c(&raw);
+        raw[16..20].copy_from_slice(&crc.to_le_bytes());
+        let unknown = BlobMetadata::from_bytes(&raw).unwrap();
+        assert_eq!(unknown.digest_count(), 0);
+        let err = validate_decoded_chunk_group(&unknown, &group, &data).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("algorithm 9"), "{err}");
     }
 
     #[test]

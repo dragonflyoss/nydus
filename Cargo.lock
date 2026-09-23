@@ -3046,7 +3046,6 @@ dependencies = [
 name = "nydus-format"
 version = "3.0.0-alpha.3"
 dependencies = [
- "bitflags 2.11.0",
  "blake3",
  "crc32c",
  "libc",

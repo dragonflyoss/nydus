@@ -251,7 +251,7 @@ pub fn build_ondemand_blob(
         }
         if digester == BlobMetadataDigester::Blake3 {
             // A digester on every source means every group has one.
-            digests.extend(meta.digest(group.index() as usize).copied());
+            digests.extend(meta.digest(group.index() as usize));
         }
     }
     let lookup_granule = nydus_format::erofs::EROFS_BLOCK_SIZE << least_blocks.ilog2();

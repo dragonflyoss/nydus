@@ -1,12 +1,11 @@
-//! The compression and digest algorithms a blob meta file declares in its
-//! `flags` word: typed views over the algorithm flag bits, decoded per read
-//! from `BlobMetadataFlags` and encoded back via `flag`.
+//! The compression and digest algorithms a blob meta file declares as enum
+//! codes in its GroupTable and DigestTable headers.
 
-use crate::blob::metadata::BlobMetadataFlags;
+use crate::error::{Error, Result};
 use std::fmt;
 
-/// The chunk group payload compressor a blob meta declares. `None` is the
-/// absent-flag state: payloads are stored raw.
+/// The chunk group payload compressor a blob meta declares. `None` stores
+/// payloads raw.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlobMetadataCompressor {
     #[default]
@@ -16,12 +15,25 @@ pub enum BlobMetadataCompressor {
 }
 
 impl BlobMetadataCompressor {
-    /// The flag bit encoding this compressor, empty for `None`.
-    pub fn flag(self) -> BlobMetadataFlags {
+    /// The GroupTable header code of this compressor.
+    pub fn code(self) -> u8 {
         match self {
-            Self::None => BlobMetadataFlags::empty(),
-            Self::Zstd => BlobMetadataFlags::COMPRESSOR_ZSTD,
-            Self::Lz4Block => BlobMetadataFlags::COMPRESSOR_LZ4,
+            Self::None => 0,
+            Self::Zstd => 1,
+            Self::Lz4Block => 2,
+        }
+    }
+
+    /// Decode a GroupTable header code; an unknown compressor rejects the
+    /// file, since its payloads cannot be decoded.
+    pub fn from_code(code: u8) -> Result<Self> {
+        match code {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Zstd),
+            2 => Ok(Self::Lz4Block),
+            _ => Err(Error::Unsupported(format!(
+                "unsupported blob meta compressor {code} (image is newer than this reader)"
+            ))),
         }
     }
 }
@@ -38,24 +50,10 @@ impl fmt::Display for BlobMetadataCompressor {
     }
 }
 
-/// Infallible: an absent compressor flag is the valid uncompressed state,
-/// and `BlobMetadataFlags` can only hold defined bits.
-impl From<BlobMetadataFlags> for BlobMetadataCompressor {
-    fn from(value: BlobMetadataFlags) -> Self {
-        if value.contains(BlobMetadataFlags::COMPRESSOR_LZ4) {
-            Self::Lz4Block
-        } else if value.contains(BlobMetadataFlags::COMPRESSOR_ZSTD) {
-            Self::Zstd
-        } else {
-            Self::None
-        }
-    }
-}
-
-/// The chunk digest algorithm a blob meta declares. `None` is the
-/// absent-flag state and records zero digests: the chunk table is still
-/// addressable but carries no integrity information, for blobs built from
-/// content that was already verified upstream.
+/// The chunk digest algorithm a blob meta declares. `None` means the blob
+/// has no DigestTable: the chunk table is still addressable but carries no
+/// integrity information, for blobs built from content that was already
+/// verified upstream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlobMetadataDigester {
     #[default]
@@ -64,12 +62,17 @@ pub enum BlobMetadataDigester {
 }
 
 impl BlobMetadataDigester {
-    /// The flag bit encoding this digester, empty for `None`.
-    pub fn flag(self) -> BlobMetadataFlags {
+    /// The DigestTable header code of this digester, `None` for no table.
+    pub fn code(self) -> Option<u8> {
         match self {
-            Self::Blake3 => BlobMetadataFlags::DIGESTER_BLAKE3,
-            Self::None => BlobMetadataFlags::empty(),
+            Self::Blake3 => Some(1),
+            Self::None => None,
         }
+    }
+
+    /// Decode a DigestTable header code, `None` for an unknown algorithm.
+    pub fn from_code(code: u8) -> Option<Self> {
+        (code == 1).then_some(Self::Blake3)
     }
 }
 
@@ -81,17 +84,5 @@ impl fmt::Display for BlobMetadataDigester {
             Self::Blake3 => "blake3",
             Self::None => "none",
         })
-    }
-}
-
-/// Infallible, like the compressor: an absent digester flag is the valid
-/// undigested state.
-impl From<BlobMetadataFlags> for BlobMetadataDigester {
-    fn from(value: BlobMetadataFlags) -> Self {
-        if value.contains(BlobMetadataFlags::DIGESTER_BLAKE3) {
-            Self::Blake3
-        } else {
-            Self::None
-        }
     }
 }

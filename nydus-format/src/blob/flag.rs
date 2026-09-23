@@ -1,23 +1,18 @@
 //! Conventions shared by the nydus on-disk record formats (blob meta, blob
-//! footer): a `magic + version + flags` header prefix where `flags` is split
-//! EROFS-style — the low 16 bits are incompatible features (unknown bits
-//! reject the file), the high 16 bits are compatible features (unknown bits
-//! are ignored) — and a crc32c computed over the record with the crc field
-//! zeroed.
+//! footer): the frozen `magic[0..8] + feature_compat[8..12] +
+//! feature_incompat[12..16] + crc32[16..20]` prefix. There is no version
+//! field: compatibility is decided by the feature words alone, EROFS-style.
+//! Unknown `feature_compat` bits are ignored, unknown `feature_incompat` bits
+//! reject the record, so an incompatible change sets a new incompat bit.
 
 use crate::error::{Error, Result};
 
-/// A format `flags` word, split EROFS-style into the incompatible low half
-/// (unknown bits reject the file) and the compatible high half (unknown bits
-/// are ignored). Wraps the raw on-disk word verbatim, so compat bits written
-/// by a newer writer survive a round trip through this reader.
+/// A `feature_incompat` word: every bit is an incompatible feature and an
+/// unknown bit rejects the record. Wraps the raw on-disk word verbatim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FeatureFlags(u32);
 
 impl FeatureFlags {
-    /// The incompatible (reject-when-unknown) half of the word.
-    pub const INCOMPAT_MASK: u32 = 0x0000_FFFF;
-
     /// A word with no feature bits set.
     pub const fn empty() -> Self {
         Self(0)
@@ -49,9 +44,9 @@ impl FeatureFlags {
         }
     }
 
-    /// Reject a word whose incompat half carries bits outside `supported`.
+    /// Reject a word carrying bits outside `supported`.
     pub fn validate_incompat(self, supported: u32) -> Result<()> {
-        let unknown_incompat = self.0 & Self::INCOMPAT_MASK & !supported;
+        let unknown_incompat = self.0 & !supported;
         if unknown_incompat != 0 {
             return Err(Error::Unsupported(format!(
                 "unsupported incompat flags {unknown_incompat:#x} (image is newer than this reader)"
@@ -97,17 +92,17 @@ mod tests {
     }
 
     #[test]
-    fn incompat_validation_follows_the_split_word_rules() {
+    fn every_unknown_bit_of_the_word_rejects() {
         let supported = 0b1;
         let cases: [(&str, u32, Option<&str>); 4] = [
             ("empty word", 0, None),
             ("supported incompat bit", 0b1, None),
-            ("unknown compat bits are ignored", 0xffff_0001, None),
             (
-                "unknown incompat bit",
-                0b10,
+                "unknown high bit",
+                0x8000_0001,
                 Some("unsupported incompat flags"),
             ),
+            ("unknown low bit", 0b10, Some("unsupported incompat flags")),
         ];
 
         for (case, bits, expected) in cases {

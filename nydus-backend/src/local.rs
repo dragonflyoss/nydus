@@ -315,7 +315,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(blob_metadata.header().chunk_count(), 1);
+        assert_eq!(blob_metadata.chunk_count(), 1);
         assert_eq!(data, payload);
     }
 
@@ -339,7 +339,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(blob_metadata.header().chunk_count(), 1);
+        assert_eq!(blob_metadata.chunk_count(), 1);
         assert_eq!(data, payload);
         assert!(backend.blob_metadata(&data_blob_id).is_err());
     }

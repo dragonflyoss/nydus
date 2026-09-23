@@ -770,8 +770,9 @@ mod tests {
             data.len() as u64,
             data.len() as u64,
             0,
+            0,
             data.len() as u64,
-            1,
+            u64::from(EROFS_BLOCK_SIZE),
             None,
         )
         .unwrap();

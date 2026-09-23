@@ -2379,8 +2379,9 @@ mod tests {
 
                 let meta = writer.blob_metadata().unwrap();
                 assert_eq!(meta.lookup_granule(), minimum);
-                assert_eq!(meta.header().lookup_granule_shift(), 21);
+                assert_eq!(meta.lookup_granule_block_shift(), 9);
                 assert_eq!(meta.group_span(), 4 * minimum);
+                assert_eq!(meta.maximum_group_span_block_shift(), 11);
                 assert_eq!(meta.chunk_count(), 34);
                 assert_eq!(meta.chunk_group_count(), 33 / chunks_per_group + 1);
                 for group in meta.chunk_groups() {
@@ -2478,7 +2479,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 meta.digest(group.index() as usize).unwrap(),
-                &BlobMetadataDigest::of_group(&members).unwrap()
+                BlobMetadataDigest::of_group(&members).unwrap()
             );
         }
     }

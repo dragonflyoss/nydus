@@ -465,9 +465,10 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
                     0,
                     offset as u64,
                     offset as u64,
-                    (region.len() / 4096) as u32,
+                    region.len() as u64,
+                    crc32c::crc32c(&region),
                     (offset + region.len()) as u64,
-                    1,
+                    4096,
                     compressed_size,
                 )
                 .unwrap();
@@ -476,9 +477,15 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
                 blob.resize(blob.len() + 4096, 0);
                 footer.write_to(&mut blob).unwrap();
                 let path = dir.path().join(format!("embedded-{offset}-{compressed}"));
-                fs::write(&path, blob).unwrap();
+                fs::write(&path, &blob).unwrap();
                 let reader = ErofsReader::open_metadata_only(&path).unwrap();
                 assert_eq!(reader.z_compr_cfgs().unwrap(), Some(config));
+
+                // Corrupting the padding still fails the bootstrap crc32.
+                blob[offset + region.len() - 1] ^= 1;
+                fs::write(&path, &blob).unwrap();
+                let err = ErofsReader::open_metadata_only(&path).err().unwrap();
+                assert!(err.to_string().contains("bootstrap crc32"), "{err}");
             }
         }
         if algorithm == ZAlgorithm::Zstd {
