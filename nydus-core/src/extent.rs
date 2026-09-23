@@ -172,6 +172,39 @@ impl<'a> ExtentResolver<'a> {
     pub(crate) fn finish(self) -> Vec<Extent> {
         self.ranges
     }
+
+    fn fetch_blob(&self, spec: &BlobRangeSpec) -> Result<()> {
+        let cache = self
+            .reader
+            .blob_cache(spec.index)
+            .with_context(|| format!("failed to open blob {}", spec.index))?;
+        cache.ensure_range(spec.offset, spec.len).with_context(|| {
+            format!(
+                "failed to fetch blob {} range [{}, +{})",
+                spec.index, spec.offset, spec.len
+            )
+        })
+    }
+
+    /// Fetch distinct blob segments concurrently, propagating fetch failures.
+    pub(crate) fn fetch_blobs(&self, specs: &[BlobRangeSpec]) -> Result<()> {
+        match specs {
+            [] => Ok(()),
+            [spec] => self.fetch_blob(spec),
+            _ => std::thread::scope(|scope| {
+                let workers: Vec<_> = specs
+                    .iter()
+                    .map(|spec| scope.spawn(move || self.fetch_blob(spec)))
+                    .collect();
+                for worker in workers {
+                    worker
+                        .join()
+                        .map_err(|_| Error::Io(io::Error::other("blob fetch worker panicked")))??;
+                }
+                Ok(())
+            }),
+        }
+    }
 }
 
 /// Lazily-built cache of read-only shared mappings of the files backing the
