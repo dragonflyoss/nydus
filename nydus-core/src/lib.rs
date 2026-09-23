@@ -84,8 +84,8 @@ impl NydusCore {
     /// first touches a blob.
     ///
     /// `config` uses the same structure as `nydus fuse --config` and must
-    /// provide both the backend serving the blobs and a persistent local cache
-    /// directory.
+    /// provide the backend serving the blobs. A persistent cache directory is
+    /// required unless every blob is a directly mappable local raw device.
     ///
     /// Unless `config.prefetch.scope` is `none`, a background prefetch worker is
     /// spawned before returning: for an optimized image it streams the
@@ -125,23 +125,18 @@ impl NydusCore {
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
-        // The multi-device model hands each blob's cache file to the kernel
-        // (as an EROFS device or fill target), so diskless mode cannot apply.
-        let Some(cache_dir) = config.storage.dir.clone() else {
-            return Err(Error::InvalidConfig(
-                "storage.dir is required: the blob cache files back the kernel-served devices"
-                    .to_string(),
-            ));
-        };
-        std::fs::create_dir_all(&cache_dir).with_context(|| {
-            format!("failed to create cache directory: {}", cache_dir.display())
-        })?;
+        let cache_dir = config.storage.dir.clone();
+        if let Some(cache_dir) = &cache_dir {
+            std::fs::create_dir_all(cache_dir).with_context(|| {
+                format!("failed to create cache directory: {}", cache_dir.display())
+            })?;
+        }
 
         let trace_recorder = Arc::new(TraceRecorder::default());
         let reader = ErofsReader::open_bootstrap(
             bootstrap,
-            backend,
-            Some(&cache_dir),
+            backend.clone(),
+            cache_dir.as_deref(),
             Some(trace_recorder.clone()),
         )
         .context("failed to open nydus bootstrap")?;
@@ -153,6 +148,20 @@ impl NydusCore {
             return Err(Error::InvalidImage(
                 "bootstrap contains no blobs".to_string(),
             ));
+        }
+        if cache_dir.is_none() {
+            for info in &raw_blob_infos {
+                let mapped = backend
+                    .raw_device_file(&info.blob_id)
+                    .with_context(|| format!("failed to resolve blob {}", info.blob_index))?
+                    .is_some_and(|file| file.data_offset == 0);
+                if !mapped {
+                    return Err(Error::InvalidConfig(format!(
+                        "storage.dir is required: blob {} has no directly mappable local device",
+                        BlobId::from(info.blob_id)
+                    )));
+                }
+            }
         }
         let flat_size = raw_blob_infos
             .iter()

@@ -5,7 +5,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use super::{BlobBackend, ReadContext};
+use super::{BlobBackend, RawDeviceFile, ReadContext};
 use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
 use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 
@@ -214,6 +214,22 @@ impl BlobBackend for Local {
 
     fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
         Ok(self.resolved_source(blob_id)?.raw_device)
+    }
+
+    fn raw_device_file(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<Option<RawDeviceFile>> {
+        let entry = self.source_entry(blob_id)?;
+        if !entry.resolved.raw_device {
+            return Ok(None);
+        }
+        Ok(Some(RawDeviceFile {
+            path: entry.resolved.path.clone(),
+            file: entry.open_file()?,
+            data_offset: entry.resolved.data_offset,
+            data_size: entry.resolved.data_size,
+        }))
     }
 
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
