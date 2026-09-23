@@ -4,7 +4,6 @@
 //! the `.blob.meta` sidecar ([`metadata`]) and the trailing blob footer
 //! ([`footer`]) — not part of the EROFS metadata format itself.
 
-use crate::erofs::bytes_to_blocks;
 use crate::error::{Context, Error, Result};
 use crate::utils::{align_up_u64, write_zeros};
 use std::io::Write;
@@ -17,8 +16,8 @@ pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
-    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataFlags,
-    BlobMetadataRedirect, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataRedirect,
+    BlobMetadataTable, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
 };
 
 /// Finish a full blob: append everything behind the data region to `writer`,
@@ -39,10 +38,10 @@ pub use metadata::{
 /// pad              zeros up to the 4 KiB aligned bootstrap_offset
 /// bootstrap        one zstd frame of the metadata-only EROFS image
 ///                  (bootstrap_compressed_size bytes), zero tail up to
-///                  bootstrap_blocks × 4 KiB, absent for an ondemand blob
-/// blob meta        NDBLMETA version 1 (Header, GroupTable, ChunkTable,
-///                  GranuleIndexTable, optional DigestTable/RedirectTable),
-///                  already block-padded, ending
+///                  bootstrap_size, absent for an ondemand blob
+/// blob meta        NDBLMETA (header, GroupTable,
+///                  ChunkTable, GranuleIndexTable, optional DigestTable/
+///                  RedirectTable), already block-padded, ending
 ///                  exactly at the footer offset
 /// footer           the sealed NDFOOTER block, fixed 4 KiB at the tail
 /// ```
@@ -92,14 +91,20 @@ fn new_blob_footer(
     let blob_metadata_offset = bootstrap_offset
         .checked_add(bootstrap_size)
         .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
+    let padding = (bootstrap_size - bootstrap_compressed_size) as usize;
+    let bootstrap_crc32 = crc32c::crc32c_append(
+        crc32c::crc32c(compressed_bootstrap),
+        &[0u8; NYDUS_BLOB_FOOTER_ALIGNMENT as usize][..padding],
+    );
 
     BlobFooter::new(
         0,
         compressed_data_size,
         bootstrap_offset,
-        bytes_to_blocks(bootstrap_size)?,
+        bootstrap_size,
+        bootstrap_crc32,
         blob_metadata_offset,
-        blob_metadata.map_or(Ok(0), |meta| bytes_to_blocks(meta.padded_size()))?,
+        blob_metadata.map_or(0, BlobMetadata::padded_size),
         (!compressed_bootstrap.is_empty()).then_some(bootstrap_compressed_size),
     )
 }

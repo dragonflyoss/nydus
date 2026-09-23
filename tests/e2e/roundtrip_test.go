@@ -135,39 +135,55 @@ func TestErofsKernelCompatibility(t *testing.T) {
 		require.NoError(t, err)
 		decodedSize := int(blocks) * 4096
 		require.Less(t, decodedSize, 1048576)
-		// Decode version 1 independently: all chunks, including lone ones,
-		// have a four-byte length; the GroupTable terminator carries totals.
+		// Decode the blob meta independently: the tables follow the header
+		// back to back at 8-byte boundaries, each starting with a 16-byte
+		// common header; all chunks, including lone ones, have a four-byte
+		// length and the GroupTable terminator carries the totals.
 		metadata, err := os.ReadFile(blob + ".blob.meta")
 		require.NoError(t, err)
-		require.GreaterOrEqual(t, len(metadata), 32)
+		require.GreaterOrEqual(t, len(metadata), 24)
 		require.Equal(t, "NDBLMETA", string(metadata[:8]))
-		require.Equal(t, uint32(1), binary.LittleEndian.Uint32(metadata[8:]), "blob meta version")
-		flags := binary.LittleEndian.Uint32(metadata[12:])
-		require.Zero(t, flags&0x3, "compressor none")
-		groupCount := int(binary.LittleEndian.Uint32(metadata[20:]))
-		groupTable := 32
-		chunkTable := groupTable + (groupCount+1)*24
-		require.GreaterOrEqual(t, len(metadata), chunkTable)
-		terminatorOffset := groupTable + groupCount*24
-		chunkCount := int(binary.LittleEndian.Uint32(metadata[terminatorOffset+12:]))
-		totalBlocks := int(binary.LittleEndian.Uint32(metadata[terminatorOffset+8:]))
-		require.GreaterOrEqual(t, len(metadata), chunkTable+chunkCount*4)
-		require.Equal(t, make([]byte, 6), metadata[26:32])
+		require.Zero(t, binary.LittleEndian.Uint32(metadata[12:]), "no incompat features")
+		tableCount := int(binary.LittleEndian.Uint16(metadata[20:]))
+		tables := map[uint16][]byte{}
+		offset := 24
+		for i := 0; i < tableCount; i++ {
+			offset = (offset + 7) / 8 * 8
+			header := metadata[offset:]
+			headerSize := int(binary.LittleEndian.Uint16(header[2:]))
+			size := headerSize + int(binary.LittleEndian.Uint32(header[8:]))*int(binary.LittleEndian.Uint32(header[12:]))
+			require.LessOrEqual(t, offset+size, len(metadata))
+			tables[binary.LittleEndian.Uint16(header)] = metadata[offset : offset+size]
+			offset += size
+		}
+		tableEntries := func(kind uint16, entrySize int) ([]byte, []byte, int) {
+			table, ok := tables[kind]
+			require.True(t, ok, "table %d", kind)
+			headerSize := int(binary.LittleEndian.Uint16(table[2:]))
+			require.Equal(t, entrySize, int(binary.LittleEndian.Uint32(table[8:])), "table %d entry size", kind)
+			count := int(binary.LittleEndian.Uint32(table[12:]))
+			return table[:headerSize], table[headerSize:], count
+		}
+		groupHeader, groupTable, groupEntries := tableEntries(1, 24)
+		require.Zero(t, groupHeader[17], "compressor none")
+		_, chunkTable, chunkCount := tableEntries(2, 4)
+		granuleHeader, indexTable, indexCount := tableEntries(3, 4)
+		groupCount := groupEntries - 1
+		terminator := groupTable[groupCount*24:]
+		require.Equal(t, chunkCount, int(binary.LittleEndian.Uint32(terminator[12:])))
+		totalBlocks := int(binary.LittleEndian.Uint32(terminator[8:]))
 		require.Equal(t, decodedSize, totalBlocks*4096, "device blocks cover the groups")
 		group := func(i int) (compressedOffset int, startBlock int, firstMember int, uncompressedSize int) {
-			entry := metadata[groupTable+i*24:]
+			entry := groupTable[i*24:]
 			return int(binary.LittleEndian.Uint64(entry)), int(binary.LittleEndian.Uint32(entry[8:])),
 				int(binary.LittleEndian.Uint32(entry[12:])), int(binary.LittleEndian.Uint32(entry[16:]))
 		}
 		chunkLen := func(index int) int {
-			entry := metadata[chunkTable+index*4:]
-			return int(binary.LittleEndian.Uint32(entry))
+			return int(binary.LittleEndian.Uint32(chunkTable[index*4:]))
 		}
-		granuleBytes := uint64(1) << metadata[25]
-		require.GreaterOrEqual(t, granuleBytes, uint64(4096))
-		indexTable := (chunkTable + chunkCount*4 + 7) &^ 7
-		indexCount := (uint64(decodedSize) + granuleBytes - 1) / granuleBytes
-		require.GreaterOrEqual(t, uint64(len(metadata)), uint64(indexTable)+indexCount*4)
+		require.LessOrEqual(t, granuleHeader[16], groupHeader[16], "granule within the group span")
+		granuleBytes := uint64(4096) << granuleHeader[16]
+		require.Equal(t, (uint64(decodedSize)+granuleBytes-1)/granuleBytes, uint64(indexCount))
 		decoded := make([]byte, decodedSize)
 		for g := 0; g < groupCount; g++ {
 			sourceOffset, startBlock, firstMember, uncompressedSize := group(g)
@@ -180,7 +196,7 @@ func TestErofsKernelCompatibility(t *testing.T) {
 			}
 			for block := startBlock; block < nextBlock; block++ {
 				index := uint64(block*4096) / granuleBytes
-				candidate := int(binary.LittleEndian.Uint32(metadata[indexTable+int(index)*4:]))
+				candidate := int(binary.LittleEndian.Uint32(indexTable[int(index)*4:]))
 				require.Less(t, candidate, groupCount)
 				_, followingBlock, _, _ := group(candidate + 1)
 				if block >= followingBlock {
@@ -266,8 +282,8 @@ func TestErofsKernelCompatibility(t *testing.T) {
 				require.NoError(t, err)
 				footer := fullBlob[len(fullBlob)-4096:]
 				require.Equal(t, "NDFOOTER", string(footer[:8]))
-				require.NotZero(t, binary.LittleEndian.Uint32(footer[12:])&(1<<1), "RAW_DEVICE flag")
-				require.Zero(t, binary.LittleEndian.Uint32(footer[60:]), "no blob meta blocks")
+				require.NotZero(t, binary.LittleEndian.Uint32(footer[12:])&(1<<1), "RAW_DEVICE feature")
+				require.Zero(t, binary.LittleEndian.Uint64(footer[72:]), "no blob meta region")
 				nativeSources = append(nativeSources, blob)
 				verify(t, bootstrap, nativeBlobDir, source)
 			}

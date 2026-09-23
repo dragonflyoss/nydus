@@ -215,6 +215,11 @@ impl ErofsReader {
         let bootstrap_offset = usize::try_from(footer.bootstrap_offset()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large")
         })?;
+        // `from_blob_bytes` anchored the layout, so the region lies within `mmap`.
+        let region = &mmap[bootstrap_offset..bootstrap_offset + footer.bootstrap_size() as usize];
+        footer
+            .verify_bootstrap(region)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
         let Some(compressed_size) = footer.bootstrap_compressed_size() else {
             return Ok((mmap, Some(bootstrap_offset)));

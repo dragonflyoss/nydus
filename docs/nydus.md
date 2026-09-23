@@ -3,8 +3,8 @@
 Current contract for this branch. Start at the
 [documentation index](../README.md#documentation) for the EROFS format and
 transport guides.
-The private `.blob.meta` chunk-table layout is version **1**; older development
-layouts are unsupported even when their version field is also 1.
+The private `.blob.meta` and footer layouts carry no version: compatibility is
+decided by feature bits, and older development layouts are unsupported.
 
 ## Status
 
@@ -740,8 +740,8 @@ Current implementation notes:
 	refused. Sources without digests (`--digester none`) make the ondemand
 	blob digest-free too.
 - The ondemand artifact layout is `[chunk groups][blob meta][footer]` with
-	`bootstrap_blocks = 0` (no embedded bootstrap); its blob meta sets the
-	`REDIRECT` flag and carries the redirect table, see
+	`bootstrap_size = 0` (no embedded bootstrap); its blob meta carries a
+	RedirectTable, see
 	[Ondemand (redirect) blob layout](#ondemand-redirect-blob-layout). It is
 	fetched and checked like any blob but never builds a cache of its own.
 
@@ -1441,58 +1441,62 @@ full blob file: <full_blob_sha256>
 |  | chunk index arrays      |  |
 |  | directory data blocks   |  |
 |  +-------------------------+  |
-+-------------------------------+  byte = footer.bootstrap_offset + footer.bootstrap_blocks * 4096
++-------------------------------+  byte = footer.bootstrap_offset + footer.bootstrap_size
 | padding to 4 KiB alignment    |
-+-------------------------------+  byte = footer.blob_meta_offset
++-------------------------------+  byte = footer.blob_metadata_offset
 | blob meta                     |
-| 32-byte header + tables       |
+| header, then tables           |
 | groups, chunks, digests       |
 | zero padding to 4 KiB         |
-+-------------------------------+  byte = footer.blob_meta_offset + footer.blob_meta_blocks * 4096
++-------------------------------+  byte = footer.blob_metadata_offset + footer.blob_metadata_size
 | blob footer                   |
 +-------------------------------+  EOF
 ```
 
-The footer is fixed at 4096 bytes and is always located at EOF. The current
-fields occupy the first 64 bytes; the remaining bytes are reserved for future
-compat fields — writers zero them, readers ignore them (EROFS-style, so a
-compat extension does not break old readers), and corruption is caught by the
-footer crc32c.
+The footer is fixed at 4096 bytes and is always located at EOF. The fields
+occupy the first 80 bytes; the remaining bytes are reserved — writers zero
+them, readers ignore them, and corruption is caught by the footer crc32c.
+There is no version: unknown `feature_compat` bits are ignored and unknown
+`feature_incompat` bits reject the blob, like the blob meta header. A new
+field takes reserved bytes together with a feature bit announcing it.
 
 ```text
 BlobFooter
 
 u8  magic[8]           "NDFOOTER", raw ASCII bytes written as-is
-u32 version            format generation, 1; other generations are rejected
-u32 flags              low 16 bits incompat (unknown bits reject),
-                       high 16 bits compat (unknown bits ignored)
+u32 feature_compat     unknown bits ignored
+u32 feature_incompat   unknown bits reject the blob
 u32 crc32              crc32c over footer bytes with this field zeroed
-u32 reserved0          future compat-field slot; writers zero, readers ignore
+u32 bootstrap_crc32    crc32c over the whole bootstrap region, padding
+                       included; zero without a bootstrap
 u64 compressed_data_offset
-u64 bootstrap_offset
-u64 blob_meta_offset
 u64 compressed_data_size
-u32 bootstrap_blocks
-u32 blob_meta_blocks            zero exactly when the RAW_DEVICE flag is set
+u64 bootstrap_offset
+u64 bootstrap_size              4 KiB multiple, zero for an ondemand blob
 u64 bootstrap_compressed_size   exact zstd frame bytes when the
-                                BOOTSTRAP_ZSTD flag is set, else 0
-u8  reserved1[4024]    compat area: writers zero, readers ignore
+                                BOOTSTRAP_ZSTD feature is set, else 0
+u64 blob_metadata_offset
+u64 blob_metadata_size          4 KiB multiple, zero exactly when the
+                                RAW_DEVICE feature is set
+u8  reserved[4016]     writers zero, readers ignore
 ```
 
-The `magic + version + flags` header prefix matches the blob meta
-(`NDBLMETA`) and group map (`NDGRPMAP`) sidecars.
+The `magic + feature_compat + feature_incompat + crc32` prefix matches the
+blob meta (`NDBLMETA`).
 
 Reader validation requires:
 
 ```text
 compressed_data_offset + compressed_data_size <= bootstrap_offset
-bootstrap_offset + bootstrap_blocks * 4096 <= blob_meta_offset
-blob_meta_offset + blob_meta_blocks * 4096 == footer_offset
+bootstrap_offset + bootstrap_size <= blob_metadata_offset
+blob_metadata_offset + blob_metadata_size == footer_offset
 ```
 
-The inequalities allow alignment padding between regions. Offsets and the footer
-offset must be 4 KiB aligned. The bootstrap and blob meta region lengths are
-stored as 4 KiB block counts in the footer.
+The inequalities allow alignment padding between regions. Offsets, region
+sizes except the compressed data size, and the footer offset must be 4 KiB
+aligned. Every offset and size is a byte count. Opening the embedded
+bootstrap (merge, check, single-blob mounts) verifies `bootstrap_crc32`
+before decoding it.
 
 The bootstrap region stores the metadata-only EROFS image as a single zstd
 frame (footer incompat flag `BOOTSTRAP_ZSTD = 1 << 0`), padded with zeros to
@@ -1504,10 +1508,10 @@ table is retargeted to the full-blob digest and flattened mapped addresses, and
 the superblock checksum is recomputed. The standalone file is therefore not
 byte-for-byte identical to the embedded bootstrap.
 
-A native `erofs-*` layer sets the incompat flag `RAW_DEVICE = 1 << 1`: its
+A native `erofs-*` layer sets the incompat feature `RAW_DEVICE = 1 << 1`: its
 data region is the raw EROFS device the kernel reads, there is no blob meta
-region (`blob_meta_blocks` is zero) and a bootstrap is mandatory. Readers that
-do not know the flag reject the blob; readers that do never fetch it on
+region (`blob_metadata_size` is zero) and a bootstrap is mandatory. Readers that
+do not know the feature reject the blob; readers that do never fetch it on
 demand.
 
 ### Bootstrap region details
@@ -1646,51 +1650,94 @@ At the same time:
 ### Blob meta region layout
 
 Chunk-based blobs contain this metadata both as a `.blob.meta` sidecar and
-verbatim before the full blob's footer. Native `erofs-*` blobs omit it. The
-format version is 1; readers reject any other generation.
+verbatim before the full blob's footer. Native `erofs-*` blobs omit it.
+There is no format version: compatibility is decided EROFS-style by feature
+bits in the header and in every table header, so a newer writer can add
+tables, table header fields and entry fields that older readers skip.
 
 The encoded payload contains tightly concatenated chunk bytes, while the
 cache address space starts every chunk on a 4096-byte boundary. Groups tile
 both spaces without additional group padding.
 
 ```text
-Header (32 bytes)
-GroupTable ((group_count + 1) * 24 bytes)
-ChunkTable (chunk_count * 4 bytes)
-GranuleIndexTable (ceil(cache_bytes / lookup_granule) * 4 bytes)
-DigestTable (group_count * 32 bytes when enabled)
-RedirectTable (group_count * 8 bytes when enabled)
+Header (24 bytes)
+table_count tables back to back, each at the next 8-byte boundary:
+  GroupTable        type 1  24-byte header + (group_count + 1) * 24 bytes
+  ChunkTable        type 2  16-byte header + chunk_count * 4 bytes
+  GranuleIndexTable type 3  24-byte header + ceil(cache_bytes / lookup_granule) * 4 bytes
+  DigestTable       type 4  24-byte header + group_count * 32 bytes, when enabled
+  RedirectTable     type 5  16-byte header + group_count * 8 bytes, redirect blobs only
 Zero padding to a 4096-byte multiple
 ```
 
-All integers are unsigned and little-endian. Each table starts at an 8-byte
-boundary; writers zero the alignment and tail padding, readers ignore it
-(corruption there is caught by the crc32c). Table offsets are derived, not
-stored.
+All integers are unsigned and little-endian. Writers zero every reserved
+field, the alignment and the tail padding; readers ignore them, and
+corruption there is caught by the crc32c. The file must end exactly at the
+4096-byte boundary after the last table, so no byte is undescribed.
 
 #### Header
 
 | Offset | Field | Bytes | Meaning |
 |---:|---|---:|---|
 | 0 | `magic` | 8 | ASCII `NDBLMETA` |
-| 8 | `version` | 4 | `1`; other generations are rejected |
-| 12 | `flags` | 4 | Compression, digest and redirect features |
+| 8 | `feature_compat` | 4 | Compatible features; unknown bits are ignored |
+| 12 | `feature_incompat` | 4 | Incompatible features; unknown bits reject the file. None is defined yet |
 | 16 | `crc32` | 4 | CRC32C of all metadata including padding, with this field zeroed |
-| 20 | `chunk_group_count` | 4 | Real groups, excluding the terminator |
-| 24 | `group_span_shift` | 1 | Maximum group span is `1 << value` bytes; from 12 (one block) through 31 (2 GiB) |
-| 25 | `lookup_granule_shift` | 1 | Lookup granule is `1 << value` bytes; from 12 through `group_span_shift` |
-| 26 | `reserved` | 6 | Writers zero it, readers ignore it |
+| 20 | `table_count` | 2 | Tables following the header |
+| 22 | `reserved` | 2 | Writers zero it, readers ignore it |
 
-Feature bits 0 and 1 select Zstandard and LZ4 respectively, and are mutually
-exclusive; neither means plain storage. Bit 2 enables BLAKE3; bit 3 marks a
-REDIRECT blob. Unknown low-16-bit features reject the file; unknown high-16-bit
-features are ignored.
+The first 20 bytes (`magic`, both feature words, `crc32`) are frozen for
+every nydus record format, including the footer: any reader can always tell
+whether it supports a file. The header holds only what concerns the whole
+file; parameters of a table live in that table's own header.
 
-The default maximum span is 8 MiB (shift 23), and lookup granule 2 MiB
-(shift 21). Setting the group minimum to 4, 8 or 16 MiB writes lookup shifts
-22, 23 or 24 respectively. File chunk size and build-time grouping threshold
-are not recorded here. Optimized blobs derive their own granule from copied
-group spans, so their lookup shift is not necessarily 21.
+#### Table header
+
+Every table starts with a 16-byte common header; table-specific fields
+follow from offset 16, and entries start at `header_size`. The first table
+starts at offset 24, and each next one at the first 8-byte boundary after
+the previous table, so the headers alone describe the layout.
+
+| Offset | Field | Bytes | Meaning |
+|---:|---|---:|---|
+| 0 | `type` | 2 | Nonzero and unique; `0x8000` and above are private |
+| 2 | `header_size` | 2 | At least 16 and the known size, a multiple of 8 |
+| 4 | `feature_compat` | 2 | Compatible table features; unknown bits are ignored |
+| 6 | `feature_incompat` | 2 | Incompatible table features; unknown bits reject the file. None is defined yet |
+| 8 | `entry_size` | 4 | Bytes per entry, at least the known entry size |
+| 12 | `entry_count` | 4 | Entries |
+
+Types 1 through 5 are the core tables above; nydus allocates the next ones
+from 6. GroupTable, ChunkTable and GranuleIndexTable are mandatory. To a
+reader that does not know a table's type every incompat bit is unknown, so
+it skips an unknown table whose `feature_incompat` is zero and rejects the
+file otherwise: a new table that older readers must understand sets an
+incompat bit.
+
+A table is exactly `header_size + entry_size * entry_count` bytes. Readers
+reach entry `i` at `header_size + i * entry_size`, so a newer writer may
+append fields to a table header or to every entry; older readers read the
+fields they know and skip the rest. A changed meaning needs a new table
+type or an incompat feature instead.
+
+Table-specific header fields:
+
+| Table | Offset | Field | Bytes | Meaning |
+|---|---:|---|---:|---|
+| GroupTable | 16 | `maximum_group_span_block_shift` | 1 | Maximum group span is `4096 << value` bytes; at most 19 (2 GiB) |
+| GroupTable | 17 | `compressor` | 1 | 0 plain, 1 Zstandard, 2 LZ4; unknown values reject the file |
+| GroupTable | 18 | `reserved` | 6 | Writers zero it, readers ignore it |
+| GranuleIndexTable | 16 | `lookup_granule_block_shift` | 1 | Lookup granule is `4096 << value` bytes; at most `maximum_group_span_block_shift` |
+| GranuleIndexTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
+| DigestTable | 16 | `algorithm` | 1 | 1 BLAKE3 group digest; a reader that does not know the value treats the blob as undigested and fails reads that must verify digests |
+| DigestTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
+
+The default maximum span is 8 MiB (block shift 11), and lookup granule
+2 MiB (block shift 9). Setting the group minimum to 4, 8 or 16 MiB writes
+granule block shifts 10, 11 or 12 respectively. File chunk size and
+build-time grouping threshold are not recorded. Optimized blobs derive
+their own granule from copied group spans, so their granule shift is not
+necessarily 9.
 
 #### GroupTable
 
@@ -1711,11 +1758,12 @@ count is a pack. There is no special zero-member representation.
 
 The final entry is a terminator: its first three fields contain total data
 bytes, total cache blocks and total chunks; payload size and CRC are zero.
-It has no DigestTable or RedirectTable entry. An empty blob has just this
-zero terminator and no other table entries.
+The group count is therefore the entry count minus one; the header does not
+store it. The terminator has no DigestTable or RedirectTable entry. An empty
+blob has just this zero terminator and no other table entries.
 
 Stored size equal to decoded payload size means plain data, even if the
-header declares compression. Otherwise the payload is compressed; the builder
+GroupTable header declares a compressor. Otherwise the payload is compressed; the builder
 stores it plain unless compression saves at least 30%. Runtime backends add
 the data-region base offset before issuing the encoded range read.
 
@@ -1734,7 +1782,7 @@ split the tight payload and recover each chunk's block-aligned cache address.
 Each entry is a four-byte `group_index` naming the group covering the
 corresponding granule's **first byte**. Every non-final group must span at
 least one granule; the final group may be shorter. The table is mandatory
-for every nonempty blob, including REDIRECT blobs.
+for every nonempty blob, including redirect blobs.
 
 For a checked cache byte offset:
 
@@ -1750,11 +1798,14 @@ O(1): direct indexing, one comparison and at most one increment. There is no
 binary-search fallback, bitmap or popcount. At the default granule the index
 costs four bytes per 2 MiB of cache address space.
 
-The parser bounds GroupTable before reading its terminator, derives the
-remaining table sizes with checked arithmetic, then validates every chunk,
-group and granule entry. The mapped reader verifies the index in place; it
-does not allocate or rebuild a second lookup structure. File mappings still
-consume page-cache memory when accessed.
+The parser verifies the crc32c and the feature words, bounds every table of
+the directory, resolves the known tables through their headers with checked
+arithmetic, cross-checks their entry counts against the GroupTable
+terminator, then validates every chunk, group and granule entry. The mapped
+reader verifies the index in place; it does not allocate or rebuild a second
+lookup structure. File mappings still consume page-cache memory when
+accessed. The bytes are kept verbatim, so saving or caching a loaded blob
+meta preserves the tables the reader does not know.
 
 #### Chunk group digest
 
@@ -1775,11 +1826,11 @@ consume page-cache memory when accessed.
 	`storage.skip_verify_checksums` is `false`: it hashes each member chunk
 	of the decoded payload and recombines them the same way.
 
-Redirect details (REDIRECT blobs only):
+Redirect details (redirect blobs only):
 
-- Entry `i` consists of two four-byte integers: `source_blob_index` is the
-	nonzero device index of a source blob (validated against the EROFS device
-	index range), and `source_chunk_group_index` a group within it.
+- Entry `i` is 8 bytes: a two-byte nonzero `source_blob_index`, the EROFS
+	device index of a source blob, two reserved bytes, and a four-byte
+	`source_chunk_group_index`, a group within it.
 	Group `i`'s encoded bytes, payload size, chunk lengths,
 	digest and `crc32c` are those of the source group, copied verbatim, so
 	the redirect blob preserves each source's chunk lengths and compatible
@@ -1906,13 +1957,14 @@ Hash and validation summary:
 - **SHA256 over the whole full blob** — the artifact file name (`--blob-dir`)
 	and the OCI layer digest.
 - **CRC32C in the blob meta header and blob footer** — checked before either
-	structure is trusted; the bootstrap has its own EROFS superblock checksum.
+	structure is trusted; the footer's `bootstrap_crc32` covers the embedded
+	bootstrap region, checked before it is decoded.
 
 ### Ondemand (redirect) blob layout
 
 `nydus optimize` emits one extra "ondemand" blob and appends it to the image
 as a new layer. It is a full blob without an embedded bootstrap
-(`bootstrap_blocks = 0`) whose blob meta sets the incompat flag `REDIRECT`:
+(`bootstrap_size = 0`) whose blob meta carries a RedirectTable:
 every chunk group is a byte-exact copy of a traced chunk group of a source
 blob — encoded payload, payload size, chunk lengths, digest and CRC32C —
 laid out in first-access order, and the redirect table names the source
@@ -1929,8 +1981,8 @@ ondemand blob — named by SHA256(full blob), one new nydus layer
 |  source groups, in first-access|
 |  order                         |
 +--------------------------------+
-| blob meta (flags: REDIRECT)    |
-|  Header (32 bytes, crc32c)      |
+| blob meta (has RedirectTable)  |
+|  Header (24 bytes, crc32c)      |
 |  GroupTable                    |
 |  ChunkTable                    |
 |  GranuleIndexTable             |
@@ -1938,7 +1990,7 @@ ondemand blob — named by SHA256(full blob), one new nydus layer
 |  RedirectTable                 |
 |   (source blob, source group)  |
 +--------------------------------+
-| footer (bootstrap_blocks = 0)  |
+| footer (bootstrap_size = 0)    |
 +--------------------------------+
 ```
 
@@ -2004,7 +2056,7 @@ data][bootstrap][footer]`, see [Full blob byte layout](#full-blob-byte-layout)):
 	its SHA256 (the file cannot contain its own digest); the standalone copy
 	written by `--bootstrap` names the full blob, i.e. the store file. Either
 	mounts on its own with `device=<layer data>`.
-- **Footer**: `RAW_DEVICE` incompat flag, `blob_metadata_blocks = 0`. There
+- **Footer**: `RAW_DEVICE` incompat feature, `blob_metadata_size = 0`. There
 	is no blob meta and no `.blob.meta` sidecar: nothing describes fetch
 	granularity because nothing fetches the layer on demand.
 
@@ -2308,11 +2360,11 @@ RedirectTable     source blob and group, for ondemand blobs only
 
 <hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
 +---------------------------------+----------------------+
-| 4 KiB header (NDGRPMAP, version,| 1 bit per group ...  |
-| flags, count, ready count)      |                      |
+| 4 KiB header (NDGRPMAP, features| 1 bit per group ...  |
+| count, ready count, state)      |                      |
 +---------------------------------+----------------------+
   bits set only after the group's bytes are resident in .blob.data;
-  the ALL_READY header flag latches once every bit is set;
+  the ALL_READY header state bit latches once every bit is set;
   byte N also carries the OFD lock claiming group N's fetch
 
 <hex>.prefetch.lock — empty; exclusive flock serializes prefetch owners
@@ -2362,7 +2414,7 @@ way a classic nydusd mount would. The resolution is logged.
 1. Priority blobs are prefetched first, sequentially, in the order listed by the
         root inode's `trusted.nydus.prefetch.blobs` xattr (a comma-separated list of
         device ids). The list is deduplicated and filtered to existing devices. The
-        "ondemand" priority blobs (their blob meta carries the `REDIRECT` flag) are
+        "ondemand" priority blobs (their blob meta carries a RedirectTable) are
         always streamed first regardless of their position in the list. Under
         `ondemand` they are the only blobs warmed; other priority blobs are skipped
         so backend bandwidth is not spent pulling whole source blobs. Under `all` the
@@ -2376,14 +2428,14 @@ way a classic nydusd mount would. The resolution is logged.
         without pulling data, priority blobs first and running alongside phase 1
         rather than after it; the `auto` decision reuses those opens. An
         optimized image lists every blob in its prefetch xattr, so without this
-        the phase 1 `REDIRECT` checks alone would open the caches
+        the phase 1 redirect checks alone would open the caches
 	one blob at a time; with it neither those checks, nor the redirect fills
 	into the source caches, nor a later first read of any blob, nor a
 	block-device frontend's probe of many blobs right after the device appears
 	pays the round trips serially.
 
 The ondemand blob (produced by `nydus optimize`, listed first in the xattr)
-is a `REDIRECT` blob: it is streamed in the order it was packed — the
+is a redirect blob (its blob meta has a RedirectTable): it is streamed in the order it was packed — the
 workload's first-access order — and every decoded group is written into its
 **source** blob's cache at the source group's blocks (after the length and
 CRC32C checks) and marked ready there, so the earliest reads find their
@@ -2411,12 +2463,11 @@ single-instance while leaving the on-demand read path untouched.
 **Shared group map bitmap.** The `<digest>.group.map` file is a 4096-byte
 header followed by one readiness bit per chunk group. The header carries the
 8-byte ASCII magic `NDGRPMAP` (same raw-bytes style as the blob meta's
-`NDBLMETA`), an informational little-endian `u32` format generation (unlike
-the strictly checked blob meta version), a mutable `flags` word (the same
-`magic + version + flags` prefix as the blob meta header — but here the flags
-are runtime state bits, not format features, and unknown bits are ignored),
-the group count, and a mutable ready-group counter; the rest of the header
-page is reserved and zero. The whole file is mapped `MAP_SHARED`
+`NDBLMETA`), the `feature_compat` and `feature_incompat` words at offsets 8
+and 12 (the blob meta prefix, without a crc32 since the file is mutable), the
+group count at 16, a mutable ready-group counter at 20 and a mutable `state`
+word at 24 whose bit 0 is `ALL_READY`; the rest of the header page is
+reserved and zero. The whole file is mapped `MAP_SHARED`
 and every bit access goes through atomic operations (`Acquire` loads,
 `fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
 are immediately observed by every other process sharing the cache directory
@@ -3070,7 +3121,7 @@ make test-nydusify
 `make test-nydusify` builds the current Rust CLI and runs all Go packages with
 the race detector. `NYDUS_TEST_BUILDER` enables the real builder test when
 invoking Go directly. The test streams gzip OCI content through Pack, checks
-chunk-table version 1, stages metadata, merges, checks and exports each of
+blob meta magic and feature words, stages metadata, merges, checks and exports each of
 `none`, `zstd`, `lz4`, `erofs-none`, `erofs-lz4` and `erofs-zstd` (the native
 layers carrying no blob meta). It verifies contents,
 PAX nanosecond timestamps, ownership, whiteouts and device metadata without

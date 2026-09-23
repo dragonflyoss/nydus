@@ -1,5 +1,5 @@
 use crate::blob::flag::FeatureFlags;
-use crate::erofs::{blocks_to_bytes, EROFS_BLOCK_SIZE};
+use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Context, Error, Result};
 use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 use crc32c::crc32c;
@@ -10,33 +10,29 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
-/// footer starts with the readable string. Same style and `magic + version +
-/// flags` header prefix as the blob meta (`NDBLMETA`) and chunk map
-/// (`NDGRPMAP`) sidecars.
+/// footer starts with the readable string. Same frozen `magic +
+/// feature_compat + feature_incompat + crc32` prefix as the blob meta
+/// (`NDBLMETA`), see [`crate::blob::flag`].
 pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"NDFOOTER";
-
-/// On-disk format generation: the layout of the fixed fields. Other
-/// generations are rejected; features within a generation are governed by
-/// the incompat half of `flags` (unknown incompat bits reject the footer).
-pub const NYDUS_BLOB_FOOTER_VERSION: u32 = 1;
 
 /// The footer's fixed on-disk size: one EROFS block at the blob's tail.
 pub const NYDUS_BLOB_FOOTER_SIZE: usize = 4096;
 
-/// Every region offset in the blob, and the footer itself, is aligned to
-/// this boundary (the EROFS block size).
+/// Every region offset and size in the blob, and the footer itself, is
+/// aligned to this boundary (the EROFS block size), except the compressed
+/// data size.
 pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
 
-/// Incompat flag: the embedded bootstrap region holds one zstd frame
+/// Incompat feature: the embedded bootstrap region holds one zstd frame
 /// instead of raw EROFS bytes. `bootstrap_compressed_size` then carries the
 /// frame's exact byte length within the block-aligned region. The merged
 /// bootstrap and the blob meta sidecar the runtime mounts are unaffected,
 /// only merge, `check`, and single-blob mounts decode this region.
 pub const NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD: u32 = 1 << 0;
 
-/// Incompat flag: the data region is a raw EROFS device the kernel reads at
-/// offset 0 (native `erofs-*` layers) and there is no blob meta region
-/// (`blob_metadata_blocks` is zero). Such blobs are never served on demand
+/// Incompat feature: the data region is a raw EROFS device the kernel reads
+/// at offset 0 (native `erofs-*` layers) and there is no blob meta region
+/// (`blob_metadata_size` is zero). Such blobs are never served on demand
 /// by the nydus daemons; they are mounted through the kernel or read whole
 /// from a local store.
 pub const NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE: u32 = 1 << 1;
@@ -59,37 +55,40 @@ const NYDUS_BLOB_FOOTER_CRC32_FIELD: Range<usize> = 16..20;
 /// ```text
 /// offset  size  field
 ///      0     8  magic                   b"NDFOOTER"
-///      8     4  version                 1; other generations are rejected
-///     12     4  flags                   low 16 incompat / high 16 compat
+///      8     4  feature_compat          unknown bits are ignored
+///     12     4  feature_incompat        unknown bits reject the footer
 ///     16     4  crc32                   crc32c of these 4096 bytes with
 ///                                       this field treated as zero
-///     20     4  reserved0               future compat field slot
-///     24     8  compressed_data_offset
-///     32     8  bootstrap_offset
-///     40     8  blob_metadata_offset
-///     48     8  compressed_data_size    bytes
-///     56     4  bootstrap_blocks        4KiB blocks, zero for an ondemand
-///                                       redirect blob without a bootstrap
-///     60     4  blob_metadata_blocks    4KiB blocks, zero exactly when the
-///                                       RAW_DEVICE flag is set
-///     64     8  bootstrap_compressed_size  exact zstd frame bytes when the
-///                                       BOOTSTRAP_ZSTD flag is set, else 0
-///     72  4024  reserved                writers zero it, readers ignore it
+///     20     4  bootstrap_crc32         crc32c of the bootstrap region,
+///                                       padding included; zero when empty
+///     24     8  compressed_data_offset  bytes
+///     32     8  compressed_data_size    bytes
+///     40     8  bootstrap_offset        bytes, 4KiB aligned
+///     48     8  bootstrap_size          bytes, 4KiB multiple, zero for an
+///                                       ondemand redirect blob
+///     56     8  bootstrap_compressed_size  exact zstd frame bytes with
+///                                       BOOTSTRAP_ZSTD, else zero
+///     64     8  blob_metadata_offset    bytes, 4KiB aligned
+///     72     8  blob_metadata_size      bytes, 4KiB multiple, zero exactly
+///                                       with RAW_DEVICE
+///     80  4016  reserved                writers zero it, readers ignore it
 /// ```
+///
+/// A new field goes into the reserved bytes together with a feature bit
+/// announcing it, compat when older readers may ignore it, else incompat.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobFooter {
-    magic: [u8; 8],
-    version: u32,
-    flags: FeatureFlags,
+    feature_compat: u32,
+    feature_incompat: FeatureFlags,
     crc32: u32,
-    reserved0: u32,
+    bootstrap_crc32: u32,
     compressed_data_offset: u64,
-    bootstrap_offset: u64,
-    blob_metadata_offset: u64,
     compressed_data_size: u64,
-    bootstrap_blocks: u32,
-    blob_metadata_blocks: u32,
+    bootstrap_offset: u64,
+    bootstrap_size: u64,
     bootstrap_compressed_size: u64,
+    blob_metadata_offset: u64,
+    blob_metadata_size: u64,
 }
 
 impl BlobFooter {
@@ -98,42 +97,44 @@ impl BlobFooter {
     /// valid by definition, then the crc32 is computed over the final bytes.
     ///
     /// `Some(n)` declares the bootstrap region stores one zstd frame of
-    /// exactly `n` bytes and sets the BOOTSTRAP_ZSTD incompat flag, `None`
+    /// exactly `n` bytes and sets the BOOTSTRAP_ZSTD incompat feature, `None`
     /// keeps the region raw. [`Self::bootstrap_compressed_size`] reads the
-    /// same value back. `blob_metadata_blocks == 0` declares a raw device
-    /// blob without blob meta and sets the RAW_DEVICE incompat flag.
+    /// same value back. `blob_metadata_size == 0` declares a raw device
+    /// blob without blob meta and sets the RAW_DEVICE incompat feature.
+    /// `bootstrap_crc32` is the crc32c of the whole bootstrap region.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         compressed_data_offset: u64,
         compressed_data_size: u64,
         bootstrap_offset: u64,
-        bootstrap_blocks: u32,
+        bootstrap_size: u64,
+        bootstrap_crc32: u32,
         blob_metadata_offset: u64,
-        blob_metadata_blocks: u32,
+        blob_metadata_size: u64,
         bootstrap_compressed_size: Option<u64>,
     ) -> Result<Self> {
-        let mut flags = FeatureFlags::empty();
-        flags.set(
+        let mut feature_incompat = FeatureFlags::empty();
+        feature_incompat.set(
             NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD,
             bootstrap_compressed_size.is_some(),
         );
-        flags.set(
+        feature_incompat.set(
             NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE,
-            blob_metadata_blocks == 0,
+            blob_metadata_size == 0,
         );
 
         let mut footer = Self {
-            magic: NYDUS_BLOB_FOOTER_MAGIC,
-            version: NYDUS_BLOB_FOOTER_VERSION,
-            flags,
+            feature_compat: 0,
+            feature_incompat,
             crc32: 0,
-            reserved0: 0,
+            bootstrap_crc32,
             compressed_data_offset,
-            bootstrap_offset,
-            blob_metadata_offset,
             compressed_data_size,
-            bootstrap_blocks,
-            blob_metadata_blocks,
+            bootstrap_offset,
+            bootstrap_size,
             bootstrap_compressed_size: bootstrap_compressed_size.unwrap_or(0),
+            blob_metadata_offset,
+            blob_metadata_size,
         };
 
         footer.validate()?;
@@ -143,7 +144,7 @@ impl BlobFooter {
     }
 
     /// Parse a footer from exactly its `NYDUS_BLOB_FOOTER_SIZE` bytes,
-    /// verifying the intrinsic fields and the crc32 over the raw bytes.
+    /// verifying the crc32 over the raw bytes and the intrinsic fields.
     ///
     /// The declared region offsets are not anchored against the blob's actual
     /// size here. The whole-blob entry points ([`Self::from_blob_bytes`],
@@ -151,52 +152,55 @@ impl BlobFooter {
     /// parsing an isolated footer (e.g. a registry range read) anchors it
     /// with [`Self::validate_layout`] before trusting any offset.
     pub fn from_bytes(bytes: &[u8; NYDUS_BLOB_FOOTER_SIZE]) -> Result<Self> {
-        let footer = Self {
-            magic: bytes[0..8].try_into().unwrap(),
-            version: read_u32_at(bytes, 8),
-            flags: FeatureFlags::from_bits(read_u32_at(bytes, 12)),
-            crc32: read_u32_at(bytes, 16),
-            reserved0: read_u32_at(bytes, 20),
-            compressed_data_offset: read_u64_at(bytes, 24),
-            bootstrap_offset: read_u64_at(bytes, 32),
-            blob_metadata_offset: read_u64_at(bytes, 40),
-            compressed_data_size: read_u64_at(bytes, 48),
-            bootstrap_blocks: read_u32_at(bytes, 56),
-            blob_metadata_blocks: read_u32_at(bytes, 60),
-            bootstrap_compressed_size: read_u64_at(bytes, 64),
-        };
-        footer.validate()?;
-
+        if !Self::has_magic(bytes) {
+            return Err(Error::InvalidImage(
+                "invalid nydus footer magic".to_string(),
+            ));
+        }
         // Verify over the raw incoming bytes, never over `to_bytes()`: a
         // re-serialization emits only the fields this reader knows, zeroing a
-        // newer writer's compat fields in the reserved tail and thereby
-        // rejecting a valid image.
-        if footer.crc32 != Self::compute_crc32(bytes) {
+        // newer writer's fields in the reserved tail and thereby rejecting a
+        // valid image.
+        if read_u32_at(bytes, 16) != Self::compute_crc32(bytes) {
             return Err(Error::InvalidImage(
                 "nydus footer crc32 mismatch".to_string(),
             ));
         }
 
+        let footer = Self {
+            feature_compat: read_u32_at(bytes, 8),
+            feature_incompat: FeatureFlags::from_bits(read_u32_at(bytes, 12)),
+            crc32: read_u32_at(bytes, 16),
+            bootstrap_crc32: read_u32_at(bytes, 20),
+            compressed_data_offset: read_u64_at(bytes, 24),
+            compressed_data_size: read_u64_at(bytes, 32),
+            bootstrap_offset: read_u64_at(bytes, 40),
+            bootstrap_size: read_u64_at(bytes, 48),
+            bootstrap_compressed_size: read_u64_at(bytes, 56),
+            blob_metadata_offset: read_u64_at(bytes, 64),
+            blob_metadata_size: read_u64_at(bytes, 72),
+        };
+        footer.validate()?;
         Ok(footer)
     }
 
     /// Serialize the footer into its on-disk bytes. The reserved tail is
     /// zeroed, so this is only the writer's view: raw bytes read from disk
-    /// may carry newer compat fields there that this type does not model.
+    /// may carry newer fields there that this type does not model.
     fn to_bytes(self) -> [u8; NYDUS_BLOB_FOOTER_SIZE] {
         let mut data = [0u8; NYDUS_BLOB_FOOTER_SIZE];
-        data[0..8].copy_from_slice(&self.magic);
-        write_u32_at(&mut data, 8, self.version);
-        write_u32_at(&mut data, 12, self.flags.bits());
+        data[0..8].copy_from_slice(&NYDUS_BLOB_FOOTER_MAGIC);
+        write_u32_at(&mut data, 8, self.feature_compat);
+        write_u32_at(&mut data, 12, self.feature_incompat.bits());
         write_u32_at(&mut data, 16, self.crc32);
-        write_u32_at(&mut data, 20, self.reserved0);
+        write_u32_at(&mut data, 20, self.bootstrap_crc32);
         write_u64_at(&mut data, 24, self.compressed_data_offset);
-        write_u64_at(&mut data, 32, self.bootstrap_offset);
-        write_u64_at(&mut data, 40, self.blob_metadata_offset);
-        write_u64_at(&mut data, 48, self.compressed_data_size);
-        write_u32_at(&mut data, 56, self.bootstrap_blocks);
-        write_u32_at(&mut data, 60, self.blob_metadata_blocks);
-        write_u64_at(&mut data, 64, self.bootstrap_compressed_size);
+        write_u64_at(&mut data, 32, self.compressed_data_size);
+        write_u64_at(&mut data, 40, self.bootstrap_offset);
+        write_u64_at(&mut data, 48, self.bootstrap_size);
+        write_u64_at(&mut data, 56, self.bootstrap_compressed_size);
+        write_u64_at(&mut data, 64, self.blob_metadata_offset);
+        write_u64_at(&mut data, 72, self.blob_metadata_size);
         data
     }
 
@@ -253,65 +257,69 @@ impl BlobFooter {
     /// fields themselves. Run once per entry point: by [`Self::from_bytes`]
     /// on the read side and by [`Self::new`] on the write side.
     ///
-    /// Deliberately not checked: `reserved0` and the reserved tail may carry
-    /// a newer writer's compat fields (corruption is caught by the crc32),
-    /// and `bootstrap_blocks` may be zero (an ondemand redirect blob embeds
-    /// no bootstrap image).
+    /// Deliberately not checked: the reserved fields and tail may carry a
+    /// newer writer's fields (corruption is caught by the crc32), and
+    /// `bootstrap_size` may be zero (an ondemand redirect blob embeds no
+    /// bootstrap image).
     fn validate(&self) -> Result<()> {
-        if self.magic != NYDUS_BLOB_FOOTER_MAGIC {
-            return Err(Error::InvalidImage(
-                "invalid nydus footer magic".to_string(),
-            ));
-        }
-        if self.version != NYDUS_BLOB_FOOTER_VERSION {
-            return Err(Error::InvalidImage(format!(
-                "unsupported nydus footer version {} (expected {NYDUS_BLOB_FOOTER_VERSION})",
-                self.version
-            )));
+        self.feature_incompat
+            .validate_incompat(NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT)?;
+        for (name, size) in [
+            ("bootstrap", self.bootstrap_size),
+            ("blob meta", self.blob_metadata_size),
+        ] {
+            if size % NYDUS_BLOB_FOOTER_ALIGNMENT != 0 {
+                return Err(Error::InvalidImage(format!(
+                    "nydus footer {name} region size {size:#x} is not a 4KiB multiple"
+                )));
+            }
         }
 
-        let raw_device = self.flags.contains(NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE);
-        if raw_device != (self.blob_metadata_blocks == 0) {
+        let raw_device = self
+            .feature_incompat
+            .contains(NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE);
+        if raw_device != (self.blob_metadata_size == 0) {
             return Err(Error::InvalidImage(
-                "nydus footer blob meta block count must be zero exactly for a raw device blob"
+                "nydus footer blob meta size must be zero exactly for a raw device blob"
                     .to_string(),
             ));
         }
-        if raw_device && self.bootstrap_blocks == 0 {
+        if raw_device && self.bootstrap_size == 0 {
             return Err(Error::InvalidImage(
                 "nydus footer raw device blob must embed a bootstrap".to_string(),
             ));
         }
+        if self.bootstrap_size == 0 && self.bootstrap_crc32 != 0 {
+            return Err(Error::InvalidImage(
+                "nydus footer bootstrap crc32 must be zero without a bootstrap".to_string(),
+            ));
+        }
 
         let compressed = self
-            .flags
+            .feature_incompat
             .contains(NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD);
         if compressed
             && (self.bootstrap_compressed_size == 0
-                || self.bootstrap_compressed_size > self.bootstrap_size())
+                || self.bootstrap_compressed_size > self.bootstrap_size)
         {
             return Err(Error::InvalidImage(format!(
                 "nydus footer compressed bootstrap size {} outside its region of {} bytes",
-                self.bootstrap_compressed_size,
-                self.bootstrap_size()
+                self.bootstrap_compressed_size, self.bootstrap_size
             )));
         }
         if !compressed && self.bootstrap_compressed_size != 0 {
             return Err(Error::InvalidImage(
-                "nydus footer compressed bootstrap size requires the BOOTSTRAP_ZSTD flag"
+                "nydus footer compressed bootstrap size requires the BOOTSTRAP_ZSTD feature"
                     .to_string(),
             ));
         }
-
-        self.flags
-            .validate_incompat(NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT)?;
         Ok(())
     }
 
     /// Validate the declared region layout against `offset`, the footer's
     /// actual position (an external fact the footer cannot fake): the
-    /// regions must tile the blob back to back (alignment gaps allowed) and
-    /// end exactly where the footer sits.
+    /// regions must tile the blob in order (alignment gaps allowed) and end
+    /// exactly where the footer sits.
     pub fn validate_layout(&self, offset: u64) -> Result<()> {
         let regions = [
             (
@@ -319,11 +327,11 @@ impl BlobFooter {
                 self.compressed_data_offset,
                 self.compressed_data_size,
             ),
-            ("bootstrap", self.bootstrap_offset, self.bootstrap_size()),
+            ("bootstrap", self.bootstrap_offset, self.bootstrap_size),
             (
                 "blob meta",
                 self.blob_metadata_offset,
-                self.blob_metadata_size(),
+                self.blob_metadata_size,
             ),
         ];
 
@@ -411,38 +419,62 @@ impl BlobFooter {
 
     /// Size of the bootstrap region in 4KiB blocks, zero for an ondemand
     /// redirect blob.
-    pub fn bootstrap_blocks(&self) -> u32 {
-        self.bootstrap_blocks
+    pub fn bootstrap_blocks(&self) -> u64 {
+        self.bootstrap_size / NYDUS_BLOB_FOOTER_ALIGNMENT
     }
 
     /// Size of the blob meta region in 4KiB blocks; zero for a raw device
     /// blob (see [`Self::is_raw_device`]).
-    pub fn blob_metadata_blocks(&self) -> u32 {
-        self.blob_metadata_blocks
+    pub fn blob_metadata_blocks(&self) -> u64 {
+        self.blob_metadata_size / NYDUS_BLOB_FOOTER_ALIGNMENT
     }
 
     /// Whether the data region is a raw EROFS device without blob meta
-    /// (native `erofs-*` layers, RAW_DEVICE flag).
+    /// (native `erofs-*` layers, RAW_DEVICE feature).
     pub fn is_raw_device(&self) -> bool {
-        self.flags.contains(NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE)
+        self.feature_incompat
+            .contains(NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE)
     }
 
     /// Size of the bootstrap region in bytes.
     pub fn bootstrap_size(&self) -> u64 {
-        blocks_to_bytes(self.bootstrap_blocks)
+        self.bootstrap_size
     }
 
     /// Exact byte length of the zstd frame in the bootstrap region, or
     /// `None` when the bootstrap is stored raw.
     pub fn bootstrap_compressed_size(&self) -> Option<u64> {
-        self.flags
+        self.feature_incompat
             .contains(NYDUS_BLOB_FOOTER_INCOMPAT_BOOTSTRAP_ZSTD)
             .then_some(self.bootstrap_compressed_size)
     }
 
     /// Size of the blob meta region in bytes.
     pub fn blob_metadata_size(&self) -> u64 {
-        blocks_to_bytes(self.blob_metadata_blocks)
+        self.blob_metadata_size
+    }
+
+    /// crc32c of the whole bootstrap region, alignment padding included.
+    pub fn bootstrap_crc32(&self) -> u32 {
+        self.bootstrap_crc32
+    }
+
+    /// Check `region`, the blob's `bootstrap_size` bytes at
+    /// `bootstrap_offset`, against [`Self::bootstrap_crc32`].
+    pub fn verify_bootstrap(&self, region: &[u8]) -> Result<()> {
+        if region.len() as u64 != self.bootstrap_size {
+            return Err(Error::InvalidImage(format!(
+                "nydus bootstrap region is {} bytes, the footer declares {}",
+                region.len(),
+                self.bootstrap_size
+            )));
+        }
+        if crc32c(region) != self.bootstrap_crc32 {
+            return Err(Error::InvalidImage(
+                "nydus bootstrap crc32 mismatch".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// crc32c over the footer bytes with the crc32 field treated as zero:
@@ -459,8 +491,10 @@ impl BlobFooter {
 mod tests {
     use super::*;
 
+    /// A footer over a zeroed one-block bootstrap at 4096.
     fn footer() -> BlobFooter {
-        BlobFooter::new(0, 17, 4096, 1, 8192, 1, None).unwrap()
+        let bootstrap_crc32 = crc32c(&[0u8; 4096]);
+        BlobFooter::new(0, 17, 4096, 4096, bootstrap_crc32, 8192, 4096, None).unwrap()
     }
 
     fn reseal(mut bytes: [u8; NYDUS_BLOB_FOOTER_SIZE]) -> [u8; NYDUS_BLOB_FOOTER_SIZE] {
@@ -478,6 +512,15 @@ mod tests {
     #[test]
     fn accessors_expose_the_sealed_layout() {
         let footer = footer();
+        let bytes = footer.to_bytes();
+        assert_eq!(&bytes[..8], b"NDFOOTER");
+        assert_eq!(read_u32_at(&bytes, 20), crc32c(&[0u8; 4096]));
+        assert_eq!(read_u64_at(&bytes, 32), 17);
+        assert_eq!(read_u64_at(&bytes, 40), 4096);
+        assert_eq!(read_u64_at(&bytes, 48), 4096);
+        assert_eq!(read_u64_at(&bytes, 64), 8192);
+        assert_eq!(read_u64_at(&bytes, 72), 4096);
+        assert!(bytes[80..].iter().all(|&byte| byte == 0));
         assert_eq!(footer.compressed_data_offset(), 0);
         assert_eq!(footer.compressed_data_size(), 17);
         assert_eq!(footer.bootstrap_offset(), 4096);
@@ -513,26 +556,27 @@ mod tests {
     }
 
     #[test]
-    fn resealed_header_mutations_follow_the_compat_rules() {
-        let cases: [(&str, usize, [u8; 4], Option<&str>); 4] = [
+    fn resealed_header_mutations_follow_the_feature_rules() {
+        let cases: [(&str, usize, [u8; 4], Option<&str>); 5] = [
             (
-                "another version rejects",
+                "unknown compat feature is ignored",
                 8,
-                (NYDUS_BLOB_FOOTER_VERSION + 1).to_le_bytes(),
-                Some("version"),
-            ),
-            (
-                "unknown compat flag is ignored",
-                12,
                 (1u32 << 31).to_le_bytes(),
                 None,
             ),
             (
-                "unknown incompat flag rejects",
+                "unknown low incompat feature rejects",
                 12,
                 (1u32 << 3).to_le_bytes(),
                 Some("incompat"),
             ),
+            (
+                "unknown high incompat feature rejects",
+                12,
+                (1u32 << 31).to_le_bytes(),
+                Some("incompat"),
+            ),
+            ("nonzero reserved area is readable", 80, [0xff; 4], None),
             (
                 "nonzero reserved tail is readable",
                 NYDUS_BLOB_FOOTER_SIZE - 4,
@@ -598,13 +642,31 @@ mod tests {
     }
 
     #[test]
-    fn zero_bootstrap_blocks_are_valid() {
-        BlobFooter::new(0, 17, 4096, 0, 4096, 1, None).unwrap();
+    fn zero_bootstrap_size_is_valid() {
+        BlobFooter::new(0, 17, 4096, 0, 0, 4096, 4096, None).unwrap();
     }
 
     #[test]
-    fn zero_blob_meta_blocks_declare_a_raw_device() {
-        let raw = BlobFooter::new(0, 17, 4096, 1, 8192, 0, None).unwrap();
+    fn bootstrap_crc32_covers_the_whole_region() {
+        let footer = footer();
+        let sealed_blob = sealed_blob();
+        let region = &sealed_blob[4096..8192];
+        footer.verify_bootstrap(region).unwrap();
+
+        let mut corrupted = region.to_vec();
+        corrupted[4095] = 1;
+        let err = footer.verify_bootstrap(&corrupted).unwrap_err();
+        assert!(err.to_string().contains("crc32 mismatch"), "{err}");
+        let err = footer.verify_bootstrap(&region[..4000]).unwrap_err();
+        assert!(err.to_string().contains("declares"), "{err}");
+
+        let err = BlobFooter::new(0, 17, 4096, 0, 1, 4096, 4096, None).unwrap_err();
+        assert!(err.to_string().contains("without a bootstrap"), "{err}");
+    }
+
+    #[test]
+    fn zero_blob_meta_size_declares_a_raw_device() {
+        let raw = BlobFooter::new(0, 17, 4096, 4096, 0, 8192, 0, None).unwrap();
         assert!(raw.is_raw_device());
         assert_eq!(raw.blob_metadata_size(), 0);
         assert_eq!(raw.offset().unwrap(), 8192);
@@ -613,46 +675,41 @@ mod tests {
         assert!(!footer().is_raw_device());
 
         // A raw device blob must embed a bootstrap.
-        let err = BlobFooter::new(0, 17, 4096, 0, 4096, 0, None).unwrap_err();
+        let err = BlobFooter::new(0, 17, 4096, 0, 0, 4096, 0, None).unwrap_err();
         assert!(err.to_string().contains("must embed a bootstrap"), "{err}");
 
-        // The flag and the block count must agree on disk.
+        // The feature and the size must agree on disk.
         let mut bytes = footer().to_bytes();
         write_u32_at(&mut bytes, 12, NYDUS_BLOB_FOOTER_INCOMPAT_RAW_DEVICE);
-        write_u32_at(&mut bytes, 16, 0);
-        let crc = BlobFooter::compute_crc32(&bytes);
-        write_u32_at(&mut bytes, 16, crc);
-        let err = BlobFooter::from_bytes(&bytes).unwrap_err();
+        let err = BlobFooter::from_bytes(&reseal(bytes)).unwrap_err();
         assert!(err.to_string().contains("raw device"), "{err}");
+
+        // Region sizes are whole blocks.
+        let err = BlobFooter::new(0, 17, 4096, 4097, 0, 12288, 4096, None).unwrap_err();
+        assert!(err.to_string().contains("4KiB multiple"), "{err}");
     }
 
     #[test]
     fn invalid_layouts_reject() {
         let cases = [
-            ("unaligned offset", (0, 17, 17, 1, 8192, 1), "aligned"),
+            ("unaligned offset", (0, 17, 17, 4096, 8192, 4096), "aligned"),
             (
                 "overlapping regions",
-                (0, 8192, 4096, 1, 8192, 1),
+                (0, 8192, 4096, 4096, 8192, 4096),
                 "overlapping",
             ),
             (
                 "region overflow",
-                (4096, u64::MAX, 4096, 1, 8192, 1),
+                (4096, u64::MAX, 4096, 4096, 8192, 4096),
                 "overflow",
             ),
         ];
 
-        for (case, (data_off, data_size, boot_off, boot_blocks, meta_off, meta_blocks), expected) in
+        for (case, (data_off, data_size, boot_off, boot_size, meta_off, meta_size), expected) in
             cases
         {
             let err = BlobFooter::new(
-                data_off,
-                data_size,
-                boot_off,
-                boot_blocks,
-                meta_off,
-                meta_blocks,
-                None,
+                data_off, data_size, boot_off, boot_size, 0, meta_off, meta_size, None,
             )
             .unwrap_err();
             assert!(err.to_string().contains(expected), "{case}: {err}");

@@ -9,31 +9,24 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use memmap2::MmapRaw;
 
 /// On-disk magic: 8 raw ASCII bytes ("NDGRPMAP" = Nydus GRouP MAP), written
-/// as-is so a hexdump of the file starts with the readable string. Same magic
-/// style as the blob meta header (`NDBLMETA`); the format version is a
-/// separate field instead of being baked into the magic.
+/// as-is so a hexdump of the file starts with the readable string. Followed
+/// by the `feature_compat` and `feature_incompat` words of the blob meta and
+/// footer prefix; this local, rebuildable state has no crc32 and no version.
 const CHUNK_GROUP_MAP_MAGIC: [u8; 8] = *b"NDGRPMAP";
-/// On-disk format generation, informational only: readers do not gate on it.
-/// A chunk_group_map is local mutable state — its `flags` word carries runtime state
-/// bits (not format features), and unknown state bits are simply ignored.
-const CHUNK_GROUP_MAP_VERSION: u32 = 1;
-/// Fixed header size: one block-sized page, matching the blob meta header
-/// (`NYDUS_BLOB_METADATA_HEADER_SIZE`) for a uniform sidecar format family. The bitmap
-/// starts on a page boundary and the unused header tail is reserved for
-/// future fields.
+/// Fixed header size: one block-sized page, so the bitmap starts on a page
+/// boundary; the unused header tail is reserved for future fields.
 const CHUNK_GROUP_MAP_HEADER_SIZE: usize = nydus_format::erofs::EROFS_BLOCK_SIZE as usize;
 
-/// Byte offsets of the header fields after magic and version. `flags` and
-/// `ready_count` are mutable at runtime, updated atomically through the
-/// shared mapping (unlike magic/version/group count, which are written once
-/// at creation). The `magic + version + flags` prefix matches the blob meta
-/// header layout.
-const GROUP_MAP_FLAGS_OFFSET: usize = 12;
-const GROUP_MAP_CHUNK_COUNT_OFFSET: usize = 16;
+/// Byte offsets of the header fields. `ready_count` and `state` are mutable
+/// at runtime, updated atomically through the shared mapping; the others
+/// are written once at creation.
+const GROUP_MAP_FEATURE_INCOMPAT_OFFSET: usize = 12;
+const GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET: usize = 16;
 const GROUP_MAP_READY_COUNT_OFFSET: usize = 20;
-/// `flags` bit: every group of this blob is ready. Sticky — ready bits are
+const GROUP_MAP_STATE_OFFSET: usize = 24;
+/// `state` bit: every group of this blob is ready. Sticky — ready bits are
 /// never cleared, so once set it stays set for the lifetime of the file.
-const GROUP_MAP_FLAG_ALL_READY: u32 = 1;
+const GROUP_MAP_STATE_ALL_READY: u32 = 1;
 
 /// Holds `flock(LOCK_EX)` on a file for the guard's lifetime.
 struct FileLock<'a> {
@@ -57,8 +50,20 @@ impl Drop for FileLock<'_> {
 
 /// Persistent per-blob group readiness bitmap, shared across processes.
 ///
-/// The on-disk layout is a 4096-byte header (magic, version, flags, group
-/// count, ready count) followed by one bit per group. The whole file is
+/// The on-disk layout is a 4096-byte header followed by one bit per group:
+///
+/// ```text
+/// offset  size  field
+///      0     8  magic                   b"NDGRPMAP"
+///      8     4  feature_compat          unknown bits are ignored
+///     12     4  feature_incompat        unknown bits reject the file
+///     16     4  chunk_group_count
+///     20     4  ready_count             advisory, atomically updated
+///     24     4  state                   bit 0 ALL_READY, atomically updated
+///     28  4068  reserved                writers zero it, readers ignore it
+/// ```
+///
+/// The whole file is
 /// mapped `MAP_SHARED` and the bits are accessed with atomic operations, so
 /// every process (or thread) that opens the same chunk_group_map file observes
 /// `set_ready` updates from all the others through the shared page cache —
@@ -66,7 +71,7 @@ impl Drop for FileLock<'_> {
 /// warmed cache. Persistence across reboots is provided by regular kernel
 /// writeback of the dirty pages.
 ///
-/// The header additionally carries an `ALL_READY` flag: the moment the last
+/// The header additionally carries an `ALL_READY` state bit: the moment the last
 /// group turns ready, the flag is set (also visible cross-process), and
 /// `is_all_ready` becomes a single atomic load. On-demand services (uffd,
 /// fanotify, FUSE) use it as a fast path to skip per-group readiness
@@ -120,7 +125,7 @@ impl ChunkGroupMap {
         // its header write, during which we may map an all-zero header. That
         // window is detected here and healed by (re)writing the identical
         // header bytes; anything else is a corrupt or foreign file. The
-        // mutable fields (flags, ready count) cannot have been touched in
+        // mutable fields (ready count, state) cannot have been touched in
         // that window: no process can update them before a successful open.
         let header =
             unsafe { std::slice::from_raw_parts(map.as_ptr(), CHUNK_GROUP_MAP_HEADER_SIZE) };
@@ -134,10 +139,23 @@ impl ChunkGroupMap {
                 ));
             }
         } else {
-            // `version` (offset 8) is informational and not gated on: the map
-            // is local mutable state, not a distributed format.
+            // No incompatible feature is defined yet.
+            let incompat = u32::from_le_bytes(
+                header[GROUP_MAP_FEATURE_INCOMPAT_OFFSET..GROUP_MAP_FEATURE_INCOMPAT_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            if incompat != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "chunk_group_map {} has unsupported incompat features {incompat:#x}",
+                        path.display()
+                    ),
+                ));
+            }
             let existing = u32::from_le_bytes(
-                header[GROUP_MAP_CHUNK_COUNT_OFFSET..GROUP_MAP_CHUNK_COUNT_OFFSET + 4]
+                header[GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET..GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET + 4]
                     .try_into()
                     .unwrap(),
             ) as usize;
@@ -209,8 +227,8 @@ impl ChunkGroupMap {
         }
         self.header_u32(GROUP_MAP_READY_COUNT_OFFSET)
             .store(0, Ordering::Release);
-        self.header_u32(GROUP_MAP_FLAGS_OFFSET)
-            .fetch_and(!GROUP_MAP_FLAG_ALL_READY, Ordering::AcqRel);
+        self.header_u32(GROUP_MAP_STATE_OFFSET)
+            .fetch_and(!GROUP_MAP_STATE_ALL_READY, Ordering::AcqRel);
         Ok(())
     }
 
@@ -299,20 +317,20 @@ impl ChunkGroupMap {
         Ok(())
     }
 
-    /// O(1) fast-path check: true when the sticky ALL_READY header flag is
+    /// O(1) fast-path check: true when the sticky ALL_READY header state bit is
     /// set, i.e. every group of this blob has been decoded into the cache.
     /// A single atomic load on the shared mapping — no bitmap scan — so
     /// per-fault handlers (uffd, fanotify, FUSE reads) can consult it on
     /// every event at effectively zero cost.
     pub fn is_all_ready(&self) -> bool {
-        self.header_u32(GROUP_MAP_FLAGS_OFFSET)
+        self.header_u32(GROUP_MAP_STATE_OFFSET)
             .load(Ordering::Acquire)
-            & GROUP_MAP_FLAG_ALL_READY
+            & GROUP_MAP_STATE_ALL_READY
             != 0
     }
 
-    /// True when every group is marked ready. Checks the sticky header flag
-    /// first; otherwise scans the shared bitmap and latches the flag when the
+    /// True when every group is marked ready. Checks the sticky ALL_READY
+    /// state bit first; otherwise scans the shared bitmap and latches the bit when the
     /// scan proves completion (also healing any ready-count skew left by a
     /// crashed writer). The answer reflects updates from other processes.
     pub fn latch_all_ready(&self) -> bool {
@@ -350,8 +368,8 @@ impl ChunkGroupMap {
         // concurrent 0→1 increment can race with this store.
         self.header_u32(GROUP_MAP_READY_COUNT_OFFSET)
             .store(self.chunk_group_count as u32, Ordering::Release);
-        self.header_u32(GROUP_MAP_FLAGS_OFFSET)
-            .fetch_or(GROUP_MAP_FLAG_ALL_READY, Ordering::AcqRel);
+        self.header_u32(GROUP_MAP_STATE_OFFSET)
+            .fetch_or(GROUP_MAP_STATE_ALL_READY, Ordering::AcqRel);
     }
 
     /// Number of groups currently marked ready (advisory shared counter,
@@ -366,10 +384,9 @@ impl ChunkGroupMap {
 fn header_bytes(chunk_group_count: usize) -> [u8; CHUNK_GROUP_MAP_HEADER_SIZE] {
     let mut header = [0u8; CHUNK_GROUP_MAP_HEADER_SIZE];
     header[..8].copy_from_slice(&CHUNK_GROUP_MAP_MAGIC);
-    header[8..12].copy_from_slice(&CHUNK_GROUP_MAP_VERSION.to_le_bytes());
-    // flags (12..16) and ready count (20..24) start at zero; the remaining
+    // The feature words, ready count and state start at zero; the remaining
     // header tail is reserved and stays zero.
-    header[GROUP_MAP_CHUNK_COUNT_OFFSET..GROUP_MAP_CHUNK_COUNT_OFFSET + 4]
+    header[GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET..GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET + 4]
         .copy_from_slice(&(chunk_group_count as u32).to_le_bytes());
     header
 }
@@ -543,7 +560,7 @@ mod tests {
         let path = dir.path().join("blob.group.map");
 
         // Model a writer that died between setting bits and bumping the ready
-        // count: craft a file whose bitmap is fully set but whose flags and
+        // count: craft a file whose bitmap is fully set but whose state and
         // ready count are still zero.
         let chunk_group_count = 10usize;
         {
@@ -571,6 +588,29 @@ mod tests {
         let map = ChunkGroupMap::open(&path, 0).unwrap();
         assert!(map.is_all_ready());
         assert!(map.latch_all_ready());
+    }
+
+    #[test]
+    fn group_map_header_carries_features_and_state() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob.group.map");
+        let map = ChunkGroupMap::open(&path, 3).unwrap();
+        map.set_range_ready(0..3).unwrap();
+        drop(map);
+
+        let bytes = std::fs::read(&path).unwrap();
+        let field = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!(&bytes[..8], b"NDGRPMAP");
+        assert_eq!((field(8), field(12)), (0, 0));
+        assert_eq!((field(16), field(20), field(24)), (3, 3, 1));
+
+        // An unknown compat feature is ignored, an unknown incompat one rejects.
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(&1u32.to_le_bytes(), 8).unwrap();
+        assert!(ChunkGroupMap::open(&path, 3).unwrap().is_all_ready());
+        file.write_all_at(&1u32.to_le_bytes(), 12).unwrap();
+        let err = ChunkGroupMap::open(&path, 3).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 
     #[test]
