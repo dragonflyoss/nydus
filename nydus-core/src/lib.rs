@@ -305,6 +305,11 @@ impl NydusCore {
             .flat_layout()
             .context("failed to describe blob device layout")?;
 
+        enum Piece {
+            Ready(Extent),
+            Blob(BlobRangeSpec),
+        }
+        let mut pieces = Vec::new();
         while pos < end {
             // `blobs` is sorted by `mapped_offset` and blob ranges never
             // overlap (device-table layout), so the only candidate containing
@@ -325,15 +330,12 @@ impl NydusCore {
                     .ok_or_else(|| Error::Overflow("blob device range overflow".to_string()))?;
                 let seg_end = end.min(blob_end);
                 let blob_offset = pos - blob.mapped_offset;
-                resolver.push_blob(
-                    BlobRangeSpec {
-                        index: blob.index,
-                        offset: blob_offset,
-                        len: seg_end - pos,
-                        source_offset: pos,
-                    },
-                    mode,
-                )?;
+                pieces.push(Piece::Blob(BlobRangeSpec {
+                    index: blob.index,
+                    offset: blob_offset,
+                    len: seg_end - pos,
+                    source_offset: pos,
+                }));
                 pos = seg_end;
             } else {
                 // `blobs[after]` is the first blob starting after `pos`, so it
@@ -346,16 +348,32 @@ impl NydusCore {
                 if hole_end <= pos {
                     break;
                 }
-                resolver.push(Extent::new(
+                pieces.push(Piece::Ready(Extent::new(
                     self.zero_file.as_raw_fd(),
                     0,
                     hole_end - pos,
                     pos,
-                ));
+                )));
                 pos = hole_end;
             }
         }
 
+        if mode == ResolveMode::Fetch {
+            let specs: Vec<BlobRangeSpec> = pieces
+                .iter()
+                .filter_map(|piece| match piece {
+                    Piece::Blob(spec) => Some(*spec),
+                    Piece::Ready(_) => None,
+                })
+                .collect();
+            resolver.fetch_blobs(&specs)?;
+        }
+        for piece in pieces {
+            match piece {
+                Piece::Ready(extent) => resolver.push(extent),
+                Piece::Blob(spec) => resolver.push_blob(spec, mode)?,
+            }
+        }
         Ok(resolver.finish())
     }
 }
