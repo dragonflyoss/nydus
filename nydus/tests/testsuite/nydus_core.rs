@@ -331,6 +331,111 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
         .is_err());
 }
 
+fn build_native_layer(store: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+    use nydus::build::{build_image, BuildImageOptions, NativeLayout};
+
+    let source = store.join(format!("{name}.src"));
+    fs::create_dir(&source).unwrap();
+    for (name, contents) in files {
+        fs::write(source.join(name), contents).unwrap();
+    }
+    let options = BuildImageOptions::new(
+        source,
+        EROFS_BLOCK_SIZE,
+        BlobMetadataCompressor::None,
+        HashSet::new(),
+        false,
+    )
+    .unwrap()
+    .with_native(NativeLayout::Plain, 0)
+    .unwrap();
+    let staging = store.join(format!("{name}.tmp"));
+    let image = build_image(&options, fs::File::create(&staging).unwrap()).unwrap();
+    let path = store.join(hex_string(&image.full_blob_digest));
+    fs::rename(staging, &path).unwrap();
+    path
+}
+
+#[test]
+fn core_maps_local_native_layers_without_a_cache() {
+    use nydus::build::merge::{merge_sources_to_bootstrap_bytes, WhiteoutSpec};
+
+    let dir = tempdir().unwrap();
+    let store = dir.path().join("store");
+    fs::create_dir(&store).unwrap();
+    let lower = build_native_layer(&store, "lower", &[("a", &vec![0xa1u8; 9000])]);
+    let upper = build_native_layer(&store, "upper", &[("b", &vec![0xb2u8; 5000])]);
+    let bootstrap = dir.path().join("image.boot");
+    fs::write(
+        &bootstrap,
+        merge_sources_to_bootstrap_bytes(&[lower.clone(), upper.clone()], WhiteoutSpec::Oci)
+            .unwrap(),
+    )
+    .unwrap();
+    let config = Config::from_yaml(&format!(
+        "backend:\n  type: local\n  config:\n    dir: {}\nprefetch:\n  scope: none\n",
+        store.display(),
+    ))
+    .unwrap();
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let blobs = core.blobs.prepare_all().unwrap();
+    assert_eq!(blobs.len(), 2);
+    for (blob, source) in blobs.iter().zip([&lower, &upper]) {
+        assert_eq!(&blob.cache_path, source);
+        assert!(core.blobs.is_all_ready(&blob.id).unwrap());
+        let extents = core
+            .fetch_flat_ranges(blob.mapped_offset, blob.cache_size)
+            .unwrap();
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].offset, 0);
+        assert_eq!(extents[0].len, blob.cache_size);
+        assert_eq!(extents[0].source_offset, blob.mapped_offset);
+        let mut mapped = vec![0u8; blob.cache_size as usize];
+        nydus_format::utils::pread_exact(extents[0].fd, &mut mapped, 0).unwrap();
+        assert_eq!(
+            mapped,
+            fs::read(source).unwrap()[..blob.cache_size as usize]
+        );
+        assert_eq!(
+            core.probe_flat_ranges(blob.mapped_offset, blob.cache_size)
+                .unwrap(),
+            extents
+        );
+    }
+    let extents = core.fetch_flat_ranges(0, core.flat_size()).unwrap();
+    assert_eq!(
+        extents,
+        core.probe_flat_ranges(0, core.flat_size()).unwrap()
+    );
+    let mut cursor = 0;
+    for extent in &extents {
+        assert_eq!(extent.source_offset, cursor);
+        cursor += extent.len;
+    }
+    assert_eq!(cursor, core.flat_size());
+    assert!(!dir.path().join("cache").exists());
+    assert_eq!(
+        core.fs.open("/a").unwrap().read().unwrap(),
+        vec![0xa1u8; 9000]
+    );
+    assert_eq!(
+        core.fs.open("/b").unwrap().read().unwrap(),
+        vec![0xb2u8; 5000]
+    );
+}
+
+#[test]
+fn core_requires_a_cache_for_chunked_layers() {
+    let dir = tempdir().unwrap();
+    let (bootstrap, mut config, _, _) = build_flattened_test_image(dir.path());
+    config.storage.dir = None;
+    let error = NydusCore::new(&bootstrap, config).err().unwrap();
+    assert!(
+        error.to_string().contains("storage.dir is required"),
+        "{error}"
+    );
+}
+
 #[test]
 fn flattened_bootstrap_records_mapped_device_slots() {
     let dir = tempdir().unwrap();

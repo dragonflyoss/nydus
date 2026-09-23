@@ -14,8 +14,9 @@ mod local;
 #[cfg(feature = "backend-registry")]
 mod registry;
 
+use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nydus_config::BackendConfig;
@@ -137,6 +138,15 @@ pub fn last_read_served_by() -> Option<nydus_telemetry::metrics::BackendTarget> 
     READ_SERVED_BY.with(|cell| cell.get())
 }
 
+/// A raw EROFS device backed by the range
+/// `[data_offset, data_offset + data_size)` of a local file.
+pub struct RawDeviceFile {
+    pub path: PathBuf,
+    pub file: Arc<File>,
+    pub data_offset: u64,
+    pub data_size: u64,
+}
+
 /// A blob backend resolves blob data and metadata by content digest.
 pub trait BlobBackend: Send + Sync {
     /// Which side serves this backend's reads, used to attribute read and CRC
@@ -160,6 +170,15 @@ pub trait BlobBackend: Send + Sync {
     /// error instead of `Ok(true)`.
     fn is_raw_device(&self, _blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
         Ok(false)
+    }
+
+    /// Return the local file backing a raw device, or `None` for a streamed
+    /// or chunked blob. File resolution and open errors are propagated.
+    fn raw_device_file(
+        &self,
+        _blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<Option<RawDeviceFile>> {
+        Ok(None)
     }
 
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
@@ -234,6 +253,13 @@ impl BlobBackend for MeteredBackend {
 
     fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
         self.inner.is_raw_device(blob_id)
+    }
+
+    fn raw_device_file(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<Option<RawDeviceFile>> {
+        self.inner.raw_device_file(blob_id)
     }
 
     fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {

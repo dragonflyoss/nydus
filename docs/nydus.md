@@ -1107,7 +1107,9 @@ Fields:
 	and nothing is written to disk — the kernel page cache above the mount is
 	the only reuse layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
 	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`)
-	and `nydus optimize` require a directory and reject its absence at startup.
+	and `nydus optimize` require a directory and reject its absence at startup,
+	except that the kernel modes accept an image whose every blob is a native
+	layer in a `local` store: its store file is handed to the kernel directly.
 - `storage.skip_verify_checksums` (default `true`) skips verifying decoded
 	chunks against the blob meta's BLAKE3 digests before they are served.
 	Every fetched chunk group is always checked against its `crc32c`; set this
@@ -2161,8 +2163,10 @@ The kernel only reads the leading data region of each store file.
 `nydus fuse` mounts a native image from a local store without any cache
 (`--blob-dir /store`), decompressing pclusters per read in userspace; this
 needs no z_erofs support from the kernel and is what `nydusify check` uses.
-The on-demand frontends (`ublk`, `nbd`, `fanotify`, `uffd`) and registry
-backends do not serve native layers.
+The on-demand frontends (`ublk`, `nbd`, `fanotify`, `uffd`) serve native
+layers from a `local` store by handing the store file itself to the kernel:
+it is already complete, so nothing is fetched, and no `storage.dir` is needed
+when every blob is native. Registry backends do not serve native layers.
 
 ### Checking
 
