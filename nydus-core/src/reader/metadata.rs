@@ -1,7 +1,8 @@
 use std::io;
 
 use nydus_format::erofs::{
-    cast_ref, erofs_xattr_prefix, ErofsDirent, ErofsInode, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE,
+    cast_ref, erofs_xattr_prefix, mode_to_erofs_file_type, ErofsDirent, ErofsInode,
+    EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT_REG_FILE, EROFS_FT_SYMLINK,
     EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
     EROFS_XATTR_ENTRY_HEADER_SIZE, EROFS_XATTR_IBODY_HEADER_SIZE,
 };
@@ -83,12 +84,18 @@ impl ErofsReader {
                         io::Error::new(io::ErrorKind::InvalidData, "invalid directory entry")
                     })?;
                 let de: &ErofsDirent = cast_ref(&block_data[i * EROFS_DIRENT_SIZE..]);
+                // The kernel reports a type it does not know as DT_UNKNOWN,
+                // leaving the answer to the inode's mode; take it from there.
+                let file_type = match de.file_type() {
+                    known @ EROFS_FT_REG_FILE..=EROFS_FT_SYMLINK => known,
+                    _ => mode_to_erofs_file_type(self.inode(entry_nid)?.mode()),
+                };
                 let next_offset = if i + 1 < count {
                     pos + ((i + 1) * EROFS_DIRENT_SIZE) as u64
                 } else {
                     pos + block_len as u64
                 };
-                if !cb(entry_nid, de.file_type(), name, next_offset)? {
+                if !cb(entry_nid, file_type, name, next_offset)? {
                     return Ok(());
                 }
             }
@@ -385,7 +392,7 @@ impl ErofsReader {
 mod tests {
     use super::*;
     use nydus_format::erofs::{
-        ErofsInodeCompact, ErofsSuperblock, EROFS_FT_REG_FILE, EROFS_SUPER_OFFSET,
+        ErofsInodeCompact, ErofsSuperblock, EROFS_FT_DIR, EROFS_FT_REG_FILE, EROFS_SUPER_OFFSET,
     };
     use std::io::Write;
 
@@ -463,6 +470,20 @@ mod tests {
             seen,
             vec![(3, EROFS_FT_REG_FILE, b"z".to_vec(), inode.size())]
         );
+    }
+
+    #[test]
+    fn directory_iteration_takes_unknown_dirent_types_from_the_inode_mode() {
+        for file_type in [0, 99] {
+            let mut data = ErofsDirent::new(0, EROFS_DIRENT_SIZE as u16, file_type)
+                .as_bytes()
+                .to_vec();
+            data.push(b'd');
+            let reader = directory_reader(&data);
+            let entries = reader.read_dir(0, &reader.inode(0).unwrap()).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].file_type, EROFS_FT_DIR);
+        }
     }
 
     #[test]

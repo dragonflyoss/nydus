@@ -138,6 +138,12 @@ impl ErofsSuperblock {
         read_u32(&self.blocks_lo) as u64
     }
 
+    /// On-disk superblock size, extension slots included; what follows it
+    /// (the COMPR_CFGS records) starts this far past `EROFS_SUPER_OFFSET`.
+    pub fn size(&self) -> usize {
+        EROFS_SB_BASE_SIZE + self.sb_extslots as usize * EROFS_SB_EXTSLOT_SIZE
+    }
+
     pub fn meta_blkaddr(&self) -> u32 {
         read_u32(&self.meta_blkaddr)
     }

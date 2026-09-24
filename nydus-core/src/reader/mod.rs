@@ -322,12 +322,13 @@ impl ErofsReader {
     /// The z_erofs compression configs (COMPR_CFGS records after the
     /// superblock), or `None` for images without compressed data.
     pub fn z_compr_cfgs(&self) -> io::Result<Option<ZComprCfgs>> {
-        let algs = self.superblock().available_compr_algs();
+        let sb = self.superblock();
+        let algs = sb.available_compr_algs();
         if algs == 0 {
             return Ok(None);
         }
         let bytes = self.mmap_slice(
-            EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE,
+            EROFS_SUPER_OFFSET as usize + sb.size(),
             ZComprCfgs::MAX_SIZE,
         )?;
         let (cfgs, _) = ZComprCfgs::parse(algs, bytes)
