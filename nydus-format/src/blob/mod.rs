@@ -14,10 +14,10 @@ pub mod flag;
 pub mod footer;
 pub mod metadata;
 pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
-pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
+pub use footer::BlobFooter;
 pub use metadata::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataRedirect,
-    BlobMetadataTable, DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
+    BlobMetadataTable,
 };
 
 /// Finish a full blob: append everything behind the data region to `writer`,

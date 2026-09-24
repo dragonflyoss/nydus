@@ -25,9 +25,7 @@ pub use blob_chunk::{DEFAULT_CHUNK_GROUP_MIN_SIZE, MAX_CHUNK_GROUP_MIN_SIZE};
 use bootstrap::render_bootstrap;
 use inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
 use nydus_error::{Context, Error, Result};
-use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester, NYDUS_BLOB_FOOTER_SIZE,
-};
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{ErofsDeviceSlot, ZAlgorithm, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_format::utils::sha256_bytes;
 
@@ -592,7 +590,7 @@ pub(crate) fn assemble_ondemand_artifact(
     let mut artifact = Vec::with_capacity(
         usize::try_from(data.len() as u64 + blob_metadata.padded_size())
             .map_err(|err| Error::Overflow(format!("artifact exceeds usize: {err}")))?
-            + NYDUS_BLOB_FOOTER_SIZE,
+            + BlobFooter::SIZE,
     );
     artifact.extend_from_slice(data);
     let footer = nydus_format::blob::finish_full_blob(
@@ -845,9 +843,7 @@ mod tests {
 
         assert_eq!(layer.full_blob_digest, blob_id, "named, not hashed");
         assert_eq!(layer.data_blob_digest, blob_id);
-        let footer = BlobFooter::from_blob_bytes(&data)
-            .unwrap()
-            .expect("z layer blob carries a footer");
+        let footer = BlobFooter::from_blob_bytes(&data).expect("z layer blob carries a footer");
         assert_eq!(footer, layer.blob_footer);
         // A native layer carries no blob meta: the device is read as-is.
         assert!(footer.is_raw_device());
