@@ -116,7 +116,7 @@ impl BlobMetadataHeader {
         Ok(Self {
             feature_compat: read_u32_at(bytes, 8),
             feature_incompat: read_u32_at(bytes, 12),
-            crc32: read_u32_at(bytes, 16),
+            crc32: read_u32_at(bytes, NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD.start),
             table_count: read_u16_at(bytes, 20),
         })
     }
