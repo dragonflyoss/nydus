@@ -617,8 +617,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         data_layout: String,
         #[tabled(rename = "GROUP SPAN")]
         group_span: String,
-        #[tabled(rename = "LOOKUP GRANULE")]
-        lookup_granule: String,
+        #[tabled(rename = "INDEX SPAN")]
+        index_span: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COUNT")]
@@ -670,7 +670,7 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
             None => "chunk-based".to_string(),
         },
         group_span: meta(|meta| meta.group_span().to_string()),
-        lookup_granule: meta(|meta| meta.lookup_granule().to_string()),
+        index_span: meta(|meta| meta.index_span().to_string()),
         chunk_group_count: meta(|meta| meta.chunk_group_count().to_string()),
         chunk_count: meta(|meta| meta.chunk_count().to_string()),
         digest_count: meta(|meta| meta.digest_count().to_string()),

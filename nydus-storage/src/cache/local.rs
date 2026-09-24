@@ -1284,7 +1284,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let (data, meta, groups, _) = groups_blob();
         let mut digests = meta.digests().to_vec();
-        digests[1] = nydus_format::blob::BlobMetadataDigest::new([0u8; 32]);
+        digests[1] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0u8; 32]);
         let members: Vec<u32> = (0..meta.chunk_count())
             .map(|index| meta.chunk_len(index).unwrap())
             .collect();

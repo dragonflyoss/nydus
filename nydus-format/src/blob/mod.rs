@@ -16,7 +16,8 @@ pub mod metadata;
 pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::BlobFooter;
 pub use metadata::{
-    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataRedirect,
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
+    BlobMetadataChunkGroupIndex, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
     BlobMetadataTable,
 };
 
@@ -39,9 +40,10 @@ pub use metadata::{
 /// bootstrap        one zstd frame of the metadata-only EROFS image
 ///                  (bootstrap_compressed_size bytes), zero tail up to
 ///                  bootstrap_size, absent for an ondemand blob
-/// blob meta        NDBLMETA (header, GroupTable,
-///                  ChunkTable, GranuleIndexTable, optional DigestTable/
-///                  RedirectTable), already block-padded, ending
+/// blob meta        NDBLMETA (header, ChunkGroupTable,
+///                  ChunkLengthTable, ChunkGroupIndexTable, optional
+///                  ChunkGroupDigestTable and
+///                  ChunkGroupRedirectTable), already block-padded, ending
 ///                  exactly at the footer offset
 /// footer           the sealed NDFOOTER block, fixed 4 KiB at the tail
 /// ```

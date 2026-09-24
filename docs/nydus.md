@@ -37,7 +37,7 @@ encoded ranges in the stored data region.
 - Persist a stable blob identifier inside bootstrap metadata.
 - Keep EROFS file chunk indexes logical and map a block to its compression chunk
 	group in O(1): groups tile the address space back to back, and a small
-	GranuleIndexTable names the group with a direct lookup and one compare,
+	ChunkGroupIndexTable names the group with a direct lookup and one compare,
 	so no index is derived at open and no lookup scans.
 - Support compressed blob data while preserving a plain decoded cache artifact
 	for EROFS compatibility and repeated reads.
@@ -393,9 +393,9 @@ Current implementation notes:
 	for other images; the original temporary benchmark artifacts are not
 	distributed with this repository. The minimum
 	must be a power of two between 4 KiB and 512 MiB, and may exceed the
-	chunk size. Build records it as the lookup granule; the file format does
+	chunk size. Build records it as the index span; the file format does
 	not store the writer's lone-chunk threshold. Readers validate group spans
-	against the lookup granule.
+	against the index span.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
@@ -411,7 +411,7 @@ Current implementation notes:
 	current-working-directory-relative paths and may be repeated.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
 	`data_blob_digest`, `full_blob_digest`, `group_span`,
-	`lookup_granule`, `chunk_group_count`,
+	`index_span`, `chunk_group_count`,
 	`chunk_count`, `digest_count`, `chunk_compressor`, payload/compressed/
 	uncompressed totals, and full blob region offsets and block counts.
 
@@ -469,7 +469,7 @@ chunks' bytes back to back, without the tail-block padding after each file
 (see [Blob meta region layout](#blob-meta-region-layout)):
 
 - Chunk groups tile the address space back to back: group `i` starts at
-	the block where group `i - 1` ends (`uncompressed_block_offset` in GroupTable) and
+	the block where group `i - 1` ends (`uncompressed_block_offset` in ChunkGroupTable) and
 	spans exactly its chunks' blocks, each chunk whole and on its own 4 KiB
 	block boundary, so the address space is as large as the block-padded
 	data and nothing else. Tail-padding overhead depends on the file-size
@@ -496,10 +496,10 @@ chunks' bytes back to back, without the tail-block padding after each file
 	index order; a chunk's block address is only known once its group
 	closes, so the builder resolves the inode chunk indexes when the data
 	region is complete, before the bootstrap is rendered.
-- Every group but the last spans at least the *lookup granule* recorded in
+- Every group but the last spans at least the *index span* recorded in
 	the blob meta (the chunk group minimum size, 2 MiB by default: a lone
-	chunk is at least that, and so is a closed pack). GranuleIndexTable
-	has one four-byte entry per granule (four bytes per 2 MiB by default),
+	chunk is at least that, and so is a closed pack). ChunkGroupIndexTable
+	has one four-byte entry per index span (four bytes per 2 MiB by default),
 	and locates a group by direct indexing and at most one forward correction (see
 	[Blob meta region layout](#blob-meta-region-layout)).
 - The group is the unit of compression, of an on-demand read (see
@@ -733,7 +733,7 @@ Current implementation notes:
 	validate it (CRC32C and, when the source carries digests, BLAKE3) before
 	it is appended.
 - Sources may use different file chunk sizes and group minimums. The output
-	uses the largest source group-span bound and derives its lookup granule
+	uses the largest source group-span bound and derives its index span
 	from the copied groups. Compressed sources must share one compressor
 	(plain-stored groups fit under any compressor), because the copies are
 	byte-exact; a source that is itself an ondemand blob is
@@ -741,7 +741,7 @@ Current implementation notes:
 	blob digest-free too.
 - The ondemand artifact layout is `[chunk groups][blob meta][footer]` with
 	`bootstrap_size = 0` (no embedded bootstrap); its blob meta carries a
-	RedirectTable, see
+	ChunkGroupRedirectTable, see
 	[Ondemand (redirect) blob layout](#ondemand-redirect-blob-layout). It is
 	fetched and checked like any blob but never builds a cache of its own.
 
@@ -772,7 +772,7 @@ Current implementation notes:
 	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
-	`group_span`, `lookup_granule`, `chunk_group_count`,
+	`group_span`, `index_span`, `chunk_group_count`,
 	`chunk_compressor`, the chunk, digest
 	and redirect counts (`BLOB META REDIRECTS` is non-zero only for an ondemand
 	blob), and payload/compressed/uncompressed totals when the referenced blob
@@ -1619,9 +1619,9 @@ first logical external data block starts at offset 0
 	logical byte offset = 0 * 4096
 
 blob_meta then maps that logical byte offset to a compressed range in the full
-blob's data region. GranuleIndexTable gives the group covering the granule
+blob's data region. ChunkGroupIndexTable gives the group covering the index span
 start; comparing with the next group start corrects the answer at most once.
-The GroupTable entry gives
+The ChunkGroupTable entry gives
 the encoded `compressed_offset` (for example 0 for the first encoded
 chunk_group).
 ```
@@ -1664,11 +1664,11 @@ both spaces without additional group padding.
 ```text
 Header (24 bytes)
 table_count tables back to back, each at the next 8-byte boundary:
-  GroupTable        type 1  24-byte header + (group_count + 1) * 24 bytes
-  ChunkTable        type 2  16-byte header + chunk_count * 4 bytes
-  GranuleIndexTable type 3  24-byte header + ceil(cache_bytes / lookup_granule) * 4 bytes
-  DigestTable       type 4  24-byte header + group_count * 32 bytes, when enabled
-  RedirectTable     type 5  16-byte header + group_count * 8 bytes, redirect blobs only
+  ChunkGroupTable        type 1  24-byte header + (group_count + 1) * 24 bytes
+  ChunkLengthTable        type 2  16-byte header + chunk_count * 4 bytes
+  ChunkGroupIndexTable type 3  24-byte header + ceil(cache_bytes / index_span) * 4 bytes
+  ChunkGroupDigestTable       type 4  24-byte header + group_count * 32 bytes, when enabled
+  ChunkGroupRedirectTable     type 5  16-byte header + group_count * 8 bytes, redirect blobs only
 Zero padding to a 4096-byte multiple
 ```
 
@@ -1695,8 +1695,9 @@ file; parameters of a table live in that table's own header.
 
 #### Table header
 
-Every table starts with a 16-byte common header; table-specific fields
-follow from offset 16, and entries start at `header_size`. The first table
+Every table starts with a 16-byte header; a table with its own header
+fields carries them behind it and declares the larger `header_size`;
+entries start at `header_size`. The first table
 starts at offset 24, and each next one at the first 8-byte boundary after
 the previous table, so the headers alone describe the layout.
 
@@ -1710,7 +1711,7 @@ the previous table, so the headers alone describe the layout.
 | 12 | `entry_count` | 4 | Entries |
 
 Types 1 through 5 are the core tables above; nydus allocates the next ones
-from 6. GroupTable, ChunkTable and GranuleIndexTable are mandatory. To a
+from 6. ChunkGroupTable, ChunkLengthTable and ChunkGroupIndexTable are mandatory. To a
 reader that does not know a table's type every incompat bit is unknown, so
 it skips an unknown table whose `feature_incompat` is zero and rejects the
 file otherwise: a new table that older readers must understand sets an
@@ -1722,26 +1723,26 @@ append fields to a table header or to every entry; older readers read the
 fields they know and skip the rest. A changed meaning needs a new table
 type or an incompat feature instead.
 
-Table-specific header fields:
+The tables' own header fields:
 
 | Table | Offset | Field | Bytes | Meaning |
 |---|---:|---|---:|---|
-| GroupTable | 16 | `maximum_group_span_block_shift` | 1 | Maximum group span is `4096 << value` bytes; at most 19 (2 GiB) |
-| GroupTable | 17 | `compressor` | 1 | 0 plain, 1 Zstandard, 2 LZ4; unknown values reject the file |
-| GroupTable | 18 | `reserved` | 6 | Writers zero it, readers ignore it |
-| GranuleIndexTable | 16 | `lookup_granule_block_shift` | 1 | Lookup granule is `4096 << value` bytes; at most `maximum_group_span_block_shift` |
-| GranuleIndexTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
-| DigestTable | 16 | `algorithm` | 1 | 1 BLAKE3 group digest; a reader that does not know the value treats the blob as undigested and fails reads that must verify digests |
-| DigestTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
+| ChunkGroupTable | 16 | `max_group_span_bits` | 1 | Maximum group span is `4096 << value` bytes; at most 19 (2 GiB) |
+| ChunkGroupTable | 17 | `compressor` | 1 | 0 plain, 1 Zstandard, 2 LZ4; unknown values reject the file |
+| ChunkGroupTable | 18 | `reserved` | 6 | Writers zero it, readers ignore it |
+| ChunkGroupIndexTable | 16 | `index_span_bits` | 1 | Lookup span is `4096 << value` bytes; at most `max_group_span_bits` |
+| ChunkGroupIndexTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
+| ChunkGroupDigestTable | 16 | `algorithm` | 1 | 1 BLAKE3 group digest; a reader that does not know the value treats the blob as undigested and fails reads that must verify digests |
+| ChunkGroupDigestTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
 
-The default maximum span is 8 MiB (block shift 11), and lookup granule
-2 MiB (block shift 9). Setting the group minimum to 4, 8 or 16 MiB writes
-granule block shifts 10, 11 or 12 respectively. File chunk size and
+The default maximum span is 8 MiB (bits 11), and index span
+2 MiB (bits 9). Setting the group minimum to 4, 8 or 16 MiB writes
+index span bits 10, 11 or 12 respectively. File chunk size and
 build-time grouping threshold are not recorded. Optimized blobs derive
-their own granule from copied group spans, so their granule shift is not
+their own index span from copied group spans, so their index span bits are not
 necessarily 9.
 
-#### GroupTable
+#### ChunkGroupTable
 
 Each entry is 24 bytes; offsets below are relative to its start.
 
@@ -1749,7 +1750,7 @@ Each entry is 24 bytes; offsets below are relative to its start.
 |---:|---|---:|---|
 | 0 | `compressed_offset` | 8 | Encoded group start relative to the blob data region |
 | 8 | `uncompressed_block_offset` | 4 | Group start in the uncompressed cache address space, in 4096-byte blocks |
-| 12 | `first_chunk_index` | 4 | First entry of this group's run in ChunkTable |
+| 12 | `first_chunk_index` | 4 | First entry of this group's run in ChunkLengthTable |
 | 16 | `payload_size` | 4 | Sum of actual chunk lengths, excluding block padding; not the cache address span |
 | 20 | `payload_crc32` | 4 | CRC32C of the decoded, tightly packed payload |
 
@@ -1761,15 +1762,15 @@ count is a pack. There is no special zero-member representation.
 The final entry is a terminator: its first three fields contain total data
 bytes, total cache blocks and total chunks; payload size and CRC are zero.
 The group count is therefore the entry count minus one; the header does not
-store it. The terminator has no DigestTable or RedirectTable entry. An empty
+store it. The terminator has no ChunkGroupDigestTable or ChunkGroupRedirectTable entry. An empty
 blob has just this zero terminator and no other table entries.
 
 Stored size equal to decoded payload size means plain data, even if the
-GroupTable header declares a compressor. Otherwise the payload is compressed; the builder
+ChunkGroupTable header declares a compressor. Otherwise the payload is compressed; the builder
 stores it plain unless compression saves at least 30%. Runtime backends add
 the data-region base offset before issuing the encoded range read.
 
-#### ChunkTable
+#### ChunkLengthTable
 
 Each entry is a nonzero `chunk_byte_length` stored as a four-byte integer.
 Every stored chunk has an entry, including lone chunks. The table is ordered
@@ -1779,31 +1780,31 @@ Chunk lengths sum to the group's decoded payload size. Their individually
 rounded block counts sum to the group's cache span. Thus the same lengths
 split the tight payload and recover each chunk's block-aligned cache address.
 
-#### GranuleIndexTable
+#### ChunkGroupIndexTable
 
 Each entry is a four-byte `group_index` naming the group covering the
-corresponding granule's **first byte**. Every non-final group must span at
-least one granule; the final group may be shorter. The table is mandatory
+corresponding index span's **first byte**. Every non-final group must span at
+least one index span; the final group may be shorter. The table is mandatory
 for every nonempty blob, including redirect blobs.
 
 For a checked cache byte offset:
 
 ```text
-granule_index = cache_byte_offset / lookup_granule
-group_index = GranuleIndexTable[granule_index]
-if cache_byte_offset >= GroupTable[group_index + 1].uncompressed_block_offset * 4096:
+span_index = cache_byte_offset / index_span
+group_index = ChunkGroupIndexTable[span_index]
+if cache_byte_offset >= ChunkGroupTable[group_index + 1].uncompressed_block_offset * 4096:
     group_index += 1
 ```
 
-At most one group boundary lies inside a granule, so this is worst-case
+At most one group boundary lies inside a index span, so this is worst-case
 O(1): direct indexing, one comparison and at most one increment. There is no
-binary-search fallback, bitmap or popcount. At the default granule the index
+binary-search fallback, bitmap or popcount. At the default index span the index
 costs four bytes per 2 MiB of cache address space.
 
 The parser verifies the crc32c and the feature words, bounds every table of
 the directory, resolves the known tables through their headers with checked
-arithmetic, cross-checks their entry counts against the GroupTable
-terminator, then validates every chunk, group and granule entry. The mapped
+arithmetic, cross-checks their entry counts against the ChunkGroupTable
+terminator, then validates every chunk, group and index entry. The mapped
 reader verifies the index in place; it does not allocate or rebuild a second
 lookup structure. File mappings still consume page-cache memory when
 accessed. The bytes are kept verbatim, so saving or caching a loaded blob
@@ -1838,12 +1839,12 @@ Redirect details (redirect blobs only):
 	the redirect blob preserves each source's chunk lengths and compatible
 	compressor and is decoded with the same code path. Its groups tile their own address space
 	in access order (the redirect blob's `uncompressed_block_offset` values are its own), with
-	a power-of-two lookup granule no larger than any non-final copied group.
+	a power-of-two index span no larger than any non-final copied group.
 - The runtime never builds a cache for a redirect blob: each decoded group is
 	written into the source blob's cache at the source group's blocks and
 	marked ready there. See [Ondemand (redirect) blob layout](#ondemand-redirect-blob-layout).
 
-Address-to-group lookups are O(1) and need no derived index: GranuleIndexTable names the group
+Address-to-group lookups are O(1) and need no derived index: ChunkGroupIndexTable names the group
 of an address (see above), the group row and its successor bound the backend
 range, the address span and the chunk run, and a chunk within a pack is
 found by walking the run's lengths (at most a group span of them). The
@@ -1915,10 +1916,10 @@ blkaddr    0        256      512      768      943 944  ..
            | A p0   | B p0   | B p1   | A p1   |C|D|..| ..
            +--------+--------+--------+--------+---+-+-+---
 group      0        1        2        3        4
-GroupTable: uncompressed_block_offset 0, 256, 512, 768, 943, ..;
+ChunkGroupTable: uncompressed_block_offset 0, 256, 512, 768, 943, ..;
 			payload_size 1048576, 1048576, 1048576, 716800, |C|+|D|+..;
 			first_chunk_index 0, 1, 2, 3, 4, 7 (group 4 holds three chunks)
-ChunkTable: 1048576, 1048576, 1048576, 716800, 300, |D|, ..
+ChunkLengthTable: 1048576, 1048576, 1048576, 716800, 300, |D|, ..
 ```
 
 Within a group the chunks' **bytes** are the group's payload, back to back
@@ -1966,7 +1967,7 @@ Hash and validation summary:
 
 `nydus optimize` emits one extra "ondemand" blob and appends it to the image
 as a new layer. It is a full blob without an embedded bootstrap
-(`bootstrap_size = 0`) whose blob meta carries a RedirectTable:
+(`bootstrap_size = 0`) whose blob meta carries a ChunkGroupRedirectTable:
 every chunk group is a byte-exact copy of a traced chunk group of a source
 blob — encoded payload, payload size, chunk lengths, digest and CRC32C —
 laid out in first-access order, and the redirect table names the source
@@ -1983,13 +1984,13 @@ ondemand blob — named by SHA256(full blob), one new nydus layer
 |  source groups, in first-access|
 |  order                         |
 +--------------------------------+
-| blob meta (has RedirectTable)  |
+| blob meta (has ChunkGroupRedirectTable)  |
 |  Header (24 bytes, crc32c)      |
-|  GroupTable                    |
-|  ChunkTable                    |
-|  GranuleIndexTable             |
-|  DigestTable                   |
-|  RedirectTable                 |
+|  ChunkGroupTable                    |
+|  ChunkLengthTable                    |
+|  ChunkGroupIndexTable             |
+|  ChunkGroupDigestTable                   |
+|  ChunkGroupRedirectTable                 |
 |   (source blob, source group)  |
 +--------------------------------+
 | footer (bootstrap_size = 0)    |
@@ -2191,7 +2192,7 @@ The build pipeline follows this sequence:
 	boundary (a digest with six low zero bits once the pack spans the pack
 	minimum, five once it spans twice that) or when a chunk would take it
 	past four times the minimum. Every chunk length, including lone chunks,
-	is recorded in ChunkTable. The chunk
+	is recorded in ChunkLengthTable. The chunk
 	index handed back for each chunk is a placeholder until its group closes.
 4. Compute BLAKE3 digests over every chunk and CRC32C over
 	each chunk group payload.
@@ -2356,11 +2357,11 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
 
 <hex>.blob.meta — verified blob meta copy (mmap'd for group/chunk lookup)
 Header            CRC32C, counts and address geometry
-GroupTable        data/block/chunk starts, payload sizes and CRC32C
-ChunkTable        u32 length for every stored chunk
-GranuleIndexTable u32 group index per lookup granule
-DigestTable       BLAKE3 per group, when enabled
-RedirectTable     source blob and group, for ondemand blobs only
+ChunkGroupTable        data/block/chunk starts, payload sizes and CRC32C
+ChunkLengthTable        u32 length for every stored chunk
+ChunkGroupIndexTable u32 group index per index span
+ChunkGroupDigestTable       BLAKE3 per group, when enabled
+ChunkGroupRedirectTable     source blob and group, for ondemand blobs only
 
 <hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
 +---------------------------------+----------------------+
@@ -2418,7 +2419,7 @@ way a classic nydusd mount would. The resolution is logged.
 1. Priority blobs are prefetched first, sequentially, in the order listed by the
         root inode's `trusted.nydus.prefetch.blobs` xattr (a comma-separated list of
         device ids). The list is deduplicated and filtered to existing devices. The
-        "ondemand" priority blobs (their blob meta carries a RedirectTable) are
+        "ondemand" priority blobs (their blob meta carries a ChunkGroupRedirectTable) are
         always streamed first regardless of their position in the list. Under
         `ondemand` they are the only blobs warmed; other priority blobs are skipped
         so backend bandwidth is not spent pulling whole source blobs. Under `all` the
@@ -2439,7 +2440,7 @@ way a classic nydusd mount would. The resolution is logged.
 	pays the round trips serially.
 
 The ondemand blob (produced by `nydus optimize`, listed first in the xattr)
-is a redirect blob (its blob meta has a RedirectTable): it is streamed in the order it was packed — the
+is a redirect blob (its blob meta has a ChunkGroupRedirectTable): it is streamed in the order it was packed — the
 workload's first-access order — and every decoded group is written into its
 **source** blob's cache at the source group's blocks (after the length and
 CRC32C checks) and marked ready there, so the earliest reads find their
@@ -2615,7 +2616,7 @@ through `ublk_drv` over `io_uring`; see
 	and `BlobInfo.cache_size` is `blocks * 4096`.
 - `blobs.fetch(id, offset, len)` guarantees the 4 KiB-aligned range is decoded,
 	validated, and resident in the cache data file. It maps the range to chunk
-	groups through GranuleIndexTable and reuses the regular cache chain
+	groups through ChunkGroupIndexTable and reuses the regular cache chain
 	(the fetch-size fill), so it is idempotent, concurrency-safe, and shares
 	trace/metrics recording with the FUSE path.
 - `fs.open(path)` resolves a path once and returns a `Node`; use
