@@ -1491,10 +1491,11 @@ Reader validation requires:
 ```text
 compressed_data_offset + compressed_data_size <= bootstrap_offset
 bootstrap_offset + bootstrap_size <= blob_metadata_offset
-blob_metadata_offset + blob_metadata_size == footer_offset
+blob_metadata_offset + blob_metadata_size <= footer_offset
 ```
 
-The inequalities allow alignment padding between regions. Offsets, region
+The inequalities allow alignment padding between regions, and a newer
+writer may add a region between the blob meta and the footer. Offsets, region
 sizes except the compressed data size, and the footer offset must be 4 KiB
 aligned. Every offset and size is a byte count. Opening the embedded
 bootstrap (merge, check, single-blob mounts) verifies `bootstrap_crc32`
@@ -1711,11 +1712,11 @@ the previous table, so the headers alone describe the layout.
 | 12 | `entry_count` | 4 | Entries |
 
 Types 1 through 5 are the core tables above; nydus allocates the next ones
-from 6. ChunkGroupTable, ChunkLengthTable and ChunkGroupIndexTable are mandatory. To a
-reader that does not know a table's type every incompat bit is unknown, so
-it skips an unknown table whose `feature_incompat` is zero and rejects the
-file otherwise: a new table that older readers must understand sets an
-incompat bit.
+from 6. ChunkGroupTable, ChunkLengthTable and ChunkGroupIndexTable are
+mandatory. Every table, whatever its type, is subject to the same rule:
+unsupported `feature_incompat` bits reject the file, and a table of unknown
+type is otherwise skipped. A new table that older readers may ignore leaves
+`feature_incompat` zero; one they must understand sets an incompat bit.
 
 A table is exactly `header_size + entry_size * entry_count` bytes. Readers
 reach entry `i` at `header_size + i * entry_size`, so a newer writer may
@@ -1756,11 +1757,14 @@ Each entry is 24 bytes; offsets below are relative to its start.
 
 Subtract the current entry from the next to obtain encoded length, cache
 block count and chunk count. All three starts increase strictly for real
-groups, starting at zero. A chunk count of one is a lone chunk; any larger
+groups. The block and chunk starts begin at zero; the first compressed
+offset may be larger, so a newer writer may put bytes ahead of the first
+group in the data region. A chunk count of one is a lone chunk; any larger
 count is a pack. There is no special zero-member representation.
 
 The last entry ends the table: its first three fields contain total data
-bytes, total cache blocks and total chunks; payload size and CRC are zero.
+bytes, total cache blocks and total chunks; its payload size and CRC fields
+are reserved (written zero, ignored by readers).
 The group count is therefore the entry count minus one; the header does not
 store it. The last entry has no ChunkGroupDigestTable or ChunkGroupRedirectTable entry. An empty
 blob has just this zero last entry and no other table entries.
@@ -2467,7 +2471,9 @@ header followed by one readiness bit per chunk group. The header carries the
 and 12 (the blob meta prefix, without a crc32 since the file is mutable), the
 group count at 16, a mutable ready-group counter at 20 and a mutable `state`
 word at 24 whose bit 0 is `ALL_READY`; the rest of the header page is
-reserved and zero. The whole file is mapped `MAP_SHARED`
+reserved and zero. Readers require the file to be at least header plus
+bitmap long and ignore any bytes past the bitmap, which a newer writer may
+append behind a compat feature bit. The whole file is mapped `MAP_SHARED`
 and every bit access goes through atomic operations (`Acquire` loads,
 `fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
 are immediately observed by every other process sharing the cache directory

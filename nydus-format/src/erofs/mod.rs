@@ -29,6 +29,8 @@ use std::mem;
 pub const EROFS_SUPER_MAGIC_V1: u32 = 0xE0F5_E1E2;
 pub const EROFS_SUPER_OFFSET: u64 = 1024;
 pub const EROFS_SB_BASE_SIZE: usize = 128;
+/// Bytes per `sb_extslots` slot extending the superblock past its base size.
+pub const EROFS_SB_EXTSLOT_SIZE: usize = 16;
 
 // Blob identity.
 /// On-disk blob ID field size: blob IDs are SHA-256 digests.

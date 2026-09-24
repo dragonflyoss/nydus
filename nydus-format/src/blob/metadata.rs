@@ -79,8 +79,8 @@ impl fmt::Display for BlobMetadataTableType {
 ///      0     2  type                    see BlobMetadataTableType
 ///      2     2  header_size             16 plus the extension, a multiple of 8
 ///      4     2  feature_compat          unknown bits are ignored
-///      6     2  feature_incompat        unknown bits reject the file, an
-///                                       unknown type is skipped when zero
+///      6     2  feature_incompat        unknown bits reject the file, even
+///                                       for a table of unknown type
 ///      8     4  entry_size              bytes per entry
 ///     12     4  entry_count
 /// ```
@@ -447,9 +447,9 @@ impl BlobMetadataChunkGroupTableHeaderExtension {
 ///      8     4  logical_block_offset       first 4KiB block in the address space
 ///     12     4  first_chunk_index          first entry in ChunkLengthTable
 ///     16     4  uncompressed_size          bytes the group decompresses to,
-///                                          zero in the last entry
-///     20     4  uncompressed_crc32         crc32c of those bytes, zero in the
-///                                          last entry
+///                                          reserved in the last entry
+///     20     4  uncompressed_crc32         crc32c of those bytes, reserved in
+///                                          the last entry
 /// ```
 ///
 /// [`BlobMetadata::chunk_group`] joins two neighbouring entries into a
@@ -498,8 +498,8 @@ impl BlobMetadataEntry for BlobMetadataChunkGroup {
 /// A writer creates entries, a reader joins them into extents through
 /// [`BlobMetadata::chunk_group`].
 impl BlobMetadataChunkGroup {
-    /// Creates an entry. The last entry carries the totals with zero size
-    /// and crc.
+    /// Creates an entry. The last entry carries the totals, its size and crc
+    /// are reserved and written zero.
     pub fn new(
         compressed_offset: u64,
         logical_block_offset: u32,
@@ -1416,8 +1416,9 @@ impl BlobMetadataHeader {
 /// ChunkGroupRedirectTable     5  optional, in redirect blobs     none                                              groups * 8 B
 /// ```
 ///
-/// The table headers are the compatibility contract. A reader skips an
-/// unknown table without incompat bits, reads known tables through their
+/// The table headers are the compatibility contract. A reader rejects
+/// unknown incompat bits of any table, skips a table of unknown type
+/// otherwise, reads known tables through their
 /// declared sizes, and keeps every byte so [`Self::write_to`] preserves what
 /// it does not know. A redirect blob (an `optimize` output) copies chunk
 /// groups of other blobs byte for byte and names their sources in
@@ -1681,10 +1682,10 @@ impl BlobMetadata {
     }
 
     /// Validate the decoded fields against each other in file order. The
-    /// header extensions bound each other, ChunkGroupTable starts at zero,
-    /// ends in a last entry that only ends and holds well-formed groups in
-    /// between, and every other table holds the entries the groups call
-    /// for. Runs on both sides, so a constructed blob meta is valid by
+    /// header extensions bound each other, ChunkGroupTable starts at block and
+    /// chunk zero, ends in a last entry that only ends and holds well-formed
+    /// groups in between, and every other table holds the entries the groups
+    /// call for. Runs on both sides, so a constructed blob meta is valid by
     /// definition.
     fn validate_fields(&self) -> Result<()> {
         if self.max_blocks_per_chunk_group > Self::MAX_BLOCKS_PER_CHUNK_GROUP {
@@ -1702,23 +1703,14 @@ impl BlobMetadata {
             )));
         }
 
+        // The compressed offset may start past zero: reads only follow each
+        // group's own offset, so a newer writer may put bytes ahead of the
+        // first group.
         let first_entry = self.chunk_groups.get(&self.bytes, 0);
-        if first_entry.compressed_offset != 0
-            || first_entry.logical_block_offset != 0
-            || first_entry.first_chunk_index != 0
-        {
+        if first_entry.logical_block_offset != 0 || first_entry.first_chunk_index != 0 {
             return Err(Error::InvalidImage(
-                "blob meta chunk groups must start at offset zero, block zero and chunk zero"
-                    .to_string(),
+                "blob meta chunk groups must start at block zero and chunk zero".to_string(),
             ));
-        }
-
-        let last_entry = self.chunk_groups.get(&self.bytes, self.chunk_group_count());
-        if last_entry.uncompressed_size != 0 || last_entry.uncompressed_crc32 != 0 {
-            return Err(Error::InvalidImage(format!(
-                "blob meta ChunkGroupTable last entry carries payload {} and crc {}",
-                last_entry.uncompressed_size, last_entry.uncompressed_crc32
-            )));
         }
 
         for index in 0..self.chunk_group_count() {
@@ -2469,9 +2461,9 @@ mod tests {
             (42, vec![1], Ok(())),
             (47, vec![1], Ok(())),
             (
-                48,
-                1u64.to_le_bytes().to_vec(),
-                Err("blob meta chunk groups must start at offset zero, block zero and chunk zero"),
+                56,
+                1u32.to_le_bytes().to_vec(),
+                Err("blob meta chunk groups must start at block zero and chunk zero"),
             ),
             (
                 72,
@@ -2528,11 +2520,9 @@ mod tests {
                 8u32.to_le_bytes().to_vec(),
                 Err("blob meta chunk group 4 chunks add up to 1 bytes, not its 2 uncompressed bytes"),
             ),
-            (
-                184,
-                1u32.to_le_bytes().to_vec(),
-                Err("blob meta ChunkGroupTable last entry carries payload 1 and crc 0"),
-            ),
+            // The last entry's uncompressed size and crc are reserved.
+            (184, u32::MAX.to_le_bytes().to_vec(), Ok(())),
+            (188, u32::MAX.to_le_bytes().to_vec(), Ok(())),
             (244, vec![1], Ok(())),
             (
                 264,
@@ -2863,7 +2853,7 @@ mod tests {
                 chunk_lengths[..1].to_vec(),
                 vec![],
                 vec![],
-                "blob meta chunk groups must start at offset zero, block zero and chunk zero",
+                "blob meta chunk groups must start at block zero and chunk zero",
             ),
             (
                 16,
@@ -2965,6 +2955,32 @@ mod tests {
         assert_eq!(chunk_group.compressed_range(), 0..10);
         assert_eq!(chunk_group.uncompressed_size(), 100);
         assert!(!chunk_group.is_uncompressed(&loaded));
+    }
+
+    #[test]
+    fn from_bytes_accepts_bytes_ahead_of_the_first_chunk_group() {
+        let payload = vec![7u8; 100];
+        let blob_metadata = BlobMetadata::new(
+            1,
+            1,
+            BlobMetadataCompressor::Zstd,
+            None,
+            vec![
+                BlobMetadataChunkGroup::new(4096, 0, 0, 100, crc32c(&payload)),
+                BlobMetadataChunkGroup::new(4106, 1, 1, 0, 0),
+            ],
+            vec![BlobMetadataChunkLength::new(100)],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let loaded = BlobMetadata::from_bytes(blob_metadata.bytes.clone()).unwrap();
+        assert_eq!(
+            loaded.chunk_group(0).unwrap().compressed_range(),
+            4096..4106
+        );
+        assert_eq!(loaded.compressed_size(), 4106);
     }
 
     #[test]

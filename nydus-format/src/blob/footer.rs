@@ -340,8 +340,8 @@ impl BlobFooter {
 
     /// Validate the declared region layout against `offset`, the footer's
     /// actual position, an external fact the footer cannot fake. The regions
-    /// must tile the blob in order (alignment gaps allowed) and end exactly
-    /// where the footer sits.
+    /// must tile the blob in order and end at or before the footer; the gaps
+    /// hold alignment padding or regions a newer writer adds.
     pub fn validate_layout(&self, offset: u64) -> Result<()> {
         if offset % EROFS_BLOCK_SIZE as u64 != 0 {
             return Err(Error::InvalidImage(format!(
@@ -374,9 +374,9 @@ impl BlobFooter {
         }
 
         let blob_metadata_end = self.offset()?;
-        if blob_metadata_end != offset {
+        if blob_metadata_end > offset {
             return Err(Error::InvalidImage(format!(
-                "nydus footer declared layout ends at {blob_metadata_end:#x}, not at the footer offset {offset:#x}"
+                "nydus footer declared layout ends at {blob_metadata_end:#x}, past the footer offset {offset:#x}"
             )));
         }
 
@@ -402,8 +402,7 @@ impl BlobFooter {
             .ok_or_else(|| Error::InvalidImage("blob too small for nydus footer".to_string()))
     }
 
-    /// The footer offset the declared layout implies, the end of the blob
-    /// meta region, since a full blob lays the footer right after it.
+    /// The end of the blob meta region, where a writer places the footer.
     pub fn offset(&self) -> Result<u64> {
         self.blob_metadata_offset
             .checked_add(self.blob_metadata_size())
@@ -704,10 +703,12 @@ mod tests {
                 0,
                 Err("nydus footer offset 0x3001 is not 4KiB aligned"),
             ),
+            // A region a newer writer adds may sit before the footer.
+            (20480, 0, Ok(footer)),
             (
-                20480,
+                12288,
                 0,
-                Err("nydus footer declared layout ends at 0x3000, not at the footer offset 0x4000"),
+                Err("nydus footer declared layout ends at 0x3000, past the footer offset 0x2000"),
             ),
         ];
 
