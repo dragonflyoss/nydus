@@ -63,6 +63,9 @@ impl Drop for FileLock<'_> {
 ///     28  4068  reserved                writers zero it, readers ignore it
 /// ```
 ///
+/// The bitmap follows at offset 4096. Bytes past it are ignored, so a newer
+/// writer may append data announced by a compat feature bit.
+///
 /// The whole file is
 /// mapped `MAP_SHARED` and the bits are accessed with atomic operations, so
 /// every process (or thread) that opens the same chunk_group_map file observes
@@ -101,11 +104,11 @@ impl ChunkGroupMap {
             // sequence: size the file, then write the identical header bytes.
             file.set_len(expected_len)?;
             file.write_all_at(&header_bytes(chunk_group_count), 0)?;
-        } else if file_len != expected_len {
+        } else if file_len < expected_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "chunk_group_map {} size mismatch: expected {}, got {}",
+                    "chunk_group_map {} is truncated: expected at least {}, got {}",
                     path.display(),
                     expected_len,
                     file_len
@@ -519,10 +522,28 @@ mod tests {
         std::fs::write(&garbage, vec![0xABu8; expected_len]).unwrap();
         assert!(ChunkGroupMap::open(&garbage, 10).is_err());
 
-        // Existing file whose size does not match the expected layout.
+        // Existing file shorter than the expected layout.
         let truncated = dir.path().join("truncated.group.map");
         std::fs::write(&truncated, vec![0u8; expected_len - 1]).unwrap();
         assert!(ChunkGroupMap::open(&truncated, 10).is_err());
+    }
+
+    #[test]
+    fn group_map_ignores_bytes_past_the_bitmap() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob.group.map");
+        ChunkGroupMap::open(&path, 10)
+            .unwrap()
+            .set_ready(3)
+            .unwrap();
+
+        // A newer writer's trailing data does not stop an older reader.
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        let len = file.metadata().unwrap().len();
+        file.write_all_at(&[0x5a; 4096], len).unwrap();
+        let reopened = ChunkGroupMap::open(&path, 10).unwrap();
+        assert!(reopened.is_ready(3).unwrap());
+        assert!(!reopened.is_ready(4).unwrap());
     }
 
     #[test]
