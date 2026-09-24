@@ -8,23 +8,75 @@ use crate::utils::le::{
 };
 use crc32c::{crc32c, crc32c_append};
 use memmap2::{Mmap, MmapOptions};
+use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
 
-/// One table of the blob meta, `header_size + entry_size * entry_count`
-/// bytes, at the next 8-byte boundary behind the previous one:
+/// The `type` field of a table header: which table follows. Not an enum:
+/// a reader keeps and skips tables of types it does not know, so any value
+/// round-trips; the known ones are the constants below.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlobMetadataTableType(u16);
+
+impl BlobMetadataTableType {
+    /// ChunkGroupTable, entries [`BlobMetadataChunkGroup`].
+    pub const CHUNK_GROUP: Self = Self(1);
+
+    /// ChunkLengthTable, entries [`BlobMetadataChunkLength`].
+    pub const CHUNK_LENGTH: Self = Self(2);
+
+    /// ChunkGroupIndexTable, entries [`BlobMetadataChunkGroupIndex`].
+    pub const CHUNK_GROUP_INDEX: Self = Self(3);
+
+    /// ChunkGroupDigestTable, entries [`BlobMetadataChunkGroupDigest`].
+    pub const CHUNK_GROUP_DIGEST: Self = Self(4);
+
+    /// ChunkGroupRedirectTable, entries [`BlobMetadataChunkGroupRedirect`].
+    pub const CHUNK_GROUP_REDIRECT: Self = Self(5);
+
+    /// The raw on-disk value.
+    pub fn get(self) -> u16 {
+        self.0
+    }
+
+    /// Whether this reader parses tables of this type; the others are kept
+    /// verbatim and skipped.
+    fn is_supported(self) -> bool {
+        (Self::CHUNK_GROUP.0..=Self::CHUNK_GROUP_REDIRECT.0).contains(&self.0)
+    }
+}
+
+impl fmt::Display for BlobMetadataTableType {
+    /// The table's name, or the raw value in hex for a type this reader
+    /// does not know.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::CHUNK_GROUP => f.write_str("ChunkGroupTable"),
+            Self::CHUNK_LENGTH => f.write_str("ChunkLengthTable"),
+            Self::CHUNK_GROUP_INDEX => f.write_str("ChunkGroupIndexTable"),
+            Self::CHUNK_GROUP_DIGEST => f.write_str("ChunkGroupDigestTable"),
+            Self::CHUNK_GROUP_REDIRECT => f.write_str("ChunkGroupRedirectTable"),
+            Self(other) => write!(f, "{other:#x}"),
+        }
+    }
+}
+
+/// One table of the blob meta, at the next 8-byte boundary behind the
+/// previous one. Every table starts with the same 16-byte header. A table
+/// type may define an optional header extension behind it, so `header_size`
+/// is 16 without one and more with one; the entries start at `header_size`:
 ///
 /// ```text
-/// ┌────────┬─────────┬─────────┬─────┬─────────┐
-/// │ header │ entry 0 │ entry 1 │ ... │ entry n │
-/// └────────┴─────────┴─────────┴─────┴─────────┘
-/// 0        header_size         + entry_size each
+/// ┌──────────────┬─────────────────────────────┬─────────┬─────────┬─────┬─────────┐
+/// │ header, 16 B │ header extension (optional) │ entry 0 │ entry 1 │ ... │ entry n │
+/// └──────────────┴─────────────────────────────┴─────────┴─────────┴─────┴─────────┘
+/// 0              16                            header_size         + entry_size each
 ///
 /// offset  size  field
-///      0     2  type                    nonzero, unique; 0x8000 and above
-///                                       are private
+///      0     2  type                    see BlobMetadataTableType; 0x8000
+///                                       and above are private
 ///      2     2  header_size             at least 16, a multiple of 8
 ///      4     2  feature_compat          unknown bits are ignored
 ///      6     2  feature_incompat        unknown bits reject the file; a
@@ -32,18 +84,21 @@ use std::path::Path;
 ///                                       when zero, rejected otherwise
 ///      8     4  entry_size              bytes per entry
 ///     12     4  entry_count
-///     16     8  own header              `ChunkGroupTableHeader`,
-///                                       `ChunkGroupIndexTableHeader` or
-///                                       `ChunkGroupDigestTableHeader`;
-///                                       absent for the other tables
+///
+/// table                    header extension
+/// ChunkGroupTable          ChunkGroupTableHeaderExtension, 8 B
+/// ChunkLengthTable         none
+/// ChunkGroupIndexTable     ChunkGroupIndexTableHeaderExtension, 8 B
+/// ChunkGroupDigestTable    ChunkGroupDigestTableHeaderExtension, 8 B
+/// ChunkGroupRedirectTable  none
 /// ```
 ///
-/// A newer writer appends header or entry fields and declares the larger
+/// A newer writer appends extension or entry fields and declares the larger
 /// `header_size` or `entry_size`; an older reader reads through the declared
-/// sizes and never sees them (ext4 `s_inode_size`, EROFS `sb_extslots`).
+/// sizes and never sees them (qcow2 header extensions, ext4 `i_extra_isize`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobMetadataTable {
-    table_type: u16,
+    table_type: BlobMetadataTableType,
     feature_compat: u16,
     feature_incompat: u16,
     offset: usize,
@@ -53,24 +108,9 @@ pub struct BlobMetadataTable {
 }
 
 impl BlobMetadataTable {
-    /// On-disk size of the header fields every table starts with; a table
-    /// with its own header behind them declares `header_size` accordingly.
+    /// On-disk size of the header every table starts with, and the whole
+    /// `header_size` of a table type without a header extension.
     pub const HEADER_SIZE: usize = 16;
-
-    /// `type` of ChunkGroupTable, entries [`BlobMetadataChunkGroup`].
-    pub const CHUNK_GROUP: u16 = 1;
-
-    /// `type` of ChunkLengthTable, entries [`BlobMetadataChunkLength`].
-    pub const CHUNK_LENGTH: u16 = 2;
-
-    /// `type` of ChunkGroupIndexTable, entries [`BlobMetadataChunkGroupIndex`].
-    pub const CHUNK_GROUP_INDEX: u16 = 3;
-
-    /// `type` of ChunkGroupDigestTable, entries [`BlobMetadataChunkGroupDigest`].
-    pub const CHUNK_GROUP_DIGEST: u16 = 4;
-
-    /// `type` of ChunkGroupRedirectTable, entries [`BlobMetadataChunkGroupRedirect`].
-    pub const CHUNK_GROUP_REDIRECT: u16 = 5;
 
     /// Every incompat bit this reader understands for a known table, none
     /// so far. A table setting a bit outside this mask was written by a
@@ -86,7 +126,7 @@ impl BlobMetadataTable {
             )));
         }
         let table = Self {
-            table_type: read_u16_at(bytes, offset),
+            table_type: BlobMetadataTableType(read_u16_at(bytes, offset)),
             header_size: read_u16_at(bytes, offset + 2) as usize,
             feature_compat: read_u16_at(bytes, offset + 4),
             feature_incompat: read_u16_at(bytes, offset + 6),
@@ -97,7 +137,7 @@ impl BlobMetadataTable {
         let kind = table.table_type;
         if table.header_size < Self::HEADER_SIZE || table.header_size % 8 != 0 {
             return Err(Error::InvalidImage(format!(
-                "blob meta table {kind:#x} header size {} is not a multiple of 8 of at least {}",
+                "blob meta table {kind} header size {} is not a multiple of 8 of at least {}",
                 table.header_size,
                 Self::HEADER_SIZE
             )));
@@ -106,7 +146,7 @@ impl BlobMetadataTable {
         let size = table.header_size as u64 + table.entry_size as u64 * table.entry_count as u64;
         if offset as u64 + size > bytes.len() as u64 {
             return Err(Error::InvalidImage(format!(
-                "blob meta table {kind:#x} extends past the {}-byte file",
+                "blob meta table {kind} extends past the {}-byte file",
                 bytes.len()
             )));
         }
@@ -114,7 +154,7 @@ impl BlobMetadataTable {
     }
 
     /// The table type.
-    pub fn table_type(&self) -> u16 {
+    pub fn table_type(&self) -> BlobMetadataTableType {
         self.table_type
     }
 
@@ -126,11 +166,6 @@ impl BlobMetadataTable {
     /// Incompatible feature bits of the table, exactly as stored.
     pub fn feature_incompat(&self) -> u16 {
         self.feature_incompat
-    }
-
-    /// Whether this reader interprets tables of this type.
-    fn is_known(&self) -> bool {
-        (Self::CHUNK_GROUP..=Self::CHUNK_GROUP_REDIRECT).contains(&self.table_type)
     }
 
     /// Byte range of the whole table, its header included.
@@ -152,58 +187,59 @@ impl BlobMetadataTable {
     /// declared header and entry sizes must cover it (a newer writer may
     /// append fields, which are then skipped), and its incompat bits must
     /// be supported.
-    fn validate_layout(&self, name: &str, header_size: usize, entry_size: usize) -> Result<()> {
+    fn validate_layout(&self, header_size: usize, entry_size: usize) -> Result<()> {
         if self.header_size < header_size {
             return Err(Error::InvalidImage(format!(
-                "blob meta {name} header size {} is below {header_size}",
-                self.header_size
+                "blob meta {} header size {} is below {header_size}",
+                self.table_type, self.header_size
             )));
         }
 
         if self.entry_size < entry_size {
             return Err(Error::InvalidImage(format!(
-                "blob meta {name} entry size {} is below {entry_size}",
-                self.entry_size
+                "blob meta {} entry size {} is below {entry_size}",
+                self.table_type, self.entry_size
             )));
         }
 
         let unknown = self.feature_incompat & !Self::INCOMPAT_SUPPORTED;
         if unknown != 0 {
             return Err(Error::Unsupported(format!(
-                "unsupported blob meta {name} incompat flags {unknown:#x} (image is newer than this reader)"
+                "unsupported blob meta {} incompat flags {unknown:#x} (image is newer than this reader)",
+                self.table_type
             )));
         }
 
         Ok(())
     }
 
-    /// Encode one table: the header, the table's `own_header` bytes behind
-    /// it (empty for a table without one), then `entry_count` entries of
+    /// Encode one table: the header, its optional `extension` bytes (empty
+    /// for a table type without one), then `entry_count` entries of
     /// `entry_size` bytes.
     fn encode(
-        table_type: u16,
-        own_header: &[u8],
+        table_type: BlobMetadataTableType,
+        extension: &[u8],
         entry_size: usize,
         entry_count: usize,
         write_entries: impl FnOnce(&mut Vec<u8>),
     ) -> Result<Vec<u8>> {
         let count = u32::try_from(entry_count)
             .map_err(|_| Error::Overflow("blob meta table entry count exceeds u32".to_string()))?;
-        let header_size = Self::HEADER_SIZE + own_header.len();
+        let header_size = Self::HEADER_SIZE + extension.len();
         debug_assert_eq!(header_size % 8, 0);
         let mut table = vec![0u8; Self::HEADER_SIZE];
-        write_u16_at(&mut table, 0, table_type);
+        write_u16_at(&mut table, 0, table_type.0);
         write_u16_at(&mut table, 2, header_size as u16);
         write_u32_at(&mut table, 8, entry_size as u32);
         write_u32_at(&mut table, 12, count);
-        table.extend_from_slice(own_header);
+        table.extend_from_slice(extension);
         write_entries(&mut table);
         debug_assert_eq!(table.len(), header_size + entry_size * entry_count);
         Ok(table)
     }
 }
 
-/// The ChunkGroupTable header behind the common fields.
+/// The ChunkGroupTable header extension.
 ///
 /// ```text
 /// offset  size  field
@@ -213,14 +249,14 @@ impl BlobMetadataTable {
 ///     18     6  reserved                writers zero it, readers ignore it
 /// ```
 #[derive(Clone, Copy, Debug)]
-struct ChunkGroupTableHeader {
+struct ChunkGroupTableHeaderExtension {
     max_group_span_bits: u8,
     compressor: u8,
     reserved: [u8; 6],
 }
 
-impl ChunkGroupTableHeader {
-    /// On-disk size, behind the common header.
+impl ChunkGroupTableHeaderExtension {
+    /// On-disk size, behind the header.
     const SIZE: usize = 8;
 
     fn read(bytes: &[u8], table: &BlobMetadataTable) -> Self {
@@ -236,72 +272,6 @@ impl ChunkGroupTableHeader {
         header[0] = self.max_group_span_bits;
         header[1] = self.compressor;
         header[2..8].copy_from_slice(&self.reserved);
-        header
-    }
-}
-
-/// The ChunkGroupIndexTable header behind the common fields.
-///
-/// ```text
-/// offset  size  field
-///     16     1  index_span_bits         log2 of the blocks one entry
-///                                       covers, at most max_group_span_bits
-///     17     7  reserved                writers zero it, readers ignore it
-/// ```
-#[derive(Clone, Copy, Debug)]
-struct ChunkGroupIndexTableHeader {
-    index_span_bits: u8,
-    reserved: [u8; 7],
-}
-
-impl ChunkGroupIndexTableHeader {
-    /// On-disk size, behind the common header.
-    const SIZE: usize = 8;
-
-    fn read(bytes: &[u8], table: &BlobMetadataTable) -> Self {
-        Self {
-            index_span_bits: read_u8_at(bytes, table.offset + 16),
-            reserved: read_bytes_at(bytes, table.offset + 17),
-        }
-    }
-
-    fn to_bytes(self) -> [u8; Self::SIZE] {
-        let mut header = [0u8; Self::SIZE];
-        header[0] = self.index_span_bits;
-        header[1..8].copy_from_slice(&self.reserved);
-        header
-    }
-}
-
-/// The ChunkGroupDigestTable header behind the common fields.
-///
-/// ```text
-/// offset  size  field
-///     16     1  algorithm               1 BLAKE3; an unknown value leaves
-///                                       the blob undigested for this reader
-///     17     7  reserved                writers zero it, readers ignore it
-/// ```
-#[derive(Clone, Copy, Debug)]
-struct ChunkGroupDigestTableHeader {
-    algorithm: u8,
-    reserved: [u8; 7],
-}
-
-impl ChunkGroupDigestTableHeader {
-    /// On-disk size, behind the common header.
-    const SIZE: usize = 8;
-
-    fn read(bytes: &[u8], table: &BlobMetadataTable) -> Self {
-        Self {
-            algorithm: read_u8_at(bytes, table.offset + 16),
-            reserved: read_bytes_at(bytes, table.offset + 17),
-        }
-    }
-
-    fn to_bytes(self) -> [u8; Self::SIZE] {
-        let mut header = [0u8; Self::SIZE];
-        header[0] = self.algorithm;
-        header[1..8].copy_from_slice(&self.reserved);
         header
     }
 }
@@ -555,6 +525,39 @@ impl BlobMetadataChunkLength {
     }
 }
 
+/// The ChunkGroupIndexTable header extension.
+///
+/// ```text
+/// offset  size  field
+///     16     1  index_span_bits         log2 of the blocks one entry
+///                                       covers, at most max_group_span_bits
+///     17     7  reserved                writers zero it, readers ignore it
+/// ```
+#[derive(Clone, Copy, Debug)]
+struct ChunkGroupIndexTableHeaderExtension {
+    index_span_bits: u8,
+    reserved: [u8; 7],
+}
+
+impl ChunkGroupIndexTableHeaderExtension {
+    /// On-disk size, behind the header.
+    const SIZE: usize = 8;
+
+    fn read(bytes: &[u8], table: &BlobMetadataTable) -> Self {
+        Self {
+            index_span_bits: read_u8_at(bytes, table.offset + 16),
+            reserved: read_bytes_at(bytes, table.offset + 17),
+        }
+    }
+
+    fn to_bytes(self) -> [u8; Self::SIZE] {
+        let mut header = [0u8; Self::SIZE];
+        header[0] = self.index_span_bits;
+        header[1..8].copy_from_slice(&self.reserved);
+        header
+    }
+}
+
 /// One ChunkGroupIndexTable entry: the chunk group covering the first
 /// block of one index span. The table has one entry per index span of the
 /// address space; see [`BlobMetadata::chunk_group_index_of`] for the
@@ -582,6 +585,39 @@ impl BlobMetadataChunkGroupIndex {
     /// The chunk group's index in ChunkGroupTable.
     pub fn get(self) -> u32 {
         self.0
+    }
+}
+
+/// The ChunkGroupDigestTable header extension.
+///
+/// ```text
+/// offset  size  field
+///     16     1  algorithm               1 BLAKE3; an unknown value leaves
+///                                       the blob undigested for this reader
+///     17     7  reserved                writers zero it, readers ignore it
+/// ```
+#[derive(Clone, Copy, Debug)]
+struct ChunkGroupDigestTableHeaderExtension {
+    algorithm: u8,
+    reserved: [u8; 7],
+}
+
+impl ChunkGroupDigestTableHeaderExtension {
+    /// On-disk size, behind the header.
+    const SIZE: usize = 8;
+
+    fn read(bytes: &[u8], table: &BlobMetadataTable) -> Self {
+        Self {
+            algorithm: read_u8_at(bytes, table.offset + 16),
+            reserved: read_bytes_at(bytes, table.offset + 17),
+        }
+    }
+
+    fn to_bytes(self) -> [u8; Self::SIZE] {
+        let mut header = [0u8; Self::SIZE];
+        header[0] = self.algorithm;
+        header[1..8].copy_from_slice(&self.reserved);
+        header
     }
 }
 
@@ -764,14 +800,14 @@ impl AsRef<[u8]> for BlobMetadataBytes {
 /// └────────┴─────────────────┴──────────────────┴──────────────────────┴───────────────────────┴─────────────────────────┴─────┘
 /// 0        24                                                           optional                redirect blobs only
 ///
-/// table                    type  own header                   entries
-/// ChunkGroupTable             1    ChunkGroupTableHeader        (groups + 1) * 24 B, the last
-///                                                               one a terminator
-/// ChunkLengthTable            2    none                         chunks * 4 B
-/// ChunkGroupIndexTable        3    ChunkGroupIndexTableHeader   ceil(blocks / index span
-///                                                               blocks) * 4 B
-/// ChunkGroupDigestTable       4    ChunkGroupDigestTableHeader  groups * 32 B
-/// ChunkGroupRedirectTable     5    none                         groups * 8 B
+/// table                    type  header extension                        entries
+/// ChunkGroupTable             1  ChunkGroupTableHeaderExtension          (groups + 1) * 24 B, the last
+///                                                                        one a terminator
+/// ChunkLengthTable            2  none                                    chunks * 4 B
+/// ChunkGroupIndexTable        3  ChunkGroupIndexTableHeaderExtension     ceil(blocks / index span
+///                                                                        blocks) * 4 B
+/// ChunkGroupDigestTable       4  ChunkGroupDigestTableHeaderExtension    groups * 32 B
+/// ChunkGroupRedirectTable     5  none                                    groups * 8 B
 /// ```
 ///
 /// The table headers are the compatibility contract: a reader skips a table
@@ -965,8 +1001,8 @@ impl BlobMetadata {
 
         let mut tables = vec![
             BlobMetadataTable::encode(
-                BlobMetadataTable::CHUNK_GROUP,
-                &ChunkGroupTableHeader {
+                BlobMetadataTableType::CHUNK_GROUP,
+                &ChunkGroupTableHeaderExtension {
                     max_group_span_bits: max_group_span_blocks.ilog2() as u8,
                     compressor: compressor.code(),
                     reserved: [0; 6],
@@ -977,7 +1013,7 @@ impl BlobMetadata {
                 |out| entries.iter().for_each(|entry| entry.write(out)),
             )?,
             BlobMetadataTable::encode(
-                BlobMetadataTable::CHUNK_LENGTH,
+                BlobMetadataTableType::CHUNK_LENGTH,
                 &[],
                 BlobMetadataChunkLength::SIZE,
                 chunk_lengths.len(),
@@ -988,8 +1024,8 @@ impl BlobMetadata {
                 },
             )?,
             BlobMetadataTable::encode(
-                BlobMetadataTable::CHUNK_GROUP_INDEX,
-                &ChunkGroupIndexTableHeader {
+                BlobMetadataTableType::CHUNK_GROUP_INDEX,
+                &ChunkGroupIndexTableHeaderExtension {
                     index_span_bits: index_span_blocks.ilog2() as u8,
                     reserved: [0; 7],
                 }
@@ -1005,8 +1041,8 @@ impl BlobMetadata {
         ];
         if let Some(algorithm) = digester.code() {
             tables.push(BlobMetadataTable::encode(
-                BlobMetadataTable::CHUNK_GROUP_DIGEST,
-                &ChunkGroupDigestTableHeader {
+                BlobMetadataTableType::CHUNK_GROUP_DIGEST,
+                &ChunkGroupDigestTableHeaderExtension {
                     algorithm,
                     reserved: [0; 7],
                 }
@@ -1018,7 +1054,7 @@ impl BlobMetadata {
         }
         if is_redirect {
             tables.push(BlobMetadataTable::encode(
-                BlobMetadataTable::CHUNK_GROUP_REDIRECT,
+                BlobMetadataTableType::CHUNK_GROUP_REDIRECT,
                 &[],
                 BlobMetadataChunkGroupRedirect::SIZE,
                 redirects.len(),
@@ -1097,15 +1133,15 @@ impl BlobMetadata {
         for _ in 0..table_count {
             let table = BlobMetadataTable::from_bytes(raw, end.next_multiple_of(8))?;
             let kind = table.table_type;
-            if kind == 0 || tables.iter().any(|known| known.table_type == kind) {
+            if kind.0 == 0 || tables.iter().any(|seen| seen.table_type == kind) {
                 return Err(Error::InvalidImage(format!(
-                    "blob meta table at {:#x} has a zero or duplicate type {kind:#x}",
+                    "blob meta table at {:#x} has a zero or duplicate type {kind}",
                     table.offset
                 )));
             }
-            if !table.is_known() && table.feature_incompat != 0 {
+            if !kind.is_supported() && table.feature_incompat != 0 {
                 return Err(Error::Unsupported(format!(
-                    "unsupported incompat blob meta table {kind:#x} (image is newer than this reader)"
+                    "unsupported incompat blob meta table {kind} (image is newer than this reader)"
                 )));
             }
             end = table.range().end;
@@ -1119,60 +1155,53 @@ impl BlobMetadata {
         }
 
         // Resolve the known tables against the layout this reader knows.
-        let known = |kind: u16,
-                     name: &str,
-                     header_size: usize,
-                     entry_size: usize|
+        let supported = |kind: BlobMetadataTableType,
+                         header_size: usize,
+                         entry_size: usize|
          -> Result<Option<BlobMetadataTable>> {
             let Some(table) = tables.iter().find(|table| table.table_type == kind) else {
                 return Ok(None);
             };
-            table.validate_layout(name, header_size, entry_size)?;
+            table.validate_layout(header_size, entry_size)?;
             Ok(Some(*table))
         };
-        let required = |kind: u16,
-                        name: &str,
+        let required = |kind: BlobMetadataTableType,
                         header_size: usize,
                         entry_size: usize|
          -> Result<BlobMetadataTable> {
-            known(kind, name, header_size, entry_size)?
-                .ok_or_else(|| Error::InvalidImage(format!("blob meta lacks its {name}")))
+            supported(kind, header_size, entry_size)?
+                .ok_or_else(|| Error::InvalidImage(format!("blob meta lacks its {kind}")))
         };
 
         let groups = required(
-            BlobMetadataTable::CHUNK_GROUP,
-            "ChunkGroupTable",
-            BlobMetadataTable::HEADER_SIZE + ChunkGroupTableHeader::SIZE,
+            BlobMetadataTableType::CHUNK_GROUP,
+            BlobMetadataTable::HEADER_SIZE + ChunkGroupTableHeaderExtension::SIZE,
             BlobMetadataChunkGroup::SIZE,
         )?;
         let chunks = required(
-            BlobMetadataTable::CHUNK_LENGTH,
-            "ChunkLengthTable",
+            BlobMetadataTableType::CHUNK_LENGTH,
             BlobMetadataTable::HEADER_SIZE,
             BlobMetadataChunkLength::SIZE,
         )?;
         let indexes = required(
-            BlobMetadataTable::CHUNK_GROUP_INDEX,
-            "ChunkGroupIndexTable",
-            BlobMetadataTable::HEADER_SIZE + ChunkGroupIndexTableHeader::SIZE,
+            BlobMetadataTableType::CHUNK_GROUP_INDEX,
+            BlobMetadataTable::HEADER_SIZE + ChunkGroupIndexTableHeaderExtension::SIZE,
             BlobMetadataChunkGroupIndex::SIZE,
         )?;
-        let digests = known(
-            BlobMetadataTable::CHUNK_GROUP_DIGEST,
-            "ChunkGroupDigestTable",
-            BlobMetadataTable::HEADER_SIZE + ChunkGroupDigestTableHeader::SIZE,
+        let digests = supported(
+            BlobMetadataTableType::CHUNK_GROUP_DIGEST,
+            BlobMetadataTable::HEADER_SIZE + ChunkGroupDigestTableHeaderExtension::SIZE,
             BlobMetadataChunkGroupDigest::SIZE,
         )?;
-        let redirects = known(
-            BlobMetadataTable::CHUNK_GROUP_REDIRECT,
-            "ChunkGroupRedirectTable",
+        let redirects = supported(
+            BlobMetadataTableType::CHUNK_GROUP_REDIRECT,
             BlobMetadataTable::HEADER_SIZE,
             BlobMetadataChunkGroupRedirect::SIZE,
         )?;
 
-        // Read the tables' own headers. The two `_bits` fields are log2
+        // Read the header extensions. The two `_bits` fields are log2
         // block counts; one past the u32 block space is no span at all.
-        let group_header = ChunkGroupTableHeader::read(raw, &groups);
+        let group_header = ChunkGroupTableHeaderExtension::read(raw, &groups);
         let max_group_span_blocks = 1u32
             .checked_shl(u32::from(group_header.max_group_span_bits))
             .ok_or_else(|| {
@@ -1181,7 +1210,7 @@ impl BlobMetadata {
                 )
             })?;
         let compressor = BlobMetadataCompressor::from_code(group_header.compressor)?;
-        let index_header = ChunkGroupIndexTableHeader::read(raw, &indexes);
+        let index_header = ChunkGroupIndexTableHeaderExtension::read(raw, &indexes);
         let index_span_blocks = 1u32
             .checked_shl(u32::from(index_header.index_span_bits))
             .ok_or_else(|| {
@@ -1192,7 +1221,7 @@ impl BlobMetadata {
         let (digests, unsupported_digest_algorithm) = match digests {
             None => (None, None),
             Some(table) => {
-                let algorithm = ChunkGroupDigestTableHeader::read(raw, &table).algorithm;
+                let algorithm = ChunkGroupDigestTableHeaderExtension::read(raw, &table).algorithm;
                 if BlobMetadataDigester::from_code(algorithm).is_some() {
                     (Some(table), None)
                 } else {
@@ -1581,7 +1610,7 @@ impl BlobMetadata {
 
     /// The raw bytes of the table of type `table_type`, its header included,
     /// `None` when there is no such table.
-    pub fn table_bytes(&self, table_type: u16) -> Option<&[u8]> {
+    pub fn table_bytes(&self, table_type: BlobMetadataTableType) -> Option<&[u8]> {
         self.tables
             .iter()
             .find(|table| table.table_type == table_type)
@@ -1876,7 +1905,7 @@ mod tests {
     }
 
     /// Byte offset of the header of table `table_type`.
-    fn table_offset(meta: &BlobMetadata, table_type: u16) -> usize {
+    fn table_offset(meta: &BlobMetadata, table_type: BlobMetadataTableType) -> usize {
         meta.tables()
             .iter()
             .find(|table| table.table_type() == table_type)
@@ -1886,7 +1915,7 @@ mod tests {
     }
 
     /// Byte offset of the first entry of table `table_type`.
-    fn entries_offset(meta: &BlobMetadata, table_type: u16) -> usize {
+    fn entries_offset(meta: &BlobMetadata, table_type: BlobMetadataTableType) -> usize {
         table_offset(meta, table_type)
             + read_u16_at(meta.table_bytes(table_type).unwrap(), 2) as usize
     }
@@ -2085,7 +2114,7 @@ mod tests {
             assert!(err.to_string().contains("incompat"), "{err}");
         }
         // The same rules hold within a table header.
-        let group_table = table_offset(&meta, BlobMetadataTable::CHUNK_GROUP);
+        let group_table = table_offset(&meta, BlobMetadataTableType::CHUNK_GROUP);
         let mut compat = raw.clone();
         write_u16_at(&mut compat, group_table + 4, 1 << 15);
         assert!(BlobMetadata::from_bytes(&reseal(compat)).is_ok());
@@ -2104,7 +2133,10 @@ mod tests {
         let tables = split(&meta);
         let unknown = |kind: u16, incompat: u16| {
             let mut table =
-                BlobMetadataTable::encode(kind, &[], 4, 5, |out| out.extend([0x5a; 20])).unwrap();
+                BlobMetadataTable::encode(BlobMetadataTableType(kind), &[], 4, 5, |out| {
+                    out.extend([0x5a; 20])
+                })
+                .unwrap();
             write_u16_at(&mut table, 6, incompat);
             table
         };
@@ -2120,14 +2152,19 @@ mod tests {
         let bytes = with(extension.clone());
         let loaded = BlobMetadata::from_bytes(&bytes).unwrap();
         assert_eq!(entries(&loaded), entries(&meta));
-        assert_eq!(loaded.table_bytes(0x100), Some(&extension[..]));
+        assert_eq!(
+            loaded.table_bytes(BlobMetadataTableType(0x100)),
+            Some(&extension[..])
+        );
         assert_eq!(raw(&loaded), bytes);
         let dir = tempdir().unwrap();
         let path = dir.path().join("x.blob.meta");
         loaded.save(&path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(
-            BlobMetadata::from_path(&path).unwrap().table_bytes(0x100),
+            BlobMetadata::from_path(&path)
+                .unwrap()
+                .table_bytes(BlobMetadataTableType(0x100)),
             Some(&extension[..])
         );
 
@@ -2152,7 +2189,7 @@ mod tests {
         );
 
         let raw = raw(&meta);
-        let digest_table = table_offset(&meta, BlobMetadataTable::CHUNK_GROUP_DIGEST);
+        let digest_table = table_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_DIGEST);
         let mut past = raw.clone();
         write_u32_at(&mut past, digest_table + 12, 1000);
         rejects(reseal(past), "past the");
@@ -2189,7 +2226,7 @@ mod tests {
         }
         // A table narrower than this reader knows rejects; the last table
         // is narrowed so that no other table moves.
-        let digest_table = table_offset(&meta, BlobMetadataTable::CHUNK_GROUP_DIGEST);
+        let digest_table = table_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_DIGEST);
         let mut narrow = raw(&meta);
         write_u32_at(&mut narrow, digest_table + 8, 16);
         let err = BlobMetadata::from_bytes(&reseal(narrow)).unwrap_err();
@@ -2204,9 +2241,9 @@ mod tests {
     fn table_header_fields_are_validated() {
         let (meta, _) = fixture();
         let raw = raw(&meta);
-        let group_table = table_offset(&meta, BlobMetadataTable::CHUNK_GROUP);
-        let chunk_group_index_table = table_offset(&meta, BlobMetadataTable::CHUNK_GROUP_INDEX);
-        let digest_table = table_offset(&meta, BlobMetadataTable::CHUNK_GROUP_DIGEST);
+        let group_table = table_offset(&meta, BlobMetadataTableType::CHUNK_GROUP);
+        let chunk_group_index_table = table_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_INDEX);
+        let digest_table = table_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_DIGEST);
         let mutate = |offset: usize, value: u8| {
             let mut bytes = raw.clone();
             bytes[offset] = value;
@@ -2413,7 +2450,8 @@ mod tests {
 
         // A tampered cell is caught at load.
         let mut tampered = raw(&meta);
-        let chunk_group_index_offset = entries_offset(&meta, BlobMetadataTable::CHUNK_GROUP_INDEX);
+        let chunk_group_index_offset =
+            entries_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_INDEX);
         write_u32_at(&mut tampered, chunk_group_index_offset + 4, 1 << 3);
         assert!(BlobMetadata::from_bytes(&reseal(tampered))
             .unwrap_err()
@@ -2596,7 +2634,7 @@ mod tests {
         assert_eq!(
             meta.tables()
                 .iter()
-                .map(|table| (table.table_type(), table.feature_incompat()))
+                .map(|table| (table.table_type().get(), table.feature_incompat()))
                 .collect::<Vec<_>>(),
             vec![(1, 0), (2, 0), (3, 0), (4, 0), (5, 0)]
         );
@@ -2628,7 +2666,7 @@ mod tests {
         // A zeroed source blob index is rejected on both sides; the
         // reserved half of an entry is ignored.
         assert!(BlobMetadataChunkGroupRedirect::new(0, 1).is_err());
-        let redirects = entries_offset(&meta, BlobMetadataTable::CHUNK_GROUP_REDIRECT);
+        let redirects = entries_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_REDIRECT);
         assert_eq!(read_u16_at(&raw, redirects), 3);
         assert_eq!(read_u32_at(&raw, redirects + 4), 4);
         let mut zeroed = raw.clone();
@@ -2723,7 +2761,8 @@ mod tests {
         for length in [0, 23, 24, 55, 127, 4095] {
             assert!(BlobMetadata::from_bytes(&raw[..length]).is_err());
         }
-        let chunk_group_index_offset = entries_offset(&meta, BlobMetadataTable::CHUNK_GROUP_INDEX);
+        let chunk_group_index_offset =
+            entries_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_INDEX);
         for value in [1, u32::MAX] {
             let mut invalid = raw.clone();
             write_u32_at(&mut invalid, chunk_group_index_offset, value);
@@ -2806,7 +2845,7 @@ mod tests {
 
         // Tables whose counts disagree with the terminator.
         let raw = raw(&meta);
-        let terminator = entries_offset(&meta, BlobMetadataTable::CHUNK_GROUP) + 5 * 24;
+        let terminator = entries_offset(&meta, BlobMetadataTableType::CHUNK_GROUP) + 5 * 24;
         for (offset, value) in [
             (terminator + 8, 31u32),
             (terminator + 12, 8),
@@ -2817,7 +2856,7 @@ mod tests {
             assert!(BlobMetadata::from_bytes(&reseal(invalid)).is_err());
         }
         let mut invalid = raw.clone();
-        invalid[table_offset(&meta, BlobMetadataTable::CHUNK_GROUP_INDEX) + 16] = 1;
+        invalid[table_offset(&meta, BlobMetadataTableType::CHUNK_GROUP_INDEX) + 16] = 1;
         assert!(BlobMetadata::from_bytes(&reseal(invalid)).is_err());
     }
 }

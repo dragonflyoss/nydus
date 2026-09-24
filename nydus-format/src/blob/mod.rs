@@ -18,7 +18,7 @@ pub use footer::BlobFooter;
 pub use metadata::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
     BlobMetadataChunkGroupIndex, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
-    BlobMetadataTable,
+    BlobMetadataTable, BlobMetadataTableType,
 };
 
 /// Finish a full blob: append everything behind the data region to `writer`,
