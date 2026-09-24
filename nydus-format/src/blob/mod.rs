@@ -4,6 +4,7 @@
 //! the `.blob.meta` sidecar ([`metadata`]) and the trailing blob footer
 //! ([`footer`]) — not part of the EROFS metadata format itself.
 
+use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Context, Error, Result};
 use crate::utils::{align_up_u64, write_zeros};
 use std::io::Write;
@@ -13,7 +14,6 @@ pub mod flag;
 pub mod footer;
 pub mod metadata;
 pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
-pub use footer::NYDUS_BLOB_FOOTER_ALIGNMENT;
 pub use footer::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
 pub use metadata::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataDigest, BlobMetadataRedirect,
@@ -84,9 +84,9 @@ fn new_blob_footer(
     blob_metadata: Option<&BlobMetadata>,
 ) -> Result<BlobFooter> {
     let bootstrap_compressed_size = compressed_bootstrap.len() as u64;
-    let bootstrap_size = align_up_u64(bootstrap_compressed_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
+    let bootstrap_size = align_up_u64(bootstrap_compressed_size, EROFS_BLOCK_SIZE as u64)
         .ok_or_else(|| Error::Overflow("bootstrap region overflow".to_string()))?;
-    let bootstrap_offset = align_up_u64(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
+    let bootstrap_offset = align_up_u64(compressed_data_size, EROFS_BLOCK_SIZE as u64)
         .ok_or_else(|| Error::Overflow("bootstrap offset overflow".to_string()))?;
     let blob_metadata_offset = bootstrap_offset
         .checked_add(bootstrap_size)
@@ -94,7 +94,7 @@ fn new_blob_footer(
     let padding = (bootstrap_size - bootstrap_compressed_size) as usize;
     let bootstrap_crc32 = crc32c::crc32c_append(
         crc32c::crc32c(compressed_bootstrap),
-        &[0u8; NYDUS_BLOB_FOOTER_ALIGNMENT as usize][..padding],
+        &[0u8; EROFS_BLOCK_SIZE as usize][..padding],
     );
 
     BlobFooter::new(

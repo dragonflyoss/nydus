@@ -16,12 +16,9 @@ use std::path::Path;
 pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"NDFOOTER";
 
 /// The footer's fixed on-disk size: one EROFS block at the blob's tail.
-pub const NYDUS_BLOB_FOOTER_SIZE: usize = 4096;
-
-/// Every region offset and size in the blob, and the footer itself, is
-/// aligned to this boundary (the EROFS block size), except the compressed
-/// data size.
-pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
+/// Every region offset and size in the blob is block aligned too, except
+/// the compressed data size.
+pub const NYDUS_BLOB_FOOTER_SIZE: usize = EROFS_BLOCK_SIZE as usize;
 
 /// Incompat feature: the embedded bootstrap region holds one zstd frame
 /// instead of raw EROFS bytes. `bootstrap_compressed_size` then carries the
@@ -268,7 +265,7 @@ impl BlobFooter {
             ("bootstrap", self.bootstrap_size),
             ("blob meta", self.blob_metadata_size),
         ] {
-            if size % NYDUS_BLOB_FOOTER_ALIGNMENT != 0 {
+            if size % EROFS_BLOCK_SIZE as u64 != 0 {
                 return Err(Error::InvalidImage(format!(
                     "nydus footer {name} region size {size:#x} is not a 4KiB multiple"
                 )));
@@ -337,7 +334,7 @@ impl BlobFooter {
 
         let mut cursor = 0;
         for (name, start, size) in regions {
-            if start % NYDUS_BLOB_FOOTER_ALIGNMENT != 0 {
+            if start % EROFS_BLOCK_SIZE as u64 != 0 {
                 return Err(Error::InvalidImage(format!(
                     "nydus footer {name} region offset {start:#x} is not 4KiB aligned"
                 )));
@@ -354,7 +351,7 @@ impl BlobFooter {
                 .ok_or_else(|| Error::Overflow(format!("nydus footer {name} region overflow")))?;
         }
 
-        if offset % NYDUS_BLOB_FOOTER_ALIGNMENT != 0 {
+        if offset % EROFS_BLOCK_SIZE as u64 != 0 {
             return Err(Error::InvalidImage(format!(
                 "nydus footer offset {offset:#x} is not 4KiB aligned"
             )));
@@ -420,13 +417,13 @@ impl BlobFooter {
     /// Size of the bootstrap region in 4KiB blocks, zero for an ondemand
     /// redirect blob.
     pub fn bootstrap_blocks(&self) -> u64 {
-        self.bootstrap_size / NYDUS_BLOB_FOOTER_ALIGNMENT
+        self.bootstrap_size / EROFS_BLOCK_SIZE as u64
     }
 
     /// Size of the blob meta region in 4KiB blocks; zero for a raw device
     /// blob (see [`Self::is_raw_device`]).
     pub fn blob_metadata_blocks(&self) -> u64 {
-        self.blob_metadata_size / NYDUS_BLOB_FOOTER_ALIGNMENT
+        self.blob_metadata_size / EROFS_BLOCK_SIZE as u64
     }
 
     /// Whether the data region is a raw EROFS device without blob meta
