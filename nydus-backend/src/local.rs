@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{BlobBackend, RawDeviceFile, ReadContext};
-use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
+use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 
 #[derive(Clone)]
@@ -101,10 +101,7 @@ impl Local {
             )
         })?;
 
-        let blob_metadata_name = format!(
-            "{}{NYDUS_BLOB_METADATA_SUFFIX}",
-            file_name.to_string_lossy()
-        );
+        let blob_metadata_name = format!("{}{}", file_name.to_string_lossy(), BlobMetadata::SUFFIX);
         Ok(self.root.join(blob_metadata_name))
     }
 
@@ -290,7 +287,8 @@ mod tests {
     use super::*;
     use crate::ReadKind;
     use nydus_format::blob::{
-        BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest, BlobMetadataDigester,
+        BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
+        BlobMetadataDigester,
     };
     use nydus_format::utils::sha256_bytes;
     use tempfile::tempdir;
@@ -305,7 +303,9 @@ mod tests {
                 BlobMetadataChunkGroup::new(4096, 4096, 1, crc32c::crc32c(payload), None).unwrap(),
             ],
             vec![4096],
-            vec![BlobMetadataDigest::new(*blake3::hash(payload).as_bytes())],
+            vec![BlobMetadataChunkGroupDigest::new(
+                *blake3::hash(payload).as_bytes(),
+            )],
         )
         .unwrap()
     }

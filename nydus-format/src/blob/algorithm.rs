@@ -1,5 +1,5 @@
 //! The compression and digest algorithms a blob meta file declares as enum
-//! codes in its GroupTable and DigestTable headers.
+//! codes in its ChunkGroupTable and ChunkGroupDigestTable headers.
 
 use crate::error::{Error, Result};
 use std::fmt;
@@ -15,7 +15,7 @@ pub enum BlobMetadataCompressor {
 }
 
 impl BlobMetadataCompressor {
-    /// The GroupTable header code of this compressor.
+    /// The ChunkGroupTable header code of this compressor.
     pub fn code(self) -> u8 {
         match self {
             Self::None => 0,
@@ -24,7 +24,7 @@ impl BlobMetadataCompressor {
         }
     }
 
-    /// Decode a GroupTable header code; an unknown compressor rejects the
+    /// Decode a ChunkGroupTable header code; an unknown compressor rejects the
     /// file, since its payloads cannot be decoded.
     pub fn from_code(code: u8) -> Result<Self> {
         match code {
@@ -51,7 +51,7 @@ impl fmt::Display for BlobMetadataCompressor {
 }
 
 /// The chunk digest algorithm a blob meta declares. `None` means the blob
-/// has no DigestTable: the chunk table is still addressable but carries no
+/// has no ChunkGroupDigestTable: the chunk table is still addressable but carries no
 /// integrity information, for blobs built from content that was already
 /// verified upstream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub enum BlobMetadataDigester {
 }
 
 impl BlobMetadataDigester {
-    /// The DigestTable header code of this digester, `None` for no table.
+    /// The ChunkGroupDigestTable header code of this digester, `None` for no table.
     pub fn code(self) -> Option<u8> {
         match self {
             Self::Blake3 => Some(1),
@@ -70,7 +70,7 @@ impl BlobMetadataDigester {
         }
     }
 
-    /// Decode a DigestTable header code, `None` for an unknown algorithm.
+    /// Decode a ChunkGroupDigestTable header code, `None` for an unknown algorithm.
     pub fn from_code(code: u8) -> Option<Self> {
         (code == 1).then_some(Self::Blake3)
     }

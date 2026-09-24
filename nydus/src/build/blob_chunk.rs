@@ -1,7 +1,7 @@
 use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest,
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
     BlobMetadataDigester,
 };
 use nydus_format::erofs::{
@@ -51,7 +51,7 @@ pub struct BlobWriter<W> {
     // `None` when the caller names the blob itself (`--blob-id`), so no
     // sha256 pass over the data region is needed.
     data_hasher: Option<Sha256>,
-    /// The pack minimum, lone-chunk threshold and lookup granule in bytes.
+    /// The pack minimum, lone-chunk threshold and index span in bytes.
     chunk_group_min_size: u32,
     // Chunk mode: the pack of small chunks under construction, closed at a
     // content-defined boundary once it spans `pack_min_blocks` (see
@@ -70,7 +70,7 @@ pub struct BlobWriter<W> {
     // group, and the sealed groups in group order.
     next_group: u64,
     members: Vec<u32>,
-    digests: Vec<BlobMetadataDigest>,
+    digests: Vec<BlobMetadataChunkGroupDigest>,
     blob_metadata_chunk_groups: Vec<BlobMetadataChunkGroup>,
     // Reused per-file read buffer: a fresh 1 MiB Vec per file costs an
     // mmap/munmap plus page faults for every source file.
@@ -117,7 +117,7 @@ pub struct BlobWriter<W> {
 struct Bin {
     data: Vec<u8>,
     lens: Vec<u32>,
-    digests: Vec<BlobMetadataDigest>,
+    digests: Vec<BlobMetadataChunkGroupDigest>,
     placements: Vec<usize>,
     blocks: u64,
 }
@@ -850,7 +850,7 @@ pub enum BlobLayout {
     /// [`PACK_STRICT_MASK`]). The minimum is independent of the file chunk
     /// size: when larger, even full chunks join packs. Every group but the
     /// last spans at least the minimum, recorded as the blob meta's lookup
-    /// granule; the standalone-chunk threshold is a writer rule only.
+    /// index span; the standalone-chunk threshold is a writer rule only.
     ChunkGroups { chunk_group_min_size: u32 },
     /// The padded address space written as-is: a native uncompressed EROFS
     /// device the kernel mounts directly (`erofs-none`). No chunk groups,
@@ -1541,9 +1541,9 @@ impl<W: Write> BlobWriter<W> {
         let len = u32::try_from(data.len())
             .map_err(|err| Error::Overflow(format!("blob meta chunk length exceeds u32: {err}")))?;
         let digest = match self.digester {
-            BlobMetadataDigester::Blake3 => {
-                Some(BlobMetadataDigest::new(*blake3::hash(data).as_bytes()))
-            }
+            BlobMetadataDigester::Blake3 => Some(BlobMetadataChunkGroupDigest::new(
+                *blake3::hash(data).as_bytes(),
+            )),
             BlobMetadataDigester::None => None,
         };
         let placement = self.placements.len();
@@ -1638,7 +1638,8 @@ impl<W: Write> BlobWriter<W> {
         // The chunk digests already computed for the boundary decision name
         // the group; a single chunk's digest is reused as is.
         let members: Vec<[u8; 32]> = bin.digests.iter().map(|digest| *digest.digest()).collect();
-        self.digests.extend(BlobMetadataDigest::of_group(&members));
+        self.digests
+            .extend(BlobMetadataChunkGroupDigest::of_group(&members));
         self.next_group = group + 1;
         self.next_blkaddr = end_block;
 
@@ -1993,7 +1994,7 @@ mod tests {
         );
         assert_eq!(
             writer.digests[2],
-            BlobMetadataDigest::of_group(&[
+            BlobMetadataChunkGroupDigest::of_group(&[
                 *blake3::hash(&tail).as_bytes(),
                 *blake3::hash(&small).as_bytes()
             ])
@@ -2191,7 +2192,7 @@ mod tests {
         writer.finish().unwrap();
         let addrs = resolve(&writer, &mut addrs);
         let meta = writer.blob_metadata().unwrap();
-        assert_eq!(meta.lookup_granule(), minimum);
+        assert_eq!(meta.index_span(), minimum);
         // Groups close in write order: {20K}, {16K}, {64K}, then the pack
         // {4K, 8K} at finish; each starts where the previous one ends.
         let runs: Vec<Vec<u32>> = (0..meta.chunk_group_count())
@@ -2263,7 +2264,7 @@ mod tests {
                 vec![EROFS_BLOCK_SIZE, EROFS_BLOCK_SIZE]
             ]
         );
-        assert_eq!(meta.lookup_granule(), TEST_GROUP_MIN_SIZE);
+        assert_eq!(meta.index_span(), TEST_GROUP_MIN_SIZE);
         let padded = scatter(&writer);
         assert_eq!(&padded[..long.len()], &long[..]);
         let at = 31 * EROFS_BLOCK_SIZE as usize;
@@ -2276,8 +2277,8 @@ mod tests {
             chunk_group_min_size,
         };
         // The minimum sets the group span (four times it, at least a chunk)
-        // and the lookup granule, even when larger than the chunk size.
-        for (chunk_group_min_size, span, granule) in [
+        // and the index span, even when larger than the chunk size.
+        for (chunk_group_min_size, group_span, index_span) in [
             (EROFS_BLOCK_SIZE, TEST_CHUNK_SIZE, EROFS_BLOCK_SIZE),
             (TEST_CHUNK_SIZE, 4 * TEST_CHUNK_SIZE, TEST_CHUNK_SIZE),
             (
@@ -2296,12 +2297,12 @@ mod tests {
             let meta = writer.blob_metadata().unwrap();
             assert_eq!(
                 meta.group_span(),
-                span,
+                group_span,
                 "chunk group minimum size {chunk_group_min_size}"
             );
             assert_eq!(
-                meta.lookup_granule(),
-                granule,
+                meta.index_span(),
+                index_span,
                 "chunk group minimum size {chunk_group_min_size}"
             );
         }
@@ -2378,10 +2379,10 @@ mod tests {
                 writer.finish().unwrap();
 
                 let meta = writer.blob_metadata().unwrap();
-                assert_eq!(meta.lookup_granule(), minimum);
-                assert_eq!(meta.lookup_granule_block_shift(), 9);
+                assert_eq!(meta.index_span(), minimum);
+                assert_eq!(meta.index_span_blocks(), 1 << 9);
                 assert_eq!(meta.group_span(), 4 * minimum);
-                assert_eq!(meta.maximum_group_span_block_shift(), 11);
+                assert_eq!(meta.group_span_blocks(), 1 << 11);
                 assert_eq!(meta.chunk_count(), 34);
                 assert_eq!(meta.chunk_group_count(), 33 / chunks_per_group + 1);
                 for group in meta.chunk_groups() {
@@ -2479,7 +2480,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 meta.digest(group.index() as usize).unwrap(),
-                BlobMetadataDigest::of_group(&members).unwrap()
+                BlobMetadataChunkGroupDigest::of_group(&members).unwrap()
             );
         }
     }
@@ -2511,7 +2512,7 @@ mod tests {
         assert_eq!(meta.compressed_end(), 5000);
         // The 5000-byte chunk spans two blocks, and the blob ends there.
         assert_eq!(meta.uncompressed_size(), 2 * EROFS_BLOCK_SIZE as u64);
-        assert_eq!(meta.lookup_granule(), TEST_GROUP_MIN_SIZE);
+        assert_eq!(meta.index_span(), TEST_GROUP_MIN_SIZE);
     }
 
     #[test]

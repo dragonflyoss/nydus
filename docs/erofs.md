@@ -181,7 +181,7 @@ device_offset = index.block_address * 4096 + within_chunk
 
 For flatdev, add the selected slot's mapped offset. A group lookup then
 resolves this kernel-visible address to a backend range: the chunk group
-holding the address (found through GranuleIndexTable in O(1)), and
+holding the address (found through ChunkGroupIndexTable in O(1)), and
 the groups of its fetch-size cell around it. A group holds whole chunks and
 can span many small files.
 
@@ -257,9 +257,9 @@ Sources: [build/mod.rs](../nydus/src/build/mod.rs),
 - **Dense groups, O(1) lookup:** groups tile the address space back to
   back, each spanning exactly its chunks' blocks, so the device is no larger
   than the block-padded data (what a guest mapping it as pmem pays
-  `struct page` for). Version-1 blob metadata has a GranuleIndexTable
-  (four bytes per lookup granule, 2 MiB by default). One direct lookup and
-  at most one forward correction name the group; two adjacent GroupTable
+  `struct page` for). Version-1 blob metadata has a ChunkGroupIndexTable
+  (four bytes per index span, 2 MiB by default). One direct lookup and
+  at most one forward correction name the group; two adjacent ChunkGroupTable
   entries give its backend range. There is no bitmap or binary search;
   there is no per-read scan and no runtime index to build at open. A chunk
   of at least the chunk group minimum size (2 MiB by default, independent

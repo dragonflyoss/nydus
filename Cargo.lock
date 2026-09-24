@@ -3018,6 +3018,7 @@ dependencies = [
 name = "nydus-core"
 version = "3.0.0-beta.1"
 dependencies = [
+ "crc32c",
  "libc",
  "lz4_flex",
  "memmap2",

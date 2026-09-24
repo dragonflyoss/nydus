@@ -41,11 +41,11 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
 - **On-demand loading** — file reads map to compressed groups through an O(1)
   logical-address lookup; missing groups and optional fetch-window neighbors
   are fetched, validated, decoded, and cached.
-- **Extensible blob metadata** — a 24-byte header followed by GroupTable,
-  ChunkTable, GranuleIndexTable, and optional DigestTable and
-  RedirectTable, each with its own header; compat and incompat feature bits
+- **Extensible blob metadata** — a 24-byte header followed by ChunkGroupTable,
+  ChunkLengthTable, ChunkGroupIndexTable, and optional ChunkGroupDigestTable and
+  ChunkGroupRedirectTable, each with its own header; compat and incompat feature bits
   replace a version field, so newer tables and fields stay readable by older
-  readers. Every chunk has a four-byte length; a mapped direct granule index
+  readers. Every chunk has a four-byte length; a mapped direct lookup table
   needs no auxiliary runtime index. Images from older experimental layouts
   must be rebuilt.
 - **Trace-driven prefetching** — `nydus optimize` turns a workload access

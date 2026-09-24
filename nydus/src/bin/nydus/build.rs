@@ -4,10 +4,7 @@ use nydus::build::{
     build_image, build_image_from_tar_layer, BuildImageOptions, Image, NativeLayout,
 };
 use nydus::error::{Context, Error, Result};
-use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester,
-    DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE, NYDUS_BLOB_METADATA_SUFFIX,
-};
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{ZAlgorithm, EROFS_BLOB_ID_SIZE};
 use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
@@ -368,7 +365,7 @@ impl BuildCommand {
 
         let chunk_size = self
             .chunk_size
-            .unwrap_or(ByteSize::b(DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64));
+            .unwrap_or(ByteSize::b(BlobMetadata::DEFAULT_CHUNK_SIZE as u64));
         let chunk_size = u32::try_from(chunk_size.as_u64()).map_err(|_| {
             Error::InvalidParameter(format!("chunk size {chunk_size} exceeds the u32 range"))
         })?;
@@ -477,7 +474,7 @@ impl BuildCommand {
 
     fn blob_metadata_path(full_blob_path: &Path) -> PathBuf {
         let mut path = full_blob_path.to_path_buf().into_os_string();
-        path.push(NYDUS_BLOB_METADATA_SUFFIX);
+        path.push(BlobMetadata::SUFFIX);
         path.into()
     }
 
@@ -620,8 +617,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         data_layout: String,
         #[tabled(rename = "GROUP SPAN")]
         group_span: String,
-        #[tabled(rename = "LOOKUP GRANULE")]
-        lookup_granule: String,
+        #[tabled(rename = "INDEX SPAN")]
+        index_span: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COUNT")]
@@ -673,7 +670,7 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
             None => "chunk-based".to_string(),
         },
         group_span: meta(|meta| meta.group_span().to_string()),
-        lookup_granule: meta(|meta| meta.lookup_granule().to_string()),
+        index_span: meta(|meta| meta.index_span().to_string()),
         chunk_group_count: meta(|meta| meta.chunk_group_count().to_string()),
         chunk_count: meta(|meta| meta.chunk_count().to_string()),
         digest_count: meta(|meta| meta.digest_count().to_string()),

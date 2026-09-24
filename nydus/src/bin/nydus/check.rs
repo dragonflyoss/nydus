@@ -452,8 +452,8 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         full_blob_digest: String,
         #[tabled(rename = "GROUP SPAN")]
         group_span: String,
-        #[tabled(rename = "LOOKUP GRANULE")]
-        lookup_granule: String,
+        #[tabled(rename = "INDEX SPAN")]
+        index_span: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
@@ -498,7 +498,7 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             data_blob_digest: data_blob_digest(blob),
             full_blob_digest: optional_digest(blob.blob_sha256),
             group_span: blob_metadata_field(blob, |meta| meta.group_span),
-            lookup_granule: blob_metadata_field(blob, |meta| meta.lookup_granule),
+            index_span: blob_metadata_field(blob, |meta| meta.index_span),
             chunk_group_count: blob_metadata_field(blob, |meta| meta.chunk_group_count),
             chunk_compressor: blob_metadata_field(blob, |meta| meta.compressor),
             blob_meta_chunks: blob_metadata_field(blob, |meta| meta.chunk_count),

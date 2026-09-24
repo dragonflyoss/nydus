@@ -910,7 +910,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         assert_eq!(meta.group_span(), 16 << 20);
         assert_eq!(meta.chunk_group_count(), 2);
         let first_span = metadata[usize::from(order[0] - 1)].uncompressed_size();
-        assert_eq!(u64::from(meta.lookup_granule()), 1u64 << first_span.ilog2());
+        assert_eq!(u64::from(meta.index_span()), 1u64 << first_span.ilog2());
         for (index, &source_index) in order.iter().enumerate() {
             let source_meta = &metadata[usize::from(source_index - 1)];
             let group = meta.chunk_group(index).unwrap();

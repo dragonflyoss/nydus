@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use nydus_backend::BlobBackend;
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest,
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
 };
 
 /// Default on-demand fetch size: the compressed bytes one backend read
@@ -474,7 +474,7 @@ pub fn validate_decoded_chunk_group(
         members.push(*blake3::hash(&decoded[at..at + len]).as_bytes());
         at += len;
     }
-    if BlobMetadataDigest::of_group(&members) != Some(expected) {
+    if BlobMetadataChunkGroupDigest::of_group(&members) != Some(expected) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("blob chunk group {} digest mismatch", group.index()),
@@ -539,13 +539,13 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 pub(crate) mod test_util {
     use nydus_format::blob::{
-        BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest,
+        BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
         BlobMetadataDigester,
     };
 
     /// Encode `groups` (each a list of chunks) with `compressor` into a data
     /// region and the blob meta describing it, with a `group_span`-byte
-    /// group span, a one-block lookup granule and BLAKE3 digests when `digests`
+    /// group span, a one-block index span and BLAKE3 digests when `digests`
     /// is set. Every group is stored compressed when that shrinks it, plain
     /// otherwise. Groups tile the address space back to back, each chunk on
     /// its own blocks.
@@ -585,7 +585,7 @@ pub(crate) mod test_util {
                 .iter()
                 .map(|chunk| *blake3::hash(chunk).as_bytes())
                 .collect();
-            digest_table.push(BlobMetadataDigest::of_group(&digests).unwrap());
+            digest_table.push(BlobMetadataChunkGroupDigest::of_group(&digests).unwrap());
         }
         if !digests {
             digest_table.clear();
@@ -630,6 +630,7 @@ mod tests {
     use super::test_util::{encode_blob, padded_image};
     use super::*;
     use nydus_backend::ReadContext;
+    use nydus_format::blob::BlobMetadataTableType;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -784,7 +785,7 @@ mod tests {
         // Same payload and crc, one wrong digest: the digest check fires and
         // is not a crc mismatch.
         let mut digests: Vec<_> = metadata.digests().to_vec();
-        digests[0] = nydus_format::blob::BlobMetadataDigest::new([0; 32]);
+        digests[0] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0; 32]);
         let wrong = BlobMetadata::new(
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::Blake3,
@@ -815,14 +816,14 @@ mod tests {
         // A short payload fails the length check.
         assert!(validate_decoded_chunk_group(&metadata, &group, &data[1..]).is_err());
 
-        // A DigestTable algorithm this reader does not know fails verification
+        // A ChunkGroupDigestTable algorithm this reader does not know fails verification
         // instead of skipping it.
         let mut raw = Vec::new();
         metadata.write_to(&mut raw).unwrap();
         let digest_table = metadata
             .tables()
             .iter()
-            .find(|table| table.table_type() == 4)
+            .find(|table| table.table_type() == BlobMetadataTableType::CHUNK_GROUP_DIGEST)
             .unwrap()
             .range();
         raw[digest_table.start + 16] = 9;

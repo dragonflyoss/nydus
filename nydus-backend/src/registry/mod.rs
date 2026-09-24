@@ -41,7 +41,7 @@ use url::Url;
 
 use crate::{BlobBackend, ReadContext, ReadKind};
 use nydus_config::{DragonflyConfig, RegistryConfig};
-use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_FOOTER_SIZE};
+use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
 use self::http::HTTP;
@@ -1079,10 +1079,10 @@ impl Registry {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> RegistryResult<BlobMetadata> {
         let size = self.fetch_blob_size(blob_id)?;
-        let footer_offset = BlobFooter::offset_from_size(size)
+        let footer_offset = BlobFooter::calculate_offset_by_blob_size(size)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
 
-        let mut footer_bytes = [0u8; NYDUS_BLOB_FOOTER_SIZE];
+        let mut footer_bytes = [0u8; BlobFooter::SIZE];
         self.try_read(
             blob_id,
             footer_offset,
