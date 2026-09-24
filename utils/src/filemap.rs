@@ -5,8 +5,10 @@
 use std::fs::File;
 use std::io::Result;
 use std::mem::size_of;
+use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 /// Struct to manage memory range mapped from file objects.
 ///
@@ -200,13 +202,137 @@ pub fn clone_file(fd: RawFd) -> Result<File> {
     }
 }
 
+/// An immutable `[T]` view into a `FileMapState`, which stays mapped for as long as the view
+/// exists.
+pub struct MappedSlice<T> {
+    ptr: *const T,
+    len: usize,
+    _map: Arc<FileMapState>,
+}
+
+impl<T> MappedSlice<T> {
+    /// Create a view of `len` entries of `T` at `offset` in `map`.
+    ///
+    /// # Safety
+    /// Every bit pattern of the mapped bytes must be a valid `T`. Nothing may write to the mapped
+    /// range or truncate the backing file while the view exists.
+    pub unsafe fn new(map: Arc<FileMapState>, offset: usize, len: usize) -> Result<Self> {
+        let size = len
+            .checked_mul(size_of::<T>())
+            .ok_or_else(|| einval!("mapped slice size overflow"))?;
+        let start = map.validate_range(offset, size)?;
+        let ptr = if size == 0 {
+            NonNull::<T>::dangling().as_ptr().cast_const()
+        } else if start.cast::<T>().is_aligned() {
+            start.cast::<T>()
+        } else {
+            return Err(einval!("unaligned mmap offset"));
+        };
+        Ok(Self {
+            ptr,
+            len,
+            _map: map,
+        })
+    }
+}
+
+impl<T> Clone for MappedSlice<T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            len: self.len,
+            _map: self._map.clone(),
+        }
+    }
+}
+
+impl<T> Deref for MappedSlice<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        // Safe because `new` checked the range against the mapping, which `_map` keeps alive.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+// Sharing the view is as safe as sharing a `&[T]`.
+unsafe impl<T: Sync> Send for MappedSlice<T> {}
+unsafe impl<T: Sync> Sync for MappedSlice<T> {}
+
+/// A table of entries that is either built in memory or viewed in a mapped file.
+#[derive(Clone)]
+pub enum MappedOrOwned<T> {
+    Owned(Vec<T>),
+    Mapped(MappedSlice<T>),
+}
+
+impl<T: Clone> MappedOrOwned<T> {
+    /// Get the entries as a vector, copying them out of the mapping first if needed.
+    pub fn to_mut(&mut self) -> &mut Vec<T> {
+        if let MappedOrOwned::Mapped(slice) = self {
+            *self = MappedOrOwned::Owned(slice.to_vec());
+        }
+        match self {
+            MappedOrOwned::Owned(v) => v,
+            MappedOrOwned::Mapped(_) => unreachable!(),
+        }
+    }
+}
+
+impl<T> Default for MappedOrOwned<T> {
+    fn default() -> Self {
+        MappedOrOwned::Owned(Vec::new())
+    }
+}
+
+impl<T> From<Vec<T>> for MappedOrOwned<T> {
+    fn from(v: Vec<T>) -> Self {
+        MappedOrOwned::Owned(v)
+    }
+}
+
+impl<T> Deref for MappedOrOwned<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match self {
+            MappedOrOwned::Owned(v) => v,
+            MappedOrOwned::Mapped(s) => s,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
     use std::fs::OpenOptions;
+    use std::io::Write;
     use std::path::PathBuf;
+
+    #[test]
+    fn mapped_slice_checks_range_and_alignment() {
+        let temp = TempFile::new().unwrap();
+        temp.as_file()
+            .write_all(&[1u8, 0, 0, 0, 2, 0, 0, 0])
+            .unwrap();
+        let map =
+            Arc::new(FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 8, false).unwrap());
+        unsafe {
+            let view = MappedSlice::<u32>::new(map.clone(), 0, 2).unwrap();
+            assert_eq!(u32::from_le(view[1]), 2);
+            assert!(MappedSlice::<u32>::new(map.clone(), 1, 1).is_err());
+            assert!(MappedSlice::<u32>::new(map.clone(), 4, 2).is_err());
+            assert!(MappedSlice::<u32>::new(map.clone(), 0, usize::MAX).is_err());
+            assert!(MappedSlice::<u32>::new(map.clone(), 8, 0)
+                .unwrap()
+                .is_empty());
+            assert!(MappedSlice::<u32>::new(map.clone(), 9, 0).is_err());
+            drop(map);
+            assert_eq!(u32::from_le(view[0]), 1);
+        }
+    }
 
     #[test]
     fn create_file_map_object() {

@@ -2220,15 +2220,13 @@ mod tests {
         batch_ctx0.set_compressed_size(0x2000);
 
         let chunk_info_array = vec![chunk0, chunk1];
-        let chunk_infos = BlobMetaChunkArray::V2(chunk_info_array);
-        let chunk_infos = ManuallyDrop::new(chunk_infos);
+        let chunk_infos = BlobMetaChunkArray::V2(chunk_info_array.into());
 
-        let batch_ctx_array = vec![batch_ctx0];
-        let batch_ctxes = ManuallyDrop::new(batch_ctx_array);
+        let batch_ctxes = vec![batch_ctx0];
 
         let mut state = BlobCompressionContext::default();
         state.chunk_info_array = chunk_infos;
-        state.batch_info_array = batch_ctxes;
+        state.batch_info_array = batch_ctxes.into();
         state.compressed_size = 0x2000;
         state.uncompressed_size = 0x3000;
         state.blob_features = (BlobFeatures::BATCH
