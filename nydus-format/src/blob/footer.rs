@@ -158,7 +158,7 @@ impl BlobFooter {
         // re-serialization emits only the fields this reader knows, zeroing a
         // newer writer's fields in the reserved tail and thereby rejecting a
         // valid image.
-        if read_u32_at(bytes, 16) != Self::compute_crc32(bytes) {
+        if read_u32_at(bytes, NYDUS_BLOB_FOOTER_CRC32_FIELD.start) != Self::compute_crc32(bytes) {
             return Err(Error::InvalidImage(
                 "nydus footer crc32 mismatch".to_string(),
             ));
@@ -167,7 +167,7 @@ impl BlobFooter {
         let footer = Self {
             feature_compat: read_u32_at(bytes, 8),
             feature_incompat: FeatureFlags::from_bits(read_u32_at(bytes, 12)),
-            crc32: read_u32_at(bytes, 16),
+            crc32: read_u32_at(bytes, NYDUS_BLOB_FOOTER_CRC32_FIELD.start),
             bootstrap_crc32: read_u32_at(bytes, 20),
             compressed_data_offset: read_u64_at(bytes, 24),
             compressed_data_size: read_u64_at(bytes, 32),
@@ -189,7 +189,7 @@ impl BlobFooter {
         data[0..8].copy_from_slice(&NYDUS_BLOB_FOOTER_MAGIC);
         write_u32_at(&mut data, 8, self.feature_compat);
         write_u32_at(&mut data, 12, self.feature_incompat.bits());
-        write_u32_at(&mut data, 16, self.crc32);
+        write_u32_at(&mut data, NYDUS_BLOB_FOOTER_CRC32_FIELD.start, self.crc32);
         write_u32_at(&mut data, 20, self.bootstrap_crc32);
         write_u64_at(&mut data, 24, self.compressed_data_offset);
         write_u64_at(&mut data, 32, self.compressed_data_size);
