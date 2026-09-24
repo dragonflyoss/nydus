@@ -1710,11 +1710,11 @@ the previous table, so the headers alone describe the layout.
 | 12 | `entry_count` | 4 | Entries |
 
 Types 1 through 5 are the core tables above; nydus allocates the next ones
-from 6. GroupTable, ChunkTable and GranuleIndexTable are mandatory. To a
-reader that does not know a table's type every incompat bit is unknown, so
-it skips an unknown table whose `feature_incompat` is zero and rejects the
-file otherwise: a new table that older readers must understand sets an
-incompat bit.
+from 6. GroupTable, ChunkTable and GranuleIndexTable are mandatory. Every
+table, whatever its type, is subject to the same rule: unsupported
+`feature_incompat` bits reject the file, and a table of unknown type is
+otherwise skipped. A new table that older readers may ignore leaves
+`feature_incompat` zero; one they must understand sets an incompat bit.
 
 A table is exactly `header_size + entry_size * entry_count` bytes. Readers
 reach entry `i` at `header_size + i * entry_size`, so a newer writer may
@@ -1759,7 +1759,8 @@ groups, starting at zero. A chunk count of one is a lone chunk; any larger
 count is a pack. There is no special zero-member representation.
 
 The final entry is a terminator: its first three fields contain total data
-bytes, total cache blocks and total chunks; payload size and CRC are zero.
+bytes, total cache blocks and total chunks; its payload size and CRC fields
+are reserved (written zero, ignored by readers).
 The group count is therefore the entry count minus one; the header does not
 store it. The terminator has no DigestTable or RedirectTable entry. An empty
 blob has just this zero terminator and no other table entries.
@@ -2471,7 +2472,9 @@ header followed by one readiness bit per chunk group. The header carries the
 and 12 (the blob meta prefix, without a crc32 since the file is mutable), the
 group count at 16, a mutable ready-group counter at 20 and a mutable `state`
 word at 24 whose bit 0 is `ALL_READY`; the rest of the header page is
-reserved and zero. The whole file is mapped `MAP_SHARED`
+reserved and zero. Readers require the file to be at least header plus
+bitmap long and ignore any bytes past the bitmap, which a newer writer may
+append behind a compat feature bit. The whole file is mapped `MAP_SHARED`
 and every bit access goes through atomic operations (`Acquire` loads,
 `fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
 are immediately observed by every other process sharing the cache directory

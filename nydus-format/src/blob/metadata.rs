@@ -152,10 +152,8 @@ impl BlobMetadataHeader {
 ///                                       are private
 ///      2     2  header_size             at least 16, a multiple of 8
 ///      4     2  feature_compat          unknown bits are ignored
-///      6     2  feature_incompat        unknown bits reject the file; for
-///                                       a table of unknown type every bit
-///                                       is unknown, so a nonzero word
-///                                       rejects and a zero one skips it
+///      6     2  feature_incompat        unknown bits reject the file, even
+///                                       for a table of unknown type
 ///      8     4  entry_size              bytes per entry
 ///     12     4  entry_count
 /// ```
@@ -243,8 +241,7 @@ struct TableView {
 
 impl TableView {
     /// Resolve a known table: its declared header and entry sizes must
-    /// cover the ones this reader knows, and its incompat bits must be
-    /// supported.
+    /// cover the ones this reader knows.
     fn of(
         table: &BlobMetadataTable,
         name: &str,
@@ -255,12 +252,6 @@ impl TableView {
             return Err(Error::InvalidImage(format!(
                 "blob meta {name} header size {} is below {header_size}",
                 table.header_size
-            )));
-        }
-        let unknown = table.feature_incompat & !NYDUS_BLOB_METADATA_SUPPORTED_TABLE_INCOMPAT;
-        if unknown != 0 {
-            return Err(Error::Unsupported(format!(
-                "unsupported blob meta {name} incompat flags {unknown:#x} (image is newer than this reader)"
             )));
         }
         if table.entry_size < entry_size {
@@ -297,10 +288,10 @@ impl TableView {
 ///                                          the address space
 ///     12     4  first_chunk_index          index of the group's first entry
 ///                                          in ChunkTable
-///     16     4  payload_size               bytes the group decodes to (zero
-///                                          in the terminator)
+///     16     4  payload_size               bytes the group decodes to
+///                                          (reserved in the terminator)
 ///     20     4  payload_crc32              CRC32C of the decoded payload
-///                                          (zero in the terminator)
+///                                          (reserved in the terminator)
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ChunkGroupEntry {
@@ -646,11 +637,11 @@ impl Deref for BlobMetadataBytes {
 /// Zero padding to a 4 KiB multiple
 /// ```
 ///
-/// The table headers are the compatibility contract: a reader skips a table
-/// of unknown type unless it has incompat bits, reads known tables
-/// through their declared header and entry sizes so that fields a newer
-/// writer appends are ignored, and rejects unknown incompat feature bits of
-/// the file or of a known table. The bytes are kept verbatim, so
+/// The table headers are the compatibility contract: a reader rejects
+/// unknown incompat feature bits of the file or of any table, skips a
+/// table of unknown type otherwise, and reads known tables through their
+/// declared header and entry sizes so that fields a newer writer appends
+/// are ignored. The bytes are kept verbatim, so
 /// [`Self::write_to`] preserves tables this reader does not know. Unknown
 /// DigestTable algorithms leave the blob undigested for this reader, see
 /// [`Self::unsupported_digest_algorithm`].
@@ -922,9 +913,10 @@ impl BlobMetadata {
                     table.offset
                 )));
             }
-            if !is_known_table(kind) && table.feature_incompat != 0 {
+            let unknown = table.feature_incompat & !NYDUS_BLOB_METADATA_SUPPORTED_TABLE_INCOMPAT;
+            if unknown != 0 {
                 return Err(Error::Unsupported(format!(
-                    "unsupported incompat blob meta table {kind:#x} (image is newer than this reader)"
+                    "unsupported blob meta table {kind:#x} incompat flags {unknown:#x} (image is newer than this reader)"
                 )));
             }
             end = table.range().end;
@@ -1101,13 +1093,6 @@ impl BlobMetadata {
         let span_blocks = u64::from(self.group_span_blocks());
         let granule_blocks = self.granule_blocks();
         let chunk_count = self.chunk_count;
-        let terminator = self.entry(self.chunk_group_count as usize);
-        if terminator.payload_size != 0 || terminator.payload_crc32 != 0 {
-            return Err(Error::InvalidImage(format!(
-                "blob meta chunk group terminator carries payload {} and crc {}",
-                terminator.payload_size, terminator.payload_crc32
-            )));
-        }
         let first = self.entry(0);
         if first.compressed_offset != 0
             || first.uncompressed_block_offset != 0
@@ -1533,12 +1518,6 @@ impl BlobMetadata {
     }
 }
 
-/// Whether this reader interprets tables of type `table_type`.
-fn is_known_table(table_type: u16) -> bool {
-    (NYDUS_BLOB_METADATA_TABLE_CHUNK_GROUP..=NYDUS_BLOB_METADATA_TABLE_REDIRECT)
-        .contains(&table_type)
-}
-
 /// crc32c over a serialized buffer with the header's crc32 field zeroed.
 fn compute_crc32(bytes: &[u8]) -> u32 {
     let field = NYDUS_BLOB_METADATA_HEADER_CRC32_FIELD;
@@ -1877,7 +1856,11 @@ mod tests {
         let mut incompat = raw.clone();
         write_u16_at(&mut incompat, group_table + 6, 1);
         let err = BlobMetadata::from_bytes(&reseal(incompat)).unwrap_err();
-        assert!(err.to_string().contains("GroupTable incompat"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("blob meta table 0x1 incompat flags 0x1"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1916,7 +1899,8 @@ mod tests {
         // Any incompat bit of an unknown table rejects.
         let err = BlobMetadata::from_bytes(&with(unknown(0x100, 1 << 15))).unwrap_err();
         assert!(
-            err.to_string().contains("incompat blob meta table 0x100"),
+            err.to_string()
+                .contains("blob meta table 0x100 incompat flags 0x8000"),
             "{err}"
         );
 
@@ -2535,14 +2519,17 @@ mod tests {
         // Tables whose counts disagree with the terminator.
         let raw = raw(&meta);
         let terminator = entries_offset(&meta, NYDUS_BLOB_METADATA_TABLE_CHUNK_GROUP) + 5 * 24;
-        for (offset, value) in [
-            (terminator + 8, 31u32),
-            (terminator + 12, 8),
-            (terminator + 16, 1),
-        ] {
+        for (offset, value) in [(terminator + 8, 31u32), (terminator + 12, 8)] {
             let mut invalid = raw.clone();
             write_u32_at(&mut invalid, offset, value);
             assert!(BlobMetadata::from_bytes(&reseal(invalid)).is_err());
+        }
+        // The terminator's payload fields are reserved.
+        for offset in [terminator + 16, terminator + 20] {
+            let mut reserved = raw.clone();
+            write_u32_at(&mut reserved, offset, u32::MAX);
+            let loaded = BlobMetadata::from_bytes(&reseal(reserved)).unwrap();
+            assert_eq!(loaded.payload_total(), meta.payload_total());
         }
         let mut invalid = raw.clone();
         invalid[table_offset(&meta, NYDUS_BLOB_METADATA_TABLE_GRANULE_INDEX) + 16] = 1;
