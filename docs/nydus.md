@@ -1691,13 +1691,13 @@ corruption there is caught by the crc32c. The file must end exactly at the
 The first 20 bytes (`magic`, both feature words, `crc32`) are frozen for
 every nydus record format, including the footer: any reader can always tell
 whether it supports a file. The header holds only what concerns the whole
-file; parameters of a table live in that table's own header.
+file; parameters of a table live in that table's header extension.
 
 #### Table header
 
-Every table starts with a 16-byte header; a table with its own header
-fields carries them behind it and declares the larger `header_size`;
-entries start at `header_size`. The first table
+Every table starts with a 16-byte header; a table type may define an
+optional header extension behind it and then declares the larger
+`header_size`; entries start at `header_size`. The first table
 starts at offset 24, and each next one at the first 8-byte boundary after
 the previous table, so the headers alone describe the layout.
 
@@ -1723,7 +1723,7 @@ append fields to a table header or to every entry; older readers read the
 fields they know and skip the rest. A changed meaning needs a new table
 type or an incompat feature instead.
 
-The tables' own header fields:
+Header extensions, optional per table type:
 
 | Table | Offset | Field | Bytes | Meaning |
 |---|---:|---|---:|---|

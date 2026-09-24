@@ -630,6 +630,7 @@ mod tests {
     use super::test_util::{encode_blob, padded_image};
     use super::*;
     use nydus_backend::ReadContext;
+    use nydus_format::blob::BlobMetadataTableType;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -822,7 +823,7 @@ mod tests {
         let digest_table = metadata
             .tables()
             .iter()
-            .find(|table| table.table_type() == 4)
+            .find(|table| table.table_type() == BlobMetadataTableType::CHUNK_GROUP_DIGEST)
             .unwrap()
             .range();
         raw[digest_table.start + 16] = 9;
