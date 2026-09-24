@@ -149,7 +149,6 @@ impl BatchContextGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::ManuallyDrop;
 
     #[test]
     fn test_batch_inflate_context() {
@@ -185,11 +184,7 @@ mod tests {
 
         let (ctx_data, _) = generator.to_vec().unwrap();
         let ctx_vec = unsafe {
-            ManuallyDrop::new(Vec::from_raw_parts(
-                ctx_data.as_slice().as_ptr() as *mut BatchInflateContext,
-                1,
-                1,
-            ))
+            std::slice::from_raw_parts(ctx_data.as_ptr() as *const BatchInflateContext, 1)
         };
         assert_eq!(ctx_vec[0].compressed_size(), 4);
         assert_eq!(ctx_vec[0].uncompressed_batch_size(), 4);

@@ -26,17 +26,18 @@
 
 use std::any::Any;
 use std::borrow::Cow;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Result;
-use std::mem::{size_of, ManuallyDrop};
+use std::mem::size_of;
 use std::ops::{Add, BitAnd, Not};
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use nydus_utils::compress::zlib_random::ZranContext;
 use nydus_utils::crypt::decrypt_with_context;
 use nydus_utils::digest::{DigestData, RafsDigest};
-use nydus_utils::filemap::FileMapState;
+use nydus_utils::filemap::{FileMapState, MappedOrOwned, MappedSlice};
 use nydus_utils::{compress, crypt};
 
 use crate::backend::BlobReader;
@@ -446,22 +447,27 @@ impl BlobCompressionContextInfo {
             )));
         }
 
-        let filemap = FileMapState::new(file, 0, expected_size, enable_write)?;
-        let base = filemap.validate_range(0, expected_size)?;
-        let header =
-            unsafe { filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size) }?;
-        if !Self::validate_header(blob_info, header)? {
+        // The tables below borrow this mapping, so it stays read-only, and downloaded metadata is
+        // written through the file instead.
+        let filemap = Arc::new(FileMapState::new(
+            file.try_clone()?,
+            0,
+            expected_size,
+            false,
+        )?);
+        // Safe because the header is plain integers and bytes, and each header reference ends
+        // with its validate_header call, so none is held while read_metadata writes the file.
+        let header_is_valid = || {
+            Self::validate_header(blob_info, unsafe {
+                filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
+            }?)
+        };
+        if !header_is_valid()? {
             if let Some(reader) = reader {
-                let buffer =
-                    unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
-                Self::read_metadata(blob_info, reader, buffer)?;
-                let header = unsafe {
-                    filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
-                }?;
-                if !Self::validate_header(blob_info, header)? {
+                Self::read_metadata(blob_info, reader, &file)?;
+                if !header_is_valid()? {
                     return Err(enoent!(format!("double check blob_info still invalid",)));
                 }
-                filemap.sync_data()?;
             } else {
                 return Err(enoent!(format!(
                     "blob meta header from file '{}' is invalid",
@@ -471,66 +477,40 @@ impl BlobCompressionContextInfo {
         }
 
         let chunk_infos = BlobMetaChunkArray::from_file_map(&filemap, blob_info)?;
-        let chunk_infos = ManuallyDrop::new(chunk_infos);
         let mut state = BlobCompressionContext {
             blob_index: blob_info.blob_index(),
             blob_features: blob_info.features().bits(),
             compressed_size: blob_info.compressed_data_size(),
             uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_info_array: chunk_infos,
-            blob_meta_file_map: filemap,
             ..Default::default()
         };
 
+        // Safe because the header, context tables, and dictionaries are plain integers and bytes,
+        // and the meta file isn't written once its header is valid.
+        let header =
+            unsafe { filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size) }?;
         if blob_info.has_feature(BlobFeatures::BATCH) {
-            let header = unsafe {
-                state
-                    .blob_meta_file_map
-                    .get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
-            }?;
-            let inflate_offset = header.s_ci_zran_offset as usize;
-            let inflate_count = header.s_ci_zran_count as usize;
-            let batch_inflate_size = inflate_count * size_of::<BatchInflateContext>();
-            let ptr = state
-                .blob_meta_file_map
-                .validate_range(inflate_offset, batch_inflate_size)?;
-            let array = unsafe {
-                Vec::from_raw_parts(
-                    ptr as *mut u8 as *mut BatchInflateContext,
-                    inflate_count,
-                    inflate_count,
+            state.batch_info_array = MappedOrOwned::Mapped(unsafe {
+                MappedSlice::new(
+                    filemap.clone(),
+                    header.s_ci_zran_offset as usize,
+                    header.s_ci_zran_count as usize,
                 )
-            };
-            state.batch_info_array = ManuallyDrop::new(array);
+            }?);
         } else if blob_info.has_feature(BlobFeatures::ZRAN) {
-            let header = unsafe {
-                state
-                    .blob_meta_file_map
-                    .get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
-            }?;
             let zran_offset = header.s_ci_zran_offset as usize;
             let zran_count = header.s_ci_zran_count as usize;
-            let ci_zran_size = header.s_ci_zran_size as usize;
+            state.zran_info_array = MappedOrOwned::Mapped(unsafe {
+                MappedSlice::new(filemap.clone(), zran_offset, zran_count)
+            }?);
             let zran_size = zran_count * size_of::<ZranInflateContext>();
-            let ptr = state
-                .blob_meta_file_map
-                .validate_range(zran_offset, zran_size)?;
-            let array = unsafe {
-                Vec::from_raw_parts(
-                    ptr as *mut u8 as *mut ZranInflateContext,
-                    zran_count,
-                    zran_count,
-                )
-            };
-            state.zran_info_array = ManuallyDrop::new(array);
-
-            let zran_dict_size = ci_zran_size - zran_size;
-            let ptr = state
-                .blob_meta_file_map
-                .validate_range(zran_offset + zran_size, zran_dict_size)?;
-            let array =
-                unsafe { Vec::from_raw_parts(ptr as *mut u8, zran_dict_size, zran_dict_size) };
-            state.zran_dict_table = ManuallyDrop::new(array);
+            let dict_size = (header.s_ci_zran_size as usize)
+                .checked_sub(zran_size)
+                .ok_or_else(|| einval!("invalid ZRan dictionary size"))?;
+            state.zran_dict_table = MappedOrOwned::Mapped(unsafe {
+                MappedSlice::new(filemap.clone(), zran_offset + zran_size, dict_size)
+            }?);
         }
 
         if load_chunk_digest && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
@@ -574,17 +554,11 @@ impl BlobCompressionContextInfo {
                 )));
             }
 
-            let file_map = FileMapState::new(file, 0, size, false)?;
-            let ptr = file_map.validate_range(0, size)?;
-            let array = unsafe {
-                Vec::from_raw_parts(
-                    ptr as *mut u8 as *mut _,
-                    chunk_count as usize,
-                    chunk_count as usize,
-                )
-            };
-            state.chunk_digest_file_map = file_map;
-            state.chunk_digest_array = ManuallyDrop::new(array);
+            let file_map = Arc::new(FileMapState::new(file, 0, size, false)?);
+            // Safe because digests are plain bytes and the digest file isn't written once it exists.
+            state.chunk_digest_array = MappedOrOwned::Mapped(unsafe {
+                MappedSlice::new(file_map, 0, chunk_count as usize)
+            }?);
         }
 
         Ok(BlobCompressionContextInfo {
@@ -753,7 +727,7 @@ impl BlobCompressionContextInfo {
     fn read_metadata(
         blob_info: &BlobInfo,
         reader: &Arc<dyn BlobReader>,
-        buffer: &mut [u8],
+        file: &File,
     ) -> Result<()> {
         trace!(
             "blob_info compressor {} ci_compressor {} ci_compressed_size {} ci_uncompressed_size {}",
@@ -866,11 +840,22 @@ impl BlobCompressionContextInfo {
         } else {
             decrypted
         };
-        buffer[0..uncompressed_size as usize].copy_from_slice(&uncompressed);
-        buffer[aligned_uncompressed_size as usize
-            ..(aligned_uncompressed_size + BLOB_CCT_HEADER_SIZE) as usize]
-            .copy_from_slice(&header);
-        Ok(())
+        if uncompressed.len() != uncompressed_size as usize
+            || header.len() != BLOB_CCT_HEADER_SIZE as usize
+        {
+            return Err(eio!(format!(
+                "blob meta for blob {} has {} table and {} header bytes, expect {} and {}",
+                blob_info.blob_id(),
+                uncompressed.len(),
+                header.len(),
+                uncompressed_size,
+                BLOB_CCT_HEADER_SIZE
+            )));
+        }
+        file.write_all_at(&uncompressed, 0)?;
+        // The header goes last, so a reader that finds a valid header also finds the table.
+        file.write_all_at(&header, aligned_uncompressed_size)?;
+        file.sync_data()
     }
 
     fn validate_header(
@@ -968,13 +953,11 @@ pub struct BlobCompressionContext {
     pub(crate) blob_features: u32,
     pub(crate) compressed_size: u64,
     pub(crate) uncompressed_size: u64,
-    pub(crate) chunk_info_array: ManuallyDrop<BlobMetaChunkArray>,
-    pub(crate) chunk_digest_array: ManuallyDrop<Vec<DigestData>>,
-    pub(crate) batch_info_array: ManuallyDrop<Vec<BatchInflateContext>>,
-    pub(crate) zran_info_array: ManuallyDrop<Vec<ZranInflateContext>>,
-    pub(crate) zran_dict_table: ManuallyDrop<Vec<u8>>,
-    blob_meta_file_map: FileMapState,
-    chunk_digest_file_map: FileMapState,
+    pub(crate) chunk_info_array: BlobMetaChunkArray,
+    pub(crate) chunk_digest_array: MappedOrOwned<DigestData>,
+    pub(crate) batch_info_array: MappedOrOwned<BatchInflateContext>,
+    pub(crate) zran_info_array: MappedOrOwned<ZranInflateContext>,
+    pub(crate) zran_dict_table: MappedOrOwned<u8>,
     chunk_digest_default: RafsDigest,
 }
 
@@ -1120,9 +1103,9 @@ impl BlobCompressionContext {
 /// A customized array to host chunk information table for a blob.
 pub enum BlobMetaChunkArray {
     /// V1 chunk compression information array.
-    V1(Vec<BlobChunkInfoV1Ondisk>),
+    V1(MappedOrOwned<BlobChunkInfoV1Ondisk>),
     /// V2 chunk compression information array.
-    V2(Vec<BlobChunkInfoV2Ondisk>),
+    V2(MappedOrOwned<BlobChunkInfoV2Ondisk>),
 }
 
 impl Default for BlobMetaChunkArray {
@@ -1135,12 +1118,12 @@ impl Default for BlobMetaChunkArray {
 impl BlobMetaChunkArray {
     /// Create a [BlobMetaChunkArray] with v1 chunk compression information format.
     pub fn new_v1() -> Self {
-        BlobMetaChunkArray::V1(Vec::new())
+        BlobMetaChunkArray::V1(MappedOrOwned::default())
     }
 
     /// Create a [BlobMetaChunkArray] with v2 chunk compression information format.
     pub fn new_v2() -> Self {
-        BlobMetaChunkArray::V2(Vec::new())
+        BlobMetaChunkArray::V2(MappedOrOwned::default())
     }
 
     /// Get number of entries in the chunk compression information array.
@@ -1192,7 +1175,7 @@ impl BlobMetaChunkArray {
                 meta.set_compressed_size(compressed_size);
                 meta.set_uncompressed_offset(uncompressed_offset);
                 meta.set_uncompressed_size(uncompressed_size);
-                v.push(meta);
+                v.to_mut().push(meta);
             }
             BlobMetaChunkArray::V2(_v) => unimplemented!(),
         }
@@ -1224,7 +1207,7 @@ impl BlobMetaChunkArray {
                 meta.set_has_crc32(has_crc32);
                 meta.set_batch(is_batch);
                 meta.set_data(data);
-                v.push(meta);
+                v.to_mut().push(meta);
             }
             BlobMetaChunkArray::V1(_v) => unimplemented!(),
         }
@@ -1233,37 +1216,23 @@ impl BlobMetaChunkArray {
     /// Add an entry of pre-built v2 chunk compression information into the array.
     pub fn add_v2_info(&mut self, chunk_info: BlobChunkInfoV2Ondisk) {
         match self {
-            BlobMetaChunkArray::V2(v) => v.push(chunk_info),
+            BlobMetaChunkArray::V2(v) => v.to_mut().push(chunk_info),
             BlobMetaChunkArray::V1(_v) => unimplemented!(),
         }
     }
 }
 
 impl BlobMetaChunkArray {
-    fn from_file_map(filemap: &FileMapState, blob_info: &BlobInfo) -> Result<Self> {
-        let chunk_count = blob_info.chunk_count();
+    fn from_file_map(filemap: &Arc<FileMapState>, blob_info: &BlobInfo) -> Result<Self> {
+        let chunk_count = blob_info.chunk_count() as usize;
+        // Safe because chunk info entries are plain integers and the meta file isn't written once
+        // its header is valid.
         if blob_info.has_feature(BlobFeatures::CHUNK_INFO_V2) {
-            let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV2Ondisk>();
-            let base = filemap.validate_range(0, chunk_size)?;
-            let v = unsafe {
-                Vec::from_raw_parts(
-                    base as *mut u8 as *mut BlobChunkInfoV2Ondisk,
-                    chunk_count as usize,
-                    chunk_count as usize,
-                )
-            };
-            Ok(BlobMetaChunkArray::V2(v))
+            let chunks = unsafe { MappedSlice::new(filemap.clone(), 0, chunk_count) }?;
+            Ok(BlobMetaChunkArray::V2(MappedOrOwned::Mapped(chunks)))
         } else {
-            let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV1Ondisk>();
-            let base = filemap.validate_range(0, chunk_size)?;
-            let v = unsafe {
-                Vec::from_raw_parts(
-                    base as *mut u8 as *mut BlobChunkInfoV1Ondisk,
-                    chunk_count as usize,
-                    chunk_count as usize,
-                )
-            };
-            Ok(BlobMetaChunkArray::V1(v))
+            let chunks = unsafe { MappedSlice::new(filemap.clone(), 0, chunk_count) }?;
+            Ok(BlobMetaChunkArray::V1(MappedOrOwned::Mapped(chunks)))
         }
     }
 
@@ -2116,6 +2085,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn chunk_tables_keep_their_mapping_alive() {
+        use vmm_sys_util::tempfile::TempFile;
+
+        for (features, entry_size) in [
+            (BlobFeatures::empty(), size_of::<BlobChunkInfoV1Ondisk>()),
+            (
+                BlobFeatures::CHUNK_INFO_V2,
+                size_of::<BlobChunkInfoV2Ondisk>(),
+            ),
+        ] {
+            let file = TempFile::new().unwrap();
+            let bytes = vec![0x12; 2 * entry_size];
+            std::fs::write(file.as_path(), &bytes).unwrap();
+            let mapping = Arc::new(
+                FileMapState::new(file.as_file().try_clone().unwrap(), 0, bytes.len(), false)
+                    .unwrap(),
+            );
+            let info = BlobInfo::new(0, "test".to_owned(), 4096, 4096, 4096, 2, features);
+            let mut chunks = BlobMetaChunkArray::from_file_map(&mapping, &info).unwrap();
+            drop(mapping);
+            assert_eq!(chunks.as_byte_slice(), bytes);
+
+            if let BlobMetaChunkArray::V2(table) = &mut chunks {
+                table.to_mut().push(BlobChunkInfoV2Ondisk::default());
+                assert_eq!(table.len(), 3);
+                assert_eq!(std::fs::read(file.as_path()).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
     fn test_round_up_4k() {
         assert_eq!(round_up_4k(0), 0x0u32);
         assert_eq!(round_up_4k(1), 0x1000u32);
@@ -2123,6 +2123,65 @@ pub(crate) mod tests {
         assert_eq!(round_up_4k(0x1000), 0x1000u32);
         assert_eq!(round_up_4k(0x1001), 0x2000u32);
         assert_eq!(round_up_4k(0x1fff), 0x2000u64);
+    }
+
+    #[test]
+    fn test_load_meta_ci_zran_from_reader() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let id = "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a";
+        let meta_file =
+            PathBuf::from(root_dir).join(format!("../tests/texture/zran/{}.blob.meta", id));
+        let meta_data = std::fs::read(meta_file).unwrap();
+        let ci_size = 0xa1290;
+        let header_offset = round_up_4k(ci_size) as usize;
+        let mut blob_data = meta_data[..ci_size as usize].to_vec();
+        blob_data.extend_from_slice(
+            &meta_data[header_offset..header_offset + BLOB_CCT_HEADER_SIZE as usize],
+        );
+        let dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let blob_path = dir.as_path().join(id);
+        std::fs::write(&blob_path, &blob_data).unwrap();
+        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
+            metrics: BackendMetrics::new(id, "localfs"),
+            file: File::open(&blob_path).unwrap(),
+        });
+
+        let features = BlobFeatures::ALIGNED
+            | BlobFeatures::INLINED_FS_META
+            | BlobFeatures::CHUNK_INFO_V2
+            | BlobFeatures::ZRAN;
+        let mut blob_info = BlobInfo::new(
+            0,
+            id.to_string(),
+            0x16c6000,
+            9839040,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0xa3,
+            features,
+        );
+        blob_info.set_blob_meta_info(0, ci_size, ci_size, compress::Algorithm::None as u32);
+
+        // The first load downloads the metadata. The second finds it already valid, so it must not
+        // read the blob, which is emptied after the first pass.
+        for pass in 0..2 {
+            if pass == 1 {
+                std::fs::write(&blob_path, b"").unwrap();
+            }
+            let meta = BlobCompressionContextInfo::new(
+                &blob_path.display().to_string(),
+                &blob_info,
+                Some(&reader),
+                false,
+            )
+            .unwrap();
+            assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
+            assert_eq!(meta.state.zran_info_array.len(), 0x15);
+            assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);
+            assert_eq!(
+                meta.state.chunk_info_array.as_byte_slice(),
+                &meta_data[..0xa3 * size_of::<BlobChunkInfoV2Ondisk>()]
+            );
+        }
     }
 
     #[test]
@@ -2458,15 +2517,13 @@ pub(crate) mod tests {
         batch_ctx1.set_uncompressed_batch_size(0x4000);
 
         let chunk_info_array = vec![chunk0, chunk1, chunk2, chunk3, chunk4];
-        let chunk_infos = BlobMetaChunkArray::V2(chunk_info_array);
-        let chunk_infos = ManuallyDrop::new(chunk_infos);
+        let chunk_infos = BlobMetaChunkArray::V2(chunk_info_array.into());
 
-        let batch_ctx_array = vec![batch_ctx0, batch_ctx1];
-        let batch_ctxes = ManuallyDrop::new(batch_ctx_array);
+        let batch_ctxes = vec![batch_ctx0, batch_ctx1];
 
         let state = BlobCompressionContext {
             chunk_info_array: chunk_infos,
-            batch_info_array: batch_ctxes,
+            batch_info_array: batch_ctxes.into(),
             compressed_size: 0x8000,
             uncompressed_size: 0xB000,
             blob_features: (BlobFeatures::BATCH

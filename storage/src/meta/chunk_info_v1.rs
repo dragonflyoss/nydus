@@ -153,10 +153,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
 mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
-    use std::mem::ManuallyDrop;
     use std::sync::Arc;
 
     use nydus_utils::compress;
+    use nydus_utils::filemap::MappedOrOwned;
     use nydus_utils::metrics::BackendMetrics;
     use vmm_sys_util::tempfile::TempFile;
 
@@ -165,10 +165,9 @@ mod tests {
     use crate::device::{BlobFeatures, BlobInfo};
     use crate::meta::tests::DummyBlobReader;
     use crate::meta::{
-        round_up_4k, BlobCompressionContext, BlobCompressionContextHeader,
-        BlobCompressionContextInfo, BlobMetaChunkArray,
+        BlobCompressionContext, BlobCompressionContextHeader, BlobCompressionContextInfo,
+        BlobMetaChunkArray,
     };
-    use crate::utils::alloc_buf;
     use crate::RAFS_MAX_CHUNK_SIZE;
 
     #[test]
@@ -216,7 +215,7 @@ mod tests {
     #[test]
     fn test_get_chunk_index_with_hole() {
         let state = BlobCompressionContext {
-            chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V1(vec![
+            chunk_info_array: BlobMetaChunkArray::V1(MappedOrOwned::Owned(vec![
                 BlobChunkInfoV1Ondisk {
                     uncomp_info: u64::to_le(0x01ff_f000_0000_0000),
                     comp_info: u64::to_le(0x00ff_f000_0000_0000),
@@ -278,7 +277,7 @@ mod tests {
             blob_features: 0,
             compressed_size: 0x6001,
             uncompressed_size: 0x102001,
-            chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V1(vec![
+            chunk_info_array: BlobMetaChunkArray::V1(MappedOrOwned::Owned(vec![
                 BlobChunkInfoV1Ondisk {
                     uncomp_info: u64::to_le(0x0100_0000_0000_0000),
                     comp_info: u64::to_le(0x00ff_f000_0000_0000),
@@ -377,7 +376,6 @@ mod tests {
                 chunks.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
             )
         };
-        let uncompressed_size = data.len();
 
         let pos = 0;
         w.write_all(data).unwrap();
@@ -400,16 +398,29 @@ mod tests {
             compress::Algorithm::None as u32,
         );
 
-        let mut buffer = alloc_buf(
-            round_up_4k(uncompressed_size) + std::mem::size_of::<BlobCompressionContextHeader>(),
-        );
+        let meta = TempFile::new().unwrap();
         let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
         });
-        BlobCompressionContextInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+        BlobCompressionContextInfo::read_metadata(&blob_info, &reader, meta.as_file()).unwrap();
 
+        let buffer = std::fs::read(meta.as_path()).unwrap();
         assert_eq!(&buffer[0..data.len()], data);
+        assert_eq!(buffer.len(), 0x1000 + header.as_bytes().len());
+        assert_eq!(&buffer[0x1000..], header.as_bytes());
+
+        blob_info.set_blob_meta_info(
+            pos,
+            data.len() as u64,
+            data.len() as u64 + 8,
+            compress::Algorithm::None as u32,
+        );
+        let meta = TempFile::new().unwrap();
+        assert!(
+            BlobCompressionContextInfo::read_metadata(&blob_info, &reader, meta.as_file()).is_err()
+        );
+        assert_eq!(std::fs::metadata(meta.as_path()).unwrap().len(), 0);
     }
 
     #[test]
@@ -470,15 +481,16 @@ mod tests {
             compress::Algorithm::Lz4Block as u32,
         );
 
-        let mut buffer = alloc_buf(
-            round_up_4k(uncompressed_size) + std::mem::size_of::<BlobCompressionContextHeader>(),
-        );
+        let meta = TempFile::new().unwrap();
         let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
         });
-        BlobCompressionContextInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+        BlobCompressionContextInfo::read_metadata(&blob_info, &reader, meta.as_file()).unwrap();
 
+        let buffer = std::fs::read(meta.as_path()).unwrap();
         assert_eq!(&buffer[0..uncompressed_size], data);
+        assert_eq!(buffer.len(), 0x1000 + header.as_bytes().len());
+        assert_eq!(&buffer[0x1000..], header.as_bytes());
     }
 }
