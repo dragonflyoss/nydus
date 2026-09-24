@@ -208,7 +208,7 @@ impl ErofsReader {
     /// the decompressed bytes (offset 0) when the footer declares the
     /// bootstrap region zstd-compressed.
     fn unpack_embedded_image(mmap: Mmap) -> io::Result<(Mmap, Option<usize>)> {
-        let Some(footer) = BlobFooter::from_blob_bytes(&mmap).map_err(io::Error::other)? else {
+        let Ok(footer) = BlobFooter::from_blob_bytes(&mmap) else {
             return Ok((mmap, None));
         };
 
@@ -217,9 +217,12 @@ impl ErofsReader {
         })?;
         // `from_blob_bytes` anchored the layout, so the region lies within `mmap`.
         let region = &mmap[bootstrap_offset..bootstrap_offset + footer.bootstrap_size() as usize];
-        footer
-            .verify_bootstrap(region)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        if crc32c::crc32c(region) != footer.bootstrap_crc32() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "nydus bootstrap crc32 mismatch",
+            ));
+        }
 
         let Some(compressed_size) = footer.bootstrap_compressed_size() else {
             return Ok((mmap, Some(bootstrap_offset)));

@@ -45,6 +45,16 @@ const _: () = assert!(mem::offset_of!(ErofsSuperblock, rootnid_8b) == 0x70);
 const _: () = assert!(mem::offset_of!(ErofsSuperblock, _reserved3) == 0x78);
 
 impl ErofsSuperblock {
+    /// Every incompat bit this reader understands. The z_erofs bits
+    /// (ZERO_PADDING, BIG_PCLUSTER/COMPR_CFGS, FRAGMENTS) are accepted for
+    /// metadata access (`merge` reads z layer bootstraps); data reads reject
+    /// the COMPRESSED_FULL layout themselves.
+    const INCOMPAT_SUPPORTED: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
+        | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
+        | EROFS_FEATURE_INCOMPAT_ZERO_PADDING
+        | EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER
+        | EROFS_FEATURE_INCOMPAT_FRAGMENTS;
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         feature_compat: u32,
@@ -199,15 +209,7 @@ pub fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
             format!("unsupported EROFS block size bits: {}", sb.blkszbits),
         ));
     }
-    // The z_erofs bits (ZERO_PADDING, BIG_PCLUSTER/COMPR_CFGS, FRAGMENTS)
-    // are accepted for metadata access (`merge` reads z layer bootstraps);
-    // data reads reject the COMPRESSED_FULL layout themselves.
-    const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
-        | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
-        | EROFS_FEATURE_INCOMPAT_ZERO_PADDING
-        | EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER
-        | EROFS_FEATURE_INCOMPAT_FRAGMENTS;
-    let unknown = sb.feature_incompat() & !SUPPORTED_INCOMPAT;
+    let unknown = sb.feature_incompat() & !ErofsSuperblock::INCOMPAT_SUPPORTED;
     if unknown != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

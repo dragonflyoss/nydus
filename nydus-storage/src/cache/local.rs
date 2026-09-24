@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use crate::access_trace::TraceRecorder;
 use crate::chunk_group_map::ChunkGroupMap;
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
-use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroup, NYDUS_BLOB_METADATA_SUFFIX};
+use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroup};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
@@ -139,8 +139,7 @@ impl LocalBlobCache {
 
         let cache_key = backend.cache_key(&blob_id)?;
         let cache_key_hex = hex_string(&cache_key);
-        let blob_metadata_path =
-            cache_dir.join(format!("{cache_key_hex}{NYDUS_BLOB_METADATA_SUFFIX}"));
+        let blob_metadata_path = cache_dir.join(format!("{cache_key_hex}{}", BlobMetadata::SUFFIX));
         let blob_metadata =
             load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
         nydus_telemetry::metrics::track_blob_chunk_groups(

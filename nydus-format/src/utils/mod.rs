@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 
-use crate::blob::{BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
+use crate::blob::BlobMetadata;
 use crate::erofs::{ErofsSuperblock, EROFS_SUPER_OFFSET};
 
 pub use self::align::{align_up_u64, align_up_usize};
@@ -48,8 +48,9 @@ pub fn write_minimal_full_blob(
     if save_sidecar {
         blob_metadata
             .save(&dir.join(format!(
-                "{}{NYDUS_BLOB_METADATA_SUFFIX}",
-                hex_string(&full_blob_id)
+                "{}{}",
+                hex_string(&full_blob_id),
+                BlobMetadata::SUFFIX
             )))
             .unwrap();
     }
