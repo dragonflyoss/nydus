@@ -1,6 +1,7 @@
 package nydus
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -32,13 +33,29 @@ func TestPackStreamsTarWithoutExtraction(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := bytes.Repeat([]byte("tar-bytes"), 20000)
-	if _, err := writer.Write(payload); err != nil {
+	var layer bytes.Buffer
+	tw := tar.NewWriter(&layer)
+	if err := tw.WriteHeader(&tar.Header{Name: "f", Mode: 0o644, Size: int64(len(payload)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(layer.Bytes()); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(output.Bytes(), payload) {
+	tr := tar.NewReader(&output)
+	hdr, err := tr.Next()
+	if err != nil || hdr.Name != "f" {
+		t.Fatalf("normalized stream lost the member: %v %v", hdr, err)
+	}
+	if got, err := io.ReadAll(tr); err != nil || !bytes.Equal(got, payload) {
 		t.Fatal("stream changed")
 	}
 	if err := writer.Close(); err != nil {

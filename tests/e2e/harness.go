@@ -276,6 +276,18 @@ func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdev
 	return startFuseMount(t, exec.Command(cErofsFuseBin, args...), mnt, "erofsfuse")
 }
 
+// MustLookupExecutable is mustLookupExecutable for the e2e subpackages.
+func MustLookupExecutable(t *testing.T, name string) string {
+	t.Helper()
+	return mustLookupExecutable(t, name)
+}
+
+// MountNydus is mountNydus for the e2e subpackages.
+func MountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup func()) {
+	t.Helper()
+	return mountNydus(t, nydusBin, imagePath, blobdev, mnt)
+}
+
 // mountNydus runs `nydus fuse` in the background and returns a cleanup
 // function that unmounts the filesystem and reaps the child process.
 func mountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup func()) {
