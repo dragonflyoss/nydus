@@ -446,15 +446,18 @@ impl BlobCompressionContextInfo {
             )));
         }
 
-        let mut filemap = FileMapState::new(file, 0, expected_size, enable_write)?;
+        let filemap = FileMapState::new(file, 0, expected_size, enable_write)?;
         let base = filemap.validate_range(0, expected_size)?;
         let header =
-            filemap.get_mut::<BlobCompressionContextHeader>(aligned_uncompressed_size as usize)?;
+            unsafe { filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size) }?;
         if !Self::validate_header(blob_info, header)? {
             if let Some(reader) = reader {
                 let buffer =
                     unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
                 Self::read_metadata(blob_info, reader, buffer)?;
+                let header = unsafe {
+                    filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
+                }?;
                 if !Self::validate_header(blob_info, header)? {
                     return Err(enoent!(format!("double check blob_info still invalid",)));
                 }
@@ -480,9 +483,11 @@ impl BlobCompressionContextInfo {
         };
 
         if blob_info.has_feature(BlobFeatures::BATCH) {
-            let header = state
-                .blob_meta_file_map
-                .get_mut::<BlobCompressionContextHeader>(aligned_uncompressed_size as usize)?;
+            let header = unsafe {
+                state
+                    .blob_meta_file_map
+                    .get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
+            }?;
             let inflate_offset = header.s_ci_zran_offset as usize;
             let inflate_count = header.s_ci_zran_count as usize;
             let batch_inflate_size = inflate_count * size_of::<BatchInflateContext>();
@@ -498,9 +503,11 @@ impl BlobCompressionContextInfo {
             };
             state.batch_info_array = ManuallyDrop::new(array);
         } else if blob_info.has_feature(BlobFeatures::ZRAN) {
-            let header = state
-                .blob_meta_file_map
-                .get_mut::<BlobCompressionContextHeader>(aligned_uncompressed_size as usize)?;
+            let header = unsafe {
+                state
+                    .blob_meta_file_map
+                    .get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
+            }?;
             let zran_offset = header.s_ci_zran_offset as usize;
             let zran_count = header.s_ci_zran_count as usize;
             let ci_zran_size = header.s_ci_zran_size as usize;

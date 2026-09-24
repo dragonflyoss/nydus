@@ -172,7 +172,7 @@ impl VerityGenerator {
         let mut map = self.file_map.lock().unwrap();
 
         while offset < total_size {
-            let digest = map.get_mut::<DigestData>(offset)?;
+            let digest = unsafe { map.get_mut::<DigestData>(offset) }?;
             digest.copy_from_slice(&NON_EXIST_ENTRY_DIGEST.data);
             offset += size_of::<DigestData>();
         }
@@ -216,7 +216,7 @@ impl VerityGenerator {
         let base = self.mkl_tree.level_base(level) as usize;
         let offset = base + index as usize * digest_size;
         let mut guard = self.file_map.lock().unwrap();
-        let buf = guard.get_mut::<DigestData>(offset)?;
+        let buf = unsafe { guard.get_mut::<DigestData>(offset) }?;
         buf.copy_from_slice(digest);
 
         Ok(())
@@ -232,9 +232,9 @@ impl VerityGenerator {
         let mut guard = self.file_map.lock().unwrap();
 
         for _ in 0..count {
-            let data = guard.get_slice::<u8>(data_base, page_size)?;
+            let data = unsafe { guard.get_slice::<u8>(data_base, page_size) }?;
             let digest = RafsDigest::from_buf(data, self.mkl_tree.digest_algo);
-            let buf = guard.get_mut::<DigestData>(digest_base)?;
+            let buf = unsafe { guard.get_mut::<DigestData>(digest_base) }?;
             buf.copy_from_slice(digest.as_ref());
             data_base += page_size;
             digest_base += self.mkl_tree.digest_size;
@@ -254,7 +254,7 @@ impl VerityGenerator {
             Ok(self.root_digest)
         } else {
             let guard = self.file_map.lock().unwrap();
-            let data = guard.get_slice::<u8>(0, self.mkl_tree.page_size as usize)?;
+            let data = unsafe { guard.get_slice::<u8>(0, self.mkl_tree.page_size as usize) }?;
             Ok(RafsDigest::from_buf(data, self.mkl_tree.digest_algo))
         }
     }
