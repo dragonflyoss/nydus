@@ -579,7 +579,7 @@ mod tests {
         [[u8; SHA256_DIGEST_SIZE]; 2],
     ) {
         use nydus_format::blob::{
-            BlobMetadataChunkGroup, BlobMetadataDigester, BlobMetadataRedirect,
+            BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataDigester,
         };
         let (payload, plain_meta) = test_payload();
         let plain_id = write_minimal_full_blob(backend_dir, &payload, &plain_meta, true);
@@ -594,7 +594,7 @@ mod tests {
                 group.payload_size(),
                 group.chunk_count(),
                 group.payload_crc32(),
-                Some(BlobMetadataRedirect::new(1, 0).unwrap()),
+                Some(BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()),
             )
             .unwrap()],
             vec![group.payload_size()],

@@ -26,8 +26,8 @@ use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigester,
-    BlobMetadataRedirect,
+    BlobFooter, BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect,
+    BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
@@ -239,7 +239,7 @@ pub fn build_ondemand_blob(
             group.payload_size(),
             group.chunk_count(),
             group.payload_crc32(),
-            Some(BlobMetadataRedirect::new(
+            Some(BlobMetadataChunkGroupRedirect::new(
                 reference.blob_index,
                 reference.chunk_group_index,
             )?),
@@ -254,12 +254,12 @@ pub fn build_ondemand_blob(
             digests.extend(meta.digest(group.index() as usize));
         }
     }
-    let lookup_granule = nydus_format::erofs::EROFS_BLOCK_SIZE << least_blocks.ilog2();
+    let index_span = nydus_format::erofs::EROFS_BLOCK_SIZE << least_blocks.ilog2();
     let blob_metadata = BlobMetadata::new(
         compressor,
         digester,
         group_span,
-        lookup_granule,
+        index_span,
         chunk_groups,
         members,
         digests,

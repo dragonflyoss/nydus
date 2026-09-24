@@ -287,7 +287,8 @@ mod tests {
     use super::*;
     use crate::ReadKind;
     use nydus_format::blob::{
-        BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest, BlobMetadataDigester,
+        BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
+        BlobMetadataDigester,
     };
     use nydus_format::utils::sha256_bytes;
     use tempfile::tempdir;
@@ -302,7 +303,9 @@ mod tests {
                 BlobMetadataChunkGroup::new(4096, 4096, 1, crc32c::crc32c(payload), None).unwrap(),
             ],
             vec![4096],
-            vec![BlobMetadataDigest::new(*blake3::hash(payload).as_bytes())],
+            vec![BlobMetadataChunkGroupDigest::new(
+                *blake3::hash(payload).as_bytes(),
+            )],
         )
         .unwrap()
     }

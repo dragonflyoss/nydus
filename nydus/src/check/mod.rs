@@ -154,8 +154,8 @@ pub struct BlobMetadataSummary {
     pub chunk_group_count: usize,
     /// The most bytes of the address space a chunk group spans.
     pub group_span: u32,
-    /// Address granule covered by each GranuleIndexTable entry.
-    pub lookup_granule: u32,
+    /// Address span covered by each ChunkGroupIndexTable entry.
+    pub index_span: u32,
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
@@ -664,7 +664,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
     Ok(BlobMetadataSummary {
         chunk_group_count: blob_metadata.chunk_group_count(),
         group_span: blob_metadata.group_span(),
-        lookup_granule: blob_metadata.lookup_granule(),
+        index_span: blob_metadata.index_span(),
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.uncompressed_size(),
         total_compressed_size: blob_metadata.compressed_end(),
