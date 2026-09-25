@@ -149,7 +149,7 @@ virtio-bindings = "0.2.7"
 virtio-queue = "0.17.0"
 vm-memory = "=0.17.1"
 vmm-sys-util = "0.15.0"
-vhost-user-backend = "0.21.0"
+vhost-user-backend = "0.23.0"
 
 # fuse-backend-rs which depends on rust-vmm
 fuse-backend-rs = "0.14.0"
