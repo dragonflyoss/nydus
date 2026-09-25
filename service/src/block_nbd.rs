@@ -21,13 +21,12 @@ use std::thread::JoinHandle;
 use bytes::{Buf, BufMut};
 use mio::Waker;
 use nydus_api::{BlobCacheEntry, BuildTimeInfo};
-use nydus_storage::utils::alloc_buf;
 use tokio::sync::broadcast::{channel, Sender};
 use tokio_uring::buf::IoBuf;
 use tokio_uring::net::UnixStream;
 
 use crate::blob_cache::{generate_blob_key, BlobCacheMgr};
-use crate::block_device::BlockDevice;
+use crate::block_device::{alloc_io_buf, BlockDevice};
 use crate::daemon::{
     DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
     NydusDaemon,
@@ -224,7 +223,7 @@ impl NbdWorker {
 
         let block_size = device.block_size();
         let mut code = NBD_OK;
-        let mut data_buf = alloc_buf(len as usize);
+        let mut data_buf = alloc_io_buf(len as usize);
         if magic != NBD_REQUEST_MAGIC || pos % block_size != 0 || len as u64 % block_size != 0 {
             warn!(
                 "block_nbd: invalid request magic 0x{:x}, type {}, pos 0x{:x}, len 0x{:x}",
