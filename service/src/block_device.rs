@@ -14,6 +14,7 @@
 use std::cmp::{max, min};
 use std::fs::OpenOptions;
 use std::io::Result;
+use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -26,15 +27,75 @@ use nydus_api::BlobCacheEntry;
 use nydus_rafs::metadata::layout::v6::{
     EROFS_BLOCK_BITS_12, EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512,
 };
-use nydus_storage::utils::alloc_buf;
+use nydus_storage::utils::{alloc_buf, AlignedBuf};
 use nydus_utils::digest::{self, RafsDigest};
 use nydus_utils::round_up;
 use nydus_utils::verity::VerityGenerator;
-use tokio_uring::buf::IoBufMut;
+use tokio_uring::buf::{IoBuf, IoBufMut};
 
 use crate::blob_cache::{generate_blob_key, BlobCacheMgr, BlobConfig, DataBlob, MetaBlob};
 
 const BLOCK_DEVICE_EXPORT_BATCH_SIZE: usize = 0x80000;
+
+pub(crate) struct AlignedIoBuf(AlignedBuf);
+
+pub(crate) fn alloc_io_buf(size: usize) -> AlignedIoBuf {
+    AlignedIoBuf(alloc_buf(size))
+}
+
+impl AlignedIoBuf {
+    fn resize(&mut self, len: usize, value: u8) {
+        self.0.resize(len, value);
+    }
+}
+
+impl Deref for AlignedIoBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl DerefMut for AlignedIoBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl AsRef<[u8]> for AlignedIoBuf {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+// SAFETY: moving AlignedIoBuf does not move the allocation owned by its inner Vec.
+unsafe impl IoBuf for AlignedIoBuf {
+    fn stable_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.0.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.0.capacity()
+    }
+}
+
+// SAFETY: mutable access is exclusive, and set_init changes only the logical byte length.
+unsafe impl IoBufMut for AlignedIoBuf {
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+
+    unsafe fn set_init(&mut self, init_len: usize) {
+        if self.0.len() < init_len {
+            self.0.set_len(init_len);
+        }
+    }
+}
 
 enum BlockRange {
     Hole,
@@ -619,7 +680,7 @@ impl BlockDevice {
         let batch_size = BLOCK_DEVICE_EXPORT_BATCH_SIZE as u32 / block_device.block_size() as u32;
         let block_size = block_device.block_size() as usize;
         let mut pos = start;
-        let mut buf = alloc_buf(BLOCK_DEVICE_EXPORT_BATCH_SIZE);
+        let mut buf = alloc_io_buf(BLOCK_DEVICE_EXPORT_BATCH_SIZE);
 
         while blocks > 0 {
             let count = min(batch_size, blocks);
@@ -680,6 +741,23 @@ mod tests {
     use std::io::{BufReader, Read};
     use std::path::PathBuf;
     use vmm_sys_util::tempdir::TempDir;
+
+    #[test]
+    fn aligned_io_buffer_preserves_its_allocation() {
+        let mut buf = alloc_io_buf(4097);
+        let ptr = buf.stable_ptr();
+        assert_eq!(ptr as usize % 4096, 0);
+        assert_eq!(buf.bytes_init(), 4097);
+        assert_eq!(buf.bytes_total(), 8192);
+        unsafe {
+            buf.stable_mut_ptr().add(5000).write(7);
+            buf.set_init(8192);
+        }
+        assert_eq!(buf.len(), 8192);
+        assert_eq!(buf[5000], 7);
+        let buf = buf;
+        assert_eq!(buf.stable_ptr(), ptr);
+    }
 
     #[test]
     fn test_block_device() {
