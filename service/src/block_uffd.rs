@@ -40,14 +40,13 @@ use std::thread::JoinHandle;
 use flume;
 use mio::Waker;
 use nydus_api::{BlobCacheEntry, BuildTimeInfo};
-use nydus_storage::utils::alloc_buf;
 use sendfd::{RecvWithFd, SendWithFd};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::broadcast::Sender;
 use tokio::task::spawn_blocking;
 
 use crate::blob_cache::{generate_blob_key, BlobCacheMgr};
-use crate::block_device::BlockDevice;
+use crate::block_device::{alloc_io_buf, BlockDevice};
 use crate::daemon::{
     DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
     NydusDaemon,
@@ -195,9 +194,17 @@ pub async fn uffdio_zeropage(uffd_fd: RawFd, start_addr: u64, len: u64) -> Resul
 /// Perform UFFDIO_COPY ioctl asynchronously.
 /// `buf` holds the source data; ownership is transferred to ensure the buffer
 /// lives until the ioctl completes inside `spawn_blocking`.
-pub async fn uffdio_copy(uffd_fd: RawFd, dst: u64, buf: Vec<u8>, len: u64) -> Result<()> {
+pub async fn uffdio_copy<B: AsRef<[u8]> + Send + 'static>(
+    uffd_fd: RawFd,
+    dst: u64,
+    buf: B,
+    len: u64,
+) -> Result<()> {
+    if len > u64::try_from(buf.as_ref().len()).unwrap_or(u64::MAX) {
+        return Err(einval!("uffdio_copy source buffer is too short"));
+    }
     spawn_blocking(move || {
-        let src = buf.as_ptr() as u64;
+        let src = buf.as_ref().as_ptr() as u64;
         let mut ioctl_arg = UffdioCopy {
             dst,
             src,
@@ -421,7 +428,7 @@ impl UffdCore {
         let num_blocks = len.div_ceil(self.block_size) as u32;
 
         let read_len = num_blocks as usize * self.block_size as usize;
-        let buf = alloc_buf(read_len);
+        let buf = alloc_io_buf(read_len);
         let (res, buf) = self.device.async_read(start_block, num_blocks, buf).await;
         let bytes_read = res.map_err(|e| eother!(format!("async_read failed: {}", e)))?;
         if bytes_read != read_len {
@@ -1267,6 +1274,12 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use vmm_sys_util::tempdir::TempDir;
+
+    #[tokio::test]
+    async fn uffdio_copy_rejects_a_short_source_buffer() {
+        let error = uffdio_copy(-1, 0, vec![0], 2).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
 
     // ---- UFFD test helpers ----
 

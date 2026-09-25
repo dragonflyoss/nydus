@@ -33,7 +33,7 @@ use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{
     BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest,
 };
-use crate::utils::{alloc_buf, copyv};
+use crate::utils::{alloc_buf, copyv, AlignedBuf};
 use crate::{StorageError, StorageResult};
 
 struct DummyCache {
@@ -142,7 +142,7 @@ impl BlobCache for DummyCache {
         }
 
         let mut user_size = 0;
-        let mut buffer_holder: Vec<Vec<u8>> = Vec::with_capacity(bios.len());
+        let mut buffer_holder: Vec<AlignedBuf> = Vec::with_capacity(bios.len());
         for bio in bios.iter() {
             if bio.user_io {
                 let mut d = alloc_buf(bio.chunkinfo.uncompressed_size() as usize);

@@ -14,9 +14,9 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
-use std::alloc::{alloc, handle_alloc_error, Layout};
 use std::cmp::{self, min};
 use std::io::{ErrorKind, IoSliceMut, Result};
+use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::io::RawFd;
 #[cfg(target_os = "linux")]
@@ -329,20 +329,89 @@ pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
     }
 }
 
-/// A customized buf allocator that avoids zeroing
-pub fn alloc_buf(size: usize) -> Vec<u8> {
+#[repr(C, align(4096))]
+#[derive(Clone)]
+struct BufferPage {
+    _bytes: [u8; 4096],
+}
+
+/// An initialized byte buffer backed by 4 KiB aligned pages.
+#[derive(Clone, Default)]
+pub struct AlignedBuf {
+    pages: Vec<BufferPage>,
+    len: usize,
+}
+
+impl AlignedBuf {
+    pub fn capacity(&self) -> usize {
+        self.pages.len() * 4096
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        self
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self
+    }
+
+    pub fn resize(&mut self, len: usize, value: u8) {
+        let old_len = self.len;
+        let pages = len.div_ceil(4096);
+        if pages > self.pages.len() {
+            self.pages.resize(pages, BufferPage { _bytes: [0; 4096] });
+        }
+        self.len = len;
+        if len > old_len {
+            self[old_len..].fill(value);
+        }
+    }
+
+    /// Set the logical length without changing the initialized page allocation.
+    ///
+    /// Panics if `len` exceeds the buffer capacity.
+    pub fn set_len(&mut self, len: usize) {
+        assert!(len <= self.capacity());
+        self.len = len;
+    }
+}
+
+impl Deref for AlignedBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // SAFETY: BufferPage has bytes at offset zero and no padding, Vec stores pages contiguously,
+        // every byte is initialized, and len never exceeds the pages' combined size.
+        unsafe { std::slice::from_raw_parts(self.pages.as_ptr().cast::<u8>(), self.len) }
+    }
+}
+
+impl DerefMut for AlignedBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the immutable slice invariants hold, and this borrow has exclusive access.
+        unsafe { std::slice::from_raw_parts_mut(self.pages.as_mut_ptr().cast::<u8>(), self.len) }
+    }
+}
+
+impl AsRef<[u8]> for AlignedBuf {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl AsMut<[u8]> for AlignedBuf {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self
+    }
+}
+
+/// Allocate initialized storage aligned for direct IO.
+pub fn alloc_buf(size: usize) -> AlignedBuf {
     assert!(size < isize::MAX as usize);
-    if size == 0 {
-        return Vec::new();
+    AlignedBuf {
+        pages: vec![BufferPage { _bytes: [0; 4096] }; size.div_ceil(4096)],
+        len: size,
     }
-    let layout = Layout::from_size_align(size, 0x1000)
-        .unwrap()
-        .pad_to_align();
-    let ptr = unsafe { alloc(layout) };
-    if ptr.is_null() {
-        handle_alloc_error(layout);
-    }
-    unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
 }
 
 /// Check hash of data matches provided one
@@ -516,6 +585,39 @@ mod tests {
             Err(StorageError::MemOverflow)
         ));
         assert_eq!(dst_buf, vec![1u8, 2u8, 3u8]);
+    }
+
+    #[test]
+    fn aligned_buffers_keep_initialized_pages_through_resize() {
+        for size in [0, 1, 4095, 4096, 4097, 65537] {
+            let mut buf = alloc_buf(size);
+            assert_eq!(buf.len(), size);
+            assert_eq!(buf.capacity(), size.div_ceil(4096) * 4096);
+            assert_eq!(buf.as_ptr() as usize % 4096, 0);
+            assert!(buf.iter().all(|byte| *byte == 0));
+            buf.fill(7);
+            buf.resize(buf.capacity(), 0);
+            assert!(buf[..size].iter().all(|byte| *byte == 7));
+            assert!(buf[size..].iter().all(|byte| *byte == 0));
+            let previous = buf.len();
+            buf.resize(previous + 4097, 9);
+            assert_eq!(buf.as_ptr() as usize % 4096, 0);
+            assert!(buf[..size].iter().all(|byte| *byte == 7));
+            assert!(buf[previous..].iter().all(|byte| *byte == 9));
+        }
+    }
+
+    #[test]
+    fn aligned_buffer_resize_retains_capacity() {
+        let mut buf = alloc_buf(4097);
+        let capacity = buf.capacity();
+        buf.fill(7);
+        buf.resize(1, 0);
+        assert_eq!(buf.capacity(), capacity);
+        assert_eq!(buf[0], 7);
+        buf.resize(capacity, 9);
+        assert_eq!(buf[0], 7);
+        assert!(buf[1..].iter().all(|byte| *byte == 9));
     }
 
     #[test]

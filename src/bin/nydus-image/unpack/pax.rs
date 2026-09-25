@@ -16,7 +16,11 @@ use std::{
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::RafsInodeExt;
-use nydus_storage::{backend::BlobReader, device::BlobChunkInfo, utils::alloc_buf};
+use nydus_storage::{
+    backend::BlobReader,
+    device::BlobChunkInfo,
+    utils::{alloc_buf, AlignedBuf},
+};
 use nydus_utils::compress::{self, Algorithm};
 use tar::{EntryType, Header};
 
@@ -703,7 +707,7 @@ struct ChunkReader {
     readers: HashMap<u32, Arc<dyn BlobReader>>,
 
     chunks: IntoIter<Arc<dyn BlobChunkInfo>>,
-    chunk: Cursor<Vec<u8>>,
+    chunk: Cursor<AlignedBuf>,
 }
 
 impl ChunkReader {
@@ -716,7 +720,7 @@ impl ChunkReader {
             compressors,
             readers,
             chunks: chunks.into_iter(),
-            chunk: Cursor::new(Vec::new()),
+            chunk: Cursor::new(AlignedBuf::default()),
         }
     }
 
@@ -745,7 +749,7 @@ impl ChunkReader {
             .get(&chunk.blob_index())
             .expect("No valid compressor");
 
-        let mut data = vec![0u8; chunk.uncompressed_size() as usize];
+        let mut data = alloc_buf(chunk.uncompressed_size() as usize);
         compress::decompress(buf.as_mut_slice(), data.as_mut_slice(), compressor)
             .with_context(|| "fail to decompress")?;
 
