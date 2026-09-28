@@ -580,7 +580,6 @@ mod tests {
     ) {
         use nydus_format::blob::{
             BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
-            BlobMetadataDigester,
         };
         let (payload, plain_meta) = test_payload();
         let plain_id = write_minimal_full_blob(backend_dir, &payload, &plain_meta, true);
@@ -589,7 +588,6 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::None,
             vec![BlobMetadataChunkGroup::new(
                 group.compressed_size(),
                 group.chunk_count(),

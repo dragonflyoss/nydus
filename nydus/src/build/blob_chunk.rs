@@ -1344,7 +1344,6 @@ impl<W: Write> BlobWriter<W> {
             self.max_blocks_per_chunk_group(),
             self.chunk_group_min_size / EROFS_BLOCK_SIZE,
             self.compressor,
-            self.digester,
             self.blob_metadata_chunk_groups.clone(),
             self.members
                 .iter()
@@ -1833,7 +1832,7 @@ mod tests {
             let payload = if meta.is_plain(&group) {
                 encoded.to_vec()
             } else {
-                zstd::bulk::decompress(encoded, meta.uncompressed_size(&group) as usize).unwrap()
+                zstd::bulk::decompress(encoded, group.uncompressed_size() as usize).unwrap()
             };
             assert_eq!(crc32c(&payload), group.uncompressed_crc32());
             meta.for_each_decoded_chunk(group.index() as usize, &payload, &mut |offset, bytes| {
@@ -2011,7 +2010,7 @@ mod tests {
         let meta = writer.blob_metadata().unwrap();
         // 16 + 16 blocks for the full chunks, 4 + 1 for the pack.
         assert_eq!(meta.logical_block_count(), 2 * TEST_CHUNK_BLOCKS + 5);
-        assert_eq!(meta.compressed_end(), big.len() as u64 + 100);
+        assert_eq!(meta.compressed_size(), big.len() as u64 + 100);
     }
 
     #[test]
@@ -2071,7 +2070,7 @@ mod tests {
         other.finish().unwrap();
         let other_meta = other.blob_metadata().unwrap();
         // Group digests name the packs, so identical packs compare equal.
-        let (first, second) = (meta.digests(), other_meta.digests());
+        let (first, second) = (meta.chunk_group_digests(), other_meta.chunk_group_digests());
         assert_ne!(first[0], second[0]);
         assert_eq!(&first[1..], &second[1..]);
 
@@ -2484,7 +2483,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                meta.digest(group.index() as usize).unwrap(),
+                meta.chunk_group_digest(group.index() as usize).unwrap(),
                 BlobMetadataChunkGroupDigest::from_chunk_digests(&members).unwrap()
             );
         }
@@ -2512,9 +2511,9 @@ mod tests {
         writer.write_blob_metadata(&meta_path).unwrap();
         let meta = BlobMetadata::from_path(&meta_path).unwrap();
         assert_eq!(meta.chunk_count(), 1);
-        assert_eq!(meta.digest_count(), 0);
+        assert_eq!(meta.chunk_group_digest_count(), 0);
         assert_eq!(meta.max_bytes_per_chunk_group(), 2 * TEST_CHUNK_SIZE);
-        assert_eq!(meta.compressed_end(), 5000);
+        assert_eq!(meta.compressed_size(), 5000);
         // The 5000-byte chunk spans two blocks, and the blob ends there.
         assert_eq!(meta.logical_size(), 2 * EROFS_BLOCK_SIZE as u64);
         assert_eq!(meta.bytes_per_chunk_group_index(), TEST_GROUP_MIN_SIZE);

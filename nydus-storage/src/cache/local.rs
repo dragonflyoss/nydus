@@ -542,7 +542,7 @@ impl LocalBlobCache {
         let payload: &[u8] = if self.blob_metadata.is_plain(group) {
             &encoded[start..end]
         } else {
-            let out = &mut decoded[..self.blob_metadata.uncompressed_size(group) as usize];
+            let out = &mut decoded[..u64::from(group.uncompressed_size()) as usize];
             super::decode_chunk_group_into(
                 self.blob_metadata.compressor(),
                 &encoded[start..end],
@@ -1283,7 +1283,7 @@ mod tests {
         super::super::set_fetch_size(0);
         let backend_dir = tempdir().unwrap();
         let (data, meta, groups, _) = groups_blob();
-        let mut digests = meta.digests().to_vec();
+        let mut digests = meta.chunk_group_digests().to_vec();
         digests[1] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0u8; 32]);
         let members: Vec<_> = (0..meta.chunk_count())
             .map(|index| {
@@ -1308,16 +1308,8 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        let meta = BlobMetadata::new(
-            4,
-            1,
-            BlobMetadataCompressor::Zstd,
-            nydus_format::blob::BlobMetadataDigester::Blake3,
-            specs,
-            members,
-            digests,
-        )
-        .unwrap();
+        let meta =
+            BlobMetadata::new(4, 1, BlobMetadataCompressor::Zstd, specs, members, digests).unwrap();
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
 
         let cache_dir = tempdir().unwrap();
@@ -1756,7 +1748,6 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
-            nydus_format::blob::BlobMetadataDigester::None,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 4096,
                 1,

@@ -253,7 +253,7 @@ pub fn build_ondemand_blob(
         }
         if digester == BlobMetadataDigester::Blake3 {
             // A digester on every source means every group has one.
-            digests.extend(meta.digest(group.index() as usize));
+            digests.extend(meta.chunk_group_digest(group.index() as usize));
         }
     }
     let blocks_per_chunk_group_index = 1 << least_blocks.ilog2();
@@ -261,7 +261,6 @@ pub fn build_ondemand_blob(
         max_blocks_per_chunk_group,
         blocks_per_chunk_group_index,
         compressor,
-        digester,
         chunk_groups,
         members,
         digests,

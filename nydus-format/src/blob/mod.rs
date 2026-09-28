@@ -106,7 +106,7 @@ fn new_blob_footer(
         bootstrap_size,
         bootstrap_crc32,
         blob_metadata_offset,
-        blob_metadata.map_or(0, BlobMetadata::padded_size),
+        blob_metadata.map_or(0, BlobMetadata::size),
         (!compressed_bootstrap.is_empty()).then_some(bootstrap_compressed_size),
     )
 }

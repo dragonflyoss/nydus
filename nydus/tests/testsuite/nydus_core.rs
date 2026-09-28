@@ -670,18 +670,18 @@ fn core_reads_back_small_files_image() {
         .count();
     assert_eq!(small_chunks, 202);
     assert_eq!(
-        blob_metadata.digest_count(),
+        blob_metadata.chunk_group_digest_count(),
         blob_metadata.chunk_group_count()
     );
     let groups: Vec<_> = blob_metadata.chunk_groups().collect();
     assert!(groups.len() > 1);
     assert!(groups
         .iter()
-        .all(|group| blob_metadata.uncompressed_size(group) <= group.logical_size()));
+        .all(|group| u64::from(group.uncompressed_size()) <= group.logical_size()));
     assert!(groups
         .iter()
-        .any(|group| blob_metadata.uncompressed_size(group) < group.logical_size()));
-    assert!(blob_metadata.total_uncompressed_size() < blob_metadata.logical_size());
+        .any(|group| u64::from(group.uncompressed_size()) < group.logical_size()));
+    assert!(blob_metadata.uncompressed_size() < blob_metadata.logical_size());
 
     let core = NydusCore::new(&bootstrap, config).unwrap();
     for (name, expected) in &corpus {

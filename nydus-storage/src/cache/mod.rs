@@ -237,7 +237,7 @@ pub fn decode_chunk_group_from_window<'a>(
                 "blob meta chunk group range outside the fetched window",
             )
         })?;
-    let payload_len = usize::try_from(blob_metadata.uncompressed_size(group)).map_err(|_| {
+    let payload_len = usize::try_from(u64::from(group.uncompressed_size())).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "blob meta chunk group payload size exceeds usize",
@@ -433,7 +433,7 @@ pub fn validate_decoded_chunk_group(
     group: &BlobMetadataChunkGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
-    let expected = blob_metadata.uncompressed_size(group);
+    let expected = u64::from(group.uncompressed_size());
     if decoded.len() as u64 != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -459,11 +459,11 @@ pub fn validate_decoded_chunk_group(
             format!("cannot verify chunk groups digested with unsupported algorithm {algorithm}"),
         ));
     }
-    if blob_metadata.digest_count() == 0 {
+    if blob_metadata.chunk_group_digest_count() == 0 {
         return Ok(());
     }
     let expected = blob_metadata
-        .digest(group.index() as usize)
+        .chunk_group_digest(group.index() as usize)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk group digest missing"))?;
     // Members follow each other in the decoded payload; a lone chunk is the
     // whole payload.
@@ -542,7 +542,7 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 pub(crate) mod test_util {
     use nydus_format::blob::{
         BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
-        BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
+        BlobMetadataChunkLength, BlobMetadataCompressor,
     };
 
     /// Encode `groups` (each a list of chunks) with `compressor` into a data
@@ -600,11 +600,6 @@ pub(crate) mod test_util {
             max_bytes_per_chunk_group / nydus_format::erofs::EROFS_BLOCK_SIZE,
             1,
             compressor,
-            if digests {
-                BlobMetadataDigester::Blake3
-            } else {
-                BlobMetadataDigester::None
-            },
             specs,
             members,
             digest_table,
@@ -790,13 +785,12 @@ mod tests {
 
         // Same payload and crc, one wrong digest: the digest check fires and
         // is not a crc mismatch.
-        let mut digests: Vec<_> = metadata.digests().to_vec();
+        let mut digests: Vec<_> = metadata.chunk_group_digests().to_vec();
         digests[0] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0; 32]);
         let wrong = BlobMetadata::new(
             4,
             1,
             BlobMetadataCompressor::None,
-            nydus_format::blob::BlobMetadataDigester::Blake3,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 data.len() as u32,
                 2,
@@ -840,7 +834,7 @@ mod tests {
         let crc = crc32c::crc32c(&raw);
         raw[16..20].copy_from_slice(&crc.to_le_bytes());
         let unknown = BlobMetadata::from_bytes(raw).unwrap();
-        assert_eq!(unknown.digest_count(), 0);
+        assert_eq!(unknown.chunk_group_digest_count(), 0);
         let err = validate_decoded_chunk_group(&unknown, &group, &data).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
         assert!(err.to_string().contains("algorithm 9"), "{err}");
@@ -937,7 +931,6 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
-            nydus_format::blob::BlobMetadataDigester::None,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 EROFS_BLOCK_SIZE,
                 1,

@@ -588,7 +588,7 @@ pub(crate) fn assemble_ondemand_artifact(
     blob_metadata: &BlobMetadata,
 ) -> Result<(Vec<u8>, [u8; EROFS_BLOB_ID_SIZE], BlobFooter)> {
     let mut artifact = Vec::with_capacity(
-        usize::try_from(data.len() as u64 + blob_metadata.padded_size())
+        usize::try_from(data.len() as u64 + blob_metadata.size())
             .map_err(|err| Error::Overflow(format!("artifact exceeds usize: {err}")))?
             + BlobFooter::SIZE,
     );

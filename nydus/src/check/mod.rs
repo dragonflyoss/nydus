@@ -667,18 +667,17 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
         bytes_per_chunk_group_index: blob_metadata.bytes_per_chunk_group_index(),
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.logical_size(),
-        total_compressed_size: blob_metadata.compressed_end(),
-        total_payload_size: blob_metadata.total_uncompressed_size(),
+        total_compressed_size: blob_metadata.compressed_size(),
+        total_payload_size: blob_metadata.uncompressed_size(),
         chunk_count: blob_metadata.chunk_count(),
-        digest_count: blob_metadata.digest_count(),
-        redirect_count: blob_metadata.redirect_count(),
+        digest_count: blob_metadata.chunk_group_digest_count(),
+        redirect_count: blob_metadata.chunk_group_redirect_count(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::BlobMetadataDigester;
     use std::fs;
     use tempfile::tempdir;
 
@@ -755,7 +754,6 @@ mod tests {
             BlobMetadata::DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE,
             1,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
             Vec::new(),
             Vec::new(),
             Vec::new(),
