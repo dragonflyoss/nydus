@@ -81,15 +81,6 @@ pub(crate) fn clamped_range_end(offset: u64, len: u64, limit: u64) -> Result<Opt
     Ok(Some(end))
 }
 
-pub(crate) fn mapped_range_offset(mapped_offset: u64, size: u64, offset: u64) -> Option<u64> {
-    let end = mapped_offset.checked_add(size)?;
-    if offset >= mapped_offset && offset < end {
-        Some(offset - mapped_offset)
-    } else {
-        None
-    }
-}
-
 /// Accumulates the [`Extent`]s of one resolution pass.
 ///
 /// Owns the state the resolution loops share — the output vector, the

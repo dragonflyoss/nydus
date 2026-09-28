@@ -31,6 +31,7 @@ pub mod blob;
 pub mod entry;
 pub mod extent;
 pub mod flat;
+mod layout;
 pub mod reader;
 
 pub use blob::{BlobId, BlobInfo, Blobs};
@@ -49,10 +50,10 @@ use nydus_config::Config;
 use nydus_error::{Context, Error, Result};
 
 use entry::ImageFs;
-use extent::{clamped_range_end, mapped_range_offset, BlobRangeSpec, ExtentResolver};
+use extent::{BlobRangeSpec, ExtentResolver};
+use layout::{FlatLayout, Segment};
 use nydus_backend::build_backend;
 use nydus_config::PrefetchScope;
-use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
 
@@ -69,7 +70,7 @@ pub struct NydusCore {
     pub fs: ImageFs,
     bootstrap: Arc<File>,
     zero_file: Arc<File>,
-    flat_size: u64,
+    address_layout: FlatLayout,
     trace_recorder: Arc<TraceRecorder>,
     /// Stop flag of the detached background prefetch worker, raised on drop
     /// so the worker exits its retry/reschedule loop instead of holding the
@@ -163,25 +164,7 @@ impl NydusCore {
                 }
             }
         }
-        let flat_size = raw_blob_infos
-            .iter()
-            .try_fold(bootstrap_size, |size, info| {
-                let offset = info
-                    .mapped_blkaddr
-                    .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .ok_or_else(|| Error::Overflow("mapped blob offset overflow".to_string()))?;
-                let len = info
-                    .blocks
-                    .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .ok_or_else(|| Error::Overflow("blob size overflow".to_string()))?;
-                Ok::<u64, Error>(
-                    size.max(
-                        offset.checked_add(len).ok_or_else(|| {
-                            Error::Overflow("flat blob range overflow".to_string())
-                        })?,
-                    ),
-                )
-            })?;
+        let address_layout = FlatLayout::new(bootstrap_size, &raw_blob_infos)?;
         let index_by_blob_id = raw_blob_infos
             .iter()
             .map(|info| (BlobId::from(info.blob_id), info.blob_index))
@@ -233,7 +216,7 @@ impl NydusCore {
             fs: ImageFs::new(reader, zero_file.clone()),
             bootstrap: bootstrap_file,
             zero_file,
-            flat_size,
+            address_layout,
             trace_recorder,
             prefetch_stop,
         })
@@ -246,7 +229,7 @@ impl NydusCore {
 
     /// Return the size of the flattened device view.
     pub fn flat_size(&self) -> u64 {
-        self.flat_size
+        self.address_layout.size()
     }
 
     /// Return the core-owned `/dev/zero` fd used for zero-filled ranges.
@@ -265,6 +248,8 @@ impl NydusCore {
     /// downloading missing blob data. Bootstrap and gaps are returned when
     /// ready; cold blob cache ranges are omitted, so the result may be
     /// discontinuous.
+    /// Only blobs intersecting the requested range are opened. Opening a
+    /// blob may load its metadata, but does not fetch missing payload data.
     pub fn probe_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<Extent>> {
         self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
@@ -280,98 +265,29 @@ impl NydusCore {
     }
 
     fn resolve_flat_ranges(&self, offset: u64, len: u64, mode: ResolveMode) -> Result<Vec<Extent>> {
-        let Some(end) = clamped_range_end(offset, len, self.flat_size)? else {
-            return Ok(Vec::new());
-        };
-
+        // Device geometry comes from the bootstrap. Resolving one range must
+        // not prepare caches for unrelated devices, even on the first request.
+        let segments = self.address_layout.segments(offset, len)?;
         let mut resolver = ExtentResolver::new(&self.blobs.reader, self.zero_file.as_raw_fd());
-        let mut pos = offset;
-        let bootstrap_end = end.min(self.bootstrap_size);
-        if pos < bootstrap_end {
-            resolver.push(Extent::new(
-                self.bootstrap.as_raw_fd(),
-                pos,
-                bootstrap_end - pos,
-                pos,
-            ));
-            pos = bootstrap_end;
-        }
-        if pos >= end {
-            return Ok(resolver.finish());
-        }
-
-        let blobs = self
-            .blobs
-            .flat_layout()
-            .context("failed to describe blob device layout")?;
-
-        enum Piece {
-            Ready(Extent),
-            Blob(BlobRangeSpec),
-        }
-        let mut pieces = Vec::new();
-        while pos < end {
-            // `blobs` is sorted by `mapped_offset` and blob ranges never
-            // overlap (device-table layout), so the only candidate containing
-            // `pos` is the last blob starting at or before it — found with a
-            // binary search instead of a linear scan (this runs per I/O).
-            let after = blobs.partition_point(|blob| blob.mapped_offset <= pos);
-            let covering = after
-                .checked_sub(1)
-                .map(|index| &blobs[index])
-                .filter(|blob| {
-                    mapped_range_offset(blob.mapped_offset, blob.cache_size, pos).is_some()
-                });
-
-            if let Some(blob) = covering {
-                let blob_end = blob
-                    .mapped_offset
-                    .checked_add(blob.cache_size)
-                    .ok_or_else(|| Error::Overflow("blob device range overflow".to_string()))?;
-                let seg_end = end.min(blob_end);
-                let blob_offset = pos - blob.mapped_offset;
-                pieces.push(Piece::Blob(BlobRangeSpec {
-                    index: blob.index,
-                    offset: blob_offset,
-                    len: seg_end - pos,
-                    source_offset: pos,
-                }));
-                pos = seg_end;
-            } else {
-                // `blobs[after]` is the first blob starting after `pos`, so it
-                // bounds the hole (or the view ends first).
-                let next_blob = blobs
-                    .get(after)
-                    .map(|blob| blob.mapped_offset)
-                    .unwrap_or(end);
-                let hole_end = end.min(next_blob);
-                if hole_end <= pos {
-                    break;
-                }
-                pieces.push(Piece::Ready(Extent::new(
-                    self.zero_file.as_raw_fd(),
-                    0,
-                    hole_end - pos,
-                    pos,
-                )));
-                pos = hole_end;
-            }
-        }
-
         if mode == ResolveMode::Fetch {
-            let specs: Vec<BlobRangeSpec> = pieces
-                .iter()
-                .filter_map(|piece| match piece {
-                    Piece::Blob(spec) => Some(*spec),
-                    Piece::Ready(_) => None,
+            let specs: Vec<BlobRangeSpec> = segments
+                .clone()
+                .filter_map(|segment| match segment {
+                    Segment::Blob { range } => Some(range),
+                    _ => None,
                 })
                 .collect();
             resolver.fetch_blobs(&specs)?;
         }
-        for piece in pieces {
-            match piece {
-                Piece::Ready(extent) => resolver.push(extent),
-                Piece::Blob(spec) => resolver.push_blob(spec, mode)?,
+        for segment in segments {
+            match segment {
+                Segment::Bootstrap { offset, len } => {
+                    resolver.push(Extent::new(self.bootstrap.as_raw_fd(), offset, len, offset))
+                }
+                Segment::Zero { offset, len } => {
+                    resolver.push(Extent::new(self.zero_file.as_raw_fd(), 0, len, offset))
+                }
+                Segment::Blob { range } => resolver.push_blob(range, mode)?,
             }
         }
         Ok(resolver.finish())

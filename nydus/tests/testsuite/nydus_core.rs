@@ -331,6 +331,26 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
         .is_err());
 }
 
+#[test]
+fn flat_geometry_does_not_prepare_caches_for_bootstrap_or_holes() {
+    let dir = tempdir().unwrap();
+    let (bootstrap, config, blob_id, _) = build_flattened_test_image(dir.path());
+    fs::remove_file(dir.path().join("blobs").join(hex_string(&blob_id))).unwrap();
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let start = FLATTENED_BLOB_ALIGNMENT;
+    assert!(start > core.bootstrap_size);
+    let ranges = core.probe_flat_ranges(0, start).unwrap();
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0].fd, core.bootstrap().as_raw_fd());
+    assert_eq!(ranges[1].fd, core.zero_fd());
+    assert_eq!(ranges[1].source_offset, core.bootstrap_size);
+    assert_eq!(ranges[1].len, start - core.bootstrap_size);
+    // Actual blob I/O still surfaces the unavailable source; the explicit
+    // public preparation API also keeps its original eager behavior.
+    assert!(core.probe_flat_ranges(start, 4096).is_err());
+    assert!(core.blobs.flat_layout().is_err());
+}
+
 fn build_native_layer(store: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
     use nydus::build::{build_image, BuildImageOptions, NativeLayout};
 
@@ -354,6 +374,55 @@ fn build_native_layer(store: &Path, name: &str, files: &[(&str, &[u8])]) -> Path
     let path = store.join(hex_string(&image.full_blob_digest));
     fs::rename(staging, &path).unwrap();
     path
+}
+
+#[test]
+fn flat_ranges_leave_unrelated_blobs_unopened() {
+    use nydus::build::merge::{merge_sources_to_bootstrap_bytes, WhiteoutSpec};
+
+    let dir = tempdir().unwrap();
+    let store = dir.path().join("store");
+    fs::create_dir(&store).unwrap();
+    let lower = build_native_layer(&store, "lower", &[("a", &vec![0xa1u8; 9000])]);
+    let upper = build_native_layer(&store, "upper", &[("b", &vec![0xb2u8; 5000])]);
+    let bootstrap = dir.path().join("image.boot");
+    fs::write(
+        &bootstrap,
+        merge_sources_to_bootstrap_bytes(&[lower.clone(), upper.clone()], WhiteoutSpec::Oci)
+            .unwrap(),
+    )
+    .unwrap();
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let infos = reader.blob_infos().unwrap();
+    let config = Config::from_yaml(&format!(
+        "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
+        store.display(), dir.path().join("cache").display(),
+    ))
+    .unwrap();
+    // A partial request must work even if an unrelated blob is unavailable.
+    // Keep a cache dir so construction itself does not validate raw devices.
+    fs::remove_file(&upper).unwrap();
+    for fetch_first in [false, true] {
+        let core = NydusCore::new(&bootstrap, config.clone()).unwrap();
+        let offset = infos[0].mapped_blkaddr * EROFS_BLOCK_SIZE as u64;
+        let len = infos[0].blocks * EROFS_BLOCK_SIZE as u64;
+        let ranges = if fetch_first {
+            core.fetch_flat_ranges(offset, len).unwrap()
+        } else {
+            core.probe_flat_ranges(offset, len).unwrap()
+        };
+        let mut actual = vec![0; len as usize];
+        nydus_core::extent::MmapCache::default()
+            .copy_ranges(&ranges, offset, core.zero_fd(), &mut actual)
+            .unwrap();
+        assert_eq!(actual, fs::read(&lower).unwrap()[..len as usize]);
+        assert_eq!(ranges, core.probe_flat_ranges(offset, len).unwrap());
+        // Errors still surface when a request reaches the missing blob;
+        // explicit whole-image preparation retains its eager behavior.
+        let missing = infos[1].mapped_blkaddr * EROFS_BLOCK_SIZE as u64;
+        assert!(core.fetch_flat_ranges(missing, 4096).is_err());
+        assert!(core.blobs.flat_layout().is_err());
+    }
 }
 
 #[test]
