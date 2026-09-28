@@ -3050,7 +3050,6 @@ dependencies = [
  "blake3",
  "crc32c",
  "libc",
- "memmap2",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",

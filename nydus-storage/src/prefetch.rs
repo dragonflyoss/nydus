@@ -579,16 +579,17 @@ mod tests {
         [[u8; SHA256_DIGEST_SIZE]; 2],
     ) {
         use nydus_format::blob::{
-            BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataDigester,
+            BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
+            BlobMetadataDigester,
         };
         let (payload, plain_meta) = test_payload();
         let plain_id = write_minimal_full_blob(backend_dir, &payload, &plain_meta, true);
         let group = plain_meta.chunk_group(0).unwrap();
         let redirect_meta = BlobMetadata::new(
+            1,
+            1,
             BlobMetadataCompressor::None,
             BlobMetadataDigester::None,
-            4096,
-            4096,
             vec![BlobMetadataChunkGroup::new(
                 group.compressed_size(),
                 group.chunk_count(),
@@ -597,7 +598,7 @@ mod tests {
                 Some(BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()),
             )
             .unwrap()],
-            vec![group.uncompressed_size()],
+            vec![BlobMetadataChunkLength::new(group.uncompressed_size())],
             Vec::new(),
         )
         .unwrap();

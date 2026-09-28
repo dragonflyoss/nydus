@@ -2240,7 +2240,7 @@ When mounting with `--blob`:
 2. Map the embedded bootstrap region as the primary EROFS image.
 3. Read device slots and resolve the full blob through the local backend.
 4. Use a temporary local cache for the mount lifetime. The cache downloads the
-	standalone blob meta into that cache, verifies its header crc32c, mmaps it for
+	standalone blob meta into that cache, verifies its header crc32c, reads it for
 	chunk group lookup, fetches encoded chunk groups from the data region, and
 	validates each decoded group.
 
@@ -2355,7 +2355,7 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
 ^ byte offset = the group's uncompressed_block_offset * 4096; written only after
   decode + CRC32C (+ digest validation when enabled) succeeds
 
-<hex>.blob.meta — verified blob meta copy (mmap'd for group/chunk lookup)
+<hex>.blob.meta — verified blob meta copy (read into memory for group/chunk lookup)
 Header            CRC32C, counts and address geometry
 ChunkGroupTable        data/block/chunk starts, payload sizes and CRC32C
 ChunkLengthTable        u32 length for every stored chunk

@@ -1115,7 +1115,7 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
         )?;
 
-        BlobMetadata::from_bytes(&blob_metadata_bytes)
+        BlobMetadata::from_bytes(blob_metadata_bytes)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))
     }
 

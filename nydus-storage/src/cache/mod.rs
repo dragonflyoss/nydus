@@ -474,7 +474,9 @@ pub fn validate_decoded_chunk_group(
         members.push(*blake3::hash(&decoded[at..at + len]).as_bytes());
         at += len;
     }
-    if BlobMetadataChunkGroupDigest::from_chunk_digests(&members) != expected {
+    let actual = BlobMetadataChunkGroupDigest::from_chunk_digests(&members)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    if actual != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("blob chunk group {} digest mismatch", group.index()),
@@ -539,8 +541,8 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 pub(crate) mod test_util {
     use nydus_format::blob::{
-        BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
-        BlobMetadataDigester,
+        BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
+        BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
     };
 
     /// Encode `groups` (each a list of chunks) with `compressor` into a data
@@ -569,7 +571,11 @@ pub(crate) mod test_util {
             .filter(|encoded| encoded.len() < payload.len());
             let stored = encoded.as_deref().unwrap_or(&payload);
             data.extend_from_slice(stored);
-            members.extend(group.iter().map(|chunk| chunk.len() as u32));
+            members.extend(
+                group
+                    .iter()
+                    .map(|chunk| BlobMetadataChunkLength::new(chunk.len() as u32)),
+            );
             let chunk_count = group.len() as u32;
             specs.push(
                 BlobMetadataChunkGroup::new(
@@ -585,20 +591,20 @@ pub(crate) mod test_util {
                 .iter()
                 .map(|chunk| *blake3::hash(chunk).as_bytes())
                 .collect();
-            digest_table.push(BlobMetadataChunkGroupDigest::from_chunk_digests(&digests));
+            digest_table.push(BlobMetadataChunkGroupDigest::from_chunk_digests(&digests).unwrap());
         }
         if !digests {
             digest_table.clear();
         }
         let meta = BlobMetadata::new(
+            max_bytes_per_chunk_group / nydus_format::erofs::EROFS_BLOCK_SIZE,
+            1,
             compressor,
             if digests {
                 BlobMetadataDigester::Blake3
             } else {
                 BlobMetadataDigester::None
             },
-            max_bytes_per_chunk_group,
-            4096,
             specs,
             members,
             digest_table,
@@ -787,10 +793,10 @@ mod tests {
         let mut digests: Vec<_> = metadata.digests().to_vec();
         digests[0] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0; 32]);
         let wrong = BlobMetadata::new(
+            4,
+            1,
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::Blake3,
-            16384,
-            4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 data.len() as u32,
                 2,
@@ -799,7 +805,10 @@ mod tests {
                 None,
             )
             .unwrap()],
-            vec![100, 5000],
+            vec![
+                nydus_format::blob::BlobMetadataChunkLength::new(100),
+                nydus_format::blob::BlobMetadataChunkLength::new(5000),
+            ],
             digests,
         )
         .unwrap();
@@ -830,7 +839,7 @@ mod tests {
         raw[16..20].fill(0);
         let crc = crc32c::crc32c(&raw);
         raw[16..20].copy_from_slice(&crc.to_le_bytes());
-        let unknown = BlobMetadata::from_bytes(&raw).unwrap();
+        let unknown = BlobMetadata::from_bytes(raw).unwrap();
         assert_eq!(unknown.digest_count(), 0);
         let err = validate_decoded_chunk_group(&unknown, &group, &data).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
@@ -925,10 +934,10 @@ mod tests {
         let payload = vec![0u8; EROFS_BLOCK_SIZE as usize];
         // A zeroed block has crc32c != 0, so a group declaring crc 0 mismatches.
         let metadata = BlobMetadata::new(
+            1,
+            1,
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
-            4096,
-            4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 EROFS_BLOCK_SIZE,
                 1,
@@ -937,7 +946,9 @@ mod tests {
                 None,
             )
             .unwrap()],
-            vec![EROFS_BLOCK_SIZE],
+            vec![nydus_format::blob::BlobMetadataChunkLength::new(
+                EROFS_BLOCK_SIZE,
+            )],
             vec![],
         )
         .unwrap();
