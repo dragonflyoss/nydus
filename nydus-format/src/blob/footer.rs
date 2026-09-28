@@ -392,8 +392,8 @@ impl BlobFooter {
     }
 
     /// Whether `data` starts with the footer magic.
-    pub fn has_magic(data: &[u8]) -> bool {
-        data.starts_with(&Self::MAGIC)
+    pub fn has_magic(bytes: &[u8]) -> bool {
+        bytes.starts_with(&Self::MAGIC)
     }
 
     /// Write the footer's on-disk bytes to `writer`.

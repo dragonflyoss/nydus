@@ -27,7 +27,7 @@ use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
     BlobFooter, BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect,
-    BlobMetadataCompressor, BlobMetadataDigester,
+    BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
@@ -127,12 +127,13 @@ pub fn build_ondemand_blob(
             .or_default()
             .insert(reference.chunk_group_index);
     }
-    let mut max_bytes_per_chunk_group = 0;
+    let mut max_blocks_per_chunk_group = 0;
     let mut compressor = BlobMetadataCompressor::None;
     let mut digester = BlobMetadataDigester::Blake3;
     for (blob_index, cache) in &sources {
         let meta = cache.blob_metadata();
-        max_bytes_per_chunk_group = max_bytes_per_chunk_group.max(meta.max_bytes_per_chunk_group());
+        max_blocks_per_chunk_group =
+            max_blocks_per_chunk_group.max(meta.max_blocks_per_chunk_group());
         match (compressor, meta.compressor()) {
             (_, BlobMetadataCompressor::None) => {}
             (BlobMetadataCompressor::None, source) => compressor = source,
@@ -147,7 +148,7 @@ pub fn build_ondemand_blob(
             digester = BlobMetadataDigester::None;
         }
     }
-    if max_bytes_per_chunk_group == 0 {
+    if max_blocks_per_chunk_group == 0 {
         return Err(Error::InvalidParameter(
             "the trace names no chunk groups".to_string(),
         ));
@@ -223,7 +224,7 @@ pub fn build_ondemand_blob(
     let mut chunk_groups = Vec::with_capacity(patterns.len());
     let mut members = Vec::new();
     let mut digests = Vec::new();
-    let mut least_blocks = max_bytes_per_chunk_group / nydus_format::erofs::EROFS_BLOCK_SIZE;
+    let mut least_blocks = max_blocks_per_chunk_group;
     for reference in patterns {
         let meta = sources[&reference.blob_index].blob_metadata();
         let group = meta
@@ -245,21 +246,22 @@ pub fn build_ondemand_blob(
             )?),
         )?);
         for member in group.chunk_range() {
-            members.push(meta.chunk_length(member).ok_or_else(|| {
+            let length = meta.chunk_length(member).ok_or_else(|| {
                 Error::InvalidImage(format!("chunk group member {member} missing"))
-            })?);
+            })?;
+            members.push(BlobMetadataChunkLength::new(length));
         }
         if digester == BlobMetadataDigester::Blake3 {
             // A digester on every source means every group has one.
             digests.extend(meta.digest(group.index() as usize));
         }
     }
-    let bytes_per_chunk_group_index = nydus_format::erofs::EROFS_BLOCK_SIZE << least_blocks.ilog2();
+    let blocks_per_chunk_group_index = 1 << least_blocks.ilog2();
     let blob_metadata = BlobMetadata::new(
+        max_blocks_per_chunk_group,
+        blocks_per_chunk_group_index,
         compressor,
         digester,
-        max_bytes_per_chunk_group,
-        bytes_per_chunk_group_index,
         chunk_groups,
         members,
         digests,

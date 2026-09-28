@@ -206,7 +206,7 @@ impl BlobBackend for Local {
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let source = self.resolved_source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&source)?;
-        BlobMetadata::from_bytes(&data).map_err(io::Error::other)
+        BlobMetadata::from_bytes(data).map_err(io::Error::other)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
@@ -287,22 +287,22 @@ mod tests {
     use super::*;
     use crate::ReadKind;
     use nydus_format::blob::{
-        BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
-        BlobMetadataDigester,
+        BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataChunkLength,
+        BlobMetadataCompressor, BlobMetadataDigester,
     };
     use nydus_format::utils::sha256_bytes;
     use tempfile::tempdir;
 
     fn blob_metadata(payload: &[u8]) -> BlobMetadata {
         BlobMetadata::new(
+            1,
+            1,
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
-            4096,
-            4096,
             vec![
                 BlobMetadataChunkGroup::new(4096, 1, 4096, crc32c::crc32c(payload), None).unwrap(),
             ],
-            vec![4096],
+            vec![BlobMetadataChunkLength::new(4096)],
             vec![BlobMetadataChunkGroupDigest::new(
                 *blake3::hash(payload).as_bytes(),
             )],

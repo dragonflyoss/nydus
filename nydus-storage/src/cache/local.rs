@@ -1285,8 +1285,10 @@ mod tests {
         let (data, meta, groups, _) = groups_blob();
         let mut digests = meta.digests().to_vec();
         digests[1] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0u8; 32]);
-        let members: Vec<u32> = (0..meta.chunk_count())
-            .map(|index| meta.chunk_length(index).unwrap())
+        let members: Vec<_> = (0..meta.chunk_count())
+            .map(|index| {
+                nydus_format::blob::BlobMetadataChunkLength::new(meta.chunk_length(index).unwrap())
+            })
             .collect();
         let specs: Vec<_> = meta
             .chunk_groups()
@@ -1307,10 +1309,10 @@ mod tests {
             })
             .collect();
         let meta = BlobMetadata::new(
+            4,
+            1,
             BlobMetadataCompressor::Zstd,
             nydus_format::blob::BlobMetadataDigester::Blake3,
-            16384,
-            4096,
             specs,
             members,
             digests,
@@ -1751,10 +1753,10 @@ mod tests {
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xacu8; 4096];
         let meta = BlobMetadata::new(
+            1,
+            1,
             BlobMetadataCompressor::None,
             nydus_format::blob::BlobMetadataDigester::None,
-            4096,
-            4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 4096,
                 1,
@@ -1763,7 +1765,7 @@ mod tests {
                 None,
             )
             .unwrap()],
-            vec![4096],
+            vec![nydus_format::blob::BlobMetadataChunkLength::new(4096)],
             vec![],
         )
         .unwrap();

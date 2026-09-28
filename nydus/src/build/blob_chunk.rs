@@ -1,8 +1,8 @@
 use crc32c::crc32c;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
-    BlobMetadataDigester,
+    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataChunkLength,
+    BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::{
     ErofsChunkAddr, ZAlgorithm, ZComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
@@ -1324,12 +1324,12 @@ impl<W: Write> BlobWriter<W> {
         &self.blob_metadata_chunk_groups
     }
 
-    /// The most bytes a group spans: a lone chunk is at most a file chunk, a
-    /// pack at most `pack_span_blocks`.
-    fn max_bytes_per_chunk_group(&self) -> u32 {
-        u32::try_from(self.pack_span_blocks * u64::from(EROFS_BLOCK_SIZE))
+    /// The most blocks a group spans: a lone chunk is at most a file chunk,
+    /// a pack at most `pack_span_blocks`.
+    fn max_blocks_per_chunk_group(&self) -> u32 {
+        u32::try_from(self.pack_span_blocks)
             .expect("the pack span is bounded by MAX_CHUNK_GROUP_MIN_SIZE")
-            .max(self.file_chunk_size)
+            .max(self.file_chunk_size / EROFS_BLOCK_SIZE)
     }
 
     /// The blob meta describing everything written; call after
@@ -1341,12 +1341,16 @@ impl<W: Write> BlobWriter<W> {
             ));
         }
         Ok(BlobMetadata::new(
+            self.max_blocks_per_chunk_group(),
+            self.chunk_group_min_size / EROFS_BLOCK_SIZE,
             self.compressor,
             self.digester,
-            self.max_bytes_per_chunk_group(),
-            self.chunk_group_min_size,
             self.blob_metadata_chunk_groups.clone(),
-            self.members.clone(),
+            self.members
+                .iter()
+                .copied()
+                .map(BlobMetadataChunkLength::new)
+                .collect(),
             self.digests.clone(),
         )?)
     }
@@ -1642,7 +1646,7 @@ impl<W: Write> BlobWriter<W> {
             let members: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> =
                 bin.digests.iter().map(|digest| digest.get()).collect();
             self.digests
-                .push(BlobMetadataChunkGroupDigest::from_chunk_digests(&members));
+                .push(BlobMetadataChunkGroupDigest::from_chunk_digests(&members)?);
         }
         self.next_group = group + 1;
         self.next_blkaddr = end_block;
@@ -2002,6 +2006,7 @@ mod tests {
                 *blake3::hash(&tail).as_bytes(),
                 *blake3::hash(&small).as_bytes()
             ])
+            .unwrap()
         );
         let meta = writer.blob_metadata().unwrap();
         // 16 + 16 blocks for the full chunks, 4 + 1 for the pack.
@@ -2480,7 +2485,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 meta.digest(group.index() as usize).unwrap(),
-                BlobMetadataChunkGroupDigest::from_chunk_digests(&members)
+                BlobMetadataChunkGroupDigest::from_chunk_digests(&members).unwrap()
             );
         }
     }

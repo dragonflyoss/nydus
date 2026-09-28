@@ -660,7 +660,7 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 }
 
 fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> {
-    let blob_metadata = BlobMetadata::from_bytes(data)?;
+    let blob_metadata = BlobMetadata::from_bytes(data.to_vec())?;
     Ok(BlobMetadataSummary {
         chunk_group_count: blob_metadata.chunk_group_count(),
         max_bytes_per_chunk_group: blob_metadata.max_bytes_per_chunk_group(),
@@ -752,10 +752,10 @@ mod tests {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let data_digest = sha256_bytes(&data);
         let blob_metadata = BlobMetadata::new(
+            BlobMetadata::DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE,
+            1,
             BlobMetadataCompressor::None,
             BlobMetadataDigester::Blake3,
-            BlobMetadata::DEFAULT_CHUNK_SIZE,
-            EROFS_BLOCK_SIZE,
             Vec::new(),
             Vec::new(),
             Vec::new(),
