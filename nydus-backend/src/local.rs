@@ -300,7 +300,7 @@ mod tests {
             4096,
             4096,
             vec![
-                BlobMetadataChunkGroup::new(4096, 4096, 1, crc32c::crc32c(payload), None).unwrap(),
+                BlobMetadataChunkGroup::new(4096, 1, 4096, crc32c::crc32c(payload), None).unwrap(),
             ],
             vec![4096],
             vec![BlobMetadataChunkGroupDigest::new(

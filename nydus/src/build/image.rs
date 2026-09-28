@@ -94,7 +94,7 @@ pub(crate) fn fill_image_head(
     let block_size = EROFS_BLOCK_SIZE as usize;
     let (devslot_offset, meta_blkaddr) = head_layout(device_slots.len(), z_erofs)?;
     let meta_blocks = metadata_len.div_ceil(block_size);
-    let total_blocks = (meta_blkaddr as u64)
+    let total_block_count = (meta_blkaddr as u64)
         .checked_add(meta_blocks as u64)
         .ok_or_else(|| Error::Overflow("bootstrap block count overflow".to_string()))?
         .max(min_total_blocks);
@@ -129,7 +129,7 @@ pub(crate) fn fill_image_head(
         root_nid,
         total_inodes,
         epoch,
-        total_blocks,
+        total_block_count,
         meta_blkaddr,
         device_slots.len() as u16,
         devt_slotoff,

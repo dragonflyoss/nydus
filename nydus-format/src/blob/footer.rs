@@ -439,7 +439,7 @@ impl BlobFooter {
 
     /// Size of the bootstrap region in 4KiB blocks, zero for an ondemand
     /// redirect blob.
-    pub fn bootstrap_blocks(&self) -> u64 {
+    pub fn bootstrap_block_count(&self) -> u64 {
         self.bootstrap_size / EROFS_BLOCK_SIZE as u64
     }
 
@@ -470,7 +470,7 @@ impl BlobFooter {
 
     /// Size of the blob meta region in 4KiB blocks; zero for a raw device
     /// blob (see [`Self::is_raw_device`]).
-    pub fn blob_metadata_blocks(&self) -> u64 {
+    pub fn blob_metadata_block_count(&self) -> u64 {
         self.blob_metadata_size / EROFS_BLOCK_SIZE as u64
     }
 
@@ -527,10 +527,10 @@ mod tests {
         assert_eq!(footer.compressed_data_offset(), 0);
         assert_eq!(footer.compressed_data_size(), 17);
         assert_eq!(footer.bootstrap_offset(), 4096);
-        assert_eq!(footer.bootstrap_blocks(), 1);
+        assert_eq!(footer.bootstrap_block_count(), 1);
         assert_eq!(footer.bootstrap_size(), 4096);
         assert_eq!(footer.blob_metadata_offset(), 8192);
-        assert_eq!(footer.blob_metadata_blocks(), 1);
+        assert_eq!(footer.blob_metadata_block_count(), 1);
         assert_eq!(footer.blob_metadata_size(), 4096);
         assert_eq!(footer.offset().unwrap(), 12288);
     }

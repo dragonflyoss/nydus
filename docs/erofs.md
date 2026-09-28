@@ -258,7 +258,7 @@ Sources: [build/mod.rs](../nydus/src/build/mod.rs),
   back, each spanning exactly its chunks' blocks, so the device is no larger
   than the block-padded data (what a guest mapping it as pmem pays
   `struct page` for). Version-1 blob metadata has a ChunkGroupIndexTable
-  (four bytes per index span, 2 MiB by default). One direct lookup and
+  (four bytes per index entry, 2 MiB by default). One direct lookup and
   at most one forward correction name the group; two adjacent ChunkGroupTable
   entries give its backend range. There is no bitmap or binary search;
   there is no per-read scan and no runtime index to build at open. A chunk

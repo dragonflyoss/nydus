@@ -520,7 +520,7 @@ fn finish_image<W: Write>(
     let epoch = choose_epoch(&inodes);
 
     let uuid_bytes = [0u8; 16];
-    let blob_blocks = blob_writer.total_blocks();
+    let blob_blocks = blob_writer.total_block_count();
     let blob_id = match options.blob_id {
         Some(id) => id,
         None => blob_writer.data_digest().ok_or_else(|| {
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(footer, layer.blob_footer);
         // A native layer carries no blob meta: the device is read as-is.
         assert!(footer.is_raw_device());
-        assert_eq!(footer.blob_metadata_blocks(), 0);
+        assert_eq!(footer.blob_metadata_block_count(), 0);
         assert!(layer.blob_metadata.is_none());
         assert_eq!(
             footer.compressed_data_size() % EROFS_BLOCK_SIZE as u64,

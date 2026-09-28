@@ -167,7 +167,7 @@ impl LocalBlobCache {
             .create(true)
             .truncate(false)
             .open(&cache_data_path)?;
-        data_file.set_len(blob_metadata.uncompressed_size())?;
+        data_file.set_len(blob_metadata.logical_size())?;
         drop(data_file);
 
         let chunk_group_map =
@@ -259,7 +259,7 @@ impl LocalBlobCache {
                 .truncate(false)
                 .open(&self.cache_data_path)?,
         );
-        file.set_len(self.blob_metadata.uncompressed_size())?;
+        file.set_len(self.blob_metadata.logical_size())?;
         nydus_telemetry::metrics::inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
@@ -515,12 +515,12 @@ impl LocalBlobCache {
             .map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize")
         })?;
-        let decoded_len = self.blob_metadata.group_span() as usize;
+        let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
         let ctx = ReadContext::chunk_group(
             kind,
-            head.uncompressed_offset(),
-            tail.uncompressed_range().end - head.uncompressed_offset(),
+            head.logical_offset(),
+            tail.logical_range().end - head.logical_offset(),
         );
         self.backend
             .read_range_into(&self.blob_id, head.compressed_offset(), encoded, ctx)?;
@@ -542,7 +542,7 @@ impl LocalBlobCache {
         let payload: &[u8] = if self.blob_metadata.is_plain(group) {
             &encoded[start..end]
         } else {
-            let out = &mut decoded[..self.blob_metadata.payload_size(group) as usize];
+            let out = &mut decoded[..self.blob_metadata.uncompressed_size(group) as usize];
             super::decode_chunk_group_into(
                 self.blob_metadata.compressor(),
                 &encoded[start..end],
@@ -693,7 +693,7 @@ impl LocalBlobCache {
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
-        if end > self.blob_metadata.uncompressed_size() {
+        if end > self.blob_metadata.logical_size() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "blob read range beyond the blob",
@@ -840,7 +840,7 @@ impl BlobCache for LocalBlobCache {
             if !self.chunk_group_ready(index)? {
                 continue;
             }
-            let slot = self.chunk_group(index).uncompressed_range();
+            let slot = self.chunk_group(index).logical_range();
             let range = slot.start.max(offset)..slot.end.min(end);
             match ready.last_mut() {
                 Some(run) if run.end == range.start => run.end = range.end,
@@ -1286,7 +1286,7 @@ mod tests {
         let mut digests = meta.digests().to_vec();
         digests[1] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0u8; 32]);
         let members: Vec<u32> = (0..meta.chunk_count())
-            .map(|index| meta.chunk_len(index).unwrap())
+            .map(|index| meta.chunk_length(index).unwrap())
             .collect();
         let specs: Vec<_> = meta
             .chunk_groups()
@@ -1294,12 +1294,12 @@ mod tests {
             .map(|(index, group)| {
                 nydus_format::blob::BlobMetadataChunkGroup::new(
                     group.compressed_size(),
-                    group.payload_size(),
                     group.chunk_count(),
+                    group.uncompressed_size(),
                     if index == 2 {
-                        group.payload_crc32() ^ 1
+                        group.uncompressed_crc32() ^ 1
                     } else {
-                        group.payload_crc32()
+                        group.uncompressed_crc32()
                     },
                     None,
                 )
@@ -1757,8 +1757,8 @@ mod tests {
             4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 4096,
-                4096,
                 1,
+                4096,
                 crc32c::crc32c(&payload).wrapping_add(1),
                 None,
             )

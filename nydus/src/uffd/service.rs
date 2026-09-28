@@ -222,7 +222,7 @@ impl UffdConn {
             }
             Request::Stat => {
                 self.proto
-                    .send_stat(self.core.device_size(), self.core.block_size(), 0)
+                    .send_stat(self.core.device_size(), self.core.logical_size(), 0)
                     .await?;
             }
             Request::Fetch(request) => {

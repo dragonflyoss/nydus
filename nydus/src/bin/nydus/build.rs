@@ -615,10 +615,10 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         full_blob_digest: String,
         #[tabled(rename = "DATA LAYOUT")]
         data_layout: String,
-        #[tabled(rename = "GROUP SPAN")]
-        group_span: String,
-        #[tabled(rename = "INDEX SPAN")]
-        index_span: String,
+        #[tabled(rename = "MAX BYTES PER CHUNK GROUP")]
+        max_bytes_per_chunk_group: String,
+        #[tabled(rename = "BYTES PER CHUNK GROUP INDEX")]
+        bytes_per_chunk_group_index: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COUNT")]
@@ -640,11 +640,11 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         #[tabled(rename = "BOOTSTRAP OFFSET")]
         bootstrap_offset: String,
         #[tabled(rename = "BOOTSTRAP BLOCKS")]
-        bootstrap_blocks: String,
+        bootstrap_block_count: String,
         #[tabled(rename = "BLOB METADATA OFFSET")]
         blob_metadata_offset: String,
         #[tabled(rename = "BLOB METADATA BLOCKS")]
-        blob_metadata_blocks: String,
+        blob_metadata_block_count: String,
         #[tabled(rename = "FULL BLOB PATH")]
         full_blob_path: String,
         #[tabled(rename = "BLOB METADATA PATH")]
@@ -669,21 +669,21 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
             Some(NativeLayout::Compressed(algorithm)) => format!("z_erofs {algorithm} device"),
             None => "chunk-based".to_string(),
         },
-        group_span: meta(|meta| meta.group_span().to_string()),
-        index_span: meta(|meta| meta.index_span().to_string()),
+        max_bytes_per_chunk_group: meta(|meta| meta.max_bytes_per_chunk_group().to_string()),
+        bytes_per_chunk_group_index: meta(|meta| meta.bytes_per_chunk_group_index().to_string()),
         chunk_group_count: meta(|meta| meta.chunk_group_count().to_string()),
         chunk_count: meta(|meta| meta.chunk_count().to_string()),
         digest_count: meta(|meta| meta.digest_count().to_string()),
         chunk_compressor: meta(|meta| meta.compressor().to_string()),
-        blob_payload_size: meta(|meta| meta.payload_total().to_string()),
+        blob_payload_size: meta(|meta| meta.total_uncompressed_size().to_string()),
         blob_compressed_size: meta(|meta| meta.compressed_end().to_string()),
-        blob_uncompressed_size: meta(|meta| meta.uncompressed_size().to_string()),
+        blob_uncompressed_size: meta(|meta| meta.logical_size().to_string()),
         compressed_data_offset: summary.blob_footer.compressed_data_offset().to_string(),
         compressed_data_size: summary.blob_footer.compressed_data_size().to_string(),
         bootstrap_offset: summary.blob_footer.bootstrap_offset().to_string(),
-        bootstrap_blocks: summary.blob_footer.bootstrap_blocks().to_string(),
+        bootstrap_block_count: summary.blob_footer.bootstrap_block_count().to_string(),
         blob_metadata_offset: summary.blob_footer.blob_metadata_offset().to_string(),
-        blob_metadata_blocks: summary.blob_footer.blob_metadata_blocks().to_string(),
+        blob_metadata_block_count: summary.blob_footer.blob_metadata_block_count().to_string(),
         full_blob_path: summary.full_blob_path.display().to_string(),
         blob_metadata_path: summary
             .blob_metadata_path
