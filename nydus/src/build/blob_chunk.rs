@@ -700,6 +700,14 @@ const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
 /// allocating; padding never exceeds a single EROFS block.
 const ZERO_BLOCK: [u8; EROFS_BLOCK_SIZE as usize] = [0u8; EROFS_BLOCK_SIZE as usize];
 
+/// Whether `data` is all zeros. Comparing a block at a time against
+/// [`ZERO_BLOCK`] runs at memcmp speed; a byte-at-a-time scan made the zero
+/// check the builder's bottleneck on sparse and zero-filled layers.
+fn is_zero(data: &[u8]) -> bool {
+    data.chunks(ZERO_BLOCK.len())
+        .all(|block| block == &ZERO_BLOCK[..block.len()])
+}
+
 /// Number of background chunk-group encoder threads. Encoding (crc32 + zstd)
 /// runs well ahead of the single-threaded produce side, so two workers fully
 /// hide it; more would only grow the in-flight memory.
@@ -1475,7 +1483,7 @@ impl<W: Write> BlobWriter<W> {
             // No blob data, no blob-meta chunk, and no blob cache traffic is
             // ever spent on it — native EROFS mounts handle the null address
             // the same way in-kernel.
-            if chunk_buf[..to_read].iter().all(|&byte| byte == 0) {
+            if is_zero(&chunk_buf[..to_read]) {
                 indexes.push(ErofsChunkAddr {
                     blkaddr: EROFS_NULL_ADDR,
                     device_id: 0,
@@ -1905,6 +1913,21 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn is_zero_checks_every_byte_across_block_boundaries() {
+        let block = EROFS_BLOCK_SIZE as usize;
+        assert!(is_zero(&[]));
+        for len in [1, block - 1, block, block + 1, 3 * block + 7] {
+            let mut data = vec![0u8; len];
+            assert!(is_zero(&data), "zeros of {len}");
+            for at in [0, len / 2, len - 1] {
+                data[at] = 1;
+                assert!(!is_zero(&data), "byte {at} of {len}");
+                data[at] = 0;
+            }
+        }
     }
 
     #[test]

@@ -781,7 +781,7 @@ mod tests {
     use nydus_core::ErofsReader;
     use nydus_format::erofs::{
         erofs_xattr_ibody_size, ErofsInode, XattrEntry, EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE,
-        EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+        EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_SLOTSIZE,
         EROFS_XATTR_INDEX_USER,
     };
     use std::collections::HashSet;
@@ -1124,6 +1124,52 @@ mod tests {
                 expected_extended,
             );
         }
+    }
+
+    /// A compact inode can be the last 32 bytes of the image; reading it must
+    /// not require the 64 bytes of an extended one.
+    #[test]
+    fn compact_inode_ending_the_image_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hit = false;
+        for count in 1..160 {
+            // Directories small enough to inline their dirents keep every
+            // byte of the image in the inode region.
+            let source = dir.path().join(format!("source-{count}"));
+            for i in 0..count {
+                fs::create_dir_all(source.join(format!("d{i}"))).unwrap();
+                fs::write(source.join(format!("d{i}")).join("f"), b"").unwrap();
+            }
+            let scratch = dir.path().join("scratch.blob");
+            let mut blob_writer =
+                BlobWriter::plain(fs::File::create(&scratch).unwrap(), EROFS_BLOCK_SIZE);
+            let mut inodes =
+                build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+            blob_writer.finish().unwrap();
+            resolve_chunk_addrs(&mut inodes, &blob_writer).unwrap();
+            for inode in inodes.iter_mut() {
+                inode.mtime = 1_700_000_000;
+                inode.mtime_nsec = 0;
+            }
+            let epoch = choose_epoch(&inodes);
+            let bootstrap =
+                render_flattened_bootstrap(&mut inodes, epoch, &[], &[0u8; 16]).unwrap();
+            let path = dir.path().join("bootstrap");
+            fs::write(&path, &bootstrap).unwrap();
+            let reader = ErofsReader::open_metadata_only(&path).unwrap();
+            let meta_base = reader.superblock().meta_blkaddr() as usize * EROFS_BLOCK_SIZE as usize;
+            for inode in &inodes {
+                reader.inode(inode.nid).unwrap();
+                hit |= meta_base
+                    + inode.nid as usize * EROFS_SLOTSIZE as usize
+                    + EROFS_INODE_COMPACT_SIZE
+                    == bootstrap.len();
+            }
+            if hit {
+                break;
+            }
+        }
+        assert!(hit, "no image ended in a compact inode");
     }
 
     /// Directories pack their last dirent block behind the inode and a
