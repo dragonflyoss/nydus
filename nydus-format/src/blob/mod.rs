@@ -17,8 +17,8 @@ pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
 pub use footer::BlobFooter;
 pub use metadata::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
-    BlobMetadataChunkGroupIndex, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
-    BlobMetadataHeader, BlobMetadataTable, BlobMetadataTableType,
+    BlobMetadataChunkGroupExtent, BlobMetadataChunkGroupIndex, BlobMetadataChunkGroupRedirect,
+    BlobMetadataChunkLength, BlobMetadataHeader, BlobMetadataTable, BlobMetadataTableType,
 };
 
 /// Finish a full blob: append everything behind the data region to `writer`,

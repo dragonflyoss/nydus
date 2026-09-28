@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
 use nydus_backend::BlobBackend;
-use nydus_format::blob::BlobMetadataChunkGroup;
+use nydus_format::blob::BlobMetadataChunkGroupExtent;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use super::{BlobCache, LocalBlobCache, RawDeviceBlobCache, RemoteBlobCache};
@@ -200,7 +200,7 @@ impl BlobCaches {
         workers: usize,
         deadline: Option<Instant>,
     ) -> io::Result<()> {
-        let source_of = |group: &BlobMetadataChunkGroup| -> Option<Arc<dyn BlobCache>> {
+        let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
             let redirect = group.redirect()?;
             match self.try_cache(redirect.source_blob_index()) {
                 Some(Ok(source)) => Some(source),
@@ -220,7 +220,7 @@ impl BlobCaches {
                 }
             }
         };
-        let skip = |group: &BlobMetadataChunkGroup| -> bool {
+        let skip = |group: &BlobMetadataChunkGroupExtent| -> bool {
             match (group.redirect(), source_of(group)) {
                 (Some(redirect), Some(source)) => {
                     source.is_chunk_group_ready(redirect.source_chunk_group_index() as usize)

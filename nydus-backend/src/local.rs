@@ -299,12 +299,14 @@ mod tests {
             1,
             BlobMetadataCompressor::None,
             vec![
-                BlobMetadataChunkGroup::new(4096, 1, 4096, crc32c::crc32c(payload), None).unwrap(),
+                BlobMetadataChunkGroup::new(0, 0, 0, 4096, crc32c::crc32c(payload)),
+                BlobMetadataChunkGroup::new(4096, 1, 1, 0, 0),
             ],
             vec![BlobMetadataChunkLength::new(4096)],
             vec![BlobMetadataChunkGroupDigest::new(
                 *blake3::hash(payload).as_bytes(),
             )],
+            Vec::new(),
         )
         .unwrap()
     }

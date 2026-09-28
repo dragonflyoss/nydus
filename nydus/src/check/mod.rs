@@ -678,6 +678,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nydus_format::blob::BlobMetadataChunkGroup;
     use std::fs;
     use tempfile::tempdir;
 
@@ -754,6 +755,7 @@ mod tests {
             BlobMetadata::DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE,
             1,
             BlobMetadataCompressor::None,
+            vec![BlobMetadataChunkGroup::new(0, 0, 0, 0, 0)],
             Vec::new(),
             Vec::new(),
             Vec::new(),

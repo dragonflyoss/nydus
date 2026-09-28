@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use crate::access_trace::TraceRecorder;
 use crate::chunk_group_map::ChunkGroupMap;
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
-use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroup};
+use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 
@@ -221,7 +221,7 @@ impl LocalBlobCache {
         self.chunk_group_map.is_ready(index)
     }
 
-    fn chunk_group(&self, index: usize) -> BlobMetadataChunkGroup {
+    fn chunk_group(&self, index: usize) -> BlobMetadataChunkGroupExtent {
         self.blob_metadata
             .chunk_group(index)
             .expect("chunk group index within the blob meta")
@@ -532,7 +532,7 @@ impl LocalBlobCache {
     /// borrows the window, a compressed one decodes into `decoded`.
     fn decode_group<'p>(
         &self,
-        group: &BlobMetadataChunkGroup,
+        group: &BlobMetadataChunkGroupExtent,
         base: u64,
         encoded: &'p [u8],
         decoded: &'p mut [u8],
@@ -585,8 +585,8 @@ impl LocalBlobCache {
         &self,
         batch: Range<usize>,
         buffers: &mut ChunkGroupBuffers,
-        skip: &(dyn Fn(&BlobMetadataChunkGroup) -> bool + Sync),
-        cb: &(dyn Fn(&BlobMetadataChunkGroup, &[u8]) -> io::Result<()> + Sync),
+        skip: &(dyn Fn(&BlobMetadataChunkGroupExtent) -> bool + Sync),
+        cb: &(dyn Fn(&BlobMetadataChunkGroupExtent, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         let mut start = batch.start;
         let mut end = batch.end;
@@ -673,7 +673,7 @@ impl LocalBlobCache {
     /// Scatter a validated decoded group into the cache file and publish it.
     fn write_chunk_group(
         &self,
-        group: &BlobMetadataChunkGroup,
+        group: &BlobMetadataChunkGroupExtent,
         payload: &[u8],
         cache_file: &File,
     ) -> io::Result<()> {
@@ -864,8 +864,8 @@ impl BlobCache for LocalBlobCache {
         &self,
         workers: usize,
         deadline: Option<Instant>,
-        skip: &(dyn Fn(&BlobMetadataChunkGroup) -> bool + Sync),
-        cb: &(dyn Fn(&BlobMetadataChunkGroup, &[u8]) -> io::Result<()> + Sync),
+        skip: &(dyn Fn(&BlobMetadataChunkGroupExtent) -> bool + Sync),
+        cb: &(dyn Fn(&BlobMetadataChunkGroupExtent, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         if !self.blob_metadata.is_redirect() {
             return Err(io::Error::new(
@@ -1290,26 +1290,40 @@ mod tests {
                 nydus_format::blob::BlobMetadataChunkLength::new(meta.chunk_length(index).unwrap())
             })
             .collect();
-        let specs: Vec<_> = meta
+        // The source's ChunkGroupTable with group 2's crc flipped.
+        let mut specs: Vec<_> = meta
             .chunk_groups()
-            .enumerate()
-            .map(|(index, group)| {
+            .map(|group| {
                 nydus_format::blob::BlobMetadataChunkGroup::new(
-                    group.compressed_size(),
-                    group.chunk_count(),
+                    group.compressed_offset(),
+                    group.logical_block_offset() as u32,
+                    group.first_chunk_index(),
                     group.uncompressed_size(),
-                    if index == 2 {
+                    if group.index() == 2 {
                         group.uncompressed_crc32() ^ 1
                     } else {
                         group.uncompressed_crc32()
                     },
-                    None,
                 )
-                .unwrap()
             })
             .collect();
-        let meta =
-            BlobMetadata::new(4, 1, BlobMetadataCompressor::Zstd, specs, members, digests).unwrap();
+        specs.push(nydus_format::blob::BlobMetadataChunkGroup::new(
+            meta.compressed_size(),
+            meta.logical_block_count() as u32,
+            meta.chunk_count() as u32,
+            0,
+            0,
+        ));
+        let meta = BlobMetadata::new(
+            4,
+            1,
+            BlobMetadataCompressor::Zstd,
+            specs,
+            members,
+            digests,
+            Vec::new(),
+        )
+        .unwrap();
         let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
 
         let cache_dir = tempdir().unwrap();
@@ -1748,15 +1762,18 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
-            vec![nydus_format::blob::BlobMetadataChunkGroup::new(
-                4096,
-                1,
-                4096,
-                crc32c::crc32c(&payload).wrapping_add(1),
-                None,
-            )
-            .unwrap()],
+            vec![
+                nydus_format::blob::BlobMetadataChunkGroup::new(
+                    0,
+                    0,
+                    0,
+                    4096,
+                    crc32c::crc32c(&payload).wrapping_add(1),
+                ),
+                nydus_format::blob::BlobMetadataChunkGroup::new(4096, 1, 1, 0, 0),
+            ],
             vec![nydus_format::blob::BlobMetadataChunkLength::new(4096)],
+            vec![],
             vec![],
         )
         .unwrap();
