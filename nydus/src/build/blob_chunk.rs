@@ -68,7 +68,7 @@ pub struct BlobWriter<W> {
     // Groups closed so far (the next group's index), all chunk byte
     // lengths in group order, including lone chunks, one digest per sealed
     // group, and the written groups' ChunkGroupTable entries in group
-    // order, without the terminator.
+    // order, without the last entry.
     next_group: u64,
     members: Vec<u32>,
     digests: Vec<BlobMetadataChunkGroupDigest>,

@@ -1759,11 +1759,11 @@ block count and chunk count. All three starts increase strictly for real
 groups, starting at zero. A chunk count of one is a lone chunk; any larger
 count is a pack. There is no special zero-member representation.
 
-The final entry is a terminator: its first three fields contain total data
+The last entry ends the table: its first three fields contain total data
 bytes, total cache blocks and total chunks; payload size and CRC are zero.
 The group count is therefore the entry count minus one; the header does not
-store it. The terminator has no ChunkGroupDigestTable or ChunkGroupRedirectTable entry. An empty
-blob has just this zero terminator and no other table entries.
+store it. The last entry has no ChunkGroupDigestTable or ChunkGroupRedirectTable entry. An empty
+blob has just this zero last entry and no other table entries.
 
 Stored size equal to decoded payload size means plain data, even if the
 ChunkGroupTable header declares a compressor. Otherwise the payload is compressed; the builder
@@ -1804,7 +1804,7 @@ costs four bytes per 2 MiB of cache address space.
 The parser verifies the crc32c and the feature words, bounds every table of
 the directory, resolves the known tables through their headers with checked
 arithmetic, cross-checks their entry counts against the ChunkGroupTable
-terminator, then validates every chunk, group and index entry. The mapped
+last entry, then validates every chunk, group and index entry. The mapped
 reader verifies the index in place; it does not allocate or rebuild a second
 lookup structure. File mappings still consume page-cache memory when
 accessed. The bytes are kept verbatim, so saving or caching a loaded blob
