@@ -13,7 +13,8 @@ use std::time::Instant;
 
 use nydus_backend::BlobBackend;
 use nydus_format::blob::{
-    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataCompressor,
+    BlobMetadata, BlobMetadataChunkGroupDigest, BlobMetadataChunkGroupExtent,
+    BlobMetadataCompressor,
 };
 
 /// Default on-demand fetch size: the compressed bytes one backend read
@@ -118,8 +119,8 @@ pub trait BlobCache: Send + Sync {
         &self,
         _workers: usize,
         _deadline: Option<Instant>,
-        _skip: &(dyn Fn(&BlobMetadataChunkGroup) -> bool + Sync),
-        _cb: &(dyn Fn(&BlobMetadataChunkGroup, &[u8]) -> io::Result<()> + Sync),
+        _skip: &(dyn Fn(&BlobMetadataChunkGroupExtent) -> bool + Sync),
+        _cb: &(dyn Fn(&BlobMetadataChunkGroupExtent, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -213,7 +214,7 @@ pub fn plan_prefetch_batches(
 pub fn decode_chunk_group_from_window<'a>(
     blob_metadata: &BlobMetadata,
     backend: &Arc<dyn BlobBackend>,
-    group: &BlobMetadataChunkGroup,
+    group: &BlobMetadataChunkGroupExtent,
     window_base_offset: u64,
     window_bytes: &'a [u8],
     decoded: &'a mut Vec<u8>,
@@ -382,7 +383,7 @@ pub(crate) fn decode_chunk_group_into(
 pub fn validate_chunk_group_with_metrics(
     backend: &Arc<dyn BlobBackend>,
     blob_metadata: &BlobMetadata,
-    group: &BlobMetadataChunkGroup,
+    group: &BlobMetadataChunkGroupExtent,
     decoded: &[u8],
 ) -> io::Result<()> {
     if let Err(err) = validate_decoded_chunk_group(blob_metadata, group, decoded) {
@@ -401,7 +402,7 @@ pub fn validate_chunk_group_with_metrics(
 /// after the last one.
 pub fn inflate_decoded_chunk_group(
     blob_metadata: &BlobMetadata,
-    group: &BlobMetadataChunkGroup,
+    group: &BlobMetadataChunkGroupExtent,
     decoded: &[u8],
 ) -> io::Result<Vec<u8>> {
     let span = usize::try_from(group.logical_size()).map_err(|_| {
@@ -430,7 +431,7 @@ pub fn inflate_decoded_chunk_group(
 /// BLAKE3 digest when the blob carries digests.
 pub fn validate_decoded_chunk_group(
     blob_metadata: &BlobMetadata,
-    group: &BlobMetadataChunkGroup,
+    group: &BlobMetadataChunkGroupExtent,
     decoded: &[u8],
 ) -> io::Result<()> {
     let expected = u64::from(group.uncompressed_size());
@@ -561,6 +562,7 @@ pub(crate) mod test_util {
         let mut specs = Vec::new();
         let mut members = Vec::new();
         let mut digest_table = Vec::new();
+        let mut logical_block_offset = 0u32;
         for group in groups {
             let payload: Vec<u8> = group.concat();
             let encoded = match compressor {
@@ -570,23 +572,19 @@ pub(crate) mod test_util {
             }
             .filter(|encoded| encoded.len() < payload.len());
             let stored = encoded.as_deref().unwrap_or(&payload);
+            specs.push(BlobMetadataChunkGroup::new(
+                data.len() as u64,
+                logical_block_offset,
+                members.len() as u32,
+                payload.len() as u32,
+                crc32c::crc32c(&payload),
+            ));
             data.extend_from_slice(stored);
-            members.extend(
-                group
-                    .iter()
-                    .map(|chunk| BlobMetadataChunkLength::new(chunk.len() as u32)),
-            );
-            let chunk_count = group.len() as u32;
-            specs.push(
-                BlobMetadataChunkGroup::new(
-                    stored.len() as u32,
-                    chunk_count,
-                    payload.len() as u32,
-                    crc32c::crc32c(&payload),
-                    None,
-                )
-                .unwrap(),
-            );
+            for chunk in group {
+                members.push(BlobMetadataChunkLength::new(chunk.len() as u32));
+                logical_block_offset +=
+                    (chunk.len() as u32).div_ceil(nydus_format::erofs::EROFS_BLOCK_SIZE);
+            }
             let digests: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = group
                 .iter()
                 .map(|chunk| *blake3::hash(chunk).as_bytes())
@@ -596,6 +594,13 @@ pub(crate) mod test_util {
         if !digests {
             digest_table.clear();
         }
+        specs.push(BlobMetadataChunkGroup::new(
+            data.len() as u64,
+            logical_block_offset,
+            members.len() as u32,
+            0,
+            0,
+        ));
         let meta = BlobMetadata::new(
             max_bytes_per_chunk_group / nydus_format::erofs::EROFS_BLOCK_SIZE,
             1,
@@ -603,6 +608,7 @@ pub(crate) mod test_util {
             specs,
             members,
             digest_table,
+            Vec::new(),
         )
         .unwrap();
         (data, meta)
@@ -791,19 +797,22 @@ mod tests {
             4,
             1,
             BlobMetadataCompressor::None,
-            vec![nydus_format::blob::BlobMetadataChunkGroup::new(
-                data.len() as u32,
-                2,
-                data.len() as u32,
-                group.uncompressed_crc32(),
-                None,
-            )
-            .unwrap()],
+            vec![
+                nydus_format::blob::BlobMetadataChunkGroup::new(
+                    0,
+                    0,
+                    0,
+                    data.len() as u32,
+                    group.uncompressed_crc32(),
+                ),
+                nydus_format::blob::BlobMetadataChunkGroup::new(data.len() as u64, 3, 2, 0, 0),
+            ],
             vec![
                 nydus_format::blob::BlobMetadataChunkLength::new(100),
                 nydus_format::blob::BlobMetadataChunkLength::new(5000),
             ],
             digests,
+            Vec::new(),
         )
         .unwrap();
         let wrong_group = wrong.chunk_group(0).unwrap();
@@ -931,17 +940,20 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
-            vec![nydus_format::blob::BlobMetadataChunkGroup::new(
-                EROFS_BLOCK_SIZE,
-                1,
-                EROFS_BLOCK_SIZE,
-                0,
-                None,
-            )
-            .unwrap()],
+            vec![
+                nydus_format::blob::BlobMetadataChunkGroup::new(0, 0, 0, EROFS_BLOCK_SIZE, 0),
+                nydus_format::blob::BlobMetadataChunkGroup::new(
+                    u64::from(EROFS_BLOCK_SIZE),
+                    1,
+                    1,
+                    0,
+                    0,
+                ),
+            ],
             vec![nydus_format::blob::BlobMetadataChunkLength::new(
                 EROFS_BLOCK_SIZE,
             )],
+            vec![],
             vec![],
         )
         .unwrap();

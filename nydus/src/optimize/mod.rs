@@ -219,11 +219,15 @@ pub fn build_ondemand_blob(
         }
     }
 
-    // Lay the copies out in access order.
+    // Lay the copies out back to back in access order: the ChunkGroupTable
+    // entries name where each copy starts, the terminator where the last
+    // one ends.
     let mut data = Vec::new();
-    let mut chunk_groups = Vec::with_capacity(patterns.len());
+    let mut chunk_groups = Vec::with_capacity(patterns.len() + 1);
+    let mut redirects = Vec::with_capacity(patterns.len());
     let mut members = Vec::new();
     let mut digests = Vec::new();
+    let mut logical_block_offset = 0u32;
     let mut least_blocks = max_blocks_per_chunk_group;
     for reference in patterns {
         let meta = sources[&reference.blob_index].blob_metadata();
@@ -233,18 +237,24 @@ pub fn build_ondemand_blob(
         if chunk_groups.len() + 1 < patterns.len() {
             least_blocks = least_blocks.min(group.logical_block_count());
         }
-        let payload = &encoded[reference];
-        data.extend_from_slice(payload);
         chunk_groups.push(BlobMetadataChunkGroup::new(
-            group.compressed_size(),
-            group.chunk_count(),
+            data.len() as u64,
+            logical_block_offset,
+            u32::try_from(members.len())
+                .map_err(|_| Error::Overflow("ondemand blob holds too many chunks".to_string()))?,
             group.uncompressed_size(),
             group.uncompressed_crc32(),
-            Some(BlobMetadataChunkGroupRedirect::new(
-                reference.blob_index,
-                reference.chunk_group_index,
-            )?),
+        ));
+        redirects.push(BlobMetadataChunkGroupRedirect::new(
+            reference.blob_index,
+            reference.chunk_group_index,
         )?);
+        data.extend_from_slice(&encoded[reference]);
+        logical_block_offset = logical_block_offset
+            .checked_add(group.logical_block_count())
+            .ok_or_else(|| {
+                Error::Overflow("ondemand blob exceeds the 32-bit block space".to_string())
+            })?;
         for member in group.chunk_range() {
             let length = meta.chunk_length(member).ok_or_else(|| {
                 Error::InvalidImage(format!("chunk group member {member} missing"))
@@ -256,6 +266,14 @@ pub fn build_ondemand_blob(
             digests.extend(meta.chunk_group_digest(group.index() as usize));
         }
     }
+    chunk_groups.push(BlobMetadataChunkGroup::new(
+        data.len() as u64,
+        logical_block_offset,
+        u32::try_from(members.len())
+            .map_err(|_| Error::Overflow("ondemand blob holds too many chunks".to_string()))?,
+        0,
+        0,
+    ));
     let blocks_per_chunk_group_index = 1 << least_blocks.ilog2();
     let blob_metadata = BlobMetadata::new(
         max_blocks_per_chunk_group,
@@ -264,6 +282,7 @@ pub fn build_ondemand_blob(
         chunk_groups,
         members,
         digests,
+        redirects,
     )
     .context("failed to assemble ondemand blob meta")?;
     let uncompressed_blocks = blob_metadata.logical_block_count();

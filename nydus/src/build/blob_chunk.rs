@@ -67,7 +67,8 @@ pub struct BlobWriter<W> {
     placements: Vec<u64>,
     // Groups closed so far (the next group's index), all chunk byte
     // lengths in group order, including lone chunks, one digest per sealed
-    // group, and the sealed groups in group order.
+    // group, and the written groups' ChunkGroupTable entries in group
+    // order, without the terminator.
     next_group: u64,
     members: Vec<u32>,
     digests: Vec<BlobMetadataChunkGroupDigest>,
@@ -709,12 +710,14 @@ const ENCODE_MAX_IN_FLIGHT: usize = 2;
 struct EncodeJob {
     seq: u64,
     data: Vec<u8>,
-    chunk_count: u32,
+    logical_block_offset: u32,
+    first_chunk_index: u32,
 }
 
 struct EncodedChunkGroup {
     data: Vec<u8>,
-    chunk_count: u32,
+    logical_block_offset: u32,
+    first_chunk_index: u32,
     crc32: u32,
     /// `Some` when compression met the format's worthwhile threshold.
     compressed: Option<Vec<u8>>,
@@ -763,7 +766,8 @@ impl ChunkGroupEncoder {
                         .filter(|c| compression_is_worthwhile(c.len(), job.data.len()));
                     let encoded = EncodedChunkGroup {
                         data: job.data,
-                        chunk_count: job.chunk_count,
+                        logical_block_offset: job.logical_block_offset,
+                        first_chunk_index: job.first_chunk_index,
                         crc32,
                         compressed,
                     };
@@ -784,11 +788,17 @@ impl ChunkGroupEncoder {
         }
     }
 
-    fn submit(&mut self, data: Vec<u8>, chunk_count: u32) -> Result<()> {
+    fn submit(
+        &mut self,
+        data: Vec<u8>,
+        logical_block_offset: u32,
+        first_chunk_index: u32,
+    ) -> Result<()> {
         let job = EncodeJob {
             seq: self.next_seq_in,
             data,
-            chunk_count,
+            logical_block_offset,
+            first_chunk_index,
         };
         self.next_seq_in += 1;
         self.tx
@@ -1340,17 +1350,28 @@ impl<W: Write> BlobWriter<W> {
                 "a raw device blob carries no blob meta".to_string(),
             ));
         }
+        let mut chunk_groups = self.blob_metadata_chunk_groups.clone();
+        chunk_groups.push(BlobMetadataChunkGroup::new(
+            self.next_compressed_offset,
+            u32::try_from(self.next_blkaddr)
+                .map_err(|_| Error::Overflow("blob exceeds 32-bit block count".to_string()))?,
+            u32::try_from(self.members.len())
+                .map_err(|_| Error::Overflow("blob holds too many chunks".to_string()))?,
+            0,
+            0,
+        ));
         Ok(BlobMetadata::new(
             self.max_blocks_per_chunk_group(),
             self.chunk_group_min_size / EROFS_BLOCK_SIZE,
             self.compressor,
-            self.blob_metadata_chunk_groups.clone(),
+            chunk_groups,
             self.members
                 .iter()
                 .copied()
                 .map(BlobMetadataChunkLength::new)
                 .collect(),
             self.digests.clone(),
+            Vec::new(),
         )?)
     }
 
@@ -1635,9 +1656,9 @@ impl<W: Write> BlobWriter<W> {
             block += u64::from(len).div_ceil(u64::from(EROFS_BLOCK_SIZE));
         }
         debug_assert_eq!(block, end_block);
+        let first_chunk_index = u32::try_from(self.members.len())
+            .map_err(|_| Error::Overflow("blob holds too many chunks".to_string()))?;
         self.members.extend_from_slice(&bin.lens);
-        let chunk_count = u32::try_from(bin.lens.len())
-            .map_err(|_| Error::Overflow("chunk group holds too many chunks".to_string()))?;
         // The chunk digests already computed for the boundary decision name
         // the group; a single chunk's digest is reused as is. Without a
         // digester there are none.
@@ -1654,7 +1675,7 @@ impl<W: Write> BlobWriter<W> {
         let encoder = self
             .encoder
             .get_or_insert_with(|| ChunkGroupEncoder::new(compressor));
-        encoder.submit(bin.data, chunk_count)?;
+        encoder.submit(bin.data, first_block as u32, first_chunk_index)?;
         while self
             .encoder
             .as_ref()
@@ -1687,19 +1708,17 @@ impl<W: Write> BlobWriter<W> {
         if let Some(hasher) = self.data_hasher.as_mut() {
             hasher.update(encoded);
         }
-        self.next_compressed_offset += encoded.len() as u64;
         self.blob_metadata_chunk_groups
             .push(BlobMetadataChunkGroup::new(
-                u32::try_from(encoded.len()).map_err(|err| {
-                    Error::Overflow(format!("encoded chunk group exceeds u32: {err}"))
-                })?,
-                group.chunk_count,
+                self.next_compressed_offset,
+                group.logical_block_offset,
+                group.first_chunk_index,
                 u32::try_from(group.data.len()).map_err(|err| {
                     Error::Overflow(format!("chunk group payload exceeds u32: {err}"))
                 })?,
                 group.crc32,
-                None,
-            )?);
+            ));
+        self.next_compressed_offset += encoded.len() as u64;
 
         self.encoder
             .as_mut()
@@ -1933,7 +1952,8 @@ mod tests {
             writer.blob_metadata_chunk_lengths(),
             &[28_000, 28_000, 28_000, 28_000, 20_000, 8_000, 4_000]
         );
-        let groups = writer.blob_metadata_chunk_groups();
+        let meta = writer.blob_metadata().unwrap();
+        let groups: Vec<_> = meta.chunk_groups().collect();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].chunk_count(), 4);
         assert_eq!(groups[0].compressed_size(), 112_000);

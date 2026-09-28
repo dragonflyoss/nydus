@@ -588,16 +588,25 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
-            vec![BlobMetadataChunkGroup::new(
-                group.compressed_size(),
-                group.chunk_count(),
-                group.uncompressed_size(),
-                group.uncompressed_crc32(),
-                Some(BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()),
-            )
-            .unwrap()],
+            vec![
+                BlobMetadataChunkGroup::new(
+                    0,
+                    0,
+                    0,
+                    group.uncompressed_size(),
+                    group.uncompressed_crc32(),
+                ),
+                BlobMetadataChunkGroup::new(
+                    u64::from(group.compressed_size()),
+                    group.logical_block_count(),
+                    group.chunk_count(),
+                    0,
+                    0,
+                ),
+            ],
             vec![BlobMetadataChunkLength::new(group.uncompressed_size())],
             Vec::new(),
+            vec![BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()],
         )
         .unwrap();
         assert!(redirect_meta.is_redirect());
