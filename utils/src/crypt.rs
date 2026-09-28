@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::alloc::{alloc, Layout};
 use std::borrow::Cow;
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
@@ -349,7 +348,7 @@ impl Cipher {
         data: &[u8],
     ) -> Result<Vec<u8>, Error> {
         let mut c = symm::Crypter::new(t, mode, key, iv)?;
-        let mut out = alloc_buf(data.len() + t.block_size());
+        let mut out = vec![0u8; data.len() + t.block_size()];
         let count = c.update(data, &mut out)?;
         let rest = c.finalize(&mut out[count..])?;
         out.truncate(count + rest);
@@ -439,16 +438,6 @@ impl CipherContext {
     pub fn get_cipher_meta(&self) -> (&[u8], &[u8]) {
         (&self.key, &self.iv)
     }
-}
-
-/// A customized buf allocator that avoids zeroing
-fn alloc_buf(size: usize) -> Vec<u8> {
-    assert!(size < isize::MAX as usize);
-    let layout = Layout::from_size_align(size, 0x1000)
-        .unwrap()
-        .pad_to_align();
-    let ptr = unsafe { alloc(layout) };
-    unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
 }
 
 // Encrypt data with Cipher and CipherContext.

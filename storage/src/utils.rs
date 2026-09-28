@@ -342,6 +342,15 @@ pub struct AlignedBuf {
     len: usize,
 }
 
+impl std::fmt::Debug for AlignedBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlignedBuf")
+            .field("len", &self.len)
+            .field("capacity", &self.capacity())
+            .finish()
+    }
+}
+
 impl AlignedBuf {
     pub fn capacity(&self) -> usize {
         self.pages.len() * 4096
@@ -618,6 +627,13 @@ mod tests {
         buf.resize(capacity, 9);
         assert_eq!(buf[0], 7);
         assert!(buf[1..].iter().all(|byte| *byte == 9));
+    }
+
+    #[test]
+    fn aligned_buffer_debug_reports_shape_without_contents() {
+        let mut buf = alloc_buf(5);
+        buf.fill(7);
+        assert_eq!(format!("{buf:?}"), "AlignedBuf { len: 5, capacity: 4096 }");
     }
 
     #[test]
