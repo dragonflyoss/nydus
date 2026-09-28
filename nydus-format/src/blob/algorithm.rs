@@ -62,17 +62,20 @@ pub enum BlobMetadataDigester {
 }
 
 impl BlobMetadataDigester {
+    /// The ChunkGroupDigestTable header code of BLAKE3.
+    pub const BLAKE3_CODE: u8 = 1;
+
     /// The ChunkGroupDigestTable header code of this digester, `None` for no table.
     pub fn code(self) -> Option<u8> {
         match self {
-            Self::Blake3 => Some(1),
+            Self::Blake3 => Some(Self::BLAKE3_CODE),
             Self::None => None,
         }
     }
 
     /// Decode a ChunkGroupDigestTable header code, `None` for an unknown algorithm.
     pub fn from_code(code: u8) -> Option<Self> {
-        (code == 1).then_some(Self::Blake3)
+        (code == Self::BLAKE3_CODE).then_some(Self::Blake3)
     }
 }
 

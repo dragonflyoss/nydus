@@ -879,7 +879,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
             meta.chunk_count(),
             content.len().div_ceil(chunk_size as usize)
         );
-        encoded.push(blob[..meta.compressed_end() as usize].to_vec());
+        encoded.push(blob[..meta.compressed_size() as usize].to_vec());
         metadata.push(meta);
         let path = directory.path().join(hex_string(&image.full_blob_digest));
         fs::write(&path, blob).unwrap();
@@ -922,7 +922,10 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
                 &optimized.artifact[range.start as usize..range.end as usize],
                 encoded[usize::from(source_index - 1)].as_slice()
             );
-            assert_eq!(meta.digest(index), source_meta.digest(0));
+            assert_eq!(
+                meta.chunk_group_digest(index),
+                source_meta.chunk_group_digest(0)
+            );
             assert_eq!(
                 group.chunk_count(),
                 source_meta.chunk_group(0).unwrap().chunk_count()

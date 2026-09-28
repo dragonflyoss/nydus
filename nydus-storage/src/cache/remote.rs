@@ -90,7 +90,7 @@ impl BlobCache for RemoteBlobCache {
             let payload: &[u8] = if meta.is_plain(&group) {
                 &encoded[start..stop]
             } else {
-                let out = &mut decoded[..meta.uncompressed_size(&group) as usize];
+                let out = &mut decoded[..group.uncompressed_size() as usize];
                 decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
                 out
             };

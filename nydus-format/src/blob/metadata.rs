@@ -331,6 +331,19 @@ impl BlobMetadataChunkGroupTableHeaderExtension {
     /// On-disk size, behind the header.
     const SIZE: usize = 8;
 
+    /// Creates the extension of a table whose groups span at most
+    /// `max_blocks_per_chunk_group` blocks, rounded down to a power of two
+    /// since only its log2 is stored.
+    fn new(max_blocks_per_chunk_group: u32, compressor: BlobMetadataCompressor) -> Result<Self> {
+        Ok(Self {
+            max_blocks_per_chunk_group_bits: max_blocks_per_chunk_group.checked_ilog2().ok_or(
+                Error::InvalidParameter("blob meta max blocks per chunk group is zero".to_string()),
+            )? as u8,
+            compressor: compressor.code(),
+            reserved: [0; 6],
+        })
+    }
+
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
             max_blocks_per_chunk_group_bits: read_u8_at(bytes, 0),
@@ -636,6 +649,20 @@ impl BlobMetadataChunkGroupIndexTableHeaderExtension {
     /// On-disk size, behind the header.
     const SIZE: usize = 8;
 
+    /// Creates the extension of a table whose entries each cover
+    /// `blocks_per_chunk_group_index` blocks, rounded down to a power of two
+    /// since only its log2 is stored.
+    fn new(blocks_per_chunk_group_index: u32) -> Result<Self> {
+        Ok(Self {
+            blocks_per_chunk_group_index_bits: blocks_per_chunk_group_index.checked_ilog2().ok_or(
+                Error::InvalidParameter(
+                    "blob meta blocks per chunk group index is zero".to_string(),
+                ),
+            )? as u8,
+            reserved: [0; 7],
+        })
+    }
+
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
             blocks_per_chunk_group_index_bits: read_u8_at(bytes, 0),
@@ -703,6 +730,15 @@ struct BlobMetadataChunkGroupDigestTableHeaderExtension {
 impl BlobMetadataChunkGroupDigestTableHeaderExtension {
     /// On-disk size, behind the header.
     const SIZE: usize = 8;
+
+    /// Creates the extension of a table of [`BlobMetadataChunkGroupDigest`]
+    /// entries, which are BLAKE3 by construction.
+    fn new() -> Self {
+        Self {
+            algorithm: BlobMetadataDigester::BLAKE3_CODE,
+            reserved: [0; 7],
+        }
+    }
 
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
@@ -842,6 +878,24 @@ impl BlobMetadataChunkGroupRedirect {
 
         redirect.validate()?;
         Ok(redirect)
+    }
+
+    /// The ChunkGroupRedirectTable of `chunk_groups`: every group's source
+    /// in group order when the blob is a redirect blob, empty when no group
+    /// redirects. A blob whose groups only partly redirect is an error.
+    pub fn from_chunk_groups(chunk_groups: &[BlobMetadataChunkGroup]) -> Result<Vec<Self>> {
+        let redirects: Vec<Self> = chunk_groups
+            .iter()
+            .filter_map(|chunk_group| chunk_group.redirect)
+            .collect();
+
+        if !redirects.is_empty() && redirects.len() != chunk_groups.len() {
+            return Err(Error::InvalidParameter(
+                "blob meta chunk groups must either all redirect or none".to_string(),
+            ));
+        }
+
+        Ok(redirects)
     }
 
     /// Validate that the source blob index is a device slot: slot zero is
@@ -1063,6 +1117,7 @@ impl BlobMetadataHeader {
 pub struct BlobMetadata {
     // The header and every table in file order.
     header: BlobMetadataHeader,
+    compressor: BlobMetadataCompressor,
     tables: Vec<BlobMetadataTable>,
     // The supported tables as typed entries, in type order.
     chunk_groups: BlobMetadataEntries<BlobMetadataChunkGroupEntry>,
@@ -1074,9 +1129,8 @@ pub struct BlobMetadata {
     max_blocks_per_chunk_group: u32,
     blocks_per_chunk_group_index: u32,
     chunk_count: u32,
-    total_block_count: u32,
+    logical_block_count: u32,
     unsupported_digest_algorithm: Option<u8>,
-    compressor: BlobMetadataCompressor,
     bytes: Vec<u8>,
 }
 
@@ -1094,59 +1148,34 @@ impl BlobMetadata {
 
     /// Creates validated metadata. `max_blocks_per_chunk_group` bounds a
     /// group in blocks and `blocks_per_chunk_group_index` is the blocks one
-    /// index entry covers, both powers of two, the index entry at most the
-    /// group. Every non-final group must cover at least one index entry.
+    /// index entry covers, both stored as their log2, the index entry at
+    /// most the group. Every non-final group must cover at least one index entry.
     /// Payloads and padded groups tile their spaces from zero.
     /// `chunk_lengths` lists every chunk, including lone ones, in group
-    /// order. `chunk_group_digests` is one entry per group with BLAKE3,
-    /// else empty.
+    /// order. `chunk_group_digests` is one BLAKE3 entry per group, or empty
+    /// for a blob without a ChunkGroupDigestTable.
     /// Redirect sources must be present for all groups or none. Returns an
     /// error for invalid geometry, inconsistent tables or overflow.
     pub fn new(
         max_blocks_per_chunk_group: u32,
         blocks_per_chunk_group_index: u32,
         compressor: BlobMetadataCompressor,
-        digester: BlobMetadataDigester,
         chunk_groups: Vec<BlobMetadataChunkGroup>,
         chunk_lengths: Vec<BlobMetadataChunkLength>,
         chunk_group_digests: Vec<BlobMetadataChunkGroupDigest>,
     ) -> Result<Self> {
-        let redirected = chunk_groups
-            .iter()
-            .filter(|chunk_group| chunk_group.redirect.is_some())
-            .count();
-        let is_redirect = redirected > 0;
-        if is_redirect && redirected != chunk_groups.len() {
-            return Err(Error::InvalidParameter(
-                "blob meta chunk groups must either all redirect or none".to_string(),
-            ));
-        }
-        let expected_chunk_group_digests = match digester {
-            BlobMetadataDigester::Blake3 => chunk_groups.len(),
-            BlobMetadataDigester::None => 0,
-        };
-        if chunk_group_digests.len() != expected_chunk_group_digests {
-            return Err(Error::InvalidParameter(format!(
-                "blob meta digest count {} does not match {} chunk groups (digester: {digester})",
-                chunk_group_digests.len(),
-                chunk_groups.len()
-            )));
-        }
-        if !max_blocks_per_chunk_group.is_power_of_two() {
-            return Err(Error::InvalidParameter(format!(
-                "blob meta max blocks per chunk group {max_blocks_per_chunk_group} must be a power of two"
-            )));
-        }
-        if !blocks_per_chunk_group_index.is_power_of_two() {
-            return Err(Error::InvalidParameter(format!(
-                "blob meta blocks per chunk group index {blocks_per_chunk_group_index} must be a power of two"
-            )));
-        }
+        let chunk_group_header_extension = BlobMetadataChunkGroupTableHeaderExtension::new(
+            max_blocks_per_chunk_group,
+            compressor,
+        )?;
+        let chunk_group_index_header_extension =
+            BlobMetadataChunkGroupIndexTableHeaderExtension::new(blocks_per_chunk_group_index)?;
+        let chunk_group_redirects =
+            BlobMetadataChunkGroupRedirect::from_chunk_groups(&chunk_groups)?;
 
         // Lay the groups out back to back in the data region, the address
         // space and ChunkLengthTable, and end with the terminator.
         let mut entries = Vec::with_capacity(chunk_groups.len() + 1);
-        let mut redirects = Vec::with_capacity(redirected);
         let mut compressed_offset = 0u64;
         let mut logical_block_offset = 0u64;
         let mut first_chunk_index = 0u32;
@@ -1184,7 +1213,6 @@ impl BlobMetadata {
                 uncompressed_size: chunk_group.uncompressed_size,
                 uncompressed_crc32: chunk_group.uncompressed_crc32,
             });
-            redirects.extend(chunk_group.redirect);
             compressed_offset = compressed_offset
                 .checked_add(chunk_group.compressed_size as u64)
                 .ok_or_else(|| {
@@ -1201,60 +1229,47 @@ impl BlobMetadata {
                 chunk_lengths.len()
             )));
         }
-        let total_block_count = u32::try_from(logical_block_offset).map_err(|_| {
+        let logical_block_count = u32::try_from(logical_block_offset).map_err(|_| {
             Error::Overflow("blob meta address space exceeds the 32-bit block space".to_string())
         })?;
         entries.push(BlobMetadataChunkGroupEntry {
             compressed_offset,
-            logical_block_offset: total_block_count,
+            logical_block_offset: logical_block_count,
             first_chunk_index,
             uncompressed_size: 0,
             uncompressed_crc32: 0,
         });
         let chunk_group_indexes = Self::build_chunk_group_index(
             &entries,
-            total_block_count,
+            logical_block_count,
             blocks_per_chunk_group_index,
         );
 
         let mut tables = vec![
             Self::encode_table(
                 BlobMetadataTableType::CHUNK_GROUP,
-                &BlobMetadataChunkGroupTableHeaderExtension {
-                    max_blocks_per_chunk_group_bits: max_blocks_per_chunk_group.ilog2() as u8,
-                    compressor: compressor.code(),
-                    reserved: [0; 6],
-                }
-                .to_bytes(),
+                &chunk_group_header_extension.to_bytes(),
                 &entries,
             )?,
             Self::encode_table(BlobMetadataTableType::CHUNK_LENGTH, &[], &chunk_lengths)?,
             Self::encode_table(
                 BlobMetadataTableType::CHUNK_GROUP_INDEX,
-                &BlobMetadataChunkGroupIndexTableHeaderExtension {
-                    blocks_per_chunk_group_index_bits: blocks_per_chunk_group_index.ilog2() as u8,
-                    reserved: [0; 7],
-                }
-                .to_bytes(),
+                &chunk_group_index_header_extension.to_bytes(),
                 &chunk_group_indexes,
             )?,
         ];
-        if let Some(algorithm) = digester.code() {
+        if !chunk_group_digests.is_empty() {
             tables.push(Self::encode_table(
                 BlobMetadataTableType::CHUNK_GROUP_DIGEST,
-                &BlobMetadataChunkGroupDigestTableHeaderExtension {
-                    algorithm,
-                    reserved: [0; 7],
-                }
-                .to_bytes(),
+                &BlobMetadataChunkGroupDigestTableHeaderExtension::new().to_bytes(),
                 &chunk_group_digests,
             )?);
         }
-        if is_redirect {
+        if !chunk_group_redirects.is_empty() {
             tables.push(Self::encode_table(
                 BlobMetadataTableType::CHUNK_GROUP_REDIRECT,
                 &[],
-                &redirects,
+                &chunk_group_redirects,
             )?);
         }
         Self::from_bytes(Self::assemble(&tables)?)
@@ -1372,7 +1387,7 @@ impl BlobMetadata {
             ));
         };
         let terminator = chunk_groups.table.entry_offset(chunk_group_count);
-        let total_block_count = read_u32_at(raw, terminator + 8);
+        let logical_block_count = read_u32_at(raw, terminator + 8);
         let chunk_count = read_u32_at(raw, terminator + 12);
 
         let blob_metadata = Self {
@@ -1385,16 +1400,15 @@ impl BlobMetadata {
             chunk_group_redirects,
             chunk_group_count: chunk_group_count as u32,
             max_blocks_per_chunk_group,
-            compressor,
-            chunk_count,
             blocks_per_chunk_group_index,
+            chunk_count,
+            logical_block_count,
             unsupported_digest_algorithm,
-            total_block_count,
+            compressor,
             bytes,
         };
         blob_metadata.validate_fields()?;
         blob_metadata.validate_tables()?;
-        blob_metadata.validate_index()?;
         Ok(blob_metadata)
     }
 
@@ -1406,90 +1420,24 @@ impl BlobMetadata {
         Self::from_bytes(bytes)
     }
 
-    /// Validate the intrinsic field invariants, needing nothing beyond the
-    /// table header fields and the table sizes.
-    fn validate_fields(&self) -> Result<()> {
-        // Geometry: a chunk group is bounded so byte sizes fit a u32, and an
-        // index entry covers at most a chunk group.
-        if self.max_blocks_per_chunk_group > Self::MAX_BLOCKS_PER_CHUNK_GROUP {
-            return Err(Error::InvalidImage(format!(
-                "blob meta max blocks per chunk group {} exceeds {}",
-                self.max_blocks_per_chunk_group,
-                Self::MAX_BLOCKS_PER_CHUNK_GROUP
-            )));
-        }
-
-        if self.blocks_per_chunk_group_index > self.max_blocks_per_chunk_group {
-            return Err(Error::InvalidImage(format!(
-                "blob meta blocks per chunk group index {} exceeds the max blocks per chunk group {}",
-                self.blocks_per_chunk_group_index, self.max_blocks_per_chunk_group
-            )));
-        }
-
-        // Counts: an empty blob has no groups, chunks or blocks, any other
-        // blob has all three, with at most one group per chunk.
-        if self.chunk_group_count == 0 {
-            if self.chunk_count != 0 || self.total_block_count != 0 {
-                return Err(Error::InvalidImage(format!(
-                    "blob meta has no chunk groups but {} chunks and {} blocks",
-                    self.chunk_count, self.total_block_count
-                )));
-            }
-        } else if self.chunk_count == 0 || self.total_block_count == 0 {
-            return Err(Error::InvalidImage(format!(
-                "blob meta has {} chunk groups but {} chunks and {} blocks",
-                self.chunk_group_count, self.chunk_count, self.total_block_count
-            )));
-        }
-        if self.chunk_group_count > self.chunk_count {
-            return Err(Error::InvalidImage(format!(
-                "blob meta names {} chunk groups among {} chunks",
-                self.chunk_group_count, self.chunk_count
-            )));
-        }
-
-        // Tables: each holds exactly one entry per chunk, index entry or group.
-        if self.chunk_lengths.len() != self.chunk_count as usize {
-            return Err(Error::InvalidImage(format!(
-                "blob meta ChunkLengthTable holds {} entries, the chunk groups name {}",
-                self.chunk_lengths.len(),
-                self.chunk_count
-            )));
-        }
-
-        let chunk_group_index_count = u64::from(self.total_block_count)
-            .div_ceil(u64::from(self.blocks_per_chunk_group_index));
-        if self.chunk_group_indexes.len() as u64 != chunk_group_index_count {
-            return Err(Error::InvalidImage(format!(
-                "blob meta ChunkGroupIndexTable holds {} entries for {chunk_group_index_count} index entries",
-                self.chunk_group_indexes.len()
-            )));
-        }
-
-        if self
-            .chunk_group_digests
-            .is_some_and(|entries| entries.len() != self.chunk_group_count as usize)
-        {
-            return Err(Error::InvalidImage(
-                "blob meta ChunkGroupDigestTable does not hold one entry per chunk group"
-                    .to_string(),
-            ));
-        }
-
-        if self
-            .chunk_group_redirects
-            .is_some_and(|entries| entries.len() != self.chunk_group_count as usize)
-        {
-            return Err(Error::InvalidImage(
-                "blob meta ChunkGroupRedirectTable does not hold one entry per chunk group"
-                    .to_string(),
-            ));
-        }
-
+    /// Write the serialized metadata verbatim, including tables this reader
+    /// does not know.
+    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
+        writer.write_all(&self.bytes)?;
         Ok(())
     }
 
-    /// Encode one table: its header, the `extension` bytes behind it (empty
+    /// Write the serialized metadata to a new sidecar file at `path`.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let mut file = File::create(path)
+            .with_context(|| format!("failed to create blob meta: {}", path.display()))?;
+        self.write_to(&mut file)?;
+        file.flush()
+            .with_context(|| format!("failed to flush blob meta: {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Encode one table: its header, the `header_extension` bytes behind it (empty
     /// for a table type without one), then the `entries`.
     fn encode_table<T: BlobMetadataEntry>(
         table_type: BlobMetadataTableType,
@@ -1534,11 +1482,11 @@ impl BlobMetadata {
     /// first block.
     fn build_chunk_group_index(
         entries: &[BlobMetadataChunkGroupEntry],
-        total_block_count: u32,
+        logical_block_count: u32,
         blocks_per_chunk_group_index: u32,
     ) -> Vec<BlobMetadataChunkGroupIndex> {
         let blocks_per_chunk_group_index = u64::from(blocks_per_chunk_group_index);
-        let count = u64::from(total_block_count).div_ceil(blocks_per_chunk_group_index);
+        let count = u64::from(logical_block_count).div_ceil(blocks_per_chunk_group_index);
         let chunk_groups = entries.len() - 1;
         let mut chunk_group = 0usize;
         (0..count)
@@ -1555,34 +1503,93 @@ impl BlobMetadata {
             .collect()
     }
 
-    /// Row `index` of ChunkGroupTable, the terminator for `chunk_group_count`.
-    fn chunk_group_entry(&self, index: usize) -> BlobMetadataChunkGroupEntry {
-        self.chunk_groups.get(&self.bytes, index)
-    }
+    /// Validate the intrinsic field invariants, needing nothing beyond the
+    /// table header fields and the table sizes.
+    fn validate_fields(&self) -> Result<()> {
+        // Geometry: a chunk group is bounded so byte sizes fit a u32, and an
+        // index entry covers at most a chunk group.
+        if self.max_blocks_per_chunk_group > Self::MAX_BLOCKS_PER_CHUNK_GROUP {
+            return Err(Error::InvalidImage(format!(
+                "blob meta max blocks per chunk group {} exceeds {}",
+                self.max_blocks_per_chunk_group,
+                Self::MAX_BLOCKS_PER_CHUNK_GROUP
+            )));
+        }
 
-    /// First block of group `index`, the terminator's for `chunk_group_count`.
-    fn logical_block_offset_of(&self, index: usize) -> u32 {
-        read_u32_at(&self.bytes, self.chunk_groups.table.entry_offset(index) + 8)
-    }
+        if self.blocks_per_chunk_group_index > self.max_blocks_per_chunk_group {
+            return Err(Error::InvalidImage(format!(
+                "blob meta blocks per chunk group index {} exceeds the max blocks per chunk group {}",
+                self.blocks_per_chunk_group_index, self.max_blocks_per_chunk_group
+            )));
+        }
 
-    /// ChunkLengthTable entry `index`; the caller keeps the index below chunk_count.
-    fn chunk_length_entry(&self, index: usize) -> BlobMetadataChunkLength {
-        self.chunk_lengths.get(&self.bytes, index)
-    }
+        // Counts: an empty blob has no groups, chunks or blocks, any other
+        // blob has all three, with at most one group per chunk.
+        if self.chunk_group_count == 0 {
+            if self.chunk_count != 0 || self.logical_block_count != 0 {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta has no chunk groups but {} chunks and {} blocks",
+                    self.chunk_count, self.logical_block_count
+                )));
+            }
+        } else if self.chunk_count == 0 || self.logical_block_count == 0 {
+            return Err(Error::InvalidImage(format!(
+                "blob meta has {} chunk groups but {} chunks and {} blocks",
+                self.chunk_group_count, self.chunk_count, self.logical_block_count
+            )));
+        }
+        if self.chunk_group_count > self.chunk_count {
+            return Err(Error::InvalidImage(format!(
+                "blob meta names {} chunk groups among {} chunks",
+                self.chunk_group_count, self.chunk_count
+            )));
+        }
 
-    /// ChunkGroupIndexTable entry `index`; the caller keeps it below the count.
-    fn chunk_group_index_entry(&self, index: usize) -> BlobMetadataChunkGroupIndex {
-        self.chunk_group_indexes.get(&self.bytes, index)
-    }
+        // Tables: each holds exactly one entry per chunk, index entry or group.
+        if self.chunk_lengths.len() != self.chunk_count as usize {
+            return Err(Error::InvalidImage(format!(
+                "blob meta ChunkLengthTable holds {} entries, the chunk groups name {}",
+                self.chunk_lengths.len(),
+                self.chunk_count
+            )));
+        }
 
-    fn redirect_entry(&self, index: usize) -> Option<BlobMetadataChunkGroupRedirect> {
-        self.chunk_group_redirects
-            .filter(|entries| index < entries.len())
-            .map(|entries| entries.get(&self.bytes, index))
+        let chunk_group_index_count = u64::from(self.logical_block_count)
+            .div_ceil(u64::from(self.blocks_per_chunk_group_index));
+        if self.chunk_group_indexes.len() as u64 != chunk_group_index_count {
+            return Err(Error::InvalidImage(format!(
+                "blob meta ChunkGroupIndexTable holds {} entries for {chunk_group_index_count} index entries",
+                self.chunk_group_indexes.len()
+            )));
+        }
+
+        if self
+            .chunk_group_digests
+            .is_some_and(|entries| entries.len() != self.chunk_group_count as usize)
+        {
+            return Err(Error::InvalidImage(
+                "blob meta ChunkGroupDigestTable does not hold one entry per chunk group"
+                    .to_string(),
+            ));
+        }
+
+        if self
+            .chunk_group_redirects
+            .is_some_and(|entries| entries.len() != self.chunk_group_count as usize)
+        {
+            return Err(Error::InvalidImage(
+                "blob meta ChunkGroupRedirectTable does not hold one entry per chunk group"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Validate contiguous data, block and chunk ranges, nonzero lengths,
-    /// uncompressed sizes, size bounds, compressed sizes and redirect sources.
+    /// uncompressed sizes, size bounds, compressed sizes, redirect sources,
+    /// and that every ChunkGroupIndexTable entry names the group covering
+    /// its first block.
     fn validate_tables(&self) -> Result<()> {
         let max_block_count = u64::from(self.max_blocks_per_chunk_group());
         let blocks_per_chunk_group_index = u64::from(self.blocks_per_chunk_group_index);
@@ -1604,8 +1611,8 @@ impl BlobMetadata {
                     .to_string(),
             ));
         }
-        for index in 0..self.redirect_count() {
-            self.redirect_entry(index)
+        for index in 0..self.chunk_group_redirect_count() {
+            self.chunk_group_redirect_entry(index)
                 .expect("redirect index within the table")
                 .validate()?;
         }
@@ -1691,6 +1698,19 @@ impl BlobMetadata {
                     "blob meta plain chunk group {index} must store its full payload"
                 )));
             }
+            // The index entries whose first block lies in this group; the
+            // last group's end is the table's end, checked by validate_fields.
+            let first_index =
+                u64::from(start.logical_block_offset).div_ceil(blocks_per_chunk_group_index);
+            let end_index =
+                u64::from(end.logical_block_offset).div_ceil(blocks_per_chunk_group_index);
+            for entry in first_index..end_index {
+                if self.chunk_group_index_entry(entry as usize).get() as usize != index {
+                    return Err(Error::InvalidImage(format!(
+                        "blob meta ChunkGroupIndexTable entry {entry} does not name chunk group {index}"
+                    )));
+                }
+            }
             start = end;
         }
         if total_chunk_count != u64::from(chunk_count) {
@@ -1698,42 +1718,6 @@ impl BlobMetadata {
                 "blob meta chunk groups hold {total_chunk_count} chunks, the terminator names {chunk_count}"
             )));
         }
-        Ok(())
-    }
-
-    fn validate_index(&self) -> Result<()> {
-        let chunk_groups = self.chunk_group_count as usize;
-        let mut chunk_group = 0usize;
-        for index in 0..self.chunk_group_indexes.len() {
-            let block = index as u64 * u64::from(self.blocks_per_chunk_group_index);
-            while chunk_group + 1 < chunk_groups
-                && u64::from(self.logical_block_offset_of(chunk_group + 1)) <= block
-            {
-                chunk_group += 1;
-            }
-            if self.chunk_group_index_entry(index).get() as usize != chunk_group {
-                return Err(Error::InvalidImage(
-                    "blob meta ChunkGroupIndexTable does not match ChunkGroupTable".to_string(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Write the serialized metadata verbatim, including tables this reader
-    /// does not know.
-    pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
-        writer.write_all(&self.bytes)?;
-        Ok(())
-    }
-
-    /// Write the serialized metadata to a new sidecar file at `path`.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let mut file = File::create(path)
-            .with_context(|| format!("failed to create blob meta: {}", path.display()))?;
-        self.write_to(&mut file)?;
-        file.flush()
-            .with_context(|| format!("failed to flush blob meta: {}", path.display()))?;
         Ok(())
     }
 
@@ -1756,43 +1740,6 @@ impl BlobMetadata {
             .map(|table| &self.bytes[table.range()])
     }
 
-    /// The algorithm code of a ChunkGroupDigestTable this reader does not know, which
-    /// leaves the blob undigested for it; a reader that must verify digests
-    /// fails on it instead of skipping the verification.
-    pub fn unsupported_digest_algorithm(&self) -> Option<u8> {
-        self.unsupported_digest_algorithm
-    }
-
-    /// Byte length of a stored chunk, including lone chunks; `None` past ChunkLengthTable.
-    pub fn chunk_length(&self, index: usize) -> Option<u32> {
-        (index < self.chunk_count as usize).then(|| self.chunk_length_entry(index).get())
-    }
-
-    /// The digest table, one entry per chunk group; empty without a
-    /// supported digester.
-    pub fn digests(&self) -> Vec<BlobMetadataChunkGroupDigest> {
-        (0..self.digest_count())
-            .filter_map(|index| self.digest(index))
-            .collect()
-    }
-
-    /// The redirect table, one entry per chunk group of a redirect blob;
-    /// empty otherwise.
-    pub fn redirects(&self) -> Vec<BlobMetadataChunkGroupRedirect> {
-        (0..self.redirect_count())
-            .filter_map(|index| self.redirect_entry(index))
-            .collect()
-    }
-
-    /// The digest of chunk group `index`, `None` past the table or without
-    /// a supported digester.
-    pub fn digest(&self, index: usize) -> Option<BlobMetadataChunkGroupDigest> {
-        let entries = self
-            .chunk_group_digests
-            .filter(|entries| index < entries.len())?;
-        Some(entries.get(&self.bytes, index))
-    }
-
     /// The chunk group at `index`, `None` past the table.
     pub fn chunk_group(&self, index: usize) -> Option<BlobMetadataChunkGroup> {
         if index >= self.chunk_group_count() {
@@ -1812,7 +1759,7 @@ impl BlobMetadata {
             chunk_count: end.first_chunk_index - start.first_chunk_index,
             uncompressed_size: start.uncompressed_size,
             uncompressed_crc32: start.uncompressed_crc32,
-            redirect: self.redirect_entry(index),
+            redirect: self.chunk_group_redirect_entry(index),
         })
     }
 
@@ -1824,20 +1771,9 @@ impl BlobMetadata {
         })
     }
 
-    /// Number of chunk groups.
-    pub fn chunk_group_count(&self) -> usize {
-        self.chunk_group_count as usize
-    }
-
-    /// Number of chunks, lone chunks included.
-    pub fn chunk_count(&self) -> usize {
-        self.chunk_count as usize
-    }
-
-    /// Number of digest entries: every chunk group with a supported
-    /// digester, else zero.
-    pub fn digest_count(&self) -> usize {
-        self.chunk_group_digests.map_or(0, |entries| entries.len())
+    /// Byte length of a stored chunk, including lone chunks; `None` past ChunkLengthTable.
+    pub fn chunk_length(&self, index: usize) -> Option<u32> {
+        (index < self.chunk_count as usize).then(|| self.chunk_length_entry(index).get())
     }
 
     /// Number of ChunkGroupIndexTable entries.
@@ -1845,10 +1781,78 @@ impl BlobMetadata {
         self.chunk_group_indexes.len()
     }
 
+    /// The group covering an address, or `None` beyond the blob. A direct
+    /// one table read and at most one forward correction give worst-case
+    /// O(1) lookup without a search or an allocated runtime index.
+    pub fn chunk_group_index_of(&self, logical_offset: u64) -> Option<usize> {
+        let block = logical_offset / EROFS_BLOCK_SIZE as u64;
+        if block >= u64::from(self.logical_block_count) {
+            return None;
+        }
+        let index = (block / u64::from(self.blocks_per_chunk_group_index)) as usize;
+        let mut chunk_group = self.chunk_group_index_entry(index).get() as usize;
+        if block >= u64::from(self.logical_block_offset_of(chunk_group + 1)) {
+            chunk_group += 1;
+        }
+        Some(chunk_group)
+    }
+
+    /// The digest table, one entry per chunk group; empty without a
+    /// supported digester.
+    pub fn chunk_group_digests(&self) -> Vec<BlobMetadataChunkGroupDigest> {
+        (0..self.chunk_group_digest_count())
+            .filter_map(|index| self.chunk_group_digest(index))
+            .collect()
+    }
+
+    /// The digest of chunk group `index`, `None` past the table or without
+    /// a supported digester.
+    pub fn chunk_group_digest(&self, index: usize) -> Option<BlobMetadataChunkGroupDigest> {
+        let entries = self
+            .chunk_group_digests
+            .filter(|entries| index < entries.len())?;
+        Some(entries.get(&self.bytes, index))
+    }
+
+    /// Number of digest entries: every chunk group with a supported
+    /// digester, else zero.
+    pub fn chunk_group_digest_count(&self) -> usize {
+        self.chunk_group_digests.map_or(0, |entries| entries.len())
+    }
+
+    /// The digest algorithm, `None` without a ChunkGroupDigestTable this reader
+    /// supports.
+    pub fn digester(&self) -> BlobMetadataDigester {
+        if self.chunk_group_digests.is_some() {
+            BlobMetadataDigester::Blake3
+        } else {
+            BlobMetadataDigester::None
+        }
+    }
+
+    /// The redirect table, one entry per chunk group of a redirect blob;
+    /// empty otherwise.
+    pub fn chunk_group_redirects(&self) -> Vec<BlobMetadataChunkGroupRedirect> {
+        (0..self.chunk_group_redirect_count())
+            .filter_map(|index| self.chunk_group_redirect_entry(index))
+            .collect()
+    }
+
     /// Number of redirect entries: every chunk group of a redirect blob.
-    pub fn redirect_count(&self) -> usize {
+    pub fn chunk_group_redirect_count(&self) -> usize {
         self.chunk_group_redirects
             .map_or(0, |entries| entries.len())
+    }
+
+    /// Whether the blob is an `optimize` output whose chunk groups copy
+    /// other blobs' groups, named by its ChunkGroupRedirectTable.
+    pub fn is_redirect(&self) -> bool {
+        self.chunk_group_redirects.is_some()
+    }
+
+    /// Number of chunk groups.
+    pub fn chunk_group_count(&self) -> usize {
+        self.chunk_group_count as usize
     }
 
     /// The most 4KiB blocks a chunk group covers.
@@ -1874,31 +1878,15 @@ impl BlobMetadata {
         self.blocks_per_chunk_group_index * EROFS_BLOCK_SIZE
     }
 
-    /// The chunk group compressor.
-    pub fn compressor(&self) -> BlobMetadataCompressor {
-        self.compressor
-    }
-
-    /// The digest algorithm, `None` without a ChunkGroupDigestTable this reader
-    /// supports.
-    pub fn digester(&self) -> BlobMetadataDigester {
-        if self.chunk_group_digests.is_some() {
-            BlobMetadataDigester::Blake3
-        } else {
-            BlobMetadataDigester::None
-        }
-    }
-
-    /// Whether the blob is an `optimize` output whose chunk groups copy
-    /// other blobs' groups, named by its ChunkGroupRedirectTable.
-    pub fn is_redirect(&self) -> bool {
-        self.chunk_group_redirects.is_some()
+    /// Number of chunks, lone chunks included.
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_count as usize
     }
 
     /// Total size of the logical address space in 4KiB blocks: the groups'
     /// blocks back to back.
     pub fn logical_block_count(&self) -> u64 {
-        u64::from(self.total_block_count)
+        u64::from(self.logical_block_count)
     }
 
     /// Total size of the logical address space in bytes, every group's
@@ -1907,32 +1895,38 @@ impl BlobMetadata {
         self.logical_block_count() * EROFS_BLOCK_SIZE as u64
     }
 
+    /// The algorithm code of a ChunkGroupDigestTable this reader does not know, which
+    /// leaves the blob undigested for it; a reader that must verify digests
+    /// fails on it instead of skipping the verification.
+    pub fn unsupported_digest_algorithm(&self) -> Option<u8> {
+        self.unsupported_digest_algorithm
+    }
+
+    /// The chunk group compressor.
+    pub fn compressor(&self) -> BlobMetadataCompressor {
+        self.compressor
+    }
+
+    /// The full serialized size, 4KiB aligned.
+    pub fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// End of the last chunk group's compressed range: the data region's
+    /// size.
+    pub fn compressed_size(&self) -> u64 {
+        self.chunk_group_entry(self.chunk_group_count())
+            .compressed_offset
+    }
+
     /// Bytes all chunk groups decode to: the chunks' bytes without padding.
-    pub fn total_uncompressed_size(&self) -> u64 {
+    pub fn uncompressed_size(&self) -> u64 {
         (0..self.chunk_group_count())
             .map(|index| u64::from(self.chunk_group_entry(index).uncompressed_size))
             .sum()
     }
 
-    /// End of the last chunk group's compressed range: the data region's
-    /// size.
-    pub fn compressed_end(&self) -> u64 {
-        self.chunk_group_entry(self.chunk_group_count())
-            .compressed_offset
-    }
-
-    /// The full serialized size, 4KiB aligned.
-    pub fn padded_size(&self) -> u64 {
-        self.bytes.len() as u64
-    }
-
-    /// Bytes group `group` decompresses to: its chunks' bytes back to
-    /// back.
-    pub fn uncompressed_size(&self, chunk_group: &BlobMetadataChunkGroup) -> u64 {
-        u64::from(chunk_group.uncompressed_size)
-    }
-
-    /// Whether group `group` is stored plain: its compressed bytes are its
+    /// Whether chunk group `chunk_group` is stored plain: its compressed bytes are its
     /// uncompressed bytes. The builder stores a group plain when compression
     /// would not shrink it, so equal sizes mean plain.
     pub fn is_plain(&self, chunk_group: &BlobMetadataChunkGroup) -> bool {
@@ -1940,23 +1934,7 @@ impl BlobMetadata {
             || chunk_group.compressed_size() == chunk_group.uncompressed_size()
     }
 
-    /// The group covering an address, or `None` beyond the blob. A direct
-    /// one table read and at most one forward correction give worst-case
-    /// O(1) lookup without a search or an allocated runtime index.
-    pub fn chunk_group_index_of(&self, logical_offset: u64) -> Option<usize> {
-        let block = logical_offset / EROFS_BLOCK_SIZE as u64;
-        if block >= u64::from(self.total_block_count) {
-            return None;
-        }
-        let index = (block / u64::from(self.blocks_per_chunk_group_index)) as usize;
-        let mut chunk_group = self.chunk_group_index_entry(index).get() as usize;
-        if block >= u64::from(self.logical_block_offset_of(chunk_group + 1)) {
-            chunk_group += 1;
-        }
-        Some(chunk_group)
-    }
-
-    /// The chunks of chunk group `group_index` in address order, as
+    /// The chunks of chunk group `chunk_group_index` in address order, as
     /// `(ordinal within the group, absolute byte offset, length)`. Empty
     /// past the table.
     pub fn chunk_group_chunks(
@@ -1985,7 +1963,7 @@ impl BlobMetadata {
         })
     }
 
-    /// Scatter chunk group `group_index`'s uncompressed bytes back into the
+    /// Scatter chunk group `chunk_group_index`'s uncompressed bytes back into the
     /// padded address space, calling `sink` with every chunk's absolute byte
     /// offset and bytes, in address order. Each chunk starts on its own
     /// block, so the bytes between chunks are tail padding the cache leaves
@@ -2004,7 +1982,7 @@ impl BlobMetadata {
                 "chunk group index out of range",
             )
         })?;
-        if payload.len() as u64 != self.uncompressed_size(&chunk_group) {
+        if payload.len() as u64 != u64::from(chunk_group.uncompressed_size()) {
             return Err(invalid(
                 "decoded chunk group length does not match its payload size",
             ));
@@ -2016,6 +1994,34 @@ impl BlobMetadata {
             position += len;
         }
         Ok(())
+    }
+
+    /// Row `index` of ChunkGroupTable, the terminator for `chunk_group_count`.
+    fn chunk_group_entry(&self, index: usize) -> BlobMetadataChunkGroupEntry {
+        self.chunk_groups.get(&self.bytes, index)
+    }
+
+    /// First block of group `index`, the terminator's for `chunk_group_count`.
+    fn logical_block_offset_of(&self, index: usize) -> u32 {
+        read_u32_at(&self.bytes, self.chunk_groups.table.entry_offset(index) + 8)
+    }
+
+    /// ChunkLengthTable entry `index`; the caller keeps the index below chunk_count.
+    fn chunk_length_entry(&self, index: usize) -> BlobMetadataChunkLength {
+        self.chunk_lengths.get(&self.bytes, index)
+    }
+
+    /// ChunkGroupIndexTable entry `index`; the caller keeps it below the count.
+    fn chunk_group_index_entry(&self, index: usize) -> BlobMetadataChunkGroupIndex {
+        self.chunk_group_indexes.get(&self.bytes, index)
+    }
+
+    /// ChunkGroupRedirectTable entry `index`, `None` past the table or
+    /// without one.
+    fn chunk_group_redirect_entry(&self, index: usize) -> Option<BlobMetadataChunkGroupRedirect> {
+        self.chunk_group_redirects
+            .filter(|entries| index < entries.len())
+            .map(|entries| entries.get(&self.bytes, index))
     }
 }
 
@@ -2114,16 +2120,10 @@ mod tests {
         chunk_lengths: Vec<u32>,
         digests: Vec<BlobMetadataChunkGroupDigest>,
     ) -> Result<BlobMetadata> {
-        let digester = if digests.is_empty() {
-            BlobMetadataDigester::None
-        } else {
-            BlobMetadataDigester::Blake3
-        };
         BlobMetadata::new(
             max_bytes_per_chunk_group / EROFS_BLOCK_SIZE,
             bytes_per_chunk_group_index.unwrap_or(EROFS_BLOCK_SIZE) / EROFS_BLOCK_SIZE,
             BlobMetadataCompressor::None,
-            digester,
             chunk_groups,
             chunk_lengths
                 .into_iter()
@@ -2369,7 +2369,7 @@ mod tests {
         let loaded = BlobMetadata::from_bytes(BlobMetadata::assemble(&widened).unwrap()).unwrap();
         assert_eq!(entries(&loaded), entries(&meta));
         assert_eq!(chunk_group_indexes(&loaded), chunk_group_indexes(&meta));
-        assert_eq!(loaded.digests(), meta.digests());
+        assert_eq!(loaded.chunk_group_digests(), meta.chunk_group_digests());
         assert_eq!(loaded.max_blocks_per_chunk_group(), 16);
         assert_eq!(loaded.blocks_per_chunk_group_index(), 1);
         for index in 0..9 {
@@ -2433,8 +2433,8 @@ mod tests {
         // An unknown digest algorithm leaves the blob undigested.
         let loaded = mutate(digest_table + 16, 9).unwrap();
         assert_eq!(loaded.digester(), BlobMetadataDigester::None);
-        assert_eq!(loaded.digest_count(), 0);
-        assert!(loaded.digests().is_empty());
+        assert_eq!(loaded.chunk_group_digest_count(), 0);
+        assert!(loaded.chunk_group_digests().is_empty());
         assert_eq!(loaded.unsupported_digest_algorithm(), Some(9));
         assert_eq!(meta.unsupported_digest_algorithm(), None);
     }
@@ -2446,11 +2446,8 @@ mod tests {
         assert_eq!(meta.chunk_count(), 9);
         assert_eq!(meta.logical_block_count(), 30);
         assert_eq!(meta.logical_size(), 30 * EROFS_BLOCK_SIZE as u64);
-        assert_eq!(
-            meta.total_uncompressed_size(),
-            5100 + 6041 + 20000 + 65536 + 2
-        );
-        assert_eq!(meta.compressed_end(), 5100 + 6041 + 20000 + 65536 + 2);
+        assert_eq!(meta.uncompressed_size(), 5100 + 6041 + 20000 + 65536 + 2);
+        assert_eq!(meta.compressed_size(), 5100 + 6041 + 20000 + 65536 + 2);
         assert_eq!(meta.bytes_per_chunk_group_index(), 4096);
         assert_eq!(meta.max_bytes_per_chunk_group(), 64 * 1024);
         assert_eq!(meta.chunk_group_index_count(), 30);
@@ -2458,9 +2455,9 @@ mod tests {
         assert_eq!(raw.len(), 4096);
         let loaded = BlobMetadata::from_bytes(raw.clone()).unwrap();
         assert_eq!(entries(&loaded), entries(&meta));
-        assert_eq!(loaded.digests(), meta.digests());
+        assert_eq!(loaded.chunk_group_digests(), meta.chunk_group_digests());
         assert_eq!(chunk_group_indexes(&loaded), chunk_group_indexes(&meta));
-        assert!(loaded.redirects().is_empty());
+        assert!(loaded.chunk_group_redirects().is_empty());
 
         let chunk_group = loaded.chunk_group(1).unwrap();
         assert_eq!(chunk_group.compressed_range(), 5100..11141);
@@ -2471,7 +2468,7 @@ mod tests {
             chunk_group.logical_range(),
             3 * EROFS_BLOCK_SIZE as u64..7 * EROFS_BLOCK_SIZE as u64
         );
-        assert_eq!(loaded.uncompressed_size(&chunk_group), 6041);
+        assert_eq!(chunk_group.uncompressed_size(), 6041);
         assert!(loaded.is_plain(&chunk_group));
         assert_eq!(
             chunk_group.uncompressed_crc32(),
@@ -2516,11 +2513,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![100, 5000, 40, 6000, 1, 20000, 65536, 1, 1]
         );
-        assert_eq!(saved.digests().len(), 5);
+        assert_eq!(saved.chunk_group_digests().len(), 5);
         // Lone groups carry their chunk's digest, packs a derived one.
-        assert_eq!(saved.digest(2).unwrap().get(), digest(&chunks_data[5]));
         assert_eq!(
-            saved.digest(1).unwrap(),
+            saved.chunk_group_digest(2).unwrap().get(),
+            digest(&chunks_data[5])
+        );
+        assert_eq!(
+            saved.chunk_group_digest(1).unwrap(),
             BlobMetadataChunkGroupDigest::from_chunk_digests(&[
                 digest(&chunks_data[2]),
                 digest(&chunks_data[3]),
@@ -2674,7 +2674,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("per chunk group index entry"));
-        // The blocks per chunk group index is a power of two between one block and the group bound.
+        // The blocks per chunk group index is at least one block and at most the group bound.
         for bytes_per_chunk_group_index in [3000, 2048, 32768] {
             let chunk_groups = vec![plain_chunk_group(&big, 1)];
             assert!(layered(
@@ -2766,7 +2766,7 @@ mod tests {
         assert_eq!(raw.len(), 4096);
         let loaded = BlobMetadata::from_bytes(raw.clone()).unwrap();
         assert_eq!(loaded.logical_size(), 0);
-        assert_eq!(loaded.compressed_end(), 0);
+        assert_eq!(loaded.compressed_size(), 0);
         assert_eq!(loaded.chunk_group_index_count(), 0);
         assert_eq!(loaded.chunk_group_index_of(0), None);
         assert_eq!(entries(&loaded).len(), 1);
@@ -2797,20 +2797,19 @@ mod tests {
                     .chunk_range()
                     .map(|i| BlobMetadataChunkLength::new(source.chunk_length(i).unwrap())),
             );
-            digests.push(source.digest(index).unwrap());
+            digests.push(source.chunk_group_digest(index).unwrap());
         }
         let meta = BlobMetadata::new(
             16,
             1,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
             chunk_groups,
             chunk_lengths,
             digests,
         )
         .unwrap();
         assert!(meta.is_redirect());
-        assert_eq!(meta.redirect_count(), 2);
+        assert_eq!(meta.chunk_group_redirect_count(), 2);
         assert_eq!(meta.chunk_count(), 4);
         assert_eq!(meta.logical_block_count(), 5);
         assert_eq!(
@@ -2841,8 +2840,10 @@ mod tests {
         let path = dir.path().join("r.blob.meta");
         meta.save(&path).unwrap();
         assert_eq!(
-            BlobMetadata::from_path(&path).unwrap().redirects(),
-            meta.redirects()
+            BlobMetadata::from_path(&path)
+                .unwrap()
+                .chunk_group_redirects(),
+            meta.chunk_group_redirects()
         );
 
         // A zeroed source blob index is rejected on both sides; the
@@ -2891,7 +2892,6 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::Zstd,
-            BlobMetadataDigester::None,
             vec![BlobMetadataChunkGroup::new(10, 1, 100, crc32c(&payload), None).unwrap()],
             vec![BlobMetadataChunkLength::new(100)],
             vec![],
@@ -3021,7 +3021,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string()
-        .contains("digest count"));
+        .contains("ChunkGroupDigestTable"));
 
         // Tables whose counts disagree with the terminator.
         let raw = raw(&meta);
