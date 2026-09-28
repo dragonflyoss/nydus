@@ -3030,6 +3030,7 @@ dependencies = [
  "nydus-error",
  "nydus-format",
  "nydus-storage",
+ "nydus-telemetry",
  "sha2 0.10.9",
  "tempfile",
  "tracing",

@@ -1,13 +1,14 @@
 //! Self-contained Prometheus metrics for nydus.
 //!
-//! This module owns a private [`prometheus::Registry`] and every metric the
-//! daemon exports. Other modules never touch Prometheus types directly; they
-//! only call the small set of `record_*` / `inc_*` helpers below and, for the
-//! HTTP `/metrics` endpoint, [`encode_text`]. Keeping all metric definitions
-//! here makes the exported surface easy to audit and keeps callers trivial.
+//! Each opened image may own a private [`prometheus::Registry`] through
+//! [`ImageMetrics`]. A separate process-wide registry backs the free helper
+//! functions for legacy callers; it is not an aggregate of the image
+//! registries. Other modules never touch Prometheus types directly. Keeping
+//! all metric definitions here makes the exported surface easy to audit and
+//! keeps callers trivial.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use prometheus::{
@@ -168,8 +169,12 @@ impl FsOp {
     ];
 }
 
-/// All metrics, registered into a single private registry.
-struct Metrics {
+/// Metrics owned by one opened nydus image.
+///
+/// Clone the surrounding [`Arc`] when the image data path is split across
+/// backend, cache and prefetch workers. A separate value must be created for
+/// each image so snapshots never mix activity from unrelated images.
+pub struct ImageMetrics {
     registry: Registry,
 
     backend_origin_read_count: IntCounter,
@@ -212,10 +217,17 @@ struct Metrics {
     cache_ondemand_fill_chunk_group: IntCounter,
     cache_redirect_fill_chunk_group: IntCounter,
     cache_redirect_skip_chunk_group: IntCounter,
+    tracked_blobs: Mutex<HashMap<[u8; SHA256_DIGEST_SIZE], TrackedBlob>>,
 }
 
-impl Metrics {
-    fn new() -> Self {
+impl Default for ImageMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImageMetrics {
+    pub fn new() -> Self {
         let registry = Registry::new();
 
         fn counter(registry: &Registry, name: &str, help: &str) -> IntCounter {
@@ -446,12 +458,257 @@ impl Metrics {
                 "cache_redirect_skip_chunk_group",
                 "Redirect (ondemand) blob chunk groups skipped: already cached, or failed to decode or fill",
             ),
+            tracked_blobs: Mutex::new(HashMap::new()),
             registry,
         }
     }
 }
 
-static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
+static METRICS: LazyLock<Arc<ImageMetrics>> = LazyLock::new(|| Arc::new(ImageMetrics::new()));
+
+/// Return the process-wide compatibility metrics handle.
+///
+/// New image owners should create their own [`ImageMetrics`] and pass it
+/// through the `*_with_metrics` constructors instead. This registry does not
+/// aggregate metrics from independently created [`ImageMetrics`] values.
+pub fn process_metrics() -> Arc<ImageMetrics> {
+    METRICS.clone()
+}
+
+impl ImageMetrics {
+    pub fn record_backend_read(
+        &self,
+        target: BackendTarget,
+        kind: ReadKind,
+        bytes: u64,
+        duration: Duration,
+        is_err: bool,
+    ) {
+        let secs = duration.as_secs_f64();
+        let high_latency = duration >= HIGH_LATENCY_THRESHOLD;
+
+        match target {
+            BackendTarget::Origin => {
+                self.backend_origin_read_count.inc();
+                self.backend_origin_read_latency.observe(secs);
+                if is_err {
+                    self.backend_origin_read_errors.inc();
+                } else {
+                    self.backend_origin_read_bytes.inc_by(bytes);
+                }
+            }
+            BackendTarget::Proxy => {
+                self.backend_proxy_read_count.inc();
+                self.backend_proxy_read_latency.observe(secs);
+                if is_err {
+                    self.backend_proxy_read_errors.inc();
+                } else {
+                    self.backend_proxy_read_bytes.inc_by(bytes);
+                }
+            }
+        }
+
+        match kind {
+            ReadKind::OnDemand => {
+                self.backend_ondemand_read_count.inc();
+                if is_err {
+                    self.backend_ondemand_read_errors.inc();
+                } else {
+                    self.backend_ondemand_read_bytes.inc_by(bytes);
+                }
+                if high_latency {
+                    self.backend_ondemand_read_high_latency_count.inc();
+                }
+            }
+            ReadKind::Prefetch => {
+                self.backend_prefetch_read_count.inc();
+                if is_err {
+                    self.backend_prefetch_read_errors.inc();
+                } else {
+                    self.backend_prefetch_read_bytes.inc_by(bytes);
+                }
+                if high_latency {
+                    self.backend_prefetch_read_high_latency_count.inc();
+                }
+            }
+        }
+    }
+
+    pub fn record_backend_crc_error(&self, target: BackendTarget) {
+        match target {
+            BackendTarget::Origin => self.backend_origin_crc_check_errors.inc(),
+            BackendTarget::Proxy => self.backend_proxy_crc_check_errors.inc(),
+        }
+    }
+
+    pub fn record_fs_op(&self, op: FsOp, duration: Duration, is_err: bool) {
+        if is_err {
+            self.fs_op_errors.with_label_values(&[op.as_str()]).inc();
+        } else {
+            self.fs_op_count.with_label_values(&[op.as_str()]).inc();
+        }
+        if op == FsOp::Read {
+            self.fs_read_latency.observe(duration.as_secs_f64());
+        }
+    }
+
+    pub fn inc_cache_opened_files(&self) {
+        self.cache_opened_files.inc();
+    }
+
+    pub fn dec_cache_opened_files(&self) {
+        self.cache_opened_files.dec();
+    }
+
+    pub fn track_blob_chunk_groups(
+        &self,
+        cache_key: [u8; SHA256_DIGEST_SIZE],
+        chunk_group_count: u64,
+    ) {
+        let mut tracked = match self.tracked_blobs.lock() {
+            Ok(tracked) => tracked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let entry = tracked.entry(cache_key).or_insert(TrackedBlob {
+            chunk_group_count,
+            holder_count: 0,
+        });
+        entry.holder_count += 1;
+        if entry.holder_count == 1 {
+            self.cache_total_chunk_group
+                .add(entry.chunk_group_count as i64);
+        }
+    }
+
+    pub fn untrack_blob_chunk_groups(&self, cache_key: &[u8; SHA256_DIGEST_SIZE]) {
+        let mut tracked = match self.tracked_blobs.lock() {
+            Ok(tracked) => tracked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(entry) = tracked.get_mut(cache_key) else {
+            return;
+        };
+        entry.holder_count -= 1;
+        if entry.holder_count == 0 {
+            self.cache_total_chunk_group
+                .sub(entry.chunk_group_count as i64);
+            tracked.remove(cache_key);
+        }
+    }
+
+    pub fn inc_cache_hit_chunk_group(&self) {
+        self.cache_hit_chunk_group.inc();
+    }
+
+    pub fn inc_cache_fill_chunk_group(&self) {
+        self.cache_fill_chunk_group.inc();
+    }
+
+    pub fn cache_fill_chunk_group_total(&self) -> u64 {
+        self.cache_fill_chunk_group.get()
+    }
+
+    pub fn inc_cache_ondemand_fill_chunk_group(&self) {
+        self.cache_ondemand_fill_chunk_group.inc();
+    }
+
+    pub fn inc_cache_redirect_fill_chunk_group(&self) {
+        self.cache_redirect_fill_chunk_group.inc();
+    }
+
+    pub fn cache_redirect_fill_chunk_group_total(&self) -> u64 {
+        self.cache_redirect_fill_chunk_group.get()
+    }
+
+    pub fn inc_cache_redirect_skip_chunk_group(&self) {
+        self.cache_redirect_skip_chunk_group.inc();
+    }
+
+    pub fn cache_redirect_skip_chunk_group_total(&self) -> u64 {
+        self.cache_redirect_skip_chunk_group.get()
+    }
+
+    pub fn record_dragonfly_error(&self, class: DragonflyErrorClass, kind: ReadKind) {
+        self.backend_dragonfly_read_errors
+            .with_label_values(&[class.as_str(), kind.as_str()])
+            .inc();
+    }
+
+    pub fn record_fallback_read(&self, is_err: bool) {
+        self.backend_fallback_read_count.inc();
+        if is_err {
+            self.backend_fallback_read_errors.inc();
+        }
+    }
+
+    pub fn record_fallback_throttle_wait(&self, wait: Duration) {
+        self.backend_fallback_throttle_wait
+            .observe(wait.as_secs_f64());
+    }
+
+    pub fn inc_prefetch_reschedule(&self) {
+        self.prefetch_reschedule_count.inc();
+    }
+
+    pub fn inc_prefetch_reschedule_run(&self) {
+        self.prefetch_reschedule_run_count.inc();
+    }
+
+    pub fn prefetch_reschedule_total(&self) -> u64 {
+        self.prefetch_reschedule_count.get()
+    }
+
+    pub fn prefetch_reschedule_run_total(&self) -> u64 {
+        self.prefetch_reschedule_run_count.get()
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            families: self.registry.gather(),
+        }
+    }
+
+    pub fn encode_text(&self) -> String {
+        encode_metric_families(self.registry.gather())
+    }
+
+    pub fn backend_read_total(&self, target: BackendTarget) -> u64 {
+        match target {
+            BackendTarget::Origin => self.backend_origin_read_count.get(),
+            BackendTarget::Proxy => self.backend_proxy_read_count.get(),
+        }
+    }
+
+    pub fn dragonfly_error_total(&self, class: DragonflyErrorClass, kind: ReadKind) -> u64 {
+        self.backend_dragonfly_read_errors
+            .with_label_values(&[class.as_str(), kind.as_str()])
+            .get()
+    }
+
+    pub fn backend_fallback_read_error_total(&self) -> u64 {
+        self.backend_fallback_read_errors.get()
+    }
+
+    pub fn backend_fallback_read_total(&self) -> u64 {
+        self.backend_fallback_read_count.get()
+    }
+
+    pub fn backend_crc_error_total(&self, target: BackendTarget) -> u64 {
+        match target {
+            BackendTarget::Origin => self.backend_origin_crc_check_errors.get(),
+            BackendTarget::Proxy => self.backend_proxy_crc_check_errors.get(),
+        }
+    }
+
+    #[cfg(test)]
+    fn tracked_blob_refs(&self, cache_key: &[u8; SHA256_DIGEST_SIZE]) -> Option<usize> {
+        let tracked = match self.tracked_blobs.lock() {
+            Ok(tracked) => tracked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tracked.get(cache_key).map(|entry| entry.holder_count)
+    }
+}
 
 /// Record a single logical backend read: its target, kind, transferred byte
 /// count (on success), duration and outcome. One call updates every relevant
@@ -463,96 +720,31 @@ pub fn record_backend_read(
     duration: Duration,
     is_err: bool,
 ) {
-    let metrics = &*METRICS;
-    let secs = duration.as_secs_f64();
-    let high_latency = duration >= HIGH_LATENCY_THRESHOLD;
-
-    match target {
-        BackendTarget::Origin => {
-            metrics.backend_origin_read_count.inc();
-            metrics.backend_origin_read_latency.observe(secs);
-            if is_err {
-                metrics.backend_origin_read_errors.inc();
-            } else {
-                metrics.backend_origin_read_bytes.inc_by(bytes);
-            }
-        }
-        BackendTarget::Proxy => {
-            metrics.backend_proxy_read_count.inc();
-            metrics.backend_proxy_read_latency.observe(secs);
-            if is_err {
-                metrics.backend_proxy_read_errors.inc();
-            } else {
-                metrics.backend_proxy_read_bytes.inc_by(bytes);
-            }
-        }
-    }
-
-    match kind {
-        ReadKind::OnDemand => {
-            metrics.backend_ondemand_read_count.inc();
-            if is_err {
-                metrics.backend_ondemand_read_errors.inc();
-            } else {
-                metrics.backend_ondemand_read_bytes.inc_by(bytes);
-            }
-            if high_latency {
-                metrics.backend_ondemand_read_high_latency_count.inc();
-            }
-        }
-        ReadKind::Prefetch => {
-            metrics.backend_prefetch_read_count.inc();
-            if is_err {
-                metrics.backend_prefetch_read_errors.inc();
-            } else {
-                metrics.backend_prefetch_read_bytes.inc_by(bytes);
-            }
-            if high_latency {
-                metrics.backend_prefetch_read_high_latency_count.inc();
-            }
-        }
-    }
+    METRICS.record_backend_read(target, kind, bytes, duration, is_err);
 }
 
 /// Record a CRC validation failure on data fetched from `target`.
 pub fn record_backend_crc_error(target: BackendTarget) {
-    let metrics = &*METRICS;
-    match target {
-        BackendTarget::Origin => metrics.backend_origin_crc_check_errors.inc(),
-        BackendTarget::Proxy => metrics.backend_proxy_crc_check_errors.inc(),
-    }
+    METRICS.record_backend_crc_error(target);
 }
 
 /// Record the outcome of a FUSE operation, plus read latency for `read`.
 pub fn record_fs_op(op: FsOp, duration: Duration, is_err: bool) {
-    let metrics = &*METRICS;
-    if is_err {
-        metrics.fs_op_errors.with_label_values(&[op.as_str()]).inc();
-    } else {
-        metrics.fs_op_count.with_label_values(&[op.as_str()]).inc();
-    }
-    if op == FsOp::Read {
-        metrics.fs_read_latency.observe(duration.as_secs_f64());
-    }
+    METRICS.record_fs_op(op, duration, is_err);
 }
 
 /// Increment the count of open blob data cache files.
 pub fn inc_cache_opened_files() {
-    METRICS.cache_opened_files.inc();
+    METRICS.inc_cache_opened_files();
 }
 
 /// Decrement the count of open blob data cache files.
 pub fn dec_cache_opened_files() {
-    METRICS.cache_opened_files.dec();
+    METRICS.dec_cache_opened_files();
 }
 
-/// Blobs currently contributing to `cache_total_chunk_group`, with how many
-/// caches hold each one. Blobs are keyed by cache key, so several caches over
-/// the same blob — including ones reached through different images — only
-/// count its chunk groups once.
-static TRACKED_BLOBS: LazyLock<Mutex<HashMap<[u8; SHA256_DIGEST_SIZE], TrackedBlob>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
+/// Blobs currently contributing to one image's `cache_total_chunk_group`,
+/// with how many caches in that image hold each one.
 struct TrackedBlob {
     chunk_group_count: u64,
     holder_count: usize,
@@ -561,96 +753,64 @@ struct TrackedBlob {
 /// Count `chunk_group_count` towards the total-chunk-groups gauge for the
 /// blob `cache_key`, unless another cache already counted it.
 pub fn track_blob_chunk_groups(cache_key: [u8; SHA256_DIGEST_SIZE], chunk_group_count: u64) {
-    // Telemetry is best-effort: recover from a poisoned lock instead of
-    // propagating the panic (unlike the fail-fast `.unwrap()` policy used on
-    // cache-state locks).
-    let mut tracked = match TRACKED_BLOBS.lock() {
-        Ok(tracked) => tracked,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let entry = tracked.entry(cache_key).or_insert(TrackedBlob {
-        chunk_group_count,
-        holder_count: 0,
-    });
-    entry.holder_count += 1;
-    if entry.holder_count == 1 {
-        METRICS
-            .cache_total_chunk_group
-            .add(entry.chunk_group_count as i64);
-    }
+    METRICS.track_blob_chunk_groups(cache_key, chunk_group_count);
 }
 
 /// Drop one cache's claim on the blob `cache_key`, uncounting its chunk
 /// groups once the last cache over that blob is gone.
 pub fn untrack_blob_chunk_groups(cache_key: &[u8; SHA256_DIGEST_SIZE]) {
-    let mut tracked = match TRACKED_BLOBS.lock() {
-        Ok(tracked) => tracked,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let Some(entry) = tracked.get_mut(cache_key) else {
-        return;
-    };
-    entry.holder_count -= 1;
-    if entry.holder_count == 0 {
-        METRICS
-            .cache_total_chunk_group
-            .sub(entry.chunk_group_count as i64);
-        tracked.remove(cache_key);
-    }
+    METRICS.untrack_blob_chunk_groups(cache_key);
 }
 
 /// Record a chunk group served from cache without a backend read.
 pub fn inc_cache_hit_chunk_group() {
-    METRICS.cache_hit_chunk_group.inc();
+    METRICS.inc_cache_hit_chunk_group();
 }
 
 /// Record a chunk group decoded into a blob's own cache by regular blob
 /// prefetch.
 pub fn inc_cache_fill_chunk_group() {
-    METRICS.cache_fill_chunk_group.inc();
+    METRICS.inc_cache_fill_chunk_group();
 }
 
 /// Current count of chunk groups filled by regular blob prefetch.
 pub fn cache_fill_chunk_group_total() -> u64 {
-    METRICS.cache_fill_chunk_group.get()
+    METRICS.cache_fill_chunk_group_total()
 }
 
 /// Record a chunk group decoded into a blob's own cache to satisfy an
 /// on-demand read. Summing this across the processes sharing a cache
 /// directory shows how much duplicate fetching they do.
 pub fn inc_cache_ondemand_fill_chunk_group() {
-    METRICS.cache_ondemand_fill_chunk_group.inc();
+    METRICS.inc_cache_ondemand_fill_chunk_group();
 }
 
 /// Record a chunk group written into a source blob's cache from a redirect
 /// (ondemand) blob.
 pub fn inc_cache_redirect_fill_chunk_group() {
-    METRICS.cache_redirect_fill_chunk_group.inc();
+    METRICS.inc_cache_redirect_fill_chunk_group();
 }
 
 /// Current count of chunk groups filled from redirect blobs.
 pub fn cache_redirect_fill_chunk_group_total() -> u64 {
-    METRICS.cache_redirect_fill_chunk_group.get()
+    METRICS.cache_redirect_fill_chunk_group_total()
 }
 
 /// Record a redirect blob chunk group that was skipped: its source was
 /// already cached, or it failed to decode or fill.
 pub fn inc_cache_redirect_skip_chunk_group() {
-    METRICS.cache_redirect_skip_chunk_group.inc();
+    METRICS.inc_cache_redirect_skip_chunk_group();
 }
 
 /// Current count of skipped redirect blob chunk groups.
 pub fn cache_redirect_skip_chunk_group_total() -> u64 {
-    METRICS.cache_redirect_skip_chunk_group.get()
+    METRICS.cache_redirect_skip_chunk_group_total()
 }
 
 /// Record a failed Dragonfly SDK read, attributed to its error class and to
 /// the kind of read (on-demand or prefetch) that hit it.
 pub fn record_dragonfly_error(class: DragonflyErrorClass, kind: ReadKind) {
-    METRICS
-        .backend_dragonfly_read_errors
-        .with_label_values(&[class.as_str(), kind.as_str()])
-        .inc();
+    METRICS.record_dragonfly_error(class, kind);
 }
 
 /// Record an origin request issued as a Dragonfly fallback. These reads also
@@ -658,29 +818,24 @@ pub fn record_dragonfly_error(class: DragonflyErrorClass, kind: ReadKind) {
 /// this pair isolates the fallback volume operators watch during Dragonfly
 /// degradation.
 pub fn record_fallback_read(is_err: bool) {
-    METRICS.backend_fallback_read_count.inc();
-    if is_err {
-        METRICS.backend_fallback_read_errors.inc();
-    }
+    METRICS.record_fallback_read(is_err);
 }
 
 /// Record how long a Dragonfly fallback waited on the origin throttle before
 /// its request was allowed to start.
 pub fn record_fallback_throttle_wait(wait: Duration) {
-    METRICS
-        .backend_fallback_throttle_wait
-        .observe(wait.as_secs_f64());
+    METRICS.record_fallback_throttle_wait(wait);
 }
 
 /// Record a blob prefetch rescheduled for a delayed retry after a throttled
 /// (429) backend failure.
 pub fn inc_prefetch_reschedule() {
-    METRICS.prefetch_reschedule_count.inc();
+    METRICS.inc_prefetch_reschedule();
 }
 
 /// Record the execution of a previously rescheduled blob prefetch.
 pub fn inc_prefetch_reschedule_run() {
-    METRICS.prefetch_reschedule_run_count.inc();
+    METRICS.inc_prefetch_reschedule_run();
 }
 
 /// How many caches currently claim the blob `cache_key`, for tests. The gauge
@@ -688,17 +843,13 @@ pub fn inc_prefetch_reschedule_run() {
 /// refcount is what can be asserted deterministically.
 #[cfg(test)]
 fn tracked_blob_refs(cache_key: &[u8; SHA256_DIGEST_SIZE]) -> Option<usize> {
-    let tracked = match TRACKED_BLOBS.lock() {
-        Ok(tracked) => tracked,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    tracked.get(cache_key).map(|entry| entry.holder_count)
+    METRICS.tracked_blob_refs(cache_key)
 }
 
 /// A serializable view over the live prometheus registry.
 ///
 /// Rather than mirror every counter by hand, this wraps the gathered metric
-/// families straight from the private `Metrics` struct's registry, so it always stays in sync
+/// families straight from the owning [`ImageMetrics`] registry, so it always stays in sync
 /// when metrics are added or removed. Serializing it yields a flat JSON object
 /// mapping each metric name to its value, which embedders (e.g. a hypervisor's
 /// stats endpoint) include to reason about runtime behavior: in particular
@@ -762,60 +913,52 @@ impl Serialize for Snapshot {
 }
 
 /// Capture a serializable snapshot of every registered metric, sourced
-/// directly from the prometheus registry inside the private `Metrics` struct.
+/// directly from the process compatibility registry.
 pub fn snapshot() -> Snapshot {
-    Snapshot {
-        families: METRICS.registry.gather(),
-    }
+    METRICS.snapshot()
 }
 
 /// Current count of failed Dragonfly reads for one error class and read kind.
 pub fn dragonfly_error_total(class: DragonflyErrorClass, kind: ReadKind) -> u64 {
-    METRICS
-        .backend_dragonfly_read_errors
-        .with_label_values(&[class.as_str(), kind.as_str()])
-        .get()
+    METRICS.dragonfly_error_total(class, kind)
 }
 
 /// Current count of origin requests issued as Dragonfly fallbacks.
 pub fn backend_fallback_read_total() -> u64 {
-    METRICS.backend_fallback_read_count.get()
+    METRICS.backend_fallback_read_total()
 }
 
 /// Current count of failed origin requests issued as Dragonfly fallbacks.
 pub fn backend_fallback_read_error_total() -> u64 {
-    METRICS.backend_fallback_read_errors.get()
+    METRICS.backend_fallback_read_error_total()
 }
 
 /// Current count of backend reads attributed to `target`.
 pub fn backend_read_total(target: BackendTarget) -> u64 {
-    match target {
-        BackendTarget::Origin => METRICS.backend_origin_read_count.get(),
-        BackendTarget::Proxy => METRICS.backend_proxy_read_count.get(),
-    }
+    METRICS.backend_read_total(target)
 }
 
 /// Current count of CRC validation failures attributed to `target`.
 pub fn backend_crc_error_total(target: BackendTarget) -> u64 {
-    match target {
-        BackendTarget::Origin => METRICS.backend_origin_crc_check_errors.get(),
-        BackendTarget::Proxy => METRICS.backend_proxy_crc_check_errors.get(),
-    }
+    METRICS.backend_crc_error_total(target)
 }
 
 /// Current count of blob prefetches rescheduled after a throttled failure.
 pub fn prefetch_reschedule_total() -> u64 {
-    METRICS.prefetch_reschedule_count.get()
+    METRICS.prefetch_reschedule_total()
 }
 
 /// Current count of re-attempts of rescheduled blob prefetches.
 pub fn prefetch_reschedule_run_total() -> u64 {
-    METRICS.prefetch_reschedule_run_count.get()
+    METRICS.prefetch_reschedule_run_total()
 }
 
 /// Encode all metrics in the Prometheus text exposition format.
 pub fn encode_text() -> String {
-    let metric_families = METRICS.registry.gather();
+    METRICS.encode_text()
+}
+
+fn encode_metric_families(metric_families: Vec<prometheus::proto::MetricFamily>) -> String {
     let mut buffer = Vec::new();
     let encoder = TextEncoder::new();
     if encoder.encode(&metric_families, &mut buffer).is_err() {
@@ -851,6 +994,25 @@ mod tests {
         assert!(text.contains("cache_total_chunk_group"));
         assert!(text.contains("cache_redirect_fill_chunk_group"));
         assert!(text.contains("cache_opened_files"));
+    }
+
+    #[test]
+    fn image_metrics_are_isolated() {
+        let first = ImageMetrics::new();
+        let second = ImageMetrics::new();
+
+        first.record_backend_read(
+            BackendTarget::Origin,
+            ReadKind::OnDemand,
+            4096,
+            Duration::from_millis(1),
+            false,
+        );
+
+        assert_eq!(first.backend_read_total(BackendTarget::Origin), 1);
+        assert_eq!(second.backend_read_total(BackendTarget::Origin), 0);
+        assert!(first.encode_text().contains("backend_origin_read_count 1"));
+        assert!(second.encode_text().contains("backend_origin_read_count 0"));
     }
 
     #[test]

@@ -12,7 +12,6 @@ use tracing::{info, warn};
 
 use nydus_backend::is_backend_throttled;
 use nydus_config::PrefetchScope;
-use nydus_telemetry::metrics::{inc_prefetch_reschedule, inc_prefetch_reschedule_run};
 
 use crate::cache::BlobCaches;
 
@@ -240,7 +239,7 @@ impl BlobPrefetcher {
             {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
                 Err(err) if is_backend_throttled(&err) => {
-                    inc_prefetch_reschedule();
+                    self.caches.metrics().inc_prefetch_reschedule();
                     warn!(
                         "backend throttled prefetch of priority blob {}, rescheduling: {}",
                         blob_index, err
@@ -282,7 +281,7 @@ impl BlobPrefetcher {
                             Some(blob_index) => match blobs.prefetch_blob(blob_index, 1, timeout) {
                                 Ok(()) => info!("prefetched blob {}", blob_index),
                                 Err(err) if is_backend_throttled(&err) => {
-                                    inc_prefetch_reschedule();
+                                    blobs.metrics().inc_prefetch_reschedule();
                                     warn!(
                                         "backend throttled prefetch of blob {}, rescheduling: {}",
                                         blob_index, err
@@ -329,14 +328,14 @@ impl BlobPrefetcher {
             if self.stopped() {
                 return;
             }
-            inc_prefetch_reschedule_run();
+            self.caches.metrics().inc_prefetch_reschedule_run();
             match self
                 .caches
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched rescheduled blob {}", blob_index),
                 Err(err) if is_backend_throttled(&err) => {
-                    inc_prefetch_reschedule();
+                    self.caches.metrics().inc_prefetch_reschedule();
                     warn!(
                         "backend throttled rescheduled prefetch of blob {}, rescheduling again: {}",
                         blob_index, err
@@ -479,8 +478,9 @@ mod tests {
             &meta,
         );
 
-        let reschedules_before = nydus_telemetry::metrics::prefetch_reschedule_total();
-        let runs_before = nydus_telemetry::metrics::prefetch_reschedule_run_total();
+        let metrics = prefetcher.caches.metrics().clone();
+        let reschedules_before = metrics.prefetch_reschedule_total();
+        let runs_before = metrics.prefetch_reschedule_run_total();
         let start = Instant::now();
         prefetcher.run();
 
@@ -488,8 +488,8 @@ mod tests {
         assert!(backend.attempts() >= 2, "attempts={}", backend.attempts());
         // The retry waited out (at least) the minimum delay.
         assert!(start.elapsed() >= Duration::from_millis(30));
-        assert!(nydus_telemetry::metrics::prefetch_reschedule_total() > reschedules_before);
-        assert!(nydus_telemetry::metrics::prefetch_reschedule_run_total() > runs_before);
+        assert!(metrics.prefetch_reschedule_total() > reschedules_before);
+        assert!(metrics.prefetch_reschedule_run_total() > runs_before);
     }
 
     #[test]

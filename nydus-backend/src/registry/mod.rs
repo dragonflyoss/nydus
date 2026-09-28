@@ -535,6 +535,7 @@ pub(crate) struct Registry {
     /// Whether reads are served through the Dragonfly SDK, used to attribute
     /// backend read and CRC metrics.
     target: nydus_telemetry::metrics::BackendTarget,
+    metrics: Arc<nydus_telemetry::metrics::ImageMetrics>,
     // Ensures the first authenticated request completes before a burst of
     // concurrent reads, so they can reuse the cached token instead of each
     // performing their own auth handshake.
@@ -543,7 +544,15 @@ pub(crate) struct Registry {
 
 impl Registry {
     /// Build a registry backend from its configuration.
+    #[cfg(test)]
     pub(crate) fn new(config: RegistryConfig) -> io::Result<Self> {
+        Self::new_with_metrics(config, nydus_telemetry::metrics::process_metrics())
+    }
+
+    pub(crate) fn new_with_metrics(
+        config: RegistryConfig,
+        metrics: Arc<nydus_telemetry::metrics::ImageMetrics>,
+    ) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
         let http = HTTP::new(&config.http)?;
         #[cfg(not(feature = "backend-dragonfly-proxy"))]
@@ -604,6 +613,7 @@ impl Registry {
             dragonfly_policy,
             fallback_limiter,
             target,
+            metrics,
             first_read_done: AtomicBool::new(false),
         })
     }
@@ -718,10 +728,8 @@ impl Registry {
                 Ok(response) => return Ok(response),
                 Err(err) => err,
             };
-            nydus_telemetry::metrics::record_dragonfly_error(
-                err.failure.metrics_class(),
-                context.kind,
-            );
+            self.metrics
+                .record_dragonfly_error(err.failure.metrics_class(), context.kind);
 
             match dragonfly_action(self.dragonfly_policy, context.kind, err.failure, attempts) {
                 DragonflyAction::Retry => {
@@ -768,7 +776,7 @@ impl Registry {
         let result = loop {
             attempts += 1;
             let waited = self.fallback_limiter.acquire();
-            nydus_telemetry::metrics::record_fallback_throttle_wait(waited);
+            self.metrics.record_fallback_throttle_wait(waited);
 
             let result = self.request_http_once(method.clone(), url, headers.clone(), context);
             // Mirror the retry middleware's transient classification: retry
@@ -789,7 +797,7 @@ impl Registry {
                  retrying through the fallback throttle"
             );
         };
-        nydus_telemetry::metrics::record_fallback_read(result.is_err());
+        self.metrics.record_fallback_read(result.is_err());
         result
     }
 
@@ -1919,11 +1927,11 @@ dragonfly:
             DragonflyFailure::RateLimited,
         )]));
         let registry = scripted_registry(&origin, transport, Duration::ZERO);
-        let metered = crate::metered(Arc::new(registry));
+        let metrics = registry.metrics.clone();
+        let metered = crate::metered_with_metrics(Arc::new(registry), metrics.clone());
 
-        let origin_before = nydus_telemetry::metrics::backend_read_total(
-            nydus_telemetry::metrics::BackendTarget::Origin,
-        );
+        let origin_before =
+            metrics.backend_read_total(nydus_telemetry::metrics::BackendTarget::Origin);
         let mut dst = vec![0u8; body.len()];
         metered
             .read_range_into(
@@ -1939,9 +1947,8 @@ dragonfly:
         // The origin served this read, so the proxy/origin split attributes
         // it to the origin even though the registry's static target is Proxy.
         assert!(
-            nydus_telemetry::metrics::backend_read_total(
-                nydus_telemetry::metrics::BackendTarget::Origin,
-            ) > origin_before
+            metrics.backend_read_total(nydus_telemetry::metrics::BackendTarget::Origin)
+                > origin_before
         );
         // The override outlives the read so a subsequent CRC validation of
         // these bytes is attributed to the origin as well.
@@ -2153,7 +2160,7 @@ dragonfly:
         )]));
         let registry = scripted_registry_at(dead_addr(), transport.clone(), Duration::ZERO, 0);
 
-        let errors_before = nydus_telemetry::metrics::backend_fallback_read_error_total();
+        let errors_before = registry.metrics.backend_fallback_read_error_total();
         let mut dst = vec![0u8; 4];
         let err = registry
             .try_read(
@@ -2166,7 +2173,7 @@ dragonfly:
 
         assert!(matches!(err, RegistryError::Io(_)), "unexpected: {err:?}");
         assert_eq!(transport.calls(), 1);
-        assert!(nydus_telemetry::metrics::backend_fallback_read_error_total() > errors_before);
+        assert!(registry.metrics.backend_fallback_read_error_total() > errors_before);
     }
 
     #[test]
@@ -2221,7 +2228,7 @@ dragonfly:
         );
         registry.dragonfly = Some(Box::new(transport));
 
-        let stream_errors_before = nydus_telemetry::metrics::dragonfly_error_total(
+        let stream_errors_before = registry.metrics.dragonfly_error_total(
             nydus_telemetry::metrics::DragonflyErrorClass::Stream,
             ReadKind::OnDemand,
         );
@@ -2239,7 +2246,7 @@ dragonfly:
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(origin.hits(), 0);
         assert!(
-            nydus_telemetry::metrics::dragonfly_error_total(
+            registry.metrics.dragonfly_error_total(
                 nydus_telemetry::metrics::DragonflyErrorClass::Stream,
                 ReadKind::OnDemand,
             ) > stream_errors_before

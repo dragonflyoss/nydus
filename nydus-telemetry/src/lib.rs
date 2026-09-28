@@ -1,7 +1,7 @@
 //! Telemetry for nydus, following the observability pillars:
 //!
-//! - [`metrics`]: the process-wide Prometheus registry and every metric the
-//!   daemon exports;
+//! - [`metrics`]: independent Prometheus registries for opened images, plus a
+//!   process-wide compatibility registry for legacy constructors;
 //! - [`logging`] (feature `logging`): `tracing`-subscriber installation
 //!   (stdout + rolling files + panic hook). Only binaries enable this —
 //!   libraries emit through the `tracing` facade and never install
