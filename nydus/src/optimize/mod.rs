@@ -220,7 +220,7 @@ pub fn build_ondemand_blob(
     }
 
     // Lay the copies out back to back in access order: the ChunkGroupTable
-    // entries name where each copy starts, the terminator where the last
+    // entries name where each copy starts, the last entry where the last
     // one ends.
     let mut data = Vec::new();
     let mut chunk_groups = Vec::with_capacity(patterns.len() + 1);

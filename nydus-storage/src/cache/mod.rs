@@ -14,7 +14,7 @@ use std::time::Instant;
 use nydus_backend::BlobBackend;
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataChunkGroupDigest, BlobMetadataChunkGroupExtent,
-    BlobMetadataCompressor,
+    BlobMetadataCompressor, BlobMetadataDigester,
 };
 
 /// Default on-demand fetch size: the compressed bytes one backend read
@@ -454,7 +454,10 @@ pub fn validate_decoded_chunk_group(
     if skip_verify_checksums() {
         return Ok(());
     }
-    if let Some(algorithm) = blob_metadata.unsupported_digest_algorithm() {
+    if let (Some(algorithm), BlobMetadataDigester::None) = (
+        blob_metadata.chunk_group_digest_algorithm(),
+        blob_metadata.digester(),
+    ) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("cannot verify chunk groups digested with unsupported algorithm {algorithm}"),
