@@ -5,7 +5,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
@@ -113,7 +113,7 @@ impl ErofsFs {
         let mtime_nsec = inode.effective_mtime_nsec(sb.fixed_nsec());
         let size = inode.size();
         let blocks = size.div_ceil(block_size) * block_size / 512;
-        let time = UNIX_EPOCH + Duration::new(mtime_secs, mtime_nsec);
+        let time = erofs_time(mtime_secs, mtime_nsec);
 
         let mode = inode.mode() as u32;
         let kind = mode_to_kind(mode);
@@ -206,6 +206,20 @@ impl ErofsFs {
 
 fn io_errno(e: &io::Error) -> Errno {
     Errno::from_i32(e.raw_os_error().unwrap_or(libc::EIO))
+}
+
+/// EROFS stores seconds as u64 but the kernel reads them as signed, so a
+/// layer time before the epoch is valid.
+fn erofs_time(secs: u64, nsec: u32) -> SystemTime {
+    let secs = secs as i64;
+    let whole = if secs >= 0 {
+        UNIX_EPOCH.checked_add(Duration::from_secs(secs.unsigned_abs()))
+    } else {
+        UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
+    };
+    whole
+        .and_then(|time| time.checked_add(Duration::from_nanos(nsec.into())))
+        .unwrap_or(UNIX_EPOCH)
 }
 
 /// The reply body for a cached negative lookup: ino 0 tells the kernel "no
@@ -764,6 +778,23 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::fs;
+
+    #[test]
+    fn erofs_times_before_the_epoch_are_signed() {
+        assert_eq!(erofs_time(5, 7), UNIX_EPOCH + Duration::new(5, 7));
+        assert_eq!(
+            erofs_time(-1i64 as u64, 0),
+            UNIX_EPOCH - Duration::from_secs(1)
+        );
+        assert_eq!(
+            erofs_time(-2i64 as u64, 500_000_000),
+            UNIX_EPOCH - Duration::from_millis(1500)
+        );
+        assert_eq!(
+            erofs_time(i64::MIN as u64, 0),
+            UNIX_EPOCH - Duration::from_secs(i64::MIN.unsigned_abs())
+        );
+    }
 
     #[test]
     fn no_xattr_is_derived_from_root_marker() {

@@ -282,13 +282,6 @@ func roOpenMode(path string, flags int, mode uint32) error {
 // Directory entries
 // ---------------------------------------------------------------------------
 
-type roDirent struct {
-	Name string
-	Ino  uint64
-	Type uint8
-	Off  int64
-}
-
 // roDirents checks the raw getdents64 stream rather than os.ReadDir, because
 // the fields os.ReadDir throws away (d_type, d_ino, d_off) are exactly the ones
 // the EROFS directory encoder has to get right.
@@ -390,52 +383,6 @@ func roExpectedDirentType(mode uint32) uint8 {
 
 func roReadDirents(t *testing.T, dir string) []roDirent {
 	return roReadDirentsBuf(t, dir, 32<<10)
-}
-
-func roReadDirentsBuf(t *testing.T, dir string, bufSize int) []roDirent {
-	t.Helper()
-
-	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
-	require.NoError(t, err, "open %s", dir)
-	defer func() { _ = unix.Close(fd) }()
-
-	return roDrainDirents(t, fd, bufSize)
-}
-
-// roDrainDirents decodes the raw getdents64 stream. unix.ParseDirent would be
-// simpler but discards d_type, d_ino and d_off, which is precisely what needs
-// checking here.
-func roDrainDirents(t *testing.T, fd int, bufSize int) []roDirent {
-	t.Helper()
-
-	buf := make([]byte, bufSize)
-	var out []roDirent
-	for {
-		n, err := unix.Getdents(fd, buf)
-		require.NoError(t, err)
-		if n == 0 {
-			return out
-		}
-
-		for offset := 0; offset < n; {
-			raw := (*unix.Dirent)(unsafe.Pointer(&buf[offset]))
-			reclen := int(raw.Reclen)
-			require.Greater(t, reclen, 0, "malformed dirent record length")
-
-			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&raw.Name[0])), reclen-int(unsafe.Offsetof(raw.Name)))
-			if i := bytes.IndexByte(nameBytes, 0); i >= 0 {
-				nameBytes = nameBytes[:i]
-			}
-
-			out = append(out, roDirent{
-				Name: string(nameBytes),
-				Ino:  raw.Ino,
-				Type: raw.Type,
-				Off:  raw.Off,
-			})
-			offset += reclen
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------

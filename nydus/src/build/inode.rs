@@ -3,7 +3,7 @@ use crate::build::dir::directory_size;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
     erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_ibody_size,
-    erofs_xattr_icount, erofs_xattr_name_split, mode_to_erofs_file_type,
+    erofs_xattr_icount, erofs_xattr_name_split, erofs_xattr_prefix, mode_to_erofs_file_type,
     needs_erofs_extended_inode, ErofsChunkAddr, ErofsChunkIndex, ErofsInodeCompact,
     ErofsInodeExtended, XattrEntry, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE,
     EROFS_FT_DIR, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_COMPRESSED_FULL,
@@ -750,7 +750,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
     let mut buf = vec![0u8; inode_size];
 
     let xattr_size = erofs_xattr_ibody_size(&inode.xattrs);
-    let i_xattr_icount = erofs_xattr_icount(xattr_size);
+    let i_xattr_icount = checked_xattr_icount(inode, xattr_size)?;
 
     match &inode.data {
         InodeData::RegularFile {
@@ -1070,6 +1070,50 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
     }
 
     Ok(buf)
+}
+
+/// Largest inline xattr body an inode can describe: EROFS sizes it as
+/// `sizeof(erofs_xattr_ibody_header) + 4 * (i_xattr_icount - 1)` and
+/// `i_xattr_icount` is a `u16`.
+const EROFS_XATTR_IBODY_MAX_SIZE: usize =
+    EROFS_XATTR_IBODY_HEADER_SIZE + 4 * (u16::MAX as usize - 1);
+
+/// Returns the inode's `i_xattr_icount` for its `xattr_size`-byte inline
+/// body, rejecting xattrs that the on-disk fields cannot encode (`u8`
+/// e_name_len, `u16` e_value_size and `u16` i_xattr_icount) instead of
+/// truncating them into a corrupt image.
+fn checked_xattr_icount(inode: &InodeInfo, xattr_size: usize) -> Result<u16> {
+    let xattr_name = |entry: &XattrEntry| {
+        let prefix = erofs_xattr_prefix(entry.name_index).unwrap_or_default();
+        String::from_utf8_lossy(&[prefix, entry.suffix.as_slice()].concat()).into_owned()
+    };
+    for entry in &inode.xattrs {
+        if entry.suffix.len() > u8::MAX as usize {
+            return Err(Error::InvalidImage(format!(
+                "inode {} has an xattr name suffix of {} bytes, EROFS allows at most {}",
+                inode.ino,
+                entry.suffix.len(),
+                u8::MAX
+            )));
+        }
+        if entry.value.len() > u16::MAX as usize {
+            return Err(Error::InvalidImage(format!(
+                "inode {} xattr {} value is {} bytes, EROFS allows at most {}",
+                inode.ino,
+                xattr_name(entry),
+                entry.value.len(),
+                u16::MAX
+            )));
+        }
+    }
+    if xattr_size > EROFS_XATTR_IBODY_MAX_SIZE {
+        return Err(Error::InvalidImage(format!(
+            "inode {} xattrs need {xattr_size} bytes of inline body, EROFS allows at most \
+             {EROFS_XATTR_IBODY_MAX_SIZE}",
+            inode.ino
+        )));
+    }
+    Ok(erofs_xattr_icount(xattr_size))
 }
 
 /// Write the EROFS xattr inline body (ibody) into `buf` at `offset`.
@@ -1519,5 +1563,56 @@ mod tests {
         );
         assert_eq!(&bytes[entry_offset + 4..entry_offset + 7], b"key");
         assert_eq!(&bytes[entry_offset + 7..entry_offset + 12], b"value");
+    }
+
+    #[test]
+    fn serialize_inode_rejects_xattrs_exceeding_erofs_fields() {
+        let entry = |suffix_len: usize, value_len: usize| XattrEntry {
+            name_index: EROFS_XATTR_INDEX_USER,
+            suffix: vec![b'k'; suffix_len],
+            value: vec![0; value_len],
+        };
+        let icount = |xattrs: Vec<XattrEntry>| {
+            serialize_inode(&root_inode_with_xattrs(xattrs), 0)
+                .map(|bytes| ErofsInode::parse(&bytes).unwrap().xattr_icount())
+        };
+
+        assert!(icount(vec![entry(u8::MAX as usize, 0)]).is_ok());
+        let err = icount(vec![entry(u8::MAX as usize + 1, 0)]).unwrap_err();
+        assert!(
+            err.to_string().contains("name suffix of 256 bytes"),
+            "{err}"
+        );
+
+        assert!(icount(vec![entry(1, u16::MAX as usize)]).is_ok());
+        // Linux allows 64 KiB values, one byte more than e_value_size holds.
+        let err = icount(vec![entry(1, u16::MAX as usize + 1)]).unwrap_err();
+        assert!(
+            err.to_string().contains("user.k value is 65536 bytes"),
+            "{err}"
+        );
+
+        // Three 64 KiB entries plus one sized to fill the body exactly give
+        // the largest icount; one more value byte needs another slot.
+        let full = 65536 - EROFS_XATTR_ENTRY_HEADER_SIZE;
+        let last = EROFS_XATTR_IBODY_MAX_SIZE
+            - EROFS_XATTR_IBODY_HEADER_SIZE
+            - 3 * 65536
+            - EROFS_XATTR_ENTRY_HEADER_SIZE;
+        let xattrs = |last| {
+            vec![
+                entry(0, full),
+                entry(0, full),
+                entry(0, full),
+                entry(0, last),
+            ]
+        };
+        assert_eq!(
+            erofs_xattr_ibody_size(&xattrs(last)),
+            EROFS_XATTR_IBODY_MAX_SIZE
+        );
+        assert_eq!(icount(xattrs(last)).unwrap(), u16::MAX);
+        let err = icount(xattrs(last + 1)).unwrap_err();
+        assert!(err.to_string().contains("inline body"), "{err}");
     }
 }

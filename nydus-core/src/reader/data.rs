@@ -5,11 +5,10 @@ use std::io::Write;
 use nydus_format::erofs::{
     cast_ref, ErofsChunkAddr, ErofsChunkIndex, ErofsInode, ZAlgorithm, EROFS_BLOCK_SIZE,
     EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
-    EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
-    EROFS_SLOTSIZE, Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG,
-    Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
-    Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_LI_LCLUSTER_TYPE_MASK,
-    Z_EROFS_MAP_HEADER_SIZE,
+    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
+    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
+    Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
+    Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
 
@@ -358,10 +357,10 @@ impl ErofsReader {
         let nid = self.superblock().packed_nid().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "fragment without packed inode")
         })?;
-        let bytes = self
-            .mmap_slice(self.z_inode_offset(nid)?, EROFS_INODE_EXTENDED_SIZE)
+        let inode = self
+            .inode_at(self.z_inode_offset(nid)?)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        Ok((nid, ErofsInode::parse(bytes)?))
+        Ok((nid, inode))
     }
 
     /// Reads z_erofs ranges through packed fragments and cached LZ4/zstd pclusters.
@@ -741,5 +740,47 @@ impl ErofsReader {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nydus_format::erofs::{
+        ErofsInodeCompact, ErofsSuperblock, EROFS_FEATURE_INCOMPAT_FRAGMENTS,
+        EROFS_INODE_COMPACT_SIZE, EROFS_SUPER_OFFSET,
+    };
+
+    #[test]
+    fn packed_compact_inode_may_end_the_image() {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let packed_nid = 1;
+        let packed_offset = block_size + packed_nid as usize * EROFS_SLOTSIZE as usize;
+        let mut image = vec![0; packed_offset + EROFS_INODE_COMPACT_SIZE];
+        let mut sb = ErofsSuperblock::new(
+            0,
+            EROFS_FEATURE_INCOMPAT_FRAGMENTS,
+            0,
+            2,
+            0,
+            image.len().div_ceil(block_size) as u64,
+            1,
+            0,
+            0,
+            &[0; 16],
+        )
+        .unwrap();
+        sb.set_packed_nid(packed_nid);
+        let sb_offset = EROFS_SUPER_OFFSET as usize;
+        image[sb_offset..sb_offset + sb.as_bytes().len()].copy_from_slice(sb.as_bytes());
+        let packed = ErofsInodeCompact::new(0, libc::S_IFREG as u16 | 0o600, 1, 123, 0, 0, 0, 0, 0);
+        image[packed_offset..].copy_from_slice(packed.as_bytes());
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&image).unwrap();
+        let reader = ErofsReader::open_metadata_only(file.path()).unwrap();
+
+        let (nid, inode) = reader.z_packed_inode().unwrap();
+        assert_eq!(nid, packed_nid);
+        assert_eq!(inode.size(), 123);
     }
 }

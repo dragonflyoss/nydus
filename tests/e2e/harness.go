@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -276,6 +277,18 @@ func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdev
 	return startFuseMount(t, exec.Command(cErofsFuseBin, args...), mnt, "erofsfuse")
 }
 
+// MustLookupExecutable is mustLookupExecutable for the e2e subpackages.
+func MustLookupExecutable(t *testing.T, name string) string {
+	t.Helper()
+	return mustLookupExecutable(t, name)
+}
+
+// MountNydus is mountNydus for the e2e subpackages.
+func MountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup func()) {
+	t.Helper()
+	return mountNydus(t, nydusBin, imagePath, blobdev, mnt)
+}
+
 // mountNydus runs `nydus fuse` in the background and returns a cleanup
 // function that unmounts the filesystem and reaps the child process.
 func mountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup func()) {
@@ -321,21 +334,27 @@ func mountNydusBootstrapWithCache(
 }
 
 // unmountFuse detaches mnt, retrying while the kernel still holds references.
-// A umount straight after heavy I/O routinely returns EBUSY for a moment, and
-// giving up there leaves a dead mountpoint that later trips up directory
-// removal.
+// A umount straight after heavy I/O routinely returns EBUSY for a moment, as
+// does one racing a fork elsewhere in the test binary, and giving up there
+// leaves a dead mountpoint that later trips up directory removal. The kernel's
+// answer decides whether mnt is still mounted: mountinfo, which mountpoint(1)
+// reads, can miss entries while parallel tests mount and unmount. Without
+// CAP_SYS_ADMIN, fusermount does the unmount instead.
 func unmountFuse(mnt string) {
 	for i := 0; i < 50; i++ {
-		if !isMountpoint(mnt) {
+		err := syscall.Unmount(mnt, 0)
+		if err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOENT) {
 			return
 		}
-		for _, argv := range [][]string{
-			{"fusermount3", "-u", mnt},
-			{"fusermount", "-u", mnt},
-		} {
-			_ = exec.Command(argv[0], argv[1:]...).Run()
-			if !isMountpoint(mnt) {
-				return
+		if errors.Is(err, syscall.EPERM) {
+			for _, argv := range [][]string{
+				{"fusermount3", "-u", mnt},
+				{"fusermount", "-u", mnt},
+			} {
+				_ = exec.Command(argv[0], argv[1:]...).Run()
+				if !isMountpoint(mnt) {
+					return
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

@@ -3,7 +3,8 @@ use std::io;
 use nydus_format::erofs::{
     cast_ref, erofs_xattr_prefix, mode_to_erofs_file_type, ErofsDirent, ErofsInode,
     EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT_REG_FILE, EROFS_FT_SYMLINK,
-    EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+    EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE,
+    EROFS_INODE_FLAT_PLAIN, EROFS_INODE_LAYOUT_COMPACT, EROFS_I_VERSION_BIT,
     EROFS_XATTR_ENTRY_HEADER_SIZE, EROFS_XATTR_IBODY_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
@@ -13,9 +14,21 @@ use super::{ErofsReader, RawDirEntry};
 impl ErofsReader {
     /// Get a zero-copy inode view from the mmap.
     pub fn inode(&self, nid: u64) -> io::Result<ErofsInode<'_>> {
-        let offset = self.nid_to_offset(nid);
-        let data = self.mmap_slice(offset, EROFS_INODE_EXTENDED_SIZE)?;
-        ErofsInode::parse(data)
+        self.inode_at(self.nid_to_offset(nid))
+    }
+
+    /// Parse the inode starting at image byte `offset`.
+    pub(crate) fn inode_at(&self, offset: usize) -> io::Result<ErofsInode<'_>> {
+        // A compact inode may end the image, so read only as many bytes as
+        // its layout bit says it has.
+        let head = self.mmap_slice(offset, EROFS_INODE_COMPACT_SIZE)?;
+        let i_format = u16::from_le_bytes([head[0], head[1]]);
+        let size = if (i_format >> EROFS_I_VERSION_BIT) & 1 == EROFS_INODE_LAYOUT_COMPACT {
+            EROFS_INODE_COMPACT_SIZE
+        } else {
+            EROFS_INODE_EXTENDED_SIZE
+        };
+        ErofsInode::parse(self.mmap_slice(offset, size)?)
     }
 
     /// Size of a FLAT_INLINE inode's block-backed region; bytes past it live

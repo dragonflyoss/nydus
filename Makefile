@@ -88,7 +88,7 @@ FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 NBD_TEST_PKG = .
 BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-nydusify test-e2e test-tooci test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-nydusify test-e2e test-tooci test-tar-corpus test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -129,6 +129,22 @@ test-tooci: release nydusify
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestNydusifyToOCI$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
+
+# Convert Go's archive/tar test corpus and vectors, containerd's archive
+# tests, generated and mutated layers, and 8 GiB files through nydus.Pack,
+# and diff each FUSE mount against the containerd archive.Apply tree.
+# Requires root and FUSE. NYDUS_E2E_TAR_SEEDS sets how many random layers
+# to generate; NYDUS_E2E_HUGE_TAR=1 also streams the 60 GB sparse corpus.
+# GO_TAR_TESTDATA points at a Go archive/tar testdata directory other than
+# the one in GOROOT. TMPDIR is set to the repo's .test-tmp/.
+test-tar-corpus: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	mkdir -p $(CURDIR)/.test-tmp
+	cd tests/e2e && \
+		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
+		"NYDUS_E2E_TAR_SEEDS=$(NYDUS_E2E_TAR_SEEDS)" "NYDUS_E2E_HUGE_TAR=$(NYDUS_E2E_HUGE_TAR)" \
+		"GO_TAR_TESTDATA=$(GO_TAR_TESTDATA)" \
+		$(GO_BIN) test -v -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) ./tar
 
 # Run the UFFD test suite: capability preflight, the stateless socket smoke,
 # real userfaultfd fault-completion integration (managed copy/zeropage and
