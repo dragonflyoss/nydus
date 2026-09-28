@@ -203,13 +203,15 @@ impl FileioCommand {
 
         // Non-fatal like the fuse service: the export keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {
-            Some(address) => match crate::api_server::ApiServer::start(address) {
-                Ok(server) => Some(server),
-                Err(err) => {
-                    warn!("failed to start metrics apiserver: {}", err.report());
-                    None
+            Some(address) => {
+                match crate::api_server::ApiServer::start(address, flat.core().metrics()) {
+                    Ok(server) => Some(server),
+                    Err(err) => {
+                        warn!("failed to start metrics apiserver: {}", err.report());
+                        None
+                    }
                 }
-            },
+            }
             None => None,
         };
 
