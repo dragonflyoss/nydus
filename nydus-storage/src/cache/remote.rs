@@ -13,9 +13,10 @@ use std::sync::Arc;
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
+use nydus_telemetry::metrics::ImageMetrics;
 
 use super::{
-    decode_chunk_group_into, validate_chunk_group_with_metrics, BlobCache, ChunkGroupBuffers,
+    decode_chunk_group_into, validate_chunk_group_for_image, BlobCache, ChunkGroupBuffers,
 };
 
 /// A diskless blob cache: reads are served straight from the backend with
@@ -24,6 +25,7 @@ pub struct RemoteBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
     blob_metadata: BlobMetadata,
     backend: Arc<dyn BlobBackend>,
+    metrics: Arc<ImageMetrics>,
 }
 
 impl RemoteBlobCache {
@@ -32,11 +34,24 @@ impl RemoteBlobCache {
         blob_id: [u8; SHA256_DIGEST_SIZE],
         backend: Arc<dyn BlobBackend>,
     ) -> io::Result<Self> {
+        Self::open_with_metrics(
+            blob_id,
+            backend,
+            nydus_telemetry::metrics::process_metrics(),
+        )
+    }
+
+    pub(crate) fn open_with_metrics(
+        blob_id: [u8; SHA256_DIGEST_SIZE],
+        backend: Arc<dyn BlobBackend>,
+        metrics: Arc<ImageMetrics>,
+    ) -> io::Result<Self> {
         let blob_metadata = backend.blob_metadata(&blob_id)?;
         Ok(Self {
             blob_id,
             blob_metadata,
             backend,
+            metrics,
         })
     }
 }
@@ -91,7 +106,7 @@ impl BlobCache for RemoteBlobCache {
                 decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
                 out
             };
-            validate_chunk_group_with_metrics(&self.backend, meta, &group, payload)?;
+            validate_chunk_group_for_image(&self.backend, meta, &group, payload, &self.metrics)?;
             meta.for_each_decoded_chunk(index, payload, &mut |chunk_offset, bytes| {
                 let copy_start = offset.max(chunk_offset);
                 let copy_end = end.min(chunk_offset + bytes.len() as u64);

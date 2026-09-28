@@ -13,11 +13,12 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use http_body_util::Full;
-use hyper::body::{Bytes, Incoming};
+use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use nydus_telemetry::metrics::ImageMetrics;
 use tokio::net::UnixListener;
 use tokio::runtime::Builder;
 use tokio::sync::Notify;
@@ -32,7 +33,7 @@ pub struct ApiServer {
 
 impl ApiServer {
     /// Start serving metrics at `address`, which must be `unix:///path/to.sock`.
-    pub fn start(address: &str) -> Result<Self> {
+    pub fn start(address: &str, metrics: Arc<ImageMetrics>) -> Result<Self> {
         let socket_path = parse_unix_address(address)?;
 
         if let Some(parent) = socket_path.parent() {
@@ -69,7 +70,7 @@ impl ApiServer {
         let handle = std::thread::Builder::new()
             .name("nydus_apiserver".to_string())
             .spawn(move || {
-                runtime.block_on(serve(listener, shutdown_for_thread));
+                runtime.block_on(serve(listener, shutdown_for_thread, metrics));
             })
             .context("failed to spawn apiserver thread")?;
 
@@ -94,16 +95,22 @@ impl ApiServer {
     }
 }
 
-async fn serve(listener: UnixListener, shutdown: Arc<Notify>) {
+async fn serve(listener: UnixListener, shutdown: Arc<Notify>, metrics: Arc<ImageMetrics>) {
     loop {
         tokio::select! {
             _ = shutdown.notified() => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _addr)) => {
                     let io = TokioIo::new(stream);
+                    let metrics = metrics.clone();
                     tokio::task::spawn(async move {
                         if let Err(err) = http1::Builder::new()
-                            .serve_connection(io, service_fn(handle_request))
+                            .serve_connection(
+                                io,
+                                service_fn(move |request| {
+                                    handle_request(request, metrics.clone())
+                                }),
+                            )
                             .await
                         {
                             warn!("apiserver connection error: {err}");
@@ -116,11 +123,12 @@ async fn serve(listener: UnixListener, shutdown: Arc<Notify>) {
     }
 }
 
-async fn handle_request(
-    req: Request<Incoming>,
+async fn handle_request<B>(
+    req: Request<B>,
+    metrics: Arc<ImageMetrics>,
 ) -> std::result::Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
-        let body = nydus_telemetry::metrics::encode_text();
+        let body = metrics.encode_text();
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain; version=0.0.4")
@@ -140,4 +148,41 @@ async fn handle_request(
             .expect("valid 404 response")
     };
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use nydus_telemetry::metrics::{BackendTarget, ReadKind};
+    use std::time::Duration;
+
+    async fn metrics_body(metrics: Arc<ImageMetrics>) -> String {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/metrics")
+            .body(())
+            .unwrap();
+        let response = handle_request(request, metrics).await.unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_uses_the_selected_image_registry() {
+        let first = Arc::new(ImageMetrics::new());
+        let second = Arc::new(ImageMetrics::new());
+        first.record_backend_read(
+            BackendTarget::Origin,
+            ReadKind::OnDemand,
+            4096,
+            Duration::from_millis(1),
+            false,
+        );
+
+        let first_body = metrics_body(first).await;
+        let second_body = metrics_body(second).await;
+        assert!(first_body.contains("backend_origin_read_count 1\n"));
+        assert!(second_body.contains("backend_origin_read_count 0\n"));
+    }
 }

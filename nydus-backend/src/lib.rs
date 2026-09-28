@@ -22,6 +22,7 @@ use std::sync::Arc;
 use nydus_config::BackendConfig;
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
+use nydus_telemetry::metrics::ImageMetrics;
 
 pub use local::Local;
 
@@ -202,11 +203,23 @@ pub trait BlobBackend: Send + Sync {
 /// they would be counted twice. Apply this exactly once, where the backend is
 /// constructed.
 pub fn metered(backend: Arc<dyn BlobBackend>) -> Arc<dyn BlobBackend> {
-    Arc::new(MeteredBackend { inner: backend })
+    metered_with_metrics(backend, nydus_telemetry::metrics::process_metrics())
+}
+
+/// Wrap `backend` and attribute every read to one image's metrics.
+pub fn metered_with_metrics(
+    backend: Arc<dyn BlobBackend>,
+    metrics: Arc<ImageMetrics>,
+) -> Arc<dyn BlobBackend> {
+    Arc::new(MeteredBackend {
+        inner: backend,
+        metrics,
+    })
 }
 
 struct MeteredBackend {
     inner: Arc<dyn BlobBackend>,
+    metrics: Arc<ImageMetrics>,
 }
 
 impl MeteredBackend {
@@ -224,7 +237,7 @@ impl MeteredBackend {
         let target = READ_SERVED_BY
             .with(|cell| cell.get())
             .unwrap_or_else(|| self.inner.backend_target());
-        nydus_telemetry::metrics::record_backend_read(
+        self.metrics.record_backend_read(
             target,
             context.kind,
             bytes,
@@ -285,10 +298,21 @@ impl BlobBackend for MeteredBackend {
 
 /// Construct a blob backend from its configuration.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
+    build_backend_with_metrics(config, nydus_telemetry::metrics::process_metrics())
+}
+
+/// Construct a blob backend whose telemetry belongs to `metrics`.
+pub fn build_backend_with_metrics(
+    config: &BackendConfig,
+    metrics: Arc<ImageMetrics>,
+) -> io::Result<Arc<dyn BlobBackend>> {
     let backend: Arc<dyn BlobBackend> = match config {
         BackendConfig::Local(local) => Arc::new(Local::new(local.dir.clone())),
         #[cfg(feature = "backend-registry")]
-        BackendConfig::Registry(registry) => Arc::new(Registry::new(registry.clone())?),
+        BackendConfig::Registry(registry) => Arc::new(Registry::new_with_metrics(
+            registry.clone(),
+            metrics.clone(),
+        )?),
         #[cfg(not(feature = "backend-registry"))]
         BackendConfig::Registry(_) => {
             return Err(io::Error::new(
@@ -297,7 +321,7 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>>
             ))
         }
     };
-    Ok(metered(backend))
+    Ok(metered_with_metrics(backend, metrics))
 }
 
 #[cfg(test)]

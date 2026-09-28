@@ -1286,11 +1286,13 @@ Fields under `backend.config`:
 
 ## Metrics
 
-When `nydus fuse` is started with `--apiserver unix:///path/to/api.sock`, a
-small HTTP server is bound to that Unix socket and serves the Prometheus text
-exposition at `GET /metrics` and the recorded chunk access order at
-`GET /trace` (any other path returns `404`). The server is torn down and the
-socket unlinked when the mount exits. Scrape it with, e.g.:
+When `nydus fuse`, `nydus fileio`, or `nydus ublk` is started with
+`--apiserver unix:///path/to/api.sock`, a small HTTP server is bound to that
+Unix socket and serves the Prometheus text exposition at `GET /metrics` and
+the recorded chunk access order at `GET /trace` (any other path returns
+`404`). Each service owns one image and one metrics registry, so the endpoint
+reports only that image. The server is torn down and the socket unlinked when
+the service exits. Scrape it with, e.g.:
 
 ```bash
 curl --unix-socket /run/nydus/api.sock http://localhost/metrics
@@ -1309,14 +1311,26 @@ Each completed backend request is also logged at `debug` level after it returns,
 carrying the request source, transport, method, URL, request headers, response
 status and headers (or an error), and the wall-clock duration.
 
-For library embedders (no apiserver socket), `nydus_telemetry::metrics::snapshot()`
-returns a serializable `Snapshot` capturing every registered metric from the same
-registry. It serializes to a flat JSON map: counters as unsigned integers,
-gauges as signed integers, histograms expanded to `<name>_sum` / `<name>_count`,
-and labeled series keyed as `<name>{label="value",...}`. Embedders (e.g. a
-hypervisor's stats endpoint) include it to reason about runtime behavior — in
-particular `backend_ondemand_read_count > 0` means the prefetch did not cover
-the access pattern and the workload fell back to the network.
+For library embedders (no apiserver socket), each `NydusCore` owns an
+independent `ImageMetrics`. Use `core.metrics().snapshot()` for a serializable
+snapshot or `core.metrics().encode_text()` for the Prometheus exposition of
+that image. `Snapshot` serializes to a flat JSON map: counters as unsigned
+integers, gauges as signed integers, histograms expanded to `<name>_sum` /
+`<name>_count`, and labeled series keyed as
+`<name>{label="value",...}`. Embedders (e.g. a hypervisor's stats endpoint)
+include it to reason about runtime behavior — in particular
+`backend_ondemand_read_count > 0` means the prefetch did not cover the access
+pattern and the workload fell back to the network.
+
+The free `nydus_telemetry::metrics::snapshot()` and `encode_text()` functions
+read a separate process-wide compatibility registry used by legacy
+constructors that do not receive an `ImageMetrics`. They do **not** aggregate
+the registries owned by `NydusCore` instances, so the process-wide value is
+not the sum of all image values. Aggregation must be explicit: counters can be
+summed; histograms must merge buckets, count, and sum; and gauges need a
+defined policy. In particular, summing per-image `cache_total_chunk_group`
+counts a blob once per image, whereas the compatibility registry deduplicates
+the same cache key across its users.
 
 Exported metrics:
 
@@ -2604,9 +2618,9 @@ through `ublk_drv` over `io_uring`; see
 	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.
 - Access traces record every chunk the guest reads, hit or miss, and
-	`nydus_telemetry::metrics::snapshot()` exposes runtime counters for embedding
-	into hypervisor stats endpoints; a saved trace JSON can be replayed offline
-	via `nydus optimize --trace-file`. See [Metrics](#metrics).
+	`core.metrics().snapshot()` exposes this image's runtime counters for
+	embedding into hypervisor stats endpoints; a saved trace JSON can be replayed
+	offline via `nydus optimize --trace-file`. See [Metrics](#metrics).
 - `BlobId` is the public blob digest type. It converts to/from 64-character
 	SHA256 hex strings and `[u8; 32]` bytes.
 - `blobs.prepare_all()` lists the device table in order as `BlobInfo` entries:

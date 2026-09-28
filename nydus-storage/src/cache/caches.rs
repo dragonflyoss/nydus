@@ -17,6 +17,7 @@ use crate::access_trace::TraceRecorder;
 use nydus_backend::BlobBackend;
 use nydus_format::blob::BlobMetadataChunkGroup;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
+use nydus_telemetry::metrics::ImageMetrics;
 
 use super::{BlobCache, LocalBlobCache, RawDeviceBlobCache, RemoteBlobCache};
 
@@ -38,7 +39,7 @@ struct BlobSlot {
 }
 
 impl BlobSlot {
-    fn cache(&self) -> io::Result<Arc<dyn BlobCache>> {
+    fn cache(&self, metrics: &Arc<ImageMetrics>) -> io::Result<Arc<dyn BlobCache>> {
         if let Some(cache) = self.cache.read().unwrap().as_ref() {
             return Ok(cache.clone());
         }
@@ -52,14 +53,19 @@ impl BlobSlot {
             Arc::new(RawDeviceBlobCache::new(self.blob_id, self.backend.clone()))
         } else {
             match &self.cache_dir {
-                Some(cache_dir) => Arc::new(LocalBlobCache::open_with_trace(
+                Some(cache_dir) => Arc::new(LocalBlobCache::open_with_trace_and_metrics(
                     self.blob_id,
                     self.blob_index as u32,
                     cache_dir,
                     self.backend.clone(),
                     self.trace_recorder.clone(),
+                    metrics.clone(),
                 )?),
-                None => Arc::new(RemoteBlobCache::open(self.blob_id, self.backend.clone())?),
+                None => Arc::new(RemoteBlobCache::open_with_metrics(
+                    self.blob_id,
+                    self.backend.clone(),
+                    metrics.clone(),
+                )?),
             }
         };
         *guard = Some(cache.clone());
@@ -70,6 +76,7 @@ impl BlobSlot {
 /// The set of per-blob lazy caches backing an opened image.
 pub struct BlobCaches {
     slots: HashMap<u16, BlobSlot>,
+    metrics: Arc<ImageMetrics>,
 }
 
 impl BlobCaches {
@@ -78,6 +85,7 @@ impl BlobCaches {
     pub fn empty() -> Self {
         Self {
             slots: HashMap::new(),
+            metrics: nydus_telemetry::metrics::process_metrics(),
         }
     }
 
@@ -89,6 +97,22 @@ impl BlobCaches {
         backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
+    ) -> io::Result<Self> {
+        Self::new_with_metrics(
+            entries,
+            backend,
+            cache_dir,
+            trace_recorder,
+            nydus_telemetry::metrics::process_metrics(),
+        )
+    }
+
+    pub fn new_with_metrics(
+        entries: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
+        backend: Arc<dyn BlobBackend>,
+        cache_dir: Option<&Path>,
+        trace_recorder: Option<Arc<TraceRecorder>>,
+        metrics: Arc<ImageMetrics>,
     ) -> io::Result<Self> {
         let slots = entries
             .into_iter()
@@ -106,7 +130,11 @@ impl BlobCaches {
                 )
             })
             .collect();
-        Ok(Self { slots })
+        Ok(Self { slots, metrics })
+    }
+
+    pub(crate) fn metrics(&self) -> &Arc<ImageMetrics> {
+        &self.metrics
     }
 
     /// Whether the set contains the blob identified by `blob_index`.
@@ -134,7 +162,9 @@ impl BlobCaches {
     ///
     /// [`cache`]: Self::cache
     pub fn try_cache(&self, blob_index: u16) -> Option<io::Result<Arc<dyn BlobCache>>> {
-        self.slots.get(&blob_index).map(BlobSlot::cache)
+        self.slots
+            .get(&blob_index)
+            .map(|slot| slot.cache(&self.metrics))
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
@@ -172,8 +202,8 @@ impl BlobCaches {
         // Time the ondemand blob prefetch and report how many source groups
         // it warmed versus skipped, so operators can tell whether the warmup
         // outran the workload.
-        let fill_before = nydus_telemetry::metrics::cache_redirect_fill_chunk_group_total();
-        let skip_before = nydus_telemetry::metrics::cache_redirect_skip_chunk_group_total();
+        let fill_before = self.metrics.cache_redirect_fill_chunk_group_total();
+        let skip_before = self.metrics.cache_redirect_skip_chunk_group_total();
         let start = Instant::now();
         let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), workers, deadline);
         info!(
@@ -181,8 +211,8 @@ impl BlobCaches {
             blob_index,
             start.elapsed(),
             workers.max(1),
-            nydus_telemetry::metrics::cache_redirect_fill_chunk_group_total() - fill_before,
-            nydus_telemetry::metrics::cache_redirect_skip_chunk_group_total() - skip_before,
+            self.metrics.cache_redirect_fill_chunk_group_total() - fill_before,
+            self.metrics.cache_redirect_skip_chunk_group_total() - skip_before,
         );
         result
     }
@@ -230,12 +260,12 @@ impl BlobCaches {
         };
         cache.for_each_redirect_chunk_group(workers, deadline, &skip, &|group, payload| {
             let (Some(redirect), Some(source)) = (group.redirect(), source_of(group)) else {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_chunk_group();
+                self.metrics.inc_cache_redirect_skip_chunk_group();
                 return Ok(());
             };
             let source_index = redirect.source_chunk_group_index() as usize;
             if let Err(err) = source.fill_chunk_group_from_redirect(source_index, payload) {
-                nydus_telemetry::metrics::inc_cache_redirect_skip_chunk_group();
+                self.metrics.inc_cache_redirect_skip_chunk_group();
                 warn!(
                     "failed to fill chunk group {source_index} of blob {} from ondemand blob {blob_index}: {err}",
                     redirect.source_blob_index()

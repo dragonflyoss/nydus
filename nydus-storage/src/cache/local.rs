@@ -17,11 +17,10 @@ use nydus_backend::{BlobBackend, ReadContext, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroup, NYDUS_BLOB_METADATA_SUFFIX};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
+use nydus_telemetry::metrics::ImageMetrics;
 
 use super::chunk_group_lock::ChunkGroupLocks;
-use super::{
-    plan_prefetch_batches, validate_chunk_group_with_metrics, BlobCache, ChunkGroupBuffers,
-};
+use super::{plan_prefetch_batches, validate_chunk_group_for_image, BlobCache, ChunkGroupBuffers};
 
 #[derive(Clone)]
 enum FlightResult {
@@ -104,6 +103,7 @@ pub struct LocalBlobCache {
     /// re-checks. A failed open leaves the slot empty and retryable.
     cache_file: RwLock<Option<Arc<File>>>,
     backend: Arc<dyn BlobBackend>,
+    metrics: Arc<ImageMetrics>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     /// In-process single flight keyed by group index; one flight covers
     /// every group of its fetch window.
@@ -135,6 +135,24 @@ impl LocalBlobCache {
         backend: Arc<dyn BlobBackend>,
         trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<Self> {
+        Self::open_with_trace_and_metrics(
+            blob_id,
+            blob_index,
+            cache_dir,
+            backend,
+            trace_recorder,
+            nydus_telemetry::metrics::process_metrics(),
+        )
+    }
+
+    pub(crate) fn open_with_trace_and_metrics(
+        blob_id: [u8; SHA256_DIGEST_SIZE],
+        blob_index: u32,
+        cache_dir: &Path,
+        backend: Arc<dyn BlobBackend>,
+        trace_recorder: Option<Arc<TraceRecorder>>,
+        metrics: Arc<ImageMetrics>,
+    ) -> io::Result<Self> {
         fs::create_dir_all(cache_dir)?;
 
         let cache_key = backend.cache_key(&blob_id)?;
@@ -143,11 +161,6 @@ impl LocalBlobCache {
             cache_dir.join(format!("{cache_key_hex}{NYDUS_BLOB_METADATA_SUFFIX}"));
         let blob_metadata =
             load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
-        nydus_telemetry::metrics::track_blob_chunk_groups(
-            cache_key,
-            blob_metadata.chunk_group_count() as u64,
-        );
-
         let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
         let group_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
@@ -192,6 +205,7 @@ impl LocalBlobCache {
         let traced_chunk_groups = (0..blob_metadata.chunk_group_count())
             .map(|_| AtomicBool::new(false))
             .collect();
+        metrics.track_blob_chunk_groups(cache_key, blob_metadata.chunk_group_count() as u64);
 
         Ok(Self {
             blob_id,
@@ -204,6 +218,7 @@ impl LocalBlobCache {
             prefetch_lock_path,
             cache_file: RwLock::new(None),
             backend,
+            metrics,
             trace_recorder,
             inflight: Mutex::new(HashMap::new()),
             cache_mmap: OnceLock::new(),
@@ -261,7 +276,7 @@ impl LocalBlobCache {
                 .open(&self.cache_data_path)?,
         );
         file.set_len(self.blob_metadata.uncompressed_size())?;
-        nydus_telemetry::metrics::inc_cache_opened_files();
+        self.metrics.inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
     }
@@ -310,7 +325,7 @@ impl LocalBlobCache {
                 "blob read beyond cache data file",
             ));
         }
-        nydus_telemetry::metrics::inc_cache_hit_chunk_group();
+        self.metrics.inc_cache_hit_chunk_group();
         Ok(Some(&mmap[offset as usize..end as usize]))
     }
 
@@ -354,7 +369,7 @@ impl LocalBlobCache {
     fn ensure_chunk_groups(&self, offset: u64, end: u64, cache_file: &File) -> io::Result<()> {
         for index in self.chunk_group_span(offset, end)? {
             if self.chunk_group_ready(index)? {
-                nydus_telemetry::metrics::inc_cache_hit_chunk_group();
+                self.metrics.inc_cache_hit_chunk_group();
             } else {
                 self.ensure_chunk_group_window(index, cache_file)?;
             }
@@ -430,7 +445,7 @@ impl LocalBlobCache {
 
         let result = (|| {
             if self.chunk_group_ready(first)? {
-                nydus_telemetry::metrics::inc_cache_hit_chunk_group();
+                self.metrics.inc_cache_hit_chunk_group();
                 return Ok(());
             }
             // Claim the window across the processes sharing this cache. The
@@ -445,7 +460,7 @@ impl LocalBlobCache {
             let _claim = self.chunk_group_locks.acquire(window.clone());
             let window = self.trim_ready(window)?;
             if window.is_empty() {
-                nydus_telemetry::metrics::inc_cache_hit_chunk_group();
+                self.metrics.inc_cache_hit_chunk_group();
                 return Ok(());
             }
             let mut buffers = ChunkGroupBuffers::default();
@@ -456,7 +471,7 @@ impl LocalBlobCache {
                 cache_file,
             )?;
             for _ in window {
-                nydus_telemetry::metrics::inc_cache_ondemand_fill_chunk_group();
+                self.metrics.inc_cache_ondemand_fill_chunk_group();
             }
             Ok(())
         })();
@@ -495,7 +510,7 @@ impl LocalBlobCache {
         }
         self.fill_chunk_group_window(batch.clone(), ReadKind::Prefetch, buffers, cache_file)?;
         for _ in batch {
-            nydus_telemetry::metrics::inc_cache_fill_chunk_group();
+            self.metrics.inc_cache_fill_chunk_group();
         }
         Ok(())
     }
@@ -551,7 +566,13 @@ impl LocalBlobCache {
             )?;
             out
         };
-        validate_chunk_group_with_metrics(&self.backend, &self.blob_metadata, group, payload)?;
+        validate_chunk_group_for_image(
+            &self.backend,
+            &self.blob_metadata,
+            group,
+            payload,
+            &self.metrics,
+        )?;
         Ok(payload)
     }
 
@@ -610,7 +631,7 @@ impl LocalBlobCache {
             match self.decode_group(&group, base, encoded, decoded) {
                 Ok(payload) => cb(&group, payload)?,
                 Err(err) => {
-                    nydus_telemetry::metrics::inc_cache_redirect_skip_chunk_group();
+                    self.metrics.inc_cache_redirect_skip_chunk_group();
                     warn!(
                         "skipping redirect chunk group {index} of blob {}: {err}",
                         self.blob_index
@@ -704,7 +725,7 @@ impl LocalBlobCache {
         // Fast path: the sticky all-ready flag says every group is already
         // decoded into the cache file, so skip the per-group walk entirely.
         if self.chunk_group_map.is_all_ready() {
-            nydus_telemetry::metrics::inc_cache_hit_chunk_group();
+            self.metrics.inc_cache_hit_chunk_group();
             return Ok(());
         }
 
@@ -724,9 +745,9 @@ impl Drop for LocalBlobCache {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_some();
         if opened {
-            nydus_telemetry::metrics::dec_cache_opened_files();
+            self.metrics.dec_cache_opened_files();
         }
-        nydus_telemetry::metrics::untrack_blob_chunk_groups(&self.cache_key);
+        self.metrics.untrack_blob_chunk_groups(&self.cache_key);
     }
 }
 
@@ -904,17 +925,23 @@ impl BlobCache for LocalBlobCache {
                 )
             })?;
         if self.chunk_group_ready(chunk_group_index)? {
-            nydus_telemetry::metrics::inc_cache_hit_chunk_group();
+            self.metrics.inc_cache_hit_chunk_group();
             return Ok(());
         }
         // Cross-check against this blob's own metadata: the redirect group's
         // crc32 and chunk lengths were copied from this group at optimize
         // time, so any divergence (stale optimize artifact, corrupted
         // transfer) is caught here before it can poison the cache.
-        validate_chunk_group_with_metrics(&self.backend, &self.blob_metadata, &group, payload)?;
+        validate_chunk_group_for_image(
+            &self.backend,
+            &self.blob_metadata,
+            &group,
+            payload,
+            &self.metrics,
+        )?;
         let cache_file = self.cache_file()?;
         self.write_chunk_group(&group, payload, cache_file.as_ref())?;
-        nydus_telemetry::metrics::inc_cache_redirect_fill_chunk_group();
+        self.metrics.inc_cache_redirect_fill_chunk_group();
         Ok(())
     }
 

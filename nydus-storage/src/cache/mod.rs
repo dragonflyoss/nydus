@@ -15,6 +15,7 @@ use nydus_backend::BlobBackend;
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataCompressor, BlobMetadataDigest,
 };
+use nydus_telemetry::metrics::ImageMetrics;
 
 /// Default on-demand fetch size: the compressed bytes one backend read
 /// covers around a missed chunk group (see [`set_fetch_size`]). 2 MiB.
@@ -385,11 +386,35 @@ pub fn validate_chunk_group_with_metrics(
     group: &BlobMetadataChunkGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
+    validate_chunk_group(backend, blob_metadata, group, decoded, |target| {
+        nydus_telemetry::metrics::record_backend_crc_error(target)
+    })
+}
+
+pub(crate) fn validate_chunk_group_for_image(
+    backend: &Arc<dyn BlobBackend>,
+    blob_metadata: &BlobMetadata,
+    group: &BlobMetadataChunkGroup,
+    decoded: &[u8],
+    metrics: &ImageMetrics,
+) -> io::Result<()> {
+    validate_chunk_group(backend, blob_metadata, group, decoded, |target| {
+        metrics.record_backend_crc_error(target)
+    })
+}
+
+fn validate_chunk_group(
+    backend: &Arc<dyn BlobBackend>,
+    blob_metadata: &BlobMetadata,
+    group: &BlobMetadataChunkGroup,
+    decoded: &[u8],
+    record_crc_error: impl FnOnce(nydus_telemetry::metrics::BackendTarget),
+) -> io::Result<()> {
     if let Err(err) = validate_decoded_chunk_group(blob_metadata, group, decoded) {
         if is_chunk_group_crc_mismatch(&err) {
             let target =
                 nydus_backend::last_read_served_by().unwrap_or_else(|| backend.backend_target());
-            nydus_telemetry::metrics::record_backend_crc_error(target);
+            record_crc_error(target);
         }
         return Err(err);
     }

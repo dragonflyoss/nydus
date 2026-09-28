@@ -2,7 +2,7 @@ use clap::Parser;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
-use nydus_backend::{build_backend, BlobBackend, Local};
+use nydus_backend::{build_backend_with_metrics, metered_with_metrics, BlobBackend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_retry_delay_max,
     default_prefetch_retry_delay_min, default_prefetch_timeout, Config, PrefetchScope,
@@ -10,6 +10,7 @@ use nydus_config::{
 use nydus_core::ErofsReader;
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::metrics::ImageMetrics;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn, Level};
@@ -188,6 +189,7 @@ impl FuseCommand {
     /// termination signal stops it.
     fn run(&self, storage_config: Option<Config>) -> Result<()> {
         let mountpoint = &self.mountpoint;
+        let metrics = Arc::new(ImageMetrics::new());
 
         let cache_dir = if let Some(dir) = self.cache_dir.clone() {
             Some(dir)
@@ -244,9 +246,15 @@ impl FuseCommand {
                     dir.display()
                 )));
             }
-            Some(nydus_backend::metered(Arc::new(Local::new(dir.clone()))))
+            Some(metered_with_metrics(
+                Arc::new(Local::new(dir.clone())),
+                metrics.clone(),
+            ))
         } else if let Some(config) = storage_config.as_ref() {
-            Some(build_backend(&config.backend).context("failed to build blob backend")?)
+            Some(
+                build_backend_with_metrics(&config.backend, metrics.clone())
+                    .context("failed to build blob backend")?,
+            )
         } else {
             None
         };
@@ -263,9 +271,17 @@ impl FuseCommand {
         let reader = match (&self.blob, &self.bootstrap, backend) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
-            (Some(blob), None, _) => ErofsReader::open_blob(blob, cache_dir.as_deref()),
+            (Some(blob), None, _) => {
+                ErofsReader::open_blob_with_metrics(blob, cache_dir.as_deref(), metrics.clone())
+            }
             (None, Some(bootstrap), Some(backend)) => {
-                ErofsReader::open_bootstrap(bootstrap, backend, cache_dir.as_deref(), None)
+                ErofsReader::open_bootstrap_with_metrics(
+                    bootstrap,
+                    backend,
+                    cache_dir.as_deref(),
+                    None,
+                    metrics.clone(),
+                )
             }
             _ => {
                 return Err(Error::InvalidParameter(
@@ -327,7 +343,7 @@ impl FuseCommand {
         // Optionally expose Prometheus metrics over a Unix socket. A failure here is
         // non-fatal: the mount keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {
-            Some(address) => match api_server::ApiServer::start(address) {
+            Some(address) => match api_server::ApiServer::start(address, metrics.clone()) {
                 Ok(server) => Some(server),
                 Err(err) => {
                     warn!("failed to start metrics apiserver: {}", err.report());

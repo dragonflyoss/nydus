@@ -55,10 +55,11 @@ use nydus_error::{Context, Error, Result};
 use entry::ImageFs;
 use extent::{BlobRangeSpec, ExtentResolver};
 use layout::{FlatLayout, Segment};
-use nydus_backend::build_backend;
+use nydus_backend::build_backend_with_metrics;
 use nydus_config::PrefetchScope;
 use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
+use nydus_telemetry::metrics::ImageMetrics;
 
 /// Read-side handle over a nydus image, split into blob data access and
 /// static filesystem metadata/data access.
@@ -129,7 +130,9 @@ impl NydusCore {
         let prefetch_retry_delay_max = config.prefetch.retry_delay_max;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
-        let backend = build_backend(&config.backend).context("failed to build blob backend")?;
+        let metrics = Arc::new(ImageMetrics::new());
+        let backend = build_backend_with_metrics(&config.backend, metrics.clone())
+            .context("failed to build blob backend")?;
         let cache_dir = config.storage.dir.clone();
         if let Some(cache_dir) = &cache_dir {
             std::fs::create_dir_all(cache_dir).with_context(|| {
@@ -138,11 +141,12 @@ impl NydusCore {
         }
 
         let trace_recorder = Arc::new(TraceRecorder::default());
-        let reader = ErofsReader::open_bootstrap(
+        let reader = ErofsReader::open_bootstrap_with_metrics(
             bootstrap,
             backend.clone(),
             cache_dir.as_deref(),
             Some(trace_recorder.clone()),
+            metrics,
         )
         .context("failed to open nydus bootstrap")?;
         let raw_blob_infos = reader
@@ -242,6 +246,11 @@ impl NydusCore {
     /// Return the bootstrap file backing this core.
     pub fn bootstrap(&self) -> &File {
         &self.bootstrap
+    }
+
+    /// Metrics collected only for this opened image.
+    pub fn metrics(&self) -> Arc<ImageMetrics> {
+        self.reader.metrics()
     }
 
     /// Return the size of the flattened device view.

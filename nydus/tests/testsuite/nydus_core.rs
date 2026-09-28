@@ -660,6 +660,43 @@ fn core_static_filesystem_api_reads_metadata_and_data() {
 }
 
 #[test]
+fn core_metrics_are_isolated_per_image() {
+    let first_dir = tempdir().unwrap();
+    let second_dir = tempdir().unwrap();
+    let (first_bootstrap, first_config, _, _) = build_test_image(first_dir.path());
+    let (second_bootstrap, second_config, _, _) = build_test_image(second_dir.path());
+    let first = NydusCore::new(&first_bootstrap, first_config).unwrap();
+    let second = NydusCore::new(&second_bootstrap, second_config).unwrap();
+
+    first.fs.open("file1").unwrap().read().unwrap();
+
+    let first_snapshot = serde_json::to_value(first.metrics().snapshot()).unwrap();
+    let second_snapshot = serde_json::to_value(second.metrics().snapshot()).unwrap();
+    assert!(
+        first_snapshot["backend_origin_read_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        second_snapshot["backend_origin_read_count"].as_u64(),
+        Some(0)
+    );
+    assert!(
+        first_snapshot["cache_ondemand_fill_chunk_group"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        second_snapshot["cache_ondemand_fill_chunk_group"].as_u64(),
+        Some(0)
+    );
+    assert!(first_snapshot["cache_opened_files"].as_i64().unwrap() > 0);
+    assert_eq!(second_snapshot["cache_opened_files"].as_i64(), Some(0));
+}
+
+#[test]
 fn node_fetch_populates_blob_cache_without_reading_data() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, _blob_id, _corpus) = build_test_image(dir.path());
