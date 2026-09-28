@@ -393,7 +393,7 @@ Current implementation notes:
 	for other images; the original temporary benchmark artifacts are not
 	distributed with this repository. The minimum
 	must be a power of two between 4 KiB and 512 MiB, and may exceed the
-	chunk size. Build records it as the index span; the file format does
+	chunk size. Build records it as `bytes_per_chunk_group_index`; the file format does
 	not store the writer's lone-chunk threshold. Readers validate group spans
 	against the index span.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
@@ -403,15 +403,15 @@ Current implementation notes:
 	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
 - `--compressor zstd` (or `lz4`) compresses each chunk group on its own. If
 	the compressed group is larger than 70% of its payload, the group is
-	stored plain and its blob_meta entry has `compressed_size == payload_size`
+	stored plain and its blob_meta entry has `compressed_size == uncompressed_size`
 	(its chunks then sit at their dense offsets).
 - `--compressor none` writes every chunk group plain.
 - `--exclude <path>` omits paths inside the source tree from the blob and the
 	resulting filesystem tree entirely. It accepts absolute or
 	current-working-directory-relative paths and may be repeated.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
-	`data_blob_digest`, `full_blob_digest`, `group_span`,
-	`index_span`, `chunk_group_count`,
+	`data_blob_digest`, `full_blob_digest`, `max_bytes_per_chunk_group`,
+	`bytes_per_chunk_group_index`, `chunk_group_count`,
 	`chunk_count`, `digest_count`, `chunk_compressor`, payload/compressed/
 	uncompressed totals, and full blob region offsets and block counts.
 
@@ -496,10 +496,10 @@ chunks' bytes back to back, without the tail-block padding after each file
 	index order; a chunk's block address is only known once its group
 	closes, so the builder resolves the inode chunk indexes when the data
 	region is complete, before the bootstrap is rendered.
-- Every group but the last spans at least the *index span* recorded in
+- Every group but the last covers at least the `bytes_per_chunk_group_index` recorded in
 	the blob meta (the chunk group minimum size, 2 MiB by default: a lone
 	chunk is at least that, and so is a closed pack). ChunkGroupIndexTable
-	has one four-byte entry per index span (four bytes per 2 MiB by default),
+	has one four-byte entry per `bytes_per_chunk_group_index` (four bytes per 2 MiB by default),
 	and locates a group by direct indexing and at most one forward correction (see
 	[Blob meta region layout](#blob-meta-region-layout)).
 - The group is the unit of compression, of an on-demand read (see
@@ -733,7 +733,7 @@ Current implementation notes:
 	validate it (CRC32C and, when the source carries digests, BLAKE3) before
 	it is appended.
 - Sources may use different file chunk sizes and group minimums. The output
-	uses the largest source group-span bound and derives its index span
+	uses the largest source per-group bound and derives its `bytes_per_chunk_group_index`
 	from the copied groups. Compressed sources must share one compressor
 	(plain-stored groups fit under any compressor), because the copies are
 	byte-exact; a source that is itself an ondemand blob is
@@ -772,7 +772,7 @@ Current implementation notes:
 	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
-	`group_span`, `index_span`, `chunk_group_count`,
+	`max_bytes_per_chunk_group`, `bytes_per_chunk_group_index`, `chunk_group_count`,
 	`chunk_compressor`, the chunk, digest
 	and redirect counts (`BLOB META REDIRECTS` is non-zero only for an ondemand
 	blob), and payload/compressed/uncompressed totals when the referenced blob
@@ -1619,7 +1619,7 @@ first logical external data block starts at offset 0
 	logical byte offset = 0 * 4096
 
 blob_meta then maps that logical byte offset to a compressed range in the full
-blob's data region. ChunkGroupIndexTable gives the group covering the index span
+blob's data region. ChunkGroupIndexTable gives the group covering the index entry
 start; comparing with the next group start corrects the answer at most once.
 The ChunkGroupTable entry gives
 the encoded `compressed_offset` (for example 0 for the first encoded
@@ -1666,7 +1666,7 @@ Header (24 bytes)
 table_count tables back to back, each at the next 8-byte boundary:
   ChunkGroupTable        type 1  24-byte header + (group_count + 1) * 24 bytes
   ChunkLengthTable        type 2  16-byte header + chunk_count * 4 bytes
-  ChunkGroupIndexTable type 3  24-byte header + ceil(cache_bytes / index_span) * 4 bytes
+  ChunkGroupIndexTable type 3  24-byte header + ceil(cache_bytes / bytes_per_chunk_group_index) * 4 bytes
   ChunkGroupDigestTable       type 4  24-byte header + group_count * 32 bytes, when enabled
   ChunkGroupRedirectTable     type 5  16-byte header + group_count * 8 bytes, redirect blobs only
 Zero padding to a 4096-byte multiple
@@ -1727,19 +1727,19 @@ Header extensions, optional per table type:
 
 | Table | Offset | Field | Bytes | Meaning |
 |---|---:|---|---:|---|
-| ChunkGroupTable | 16 | `max_group_span_bits` | 1 | Maximum group span is `4096 << value` bytes; at most 19 (2 GiB) |
+| ChunkGroupTable | 16 | `max_blocks_per_chunk_group_bits` | 1 | A chunk group covers at most `4096 << value` bytes; at most 19 (2 GiB) |
 | ChunkGroupTable | 17 | `compressor` | 1 | 0 plain, 1 Zstandard, 2 LZ4; unknown values reject the file |
 | ChunkGroupTable | 18 | `reserved` | 6 | Writers zero it, readers ignore it |
-| ChunkGroupIndexTable | 16 | `index_span_bits` | 1 | Lookup span is `4096 << value` bytes; at most `max_group_span_bits` |
+| ChunkGroupIndexTable | 16 | `blocks_per_chunk_group_index_bits` | 1 | Lookup span is `4096 << value` bytes; at most `max_blocks_per_chunk_group_bits` |
 | ChunkGroupIndexTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
 | ChunkGroupDigestTable | 16 | `algorithm` | 1 | 1 BLAKE3 group digest; a reader that does not know the value treats the blob as undigested and fails reads that must verify digests |
 | ChunkGroupDigestTable | 17 | `reserved` | 7 | Writers zero it, readers ignore it |
 
-The default maximum span is 8 MiB (bits 11), and index span
+The default `max_bytes_per_chunk_group` is 8 MiB (bits 11), and `bytes_per_chunk_group_index`
 2 MiB (bits 9). Setting the group minimum to 4, 8 or 16 MiB writes
-index span bits 10, 11 or 12 respectively. File chunk size and
+blocks_per_chunk_group_index_bits 10, 11 or 12 respectively. File chunk size and
 build-time grouping threshold are not recorded. Optimized blobs derive
-their own index span from copied group spans, so their index span bits are not
+their own `bytes_per_chunk_group_index` from the copied groups, so their `blocks_per_chunk_group_index_bits` is not
 necessarily 9.
 
 #### ChunkGroupTable
@@ -1749,10 +1749,10 @@ Each entry is 24 bytes; offsets below are relative to its start.
 | Offset | Field | Bytes | Meaning |
 |---:|---|---:|---|
 | 0 | `compressed_offset` | 8 | Encoded group start relative to the blob data region |
-| 8 | `uncompressed_block_offset` | 4 | Group start in the uncompressed cache address space, in 4096-byte blocks |
+| 8 | `logical_block_offset` | 4 | Group start in the logical address space the cache mirrors, in 4096-byte blocks |
 | 12 | `first_chunk_index` | 4 | First entry of this group's run in ChunkLengthTable |
-| 16 | `payload_size` | 4 | Sum of actual chunk lengths, excluding block padding; not the cache address span |
-| 20 | `payload_crc32` | 4 | CRC32C of the decoded, tightly packed payload |
+| 16 | `uncompressed_size` | 4 | Sum of actual chunk lengths, excluding block padding; not the logical size |
+| 20 | `uncompressed_crc32` | 4 | CRC32C of the decoded, tightly packed bytes |
 
 Subtract the current entry from the next to obtain encoded length, cache
 block count and chunk count. All three starts increase strictly for real
@@ -1783,14 +1783,14 @@ split the tight payload and recover each chunk's block-aligned cache address.
 #### ChunkGroupIndexTable
 
 Each entry is a four-byte `group_index` naming the group covering the
-corresponding index span's **first byte**. Every non-final group must span at
-least one index span; the final group may be shorter. The table is mandatory
+corresponding index entry's **first byte**. Every non-final group must span at
+least one index entry; the final group may be shorter. The table is mandatory
 for every nonempty blob, including redirect blobs.
 
 For a checked cache byte offset:
 
 ```text
-span_index = cache_byte_offset / index_span
+span_index = cache_byte_offset / bytes_per_chunk_group_index
 group_index = ChunkGroupIndexTable[span_index]
 if cache_byte_offset >= ChunkGroupTable[group_index + 1].uncompressed_block_offset * 4096:
     group_index += 1
@@ -1798,7 +1798,7 @@ if cache_byte_offset >= ChunkGroupTable[group_index + 1].uncompressed_block_offs
 
 At most one group boundary lies inside a index span, so this is worst-case
 O(1): direct indexing, one comparison and at most one increment. There is no
-binary-search fallback, bitmap or popcount. At the default index span the index
+binary-search fallback, bitmap or popcount. At the default `bytes_per_chunk_group_index` the index
 costs four bytes per 2 MiB of cache address space.
 
 The parser verifies the crc32c and the feature words, bounds every table of
@@ -1839,7 +1839,7 @@ Redirect details (redirect blobs only):
 	the redirect blob preserves each source's chunk lengths and compatible
 	compressor and is decoded with the same code path. Its groups tile their own address space
 	in access order (the redirect blob's `uncompressed_block_offset` values are its own), with
-	a power-of-two index span no larger than any non-final copied group.
+	a power-of-two `bytes_per_chunk_group_index` no larger than any non-final copied group.
 - The runtime never builds a cache for a redirect blob: each decoded group is
 	written into the source blob's cache at the source group's blocks and
 	marked ready there. See [Ondemand (redirect) blob layout](#ondemand-redirect-blob-layout).
@@ -2200,7 +2200,7 @@ The build pipeline follows this sequence:
 	the encoded bytes directly to the data region, in group index order. Encoded
 	chunk groups are packed back-to-back with no inter-chunk group padding. For
 	zstd and LZ4, chunk groups that do not shrink to at most 70% of their payload
-	are stored plain and marked by `compressed_size == payload_size`.
+	are stored plain and marked by `compressed_size == uncompressed_size`.
 6. Compute SHA256 over the encoded data region as those bytes are written and
 	write it into the bootstrap device slot tag.
 7. Close the remaining groups, resolve every placeholder chunk index to its
@@ -2359,7 +2359,7 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
 Header            CRC32C, counts and address geometry
 ChunkGroupTable        data/block/chunk starts, payload sizes and CRC32C
 ChunkLengthTable        u32 length for every stored chunk
-ChunkGroupIndexTable u32 group index per index span
+ChunkGroupIndexTable u32 group index per `bytes_per_chunk_group_index`
 ChunkGroupDigestTable       BLAKE3 per group, when enabled
 ChunkGroupRedirectTable     source blob and group, for ondemand blobs only
 

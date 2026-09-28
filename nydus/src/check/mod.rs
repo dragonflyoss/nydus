@@ -152,10 +152,10 @@ struct BlobInspection {
 #[derive(Clone)]
 pub struct BlobMetadataSummary {
     pub chunk_group_count: usize,
-    /// The most bytes of the address space a chunk group spans.
-    pub group_span: u32,
-    /// Address span covered by each ChunkGroupIndexTable entry.
-    pub index_span: u32,
+    /// The most bytes of the address space a chunk group covers.
+    pub max_bytes_per_chunk_group: u32,
+    /// Bytes of the logical address space each ChunkGroupIndexTable entry covers.
+    pub bytes_per_chunk_group_index: u32,
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
@@ -663,12 +663,12 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
     let blob_metadata = BlobMetadata::from_bytes(data)?;
     Ok(BlobMetadataSummary {
         chunk_group_count: blob_metadata.chunk_group_count(),
-        group_span: blob_metadata.group_span(),
-        index_span: blob_metadata.index_span(),
+        max_bytes_per_chunk_group: blob_metadata.max_bytes_per_chunk_group(),
+        bytes_per_chunk_group_index: blob_metadata.bytes_per_chunk_group_index(),
         compressor: blob_metadata.compressor(),
-        total_uncompressed_size: blob_metadata.uncompressed_size(),
+        total_uncompressed_size: blob_metadata.logical_size(),
         total_compressed_size: blob_metadata.compressed_end(),
-        total_payload_size: blob_metadata.payload_total(),
+        total_payload_size: blob_metadata.total_uncompressed_size(),
         chunk_count: blob_metadata.chunk_count(),
         digest_count: blob_metadata.digest_count(),
         redirect_count: blob_metadata.redirect_count(),

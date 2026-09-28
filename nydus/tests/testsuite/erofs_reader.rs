@@ -873,7 +873,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         let mut blob = Vec::new();
         let image = build_image(&options, &mut blob).unwrap();
         let meta = image.blob_metadata.unwrap();
-        assert_eq!(meta.group_span(), 4 * minimum);
+        assert_eq!(meta.max_bytes_per_chunk_group(), 4 * minimum);
         assert_eq!(meta.chunk_group_count(), 1);
         assert_eq!(
             meta.chunk_count(),
@@ -907,10 +907,13 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         )
         .unwrap();
         let meta = &optimized.blob_metadata;
-        assert_eq!(meta.group_span(), 16 << 20);
+        assert_eq!(meta.max_bytes_per_chunk_group(), 16 << 20);
         assert_eq!(meta.chunk_group_count(), 2);
-        let first_span = metadata[usize::from(order[0] - 1)].uncompressed_size();
-        assert_eq!(u64::from(meta.index_span()), 1u64 << first_span.ilog2());
+        let first_span = metadata[usize::from(order[0] - 1)].logical_size();
+        assert_eq!(
+            u64::from(meta.bytes_per_chunk_group_index()),
+            1u64 << first_span.ilog2()
+        );
         for (index, &source_index) in order.iter().enumerate() {
             let source_meta = &metadata[usize::from(source_index - 1)];
             let group = meta.chunk_group(index).unwrap();
@@ -925,7 +928,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
                 source_meta.chunk_group(0).unwrap().chunk_count()
             );
             assert_eq!(group.redirect().unwrap().source_blob_index(), source_index);
-            for offset in group.uncompressed_range().step_by(4096) {
+            for offset in group.logical_range().step_by(4096) {
                 assert_eq!(meta.chunk_group_index_of(offset), Some(index));
             }
         }
@@ -1090,7 +1093,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
 
     let data_blob_id = sha256_file(&data_path).expect("hash data blob");
     let embedded_device_slots =
-        [ErofsDeviceSlot::with_blob_id(blob_writer.total_blocks(), &data_blob_id).unwrap()];
+        [ErofsDeviceSlot::with_blob_id(blob_writer.total_block_count(), &data_blob_id).unwrap()];
     let embedded_bootstrap = render_bootstrap(
         &mut inodes,
         1_700_000_000,
@@ -1105,7 +1108,10 @@ fn reads_chunk_data_from_footer_based_full_blob() {
         fixture::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_metadata);
 
     let standalone_device_slots =
-        [ErofsDeviceSlot::with_blob_id(blob_writer.total_blocks(), &full_blob_digest).unwrap()];
+        [
+            ErofsDeviceSlot::with_blob_id(blob_writer.total_block_count(), &full_blob_digest)
+                .unwrap(),
+        ];
     let bootstrap = render_bootstrap(
         &mut inodes,
         1_700_000_000,

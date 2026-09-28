@@ -127,12 +127,12 @@ pub fn build_ondemand_blob(
             .or_default()
             .insert(reference.chunk_group_index);
     }
-    let mut group_span = 0;
+    let mut max_bytes_per_chunk_group = 0;
     let mut compressor = BlobMetadataCompressor::None;
     let mut digester = BlobMetadataDigester::Blake3;
     for (blob_index, cache) in &sources {
         let meta = cache.blob_metadata();
-        group_span = group_span.max(meta.group_span());
+        max_bytes_per_chunk_group = max_bytes_per_chunk_group.max(meta.max_bytes_per_chunk_group());
         match (compressor, meta.compressor()) {
             (_, BlobMetadataCompressor::None) => {}
             (BlobMetadataCompressor::None, source) => compressor = source,
@@ -147,7 +147,7 @@ pub fn build_ondemand_blob(
             digester = BlobMetadataDigester::None;
         }
     }
-    if group_span == 0 {
+    if max_bytes_per_chunk_group == 0 {
         return Err(Error::InvalidParameter(
             "the trace names no chunk groups".to_string(),
         ));
@@ -178,8 +178,8 @@ pub fn build_ondemand_blob(
             let mut window = vec![0u8; len];
             let ctx = ReadContext::chunk_group(
                 ReadKind::Prefetch,
-                first.uncompressed_offset(),
-                last.uncompressed_range().end - first.uncompressed_offset(),
+                first.logical_offset(),
+                last.logical_range().end - first.logical_offset(),
             );
             backend
                 .read_range_into(&blob_id, first.compressed_offset(), &mut window, ctx)
@@ -223,29 +223,29 @@ pub fn build_ondemand_blob(
     let mut chunk_groups = Vec::with_capacity(patterns.len());
     let mut members = Vec::new();
     let mut digests = Vec::new();
-    let mut least_blocks = group_span / nydus_format::erofs::EROFS_BLOCK_SIZE;
+    let mut least_blocks = max_bytes_per_chunk_group / nydus_format::erofs::EROFS_BLOCK_SIZE;
     for reference in patterns {
         let meta = sources[&reference.blob_index].blob_metadata();
         let group = meta
             .chunk_group(reference.chunk_group_index as usize)
             .expect("validated above");
         if chunk_groups.len() + 1 < patterns.len() {
-            least_blocks = least_blocks.min(group.uncompressed_block_count());
+            least_blocks = least_blocks.min(group.logical_block_count());
         }
         let payload = &encoded[reference];
         data.extend_from_slice(payload);
         chunk_groups.push(BlobMetadataChunkGroup::new(
             group.compressed_size(),
-            group.payload_size(),
             group.chunk_count(),
-            group.payload_crc32(),
+            group.uncompressed_size(),
+            group.uncompressed_crc32(),
             Some(BlobMetadataChunkGroupRedirect::new(
                 reference.blob_index,
                 reference.chunk_group_index,
             )?),
         )?);
         for member in group.chunk_range() {
-            members.push(meta.chunk_len(member).ok_or_else(|| {
+            members.push(meta.chunk_length(member).ok_or_else(|| {
                 Error::InvalidImage(format!("chunk group member {member} missing"))
             })?);
         }
@@ -254,18 +254,18 @@ pub fn build_ondemand_blob(
             digests.extend(meta.digest(group.index() as usize));
         }
     }
-    let index_span = nydus_format::erofs::EROFS_BLOCK_SIZE << least_blocks.ilog2();
+    let bytes_per_chunk_group_index = nydus_format::erofs::EROFS_BLOCK_SIZE << least_blocks.ilog2();
     let blob_metadata = BlobMetadata::new(
         compressor,
         digester,
-        group_span,
-        index_span,
+        max_bytes_per_chunk_group,
+        bytes_per_chunk_group_index,
         chunk_groups,
         members,
         digests,
     )
     .context("failed to assemble ondemand blob meta")?;
-    let uncompressed_blocks = blob_metadata.uncompressed_block_count();
+    let uncompressed_blocks = blob_metadata.logical_block_count();
     let (artifact, full_blob_digest, footer) = assemble_ondemand_artifact(&data, &blob_metadata)?;
 
     let bootstrap = rewrite_bootstrap_with_ondemand_blob(

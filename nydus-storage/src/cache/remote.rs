@@ -59,13 +59,16 @@ impl BlobCache for RemoteBlobCache {
         let tail = meta.chunk_group(last).expect("group within the table");
 
         // The touched groups are consecutive in the blob: one read covers
-        // them all, then each decodes on its own (into a group-span-sized
+        // them all, then each decodes on its own (into a max-bytes-per-chunk-group-sized
         // scratch, which no group's payload exceeds).
         let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
             .map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "group span exceeds usize")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "max bytes per chunk group exceed usize",
+            )
         })?;
-        let decoded_len = meta.group_span() as usize;
+        let decoded_len = meta.max_bytes_per_chunk_group() as usize;
         let mut buffers = ChunkGroupBuffers::default();
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
         self.backend.read_range_into(
@@ -74,8 +77,8 @@ impl BlobCache for RemoteBlobCache {
             encoded,
             ReadContext::chunk_group(
                 ReadKind::OnDemand,
-                head.uncompressed_offset(),
-                tail.uncompressed_range().end - head.uncompressed_offset(),
+                head.logical_offset(),
+                tail.logical_range().end - head.logical_offset(),
             ),
         )?;
 
@@ -87,7 +90,7 @@ impl BlobCache for RemoteBlobCache {
             let payload: &[u8] = if meta.is_plain(&group) {
                 &encoded[start..stop]
             } else {
-                let out = &mut decoded[..meta.payload_size(&group) as usize];
+                let out = &mut decoded[..meta.uncompressed_size(&group) as usize];
                 decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
                 out
             };

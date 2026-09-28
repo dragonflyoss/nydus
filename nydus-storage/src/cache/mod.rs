@@ -237,7 +237,7 @@ pub fn decode_chunk_group_from_window<'a>(
                 "blob meta chunk group range outside the fetched window",
             )
         })?;
-    let payload_len = usize::try_from(blob_metadata.payload_size(group)).map_err(|_| {
+    let payload_len = usize::try_from(blob_metadata.uncompressed_size(group)).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "blob meta chunk group payload size exceeds usize",
@@ -404,13 +404,13 @@ pub fn inflate_decoded_chunk_group(
     group: &BlobMetadataChunkGroup,
     decoded: &[u8],
 ) -> io::Result<Vec<u8>> {
-    let span = usize::try_from(group.uncompressed_size()).map_err(|_| {
+    let span = usize::try_from(group.logical_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "blob meta chunk group span exceeds usize",
+            "blob meta max bytes per chunk group exceed usize",
         )
     })?;
-    let base = group.uncompressed_offset();
+    let base = group.logical_offset();
     let mut padded = vec![0u8; span];
     blob_metadata.for_each_decoded_chunk(
         group.index() as usize,
@@ -433,7 +433,7 @@ pub fn validate_decoded_chunk_group(
     group: &BlobMetadataChunkGroup,
     decoded: &[u8],
 ) -> io::Result<()> {
-    let expected = blob_metadata.payload_size(group);
+    let expected = blob_metadata.uncompressed_size(group);
     if decoded.len() as u64 != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -444,7 +444,7 @@ pub fn validate_decoded_chunk_group(
             ),
         ));
     }
-    if crc32c::crc32c(decoded) != group.payload_crc32() {
+    if crc32c::crc32c(decoded) != group.uncompressed_crc32() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             ChunkGroupCrcMismatch,
@@ -474,7 +474,7 @@ pub fn validate_decoded_chunk_group(
         members.push(*blake3::hash(&decoded[at..at + len]).as_bytes());
         at += len;
     }
-    if BlobMetadataChunkGroupDigest::of_group(&members) != Some(expected) {
+    if BlobMetadataChunkGroupDigest::from_chunk_digests(&members) != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("blob chunk group {} digest mismatch", group.index()),
@@ -544,14 +544,14 @@ pub(crate) mod test_util {
     };
 
     /// Encode `groups` (each a list of chunks) with `compressor` into a data
-    /// region and the blob meta describing it, with a `group_span`-byte
-    /// group span, a one-block index span and BLAKE3 digests when `digests`
-    /// is set. Every group is stored compressed when that shrinks it, plain
+    /// region and the blob meta describing it, with `max_bytes_per_chunk_group`
+    /// as the group bound, one block per index and BLAKE3 digests when
+    /// `digests` is set. Every group is stored compressed when that shrinks it, plain
     /// otherwise. Groups tile the address space back to back, each chunk on
     /// its own blocks.
     pub(crate) fn encode_blob(
         compressor: BlobMetadataCompressor,
-        group_span: u32,
+        max_bytes_per_chunk_group: u32,
         groups: &[Vec<Vec<u8>>],
         digests: bool,
     ) -> (Vec<u8>, BlobMetadata) {
@@ -574,18 +574,18 @@ pub(crate) mod test_util {
             specs.push(
                 BlobMetadataChunkGroup::new(
                     stored.len() as u32,
-                    payload.len() as u32,
                     chunk_count,
+                    payload.len() as u32,
                     crc32c::crc32c(&payload),
                     None,
                 )
                 .unwrap(),
             );
-            let digests: Vec<[u8; 32]> = group
+            let digests: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = group
                 .iter()
                 .map(|chunk| *blake3::hash(chunk).as_bytes())
                 .collect();
-            digest_table.push(BlobMetadataChunkGroupDigest::of_group(&digests).unwrap());
+            digest_table.push(BlobMetadataChunkGroupDigest::from_chunk_digests(&digests));
         }
         if !digests {
             digest_table.clear();
@@ -597,7 +597,7 @@ pub(crate) mod test_util {
             } else {
                 BlobMetadataDigester::None
             },
-            group_span,
+            max_bytes_per_chunk_group,
             4096,
             specs,
             members,
@@ -793,9 +793,9 @@ mod tests {
             4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 data.len() as u32,
-                data.len() as u32,
                 2,
-                group.payload_crc32(),
+                data.len() as u32,
+                group.uncompressed_crc32(),
                 None,
             )
             .unwrap()],
@@ -931,8 +931,8 @@ mod tests {
             4096,
             vec![nydus_format::blob::BlobMetadataChunkGroup::new(
                 EROFS_BLOCK_SIZE,
-                EROFS_BLOCK_SIZE,
                 1,
+                EROFS_BLOCK_SIZE,
                 0,
                 None,
             )

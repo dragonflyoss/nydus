@@ -186,7 +186,7 @@ fn build_test_image_full(
 
     let data_blob_id = writer.data_digest().unwrap();
     let blob_metadata = writer.blob_metadata().unwrap();
-    let blocks = writer.total_blocks();
+    let blocks = writer.total_block_count();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
     let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id).unwrap()];
     let embedded_bootstrap_bytes =
@@ -543,7 +543,7 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let second_blob_id = writer.data_digest().unwrap();
     let device_slots = [
         ErofsDeviceSlot::with_blob_id(blob_infos[0].blocks, &blob_id).unwrap(),
-        ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id).unwrap(),
+        ErofsDeviceSlot::with_blob_id(writer.total_block_count(), &second_blob_id).unwrap(),
     ];
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1, 2]).unwrap();
     let flattened = render_flattened_bootstrap(&mut inodes, 0, &device_slots, &[0u8; 16]).unwrap();
@@ -746,11 +746,11 @@ fn core_reads_back_small_files_image() {
     assert!(groups.len() > 1);
     assert!(groups
         .iter()
-        .all(|group| blob_metadata.payload_size(group) <= group.uncompressed_size()));
+        .all(|group| blob_metadata.uncompressed_size(group) <= group.logical_size()));
     assert!(groups
         .iter()
-        .any(|group| blob_metadata.payload_size(group) < group.uncompressed_size()));
-    assert!(blob_metadata.payload_total() < blob_metadata.uncompressed_size());
+        .any(|group| blob_metadata.uncompressed_size(group) < group.logical_size()));
+    assert!(blob_metadata.total_uncompressed_size() < blob_metadata.logical_size());
 
     let core = NydusCore::new(&bootstrap, config).unwrap();
     for (name, expected) in &corpus {

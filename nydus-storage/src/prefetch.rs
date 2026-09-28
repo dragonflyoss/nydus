@@ -591,13 +591,13 @@ mod tests {
             4096,
             vec![BlobMetadataChunkGroup::new(
                 group.compressed_size(),
-                group.payload_size(),
                 group.chunk_count(),
-                group.payload_crc32(),
+                group.uncompressed_size(),
+                group.uncompressed_crc32(),
                 Some(BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()),
             )
             .unwrap()],
-            vec![group.payload_size()],
+            vec![group.uncompressed_size()],
             Vec::new(),
         )
         .unwrap();

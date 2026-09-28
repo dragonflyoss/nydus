@@ -450,10 +450,10 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         data_blob_digest: String,
         #[tabled(rename = "FULL BLOB DIGEST")]
         full_blob_digest: String,
-        #[tabled(rename = "GROUP SPAN")]
-        group_span: String,
-        #[tabled(rename = "INDEX SPAN")]
-        index_span: String,
+        #[tabled(rename = "MAX BYTES PER CHUNK GROUP")]
+        max_bytes_per_chunk_group: String,
+        #[tabled(rename = "BYTES PER CHUNK GROUP INDEX")]
+        bytes_per_chunk_group_index: String,
         #[tabled(rename = "CHUNK GROUP COUNT")]
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
@@ -497,8 +497,12 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             },
             data_blob_digest: data_blob_digest(blob),
             full_blob_digest: optional_digest(blob.blob_sha256),
-            group_span: blob_metadata_field(blob, |meta| meta.group_span),
-            index_span: blob_metadata_field(blob, |meta| meta.index_span),
+            max_bytes_per_chunk_group: blob_metadata_field(blob, |meta| {
+                meta.max_bytes_per_chunk_group
+            }),
+            bytes_per_chunk_group_index: blob_metadata_field(blob, |meta| {
+                meta.bytes_per_chunk_group_index
+            }),
             chunk_group_count: blob_metadata_field(blob, |meta| meta.chunk_group_count),
             chunk_compressor: blob_metadata_field(blob, |meta| meta.compressor),
             blob_meta_chunks: blob_metadata_field(blob, |meta| meta.chunk_count),
