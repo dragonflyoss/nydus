@@ -95,7 +95,10 @@ impl BlobCache for RemoteBlobCache {
                 out
             };
             validate_chunk_group_with_metrics(&self.backend, meta, &group, payload)?;
-            for (chunk_offset, bytes) in super::decoded_chunks(meta, &group, payload)? {
+            for (chunk_offset, bytes) in group
+                .chunks(meta, payload)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+            {
                 let copy_start = offset.max(chunk_offset);
                 let copy_end = end.min(chunk_offset + bytes.len() as u64);
                 if copy_start < copy_end {

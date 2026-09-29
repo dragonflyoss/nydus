@@ -678,7 +678,10 @@ impl LocalBlobCache {
         cache_file: &File,
     ) -> io::Result<()> {
         let mut batch = ScatterBatch::new(cache_file);
-        for (offset, bytes) in super::decoded_chunks(&self.blob_metadata, group, payload)? {
+        for (offset, bytes) in group
+            .chunks(&self.blob_metadata, payload)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        {
             batch.push(offset, bytes)?;
         }
         batch.flush()?;
