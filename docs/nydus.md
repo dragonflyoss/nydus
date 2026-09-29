@@ -412,7 +412,7 @@ Current implementation notes:
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
 	`data_blob_digest`, `full_blob_digest`, `max_bytes_per_chunk_group`,
 	`bytes_per_chunk_group_index`, `chunk_group_count`,
-	`chunk_count`, `digest_count`, `chunk_compressor`, payload/compressed/
+	`chunk_count`, `chunk_digester`, `chunk_compressor`, payload/compressed/
 	uncompressed totals, and full blob region offsets and block counts.
 
 #### Sources
@@ -446,7 +446,7 @@ caller already trusts the content:
 	no digest
 	marks a boundary. No
 	mount path verifies digests by default (`storage.skip_verify_checksums`);
-	`nydus check` reports the digester and the digest count.
+	`nydus check` reports the digester.
 - `--blob-id <64-hex>` (optionally prefixed `sha256:`) names the blob up front,
 	e.g. with the OCI layer digest, and skips both SHA256 passes. The id is
 	written to the device slot tag, used as the file name under `--blob-dir`

@@ -190,11 +190,12 @@ pub enum Digester {
     None,
 }
 
-impl From<Digester> for BlobMetadataDigester {
-    fn from(value: Digester) -> Self {
-        match value {
-            Digester::Blake3 => Self::Blake3,
-            Digester::None => Self::None,
+impl Digester {
+    /// The blob meta digester this choice stands for, `None` for none.
+    fn blob_metadata_digester(self) -> Option<BlobMetadataDigester> {
+        match self {
+            Self::Blake3 => Some(BlobMetadataDigester::Blake3),
+            Self::None => None,
         }
     }
 }
@@ -388,7 +389,7 @@ impl BuildCommand {
                 excludes,
                 self.bootstrap.is_some(),
             )?
-            .with_digester(BlobMetadataDigester::None)
+            .with_digester(None)
             .with_blob_id(self.blob_id)
             .with_native(layout, erofs_data_alignment);
         }
@@ -400,7 +401,7 @@ impl BuildCommand {
             excludes,
             self.bootstrap.is_some(),
         )?
-        .with_digester(self.digester.into())
+        .with_digester(self.digester.blob_metadata_digester())
         .with_blob_id(self.blob_id);
         let options = match self.chunk_group_min_size {
             Some(chunk_group_min_size) => {
@@ -623,8 +624,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         chunk_group_count: String,
         #[tabled(rename = "CHUNK COUNT")]
         chunk_count: String,
-        #[tabled(rename = "DIGEST COUNT")]
-        digest_count: String,
+        #[tabled(rename = "CHUNK DIGESTER")]
+        chunk_digester: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
         chunk_compressor: String,
         #[tabled(rename = "BLOB PAYLOAD SIZE")]
@@ -673,9 +674,10 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         bytes_per_chunk_group_index: meta(|meta| meta.bytes_per_chunk_group_index().to_string()),
         chunk_group_count: meta(|meta| meta.chunk_group_count().to_string()),
         chunk_count: meta(|meta| meta.chunk_count().to_string()),
-        digest_count: meta(|meta| match meta.digester() {
-            BlobMetadataDigester::None => "0".to_string(),
-            BlobMetadataDigester::Blake3 => meta.chunk_group_count().to_string(),
+        chunk_digester: meta(|meta| match meta.digester() {
+            Ok(Some(digester)) => digester.to_string(),
+            Ok(None) => "none".to_string(),
+            Err(err) => err.to_string(),
         }),
         chunk_compressor: meta(|meta| meta.compressor().to_string()),
         blob_payload_size: meta(|meta| meta.uncompressed_size().to_string()),

@@ -167,7 +167,7 @@ fn build_test_image_full(
         fs::File::create(&staging).unwrap(),
         FIXTURE_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
-        BlobMetadataDigester::Blake3,
+        Some(BlobMetadataDigester::Blake3),
         true,
         BlobLayout::ChunkGroups {
             chunk_group_min_size: FIXTURE_CHUNK_GROUP_THRESHOLD,
@@ -454,7 +454,7 @@ fn flattened_bootstrap_records_mapped_device_slots() {
         fs::File::create(&staging).unwrap(),
         FIXTURE_CHUNK_SIZE,
         BlobMetadataCompressor::Zstd,
-        BlobMetadataDigester::Blake3,
+        Some(BlobMetadataDigester::Blake3),
         true,
         BlobLayout::ChunkGroups {
             chunk_group_min_size: FIXTURE_CHUNK_GROUP_THRESHOLD,
@@ -668,7 +668,10 @@ fn core_reads_back_small_files_image() {
         .filter(|index| blob_metadata.chunk_length(*index).unwrap() <= 20_000)
         .count();
     assert_eq!(small_chunks, 202);
-    assert_eq!(blob_metadata.digester(), BlobMetadataDigester::Blake3);
+    assert_eq!(
+        blob_metadata.digester().unwrap(),
+        Some(BlobMetadataDigester::Blake3)
+    );
     let groups: Vec<_> = blob_metadata.chunk_groups().collect();
     assert!(groups.len() > 1);
     assert!(groups

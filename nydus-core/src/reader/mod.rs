@@ -208,9 +208,13 @@ impl ErofsReader {
     /// the decompressed bytes (offset 0) when the footer declares the
     /// bootstrap region zstd-compressed.
     fn unpack_embedded_image(mmap: Mmap) -> io::Result<(Mmap, Option<usize>)> {
-        let Ok(footer) = BlobFooter::from_blob_bytes(&mmap) else {
+        if !mmap
+            .last_chunk::<{ BlobFooter::SIZE }>()
+            .is_some_and(|tail| BlobFooter::has_magic(tail))
+        {
             return Ok((mmap, None));
-        };
+        }
+        let footer = BlobFooter::from_blob_bytes(&mmap).map_err(io::Error::other)?;
 
         let bootstrap_offset = usize::try_from(footer.bootstrap_offset()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large")
