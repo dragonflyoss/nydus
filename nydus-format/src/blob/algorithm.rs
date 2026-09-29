@@ -64,28 +64,27 @@ pub enum BlobMetadataDigester {
     /// BLAKE3, 32-byte digests.
     #[default]
     Blake3,
-
-    /// No ChunkGroupDigestTable.
-    None,
 }
 
 /// Maps the digester to and from the code the ChunkGroupDigestTable header
 /// stores.
 impl BlobMetadataDigester {
-    /// The ChunkGroupDigestTable header code of BLAKE3.
-    pub const BLAKE3_CODE: u8 = 1;
-
-    /// The ChunkGroupDigestTable header code of this digester, `None` for no table.
-    pub fn code(self) -> Option<u8> {
+    /// The ChunkGroupDigestTable header code of this digester.
+    pub fn code(self) -> u8 {
         match self {
-            Self::Blake3 => Some(Self::BLAKE3_CODE),
-            Self::None => None,
+            Self::Blake3 => 1,
         }
     }
 
-    /// Decode a ChunkGroupDigestTable header code, `None` for an unknown algorithm.
-    pub fn from_code(code: u8) -> Option<Self> {
-        (code == Self::BLAKE3_CODE).then_some(Self::Blake3)
+    /// Decode a ChunkGroupDigestTable header code. An unknown code is an
+    /// error, the blob then reads as undigested.
+    pub fn from_code(code: u8) -> Result<Self> {
+        match code {
+            1 => Ok(Self::Blake3),
+            _ => Err(Error::Unsupported(format!(
+                "unsupported blob meta digester {code} (image is newer than this reader)"
+            ))),
+        }
     }
 }
 
@@ -95,7 +94,6 @@ impl fmt::Display for BlobMetadataDigester {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Blake3 => "blake3",
-            Self::None => "none",
         })
     }
 }
@@ -145,14 +143,7 @@ mod tests {
 
     #[test]
     fn digester_formats_as_its_name() {
-        let test_cases = vec![
-            (BlobMetadataDigester::Blake3, "blake3"),
-            (BlobMetadataDigester::None, "none"),
-        ];
-
-        for (digester, expected) in test_cases {
-            assert_eq!(digester.to_string(), expected);
-        }
+        assert_eq!(BlobMetadataDigester::Blake3.to_string(), "blake3");
     }
 
     #[test]
@@ -161,17 +152,25 @@ mod tests {
             BlobMetadataDigester::default(),
             BlobMetadataDigester::Blake3
         );
-        assert_eq!(BlobMetadataDigester::Blake3.code(), Some(1));
-        assert_eq!(BlobMetadataDigester::None.code(), None);
+        assert_eq!(BlobMetadataDigester::Blake3.code(), 1);
 
         let test_cases = vec![
-            (0, None),
-            (1, Some(BlobMetadataDigester::Blake3)),
-            (2, None),
+            (
+                0,
+                Err("unsupported blob meta digester 0 (image is newer than this reader)"),
+            ),
+            (1, Ok(BlobMetadataDigester::Blake3)),
+            (
+                2,
+                Err("unsupported blob meta digester 2 (image is newer than this reader)"),
+            ),
         ];
 
         for (code, expected) in test_cases {
-            assert_eq!(BlobMetadataDigester::from_code(code), expected);
+            assert_eq!(
+                BlobMetadataDigester::from_code(code).map_err(|err| err.to_string()),
+                expected.map_err(String::from)
+            );
         }
     }
 }

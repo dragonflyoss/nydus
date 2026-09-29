@@ -14,7 +14,7 @@ use std::time::Instant;
 use nydus_backend::BlobBackend;
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataChunkGroupDigest, BlobMetadataChunkGroupExtent,
-    BlobMetadataCompressor, BlobMetadataDigester,
+    BlobMetadataCompressor,
 };
 
 /// Default on-demand fetch size: the compressed bytes one backend read
@@ -452,16 +452,13 @@ pub fn validate_decoded_chunk_group(
     if skip_verify_checksums() {
         return Ok(());
     }
-    if let (Some(algorithm), BlobMetadataDigester::None) = (
-        blob_metadata.chunk_group_digest_algorithm(),
-        blob_metadata.digester(),
-    ) {
-        return Err(io::Error::new(
+    let digester = blob_metadata.digester().map_err(|err| {
+        io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("cannot verify chunk groups digested with unsupported algorithm {algorithm}"),
-        ));
-    }
-    if blob_metadata.digester() == BlobMetadataDigester::None {
+            format!("cannot verify chunk group digests, {err}"),
+        )
+    })?;
+    if digester.is_none() {
         return Ok(());
     }
     let expected = blob_metadata
@@ -540,7 +537,7 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 pub(crate) mod test_util {
     use nydus_format::blob::{
         BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
-        BlobMetadataChunkLength, BlobMetadataCompressor,
+        BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
     };
 
     /// Encode `groups` (each a list of chunks) with `compressor` into a data
@@ -602,6 +599,7 @@ pub(crate) mod test_util {
             max_bytes_per_chunk_group / nydus_format::erofs::EROFS_BLOCK_SIZE,
             1,
             compressor,
+            digests.then_some(BlobMetadataDigester::Blake3),
             specs,
             members,
             digest_table,
@@ -634,7 +632,7 @@ mod tests {
     use super::test_util::{encode_blob, padded_image};
     use super::*;
     use nydus_backend::ReadContext;
-    use nydus_format::blob::BlobMetadataTableType;
+    use nydus_format::blob::{BlobMetadataDigester, BlobMetadataTableType};
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -794,6 +792,7 @@ mod tests {
             4,
             1,
             BlobMetadataCompressor::None,
+            Some(BlobMetadataDigester::Blake3),
             vec![
                 nydus_format::blob::BlobMetadataChunkGroup::new(
                     0,
@@ -840,10 +839,10 @@ mod tests {
         let crc = crc32c::crc32c(&raw);
         raw[16..20].copy_from_slice(&crc.to_le_bytes());
         let unknown = BlobMetadata::from_bytes(raw).unwrap();
-        assert_eq!(unknown.digester(), BlobMetadataDigester::None);
+        assert!(unknown.digester().is_err());
         let err = validate_decoded_chunk_group(&unknown, &group, &data).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        assert!(err.to_string().contains("algorithm 9"), "{err}");
+        assert!(err.to_string().contains("digester 9"), "{err}");
     }
 
     #[test]
@@ -937,6 +936,7 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
+            None,
             vec![
                 nydus_format::blob::BlobMetadataChunkGroup::new(0, 0, 0, EROFS_BLOCK_SIZE, 0),
                 nydus_format::blob::BlobMetadataChunkGroup::new(

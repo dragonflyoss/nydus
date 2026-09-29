@@ -7,7 +7,7 @@ use memmap2::Mmap;
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
-use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor};
 use nydus_format::erofs::{
     mode_to_erofs_file_type, ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
@@ -164,8 +164,9 @@ pub struct BlobMetadataSummary {
     pub total_payload_size: u64,
     /// Chunk table entries.
     pub chunk_count: usize,
-    /// Digest table entries.
-    pub digest_count: usize,
+    /// The chunk group digester, `none` without one, or why the reader
+    /// cannot tell.
+    pub digester: String,
     /// Redirect table entries: every chunk group of an ondemand (REDIRECT)
     /// blob, zero otherwise.
     pub redirect_count: usize,
@@ -624,9 +625,13 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
         .with_context(|| format!("failed to open blob candidate: {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }
         .with_context(|| format!("failed to map blob candidate: {}", path.display()))?;
-    let Ok(footer) = BlobFooter::from_blob_bytes(&mmap) else {
+    if !mmap
+        .last_chunk::<{ BlobFooter::SIZE }>()
+        .is_some_and(|tail| BlobFooter::has_magic(tail))
+    {
         return Ok(None);
-    };
+    }
+    let footer = BlobFooter::from_blob_bytes(&mmap)?;
     let data_start = usize::try_from(footer.compressed_data_offset())
         .map_err(|err| Error::Overflow(format!("compressed data offset too large: {err}")))?;
     let data_size = usize::try_from(footer.compressed_data_size())
@@ -670,9 +675,10 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
         total_compressed_size: blob_metadata.compressed_size(),
         total_payload_size: blob_metadata.uncompressed_size(),
         chunk_count: blob_metadata.chunk_count(),
-        digest_count: match blob_metadata.digester() {
-            BlobMetadataDigester::None => 0,
-            BlobMetadataDigester::Blake3 => blob_metadata.chunk_group_count(),
+        digester: match blob_metadata.digester() {
+            Ok(Some(digester)) => digester.to_string(),
+            Ok(None) => "none".to_string(),
+            Err(err) => err.to_string(),
         },
         redirect_count: if blob_metadata.is_redirect() {
             blob_metadata.chunk_group_count()
@@ -762,6 +768,7 @@ mod tests {
             BlobMetadata::DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE,
             1,
             BlobMetadataCompressor::None,
+            None,
             vec![BlobMetadataChunkGroup::new(0, 0, 0, 0, 0)],
             Vec::new(),
             Vec::new(),

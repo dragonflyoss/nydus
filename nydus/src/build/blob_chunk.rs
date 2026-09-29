@@ -42,7 +42,7 @@ pub struct BlobWriter<W> {
     writer: W,
     file_chunk_size: u32,
     compressor: BlobMetadataCompressor,
-    digester: BlobMetadataDigester,
+    digester: Option<BlobMetadataDigester>,
     // Raw device mode: the next block of the padded device. Chunk mode: the
     // block right after the last sealed group; groups tile the address
     // space back to back, each spanning its chunks' block-rounded lengths.
@@ -896,7 +896,7 @@ impl<W: Write> BlobWriter<W> {
             writer,
             chunk_size,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
+            Some(BlobMetadataDigester::Blake3),
             true,
             BlobLayout::ChunkGroups {
                 chunk_group_min_size: (chunk_size / 2).max(EROFS_BLOCK_SIZE),
@@ -917,7 +917,7 @@ impl<W: Write> BlobWriter<W> {
         writer: W,
         chunk_size: u32,
         compressor: BlobMetadataCompressor,
-        digester: BlobMetadataDigester,
+        digester: Option<BlobMetadataDigester>,
         hash_data: bool,
         layout: BlobLayout,
     ) -> Result<Self> {
@@ -993,7 +993,7 @@ impl<W: Write> BlobWriter<W> {
                 data_alignment_threshold,
             } => {
                 writer.raw_device = true;
-                writer.digester = BlobMetadataDigester::None;
+                writer.digester = None;
                 writer.data_alignment = alignment(data_alignment)?;
                 writer.data_alignment_threshold = data_alignment_threshold;
             }
@@ -1364,6 +1364,7 @@ impl<W: Write> BlobWriter<W> {
             self.max_blocks_per_chunk_group(),
             self.chunk_group_min_size / EROFS_BLOCK_SIZE,
             self.compressor,
+            self.digester,
             chunk_groups,
             self.members
                 .iter()
@@ -1564,12 +1565,11 @@ impl<W: Write> BlobWriter<W> {
         }
         let len = u32::try_from(data.len())
             .map_err(|err| Error::Overflow(format!("blob meta chunk length exceeds u32: {err}")))?;
-        let digest = match self.digester {
-            BlobMetadataDigester::Blake3 => Some(BlobMetadataChunkGroupDigest::new(
-                *blake3::hash(data).as_bytes(),
-            )),
-            BlobMetadataDigester::None => None,
-        };
+        let digest = self.digester.map(|digester| match digester {
+            BlobMetadataDigester::Blake3 => {
+                BlobMetadataChunkGroupDigest::new(*blake3::hash(data).as_bytes())
+            }
+        });
         let placement = self.placements.len();
         self.placements.push(PENDING);
         let lone = || Bin {
@@ -1775,7 +1775,7 @@ mod tests {
             Vec::new(),
             chunk_size,
             compressor,
-            BlobMetadataDigester::Blake3,
+            Some(BlobMetadataDigester::Blake3),
             true,
             layout,
         )
@@ -1884,7 +1884,7 @@ mod tests {
                 Vec::new(),
                 EROFS_BLOCK_SIZE,
                 BlobMetadataCompressor::None,
-                BlobMetadataDigester::None,
+                None,
                 false,
                 BlobLayout::ZErofs {
                     algorithm,
@@ -1901,7 +1901,7 @@ mod tests {
             Vec::new(),
             EROFS_BLOCK_SIZE,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::None,
+            None,
             false,
             BlobLayout::RawDevice {
                 data_alignment: 3 * EROFS_BLOCK_SIZE,
@@ -2100,7 +2100,7 @@ mod tests {
             Vec::new(),
             TEST_CHUNK_SIZE,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::None,
+            None,
             true,
             BlobLayout::ChunkGroups {
                 chunk_group_min_size: TEST_GROUP_MIN_SIZE,
@@ -2367,7 +2367,7 @@ mod tests {
                 Vec::new(),
                 TEST_CHUNK_SIZE,
                 BlobMetadataCompressor::None,
-                BlobMetadataDigester::Blake3,
+                Some(BlobMetadataDigester::Blake3),
                 true,
                 layout(bad),
             )
@@ -2377,7 +2377,7 @@ mod tests {
             Vec::new(),
             TEST_CHUNK_SIZE,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
+            Some(BlobMetadataDigester::Blake3),
             true,
             layout(MAX_CHUNK_GROUP_MIN_SIZE),
         )
@@ -2390,9 +2390,9 @@ mod tests {
         let minimum = DEFAULT_CHUNK_GROUP_MIN_SIZE;
         for compressor in [BlobMetadataCompressor::None, BlobMetadataCompressor::Zstd] {
             for (mark, digester, chunks_per_group) in [
-                (Mark::Strict, BlobMetadataDigester::Blake3, 8),
-                (Mark::Plain, BlobMetadataDigester::Blake3, 32),
-                (Mark::Strict, BlobMetadataDigester::None, 32),
+                (Mark::Strict, Some(BlobMetadataDigester::Blake3), 8),
+                (Mark::Plain, Some(BlobMetadataDigester::Blake3), 32),
+                (Mark::Strict, None, 32),
             ] {
                 let options = crate::build::BuildImageOptions::new(
                     ".".into(),
@@ -2519,7 +2519,7 @@ mod tests {
             File::create(&blob_path).unwrap(),
             TEST_CHUNK_SIZE,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::None,
+            None,
             true,
             BlobLayout::ChunkGroups {
                 chunk_group_min_size: TEST_GROUP_MIN_SIZE,
@@ -2532,7 +2532,7 @@ mod tests {
         writer.write_blob_metadata(&meta_path).unwrap();
         let meta = BlobMetadata::from_path(&meta_path).unwrap();
         assert_eq!(meta.chunk_count(), 1);
-        assert_eq!(meta.digester(), BlobMetadataDigester::None);
+        assert_eq!(meta.digester().unwrap(), None);
         assert_eq!(meta.max_bytes_per_chunk_group(), 2 * TEST_CHUNK_SIZE);
         assert_eq!(meta.compressed_size(), 5000);
         // The 5000-byte chunk spans two blocks, and the blob ends there.
@@ -2602,7 +2602,7 @@ mod tests {
             Vec::new(),
             EROFS_BLOCK_SIZE,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::None,
+            None,
             true,
             BlobLayout::ZErofs {
                 algorithm,

@@ -129,7 +129,7 @@ pub fn build_ondemand_blob(
     }
     let mut max_blocks_per_chunk_group = 0;
     let mut compressor = BlobMetadataCompressor::None;
-    let mut digester = BlobMetadataDigester::Blake3;
+    let mut digester = Some(BlobMetadataDigester::Blake3);
     for (blob_index, cache) in &sources {
         let meta = cache.blob_metadata();
         max_blocks_per_chunk_group =
@@ -144,8 +144,8 @@ pub fn build_ondemand_blob(
             }
             _ => {}
         }
-        if meta.digester() == BlobMetadataDigester::None {
-            digester = BlobMetadataDigester::None;
+        if !matches!(meta.digester(), Ok(Some(_))) {
+            digester = None;
         }
     }
     if max_blocks_per_chunk_group == 0 {
@@ -261,7 +261,7 @@ pub fn build_ondemand_blob(
             })?;
             members.push(BlobMetadataChunkLength::new(length));
         }
-        if digester == BlobMetadataDigester::Blake3 {
+        if digester.is_some() {
             // A digester on every source means every group has one.
             digests.extend(meta.chunk_group_digest(group.index() as usize));
         }
@@ -274,11 +274,15 @@ pub fn build_ondemand_blob(
         0,
         0,
     ));
-    let blocks_per_chunk_group_index = 1 << least_blocks.ilog2();
+    let blocks_per_chunk_group_index = 1
+        << least_blocks.checked_ilog2().ok_or_else(|| {
+            Error::InvalidImage("ondemand blob copies a chunk group spanning no blocks".to_string())
+        })?;
     let blob_metadata = BlobMetadata::new(
         max_blocks_per_chunk_group,
         blocks_per_chunk_group_index,
         compressor,
+        digester,
         chunk_groups,
         members,
         digests,

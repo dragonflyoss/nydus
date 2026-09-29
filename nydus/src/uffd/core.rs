@@ -74,7 +74,7 @@ impl UffdCore {
         self.device_size
     }
 
-    pub fn logical_size(&self) -> u32 {
+    pub fn block_size(&self) -> u32 {
         UFFD_BLOCK_SIZE as u32
     }
 

@@ -61,8 +61,8 @@ pub struct BuildImageOptions {
     chunk_group_min_size: u32,
     /// Algorithm to compress data chunks.
     compressor: BlobMetadataCompressor,
-    /// Chunk digest algorithm recorded in the blob meta.
-    digester: BlobMetadataDigester,
+    /// Chunk digest algorithm recorded in the blob meta, `None` for none.
+    digester: Option<BlobMetadataDigester>,
     /// Caller-assigned blob id (device slot tag and store file name). When
     /// set, no sha256 pass is made over the data region or the full blob.
     blob_id: Option<[u8; EROFS_BLOB_ID_SIZE]>,
@@ -132,7 +132,7 @@ impl BuildImageOptions {
             chunk_size,
             chunk_group_min_size: DEFAULT_CHUNK_GROUP_MIN_SIZE,
             compressor,
-            digester: BlobMetadataDigester::Blake3,
+            digester: Some(BlobMetadataDigester::Blake3),
             blob_id: None,
             excludes,
             render_standalone_bootstrap,
@@ -166,7 +166,7 @@ impl BuildImageOptions {
     }
 
     /// Selects the chunk digest algorithm; `None` skips chunk hashing.
-    pub fn with_digester(mut self, digester: BlobMetadataDigester) -> Self {
+    pub fn with_digester(mut self, digester: Option<BlobMetadataDigester>) -> Self {
         self.digester = digester;
         self
     }
@@ -292,7 +292,7 @@ impl BuildImageOptions {
             ZDataWriter::new(writer, self.blob_id.is_none()),
             self.chunk_size,
             BlobMetadataCompressor::None,
-            BlobMetadataDigester::None,
+            None,
             false,
             BlobLayout::ZErofs {
                 algorithm,

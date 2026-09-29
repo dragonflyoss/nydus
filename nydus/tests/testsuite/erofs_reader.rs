@@ -1077,7 +1077,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
         fs::File::create(&data_path).expect("create blob"),
         EROFS_BLOCK_SIZE,
         BlobMetadataCompressor::None,
-        BlobMetadataDigester::Blake3,
+        Some(BlobMetadataDigester::Blake3),
         true,
         BlobLayout::ChunkGroups {
             chunk_group_min_size: EROFS_BLOCK_SIZE,

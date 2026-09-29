@@ -1138,7 +1138,7 @@ mod tests {
     use super::super::test_util::{encode_blob, padded_image};
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::BlobMetadataCompressor;
+    use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
     use nydus_format::utils::write_minimal_full_blob;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
@@ -1319,6 +1319,7 @@ mod tests {
             4,
             1,
             BlobMetadataCompressor::Zstd,
+            (!digests.is_empty()).then_some(BlobMetadataDigester::Blake3),
             specs,
             members,
             digests,
@@ -1763,6 +1764,7 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
+            None,
             vec![
                 nydus_format::blob::BlobMetadataChunkGroup::new(
                     0,

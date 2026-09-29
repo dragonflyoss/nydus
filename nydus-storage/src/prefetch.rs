@@ -588,6 +588,7 @@ mod tests {
             1,
             1,
             BlobMetadataCompressor::None,
+            None,
             vec![
                 BlobMetadataChunkGroup::new(
                     0,
