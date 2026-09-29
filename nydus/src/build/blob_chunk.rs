@@ -114,8 +114,8 @@ pub struct BlobWriter<W> {
 }
 
 /// A chunk group under construction: the chunks packed so far, their
-/// lengths and placement ids, the blocks they span, and for a lone chunk
-/// the digest already taken of it, which is the group's.
+/// lengths and placement ids, the blocks they span, and while it holds a
+/// single chunk the digest already taken of it, which is then the group's.
 struct Bin {
     data: Vec<u8>,
     lens: Vec<u32>,
@@ -1609,6 +1609,7 @@ impl<W: Write> BlobWriter<W> {
                 })
             }
         };
+        bin.digest = if bin.lens.is_empty() { digest } else { None };
         bin.data.extend_from_slice(data);
         bin.lens.push(len);
         bin.placements.push(placement);
