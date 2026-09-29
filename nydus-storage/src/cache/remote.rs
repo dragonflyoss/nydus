@@ -53,8 +53,8 @@ impl BlobCache for RemoteBlobCache {
         })?;
         let not_found = || io::Error::new(io::ErrorKind::NotFound, "blob chunk group not found");
         let meta = &self.blob_metadata;
-        let first = meta.chunk_group_index_of(offset).ok_or_else(not_found)?;
-        let last = meta.chunk_group_index_of(end - 1).ok_or_else(not_found)?;
+        let first = meta.chunk_group_index(offset).ok_or_else(not_found)?;
+        let last = meta.chunk_group_index(end - 1).ok_or_else(not_found)?;
         let head = meta.chunk_group(first).expect("group within the table");
         let tail = meta.chunk_group(last).expect("group within the table");
 
@@ -87,7 +87,7 @@ impl BlobCache for RemoteBlobCache {
             let group = meta.chunk_group(index).expect("group within the table");
             let start = (group.compressed_offset() - head.compressed_offset()) as usize;
             let stop = start + group.compressed_size() as usize;
-            let payload: &[u8] = if meta.is_plain(&group) {
+            let payload: &[u8] = if group.is_uncompressed(meta) {
                 &encoded[start..stop]
             } else {
                 let out = &mut decoded[..group.uncompressed_size() as usize];
@@ -95,7 +95,7 @@ impl BlobCache for RemoteBlobCache {
                 out
             };
             validate_chunk_group_with_metrics(&self.backend, meta, &group, payload)?;
-            meta.for_each_decoded_chunk(index, payload, &mut |chunk_offset, bytes| {
+            for (chunk_offset, bytes) in super::decoded_chunks(meta, &group, payload)? {
                 let copy_start = offset.max(chunk_offset);
                 let copy_end = end.min(chunk_offset + bytes.len() as u64);
                 if copy_start < copy_end {
@@ -105,8 +105,7 @@ impl BlobCache for RemoteBlobCache {
                     dst[target_start..target_start + length]
                         .copy_from_slice(&bytes[source_start..source_start + length]);
                 }
-                Ok(())
-            })?;
+            }
         }
         Ok(())
     }

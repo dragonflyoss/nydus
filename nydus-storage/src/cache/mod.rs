@@ -245,7 +245,7 @@ pub fn decode_chunk_group_from_window<'a>(
         )
     })?;
 
-    let payload = if blob_metadata.is_plain(group) {
+    let payload = if group.is_uncompressed(blob_metadata) {
         encoded
     } else {
         decoded.clear();
@@ -413,16 +413,27 @@ pub fn inflate_decoded_chunk_group(
     })?;
     let base = group.logical_offset();
     let mut padded = vec![0u8; span];
-    blob_metadata.for_each_decoded_chunk(
-        group.index() as usize,
-        decoded,
-        &mut |offset, bytes| {
-            let start = (offset - base) as usize;
-            padded[start..start + bytes.len()].copy_from_slice(bytes);
-            Ok(())
-        },
-    )?;
+    for (offset, bytes) in decoded_chunks(blob_metadata, group, decoded)? {
+        let start = (offset - base) as usize;
+        padded[start..start + bytes.len()].copy_from_slice(bytes);
+    }
     Ok(padded)
+}
+
+/// The decoded chunks of `group` scattered over the address space
+/// ([`BlobMetadata::decoded_chunks`]), as an I/O error when `payload` is
+/// not the group's decoded size.
+pub(crate) fn decoded_chunks<'a>(
+    blob_metadata: &'a BlobMetadata,
+    group: &BlobMetadataChunkGroupExtent,
+    payload: &'a [u8],
+) -> io::Result<impl Iterator<Item = (u64, &'a [u8])> + 'a> {
+    group.decoded_chunks(blob_metadata, payload).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoded chunk group length does not match its payload size",
+        )
+    })
 }
 
 /// Check a decoded chunk group: its length against the chunk table, its
@@ -463,7 +474,7 @@ pub fn validate_decoded_chunk_group(
             format!("cannot verify chunk groups digested with unsupported algorithm {algorithm}"),
         ));
     }
-    if blob_metadata.chunk_group_digest_count() == 0 {
+    if blob_metadata.digester() == BlobMetadataDigester::None {
         return Ok(());
     }
     let expected = blob_metadata
@@ -473,7 +484,7 @@ pub fn validate_decoded_chunk_group(
     // whole payload.
     let mut at = 0usize;
     let mut members = Vec::with_capacity(group.chunk_count() as usize);
-    for (_, _, len) in blob_metadata.chunk_group_chunks(group.index() as usize) {
+    for (_, len) in group.chunks(blob_metadata) {
         let len = len as usize;
         members.push(*blake3::hash(&decoded[at..at + len]).as_bytes());
         at += len;
@@ -743,7 +754,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(result, payload);
-            if metadata.is_plain(&group) {
+            if group.is_uncompressed(&metadata) {
                 assert_eq!(compressor, BlobMetadataCompressor::None);
                 assert_eq!(result.as_ptr(), window[37..].as_ptr());
                 assert_eq!(scratch.capacity(), 0);
@@ -794,7 +805,7 @@ mod tests {
 
         // Same payload and crc, one wrong digest: the digest check fires and
         // is not a crc mismatch.
-        let mut digests: Vec<_> = metadata.chunk_group_digests().to_vec();
+        let mut digests: Vec<_> = metadata.chunk_group_digests().collect();
         digests[0] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0; 32]);
         let wrong = BlobMetadata::new(
             4,
@@ -846,7 +857,7 @@ mod tests {
         let crc = crc32c::crc32c(&raw);
         raw[16..20].copy_from_slice(&crc.to_le_bytes());
         let unknown = BlobMetadata::from_bytes(raw).unwrap();
-        assert_eq!(unknown.chunk_group_digest_count(), 0);
+        assert_eq!(unknown.digester(), BlobMetadataDigester::None);
         let err = validate_decoded_chunk_group(&unknown, &group, &data).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
         assert!(err.to_string().contains("algorithm 9"), "{err}");

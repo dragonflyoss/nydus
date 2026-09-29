@@ -1848,17 +1848,15 @@ mod tests {
         for group in meta.chunk_groups() {
             let range = group.compressed_range();
             let encoded = &data[range.start as usize..range.end as usize];
-            let payload = if meta.is_plain(&group) {
+            let payload = if group.is_uncompressed(&meta) {
                 encoded.to_vec()
             } else {
                 zstd::bulk::decompress(encoded, group.uncompressed_size() as usize).unwrap()
             };
             assert_eq!(crc32c(&payload), group.uncompressed_crc32());
-            meta.for_each_decoded_chunk(group.index() as usize, &payload, &mut |offset, bytes| {
+            for (offset, bytes) in group.decoded_chunks(&meta, &payload).unwrap() {
                 padded[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
-                Ok(())
-            })
-            .unwrap();
+            }
         }
         padded
     }
@@ -1879,8 +1877,8 @@ mod tests {
         assert_eq!(resolve(&writer, &mut addrs), vec![1, 0]);
         let metadata = writer.blob_metadata().unwrap();
         assert_eq!(metadata.chunk_group_count(), 2);
-        assert_eq!(metadata.chunk_group_index_of(0), Some(0));
-        assert_eq!(metadata.chunk_group_index_of(4096), Some(1));
+        assert_eq!(metadata.chunk_group_index(0), Some(0));
+        assert_eq!(metadata.chunk_group_index(4096), Some(1));
         for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
             assert!(BlobWriter::new(
                 Vec::new(),
@@ -2090,7 +2088,10 @@ mod tests {
         other.finish().unwrap();
         let other_meta = other.blob_metadata().unwrap();
         // Group digests name the packs, so identical packs compare equal.
-        let (first, second) = (meta.chunk_group_digests(), other_meta.chunk_group_digests());
+        let (first, second): (Vec<_>, Vec<_>) = (
+            meta.chunk_group_digests().collect(),
+            other_meta.chunk_group_digests().collect(),
+        );
         assert_ne!(first[0], second[0]);
         assert_eq!(&first[1..], &second[1..]);
 
@@ -2163,10 +2164,10 @@ mod tests {
         );
         let meta = writer.blob_metadata().unwrap();
         assert_eq!(
-            (0..2)
-                .flat_map(|group| meta.chunk_group_chunks(group))
+            meta.chunk_groups()
+                .flat_map(|group| group.chunks(&meta))
                 .collect::<Vec<_>>(),
-            vec![(0, 0, EROFS_BLOCK_SIZE), (0, 4096, 100)]
+            vec![(0, EROFS_BLOCK_SIZE), (4096, 100)]
         );
         let data = fs::read(&blob_path).unwrap();
         assert_eq!(data.len(), EROFS_BLOCK_SIZE as usize + 100);
@@ -2222,12 +2223,9 @@ mod tests {
         assert_eq!(meta.bytes_per_chunk_group_index(), minimum);
         // Groups close in write order: {20K}, {16K}, {64K}, then the pack
         // {4K, 8K} at finish; each starts where the previous one ends.
-        let runs: Vec<Vec<u32>> = (0..meta.chunk_group_count())
-            .map(|group| {
-                meta.chunk_group_chunks(group)
-                    .map(|(_, _, len)| len)
-                    .collect()
-            })
+        let runs: Vec<Vec<u32>> = meta
+            .chunk_groups()
+            .map(|group| group.chunks(&meta).map(|(_, len)| len).collect())
             .collect();
         assert_eq!(
             runs,
@@ -2277,12 +2275,9 @@ mod tests {
         writer.finish().unwrap();
         assert_eq!(resolve(&writer, &mut addrs), vec![31, 32, 0]);
         let meta = writer.blob_metadata().unwrap();
-        let runs: Vec<Vec<u32>> = (0..meta.chunk_group_count())
-            .map(|group| {
-                meta.chunk_group_chunks(group)
-                    .map(|(_, _, len)| len)
-                    .collect()
-            })
+        let runs: Vec<Vec<u32>> = meta
+            .chunk_groups()
+            .map(|group| group.chunks(&meta).map(|(_, len)| len).collect())
             .collect();
         assert_eq!(
             runs,
@@ -2421,10 +2416,7 @@ mod tests {
                         assert!(group.logical_size() < u64::from(minimum));
                     }
                     for offset in group.logical_range().step_by(EROFS_BLOCK_SIZE as usize) {
-                        assert_eq!(
-                            meta.chunk_group_index_of(offset),
-                            Some(group.index() as usize)
-                        );
+                        assert_eq!(meta.chunk_group_index(offset), Some(group.index() as usize));
                     }
                 }
                 assert_eq!(
@@ -2457,9 +2449,9 @@ mod tests {
         let meta = writer.blob_metadata().unwrap();
         let groups: Vec<_> = meta.chunk_groups().collect();
         assert_eq!(groups.len(), 2);
-        assert!(meta.is_plain(&groups[0]));
+        assert!(groups[0].is_uncompressed(&meta));
         assert_eq!(groups[0].compressed_size(), TEST_CHUNK_SIZE);
-        assert!(!meta.is_plain(&groups[1]));
+        assert!(!groups[1].is_uncompressed(&meta));
         assert!(groups[1].compressed_size() < TEST_CHUNK_SIZE / 10);
         let padded = scatter(&writer);
         assert_eq!(&padded[..noise.len()], &noise[..]);
@@ -2487,7 +2479,9 @@ mod tests {
         let meta = writer.blob_metadata().unwrap();
         assert!(meta.chunk_group_count() > 1);
         assert_eq!(meta.chunk_count(), files.len());
-        assert!(meta.chunk_groups().all(|group| !meta.is_plain(&group)));
+        assert!(meta
+            .chunk_groups()
+            .all(|group| !group.is_uncompressed(&meta)));
         let padded = scatter(&writer);
         for (file, addr) in files.iter().zip(addrs) {
             let offset = addr as usize * EROFS_BLOCK_SIZE as usize;
@@ -2495,9 +2489,9 @@ mod tests {
         }
         // Every group's digest derives from its chunks' bytes.
         for group in meta.chunk_groups() {
-            let members: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = meta
-                .chunk_group_chunks(group.index() as usize)
-                .map(|(_, offset, len)| {
+            let members: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = group
+                .chunks(&meta)
+                .map(|(offset, len)| {
                     *blake3::hash(&padded[offset as usize..offset as usize + len as usize])
                         .as_bytes()
                 })
@@ -2531,7 +2525,7 @@ mod tests {
         writer.write_blob_metadata(&meta_path).unwrap();
         let meta = BlobMetadata::from_path(&meta_path).unwrap();
         assert_eq!(meta.chunk_count(), 1);
-        assert_eq!(meta.chunk_group_digest_count(), 0);
+        assert_eq!(meta.digester(), BlobMetadataDigester::None);
         assert_eq!(meta.max_bytes_per_chunk_group(), 2 * TEST_CHUNK_SIZE);
         assert_eq!(meta.compressed_size(), 5000);
         // The 5000-byte chunk spans two blocks, and the blob ends there.

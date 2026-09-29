@@ -403,9 +403,9 @@ Current implementation notes:
 	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
 - `--compressor zstd` (or `lz4`) compresses each chunk group on its own. If
 	the compressed group is larger than 70% of its payload, the group is
-	stored plain and its blob_meta entry has `compressed_size == uncompressed_size`
+	stored uncompressed and its blob_meta entry has `compressed_size == uncompressed_size`
 	(its chunks then sit at their dense offsets).
-- `--compressor none` writes every chunk group plain.
+- `--compressor none` writes every chunk group uncompressed.
 - `--exclude <path>` omits paths inside the source tree from the blob and the
 	resulting filesystem tree entirely. It accepts absolute or
 	current-working-directory-relative paths and may be repeated.

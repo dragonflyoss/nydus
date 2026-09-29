@@ -21,11 +21,11 @@ pub use metadata::{
     BlobMetadataChunkLength, BlobMetadataHeader, BlobMetadataTable, BlobMetadataTableType,
 };
 
-/// Finish a full blob: append everything behind the data region to `writer`,
-/// which must already hold the `compressed_data_size` bytes of blob data.
-/// Returns the sealed footer describing the finished blob.
+/// Finish a full blob by appending everything behind the data region to
+/// `writer`, which already holds the `compressed_data_size` bytes of blob
+/// data. Returns the sealed footer describing the finished blob.
 ///
-/// The finished blob, every region offset 4 KiB aligned:
+/// The finished blob, every region offset 4 KiB aligned.
 ///
 /// ```text
 /// ┌─────────────────┬───┬───────────────────────┬──────────────────┬────────┐
@@ -48,10 +48,10 @@ pub use metadata::{
 /// footer           the sealed NDFOOTER block, fixed 4 KiB at the tail
 /// ```
 ///
-/// An empty `bootstrap` yields the ondemand layout (no bootstrap region,
-/// zero bootstrap blocks). `blob_metadata: None` yields the raw device
-/// layout of native `erofs-*` layers: no blob meta region, the footer's
-/// RAW_DEVICE flag set, and a bootstrap required.
+/// An empty `bootstrap` yields the ondemand layout without a bootstrap
+/// region. `blob_metadata: None` yields the raw device layout of native
+/// `erofs-*` layers, with no blob meta region, the footer's RAW_DEVICE
+/// flag set, and a bootstrap required.
 pub fn finish_full_blob(
     writer: &mut dyn Write,
     compressed_data_size: u64,
