@@ -5,7 +5,7 @@
 //! ([`footer`]) — not part of the EROFS metadata format itself.
 
 use crate::erofs::EROFS_BLOCK_SIZE;
-use crate::error::{Context, Error, Result};
+use crate::error::{Error, Result};
 use crate::utils::{align_up_u64, write_zeros};
 use std::io::Write;
 
