@@ -1854,7 +1854,7 @@ mod tests {
                 zstd::bulk::decompress(encoded, group.uncompressed_size() as usize).unwrap()
             };
             assert_eq!(crc32c(&payload), group.uncompressed_crc32());
-            for (offset, bytes) in group.decoded_chunks(&meta, &payload).unwrap() {
+            for (offset, bytes) in group.chunks(&meta, &payload).unwrap() {
                 padded[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
             }
         }
@@ -2165,9 +2165,9 @@ mod tests {
         let meta = writer.blob_metadata().unwrap();
         assert_eq!(
             meta.chunk_groups()
-                .flat_map(|group| group.chunks(&meta))
+                .map(|group| (group.logical_offset(), group.chunk_range()))
                 .collect::<Vec<_>>(),
-            vec![(0, EROFS_BLOCK_SIZE), (4096, 100)]
+            vec![(0, 0..1), (4096, 1..2)]
         );
         let data = fs::read(&blob_path).unwrap();
         assert_eq!(data.len(), EROFS_BLOCK_SIZE as usize + 100);
@@ -2225,7 +2225,12 @@ mod tests {
         // {4K, 8K} at finish; each starts where the previous one ends.
         let runs: Vec<Vec<u32>> = meta
             .chunk_groups()
-            .map(|group| group.chunks(&meta).map(|(_, len)| len).collect())
+            .map(|group| {
+                group
+                    .chunk_range()
+                    .map(|index| meta.chunk_length(index).unwrap())
+                    .collect()
+            })
             .collect();
         assert_eq!(
             runs,
@@ -2277,7 +2282,12 @@ mod tests {
         let meta = writer.blob_metadata().unwrap();
         let runs: Vec<Vec<u32>> = meta
             .chunk_groups()
-            .map(|group| group.chunks(&meta).map(|(_, len)| len).collect())
+            .map(|group| {
+                group
+                    .chunk_range()
+                    .map(|index| meta.chunk_length(index).unwrap())
+                    .collect()
+            })
             .collect();
         assert_eq!(
             runs,
@@ -2489,12 +2499,9 @@ mod tests {
         }
         // Every group's digest derives from its chunks' bytes.
         for group in meta.chunk_groups() {
-            let members: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = group
-                .chunks(&meta)
-                .map(|(offset, len)| {
-                    *blake3::hash(&padded[offset as usize..offset as usize + len as usize])
-                        .as_bytes()
-                })
+            let members: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = files[group.chunk_range()]
+                .iter()
+                .map(|file| *blake3::hash(file).as_bytes())
                 .collect();
             assert_eq!(
                 meta.chunk_group_digest(group.index() as usize).unwrap(),

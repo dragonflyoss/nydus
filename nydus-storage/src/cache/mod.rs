@@ -413,27 +413,14 @@ pub fn inflate_decoded_chunk_group(
     })?;
     let base = group.logical_offset();
     let mut padded = vec![0u8; span];
-    for (offset, bytes) in decoded_chunks(blob_metadata, group, decoded)? {
+    for (offset, bytes) in group
+        .chunks(blob_metadata, decoded)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+    {
         let start = (offset - base) as usize;
         padded[start..start + bytes.len()].copy_from_slice(bytes);
     }
     Ok(padded)
-}
-
-/// The decoded chunks of `group` scattered over the address space
-/// ([`BlobMetadata::decoded_chunks`]), as an I/O error when `payload` is
-/// not the group's decoded size.
-pub(crate) fn decoded_chunks<'a>(
-    blob_metadata: &'a BlobMetadata,
-    group: &BlobMetadataChunkGroupExtent,
-    payload: &'a [u8],
-) -> io::Result<impl Iterator<Item = (u64, &'a [u8])> + 'a> {
-    group.decoded_chunks(blob_metadata, payload).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "decoded chunk group length does not match its payload size",
-        )
-    })
 }
 
 /// Check a decoded chunk group: its length against the chunk table, its
@@ -480,16 +467,12 @@ pub fn validate_decoded_chunk_group(
     let expected = blob_metadata
         .chunk_group_digest(group.index() as usize)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk group digest missing"))?;
-    // Members follow each other in the decoded payload; a lone chunk is the
-    // whole payload.
-    let mut at = 0usize;
-    let mut members = Vec::with_capacity(group.chunk_count() as usize);
-    for (_, len) in group.chunks(blob_metadata) {
-        let len = len as usize;
-        members.push(*blake3::hash(&decoded[at..at + len]).as_bytes());
-        at += len;
-    }
-    let actual = BlobMetadataChunkGroupDigest::from_chunk_digests(&members)
+    let chunk_digests: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = group
+        .chunks(blob_metadata, decoded)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        .map(|(_, chunk)| *blake3::hash(chunk).as_bytes())
+        .collect();
+    let actual = BlobMetadataChunkGroupDigest::from_chunk_digests(&chunk_digests)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     if actual != expected {
         return Err(io::Error::new(

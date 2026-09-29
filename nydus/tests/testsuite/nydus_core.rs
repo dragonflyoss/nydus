@@ -733,10 +733,8 @@ fn core_reads_back_small_files_image() {
     .unwrap();
     // One chunk per small file (zeros is a hole) plus the chunks of the
     // large files; every chunk group carries a digest.
-    let small_chunks = blob_metadata
-        .chunk_groups()
-        .flat_map(|group| group.chunks(&blob_metadata))
-        .filter(|(_, len)| *len <= 20_000)
+    let small_chunks = (0..blob_metadata.chunk_count())
+        .filter(|index| blob_metadata.chunk_length(*index).unwrap() <= 20_000)
         .count();
     assert_eq!(small_chunks, 202);
     assert_eq!(blob_metadata.digester(), BlobMetadataDigester::Blake3);

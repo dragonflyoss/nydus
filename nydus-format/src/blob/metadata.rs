@@ -665,44 +665,36 @@ impl BlobMetadataChunkGroupExtent {
             || self.compressed_size == self.uncompressed_size
     }
 
-    /// The group's chunks as `(logical byte offset, length)`, in address
-    /// order, each on its own block, their lengths read from
-    /// `blob_metadata`'s ChunkLengthTable. [`Self::decoded_chunks`] pairs
-    /// them with their bytes.
+    /// The group's chunks cut out of `bytes`, its uncompressed bytes, as
+    /// `(logical byte offset, chunk)` in address order, each chunk on its
+    /// own block, the lengths read from `blob_metadata`'s ChunkLengthTable.
+    /// `bytes` must be exactly [`Self::uncompressed_size`] long.
     pub fn chunks<'a>(
         &self,
         blob_metadata: &'a BlobMetadata,
-    ) -> impl Iterator<Item = (u64, u32)> + 'a {
-        let mut block = self.logical_block_offset();
-        self.chunk_range().map(move |chunk| {
-            let length = blob_metadata
-                .chunk_lengths
-                .get(&blob_metadata.bytes, chunk)
-                .get();
-            let offset = block * EROFS_BLOCK_SIZE as u64;
-            block += u64::from(length).div_ceil(EROFS_BLOCK_SIZE as u64);
-            (offset, length)
-        })
-    }
-
-    /// The group's chunks as `(logical byte offset, bytes within payload)`,
-    /// `payload` being the group's decoded bytes, the gaps between chunks
-    /// block padding. `None` when `payload` is not the group's uncompressed
-    /// size.
-    pub fn decoded_chunks<'a>(
-        &self,
-        blob_metadata: &'a BlobMetadata,
-        payload: &'a [u8],
-    ) -> Option<impl Iterator<Item = (u64, &'a [u8])> + 'a> {
-        if payload.len() != self.uncompressed_size as usize {
-            return None;
+        bytes: &'a [u8],
+    ) -> Result<impl Iterator<Item = (u64, &'a [u8])> + 'a> {
+        if bytes.len() != self.uncompressed_size as usize {
+            return Err(Error::InvalidParameter(format!(
+                "blob meta chunk group {} holds {} uncompressed bytes, got {}",
+                self.index,
+                self.uncompressed_size,
+                bytes.len()
+            )));
         }
 
+        let mut block = self.logical_block_offset();
         let mut position = 0usize;
-        Some(self.chunks(blob_metadata).map(move |(offset, length)| {
-            let bytes = &payload[position..position + length as usize];
-            position += length as usize;
-            (offset, bytes)
+        Ok(self.chunk_range().map(move |index| {
+            let length = blob_metadata
+                .chunk_lengths
+                .get(&blob_metadata.bytes, index)
+                .get() as usize;
+            let chunk = &bytes[position..position + length];
+            let offset = block * EROFS_BLOCK_SIZE as u64;
+            position += length;
+            block += (length as u64).div_ceil(EROFS_BLOCK_SIZE as u64);
+            (offset, chunk)
         }))
     }
 }
@@ -2144,26 +2136,6 @@ mod tests {
     }
 
     #[test]
-    fn chunks_returns_the_offset_and_length_of_every_chunk() {
-        let blob_metadata = blob_metadata();
-
-        let test_cases = vec![
-            (0, vec![(0, 100), (4096, 5000)]),
-            (1, vec![(3 * 4096, 40), (4 * 4096, 6000), (6 * 4096, 1)]),
-            (2, vec![(7 * 4096, 20000)]),
-            (4, vec![(28 * 4096, 1), (29 * 4096, 1)]),
-        ];
-
-        for (index, expected) in test_cases {
-            let chunk_group = blob_metadata.chunk_group(index).unwrap();
-            assert_eq!(
-                chunk_group.chunks(&blob_metadata).collect::<Vec<_>>(),
-                expected
-            );
-        }
-    }
-
-    #[test]
     fn chunk_length_returns_the_length_or_none() {
         let blob_metadata = blob_metadata();
 
@@ -2322,32 +2294,37 @@ mod tests {
     }
 
     #[test]
-    fn decoded_chunks_returns_every_chunk_at_its_offset() {
+    fn chunks_returns_every_chunk_at_its_offset() {
         let blob_metadata = blob_metadata();
         let chunks = chunks();
         let mut address_space = vec![0u8; blob_metadata.logical_size() as usize];
         for (chunk_group, chunks) in blob_metadata.chunk_groups().zip(&chunks) {
             let payload = chunks.concat();
-            let decoded_chunks: Vec<_> = chunk_group
-                .decoded_chunks(&blob_metadata, &payload)
+            let group_chunks: Vec<_> = chunk_group
+                .chunks(&blob_metadata, &payload)
                 .unwrap()
                 .collect();
-            assert_eq!(decoded_chunks.len(), chunks.len());
-            for ((offset, decoded_chunk), chunk) in decoded_chunks.into_iter().zip(chunks) {
-                assert_eq!(decoded_chunk, chunk.as_slice());
-                address_space[offset as usize..offset as usize + decoded_chunk.len()]
-                    .copy_from_slice(decoded_chunk);
+            assert_eq!(group_chunks.len(), chunks.len());
+            for ((offset, bytes), chunk) in group_chunks.into_iter().zip(chunks) {
+                assert_eq!(bytes, chunk.as_slice());
+                address_space[offset as usize..offset as usize + bytes.len()]
+                    .copy_from_slice(bytes);
             }
         }
 
         assert_eq!(&address_space[..100], &chunks[0][0][..]);
         assert!(address_space[100..4096].iter().all(|byte| *byte == 0));
         assert_eq!(&address_space[28 * 4096..28 * 4096 + 1], &chunks[4][0][..]);
-        assert!(blob_metadata
-            .chunk_group(0)
-            .unwrap()
-            .decoded_chunks(&blob_metadata, &chunks[0].concat()[..10])
-            .is_none());
+        assert_eq!(
+            blob_metadata
+                .chunk_group(0)
+                .unwrap()
+                .chunks(&blob_metadata, &chunks[0].concat()[..10])
+                .map(drop)
+                .unwrap_err()
+                .to_string(),
+            "blob meta chunk group 0 holds 5100 uncompressed bytes, got 10"
+        );
     }
 
     #[test]
