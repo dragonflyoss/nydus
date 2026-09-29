@@ -1326,7 +1326,7 @@ mod tests {
             finish_full_blob(
                 &mut full_blob,
                 0,
-                &parent_bytes,
+                Some(&parent_bytes),
                 Some(&blob_writer.blob_metadata().unwrap()),
             )
             .unwrap();
@@ -1438,7 +1438,7 @@ mod tests {
             nydus_format::blob::finish_full_blob(
                 &mut rebuilt,
                 data_size as u64,
-                &bootstrap,
+                Some(&bootstrap),
                 image.blob_metadata.as_ref(),
             )
             .unwrap();
