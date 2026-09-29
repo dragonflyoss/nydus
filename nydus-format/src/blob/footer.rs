@@ -9,12 +9,11 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-/// The trailing footer of a nydus full blob: the blob's self-describing map,
-/// recording where each region lives, sealed with a crc32c. The whole-blob
-/// layout the fields describe is drawn at
-/// [`finish_full_blob`](crate::blob::finish_full_blob).
+/// The trailing footer of a nydus full blob, the blob's self-describing map
+/// of where each region lives, sealed with a crc32c. The whole-blob layout
+/// is drawn at [`finish_full_blob`](crate::blob::finish_full_blob).
 ///
-/// The footer's own 4096 bytes (integers little-endian):
+/// The footer's own 4096 bytes, integers little-endian.
 ///
 /// ```text
 /// offset  size  field
@@ -24,7 +23,7 @@ use std::path::Path;
 ///     16     4  crc32                   crc32c of these 4096 bytes with
 ///                                       this field treated as zero
 ///     20     4  bootstrap_crc32         crc32c of the bootstrap region,
-///                                       padding included; zero when empty
+///                                       padding included, zero when empty
 ///     24     8  compressed_data_offset  bytes
 ///     32     8  compressed_data_size    bytes
 ///     40     8  bootstrap_offset        bytes, 4KiB aligned
@@ -55,30 +54,28 @@ pub struct BlobFooter {
     blob_metadata_size: u64,
 }
 
+/// Writes and reads the footer, and answers where each region of the blob
+/// lies.
 impl BlobFooter {
-    /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
-    /// footer starts with the readable string. Same frozen `magic +
-    /// feature_compat + feature_incompat + crc32` prefix as the blob meta
-    /// (`NDBLMETA`), see [`crate::blob::flag`].
+    /// On-disk magic, 8 raw ASCII bytes written as-is so a hexdump of the
+    /// footer starts with the readable string. Same frozen prefix as the
+    /// blob meta (`NDBLMETA`), see [`crate::blob::flag`].
     pub const MAGIC: [u8; 8] = *b"NDFOOTER";
 
-    /// The footer's fixed on-disk size: one EROFS block at the blob's tail.
+    /// The footer's fixed on-disk size, one EROFS block at the blob's tail.
     /// Every region offset and size in the blob is block aligned too, except
     /// the compressed data size.
     pub const SIZE: usize = EROFS_BLOCK_SIZE as usize;
 
-    /// Incompat feature: the embedded bootstrap region holds one zstd frame
-    /// instead of raw EROFS bytes. `bootstrap_compressed_size` then carries the
-    /// frame's exact byte length within the block-aligned region. The merged
-    /// bootstrap and the blob meta sidecar the runtime mounts are unaffected,
-    /// only merge, `check`, and single-blob mounts decode this region.
+    /// The embedded bootstrap region holds one zstd frame instead of raw
+    /// EROFS bytes, its exact length in `bootstrap_compressed_size`. Only
+    /// merge, `check` and single-blob mounts decode this region.
     pub const INCOMPAT_BOOTSTRAP_ZSTD: u32 = 1 << 0;
 
-    /// Incompat feature: the data region is a raw EROFS device the kernel reads
-    /// at offset 0 (native `erofs-*` layers) and there is no blob meta region
-    /// (`blob_metadata_size` is zero). Such blobs are never served on demand
-    /// by the nydus daemons; they are mounted through the kernel or read whole
-    /// from a local store.
+    /// The data region is a raw EROFS device the kernel reads at offset 0
+    /// (native `erofs-*` layers) and there is no blob meta region. Such blobs
+    /// are never served on demand, they are mounted through the kernel or
+    /// read whole from a local store.
     pub const INCOMPAT_RAW_DEVICE: u32 = 1 << 1;
 
     /// Every incompat bit this reader understands. A footer setting a bit
@@ -89,16 +86,14 @@ impl BlobFooter {
     /// Byte range of the crc32 field within the footer.
     const CRC32_FIELD: Range<usize> = 16..20;
 
-    /// Creates a validated, sealed footer for the given region layout: the
-    /// fields and the layout are checked first, so a constructed footer is
-    /// valid by definition, then the crc32 is computed over the final bytes.
+    /// Creates a validated, sealed footer for the given region layout. The
+    /// fields and the layout are checked first, then the crc32 is computed
+    /// over the final bytes.
     ///
     /// `Some(n)` declares the bootstrap region stores one zstd frame of
-    /// exactly `n` bytes and sets the BOOTSTRAP_ZSTD incompat feature, `None`
-    /// keeps the region raw. [`Self::bootstrap_compressed_size`] reads the
-    /// same value back. `blob_metadata_size == 0` declares a raw device
-    /// blob without blob meta and sets the RAW_DEVICE incompat feature.
-    /// `bootstrap_crc32` is the crc32c of the whole bootstrap region.
+    /// exactly `n` bytes and sets BOOTSTRAP_ZSTD, `None` keeps the region
+    /// raw. `blob_metadata_size == 0` declares a raw device blob and sets
+    /// RAW_DEVICE. `bootstrap_crc32` covers the whole bootstrap region.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         compressed_data_offset: u64,
@@ -133,15 +128,14 @@ impl BlobFooter {
         Ok(footer)
     }
 
-    /// Parse a footer from exactly its [`Self::SIZE`] bytes: the raw bytes
+    /// Parse a footer from exactly its [`Self::SIZE`] bytes. The raw bytes
     /// are checked first (`validate_bytes`), then the decoded fields against
     /// each other (`validate_fields`).
     ///
-    /// The declared region offsets are not anchored against the blob's actual
-    /// size here. The whole-blob entry points ([`Self::from_blob_bytes`],
-    /// [`Self::from_blob_path`]) do that anchoring themselves; a caller
-    /// parsing an isolated footer (e.g. a registry range read) anchors it
-    /// with [`Self::validate_layout`] before trusting any offset.
+    /// The declared region offsets are not anchored against the blob's
+    /// actual size here. [`Self::from_blob_bytes`] and
+    /// [`Self::from_blob_path`] do that, a caller parsing an isolated footer
+    /// does it with [`Self::validate_layout`] before trusting any offset.
     pub fn from_bytes(bytes: &[u8; Self::SIZE]) -> Result<Self> {
         Self::validate_bytes(bytes)?;
         let footer = Self {
@@ -163,7 +157,7 @@ impl BlobFooter {
     }
 
     /// Serialize the footer into its on-disk bytes. The reserved tail is
-    /// zeroed, so this is only the writer's view: raw bytes read from disk
+    /// zeroed, so this is only the writer's view. Raw bytes read from disk
     /// may carry newer fields there that this type does not model.
     fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut data = [0u8; Self::SIZE];
@@ -186,7 +180,7 @@ impl BlobFooter {
     /// declared layout against the blob's size. Errors when the bytes are
     /// too short for a footer, the tail carries no footer magic (the input
     /// is not a full blob, e.g. a bare bootstrap), or the footer is
-    /// malformed. The bootstrap region is not read here; its consumer
+    /// malformed. The bootstrap region is not read here, its consumer
     /// checks it against [`Self::bootstrap_crc32`].
     pub fn from_blob_bytes(blob: &[u8]) -> Result<Self> {
         let footer_offset = Self::calculate_offset_by_blob_size(blob.len() as u64)?;
@@ -214,9 +208,9 @@ impl BlobFooter {
         Ok(footer)
     }
 
-    /// The `feature_incompat` word a new footer declares: BOOTSTRAP_ZSTD
-    /// when the bootstrap region holds a zstd frame, RAW_DEVICE when there
-    /// is no blob meta region.
+    /// The `feature_incompat` word a new footer declares, BOOTSTRAP_ZSTD
+    /// when the bootstrap region holds a zstd frame and RAW_DEVICE when
+    /// there is no blob meta region.
     fn feature_incompat(bootstrap_zstd: bool, raw_device: bool) -> FeatureFlags {
         let mut flags = FeatureFlags::empty();
         flags.set(Self::INCOMPAT_BOOTSTRAP_ZSTD, bootstrap_zstd);
@@ -224,11 +218,10 @@ impl BlobFooter {
         flags
     }
 
-    /// Validate the raw on-disk bytes before decoding them: the magic and
+    /// Validate the raw on-disk bytes before decoding them, the magic and
     /// the stored crc32 against [`Self::compute_crc32`]. Runs over the
-    /// incoming bytes, never over `to_bytes()`: a re-serialization emits
-    /// only the fields this reader knows, zeroing a newer writer's fields in
-    /// the reserved tail and thereby rejecting a valid image.
+    /// incoming bytes, never over `to_bytes()`, which would zero a newer
+    /// writer's fields in the reserved tail and reject a valid image.
     fn validate_bytes(bytes: &[u8; Self::SIZE]) -> Result<()> {
         if !Self::has_magic(bytes) {
             return Err(Error::InvalidImage(
@@ -246,19 +239,18 @@ impl BlobFooter {
     }
 
     /// Validate the intrinsic field invariants, needing nothing beyond the
-    /// fields themselves. Run once per entry point: by [`Self::from_bytes`]
-    /// on the read side and by [`Self::new`] on the write side.
+    /// fields themselves. Run by [`Self::from_bytes`] on the read side and
+    /// by [`Self::new`] on the write side.
     ///
-    /// Deliberately not checked: the reserved fields and tail may carry a
-    /// newer writer's fields (corruption is caught by the crc32), and
-    /// `bootstrap_size` may be zero (an ondemand redirect blob embeds no
-    /// bootstrap image).
+    /// The reserved tail is deliberately not checked, since a newer writer
+    /// may use it, and `bootstrap_size` may be zero, since an ondemand
+    /// redirect blob embeds no bootstrap image.
     fn validate_fields(&self) -> Result<()> {
         self.feature_incompat
             .validate_incompat(Self::INCOMPAT_SUPPORTED)?;
 
-        // RAW_DEVICE: no blob meta region, and the bootstrap is mandatory;
-        // every other blob carries blob meta.
+        // RAW_DEVICE has no blob meta region and a mandatory bootstrap.
+        // Every other blob carries blob meta.
         let raw_device = self.feature_incompat.contains(Self::INCOMPAT_RAW_DEVICE);
         if raw_device {
             if self.blob_metadata_size != 0 {
@@ -277,8 +269,8 @@ impl BlobFooter {
             ));
         }
 
-        // BOOTSTRAP_ZSTD: the frame length is declared and lies within the
-        // bootstrap region; a raw bootstrap declares none.
+        // BOOTSTRAP_ZSTD declares a frame length within the bootstrap
+        // region. A raw bootstrap declares none.
         let bootstrap_zstd = self
             .feature_incompat
             .contains(Self::INCOMPAT_BOOTSTRAP_ZSTD);
@@ -347,9 +339,9 @@ impl BlobFooter {
     }
 
     /// Validate the declared region layout against `offset`, the footer's
-    /// actual position (an external fact the footer cannot fake): the
-    /// regions must tile the blob in order (alignment gaps allowed) and end
-    /// exactly where the footer sits.
+    /// actual position, an external fact the footer cannot fake. The regions
+    /// must tile the blob in order (alignment gaps allowed) and end exactly
+    /// where the footer sits.
     pub fn validate_layout(&self, offset: u64) -> Result<()> {
         if offset % EROFS_BLOCK_SIZE as u64 != 0 {
             return Err(Error::InvalidImage(format!(
@@ -402,17 +394,16 @@ impl BlobFooter {
         Ok(())
     }
 
-    /// The footer's actual offset in a blob of `blob_size` total bytes: the
-    /// footer is the blob's fixed-size tail.
+    /// The footer's actual offset in a blob of `blob_size` total bytes, the
+    /// footer being the blob's fixed-size tail.
     pub fn calculate_offset_by_blob_size(blob_size: u64) -> Result<u64> {
         blob_size
             .checked_sub(Self::SIZE as u64)
             .ok_or_else(|| Error::InvalidImage("blob too small for nydus footer".to_string()))
     }
 
-    /// The footer offset the declared layout implies: a full blob lays the
-    /// footer immediately after the blob meta region, so this is the
-    /// exclusive end of that region.
+    /// The footer offset the declared layout implies, the end of the blob
+    /// meta region, since a full blob lays the footer right after it.
     pub fn offset(&self) -> Result<u64> {
         self.blob_metadata_offset
             .checked_add(self.blob_metadata_size())
@@ -468,7 +459,7 @@ impl BlobFooter {
         self.blob_metadata_size
     }
 
-    /// Size of the blob meta region in 4KiB blocks; zero for a raw device
+    /// Size of the blob meta region in 4KiB blocks, zero for a raw device
     /// blob (see [`Self::is_raw_device`]).
     pub fn blob_metadata_block_count(&self) -> u64 {
         self.blob_metadata_size / EROFS_BLOCK_SIZE as u64
@@ -480,8 +471,8 @@ impl BlobFooter {
         self.feature_incompat.contains(Self::INCOMPAT_RAW_DEVICE)
     }
 
-    /// crc32c over the footer bytes with the crc32 field treated as zero:
-    /// the writer seals `to_bytes()` with it, the reader verifies the raw
+    /// crc32c over the footer bytes with the crc32 field treated as zero.
+    /// The writer seals `to_bytes()` with it, the reader verifies the raw
     /// incoming bytes against it.
     fn compute_crc32(bytes: &[u8; Self::SIZE]) -> u32 {
         let mut zeroed = *bytes;

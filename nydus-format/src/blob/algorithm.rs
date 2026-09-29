@@ -8,12 +8,18 @@ use std::fmt;
 /// payloads raw.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlobMetadataCompressor {
+    /// Payloads are stored as they are.
     #[default]
     None,
+
+    /// One zstd frame per chunk group.
     Zstd,
+
+    /// One LZ4 block per chunk group, without a frame header.
     Lz4Block,
 }
 
+/// Maps the compressor to and from the code the ChunkGroupTable header stores.
 impl BlobMetadataCompressor {
     /// The ChunkGroupTable header code of this compressor.
     pub fn code(self) -> u8 {
@@ -24,8 +30,8 @@ impl BlobMetadataCompressor {
         }
     }
 
-    /// Decode a ChunkGroupTable header code; an unknown compressor rejects the
-    /// file, since its payloads cannot be decoded.
+    /// Decode a ChunkGroupTable header code. An unknown compressor rejects
+    /// the file, since its payloads cannot be decoded.
     pub fn from_code(code: u8) -> Result<Self> {
         match code {
             0 => Ok(Self::None),
@@ -38,9 +44,9 @@ impl BlobMetadataCompressor {
     }
 }
 
-/// The lowercase algorithm name, as surfaced in the `build` and `check`
-/// summaries.
+/// Names the compressor in the `build` and `check` summaries.
 impl fmt::Display for BlobMetadataCompressor {
+    /// The lowercase algorithm name.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::None => "none",
@@ -51,16 +57,20 @@ impl fmt::Display for BlobMetadataCompressor {
 }
 
 /// The chunk digest algorithm a blob meta declares. `None` means the blob
-/// has no ChunkGroupDigestTable: the chunk table is still addressable but carries no
-/// integrity information, for blobs built from content that was already
-/// verified upstream.
+/// has no ChunkGroupDigestTable, so its chunks carry no integrity
+/// information, for content already verified upstream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlobMetadataDigester {
+    /// BLAKE3, 32-byte digests.
     #[default]
     Blake3,
+
+    /// No ChunkGroupDigestTable.
     None,
 }
 
+/// Maps the digester to and from the code the ChunkGroupDigestTable header
+/// stores.
 impl BlobMetadataDigester {
     /// The ChunkGroupDigestTable header code of BLAKE3.
     pub const BLAKE3_CODE: u8 = 1;
@@ -79,9 +89,9 @@ impl BlobMetadataDigester {
     }
 }
 
-/// The lowercase algorithm name, as surfaced in the `build` and `check`
-/// summaries.
+/// Names the digester in the `build` and `check` summaries.
 impl fmt::Display for BlobMetadataDigester {
+    /// The lowercase algorithm name.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Blake3 => "blake3",

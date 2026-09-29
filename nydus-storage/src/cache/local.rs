@@ -232,11 +232,11 @@ impl LocalBlobCache {
         let not_found = || io::Error::new(io::ErrorKind::NotFound, "blob chunk group not found");
         let first = self
             .blob_metadata
-            .chunk_group_index_of(offset)
+            .chunk_group_index(offset)
             .ok_or_else(not_found)?;
         let last = self
             .blob_metadata
-            .chunk_group_index_of(end - 1)
+            .chunk_group_index(end - 1)
             .ok_or_else(not_found)?;
         Ok(first..last + 1)
     }
@@ -539,7 +539,7 @@ impl LocalBlobCache {
     ) -> io::Result<&'p [u8]> {
         let start = (group.compressed_offset() - base) as usize;
         let end = start + group.compressed_size() as usize;
-        let payload: &[u8] = if self.blob_metadata.is_plain(group) {
+        let payload: &[u8] = if group.is_uncompressed(&self.blob_metadata) {
             &encoded[start..end]
         } else {
             let out = &mut decoded[..u64::from(group.uncompressed_size()) as usize];
@@ -678,11 +678,9 @@ impl LocalBlobCache {
         cache_file: &File,
     ) -> io::Result<()> {
         let mut batch = ScatterBatch::new(cache_file);
-        self.blob_metadata.for_each_decoded_chunk(
-            group.index() as usize,
-            payload,
-            &mut |offset, bytes| batch.push(offset, bytes),
-        )?;
+        for (offset, bytes) in super::decoded_chunks(&self.blob_metadata, group, payload)? {
+            batch.push(offset, bytes)?;
+        }
         batch.flush()?;
         self.chunk_group_map.set_ready(group.index() as usize)
     }
@@ -1283,7 +1281,7 @@ mod tests {
         super::super::set_fetch_size(0);
         let backend_dir = tempdir().unwrap();
         let (data, meta, groups, _) = groups_blob();
-        let mut digests = meta.chunk_group_digests().to_vec();
+        let mut digests: Vec<_> = meta.chunk_group_digests().collect();
         digests[1] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0u8; 32]);
         let members: Vec<_> = (0..meta.chunk_count())
             .map(|index| {

@@ -932,7 +932,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
             );
             assert_eq!(group.redirect().unwrap().source_blob_index(), source_index);
             for offset in group.logical_range().step_by(4096) {
-                assert_eq!(meta.chunk_group_index_of(offset), Some(index));
+                assert_eq!(meta.chunk_group_index(offset), Some(index));
             }
         }
         fs::write(

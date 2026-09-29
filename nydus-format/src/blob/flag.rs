@@ -1,17 +1,18 @@
-//! Conventions shared by the nydus on-disk record formats (blob meta, blob
-//! footer): the frozen `magic[0..8] + feature_compat[8..12] +
-//! feature_incompat[12..16] + crc32[16..20]` prefix. There is no version
-//! field: compatibility is decided by the feature words alone, EROFS-style.
-//! Unknown `feature_compat` bits are ignored, unknown `feature_incompat` bits
-//! reject the record, so an incompatible change sets a new incompat bit.
+//! The frozen prefix shared by the blob meta and the blob footer,
+//! `magic[0..8] + feature_compat[8..12] + feature_incompat[12..16] +
+//! crc32[16..20]`. There is no version field. Compatibility is decided by
+//! the feature words alone, EROFS-style. Unknown `feature_compat` bits are
+//! ignored, unknown `feature_incompat` bits reject the record, so an
+//! incompatible change sets a new incompat bit.
 
 use crate::error::{Error, Result};
 
-/// A `feature_incompat` word: every bit is an incompatible feature and an
-/// unknown bit rejects the record. Wraps the raw on-disk word verbatim.
+/// A `feature_incompat` word, the raw on-disk word verbatim. Every bit is
+/// an incompatible feature and an unknown bit rejects the record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FeatureFlags(u32);
 
+/// Builds, queries and checks a feature word.
 impl FeatureFlags {
     /// A word with no feature bits set.
     pub const fn empty() -> Self {

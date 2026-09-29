@@ -673,7 +673,10 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
         bytes_per_chunk_group_index: meta(|meta| meta.bytes_per_chunk_group_index().to_string()),
         chunk_group_count: meta(|meta| meta.chunk_group_count().to_string()),
         chunk_count: meta(|meta| meta.chunk_count().to_string()),
-        digest_count: meta(|meta| meta.chunk_group_digest_count().to_string()),
+        digest_count: meta(|meta| match meta.digester() {
+            BlobMetadataDigester::None => "0".to_string(),
+            BlobMetadataDigester::Blake3 => meta.chunk_group_count().to_string(),
+        }),
         chunk_compressor: meta(|meta| meta.compressor().to_string()),
         blob_payload_size: meta(|meta| meta.uncompressed_size().to_string()),
         blob_compressed_size: meta(|meta| meta.compressed_size().to_string()),
