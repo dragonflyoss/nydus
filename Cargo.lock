@@ -3060,7 +3060,6 @@ dependencies = [
 name = "nydus-storage"
 version = "3.0.0-beta.1"
 dependencies = [
- "blake3",
  "crc32c",
  "libc",
  "lz4_flex",

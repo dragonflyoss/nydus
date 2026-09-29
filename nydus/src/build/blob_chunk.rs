@@ -114,13 +114,14 @@ pub struct BlobWriter<W> {
 }
 
 /// A chunk group under construction: the chunks packed so far, their
-/// lengths, digests and placement ids, and the blocks they span.
+/// lengths and placement ids, the blocks they span, and for a lone chunk
+/// the digest already taken of it, which is the group's.
 struct Bin {
     data: Vec<u8>,
     lens: Vec<u32>,
-    digests: Vec<BlobMetadataChunkGroupDigest>,
     placements: Vec<usize>,
     blocks: u64,
+    digest: Option<BlobMetadataChunkGroupDigest>,
 }
 
 /// Content-defined pack boundaries, normalized around the chunk group
@@ -1566,18 +1567,16 @@ impl<W: Write> BlobWriter<W> {
         let len = u32::try_from(data.len())
             .map_err(|err| Error::Overflow(format!("blob meta chunk length exceeds u32: {err}")))?;
         let digest = self.digester.map(|digester| match digester {
-            BlobMetadataDigester::Blake3 => {
-                BlobMetadataChunkGroupDigest::new(*blake3::hash(data).as_bytes())
-            }
+            BlobMetadataDigester::Blake3 => BlobMetadataChunkGroupDigest::from_chunks([data]),
         });
         let placement = self.placements.len();
         self.placements.push(PENDING);
         let lone = || Bin {
             data: data.to_vec(),
             lens: vec![len],
-            digests: digest.into_iter().collect(),
             placements: vec![placement],
             blocks,
+            digest,
         };
 
         if len >= self.chunk_group_min_size {
@@ -1604,15 +1603,14 @@ impl<W: Write> BlobWriter<W> {
                 self.open_bin.insert(Bin {
                     data: buffer,
                     lens: Vec::new(),
-                    digests: Vec::new(),
                     placements: Vec::new(),
                     blocks: 0,
+                    digest: None,
                 })
             }
         };
         bin.data.extend_from_slice(data);
         bin.lens.push(len);
-        bin.digests.extend(digest);
         bin.placements.push(placement);
         bin.blocks += blocks;
         let cuts = cut_byte.is_some_and(|byte| {
@@ -1659,14 +1657,11 @@ impl<W: Write> BlobWriter<W> {
         let first_chunk_index = u32::try_from(self.members.len())
             .map_err(|_| Error::Overflow("blob holds too many chunks".to_string()))?;
         self.members.extend_from_slice(&bin.lens);
-        // The chunk digests already computed for the boundary decision name
-        // the group; a single chunk's digest is reused as is. Without a
-        // digester there are none.
-        if !bin.digests.is_empty() {
-            let members: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> =
-                bin.digests.iter().map(|digest| digest.get()).collect();
-            self.digests
-                .push(BlobMetadataChunkGroupDigest::from_chunk_digests(&members)?);
+        if self.digester.is_some() {
+            self.digests.push(match bin.digest {
+                Some(digest) => digest,
+                None => BlobMetadataChunkGroupDigest::from_chunks([bin.data.as_slice()]),
+            });
         }
         self.next_group = group + 1;
         self.next_blkaddr = end_block;
@@ -2009,8 +2004,8 @@ mod tests {
             writer.blob_metadata_chunk_lengths(),
             &[TEST_CHUNK_SIZE, TEST_CHUNK_SIZE, TEST_CHUNK_SIZE / 4, 100]
         );
-        // One digest per group: the two full chunks are equal bytes and
-        // name their groups by their own digest; the pack's is derived.
+        // One digest per group over its bytes, so the two equal full chunks
+        // share one and the pack's covers both of its chunks.
         assert_eq!(writer.digests.len(), 3);
         assert_eq!(writer.digests[0].get(), writer.digests[1].get());
         assert_eq!(
@@ -2019,11 +2014,7 @@ mod tests {
         );
         assert_eq!(
             writer.digests[2],
-            BlobMetadataChunkGroupDigest::from_chunk_digests(&[
-                *blake3::hash(&tail).as_bytes(),
-                *blake3::hash(&small).as_bytes()
-            ])
-            .unwrap()
+            BlobMetadataChunkGroupDigest::from_chunks([tail.as_slice(), small.as_slice()])
         );
         let meta = writer.blob_metadata().unwrap();
         // 16 + 16 blocks for the full chunks, 4 + 1 for the pack.
@@ -2499,13 +2490,11 @@ mod tests {
         }
         // Every group's digest derives from its chunks' bytes.
         for group in meta.chunk_groups() {
-            let members: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = files[group.chunk_range()]
-                .iter()
-                .map(|file| *blake3::hash(file).as_bytes())
-                .collect();
             assert_eq!(
                 meta.chunk_group_digest(group.index() as usize).unwrap(),
-                BlobMetadataChunkGroupDigest::from_chunk_digests(&members).unwrap()
+                BlobMetadataChunkGroupDigest::from_chunks(
+                    files[group.chunk_range()].iter().map(Vec::as_slice)
+                )
             );
         }
     }

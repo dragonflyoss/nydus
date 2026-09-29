@@ -344,7 +344,7 @@ Options:
 	--compressor <COMPRESSOR>
 		Specify the data layout and compression. zstd, lz4 and none build chunk groups the nydus daemon fetches on demand and decodes, described by the blob meta. The erofs-* values instead build a native EROFS layer without blob meta: the full blob's data region is the raw layer device, so the store file serves as a device= of a kernel block-device mount and the nydus daemons never fetch it on demand. erofs-none stores the chunks uncompressed at their block addresses; erofs-lz4 and erofs-zstd compress file data into native LZ4 or zstd pclusters the kernel decompresses (64KiB pclusters, files up to 64KiB packed into the shared fragment inode; kernel mounts need 6.1+ for erofs-lz4 and 6.10+ for erofs-zstd). --digester does not apply to the erofs-* values [env: NYDUS_BUILD_COMPRESSOR=] [default: zstd] [possible values: none, zstd, lz4, erofs-none, erofs-lz4, erofs-zstd]
 	--digester <DIGESTER>
-		Specify the digest algorithm recorded in the blob meta, one digest per chunk group (a lone chunk's content digest, or a BLAKE3 derived from the member chunks' digests for a pack); "none" records no digests and skips hashing, for content already verified upstream [env: NYDUS_BUILD_DIGESTER=] [default: blake3] [possible values: blake3, none]
+		Specify the digest algorithm recorded in the blob meta, one BLAKE3 digest per chunk group over its chunks back to back, for a lone chunk its content digest; "none" records no digests and skips hashing, for content already verified upstream [env: NYDUS_BUILD_DIGESTER=] [default: blake3] [possible values: blake3, none]
 	--blob-id <BLOB_ID>
 		Name the blob with this 64-hex id (e.g. the OCI layer digest) instead of its SHA256, skipping the data and full-blob hashing; with --blob-dir an existing entry of that name is replaced. Only local stores resolve such blobs (the id is the file name under --blob-dir); a registry serves blobs by their real digest [env: NYDUS_BUILD_BLOB_ID=]
 	--exclude <EXCLUDE>
@@ -516,9 +516,9 @@ chunks' bytes back to back, without the tail-block padding after each file
 - The blob meta records one 24-byte entry per group (compressed offset,
 	start block, first chunk index, payload size, crc32c), one four-byte length
 	per stored chunk (including a lone chunk)
-	and one 32-byte BLAKE3 digest per group: a lone chunk's content digest,
-	or for a pack a domain-separated BLAKE3 over the member chunks' digests
-	(see [Chunk group digest](#chunk-group-digest); no digests with
+	and one 32-byte BLAKE3 digest per group over the group's chunks back to
+	back, for a lone chunk its plain content digest (see
+	[Chunk group digest](#chunk-group-digest); no digests with
 	`--digester none`).
 
 The chunk size therefore trades compression and table size against read
@@ -1813,21 +1813,16 @@ meta preserves the tables the reader does not know.
 #### Chunk group digest
 
 - The digest table has one entry per chunk group: entry `i` names group
-	`i`'s content. A group holding one chunk carries the BLAKE3 digest of that
-	chunk's exact bytes (no padding), so every chunk of at least the chunk
-	group minimum size is addressable by its plain content digest. A group of
-	several chunks (a pack) carries a domain-separated BLAKE3 over its member
-	chunks' digests in order: `blake3::derive_key("nydus blob meta chunk
-	group digest v1", d_0 ‖ d_1 ‖ … ‖ d_n-1)`. The builder already hashes
-	every chunk to decide the pack boundaries, so the group digest costs no
-	second pass over the bytes. The context separates group hashing from plain
-	content hashing; collision resistance still relies on BLAKE3. The table
-	uses 32 bytes per group rather than per chunk, so its reduction depends
-	on the number of chunks per group. These digests are the identities a
-	content-addressed cache uses for groups.
+	`i`'s content, the BLAKE3 digest of the group's chunks back to back with
+	no padding, which is the group's uncompressed payload. A group holding
+	one chunk therefore carries that chunk's plain content digest, so every
+	chunk of at least the chunk group minimum size is addressable by its
+	content digest. The table uses 32 bytes per group rather than per chunk,
+	so its reduction depends on the number of chunks per group. These digests
+	are the identities a content-addressed cache uses for groups.
 - The runtime checks a decoded group against its entry when
-	`storage.skip_verify_checksums` is `false`: it hashes each member chunk
-	of the decoded payload and recombines them the same way.
+	`storage.skip_verify_checksums` is `false`: it hashes the decoded payload
+	and compares.
 
 Redirect details (redirect blobs only):
 
@@ -1949,8 +1944,8 @@ leaving the tail of each block zero.
 Hash and validation summary:
 
 - **BLAKE3 per chunk group** (blob meta digest table, one entry per group)
-	— the content identity of the group: a lone chunk's own digest, or a
-	BLAKE3 derived from the member chunks' digests for a pack (see
+	— the content identity of the group, BLAKE3 over its decoded payload,
+	for a lone chunk the chunk's own digest (see
 	[Chunk group digest](#chunk-group-digest)); what a read checks a decoded
 	group against when checksum verification is enabled.
 - **CRC32C per chunk group** (blob meta chunk group entry) — validated after

@@ -464,14 +464,7 @@ pub fn validate_decoded_chunk_group(
     let expected = blob_metadata
         .chunk_group_digest(group.index() as usize)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk group digest missing"))?;
-    let chunk_digests: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = group
-        .chunks(blob_metadata, decoded)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
-        .map(|(_, chunk)| *blake3::hash(chunk).as_bytes())
-        .collect();
-    let actual = BlobMetadataChunkGroupDigest::from_chunk_digests(&chunk_digests)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    if actual != expected {
+    if BlobMetadataChunkGroupDigest::from_chunks([decoded]) != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("blob chunk group {} digest mismatch", group.index()),
@@ -579,11 +572,9 @@ pub(crate) mod test_util {
                 logical_block_offset +=
                     (chunk.len() as u32).div_ceil(nydus_format::erofs::EROFS_BLOCK_SIZE);
             }
-            let digests: Vec<[u8; BlobMetadataChunkGroupDigest::SIZE]> = group
-                .iter()
-                .map(|chunk| *blake3::hash(chunk).as_bytes())
-                .collect();
-            digest_table.push(BlobMetadataChunkGroupDigest::from_chunk_digests(&digests).unwrap());
+            digest_table.push(BlobMetadataChunkGroupDigest::from_chunks(
+                group.iter().map(Vec::as_slice),
+            ));
         }
         if !digests {
             digest_table.clear();

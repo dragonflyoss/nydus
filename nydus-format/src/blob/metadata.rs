@@ -1017,7 +1017,7 @@ impl BlobMetadataChunkGroupDigestTableHeaderExtension {
 }
 
 /// One ChunkGroupDigestTable entry, the content digest of the chunk group
-/// at the same index in ChunkGroupTable (see [`Self::from_chunk_digests`]).
+/// at the same index in ChunkGroupTable (see [`Self::from_chunks`]).
 ///
 /// ```text
 /// offset  size  field
@@ -1052,10 +1052,6 @@ impl BlobMetadataChunkGroupDigest {
     /// ChunkGroupDigestTable entry size.
     pub const SIZE: usize = 32;
 
-    /// BLAKE3 `derive_key` context separating multi-chunk group digests from
-    /// plain content digests.
-    const DERIVE_KEY_CONTEXT: &str = "nydus blob meta chunk group digest v1";
-
     /// Creates an entry for the group at the same index in ChunkGroupTable.
     pub fn new(digest: [u8; Self::SIZE]) -> Self {
         Self(digest)
@@ -1066,26 +1062,17 @@ impl BlobMetadataChunkGroupDigest {
         self.0
     }
 
-    /// The digest of a chunk group from the BLAKE3 digests of its chunks. A lone
-    /// chunk is named by its own digest, so a content-addressed cache serves it
-    /// by content. A pack is named by a domain-separated BLAKE3 (`derive_key`)
-    /// over the member digests, without a second pass over the bytes. An empty
-    /// slice is an error, since a group holds at least one chunk.
-    pub fn from_chunk_digests(chunk_digests: &[[u8; Self::SIZE]]) -> Result<Self> {
-        match chunk_digests {
-            [] => Err(Error::InvalidParameter(
-                "blob meta chunk group digest needs at least one chunk digest".to_string(),
-            )),
-            [only] => Ok(Self(*only)),
-            many => {
-                let mut hasher = blake3::Hasher::new_derive_key(Self::DERIVE_KEY_CONTEXT);
-                for digest in many {
-                    hasher.update(digest);
-                }
-
-                Ok(Self(hasher.finalize().into()))
-            }
+    /// The digest of a chunk group, BLAKE3 over its `chunks` back to back.
+    /// The chunks back to back are the group's uncompressed bytes, so the
+    /// whole payload in one piece gives the same digest, and a lone chunk's
+    /// group digest is that chunk's own content digest.
+    pub fn from_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        for chunk in chunks {
+            hasher.update(chunk);
         }
+
+        Self(hasher.finalize().into())
     }
 }
 
@@ -2018,12 +2005,9 @@ mod tests {
                     .iter()
                     .map(|chunk| BlobMetadataChunkLength::new(chunk.len() as u32)),
             );
-            let chunk_digests: Vec<[u8; 32]> = chunks
-                .iter()
-                .map(|chunk| blake3::hash(chunk).into())
-                .collect();
-            chunk_group_digests
-                .push(BlobMetadataChunkGroupDigest::from_chunk_digests(&chunk_digests).unwrap());
+            chunk_group_digests.push(BlobMetadataChunkGroupDigest::from_chunks(
+                chunks.iter().map(Vec::as_slice),
+            ));
             compressed_offset += payload.len() as u64;
             logical_block_offset += chunks
                 .iter()
@@ -2289,48 +2273,28 @@ mod tests {
     }
 
     #[test]
-    fn from_chunk_digests_keeps_a_lone_digest_and_derives_a_pack_digest() {
-        let first_chunk_digest: [u8; 32] = blake3::hash(b"first").into();
-        let second_chunk_digest: [u8; 32] = blake3::hash(b"second").into();
+    fn from_chunks_hashes_the_chunks_back_to_back() {
+        let first_chunk = vec![1u8; 100];
+        let second_chunk = vec![2u8; 5000];
+        let pack_digest = BlobMetadataChunkGroupDigest::from_chunks([
+            first_chunk.as_slice(),
+            second_chunk.as_slice(),
+        ]);
         assert_eq!(
-            BlobMetadataChunkGroupDigest::from_chunk_digests(&[])
-                .unwrap_err()
-                .to_string(),
-            "blob meta chunk group digest needs at least one chunk digest"
+            BlobMetadataChunkGroupDigest::from_chunks([first_chunk.as_slice()]).get(),
+            *blake3::hash(&first_chunk).as_bytes()
         );
         assert_eq!(
-            BlobMetadataChunkGroupDigest::from_chunk_digests(&[first_chunk_digest])
-                .unwrap()
-                .get(),
-            first_chunk_digest
-        );
-
-        let pack_digest = BlobMetadataChunkGroupDigest::from_chunk_digests(&[
-            first_chunk_digest,
-            second_chunk_digest,
-        ])
-        .unwrap();
-        assert_eq!(
-            pack_digest,
-            BlobMetadataChunkGroupDigest::from_chunk_digests(&[
-                first_chunk_digest,
-                second_chunk_digest
-            ])
-            .unwrap()
-        );
-        assert_ne!(
-            pack_digest,
-            BlobMetadataChunkGroupDigest::from_chunk_digests(&[
-                second_chunk_digest,
-                first_chunk_digest
-            ])
-            .unwrap()
-        );
-        assert_ne!(
             pack_digest.get(),
-            *blake3::hash(&[first_chunk_digest, second_chunk_digest].concat()).as_bytes()
+            *blake3::hash(&[first_chunk.clone(), second_chunk.clone()].concat()).as_bytes()
         );
-        assert_ne!(pack_digest.get(), first_chunk_digest);
+        assert_ne!(
+            pack_digest,
+            BlobMetadataChunkGroupDigest::from_chunks([
+                second_chunk.as_slice(),
+                first_chunk.as_slice()
+            ])
+        );
     }
 
     #[test]
@@ -2342,14 +2306,9 @@ mod tests {
         let test_cases = vec![
             (
                 1,
-                Some(
-                    BlobMetadataChunkGroupDigest::from_chunk_digests(&[
-                        blake3::hash(&chunks[1][0]).into(),
-                        blake3::hash(&chunks[1][1]).into(),
-                        blake3::hash(&chunks[1][2]).into(),
-                    ])
-                    .unwrap(),
-                ),
+                Some(BlobMetadataChunkGroupDigest::from_chunks(
+                    chunks[1].iter().map(Vec::as_slice),
+                )),
             ),
             (
                 2,

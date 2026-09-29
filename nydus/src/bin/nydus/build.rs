@@ -93,7 +93,7 @@ pub struct BuildCommand {
         value_enum,
         default_value_t = Digester::Blake3,
         env = "NYDUS_BUILD_DIGESTER",
-        help = "Specify the digest algorithm recorded in the blob meta, one digest per chunk group (a lone chunk's content digest, or a BLAKE3 derived from the member chunks' digests for a pack); \"none\" records no digests and skips hashing, for content already verified upstream"
+        help = "Specify the digest algorithm recorded in the blob meta, one BLAKE3 digest per chunk group over its chunks back to back, for a lone chunk its content digest; \"none\" records no digests and skips hashing, for content already verified upstream"
     )]
     digester: Digester,
 
