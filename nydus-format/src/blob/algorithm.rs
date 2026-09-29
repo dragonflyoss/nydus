@@ -99,3 +99,79 @@ impl fmt::Display for BlobMetadataDigester {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compressor_formats_as_its_name() {
+        let test_cases = vec![
+            (BlobMetadataCompressor::None, "none"),
+            (BlobMetadataCompressor::Zstd, "zstd"),
+            (BlobMetadataCompressor::Lz4Block, "lz4"),
+        ];
+
+        for (compressor, expected) in test_cases {
+            assert_eq!(compressor.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn compressor_from_code_accepts_known_codes() {
+        assert_eq!(
+            BlobMetadataCompressor::default(),
+            BlobMetadataCompressor::None
+        );
+
+        let test_cases = vec![
+            (0, Ok(BlobMetadataCompressor::None)),
+            (1, Ok(BlobMetadataCompressor::Zstd)),
+            (2, Ok(BlobMetadataCompressor::Lz4Block)),
+            (
+                3,
+                Err("unsupported blob meta compressor 3 (image is newer than this reader)"),
+            ),
+        ];
+
+        for (code, expected) in test_cases {
+            let compressor = BlobMetadataCompressor::from_code(code).map_err(|err| err.to_string());
+            assert_eq!(compressor, expected.map_err(String::from));
+            if let Ok(compressor) = compressor {
+                assert_eq!(compressor.code(), code);
+            }
+        }
+    }
+
+    #[test]
+    fn digester_formats_as_its_name() {
+        let test_cases = vec![
+            (BlobMetadataDigester::Blake3, "blake3"),
+            (BlobMetadataDigester::None, "none"),
+        ];
+
+        for (digester, expected) in test_cases {
+            assert_eq!(digester.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn digester_from_code_accepts_only_blake3() {
+        assert_eq!(
+            BlobMetadataDigester::default(),
+            BlobMetadataDigester::Blake3
+        );
+        assert_eq!(BlobMetadataDigester::Blake3.code(), Some(1));
+        assert_eq!(BlobMetadataDigester::None.code(), None);
+
+        let test_cases = vec![
+            (0, None),
+            (1, Some(BlobMetadataDigester::Blake3)),
+            (2, None),
+        ];
+
+        for (code, expected) in test_cases {
+            assert_eq!(BlobMetadataDigester::from_code(code), expected);
+        }
+    }
+}

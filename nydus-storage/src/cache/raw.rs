@@ -114,8 +114,13 @@ mod tests {
         let payload: Vec<u8> = (0..8192u32).map(|index| (index % 251) as u8).collect();
         let mut blob = payload.clone();
         let bootstrap = vec![0u8; 4096];
-        nydus_format::blob::finish_full_blob(&mut blob, payload.len() as u64, &bootstrap, None)
-            .unwrap();
+        nydus_format::blob::finish_full_blob(
+            &mut blob,
+            payload.len() as u64,
+            Some(&bootstrap),
+            None,
+        )
+        .unwrap();
         let blob_id = sha256_bytes(&blob);
         std::fs::write(dir.join(hex_string(&blob_id)), &blob).unwrap();
         (payload, blob_id)

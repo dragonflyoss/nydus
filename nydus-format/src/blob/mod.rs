@@ -23,83 +23,75 @@ pub use metadata::{
 
 /// Finish a full blob by appending everything behind the data region to
 /// `writer`, which already holds the `compressed_data_size` bytes of blob
-/// data. Returns the sealed footer describing the finished blob.
-///
-/// The finished blob, every region offset 4 KiB aligned.
+/// data, and return the sealed footer describing the finished blob.
 ///
 /// ```text
-/// ┌─────────────────┬───┬───────────────────────┬──────────────────┬────────┐
-/// │ compressed data │pad│ bootstrap             │ blob meta        │ footer │
-/// └─────────────────┴───┴───────────────────────┴──────────────────┴────────┘
-/// 0                     bootstrap_offset        blob_metadata_offset      EOF
+/// ┌─────────────────┬─────┬────────────────────┬────────────────────────┬────────┐
+/// │ compressed data │ pad │     bootstrap      │       blob meta        │ footer │
+/// └─────────────────┴─────┴────────────────────┴────────────────────────┴────────┘
+/// 0                       bootstrap_offset     blob_metadata_offset     footer offset
 ///
-/// compressed data  the chunk group payloads, packed back to back and
-///                  byte-exact (compressed_data_size bytes), mapped by the
-///                  blob meta chunk group table
+/// compressed data  the chunk group payloads back to back, compressed_data_size
+///                  bytes, mapped by the blob meta ChunkGroupTable
 /// pad              zeros up to the 4 KiB aligned bootstrap_offset
-/// bootstrap        one zstd frame of the metadata-only EROFS image
-///                  (bootstrap_compressed_size bytes), zero tail up to
+/// bootstrap        one zstd frame of the metadata-only EROFS image,
+///                  bootstrap_compressed_size bytes, zero padded to
 ///                  bootstrap_size, absent for an ondemand blob
-/// blob meta        NDBLMETA (header, ChunkGroupTable,
-///                  ChunkLengthTable, ChunkGroupIndexTable, optional
-///                  ChunkGroupDigestTable and
-///                  ChunkGroupRedirectTable), already block-padded, ending
-///                  exactly at the footer offset
-/// footer           the sealed NDFOOTER block, fixed 4 KiB at the tail
+/// blob meta        the NDBLMETA file, a whole number of blocks ending at
+///                  the footer offset, absent for a raw device blob
+/// footer           the sealed NDFOOTER block, 4 KiB at the tail
 /// ```
 ///
-/// An empty `bootstrap` yields the ondemand layout without a bootstrap
-/// region. `blob_metadata: None` yields the raw device layout of native
+/// `bootstrap` of `None` yields the ondemand layout without a bootstrap
+/// region. `blob_metadata` of `None` yields the raw device layout of native
 /// `erofs-*` layers, with no blob meta region, the footer's RAW_DEVICE
 /// flag set, and a bootstrap required.
 pub fn finish_full_blob(
     writer: &mut dyn Write,
     compressed_data_size: u64,
-    bootstrap: &[u8],
+    bootstrap: Option<&[u8]>,
     blob_metadata: Option<&BlobMetadata>,
 ) -> Result<BlobFooter> {
-    let compressed_bootstrap = compress_bootstrap(bootstrap)?;
-    let blob_footer = new_blob_footer(compressed_data_size, &compressed_bootstrap, blob_metadata)?;
-    write_blob_tail(writer, &blob_footer, &compressed_bootstrap, blob_metadata)?;
-    Ok(blob_footer)
-}
+    let compressed_bootstrap = bootstrap
+        .map(|bootstrap| zstd::stream::encode_all(bootstrap, zstd::DEFAULT_COMPRESSION_LEVEL))
+        .transpose()?;
 
-/// Compress the embedded bootstrap. An empty bootstrap (the ondemand layout)
-/// stores no bytes at all, since even an empty zstd frame would occupy a
-/// whole block-aligned region.
-fn compress_bootstrap(bootstrap: &[u8]) -> Result<Vec<u8>> {
-    if bootstrap.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    zstd::stream::encode_all(bootstrap, zstd::DEFAULT_COMPRESSION_LEVEL)
-        .context("failed to compress bootstrap")
-}
-
-/// Lay the trailing regions out behind the data region, each 4 KiB aligned,
-/// and seal the footer describing them. Construction validates the layout,
-/// so the sealed footer is the single source of truth the write pass
-/// follows.
-fn new_blob_footer(
-    compressed_data_size: u64,
-    compressed_bootstrap: &[u8],
-    blob_metadata: Option<&BlobMetadata>,
-) -> Result<BlobFooter> {
-    let bootstrap_compressed_size = compressed_bootstrap.len() as u64;
-    let bootstrap_size = align_up_u64(bootstrap_compressed_size, EROFS_BLOCK_SIZE as u64)
-        .ok_or_else(|| Error::Overflow("bootstrap region overflow".to_string()))?;
     let bootstrap_offset = align_up_u64(compressed_data_size, EROFS_BLOCK_SIZE as u64)
         .ok_or_else(|| Error::Overflow("bootstrap offset overflow".to_string()))?;
+    let (bootstrap_size, bootstrap_crc32) = match &compressed_bootstrap {
+        None => (0, 0),
+        Some(compressed_bootstrap) => {
+            let bootstrap_size =
+                align_up_u64(compressed_bootstrap.len() as u64, EROFS_BLOCK_SIZE as u64)
+                    .ok_or_else(|| Error::Overflow("bootstrap region overflow".to_string()))?;
+            let padding = (bootstrap_size - compressed_bootstrap.len() as u64) as usize;
+            let bootstrap_crc32 = crc32c::crc32c_append(
+                crc32c::crc32c(compressed_bootstrap),
+                &[0u8; EROFS_BLOCK_SIZE as usize][..padding],
+            );
+            (bootstrap_size, bootstrap_crc32)
+        }
+    };
+
+    write_zeros(writer, bootstrap_offset - compressed_data_size)?;
+    if let Some(compressed_bootstrap) = &compressed_bootstrap {
+        writer
+            .write_all(compressed_bootstrap)
+            .context("failed to write blob bootstrap")?;
+        write_zeros(writer, bootstrap_size - compressed_bootstrap.len() as u64)?;
+    }
+
+    if let Some(blob_metadata) = blob_metadata {
+        blob_metadata
+            .write_to(writer)
+            .context("failed to write blob meta")?;
+    }
+
     let blob_metadata_offset = bootstrap_offset
         .checked_add(bootstrap_size)
         .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
-    let padding = (bootstrap_size - bootstrap_compressed_size) as usize;
-    let bootstrap_crc32 = crc32c::crc32c_append(
-        crc32c::crc32c(compressed_bootstrap),
-        &[0u8; EROFS_BLOCK_SIZE as usize][..padding],
-    );
 
-    BlobFooter::new(
+    let footer = BlobFooter::new(
         0,
         compressed_data_size,
         bootstrap_offset,
@@ -107,36 +99,13 @@ fn new_blob_footer(
         bootstrap_crc32,
         blob_metadata_offset,
         blob_metadata.map_or(0, BlobMetadata::size),
-        (!compressed_bootstrap.is_empty()).then_some(bootstrap_compressed_size),
-    )
-}
-
-/// Stream everything behind the data region in offset order — bootstrap,
-/// blob meta, then the footer itself — zero-padding the alignment gaps the
-/// footer declares.
-fn write_blob_tail(
-    writer: &mut dyn Write,
-    footer: &BlobFooter,
-    compressed_bootstrap: &[u8],
-    blob_metadata: Option<&BlobMetadata>,
-) -> Result<()> {
-    write_zeros(
-        writer,
-        footer.bootstrap_offset() - footer.compressed_data_size(),
+        compressed_bootstrap
+            .as_ref()
+            .map(|compressed_bootstrap| compressed_bootstrap.len() as u64),
     )?;
-    writer
-        .write_all(compressed_bootstrap)
-        .context("failed to write blob bootstrap")?;
-
-    let bootstrap_end = footer.bootstrap_offset() + compressed_bootstrap.len() as u64;
-    write_zeros(writer, footer.blob_metadata_offset() - bootstrap_end)?;
-    if let Some(blob_metadata) = blob_metadata {
-        blob_metadata
-            .write_to(writer)
-            .context("failed to write blob meta")?;
-    }
 
     footer
         .write_to(writer)
-        .context("failed to write blob footer")
+        .context("failed to write blob footer")?;
+    Ok(footer)
 }

@@ -484,265 +484,271 @@ impl BlobFooter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
-    /// A footer over a zeroed one-block bootstrap at 4096.
-    fn footer() -> BlobFooter {
-        let bootstrap_crc32 = crc32c(&[0u8; 4096]);
-        BlobFooter::new(0, 17, 4096, 4096, bootstrap_crc32, 8192, 4096, None).unwrap()
-    }
+    #[test]
+    fn to_bytes_encodes_every_field() {
+        let footer =
+            BlobFooter::new(0, 17, 4096, 4096, crc32c(&[0u8; 4096]), 8192, 4096, None).unwrap();
+        let bytes = footer.to_bytes();
+        assert_eq!(&bytes[..8], b"NDFOOTER");
+        assert_eq!(read_u32_at(&bytes, 8), 0);
+        assert_eq!(read_u32_at(&bytes, 12), 0);
+        assert_eq!(read_u32_at(&bytes, 16), BlobFooter::compute_crc32(&bytes));
+        assert_eq!(read_u32_at(&bytes, 20), crc32c(&[0u8; 4096]));
+        assert!(bytes[80..].iter().all(|byte| *byte == 0));
 
-    fn reseal(mut bytes: [u8; BlobFooter::SIZE]) -> [u8; BlobFooter::SIZE] {
-        let crc32 = BlobFooter::compute_crc32(&bytes);
-        bytes[BlobFooter::CRC32_FIELD].copy_from_slice(&crc32.to_le_bytes());
-        bytes
-    }
+        let test_cases = vec![
+            (24, 0),
+            (32, 17),
+            (40, 4096),
+            (48, 4096),
+            (56, 0),
+            (64, 8192),
+            (72, 4096),
+        ];
 
-    fn sealed_blob() -> Vec<u8> {
-        let mut blob = vec![0u8; 16384];
-        blob[12288..].copy_from_slice(&footer().to_bytes());
-        blob
+        for (offset, expected) in test_cases {
+            assert_eq!(read_u64_at(&bytes, offset), expected);
+        }
     }
 
     #[test]
-    fn accessors_expose_the_sealed_layout() {
-        let footer = footer();
-        let bytes = footer.to_bytes();
-        assert_eq!(&bytes[..8], b"NDFOOTER");
-        assert_eq!(read_u32_at(&bytes, 20), crc32c(&[0u8; 4096]));
-        assert_eq!(read_u64_at(&bytes, 32), 17);
-        assert_eq!(read_u64_at(&bytes, 40), 4096);
-        assert_eq!(read_u64_at(&bytes, 48), 4096);
-        assert_eq!(read_u64_at(&bytes, 64), 8192);
-        assert_eq!(read_u64_at(&bytes, 72), 4096);
-        assert!(bytes[80..].iter().all(|&byte| byte == 0));
+    fn getters_return_the_layout() {
+        let footer =
+            BlobFooter::new(0, 17, 4096, 4096, crc32c(&[0u8; 4096]), 8192, 4096, None).unwrap();
         assert_eq!(footer.compressed_data_offset(), 0);
         assert_eq!(footer.compressed_data_size(), 17);
         assert_eq!(footer.bootstrap_offset(), 4096);
-        assert_eq!(footer.bootstrap_block_count(), 1);
         assert_eq!(footer.bootstrap_size(), 4096);
+        assert_eq!(footer.bootstrap_block_count(), 1);
+        assert_eq!(footer.bootstrap_crc32(), crc32c(&[0u8; 4096]));
+        assert_eq!(footer.bootstrap_compressed_size(), None);
         assert_eq!(footer.blob_metadata_offset(), 8192);
-        assert_eq!(footer.blob_metadata_block_count(), 1);
         assert_eq!(footer.blob_metadata_size(), 4096);
+        assert_eq!(footer.blob_metadata_block_count(), 1);
         assert_eq!(footer.offset().unwrap(), 12288);
+        assert!(!footer.is_raw_device());
     }
 
     #[test]
-    fn calculate_offset_by_blob_size_locates_the_fixed_tail() {
-        assert_eq!(
-            BlobFooter::calculate_offset_by_blob_size(16384).unwrap(),
-            12288
-        );
+    fn new_accepts_raw_device_and_compressed_bootstrap_layouts() {
+        let test_cases = vec![
+            ((0, 17, 4096, 0, 0, 4096, 4096, None), false, None, 8192),
+            ((0, 17, 4096, 4096, 0, 8192, 0, None), true, None, 8192),
+            (
+                (0, 17, 4096, 4096, 0, 8192, 4096, Some(100)),
+                false,
+                Some(100),
+                12288,
+            ),
+        ];
+
+        for (layout, raw_device, bootstrap_compressed_size, offset) in test_cases {
+            let footer = BlobFooter::new(
+                layout.0, layout.1, layout.2, layout.3, layout.4, layout.5, layout.6, layout.7,
+            )
+            .unwrap();
+            assert_eq!(footer.is_raw_device(), raw_device);
+            assert_eq!(
+                footer.bootstrap_compressed_size(),
+                bootstrap_compressed_size
+            );
+            assert_eq!(footer.offset().unwrap(), offset);
+            assert_eq!(BlobFooter::from_bytes(&footer.to_bytes()).unwrap(), footer);
+        }
     }
 
     #[test]
-    fn write_to_emits_parseable_bytes() {
-        let footer = footer();
+    fn new_rejects_inconsistent_layouts() {
+        let test_cases = vec![
+            (
+                (0, 17, 4096, 0, 1, 4096, 4096, None),
+                "nydus footer bootstrap crc32 must be zero without a bootstrap",
+            ),
+            (
+                (0, 17, 4096, 0, 0, 4096, 0, None),
+                "nydus footer raw device blob must embed a bootstrap",
+            ),
+            (
+                (0, 17, 4096, 4096, 0, 8192, 4096, Some(5000)),
+                "nydus footer compressed bootstrap size 5000 exceeds its region of 4096 bytes",
+            ),
+            (
+                (0, 17, 4096, 4097, 0, 12288, 4096, None),
+                "nydus footer bootstrap region size 0x1001 is not a 4KiB multiple",
+            ),
+            (
+                (0, 17, 17, 4096, 0, 8192, 4096, None),
+                "nydus footer bootstrap region offset 0x11 is not 4KiB aligned",
+            ),
+            (
+                (0, 8192, 4096, 4096, 0, 8192, 4096, None),
+                "nydus footer bootstrap region starts at 0x1000, overlapping the compressed data region ending at 0x2000",
+            ),
+            (
+                (4096, u64::MAX, 4096, 4096, 0, 8192, 4096, None),
+                "nydus footer compressed data region overflow",
+            ),
+        ];
+
+        for (layout, expected) in test_cases {
+            let err = BlobFooter::new(
+                layout.0, layout.1, layout.2, layout.3, layout.4, layout.5, layout.6, layout.7,
+            )
+            .unwrap_err();
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn from_bytes_reads_what_write_to_wrote() {
+        let footer =
+            BlobFooter::new(0, 17, 4096, 4096, crc32c(&[0u8; 4096]), 8192, 4096, None).unwrap();
         let mut written = Vec::new();
         footer.write_to(&mut written).unwrap();
 
-        let bytes: [u8; BlobFooter::SIZE] = written.as_slice().try_into().unwrap();
+        let bytes: [u8; BlobFooter::SIZE] = written.try_into().unwrap();
         assert!(BlobFooter::has_magic(&bytes));
         assert_eq!(BlobFooter::from_bytes(&bytes).unwrap(), footer);
     }
 
     #[test]
-    fn round_trips_through_bytes() {
-        let footer = footer();
+    fn from_bytes_rejects_corrupted_bytes() {
+        let footer =
+            BlobFooter::new(0, 17, 4096, 4096, crc32c(&[0u8; 4096]), 8192, 4096, None).unwrap();
 
-        assert_eq!(BlobFooter::from_bytes(&footer.to_bytes()).unwrap(), footer);
-    }
-
-    #[test]
-    fn resealed_header_mutations_follow_the_feature_rules() {
-        let cases: [(&str, usize, [u8; 4], Option<&str>); 5] = [
-            (
-                "unknown compat feature is ignored",
-                8,
-                (1u32 << 31).to_le_bytes(),
-                None,
-            ),
-            (
-                "unknown low incompat feature rejects",
-                12,
-                (1u32 << 3).to_le_bytes(),
-                Some("incompat"),
-            ),
-            (
-                "unknown high incompat feature rejects",
-                12,
-                (1u32 << 31).to_le_bytes(),
-                Some("incompat"),
-            ),
-            ("nonzero reserved area is readable", 80, [0xff; 4], None),
-            (
-                "nonzero reserved tail is readable",
-                BlobFooter::SIZE - 4,
-                [0, 0, 0, 0xff],
-                None,
-            ),
+        let test_cases = vec![
+            (0, "invalid nydus footer magic"),
+            (24, "nydus footer crc32 mismatch"),
         ];
 
-        for (case, offset, value, expected_err) in cases {
-            let mut bytes = footer().to_bytes();
-            bytes[offset..offset + 4].copy_from_slice(&value);
-
-            let result = BlobFooter::from_bytes(&reseal(bytes));
-            match expected_err {
-                None => {
-                    result.unwrap_or_else(|err| panic!("{case}: {err}"));
-                }
-                Some(expected) => {
-                    let err = result.unwrap_err();
-                    assert!(err.to_string().contains(expected), "{case}: {err}");
-                }
-            }
+        for (offset, expected) in test_cases {
+            let mut bytes = footer.to_bytes();
+            bytes[offset] ^= 0xff;
+            assert_eq!(
+                BlobFooter::from_bytes(&bytes).unwrap_err().to_string(),
+                expected
+            );
         }
     }
 
     #[test]
-    fn corrupted_bytes_fail_the_crc32_check() {
-        let mut bytes = footer().to_bytes();
-        bytes[24] ^= 0xff;
+    fn from_bytes_ignores_reserved_bytes_and_rejects_unknown_incompat_flags() {
+        let footer =
+            BlobFooter::new(0, 17, 4096, 4096, crc32c(&[0u8; 4096]), 8192, 4096, None).unwrap();
 
-        let err = BlobFooter::from_bytes(&bytes).unwrap_err();
-        assert!(err.to_string().contains("crc32 mismatch"), "{err}");
-    }
-
-    #[test]
-    fn from_blob_bytes_rejects_a_short_input() {
-        let err = BlobFooter::from_blob_bytes(&[0u8; 100]).unwrap_err();
-        assert!(err.to_string().contains("too small"), "{err}");
-    }
-
-    #[test]
-    fn from_blob_bytes_rejects_a_tail_without_the_magic() {
-        let err = BlobFooter::from_blob_bytes(&[0u8; 16384]).unwrap_err();
-        assert!(err.to_string().contains("magic"), "{err}");
-    }
-
-    #[test]
-    fn from_blob_bytes_parses_a_sealed_blob() {
-        let parsed = BlobFooter::from_blob_bytes(&sealed_blob()).unwrap();
-
-        assert_eq!(parsed, footer());
-    }
-
-    #[test]
-    fn from_blob_bytes_errors_on_corruption_behind_the_magic() {
-        let mut blob = sealed_blob();
-        blob[12288 + 24] ^= 0xff;
-
-        let err = BlobFooter::from_blob_bytes(&blob).unwrap_err();
-        assert!(err.to_string().contains("crc32 mismatch"), "{err}");
-    }
-
-    #[test]
-    fn zero_bootstrap_size_is_valid() {
-        BlobFooter::new(0, 17, 4096, 0, 0, 4096, 4096, None).unwrap();
-    }
-
-    #[test]
-    fn bootstrap_crc32_requires_a_bootstrap() {
-        let err = BlobFooter::new(0, 17, 4096, 0, 1, 4096, 4096, None).unwrap_err();
-        assert!(err.to_string().contains("without a bootstrap"), "{err}");
-    }
-
-    #[test]
-    fn zero_blob_meta_size_declares_a_raw_device() {
-        let raw = BlobFooter::new(0, 17, 4096, 4096, 0, 8192, 0, None).unwrap();
-        assert!(raw.is_raw_device());
-        assert_eq!(raw.blob_metadata_size(), 0);
-        assert_eq!(raw.offset().unwrap(), 8192);
-        let parsed = BlobFooter::from_bytes(&raw.to_bytes()).unwrap();
-        assert_eq!(parsed, raw);
-        assert!(!footer().is_raw_device());
-
-        // A raw device blob must embed a bootstrap.
-        let err = BlobFooter::new(0, 17, 4096, 0, 0, 4096, 0, None).unwrap_err();
-        assert!(err.to_string().contains("must embed a bootstrap"), "{err}");
-
-        // The feature and the size must agree on disk.
-        let mut bytes = footer().to_bytes();
-        write_u32_at(&mut bytes, 12, BlobFooter::INCOMPAT_RAW_DEVICE);
-        let err = BlobFooter::from_bytes(&reseal(bytes)).unwrap_err();
-        assert!(err.to_string().contains("raw device"), "{err}");
-
-        // Region sizes are whole blocks.
-        let err = BlobFooter::new(0, 17, 4096, 4097, 0, 12288, 4096, None).unwrap_err();
-        assert!(err.to_string().contains("4KiB multiple"), "{err}");
-    }
-
-    #[test]
-    fn invalid_layouts_reject() {
-        let cases = [
-            ("unaligned offset", (0, 17, 17, 4096, 8192, 4096), "aligned"),
+        let test_cases = vec![
+            (8, 1u32 << 31, Ok(())),
             (
-                "overlapping regions",
-                (0, 8192, 4096, 4096, 8192, 4096),
-                "overlapping",
+                12,
+                1 << 3,
+                Err("unsupported incompat flags 0x8 (image is newer than this reader)"),
             ),
             (
-                "region overflow",
-                (4096, u64::MAX, 4096, 4096, 8192, 4096),
-                "overflow",
+                12,
+                1 << 31,
+                Err("unsupported incompat flags 0x80000000 (image is newer than this reader)"),
             ),
+            (
+                12,
+                BlobFooter::INCOMPAT_RAW_DEVICE,
+                Err("nydus footer raw device blob must not carry a blob meta region"),
+            ),
+            (
+                12,
+                BlobFooter::INCOMPAT_BOOTSTRAP_ZSTD,
+                Err("nydus footer BOOTSTRAP_ZSTD blob must declare its compressed bootstrap size"),
+            ),
+            (80, 0xffff_ffff, Ok(())),
+            (BlobFooter::SIZE - 4, 0xff00_0000, Ok(())),
         ];
 
-        for (case, (data_off, data_size, boot_off, boot_size, meta_off, meta_size), expected) in
-            cases
-        {
-            let err = BlobFooter::new(
-                data_off, data_size, boot_off, boot_size, 0, meta_off, meta_size, None,
-            )
-            .unwrap_err();
-            assert!(err.to_string().contains(expected), "{case}: {err}");
+        for (offset, value, expected) in test_cases {
+            let mut bytes = footer.to_bytes();
+            write_u32_at(&mut bytes, offset, value);
+            let crc32 = BlobFooter::compute_crc32(&bytes);
+            write_u32_at(&mut bytes, 16, crc32);
+            assert_eq!(
+                BlobFooter::from_bytes(&bytes)
+                    .map(drop)
+                    .map_err(|err| err.to_string()),
+                expected.map_err(String::from),
+                "{offset}"
+            );
         }
     }
 
     #[test]
-    fn a_layout_not_ending_at_the_footer_rejects() {
-        let err = footer()
-            .validate_layout(BlobFooter::calculate_offset_by_blob_size(16384 + 4096).unwrap())
-            .unwrap_err();
-
-        assert!(
-            err.to_string().contains("not at the footer offset"),
-            "{err}"
+    fn from_blob_bytes_reads_the_tail_footer_or_rejects_a_bad_blob() {
+        let footer =
+            BlobFooter::new(0, 17, 4096, 4096, crc32c(&[0u8; 4096]), 8192, 4096, None).unwrap();
+        assert_eq!(
+            BlobFooter::from_blob_bytes(&[0u8; 100])
+                .unwrap_err()
+                .to_string(),
+            "blob too small for nydus footer"
         );
+        assert_eq!(
+            BlobFooter::from_blob_bytes(&[0u8; 16384])
+                .unwrap_err()
+                .to_string(),
+            "invalid nydus footer magic"
+        );
+
+        let test_cases = vec![
+            (16384, 0, Ok(footer)),
+            (16384, 0xff, Err("nydus footer crc32 mismatch")),
+            (
+                16385,
+                0,
+                Err("nydus footer offset 0x3001 is not 4KiB aligned"),
+            ),
+            (
+                20480,
+                0,
+                Err("nydus footer declared layout ends at 0x3000, not at the footer offset 0x4000"),
+            ),
+        ];
+
+        for (blob_size, corruption, expected) in test_cases {
+            let footer_offset = blob_size - BlobFooter::SIZE;
+            let mut blob = vec![0u8; blob_size];
+            blob[footer_offset..].copy_from_slice(&footer.to_bytes());
+            blob[footer_offset + 24] ^= corruption;
+            assert_eq!(
+                BlobFooter::from_blob_bytes(&blob).map_err(|err| err.to_string()),
+                expected.map_err(String::from)
+            );
+        }
     }
 
     #[test]
-    fn from_blob_path_reads_back_the_sealed_footer() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("layer.blob");
-        std::fs::write(&path, sealed_blob()).unwrap();
+    fn from_blob_path_reads_the_tail_footer() {
+        let footer =
+            BlobFooter::new(0, 17, 4096, 4096, crc32c(&[0u8; 4096]), 8192, 4096, None).unwrap();
+        let mut blob = vec![0u8; 16384];
+        blob[12288..].copy_from_slice(&footer.to_bytes());
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("layer.blob");
+        std::fs::write(&path, blob).unwrap();
 
-        assert_eq!(BlobFooter::from_blob_path(&path).unwrap(), footer());
+        assert_eq!(BlobFooter::from_blob_path(&path).unwrap(), footer);
     }
 
     #[test]
-    fn bad_magic_rejects() {
-        let mut bytes = footer().to_bytes();
-        bytes[0] ^= 0xff;
+    fn calculate_offset_by_blob_size_subtracts_the_footer_size() {
+        let test_cases = vec![
+            (16384, Ok(12288)),
+            (4096, Ok(0)),
+            (100, Err("blob too small for nydus footer")),
+        ];
 
-        let err = BlobFooter::from_bytes(&bytes).unwrap_err();
-        assert!(err.to_string().contains("magic"), "{err}");
-    }
-
-    #[test]
-    fn an_unaligned_blob_length_rejects() {
-        let mut blob = vec![0u8; 16385];
-        let tail = blob.len() - BlobFooter::SIZE;
-        blob[tail..].copy_from_slice(&footer().to_bytes());
-
-        let err = BlobFooter::from_blob_bytes(&blob).unwrap_err();
-        assert!(err.to_string().contains("aligned"), "{err}");
-    }
-
-    #[test]
-    fn an_undersized_blob_rejects() {
-        let err = BlobFooter::calculate_offset_by_blob_size(100).unwrap_err();
-
-        assert!(err.to_string().contains("too small"), "{err}");
+        for (blob_size, expected) in test_cases {
+            assert_eq!(
+                BlobFooter::calculate_offset_by_blob_size(blob_size).map_err(|err| err.to_string()),
+                expected.map_err(String::from)
+            );
+        }
     }
 }

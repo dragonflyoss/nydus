@@ -401,7 +401,8 @@ fn finish_z_image<W: Write>(
     )?;
     drop(inodes);
 
-    let footer = nydus_format::blob::finish_full_blob(&mut writer, sealed.len, &bootstrap, None)?;
+    let footer =
+        nydus_format::blob::finish_full_blob(&mut writer, sealed.len, Some(&bootstrap), None)?;
     let full_blob_digest = writer
         .finish()
         .context("failed to flush full blob")?
@@ -547,7 +548,7 @@ fn finish_image<W: Write>(
     let footer = nydus_format::blob::finish_full_blob(
         &mut blob_writer_stream,
         compressed_data_size,
-        &bootstrap_bytes,
+        Some(&bootstrap_bytes),
         blob_metadata.as_ref(),
     )?;
     let full_blob_digest = blob_writer_stream
@@ -596,7 +597,7 @@ pub(crate) fn assemble_ondemand_artifact(
     let footer = nydus_format::blob::finish_full_blob(
         &mut artifact,
         data.len() as u64,
-        &[],
+        None,
         Some(blob_metadata),
     )?;
 

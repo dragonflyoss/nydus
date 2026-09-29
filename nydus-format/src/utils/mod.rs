@@ -38,7 +38,7 @@ pub fn write_minimal_full_blob(
     crate::blob::finish_full_blob(
         &mut full_blob,
         payload.len() as u64,
-        &bootstrap,
+        Some(&bootstrap),
         Some(blob_metadata),
     )
     .unwrap();
