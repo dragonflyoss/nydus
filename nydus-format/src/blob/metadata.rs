@@ -646,6 +646,7 @@ impl BlobMetadataChunkGroupExtent {
                     "blob meta chunk {chunk} is empty"
                 )));
             }
+
             uncompressed_size += u64::from(length);
             block_count += u64::from(length).div_ceil(u64::from(EROFS_BLOCK_SIZE));
         }
@@ -934,6 +935,11 @@ impl BlobMetadataEntry for BlobMetadataChunkGroupIndex {
 /// Derives the table from ChunkGroupTable for a writer, and unwraps an
 /// entry for a reader.
 impl BlobMetadataChunkGroupIndex {
+    /// The chunk group's index in ChunkGroupTable.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
     /// The ChunkGroupIndexTable of the ChunkGroupTable entries `chunk_groups`,
     /// last entry included. A group over blocks `s..e` covers the entries
     /// `ceil(s / n)..ceil(e / n)`, so the table is the groups' runs back to back.
@@ -955,11 +961,6 @@ impl BlobMetadataChunkGroupIndex {
                 std::iter::repeat(Self(index as u32)).take(entry_count as usize)
             })
             .collect()
-    }
-
-    /// The chunk group's index in ChunkGroupTable.
-    pub fn get(self) -> u32 {
-        self.0
     }
 }
 
@@ -1551,6 +1552,7 @@ impl BlobMetadata {
         let chunk_group_count = chunk_group_table.len().checked_sub(1).ok_or_else(|| {
             Error::InvalidParameter("blob meta ChunkGroupTable lacks its last entry".to_string())
         })?;
+
         let blob_metadata = Self {
             header,
             compressor,
