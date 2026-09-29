@@ -75,16 +75,12 @@ pub fn finish_full_blob(
 
     write_zeros(writer, bootstrap_offset - compressed_data_size)?;
     if let Some(compressed_bootstrap) = &compressed_bootstrap {
-        writer
-            .write_all(compressed_bootstrap)
-            .context("failed to write blob bootstrap")?;
+        writer.write_all(compressed_bootstrap)?;
         write_zeros(writer, bootstrap_size - compressed_bootstrap.len() as u64)?;
     }
 
     if let Some(blob_metadata) = blob_metadata {
-        blob_metadata
-            .write_to(writer)
-            .context("failed to write blob meta")?;
+        blob_metadata.write_to(writer)?;
     }
 
     let blob_metadata_offset = bootstrap_offset
@@ -104,8 +100,6 @@ pub fn finish_full_blob(
             .map(|compressed_bootstrap| compressed_bootstrap.len() as u64),
     )?;
 
-    footer
-        .write_to(writer)
-        .context("failed to write blob footer")?;
+    footer.write_to(writer)?;
     Ok(footer)
 }
