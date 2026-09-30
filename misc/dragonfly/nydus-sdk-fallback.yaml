@@ -1,0 +1,21 @@
+backend:
+  type: registry
+  config:
+    # The throwaway local registry that CI seeds with a freshly converted
+    # nydus image (see .github/workflows/e2e-dragonfly.yml).
+    addr: http://127.0.0.1:5000
+    repository: nydus-e2e/dragonfly
+    http:
+      timeout: 5s
+      max_retries: 1
+      tls:
+        skip_verify: true
+    dragonfly:
+      scheduler_endpoint: http://127.0.0.1:8002
+      ondemand_max_retries: 3
+      prefetch_max_retries: 10
+      fallback_interval: 1s
+storage:
+  dir: /tmp/nydus-dragonfly/cache-fallback
+prefetch:
+  scope: none

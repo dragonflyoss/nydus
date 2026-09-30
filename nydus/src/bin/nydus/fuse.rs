@@ -4,7 +4,8 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{build_backend, BlobBackend, Local};
 use nydus_config::{
-    default_prefetch_concurrent_blob_count, default_prefetch_timeout, Config, PrefetchScope,
+    default_prefetch_concurrent_blob_count, default_prefetch_retry_delay_max,
+    default_prefetch_retry_delay_min, default_prefetch_timeout, Config, PrefetchScope,
 };
 use nydus_core::ErofsReader;
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -163,6 +164,7 @@ impl FuseCommand {
         };
         if let Some(config) = storage_config.as_ref() {
             nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
+            nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
         }
 
         // Runs the FUSE service until shutdown.
@@ -195,31 +197,40 @@ impl FuseCommand {
                 .and_then(|config| config.storage.dir.clone())
         };
 
-        let (prefetch_scope, prefetch_concurrent_blob_count, prefetch_timeout) =
-            match storage_config.as_ref() {
-                Some(config) => {
-                    // `--prefetch` forces prefetch on when the config disables it.
-                    let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        config.prefetch.scope
-                    };
-                    (
-                        scope,
-                        config.prefetch.concurrent_blob_count,
-                        config.prefetch.timeout,
-                    )
-                }
-                None => (
-                    if self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        PrefetchScope::None
-                    },
-                    default_prefetch_concurrent_blob_count(),
-                    default_prefetch_timeout(),
-                ),
-            };
+        let (
+            prefetch_scope,
+            prefetch_concurrent_blob_count,
+            prefetch_timeout,
+            prefetch_retry_delay_min,
+            prefetch_retry_delay_max,
+        ) = match storage_config.as_ref() {
+            Some(config) => {
+                // `--prefetch` forces prefetch on when the config disables it.
+                let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    config.prefetch.scope
+                };
+                (
+                    scope,
+                    config.prefetch.concurrent_blob_count,
+                    config.prefetch.timeout,
+                    config.prefetch.retry_delay_min,
+                    config.prefetch.retry_delay_max,
+                )
+            }
+            None => (
+                if self.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    PrefetchScope::None
+                },
+                default_prefetch_concurrent_blob_count(),
+                default_prefetch_timeout(),
+                default_prefetch_retry_delay_min(),
+                default_prefetch_retry_delay_max(),
+            ),
+        };
 
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
@@ -233,7 +244,7 @@ impl FuseCommand {
                     dir.display()
                 )));
             }
-            Some(Arc::new(Local::new(dir.clone())))
+            Some(nydus_backend::metered(Arc::new(Local::new(dir.clone()))))
         } else if let Some(config) = storage_config.as_ref() {
             Some(build_backend(&config.backend).context("failed to build blob backend")?)
         } else {
@@ -250,7 +261,7 @@ impl FuseCommand {
         }
 
         let reader = match (&self.blob, &self.bootstrap, backend) {
-            // A self-contained full blob still wants the decoded-block-group
+            // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
             (Some(blob), None, _) => ErofsReader::open_blob(blob, cache_dir.as_deref()),
             (None, Some(bootstrap), Some(backend)) => {
@@ -265,7 +276,7 @@ impl FuseCommand {
         .context("failed to open EROFS image")?;
 
         let reader = Arc::new(reader);
-        let fs = ErofsFs::new(reader.clone());
+        let fs = ErofsFs::new(reader.clone()).context("failed to initialize FUSE filesystem")?;
         let mut config = FuseConfig::default();
         // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
         // other than the daemon's, setuid binaries in the image have to keep
@@ -297,6 +308,8 @@ impl FuseCommand {
                 prefetch_concurrent_blob_count,
                 prefetch_scope,
                 prefetch_timeout,
+                prefetch_retry_delay_min,
+                prefetch_retry_delay_max,
             );
             let stop = prefetcher.stop_flag();
             match prefetcher.spawn() {

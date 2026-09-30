@@ -1,12 +1,12 @@
 # nydus-storage
 
 Local data plane for [Nydus](https://github.com/dragonflyoss/nydus) images:
-sparse blob caches, block group-level fill tracking, background prefetch and
+sparse blob caches, chunk group-level fill tracking, background prefetch and
 on-demand access tracing.
 
 - `cache`: sparse local blob caches over the dense decoded block address
   space.
-- `block_group_map`: group-level fill tracking for cached blobs.
+- `chunk_group_map`: group-level fill tracking for cached blobs.
 - `prefetch`: background prefetch scheduling.
 - `access_trace`: on-demand access tracing.
 

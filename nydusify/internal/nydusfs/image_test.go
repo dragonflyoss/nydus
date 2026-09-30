@@ -10,21 +10,64 @@ import (
 	"testing"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
-func TestRAFSVersion(t *testing.T) {
-	bootstrap := ocispec.Descriptor{Annotations: map[string]string{
-		nydus.LayerAnnotationNydusFsVersion: "7",
-	}}
-	if got := (&Image{Kind: KindNydus, Bootstrap: &bootstrap}).RAFSVersion(); got != "7" {
-		t.Fatalf("RAFS version = %q, want 7", got)
+func TestFsVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		img  *Image
+		run  func(t *testing.T, version string, ok bool)
+	}{
+		{
+			name: "nydus image with annotation",
+			img: &Image{
+				Kind: KindNydus,
+				Bootstrap: &ocispec.Descriptor{Annotations: map[string]string{
+					nydus.LayerAnnotationNydusFsVersion: nydus.NydusFsVersion,
+				}},
+			},
+			run: func(t *testing.T, version string, ok bool) {
+				assert := assert.New(t)
+				assert.True(ok)
+				assert.Equal(nydus.NydusFsVersion, version)
+			},
+		},
+		{
+			name: "nydus image without annotation",
+			img:  &Image{Kind: KindNydus, Bootstrap: &ocispec.Descriptor{}},
+			run: func(t *testing.T, version string, ok bool) {
+				assert := assert.New(t)
+				assert.True(ok)
+				assert.Equal(nydus.NydusFsVersionUnknown, version)
+			},
+		},
+		{
+			name: "nydus image without bootstrap",
+			img:  &Image{Kind: KindNydus},
+			run: func(t *testing.T, version string, ok bool) {
+				assert := assert.New(t)
+				assert.False(ok)
+				assert.Empty(version)
+			},
+		},
+		{
+			name: "oci image",
+			img:  &Image{Kind: KindOCI},
+			run: func(t *testing.T, version string, ok bool) {
+				assert := assert.New(t)
+				assert.False(ok)
+				assert.Empty(version)
+			},
+		},
 	}
-	if got := (&Image{Kind: KindNydus, Bootstrap: &ocispec.Descriptor{}}).RAFSVersion(); got != "unknown" {
-		t.Fatalf("missing RAFS version = %q, want unknown", got)
-	}
-	if got := (&Image{Kind: KindOCI}).RAFSVersion(); got != "" {
-		t.Fatalf("OCI RAFS version = %q, want empty", got)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			version, ok := tc.img.FsVersion()
+			tc.run(t, version, ok)
+		})
 	}
 }

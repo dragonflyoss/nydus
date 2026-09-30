@@ -74,10 +74,6 @@ impl ErofsInodeCompact {
         read_u32(&self.i_size) as u64
     }
 
-    pub fn mtime_delta(&self) -> u32 {
-        read_u32(&self.i_mtime)
-    }
-
     pub fn i_u(&self) -> u32 {
         read_u32(&self.i_u)
     }
@@ -218,8 +214,14 @@ impl<'a> ErofsInode<'a> {
         }
 
         let i_format = u16::from_le_bytes([data[0], data[1]]);
+        if i_format & !0x0f != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported EROFS inode format: {i_format:#x}"),
+            ));
+        }
         let is_compact = (i_format >> EROFS_I_VERSION_BIT) & 1 == EROFS_INODE_LAYOUT_COMPACT;
-        if is_compact {
+        let inode = if is_compact {
             if data.len() < EROFS_INODE_COMPACT_SIZE {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -227,7 +229,7 @@ impl<'a> ErofsInode<'a> {
                 ));
             }
 
-            Ok(ErofsInode::Compact(cast_ref::<ErofsInodeCompact>(data)))
+            ErofsInode::Compact(cast_ref::<ErofsInodeCompact>(data))
         } else {
             if data.len() < EROFS_INODE_EXTENDED_SIZE {
                 return Err(std::io::Error::new(
@@ -236,8 +238,20 @@ impl<'a> ErofsInode<'a> {
                 ));
             }
 
-            Ok(ErofsInode::Extended(cast_ref::<ErofsInodeExtended>(data)))
+            ErofsInode::Extended(cast_ref::<ErofsInodeExtended>(data))
+        };
+        if inode.data_layout() == EROFS_INODE_CHUNK_BASED {
+            let format = inode.chunk_format();
+            if format & EROFS_CHUNK_FORMAT_INDEXES == 0
+                || format & !(EROFS_CHUNK_FORMAT_INDEXES | 0x1f) != 0
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unsupported EROFS chunk format: {format:#x}"),
+                ));
+            }
         }
+        Ok(inode)
     }
 
     pub fn format(&self) -> u16 {
@@ -293,7 +307,7 @@ impl<'a> ErofsInode<'a> {
     /// Absolute mtime in seconds. For compact inodes `epoch` must be provided.
     pub fn mtime(&self, epoch: u64) -> u64 {
         match self {
-            Self::Compact(c) => epoch + c.mtime_delta() as u64,
+            Self::Compact(_) => epoch,
             Self::Extended(e) => e.mtime(),
         }
     }
@@ -307,7 +321,7 @@ impl<'a> ErofsInode<'a> {
 
     pub fn nlink(&self) -> u32 {
         match self {
-            Self::Compact(_) => 1,
+            Self::Compact(inode) => inode.nb() as u32,
             Self::Extended(e) => e.nlink(),
         }
     }
@@ -356,7 +370,7 @@ impl<'a> ErofsInode<'a> {
     }
 
     pub fn startblk(&self) -> u64 {
-        ((self.nb() as u64) << 32) | self.i_u() as u64
+        self.i_u() as u64
     }
 }
 
@@ -485,4 +499,63 @@ pub fn is_nydus_xattr(name: &[u8]) -> bool {
 /// Check if an xattr name is the Nydus prefetch blobs xattr ("trusted.nydus.prefetch.blobs").
 pub fn is_nydus_prefetch_blobs_xattr(name: &[u8]) -> bool {
     is_nydus_xattr(name) && name.ends_with(NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_timestamps_use_only_superblock_time() {
+        let inode = ErofsInodeCompact::new(0, 0o100644, 1, 0, u32::MAX, 0, 1, 0, 0);
+        let parsed = ErofsInode::parse(inode.as_bytes()).unwrap();
+        assert_eq!(parsed.mtime(1_700_000_000), 1_700_000_000);
+        assert_eq!(parsed.mtime(u64::MAX), u64::MAX);
+        assert_eq!(parsed.effective_mtime_nsec(123_456_789), 123_456_789);
+    }
+
+    #[test]
+    fn flat_addresses_do_not_include_compact_link_count_or_reserved_bits() {
+        let compact = ErofsInodeCompact::new(0, 0o040755, 3, 4096, 0, 7, 1, 0, 0);
+        let parsed = ErofsInode::parse(compact.as_bytes()).unwrap();
+        assert_eq!(parsed.nlink(), 3);
+        assert_eq!(parsed.startblk(), 7);
+        let extended = ErofsInodeExtended::new(1, 0o040755, 0xffff, 4096, 7, 1, 0, 0, 0, 0, 3);
+        assert_eq!(
+            ErofsInode::parse(extended.as_bytes()).unwrap().startblk(),
+            7
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_chunk_formats_even_for_empty_files() {
+        for size in [0, 4096] {
+            for chunk_format in [0, 0x40, 0x60, 0x8020] {
+                let inode = ErofsInodeCompact::new(
+                    erofs_compact_i_format(EROFS_INODE_CHUNK_BASED),
+                    0o100644,
+                    1,
+                    size,
+                    0,
+                    chunk_format,
+                    1,
+                    0,
+                    0,
+                );
+                assert!(ErofsInode::parse(inode.as_bytes()).is_err());
+            }
+            let inode = ErofsInodeCompact::new(
+                erofs_compact_i_format(EROFS_INODE_CHUNK_BASED),
+                0o100644,
+                1,
+                size,
+                0,
+                EROFS_CHUNK_FORMAT_INDEXES as u32,
+                1,
+                0,
+                0,
+            );
+            assert!(ErofsInode::parse(inode.as_bytes()).is_ok());
+        }
+    }
 }

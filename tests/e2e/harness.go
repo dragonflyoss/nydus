@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,28 +25,7 @@ var blobMetaFilenamePattern = regexp.MustCompile(`^[0-9a-f]{64}\.blob\.meta$`)
 
 const (
 	erofsCFuseEnv = "EROFS_C_FUSE"
-	erofsMkfsEnv  = "EROFS_MKFS"
 )
-
-// setupCErofsFuse checks if erofsfuse is available. An explicit EROFS_C_FUSE
-// path wins and skips the setup script.
-func setupCErofsFuse(t *testing.T) {
-	if _, err := lookupCErofsFuseExecutable(); err == nil {
-		if os.Getenv(erofsMkfsEnv) != "" {
-			_, err := lookupCErofsMkfsExecutable()
-			require.NoError(t, err)
-		}
-		return
-	} else if os.Getenv(erofsCFuseEnv) != "" {
-		require.NoError(t, err)
-	}
-
-	script, err := filepath.Abs(filepath.Join("..", "scripts", "setup_erofsfuse.sh"))
-	require.NoError(t, err)
-
-	out, err := exec.Command("bash", script).CombinedOutput()
-	require.NoError(t, err, "setup_erofsfuse.sh failed:\n%s", out)
-}
 
 // mustLookupExecutable is a test helper that wraps lookupExecutable and fails the test if the executable is not found.
 func mustLookupExecutable(t *testing.T, name string) string {
@@ -126,21 +106,6 @@ func lookupCErofsFuseExecutable() (string, error) {
 	}
 
 	return "", fmt.Errorf("erofsfuse not found, set %s=path to enable comparison", erofsCFuseEnv)
-}
-
-func lookupCErofsMkfsExecutable() (string, error) {
-	if p := os.Getenv(erofsMkfsEnv); p != "" {
-		if err := validateExecutablePath(p, erofsMkfsEnv); err != nil {
-			return "", err
-		}
-		return p, nil
-	}
-
-	if p, err := exec.LookPath("mkfs.erofs"); err == nil {
-		return p, nil
-	}
-
-	return "", fmt.Errorf("mkfs.erofs not found, set %s=path if a test requires it", erofsMkfsEnv)
 }
 
 // fsckErofsImage validates a freshly built bootstrap with erofs-utils. A nydus
@@ -312,6 +277,18 @@ func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdev
 	return startFuseMount(t, exec.Command(cErofsFuseBin, args...), mnt, "erofsfuse")
 }
 
+// MustLookupExecutable is mustLookupExecutable for the e2e subpackages.
+func MustLookupExecutable(t *testing.T, name string) string {
+	t.Helper()
+	return mustLookupExecutable(t, name)
+}
+
+// MountNydus is mountNydus for the e2e subpackages.
+func MountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup func()) {
+	t.Helper()
+	return mountNydus(t, nydusBin, imagePath, blobdev, mnt)
+}
+
 // mountNydus runs `nydus fuse` in the background and returns a cleanup
 // function that unmounts the filesystem and reaps the child process.
 func mountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup func()) {
@@ -357,21 +334,27 @@ func mountNydusBootstrapWithCache(
 }
 
 // unmountFuse detaches mnt, retrying while the kernel still holds references.
-// A umount straight after heavy I/O routinely returns EBUSY for a moment, and
-// giving up there leaves a dead mountpoint that later trips up directory
-// removal.
+// A umount straight after heavy I/O routinely returns EBUSY for a moment, as
+// does one racing a fork elsewhere in the test binary, and giving up there
+// leaves a dead mountpoint that later trips up directory removal. The kernel's
+// answer decides whether mnt is still mounted: mountinfo, which mountpoint(1)
+// reads, can miss entries while parallel tests mount and unmount. Without
+// CAP_SYS_ADMIN, fusermount does the unmount instead.
 func unmountFuse(mnt string) {
 	for i := 0; i < 50; i++ {
-		if !isMountpoint(mnt) {
+		err := syscall.Unmount(mnt, 0)
+		if err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOENT) {
 			return
 		}
-		for _, argv := range [][]string{
-			{"fusermount3", "-u", mnt},
-			{"fusermount", "-u", mnt},
-		} {
-			_ = exec.Command(argv[0], argv[1:]...).Run()
-			if !isMountpoint(mnt) {
-				return
+		if errors.Is(err, syscall.EPERM) {
+			for _, argv := range [][]string{
+				{"fusermount3", "-u", mnt},
+				{"fusermount", "-u", mnt},
+			} {
+				_ = exec.Command(argv[0], argv[1:]...).Run()
+				if !isMountpoint(mnt) {
+					return
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -385,9 +368,6 @@ func buildNydusFSImageToDir(t *testing.T, nydusBin, imagePath, blobDir, srcDir s
 	before := listFilesInDir(t, blobDir)
 
 	args := []string{"build", "--blob-dir", blobDir, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
-	if gs := os.Getenv("NYDUSFS_PERF_BLOCK_GROUP_SIZE"); gs != "" {
-		args = append(args, "--block-group-size", gs)
-	}
 	if imagePath != "" {
 		args = append(args, "--bootstrap", imagePath)
 	}

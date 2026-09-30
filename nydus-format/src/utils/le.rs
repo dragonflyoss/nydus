@@ -57,6 +57,18 @@ pub fn read_u64_at(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }
 
+/// Copy `N` bytes out of `data` at `offset`, for reserved areas and digests.
+#[inline]
+pub fn read_bytes_at<const N: usize>(data: &[u8], offset: usize) -> [u8; N] {
+    data[offset..offset + N].try_into().unwrap()
+}
+
+/// Copy `value` into `data` at `offset`.
+#[inline]
+pub fn write_bytes_at<const N: usize>(data: &mut [u8], offset: usize, value: &[u8; N]) {
+    data[offset..offset + N].copy_from_slice(value);
+}
+
 /// Read a little-endian 40-bit unsigned integer (5 bytes) from `data` at
 /// `offset`, zero-extended to a `u64`.
 #[inline]

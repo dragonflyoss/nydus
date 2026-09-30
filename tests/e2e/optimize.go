@@ -169,28 +169,9 @@ func fetchMetrics(t *testing.T, socketPath string) map[string]float64 {
 	return metrics
 }
 
-// metricValue sums the series of every metric whose name matches name, a
-// bare name or a `*` glob such as `nydus_read_backend_total`, and whose
-// labels carry every given `label="value"` pair, 0 when absent.
-func metricValue(metrics map[string]float64, name string, labels ...string) float64 {
-	var total float64
-	for key, value := range metrics {
-		bare, rest, _ := strings.Cut(key, "{")
-		if matched, _ := filepath.Match(name, bare); !matched {
-			continue
-		}
-		matched := true
-		for _, label := range labels {
-			if !strings.Contains(rest, label) {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			total += value
-		}
-	}
-	return total
+// metricValue returns the metric's value, or 0 when absent.
+func metricValue(metrics map[string]float64, name string) float64 {
+	return metrics[name]
 }
 
 // waitPrefetchQuiesce polls the prefetch read counter until it is non-zero and
@@ -202,7 +183,7 @@ func waitPrefetchQuiesce(t *testing.T, socketPath string) {
 	var last float64
 	stable := 0
 	require.Eventually(t, func() bool {
-		current := metricValue(fetchMetrics(t, socketPath), "nydus_read_backend_total", `type="prefetch"`)
+		current := metricValue(fetchMetrics(t, socketPath), "backend_prefetch_read_count")
 		if current > 0 && current == last {
 			stable++
 		} else {
@@ -215,7 +196,7 @@ func waitPrefetchQuiesce(t *testing.T, socketPath string) {
 
 // saveTrace GETs the /trace endpoint from the mount's apiserver socket, saves
 // the raw JSON access-pattern document to path, and returns the number of
-// recorded (blob, block group) access patterns.
+// recorded (blob, chunk) access patterns.
 func saveTrace(t *testing.T, socketPath, path string) int {
 	t.Helper()
 
@@ -241,7 +222,7 @@ func saveTrace(t *testing.T, socketPath, path string) int {
 		Version  uint32 `json:"version"`
 		Patterns []struct {
 			BlobIndex       uint32 `json:"blob_index"`
-			BlockGroupIndex uint32 `json:"block_group_index"`
+			ChunkGroupIndex uint32 `json:"chunk_group_index"`
 		} `json:"patterns"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &doc))

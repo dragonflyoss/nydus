@@ -89,12 +89,13 @@ func (c *Checker) Check(ctx context.Context) error {
 	cs := provider.ContentStore()
 
 	// A filesystem diff only runs when both a source and a target image are
-	// present. When only one is provided, OCI data layers are not needed and
-	// are therefore not pulled. Nydus data blob layers are never pulled by the
-	// checker: the bootstrap check is static and the FUSE mount fetches blobs on
-	// demand from the registry.
+	// present. When only one is provided, no data layers are needed: the
+	// bootstrap check is static. With both present the nydus blob layers are
+	// pulled as well, so the filesystem rule can tell native layers (mounted
+	// from a local store) from chunk-based ones (fetched on demand from the
+	// registry) by their footers.
 	bothPresent := c.opt.Source != "" && c.opt.Target != ""
-	pullOpt := remote.PullOption{PullOCILayers: bothPresent, PullNydusBlobs: false}
+	pullOpt := remote.PullOption{PullOCILayers: bothPresent, PullNydusBlobs: bothPresent}
 
 	source, err := c.load(ctx, provider, c.opt.Source, pullOpt, remote.Source)
 	if err != nil {

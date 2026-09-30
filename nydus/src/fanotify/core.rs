@@ -59,8 +59,6 @@ pub enum DenyReason {
     NotPreAccess,
     /// The event fd did not resolve to a known source blob device.
     UnknownDevice,
-    /// A read targeted a redirect slot, which the guest must never read.
-    RedirectRead,
     /// The backend fetch, decode, CRC, or cache write failed.
     BackendFailure,
 }
@@ -87,16 +85,13 @@ pub enum RangeError {
 
 /// One blob exposed as an EROFS device (the backing file the kernel reads).
 ///
-/// Slots are kept in original device-table order, including redirect slots, so
-/// the EROFS `device=` index is never renumbered. A read routed to a redirect
-/// slot is an invariant violation and is denied.
+/// Slots are kept in original device-table order, so the EROFS `device=`
+/// index is never renumbered.
 #[derive(Clone, Debug)]
 pub struct BlobDevice {
     /// 1-based device-table index, preserved from the bootstrap.
     pub index: u16,
     pub id: BlobId,
-    /// True for an "ondemand" redirect blob the guest must never read directly.
-    pub is_redirect: bool,
     /// Host path of the blob's sparse cache file = the EROFS `device=` target.
     pub cache_path: PathBuf,
     /// Device size in bytes (block-aligned).
@@ -105,17 +100,10 @@ pub struct BlobDevice {
 
 #[cfg(test)]
 impl BlobDevice {
-    pub(crate) fn for_test(
-        index: u16,
-        id: BlobId,
-        is_redirect: bool,
-        cache_path: PathBuf,
-        cache_size: u64,
-    ) -> Self {
+    pub(crate) fn for_test(index: u16, id: BlobId, cache_path: PathBuf, cache_size: u64) -> Self {
         Self {
             index,
             id,
-            is_redirect,
             cache_path,
             cache_size,
         }
@@ -142,7 +130,7 @@ impl FanotifyCore {
     /// prepares (creates + sizes) each blob's cache file, so the device files
     /// exist and can be marked/mounted immediately after this returns.
     ///
-    /// Every device-table slot is preserved in order (including redirect slots),
+    /// Every device-table slot is preserved in order,
     /// the indices are validated to run contiguously from 1, every device size
     /// is validated block-aligned (`align_fetch_range` relies on it), and each
     /// cache file is confirmed to be a regular file whose size matches the slot
@@ -187,7 +175,6 @@ impl FanotifyCore {
             devices.push(BlobDevice {
                 index: b.index,
                 id: b.id,
-                is_redirect: b.is_redirect,
                 cache_path: b.cache_path,
                 cache_size: b.cache_size,
             });
@@ -205,7 +192,7 @@ impl FanotifyCore {
     }
 
     /// The blob devices, in device-table order (the order they must be passed as
-    /// EROFS `-o device=` options). Includes redirect slots as placeholders.
+    /// EROFS `-o device=` options).
     pub fn devices(&self) -> &[BlobDevice] {
         &self.devices
     }
@@ -218,7 +205,7 @@ impl FanotifyCore {
             .map(|&idx| &self.devices[idx])
     }
 
-    /// Return true when the authoritative block_group_map already covers the complete
+    /// Return true when the authoritative chunk map already covers the complete
     /// aligned range. This never triggers backend I/O.
     pub fn is_range_ready(&self, id: &BlobId, offset: u64, len: u64) -> Result<bool> {
         let end = offset
@@ -260,7 +247,7 @@ impl FanotifyCore {
         }
     }
 
-    /// Remove the fanotify mark on a blob whose block_group_map is fully ready.
+    /// Remove the fanotify mark on a blob whose chunk map is fully ready.
     ///
     /// Called from fetch worker threads after a successful fetch. The per-slot
     /// [`AtomicBool`] ensures the readiness probe and the `FAN_MARK_REMOVE`
@@ -284,7 +271,7 @@ impl FanotifyCore {
         if self.unmarked[slot].load(Ordering::Acquire) {
             return false;
         }
-        // O(1) probe: single atomic load on the block_group_map's shared ALL_READY flag.
+        // O(1) probe: single atomic load on the chunk map's shared ALL_READY flag.
         if !self.core.blobs.is_all_ready(id).unwrap_or(false) {
             return false;
         }

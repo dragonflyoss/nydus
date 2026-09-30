@@ -34,7 +34,7 @@ import (
 // run unprivileged.
 func ExtractTar(ctx context.Context, r io.Reader, dir string) error {
 	if os.Geteuid() != 0 {
-		return errors.New("converting an image requires root privileges to preserve file ownership and device nodes; re-run with sudo")
+		return errors.New("extracting a rootfs requires root privileges to preserve file ownership and device nodes; re-run with sudo")
 	}
 
 	if _, err := archive.Apply(

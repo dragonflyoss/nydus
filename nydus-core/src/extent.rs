@@ -81,15 +81,6 @@ pub(crate) fn clamped_range_end(offset: u64, len: u64, limit: u64) -> Result<Opt
     Ok(Some(end))
 }
 
-pub(crate) fn mapped_range_offset(mapped_offset: u64, size: u64, offset: u64) -> Option<u64> {
-    let end = mapped_offset.checked_add(size)?;
-    if offset >= mapped_offset && offset < end {
-        Some(offset - mapped_offset)
-    } else {
-        None
-    }
-}
-
 /// Accumulates the [`Extent`]s of one resolution pass.
 ///
 /// Owns the state the resolution loops share — the output vector, the
@@ -171,6 +162,39 @@ impl<'a> ExtentResolver<'a> {
     /// Consume the resolver and return the accumulated ranges.
     pub(crate) fn finish(self) -> Vec<Extent> {
         self.ranges
+    }
+
+    fn fetch_blob(&self, spec: &BlobRangeSpec) -> Result<()> {
+        let cache = self
+            .reader
+            .blob_cache(spec.index)
+            .with_context(|| format!("failed to open blob {}", spec.index))?;
+        cache.ensure_range(spec.offset, spec.len).with_context(|| {
+            format!(
+                "failed to fetch blob {} range [{}, +{})",
+                spec.index, spec.offset, spec.len
+            )
+        })
+    }
+
+    /// Fetch distinct blob segments concurrently, propagating fetch failures.
+    pub(crate) fn fetch_blobs(&self, specs: &[BlobRangeSpec]) -> Result<()> {
+        match specs {
+            [] => Ok(()),
+            [spec] => self.fetch_blob(spec),
+            _ => std::thread::scope(|scope| {
+                let workers: Vec<_> = specs
+                    .iter()
+                    .map(|spec| scope.spawn(move || self.fetch_blob(spec)))
+                    .collect();
+                for worker in workers {
+                    worker
+                        .join()
+                        .map_err(|_| Error::Io(io::Error::other("blob fetch worker panicked")))??;
+                }
+                Ok(())
+            }),
+        }
     }
 }
 

@@ -111,10 +111,13 @@ func MergeBootstrap(ctx context.Context, layers []Layer, opt MergeOption) ([]byt
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "extract blob meta %s", layer.Digest)
 		}
-		blobMetas = append(blobMetas, BlobMetaFile{
-			Name: layer.Digest.Encoded() + ".blob.meta",
-			Data: meta,
-		})
+		// Native layers carry no blob meta and get no sidecar.
+		if meta != nil {
+			blobMetas = append(blobMetas, BlobMetaFile{
+				Name: layer.Digest.Encoded() + ".blob.meta",
+				Data: meta,
+			})
+		}
 	}
 
 	bootstrapPath := filepath.Join(mergeDir, "bootstrap")

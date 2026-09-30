@@ -26,18 +26,18 @@ backend:
     # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
 
-    # HTTP client settings of requests to the origin registry: timeouts,
-    # retries, and TLS trust. The whole block and every field are optional.
+    # HTTP client settings: timeouts, retries, and TLS trust. The whole block
+    # and every field are optional; the timeout and retry limits also apply to
+    # Dragonfly SDK requests.
     http:
       # Per-request timeout (connect + read), e.g. `5s` or `1m`; `0s` disables
-      # it. Default: 5s. Kept short because a read holds the block group's fetch
-      # claim for its whole duration, and the readers waiting behind that
-      # claim are FUSE worker threads.
+      # it. Default: 5s. Kept short because a read holds its chunk group's
+      # fetch claim for its whole duration, and the readers waiting behind
+      # that claim are FUSE worker threads.
       timeout: 5s
 
       # Maximum number of retry attempts per request, applied by the HTTP
-      # client's retry middleware on direct origin requests and on origin
-      # requests issued when Dragonfly cannot serve a read. Default: 3.
+      # client's retry middleware and by the Dragonfly SDK. Default: 3.
       max_retries: 3
 
       # Optional proxy block routing every registry request through an HTTP
@@ -61,31 +61,26 @@ backend:
         #
         # ca_cert: /etc/nydus/certs/registry-ca.pem
 
-    # Optional Dragonfly block (requires the `backend-dragonfly`
+      # Thread bounds of the process-wide async runtime behind the registry
+      # client. Workers only move bytes for the connection pool (readers
+      # block on their own threads); the blocking pool serves DNS lookups
+      # and shrinks again after 10 s idle. 0 selects the defaults (2 and 8).
+      # The runtime is shared by every registry backend in the process, so
+      # only the first backend constructed with non-zero values applies.
+      #
+      # worker_threads: 2
+      # max_blocking_threads: 8
+
+    # Optional Dragonfly block (requires the `backend-dragonfly-proxy`
     # feature). When set, blob GETs are routed through the Dragonfly client
-    # SDK for P2P distribution. An on-demand read the seed peers cannot serve
-    # goes back to the origin registry through a rate limit, a prefetch read
-    # is rescheduled hours later instead. Every other request goes directly
-    # to the origin registry. Omit to talk to the origin directly.
+    # SDK for P2P distribution, falling back to the origin registry when a
+    # Dragonfly request still fails after the SDK's retries; every other
+    # request goes directly to the origin registry. Omit to talk to the
+    # origin directly.
     #
     # dragonfly:
-    #   # The Dragonfly scheduler service address with the scheme.
-    #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
-    #
-    #   # Timeout of each attempt of a request through the seed peers, e.g.
-    #   # `30s` or `1m`. Default: 30s.
-    #   timeout: 30s
-    #
-    #   # Retries of an on-demand read on a transient failure (timeout,
-    #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer.
-    #   # Default: 1, at most 3. Prefetch reads never retry.
-    #   max_retries: 1
-    #
-    #   # Origin reads issued when the seed peers cannot serve an on-demand
-    #   # read.
-    #   back_to_source:
-    #     # Rate limit in requests per second; 0 disables it. Default: 1.
-    #     request_rate_limit: 1
+    #   # The Dragonfly scheduler endpoint (gRPC).
+    #   scheduler_endpoint: http://127.0.0.1:65000
 
 storage:
   # Persistent chunk cache directory (equivalent to --cache-dir). Optional:
@@ -94,20 +89,30 @@ storage:
   # written to disk. Kernel-served modes (fanotify/nbd/ublk/uffd) and
   # `nydus optimize` require a directory.
   dir: /var/lib/nydus/cache
-  # Skip verifying decoded block groups against their stored checksums
-  # before they are served. Default: true. Set to false to verify every
-  # decoded block group when the transport is not trusted end to end.
+  # Skip verifying decoded chunks against their BLAKE3 digests before they
+  # are served. Default: true. Every fetched chunk group is always checked
+  # against its crc32c; set this to false to also verify each chunk when the
+  # transport is not trusted end to end.
   # skip_verify_checksums: true
+  # Compressed bytes one on-demand backend read covers: the chunk groups
+  # whose compressed ranges overlap the fetch-size-aligned cell holding the
+  # missed group, trimmed at groups already cached or being fetched. Larger
+  # sizes make fewer, larger requests (better over high per-request
+  # latency); smaller sizes transfer fewer unused bytes (better over
+  # limited bandwidth). 0 fetches the missed group alone. Independent of the
+  # image's chunk size. Default: 2097152 (2 MiB).
+  # fetch_size: 2097152
 
 prefetch:
   # Number of concurrently prefetched blobs.
   concurrent_blob_count: 10
   # Per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching one
-  # whole blob may take, while `http.timeout` bounds each block group request
+  # whole blob may take, while `http.timeout` bounds each backend request
   # within it. `0s` disables the bound. Default: 1h.
   timeout: 1h
   # Which blobs to pull: `none` disables prefetch; `ondemand` (default)
-  # prefetches only the "ondemand" redirect blob, warming the access-ordered
-  # hot set without pulling the whole image; `all` prefetches every blob, so
-  # the entire image ends up in the local cache.
+  # prefetches only the "ondemand" blob produced by `nydus optimize`, which
+  # holds the recorded hot set in access order, without pulling the whole
+  # image; `all` prefetches every blob, so the entire image ends up in the
+  # local cache.
   scope: ondemand

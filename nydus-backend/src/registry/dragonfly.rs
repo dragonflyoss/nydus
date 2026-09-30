@@ -1,31 +1,33 @@
-//! The Dragonfly SDK transport, feature `backend-dragonfly`.
+//! Dragonfly SDK transport (feature `backend-dragonfly-proxy`).
 //!
-//! A blob `GET` rides the Dragonfly client SDK to the seed peers named by the
-//! scheduler, every other request going straight to the origin. The SDK owns
-//! the retries: an on-demand read retries a transient failure, a `429`
-//! included, on the next seed peer up to the configured budget, while a
-//! prefetch read never retries, the storage layer rescheduling a failed
-//! prefetch hours later instead. An answer the SDK reports as an error but
-//! that carries an HTTP status is handed back as a [`Response`], so
-//! [`policy`](super::policy) classifies it by status like an origin answer.
+//! Routes a blob `GET` through the Dragonfly client SDK using a scheduler
+//! endpoint, returning a streaming response. This bypasses plain HTTP and lets
+//! Dragonfly schedule P2P chunk distribution directly; it is selected for blob
+//! `GET`s when a scheduler endpoint is configured, while every other request
+//! goes directly to the origin. SDK errors are classified into the
+//! load-shedding policy's failure classes here; retries are owned by the
+//! policy loop in the parent module, so the SDK's internal retries are
+//! disabled to keep the policy's attempt counts exact.
 
-use std::collections::HashMap;
-use std::io;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
-use async_trait::async_trait;
-use bytes::BytesMut;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::{Method, StatusCode};
+use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::StatusCode;
 
-use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
-use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
+use dragonfly_client_request::errors::{BackendError, Error, ProxyError};
+use dragonfly_client_request::{Body, Builder, GetRequest, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
 
-use super::response::{log_request_done, Response};
-use super::{BlobTransport, RegistryError, RegistryResult, RUNTIME};
-use crate::{Protocol, ReadKind};
+use super::{
+    block_on_worker, DragonflyError, DragonflyFailure, DragonflyTransport, Response, RetryableCause,
+};
+use crate::ReadKind;
+
+/// The fallback request timeout when the configured timeout is `0` (disabled):
+/// SDK requests always need a bounded timeout.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The priority hint for background prefetch requests.
 const PRIORITY_PREFETCH: i32 = 3;
@@ -33,7 +35,13 @@ const PRIORITY_PREFETCH: i32 = 3;
 /// The priority hint for on-demand (foreground) requests.
 const PRIORITY_ONDEMAND: i32 = 6;
 
-/// The Dragonfly priority of a read kind.
+/// The header carrying the Dragonfly scheduling priority of a request.
+const HEADER_PRIORITY: &str = "X-Dragonfly-Priority";
+
+/// The header opting a request into Dragonfly P2P distribution.
+const HEADER_USE_P2P: &str = "X-Dragonfly-Use-P2P";
+
+/// Map a read kind to its Dragonfly priority value.
 fn priority(kind: ReadKind) -> i32 {
     match kind {
         ReadKind::Prefetch => PRIORITY_PREFETCH,
@@ -41,162 +49,127 @@ fn priority(kind: ReadKind) -> i32 {
     }
 }
 
-/// The Dragonfly SDK transport, one client per read kind so each kind keeps
-/// its own retry budget.
+/// The Dragonfly SDK transport, wrapping a scheduler connection.
 pub(crate) struct Dragonfly {
-    /// The client serving on-demand reads, retrying at once because a FUSE
-    /// reader is waiting, a `429` included since another seed peer may not be
-    /// rate limited.
-    ondemand: Proxy,
+    /// The SDK client bound to the scheduler. Shared so each request future
+    /// can own a handle while it runs on a runtime thread.
+    client: Arc<Proxy>,
 
-    /// The client serving prefetch reads, never retrying: a failed prefetch
-    /// is rescheduled hours later instead.
-    prefetch: Proxy,
-
-    /// The per-attempt timeout.
+    /// The per-request timeout.
     timeout: Duration,
 }
 
 impl Dragonfly {
-    /// Connect to the configured scheduler. Only the on-demand client
-    /// retries, `max_retries` times across seed peers.
-    pub(crate) fn new(config: &DragonflyConfig) -> io::Result<Dragonfly> {
-        let max_retries = u8::try_from(config.max_retries).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "dragonfly.max_retries {} exceeds the SDK limit",
-                    config.max_retries
-                ),
-            )
-        })?;
+    /// Create a new Dragonfly transport connected to the configured scheduler.
+    /// `timeout` is the configured per-request timeout, `0s` (disabled)
+    /// falling back to [`DEFAULT_TIMEOUT`]. The SDK's internal retries are
+    /// disabled (`max_retries(0)`): the load-shedding policy in the parent
+    /// module owns retry counts, so they stay exact and observable.
+    pub(crate) fn new(config: &DragonflyConfig, timeout: Duration) -> std::io::Result<Dragonfly> {
         let endpoint = config.scheduler_endpoint.clone();
-        let (ondemand, prefetch) = RUNTIME
-            .block_on(async move {
-                let ondemand = Proxy::builder()
-                    .scheduler_endpoint(endpoint.clone())
-                    .max_retries(max_retries)
-                    .build()
-                    .await?;
-                let prefetch = Proxy::builder()
-                    .scheduler_endpoint(endpoint)
-                    .max_retries(0)
-                    .build()
-                    .await?;
-                Ok::<_, Error>((ondemand, prefetch))
-            })
-            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
+        let client = block_on_worker(async move {
+            Builder::default()
+                .scheduler_endpoint(endpoint)
+                .max_retries(0)
+                .build()
+                .await
+        })?
+        .map_err(|err| std::io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
+        let timeout = if timeout.is_zero() {
+            DEFAULT_TIMEOUT
+        } else {
+            timeout
+        };
         Ok(Dragonfly {
-            ondemand,
-            prefetch,
-            timeout: config.timeout,
+            client: Arc::new(client),
+            timeout,
         })
     }
+}
 
-    /// The client serving reads of `kind`.
-    fn client(&self, kind: ReadKind) -> &Proxy {
-        match kind {
-            ReadKind::OnDemand => &self.ondemand,
-            ReadKind::Prefetch => &self.prefetch,
+/// Classify an SDK error into the load-shedding policy's failure classes:
+/// a proxy or backend `429` is `RateLimited`, a `403` is `Forbidden`, and
+/// everything else is `Retryable` tagged with its cause — request timeout,
+/// dfdaemon connectivity, a proxy/backend `5xx`, or any other transport
+/// error.
+fn classify(err: &Error) -> DragonflyFailure {
+    match err {
+        Error::RequestTimeout(_) => DragonflyFailure::Retryable(RetryableCause::Timeout),
+        Error::DfdaemonError(_) => DragonflyFailure::Retryable(RetryableCause::Connect),
+        Error::ProxyError(ProxyError { status_code, .. })
+        | Error::BackendError(BackendError { status_code, .. }) => match status_code {
+            Some(StatusCode::TOO_MANY_REQUESTS) => DragonflyFailure::RateLimited,
+            Some(StatusCode::FORBIDDEN) => DragonflyFailure::Forbidden,
+            Some(code) if code.is_server_error() => {
+                DragonflyFailure::Retryable(RetryableCause::ServerError)
+            }
+            _ => DragonflyFailure::Retryable(RetryableCause::Other),
+        },
+        _ => DragonflyFailure::Retryable(RetryableCause::Other),
+    }
+}
+
+impl DragonflyTransport for Dragonfly {
+    /// Issue a blob `GET` through Dragonfly, attaching the priority and P2P
+    /// hints derived from the read kind.
+    fn get(
+        &self,
+        url: &str,
+        mut headers: HeaderMap,
+        kind: ReadKind,
+    ) -> Result<Response, DragonflyError> {
+        let priority = priority(kind);
+        if let Ok(value) = priority.to_string().parse() {
+            headers.insert(HEADER_PRIORITY, value);
         }
-    }
-}
+        headers.insert(HEADER_USE_P2P, HeaderValue::from_static("true"));
 
-/// Convert an SDK outcome into a transport outcome. A success carries the
-/// buffered `body`. A proxy, backend or dfdaemon error carrying an HTTP
-/// status is an answer, rebuilt as a [`Response`] with its status, headers and
-/// message, so a `429`, `403` or a dfdaemon `422` reaches the policy the same
-/// way an origin answer does. Anything else, a request timeout, seed peer
-/// connectivity, a failed body stream, is a transport failure.
-fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> RegistryResult<Response> {
-    match result {
-        Ok(response) => Ok(Response {
-            status: response.status_code.unwrap_or(StatusCode::OK),
-            headers: response.header,
-            reader: Box::new(std::io::Cursor::new(body.freeze())),
-            protocol: Protocol::Dragonfly,
-        }),
-        Err(Error::ProxyError(ProxyError {
-            status_code: Some(status),
-            header,
-            message,
-        }))
-        | Err(Error::BackendError(BackendError {
-            status_code: Some(status),
-            header,
-            message,
-        }))
-        | Err(Error::DfdaemonError(DfdaemonError {
-            status_code: Some(status),
-            header,
-            message,
-        })) => Ok(Response {
-            status,
-            headers: header_map(header),
-            reader: Box::new(std::io::Cursor::new(
-                message.unwrap_or_default().into_bytes(),
-            )),
-            protocol: Protocol::Dragonfly,
-        }),
-        Err(Error::RequestTimeout(message)) => Err(RegistryError::Io(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("dragonfly request timed out: {message}"),
-        ))),
-        Err(err) => Err(RegistryError::Io(io::Error::other(format!(
-            "dragonfly error: {err}"
-        )))),
-    }
-}
-
-/// Rebuild a header map from the SDK's string map, dropping entries that are
-/// not valid HTTP headers.
-fn header_map(headers: HashMap<String, String>) -> HeaderMap {
-    headers
-        .into_iter()
-        .filter_map(|(name, value)| {
-            Some((
-                HeaderName::from_bytes(name.as_bytes()).ok()?,
-                HeaderValue::from_str(&value).ok()?,
-            ))
-        })
-        .collect()
-}
-
-#[async_trait]
-impl BlobTransport for Dragonfly {
-    /// Fetch `url` through the client of the read kind with its priority
-    /// hint, the SDK adding the P2P and priority headers itself, and log the
-    /// outcome.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
         let request = GetRequest {
             url: url.to_string(),
-            header: headers.clone(),
+            header: headers,
             filtered_query_params: Vec::new(),
-            priority: Some(priority(kind)),
+            priority: Some(priority),
             timeout: self.timeout,
             ..Default::default()
         };
-        let start = Instant::now();
-        let mut body = BytesMut::new();
-        let result = self.client(kind).get_into(&request, &mut body).await;
-        let result = into_response(result, body);
-        log_request_done(
-            "dragonfly_sdk",
-            &Method::GET,
-            url,
-            &headers,
-            kind,
-            &result,
-            start.elapsed(),
-        );
-        result
+
+        let client = self.client.clone();
+        let response: Result<dragonfly_client_request::GetResponse<Body>, Error> =
+            match block_on_worker(async move { client.get(&request).await }) {
+                Ok(response) => response,
+                // The runtime task itself failed, not the SDK: a transport
+                // failure like any other for the policy.
+                Err(err) => {
+                    return Err(DragonflyError {
+                        failure: DragonflyFailure::Retryable(RetryableCause::Other),
+                        message: err.to_string(),
+                    })
+                }
+            };
+
+        match response {
+            Ok(response) => Ok(Response {
+                status: response.status_code.unwrap_or(StatusCode::OK),
+                headers: response.header,
+                reader: match response.reader {
+                    Some(reader) => Box::new(reader),
+                    None => Box::new(tokio::io::empty()),
+                },
+            }),
+            Err(err) => Err(DragonflyError {
+                failure: classify(&err),
+                message: err.to_string(),
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dragonfly_client_request::errors::{BackendError, DfdaemonError, ProxyError};
+    use std::collections::HashMap;
 
     fn proxy_error(status_code: Option<StatusCode>) -> Error {
         Error::ProxyError(ProxyError {
@@ -206,110 +179,49 @@ mod tests {
         })
     }
 
-    fn ok_response(status_code: StatusCode) -> GetResponse {
-        GetResponse {
-            success: status_code.is_success(),
-            header: HeaderMap::new(),
-            status_code: Some(status_code),
-            body: None,
-        }
-    }
-
     #[test]
-    fn a_success_carries_the_buffered_body() {
-        let response = into_response(
-            Ok(ok_response(StatusCode::PARTIAL_CONTENT)),
-            BytesMut::from(&b"payload"[..]),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "payload");
-    }
-
-    #[test]
-    fn answers_with_a_status_become_responses() {
-        let response = into_response(
-            Err(proxy_error(Some(StatusCode::TOO_MANY_REQUESTS))),
-            BytesMut::new(),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
-
-        let response = into_response(
-            Err(Error::BackendError(BackendError {
-                message: Some("origin said no".to_string()),
-                header: HashMap::from([("x-served-by".to_string(), "origin".to_string())]),
-                status_code: Some(StatusCode::FORBIDDEN),
-            })),
-            BytesMut::new(),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::FORBIDDEN);
-        assert_eq!(response.headers.get("x-served-by").unwrap(), "origin");
-        assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "origin said no");
-
-        let response = into_response(
-            Err(proxy_error(Some(StatusCode::BAD_GATEWAY))),
-            BytesMut::new(),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-
-        for status in [
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::INSUFFICIENT_STORAGE,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ] {
-            let response = into_response(
-                Err(Error::DfdaemonError(DfdaemonError {
-                    message: Some("no space".to_string()),
-                    header: HashMap::new(),
-                    status_code: Some(status),
-                })),
-                BytesMut::new(),
-            )
-            .unwrap();
-            assert_eq!(response.status, status);
-            assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "no space");
-        }
-    }
-
-    #[test]
-    fn failures_without_a_status_are_transport_errors() {
-        let err = into_response(
-            Err(Error::RequestTimeout("deadline exceeded".to_string())),
-            BytesMut::new(),
-        )
-        .err()
-        .unwrap();
-        assert!(
-            matches!(&err, RegistryError::Io(io_err) if io_err.kind() == io::ErrorKind::TimedOut)
+    fn classifies_sdk_errors() {
+        assert_eq!(
+            classify(&proxy_error(Some(StatusCode::TOO_MANY_REQUESTS))),
+            DragonflyFailure::RateLimited
         );
-
-        for err in [
-            proxy_error(None),
-            Error::DfdaemonError(DfdaemonError {
+        assert_eq!(
+            classify(&proxy_error(Some(StatusCode::FORBIDDEN))),
+            DragonflyFailure::Forbidden
+        );
+        assert_eq!(
+            classify(&proxy_error(Some(StatusCode::BAD_GATEWAY))),
+            DragonflyFailure::Retryable(RetryableCause::ServerError)
+        );
+        assert_eq!(
+            classify(&proxy_error(Some(StatusCode::NOT_FOUND))),
+            DragonflyFailure::Retryable(RetryableCause::Other)
+        );
+        assert_eq!(
+            classify(&proxy_error(None)),
+            DragonflyFailure::Retryable(RetryableCause::Other)
+        );
+        assert_eq!(
+            classify(&Error::RequestTimeout("deadline exceeded".to_string())),
+            DragonflyFailure::Retryable(RetryableCause::Timeout)
+        );
+        assert_eq!(
+            classify(&Error::DfdaemonError(DfdaemonError {
                 message: Some("connection refused".to_string()),
+            })),
+            DragonflyFailure::Retryable(RetryableCause::Connect)
+        );
+        assert_eq!(
+            classify(&Error::BackendError(BackendError {
+                message: Some("origin 503".to_string()),
                 header: HashMap::new(),
-                status_code: None,
-            }),
-            Error::Internal("failed to read response body".to_string()),
-        ] {
-            assert!(matches!(
-                into_response(Err(err), BytesMut::new()),
-                Err(RegistryError::Io(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn header_map_drops_invalid_entries() {
-        let headers = header_map(HashMap::from([
-            ("content-length".to_string(), "4".to_string()),
-            ("bad header".to_string(), "x".to_string()),
-            ("x-ok".to_string(), "bad\nvalue".to_string()),
-        ]));
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers.get("content-length").unwrap(), "4");
+                status_code: Some(StatusCode::SERVICE_UNAVAILABLE),
+            })),
+            DragonflyFailure::Retryable(RetryableCause::ServerError)
+        );
+        assert_eq!(
+            classify(&Error::Internal("boom".to_string())),
+            DragonflyFailure::Retryable(RetryableCause::Other)
+        );
     }
 }

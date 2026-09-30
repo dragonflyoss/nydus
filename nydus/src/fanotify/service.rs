@@ -663,16 +663,6 @@ impl Coordinator<'_> {
             respond(&mut permission, Response::Deny)?;
             return Ok(());
         };
-        if device.is_redirect {
-            warn!(
-                "fanotify: {:?}: redirect slot {} received a data read",
-                DenyReason::RedirectRead,
-                device.index
-            );
-            respond(&mut permission, Response::Deny)?;
-            return Ok(());
-        }
-
         let (offset, count) = match align_fetch_range(range.offset, range.count, device.cache_size)
         {
             Ok(range) => (range.offset, range.count),
@@ -741,8 +731,8 @@ impl Coordinator<'_> {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 core.fetch(&id, cache_size, offset, count)
             }));
-            // After a successful fetch, check whether this was the last block group of
-            // the blob. If the block_group_map's sticky ALL_READY flag is now set, remove
+            // After a successful fetch, check whether this was the last chunk group of
+            // the blob. If the chunk map's sticky ALL_READY flag is now set, remove
             // the fanotify mark so the kernel stops generating events for this
             // file entirely — subsequent reads hit the page cache without any
             // daemon involvement.

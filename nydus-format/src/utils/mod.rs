@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 
-use crate::blob::{BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
+use crate::blob::BlobMetadata;
 use crate::erofs::{ErofsSuperblock, EROFS_SUPER_OFFSET};
 
 pub use self::align::{align_up_u64, align_up_usize};
@@ -28,7 +28,7 @@ pub fn write_minimal_full_blob(
     save_sidecar: bool,
 ) -> [u8; SHA256_DIGEST_SIZE] {
     let mut bootstrap = vec![0u8; 8192];
-    let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]);
+    let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]).unwrap();
     let sb_start = EROFS_SUPER_OFFSET as usize;
     let sb_end = sb_start + sb.as_bytes().len();
     bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
@@ -38,8 +38,8 @@ pub fn write_minimal_full_blob(
     crate::blob::finish_full_blob(
         &mut full_blob,
         payload.len() as u64,
-        &bootstrap,
-        blob_metadata,
+        Some(&bootstrap),
+        Some(blob_metadata),
     )
     .unwrap();
     let full_blob_id = sha256_bytes(&full_blob);
@@ -48,8 +48,9 @@ pub fn write_minimal_full_blob(
     if save_sidecar {
         blob_metadata
             .save(&dir.join(format!(
-                "{}{NYDUS_BLOB_METADATA_SUFFIX}",
-                hex_string(&full_blob_id)
+                "{}{}",
+                hex_string(&full_blob_id),
+                BlobMetadata::SUFFIX
             )))
             .unwrap();
     }

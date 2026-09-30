@@ -5,7 +5,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
@@ -15,9 +15,9 @@ use fuser::{
 };
 
 use nydus_format::erofs::{
-    is_nydus_xattr, ErofsInode, EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR, EROFS_FT_BLKDEV,
-    EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK,
-    EROFS_FT_SYMLINK,
+    erofs_xattr_name_split, is_nydus_xattr, ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
+    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
+    EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR,
 };
 use nydus_telemetry::metrics;
 
@@ -42,8 +42,6 @@ pub struct ErofsFs {
     /// handles keep the page cache (KEEP_CACHE, and CACHE_DIR for dirs).
     no_open: AtomicBool,
     no_opendir: AtomicBool,
-    /// Image-wide "no inode has xattrs" declaration from the builder: xattr
-    /// requests answer ENOSYS so the kernel stops sending them entirely.
     no_xattr: bool,
 }
 
@@ -70,17 +68,25 @@ impl DirHandle {
 }
 
 impl ErofsFs {
-    pub fn new(reader: Arc<ErofsReader>) -> Self {
-        let no_xattr =
-            reader.superblock().feature_compat() & EROFS_FEATURE_COMPAT_NYDUS_NO_XATTR != 0;
-        Self {
+    pub fn new(reader: Arc<ErofsReader>) -> io::Result<Self> {
+        let root_nid = reader.superblock().root_nid();
+        let root = reader.inode(root_nid)?;
+        let no_xattr = reader
+            .read_xattrs(root_nid, &root)?
+            .iter()
+            .any(|(name, value)| {
+                erofs_xattr_name_split(name)
+                    == Some((EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR))
+                    && value == b"1"
+            });
+        Ok(Self {
             reader,
             dir_handles: Mutex::new(HashMap::new()),
             next_dir_handle: AtomicU64::new(1),
             no_open: AtomicBool::new(false),
             no_opendir: AtomicBool::new(false),
             no_xattr,
-        }
+        })
     }
 
     fn ino_to_nid(&self, ino: u64) -> u64 {
@@ -107,7 +113,7 @@ impl ErofsFs {
         let mtime_nsec = inode.effective_mtime_nsec(sb.fixed_nsec());
         let size = inode.size();
         let blocks = size.div_ceil(block_size) * block_size / 512;
-        let time = UNIX_EPOCH + Duration::new(mtime_secs, mtime_nsec);
+        let time = erofs_time(mtime_secs, mtime_nsec);
 
         let mode = inode.mode() as u32;
         let kind = mode_to_kind(mode);
@@ -167,21 +173,53 @@ impl ErofsFs {
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))
     }
 
-    /// Directory entries for a readdir(plus): through the handle when opendir
-    /// issued one, or straight from the inode for the kernel's no-opendir
-    /// dummy handle (fh 0).
-    fn dir_entries(&self, ino: INodeNo, fh: FileHandle) -> io::Result<Arc<Vec<RawDirEntry>>> {
+    /// Iterate a readdir(plus) page through an opened handle's cached entries,
+    /// or directly from the inode for the kernel's no-opendir dummy handle (fh 0).
+    /// Cookies are entry ordinals for opened handles and directory byte offsets
+    /// for dummy handles. The callback receives the next cookie; returning
+    /// `false` stops iteration, so callers only save cookies for accepted entries.
+    fn for_each_dir_entry<F>(
+        &self,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        mut cb: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(u64, u8, &[u8], u64) -> io::Result<bool>,
+    {
         if fh.0 != 0 {
-            return self.dir_handle(fh.0)?.entries(self);
+            let entries = self.dir_handle(fh.0)?.entries(self)?;
+            let start = usize::try_from(offset).unwrap_or(usize::MAX);
+            for (index, entry) in entries.iter().enumerate().skip(start) {
+                if !cb(entry.nid, entry.file_type, &entry.name, index as u64 + 1)? {
+                    break;
+                }
+            }
+            return Ok(());
         }
         let nid = self.ino_to_nid(ino.0);
         let vi = self.reader.inode(nid)?;
-        Ok(Arc::new(self.reader.read_dir(nid, &vi)?))
+        self.reader.for_each_dir_entry_from(nid, &vi, offset, cb)
     }
 }
 
 fn io_errno(e: &io::Error) -> Errno {
     Errno::from_i32(e.raw_os_error().unwrap_or(libc::EIO))
+}
+
+/// EROFS stores seconds as u64 but the kernel reads them as signed, so a
+/// layer time before the epoch is valid.
+fn erofs_time(secs: u64, nsec: u32) -> SystemTime {
+    let secs = secs as i64;
+    let whole = if secs >= 0 {
+        UNIX_EPOCH.checked_add(Duration::from_secs(secs.unsigned_abs()))
+    } else {
+        UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
+    };
+    whole
+        .and_then(|time| time.checked_add(Duration::from_nanos(nsec.into())))
+        .unwrap_or(UNIX_EPOCH)
 }
 
 /// The reply body for a cached negative lookup: ino 0 tells the kernel "no
@@ -231,11 +269,7 @@ impl FsOpMetric {
 
 impl Drop for FsOpMetric {
     fn drop(&mut self) {
-        if self.errored {
-            metrics::collect_fs_op_failure_metrics(self.op, self.start.elapsed());
-        } else {
-            metrics::collect_fs_op_finished_metrics(self.op, self.start.elapsed());
-        }
+        metrics::record_fs_op(self.op, self.start.elapsed(), self.errored);
     }
 }
 
@@ -460,6 +494,7 @@ impl Filesystem for ErofsFs {
             {
                 Ok(_) => reply.data(&buf),
                 Err(err) => {
+                    tracing::warn!(nid, offset, size, "read failed: {err}");
                     m.fail();
                     reply.error(io_errno(&err));
                 }
@@ -532,22 +567,20 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectory,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdir);
-        let entries = match self.dir_entries(ino, fh) {
-            Ok(entries) => entries,
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-                return;
-            }
-        };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
-            let ino = self.nid_to_ino(entry.nid);
-            let kind = erofs_ft_to_kind(entry.file_type);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(INodeNo(ino), (index as u64) + 1, kind, name) {
-                break;
-            }
+        let result = self.for_each_dir_entry(
+            ino,
+            fh,
+            offset,
+            |entry_nid, file_type, name, next_offset| {
+                let ino = self.nid_to_ino(entry_nid);
+                let kind = erofs_ft_to_kind(file_type);
+                Ok(!reply.add(INodeNo(ino), next_offset, kind, OsStr::from_bytes(name)))
+            },
+        );
+        if let Err(err) = result {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
@@ -561,37 +594,28 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectoryPlus,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdirplus);
-        let entries = match self.dir_entries(ino, fh) {
-            Ok(entries) => entries,
-            Err(err) => {
-                m.fail();
-                reply.error(io_errno(&err));
-                return;
-            }
-        };
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (index, entry) in entries.iter().enumerate().skip(start) {
-            let child_inode = match self.reader.inode(entry.nid) {
-                Ok(vi) => vi,
-                Err(err) => {
-                    m.fail();
-                    reply.error(io_errno(&err));
-                    return;
-                }
-            };
-            let attr = self.make_attr(entry.nid, &child_inode);
-            let ino = self.nid_to_ino(entry.nid);
-            let name = OsStr::from_bytes(&entry.name);
-            if reply.add(
-                INodeNo(ino),
-                (index as u64) + 1,
-                name,
-                &EROFS_FUSE_TIMEOUT,
-                &attr,
-                Generation(0),
-            ) {
-                break;
-            }
+        let result = self.for_each_dir_entry(
+            ino,
+            fh,
+            offset,
+            |entry_nid, _file_type, name, next_offset| {
+                let child_inode = self.reader.inode(entry_nid)?;
+                let attr = self.make_attr(entry_nid, &child_inode);
+                let ino = self.nid_to_ino(entry_nid);
+                Ok(!reply.add(
+                    INodeNo(ino),
+                    next_offset,
+                    OsStr::from_bytes(name),
+                    &EROFS_FUSE_TIMEOUT,
+                    &attr,
+                    Generation(0),
+                ))
+            },
+        );
+        if let Err(err) = result {
+            m.fail();
+            reply.error(io_errno(&err));
+            return;
         }
         reply.ok();
     }
@@ -739,5 +763,257 @@ impl Filesystem for ErofsFs {
             return;
         }
         reply.data(&names_buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::blob_chunk::BlobWriter;
+    use crate::build::bootstrap::render_bootstrap;
+    use crate::build::inode::{build_tree, resolve_chunk_addrs};
+    use nydus_format::erofs::{
+        XattrEntry, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_INODE_FLAT_INLINE,
+        EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_INDEX_USER,
+    };
+    use std::collections::HashSet;
+    use std::fs;
+
+    #[test]
+    fn erofs_times_before_the_epoch_are_signed() {
+        assert_eq!(erofs_time(5, 7), UNIX_EPOCH + Duration::new(5, 7));
+        assert_eq!(
+            erofs_time(-1i64 as u64, 0),
+            UNIX_EPOCH - Duration::from_secs(1)
+        );
+        assert_eq!(
+            erofs_time(-2i64 as u64, 500_000_000),
+            UNIX_EPOCH - Duration::from_millis(1500)
+        );
+        assert_eq!(
+            erofs_time(i64::MIN as u64, 0),
+            UNIX_EPOCH - Duration::from_secs(i64::MIN.unsigned_abs())
+        );
+    }
+
+    #[test]
+    fn no_xattr_is_derived_from_root_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("child"), b"").unwrap();
+        let mut writer = BlobWriter::plain(
+            fs::File::create(directory.path().join("data")).unwrap(),
+            EROFS_BLOCK_SIZE,
+        );
+        let mut inodes =
+            build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        writer.finish().unwrap();
+        resolve_chunk_addrs(&mut inodes, &writer).unwrap();
+        let bootstrap = directory.path().join("bootstrap");
+
+        for (name_index, suffix, value, expected) in [
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"1".as_slice(),
+                true,
+            ),
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"0".as_slice(),
+                false,
+            ),
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"".as_slice(),
+                false,
+            ),
+            (
+                EROFS_XATTR_INDEX_USER,
+                NYDUS_XATTR_SUFFIX_NO_XATTR,
+                b"1".as_slice(),
+                false,
+            ),
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                b"nydus.other".as_slice(),
+                b"1".as_slice(),
+                false,
+            ),
+        ] {
+            inodes[0].xattrs = vec![XattrEntry {
+                name_index,
+                suffix: suffix.to_vec(),
+                value: value.to_vec(),
+            }];
+            inodes[1].xattrs = vec![XattrEntry {
+                name_index: EROFS_XATTR_INDEX_TRUSTED,
+                suffix: NYDUS_XATTR_SUFFIX_NO_XATTR.to_vec(),
+                value: b"1".to_vec(),
+            }];
+            let bytes = render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap();
+            fs::write(&bootstrap, bytes).unwrap();
+            let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+            let filesystem = ErofsFs::new(Arc::new(reader)).unwrap();
+            assert_eq!(filesystem.no_xattr, expected);
+        }
+        assert!(should_hide_xattr(FUSE_ROOT_ID, b"trusted.nydus.no_xattr"));
+        assert!(!should_hide_xattr(
+            FUSE_ROOT_ID + 1,
+            b"trusted.nydus.no_xattr"
+        ));
+    }
+
+    #[test]
+    fn directory_pagination_preserves_entries_and_cookies() {
+        for (child_count, layout) in [
+            (0, EROFS_INODE_FLAT_INLINE),
+            (105, EROFS_INODE_FLAT_PLAIN),
+            (120, EROFS_INODE_FLAT_INLINE),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source");
+            fs::create_dir(&source).unwrap();
+            let mut names = vec![b".".to_vec(), b"..".to_vec()];
+            for index in 0..child_count {
+                let name = format!("{index:04}-{}", "n".repeat(60));
+                fs::write(source.join(&name), b"").unwrap();
+                names.push(name.into_bytes());
+            }
+            let mut writer = BlobWriter::plain(
+                fs::File::create(directory.path().join("data")).unwrap(),
+                EROFS_BLOCK_SIZE,
+            );
+            let mut inodes =
+                build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+            writer.finish().unwrap();
+            resolve_chunk_addrs(&mut inodes, &writer).unwrap();
+            let bootstrap = directory.path().join("bootstrap");
+            fs::write(
+                &bootstrap,
+                render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap(),
+            )
+            .unwrap();
+            let filesystem = ErofsFs::new(Arc::new(
+                ErofsReader::open_metadata_only(&bootstrap).unwrap(),
+            ))
+            .unwrap();
+            let nid = filesystem.reader.superblock().root_nid();
+            let inode = filesystem.reader.inode(nid).unwrap();
+            assert_eq!(inode.data_layout(), layout);
+            if child_count > 0 {
+                assert!(inode.size() > EROFS_BLOCK_SIZE as u64);
+            }
+            let expected: Vec<_> = filesystem
+                .reader
+                .read_dir(nid, &inode)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.nid, entry.file_type, entry.name))
+                .collect();
+            assert_eq!(
+                expected.iter().map(|entry| &entry.2).collect::<Vec<_>>(),
+                names.iter().collect::<Vec<_>>()
+            );
+            assert_eq!(expected[0], (nid, EROFS_FT_DIR, b".".to_vec()));
+            assert_eq!(expected[1], (nid, EROFS_FT_DIR, b"..".to_vec()));
+
+            let ino = INodeNo(FUSE_ROOT_ID);
+            let handle = filesystem.create_dir_handle(ino.0).unwrap();
+            for fh in [FileHandle(0), FileHandle(handle)] {
+                for capacity in [1, 2, 7, 53, 54, 55, 200] {
+                    let mut offset = 0;
+                    let mut seen = Vec::new();
+                    let mut cookies = Vec::new();
+                    loop {
+                        let mut accepted = 0;
+                        let mut calls = 0;
+                        filesystem
+                            .for_each_dir_entry(ino, fh, offset, |nid, ft, name, next| {
+                                calls += 1;
+                                if accepted == capacity {
+                                    return Ok(false);
+                                }
+                                // Exercise the same inode/attribute lookup as readdirplus.
+                                let child = filesystem.reader.inode(nid)?;
+                                let attr = filesystem.make_attr(nid, &child);
+                                assert_eq!(attr.kind, erofs_ft_to_kind(ft));
+                                assert!(next > offset);
+                                offset = next;
+                                cookies.push(next);
+                                seen.push((nid, ft, name.to_vec()));
+                                accepted += 1;
+                                Ok(true)
+                            })
+                            .unwrap();
+                        assert!(calls <= capacity + 1);
+                        assert!(seen.len() <= expected.len());
+                        if accepted == 0 {
+                            break;
+                        }
+                    }
+                    assert_eq!(
+                        seen, expected,
+                        "children={child_count}, fh={}, capacity={capacity}",
+                        fh.0
+                    );
+                    if fh.0 == 0 {
+                        assert_eq!(cookies[0], EROFS_DIRENT_SIZE as u64);
+                        assert_eq!(offset, inode.size());
+                        if child_count > 0 {
+                            // The first block holds dot, dotdot and 52 long names.
+                            assert_eq!(cookies[53], EROFS_BLOCK_SIZE as u64);
+                            assert_eq!(
+                                cookies[54],
+                                (EROFS_BLOCK_SIZE as usize + EROFS_DIRENT_SIZE) as u64
+                            );
+                        }
+                    } else {
+                        assert_eq!(cookies, (1..=expected.len() as u64).collect::<Vec<_>>());
+                    }
+                    // A saved cookie must also work after later pages have been read.
+                    for (index, cookie) in cookies.iter().copied().enumerate() {
+                        let mut next_entry = None;
+                        filesystem
+                            .for_each_dir_entry(ino, fh, cookie, |nid, ft, name, _| {
+                                next_entry = Some((nid, ft, name.to_vec()));
+                                Ok(false)
+                            })
+                            .unwrap();
+                        assert_eq!(next_entry.as_ref(), expected.get(index + 1));
+                    }
+                }
+
+                let mut calls = 0;
+                filesystem
+                    .for_each_dir_entry(ino, fh, 0, |_, _, name, _| {
+                        calls += 1;
+                        assert_eq!(name, b".");
+                        Ok(false)
+                    })
+                    .unwrap();
+                assert_eq!(calls, 1);
+                let err = filesystem
+                    .for_each_dir_entry(ino, fh, 0, |_, _, _, _| {
+                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    })
+                    .unwrap_err();
+                assert_eq!(err.raw_os_error(), Some(libc::EIO));
+                filesystem
+                    .for_each_dir_entry(ino, fh, u64::MAX, |_, _, _, _| {
+                        panic!("offset past EOF must not yield entries")
+                    })
+                    .unwrap();
+            }
+            let err = filesystem
+                .for_each_dir_entry(ino, FileHandle(u64::MAX), 0, |_, _, _, _| {
+                    panic!("invalid handle must not yield entries")
+                })
+                .unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+        }
     }
 }
