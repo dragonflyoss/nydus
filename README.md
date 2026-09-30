@@ -374,6 +374,19 @@ make test
 # End-to-end integration tests (requires root and FUSE).
 make test-e2e
 
+# Cross-version on-disk compatibility (requires root and FUSE): build images
+# of a corpus of data, hole and metadata edge cases in every layout with
+# COMPAT_BUILDER, then check, mount and export them with COMPAT_READER.
+# Both default to the in-tree build; CI runs both directions against the
+# v3.0.0-beta.1 release on pull requests to v3.
+make test-compat COMPAT_BUILDER=/abs/path/to/released/nydus
+make test-compat COMPAT_READER=/abs/path/to/released/nydus
+# The same in two runs, keeping the images in COMPAT_IMAGES (CI caches the
+# images the release builds; pushes to v3 fill the cache that pull requests
+# into v3 share).
+make test-compat-build COMPAT_BUILDER=/abs/path/to/released/nydus COMPAT_IMAGES=/abs/path/to/images
+make test-compat-read COMPAT_IMAGES=/abs/path/to/images
+
 # UFFD service smoke test.
 make test-uffd
 
