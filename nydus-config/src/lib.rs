@@ -338,8 +338,9 @@ pub struct DragonflyConfig {
 pub struct StorageConfig {
     /// The directory storing each blob's decoded chunk cache file. When
     /// unset (or the whole `storage` section is omitted), blob data is not
-    /// written to disk: every read fetches from the backend directly and the
-    /// kernel page cache is the only reuse layer. Modes that hand the cache
+    /// written to disk: reads fetch from the backend directly, reusing only
+    /// a small in-memory cache of recently decoded chunk groups and the
+    /// kernel page cache. Modes that hand the cache
     /// file to the kernel (fanotify, NBD, ublk, userfaultfd, virtio-pmem)
     /// require a directory.
     #[serde(default)]
