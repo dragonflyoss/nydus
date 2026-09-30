@@ -8,6 +8,9 @@ use std::io::{self, BufWriter};
 use std::path::PathBuf;
 use tracing::Level;
 
+/// Tar stream bytes gathered per write to the output.
+const OUTPUT_BUFFER: usize = 1 << 20;
+
 #[derive(Debug, Clone, Parser)]
 pub struct ExportCommand {
     #[arg(help = "Specify the nydus full blob to export the OCI layer tar stream from")]
@@ -78,11 +81,14 @@ impl ExportCommand {
             Some(path) => {
                 let file = File::create(path)
                     .with_context(|| format!("failed to create output: {}", path.display()))?;
-                write_tar(&reader, BufWriter::new(file))?;
+                write_tar(&reader, BufWriter::with_capacity(OUTPUT_BUFFER, file))?;
             }
             None => {
                 let stdout = io::stdout();
-                write_tar(&reader, BufWriter::new(stdout.lock()))?;
+                write_tar(
+                    &reader,
+                    BufWriter::with_capacity(OUTPUT_BUFFER, stdout.lock()),
+                )?;
             }
         }
 
