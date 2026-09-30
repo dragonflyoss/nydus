@@ -1528,17 +1528,19 @@ func setupLogLevel(c *cli.Context) {
 	// global `-D` has the highest priority
 	if c.Bool("D") {
 		logrus.SetLevel(logrus.DebugLevel)
-		return
+	} else {
+		lvl := c.String("log-level")
+		logLevel, err := logrus.ParseLevel(lvl)
+		if err != nil {
+			logrus.Warnf("failed to parse log level(%s): %+v\ndefault log level(info) will be used", lvl, err)
+			logLevel = defaultLogLevel
+		}
+		logrus.SetLevel(logLevel)
 	}
 
-	lvl := c.String("log-level")
-	logLevel, err := logrus.ParseLevel(lvl)
-	if err != nil {
-		logrus.Warnf("failed to parse log level(%s): %+v\ndefault log level(info) will be used", lvl, err)
-		logLevel = defaultLogLevel
+	if c.String("log-format") == "json" {
+		logrus.SetFormatter(&logrus.JSONFormatter{})
 	}
-
-	logrus.SetLevel(logLevel)
 
 	if c.String("log-file") != "" {
 		f, err := os.OpenFile(c.String("log-file"), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
@@ -1572,6 +1574,18 @@ func getGlobalFlags() []cli.Flag {
 			Required: false,
 			Usage:    "Write logs to a file",
 			EnvVars:  []string{"LOG_FILE"},
+		},
+		&cli.StringFlag{
+			Name:    "log-format",
+			Value:   "text",
+			Usage:   "Log format (text or json)",
+			EnvVars: []string{"LOG_FORMAT"},
+			Action: func(_ *cli.Context, value string) error {
+				if value != "text" && value != "json" {
+					return fmt.Errorf("invalid log format %q, expected text or json", value)
+				}
+				return nil
+			},
 		},
 	}
 }
