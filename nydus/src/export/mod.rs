@@ -169,7 +169,16 @@ impl Unpacker<'_> {
         if let Some(target) = link_target {
             builder.append_link(&mut header, tar_path, target)?;
         } else if header.entry_type() == EntryType::Regular {
-            builder.append_data(&mut header, tar_path, InodeReader::new(self.reader, nid)?)?;
+            // The tar writer copies 8 KiB at a time; buffering turns that
+            // into a few large reads of the image, without holding more of
+            // the file than FILE_READ_BUFFER.
+            let data = InodeReader::new(self.reader, nid)?;
+            let capacity = data.size.min(FILE_READ_BUFFER) as usize;
+            builder.append_data(
+                &mut header,
+                tar_path,
+                io::BufReader::with_capacity(capacity, data),
+            )?;
         } else {
             builder.append_data(&mut header, tar_path, io::empty())?;
         }
@@ -208,6 +217,9 @@ impl Unpacker<'_> {
         Ok(records)
     }
 }
+
+/// Most file data read from the image at once while exporting a file.
+const FILE_READ_BUFFER: u64 = 2 << 20;
 
 /// Pull-based adapter over the push-based `write_file_data_to`, so that file
 /// data streams into the tar writer without buffering the whole file.
