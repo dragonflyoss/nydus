@@ -67,7 +67,7 @@ hyper-util = { version = "0.1.19", features = ["server"] }
 vmm-sys-util = { workspace = true }
 tar = "0.4.40"
 regex = "1.7.0"
-toml = "0.5"
+toml = "1.1"
 tokio = { version = "1.19.0", features = ["macros", "rt-multi-thread", "time"] }
 
 [features]
