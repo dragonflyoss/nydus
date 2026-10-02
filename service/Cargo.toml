@@ -23,7 +23,7 @@ sendfd = "0.4"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
 serde_repr = "0.1"
-thiserror = "1.0"
+thiserror = "2.0"
 time = { version = "0.3.14", features = ["serde-human-readable"] }
 tokio = { version = "1.24", features = ["macros"] }
 versionize_derive = "0.1.6"
