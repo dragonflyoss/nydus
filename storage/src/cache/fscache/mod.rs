@@ -257,6 +257,7 @@ impl FileCacheEntry {
 
         let need_validation = mgr.need_validation
             && !blob_info.is_legacy_stargz()
+            && !blob_info.is_external()
             && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
         let load_chunk_digest = need_validation || cas_mgr.is_some();
         let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
