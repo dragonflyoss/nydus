@@ -250,10 +250,12 @@ impl FileCacheEntry {
             let (chunk_map, is_direct_chunkmap) =
                 Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
             // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
+            // External blobs carry no chunk digest, so they can't be validated by digest.
             let validation_supported = !blob_info.meta_ci_is_valid()
                 || blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
             let need_validation = ((mgr.validate && validation_supported) || !is_direct_chunkmap)
-                && !is_legacy_stargz;
+                && !is_legacy_stargz
+                && !blob_info.is_external();
             // Set cache file to its expected size.
             let suffix = if mgr.cache_raw_data {
                 BLOB_RAW_FILE_SUFFIX

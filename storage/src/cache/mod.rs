@@ -380,6 +380,15 @@ pub trait BlobCache: Send + Sync {
     }
 
     /// Validate chunk data.
+    ///
+    /// When digest validation is enabled (by local configuration or `force_validation`),
+    /// the chunk data is always verified against its cryptographic digest. The CRC32 is
+    /// only used as a lightweight integrity check when digest validation is disabled.
+    ///
+    /// The `has_crc32` flag and the CRC32 value may come from the blob meta, which is
+    /// fetched from the storage backend and not authenticated. So they must never decide
+    /// whether the digest gets checked, otherwise a backend could substitute chunk data
+    /// and supply a matching CRC32 to bypass the digest validation.
     fn validate_chunk_data(
         &self,
         chunk: &dyn BlobChunkInfo,
@@ -388,26 +397,27 @@ pub trait BlobCache: Send + Sync {
     ) -> Result<usize> {
         let d_size = chunk.uncompressed_size() as usize;
         if buffer.len() != d_size {
-            Err(eio!("uncompressed size and buffer size doesn't match"))
-        } else if (self.need_validation() || chunk.has_crc32() || force_validation)
-            && !self.is_legacy_stargz()
-            && !self.check_digest(chunk, buffer)
-        {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "data digest value doesn't match",
-            ))
-        } else {
-            Ok(d_size)
+            return Err(eio!("uncompressed size and buffer size doesn't match"));
         }
-    }
+        if self.is_legacy_stargz() {
+            return Ok(d_size);
+        }
 
-    fn check_digest(&self, chunk: &dyn BlobChunkInfo, buffer: &[u8]) -> bool {
-        if chunk.has_crc32() {
-            check_crc(buffer, chunk.crc32())
-        } else {
-            check_hash(buffer, chunk.chunk_id(), self.blob_digester())
+        if self.need_validation() || force_validation {
+            if !check_hash(buffer, chunk.chunk_id(), self.blob_digester()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "data digest value doesn't match",
+                ));
+            }
+        } else if chunk.has_crc32() && !check_crc(buffer, chunk.crc32()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunk crc32 value doesn't match",
+            ));
         }
+
+        Ok(d_size)
     }
 
     /// Cache pre-read compressed chunk data from a streaming source.
