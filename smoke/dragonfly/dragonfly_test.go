@@ -156,12 +156,13 @@ func TestDragonflyE2E(t *testing.T) {
 
 		t.Logf("read %d files under /usr, %d bytes total", len(files), totalBytes)
 
-		// Check nydusd logs for digest validation errors
-		newLogs := env.Nydusd.LogSince(t, logBefore)
-		assert.NotContains(t, strings.ToLower(newLogs), "data digest value doesn't match",
+		// Check nydusd logs for chunk validation errors, reported either by the
+		// digest check (validate = true) or by the CRC32 check (validate = false).
+		newLogs := strings.ToLower(env.Nydusd.LogSince(t, logBefore))
+		assert.NotContains(t, newLogs, "data digest value doesn't match",
 			"nydusd should not report digest mismatch errors")
-		assert.NotContains(t, strings.ToLower(newLogs), "data digest value doesn't match",
-			"nydusd should not report digest validation errors")
+		assert.NotContains(t, newLogs, "chunk crc32 value doesn't match",
+			"nydusd should not report crc32 mismatch errors")
 
 		if len(readErrors) > 0 {
 			t.Logf("read errors (%d):\n  %s", len(readErrors),
