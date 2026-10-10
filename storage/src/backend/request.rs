@@ -31,7 +31,7 @@ use crate::backend::proxy::ProxySDKClients;
 use crate::backend::RequestSource;
 
 #[cfg(feature = "backend-dragonfly-proxy")]
-use dragonfly_client_util::request::GetResponse;
+use dragonfly_client_request::GetResponse;
 
 const HEADER_ENV_PREFIX: &str = "NYDUS_HEADER_";
 const HEADER_USER_AGENT: &str = "User-Agent";
@@ -77,8 +77,7 @@ impl Response {
             Self::HTTP(resp) => Box::new(resp),
             #[cfg(feature = "backend-dragonfly-proxy")]
             Self::ProxySDK(resp) => {
-                let reader = resp.reader.unwrap_or(Box::new(tokio::io::empty()));
-                Box::new(proxy::SyncAdapter::new(reader))
+                Box::new(proxy::SyncAdapter::new(proxy::body_reader(resp.body)))
             }
         }
     }
@@ -98,7 +97,7 @@ impl Response {
             }
             #[cfg(feature = "backend-dragonfly-proxy")]
             Self::ProxySDK(resp) => {
-                let mut reader = resp.reader.unwrap_or(Box::new(tokio::io::empty()));
+                let mut reader = proxy::body_reader(resp.body);
                 proxy::runtime()
                     .block_on(async {
                         tokio::io::copy(&mut reader, &mut std::io::Cursor::new(writer)).await
@@ -602,15 +601,16 @@ mod tests {
         headers: Option<HeaderMap>,
         body: Option<&[u8]>,
     ) -> GetResponse {
-        let reader: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = body.map(|b| {
-            Box::new(tokio::io::BufReader::new(std::io::Cursor::new(b.to_vec())))
-                as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+        let body: Option<dragonfly_client_request::Body> = body.map(|b| {
+            Box::new(futures::stream::once(futures::future::ready(Ok(
+                tokio_util::bytes::Bytes::copy_from_slice(b),
+            )))) as dragonfly_client_request::Body
         });
         GetResponse {
             success: status.is_some_and(|s| s.is_success()),
             status_code: status,
             header: headers.unwrap_or_default(),
-            reader,
+            body,
         }
     }
 

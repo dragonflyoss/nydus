@@ -15,13 +15,14 @@ use std::{
 use tokio::io::AsyncRead;
 use tokio::runtime::Runtime;
 
-use dragonfly_client_util::request::errors::Error;
-use dragonfly_client_util::request::Request;
-use dragonfly_client_util::request::{Body, GetRequest, GetResponse, Proxy};
+use dragonfly_client_request::errors::Error;
+use dragonfly_client_request::{Body, GetRequest, GetResponse, Proxy, Request};
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use log::info;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
+use tokio_util::io::StreamReader;
 
 // --- Dragonfly header constants ---
 pub const HEADER_DRAGONFLY_PRIORITY: &str = "X-Dragonfly-Priority";
@@ -80,6 +81,12 @@ impl<R: AsyncRead + Unpin> Read for SyncAdapter<R> {
     }
 }
 
+/// Expose a chunked SDK response body as an `AsyncRead`; `None` reads as empty.
+pub(crate) fn body_reader(body: Option<Body>) -> impl AsyncRead + Send + Unpin {
+    let body = body.unwrap_or_else(|| Box::new(futures::stream::empty()));
+    StreamReader::new(body.map_err(std::io::Error::other))
+}
+
 pub struct ProxySDKClient {
     client: Proxy,
 }
@@ -104,6 +111,7 @@ impl ProxySDKClient {
             priority,
             timeout: Duration::from_secs(5),
             client_cert: None,
+            ..GetRequest::default()
         };
         let resp = runtime().block_on(async { self.client.get(&request).await });
         match resp {
@@ -130,7 +138,7 @@ impl ProxySDKClient {
                         success: true,
                         status_code: err.status_code,
                         header: header_map,
-                        reader: None,
+                        body: None,
                     })
                 }
                 Error::ProxyError(err) => match err.status_code {
