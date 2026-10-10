@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"syscall"
@@ -134,7 +135,7 @@ func fetchHandler(ingester content.Ingester, fetcher remotes.Fetcher) images.Han
 // ref.
 //
 // Adapted from containerd's client push flow.
-func push(ctx context.Context, store content.Store, resolver remotes.Resolver, desc ocispec.Descriptor, ref string, platformMC platforms.MatchComparer) error {
+func push(ctx context.Context, store content.Store, resolver remotes.Resolver, desc ocispec.Descriptor, ref string, platformMC platforms.MatchComparer, wrapper func(images.Handler) images.Handler) error {
 	pushRef := ref
 	if pushRef == "" {
 		return errors.New("empty push reference")
@@ -143,7 +144,43 @@ func push(ctx context.Context, store content.Store, resolver remotes.Resolver, d
 	if err != nil {
 		return errors.Wrapf(err, "create pusher for %q", pushRef)
 	}
-	return remotes.PushContent(ctx, &retryPusher{pusher: pusher}, desc, store, nil, platformMC, nil)
+	return remotes.PushContent(ctx, &retryPusher{pusher: pusher}, desc, store, nil, platformMC, wrapper)
+}
+
+func pushBlobFile(ctx context.Context, resolver remotes.Resolver, desc ocispec.Descriptor, ref, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return errors.Wrapf(err, "stat blob file %q", path)
+	}
+	if info.Size() != desc.Size {
+		return errors.Errorf("blob file %q size changed: got %d, expected %d", path, info.Size(), desc.Size)
+	}
+
+	pusher, err := resolver.Pusher(ctx, ref)
+	if err != nil {
+		return errors.Wrapf(err, "create pusher for %q", ref)
+	}
+	writer, err := (&retryPusher{pusher: pusher}).Push(ctx, desc)
+	if errdefs.IsAlreadyExists(err) {
+		return nil
+	}
+	if err != nil {
+		return errors.Wrapf(err, "open remote writer for %s", desc.Digest)
+	}
+	defer func() { _ = writer.Close() }()
+
+	file, err := os.Open(path)
+	if err != nil {
+		return errors.Wrapf(err, "open blob file %q", path)
+	}
+	defer func() { _ = file.Close() }()
+	reader := io.NewSectionReader(file, 0, desc.Size)
+	if err := content.Copy(ctx, writer, reader, desc.Size, desc.Digest); errdefs.IsAlreadyExists(err) {
+		return nil
+	} else if err != nil {
+		return errors.Wrapf(err, "upload blob file %q", path)
+	}
+	return nil
 }
 
 // pushRetries bounds upload attempts, including containerd's in-session resets.

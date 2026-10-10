@@ -37,6 +37,8 @@ type Option struct {
 	LogLevel string
 	// PlatformMC selects which platforms to convert. Defaults to all.
 	PlatformMC platforms.MatchComparer
+	// Annotations are added to each generated OCI image manifest.
+	Annotations map[string]string
 }
 
 // Convert converts the image rooted at srcDesc (already present in cs) into a
@@ -75,7 +77,7 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		BuilderPath: opt.BuilderPath,
 		WorkDir:     opt.WorkDir,
 		LogLevel:    opt.LogLevel,
-	})
+	}, opt.Annotations)
 
 	indexConvertFn := converter.IndexConvertFuncWithHook(
 		layerFn,
