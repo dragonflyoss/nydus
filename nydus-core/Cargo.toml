@@ -10,6 +10,7 @@ readme = "README.md"
 
 [dependencies]
 crc32c = "0.6"
+lz4-sys = "1"
 zstd = "0.13"
 lz4_flex = "0.11"
 libc = { workspace = true }
@@ -19,7 +20,10 @@ nydus-config = { version = "3.0.0-beta.1", path = "../nydus-config" }
 nydus-error = { version = "3.0.0-beta.1", path = "../nydus-error" }
 nydus-format = { version = "3.0.0-beta.1", path = "../nydus-format" }
 nydus-storage = { version = "3.0.0-beta.1", path = "../nydus-storage" }
+sha2 = { workspace = true }
 tracing = { workspace = true }
+xattr = { workspace = true }
 
 [dev-dependencies]
+blake3 = "1"
 tempfile = { workspace = true }

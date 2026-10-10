@@ -5,14 +5,10 @@
 //! [`build_image`] is the high-level entry point that converts a
 //! directory tree into a nydus full blob.
 
-pub mod blob_chunk;
-pub mod bootstrap;
-pub mod dir;
-pub mod image;
-pub mod inode;
-pub mod layout;
 pub mod merge;
 pub mod tar;
+
+pub use nydus_core::build::{blob_metadata_sidecar_path, save_blob_metadata_sidecar};
 
 use std::collections::HashSet;
 use std::io::{self, BufWriter, Write};
@@ -20,14 +16,28 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use blob_chunk::{BlobLayout, BlobWriter};
-pub use blob_chunk::{DEFAULT_CHUNK_GROUP_MIN_SIZE, MAX_CHUNK_GROUP_MIN_SIZE};
-use bootstrap::render_bootstrap;
-use inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
+use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
+pub use nydus_core::build::blob_chunk::{DEFAULT_CHUNK_GROUP_MIN_SIZE, MAX_CHUNK_GROUP_MIN_SIZE};
+use nydus_core::build::bootstrap::render_bootstrap;
+use nydus_core::build::inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
+use nydus_core::build::{bootstrap, inode, HashingWriter};
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{ErofsDeviceSlot, ZAlgorithm, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
-use nydus_format::utils::sha256_bytes;
+#[cfg(test)]
+pub(crate) fn plain_blob_writer<W: Write>(writer: W, chunk_size: u32) -> BlobWriter<W> {
+    BlobWriter::new(
+        writer,
+        chunk_size,
+        BlobMetadataCompressor::None,
+        Some(BlobMetadataDigester::Blake3),
+        true,
+        BlobLayout::ChunkGroups {
+            chunk_group_min_size: (chunk_size / 2).max(EROFS_BLOCK_SIZE),
+        },
+    )
+    .expect("valid test blob writer")
+}
 
 /// Native EROFS output: the full blob's data region is the raw layer device
 /// the kernel reads at offset 0 (`device=` of a block-device mount), carries
@@ -580,65 +590,6 @@ fn finish_image<W: Write>(
         blob_footer: footer,
         standalone_bootstrap,
     })
-}
-
-/// Assemble an ondemand artifact `[chunk_group data][blob.meta][footer]` (no
-/// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
-pub(crate) fn assemble_ondemand_artifact(
-    data: &[u8],
-    blob_metadata: &BlobMetadata,
-) -> Result<(Vec<u8>, [u8; EROFS_BLOB_ID_SIZE], BlobFooter)> {
-    let mut artifact = Vec::with_capacity(
-        usize::try_from(data.len() as u64 + blob_metadata.size())
-            .map_err(|err| Error::Overflow(format!("artifact exceeds usize: {err}")))?
-            + BlobFooter::SIZE,
-    );
-    artifact.extend_from_slice(data);
-    let footer = nydus_format::blob::finish_full_blob(
-        &mut artifact,
-        data.len() as u64,
-        None,
-        Some(blob_metadata),
-    )?;
-
-    let digest = sha256_bytes(&artifact);
-    Ok((artifact, digest, footer))
-}
-
-/// A writer that hashes every byte it forwards to the inner writer, unless
-/// hashing was disabled by naming the blob explicitly.
-struct HashingWriter<W> {
-    inner: W,
-    hasher: Option<Sha256>,
-}
-
-impl<W: Write> HashingWriter<W> {
-    fn new(inner: W, hasher: Option<Sha256>) -> Self {
-        Self { inner, hasher }
-    }
-
-    fn finish(mut self) -> io::Result<Option<[u8; EROFS_BLOB_ID_SIZE]>> {
-        self.inner.flush()?;
-        Ok(self.hasher.map(|hasher| {
-            let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-            digest.copy_from_slice(&hasher.finalize());
-            digest
-        }))
-    }
-}
-
-impl<W: Write> Write for HashingWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let written = self.inner.write(buf)?;
-        if let Some(hasher) = self.hasher.as_mut() {
-            hasher.update(&buf[..written]);
-        }
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
 }
 
 #[cfg(test)]

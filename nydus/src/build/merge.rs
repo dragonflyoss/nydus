@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use crate::build::bootstrap::{
+use nydus_core::build::bootstrap::{
     fit_z_devices_past_bootstrap, place_z_device_slots, render_flattened_bootstrap,
     render_flattened_bootstrap_to, render_z_device_bootstrap, ZRelocation,
     FLATTENED_BLOB_ALIGNMENT,
 };
-use crate::build::inode::{
+use nydus_core::build::inode::{
     choose_epoch, flatten_tree, packed_inode, set_root_prefetch_blobs_xattr, InodeData,
     NamedChildren, NodeAttrs, TreeNode,
 };
@@ -1231,9 +1231,8 @@ mod tests {
 
     #[test]
     fn merge_and_optimize_reselect_epoch_and_reencode_parent_inodes() {
-        use crate::build::blob_chunk::BlobWriter;
-        use crate::build::bootstrap::render_bootstrap;
-        use crate::build::inode::{ChildRef, InodeInfo};
+        use nydus_core::build::bootstrap::render_bootstrap;
+        use nydus_core::build::inode::{ChildRef, InodeInfo};
         use nydus_format::blob::finish_full_blob;
         use nydus_format::erofs::{
             EROFS_INODE_COMPACT_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
@@ -1321,7 +1320,7 @@ mod tests {
             let parent = directory.path().join("parent");
             let parent_bytes = render_bootstrap(&mut inodes, 100, &slots, &[0; 16]).unwrap();
             fs::write(&parent, &parent_bytes).unwrap();
-            let blob_writer = BlobWriter::plain(Vec::new(), EROFS_BLOCK_SIZE);
+            let blob_writer = crate::build::plain_blob_writer(Vec::new(), EROFS_BLOCK_SIZE);
             let mut full_blob = Vec::new();
             finish_full_blob(
                 &mut full_blob,
@@ -1392,8 +1391,8 @@ mod tests {
 
     #[test]
     fn merge_accepts_full_blob_when_file_size_matches_primary_image() {
-        use crate::build::image::write_erofs_superblock_checksum;
         use crate::build::{build_image, BuildImageOptions};
+        use crc32c::crc32c_append;
         use nydus_format::blob::BlobMetadataCompressor;
         use std::collections::HashSet;
 
@@ -1432,7 +1431,14 @@ mod tests {
         let blob = loop {
             bootstrap[blocks_lo_offset..blocks_lo_offset + 4]
                 .copy_from_slice(&file_blocks.to_le_bytes());
-            write_erofs_superblock_checksum(&mut bootstrap).unwrap();
+            let checksum_offset = EROFS_SUPER_OFFSET as usize + 4;
+            bootstrap[checksum_offset..checksum_offset + 4].fill(0);
+            let checksum = !crc32c_append(
+                0u32,
+                &bootstrap[EROFS_SUPER_OFFSET as usize..EROFS_BLOCK_SIZE as usize],
+            );
+            bootstrap[checksum_offset..checksum_offset + 4]
+                .copy_from_slice(&checksum.to_le_bytes());
 
             let mut rebuilt = original_blob[..data_size].to_vec();
             nydus_format::blob::finish_full_blob(
@@ -1743,9 +1749,8 @@ mod tests {
     /// prefetch xattr aside, which is stamped on after flattening).
     #[test]
     fn build_and_single_layer_merge_produce_identical_inodes() {
-        use crate::build::blob_chunk::BlobWriter;
-        use crate::build::inode::build_tree;
         use crate::build::{build_image, BuildImageOptions};
+        use nydus_core::build::inode::build_tree;
         use nydus_format::blob::BlobMetadataCompressor;
         use nydus_format::utils::hex_string;
         use std::collections::HashSet;
@@ -1790,11 +1795,13 @@ mod tests {
         // Path A: build the tree straight from the host directory.
         let excludes = HashSet::new();
         let scratch_blob = dir.path().join("scratch.blob");
-        let mut blob_writer =
-            BlobWriter::plain(fs::File::create(&scratch_blob).unwrap(), EROFS_BLOCK_SIZE);
+        let mut blob_writer = crate::build::plain_blob_writer(
+            fs::File::create(&scratch_blob).unwrap(),
+            EROFS_BLOCK_SIZE,
+        );
         let mut built = build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &excludes).unwrap();
         blob_writer.finish().unwrap();
-        crate::build::inode::resolve_chunk_addrs(&mut built, &blob_writer).unwrap();
+        nydus_core::build::inode::resolve_chunk_addrs(&mut built, &blob_writer).unwrap();
 
         // Path B: build the same tree into a full blob, then load it back as
         // a single merge layer and flatten it.
@@ -1808,7 +1815,7 @@ mod tests {
                 false,
             )
             .unwrap()
-            // The same pack geometry `BlobWriter::plain` picks for path A.
+            // The same pack geometry `plain_blob_writer` picks for path A.
             .with_chunk_group_min_size(EROFS_BLOCK_SIZE)
             .unwrap(),
             fs::File::create(&blob_path).unwrap(),

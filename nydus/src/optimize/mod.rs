@@ -18,7 +18,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::build::assemble_ondemand_artifact;
 use crate::build::merge::rewrite_bootstrap_with_ondemand_blob;
 use crate::parse_unix_address;
 use nydus_backend::{BlobBackend, ReadContext, ReadKind};
@@ -30,12 +29,36 @@ use nydus_format::blob::{
     BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
+use nydus_format::utils::sha256_bytes;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
 use nydus_storage::cache::{decode_chunk_group_from_window, LocalBlobCache};
 
 /// Longest contiguous run of source chunk groups fetched in one backend
 /// read while copying them into the ondemand blob.
 const COPY_READ_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Assemble an ondemand artifact `[group data][blob.meta][footer]` without
+/// an embedded bootstrap.
+fn assemble_ondemand_artifact(
+    data: &[u8],
+    blob_metadata: &BlobMetadata,
+) -> Result<(Vec<u8>, [u8; EROFS_BLOB_ID_SIZE], BlobFooter)> {
+    let mut artifact = Vec::with_capacity(
+        usize::try_from(data.len() as u64 + blob_metadata.size())
+            .map_err(|err| Error::Overflow(format!("artifact exceeds usize: {err}")))?
+            + BlobFooter::SIZE,
+    );
+    artifact.extend_from_slice(data);
+    let footer = nydus_format::blob::finish_full_blob(
+        &mut artifact,
+        data.len() as u64,
+        None,
+        Some(blob_metadata),
+    )?;
+
+    let digest = sha256_bytes(&artifact);
+    Ok((artifact, digest, footer))
+}
 
 /// The result of [`build_ondemand_blob`]: the assembled ondemand artifact and
 /// the rewritten bootstrap, ready to be written out by the caller.

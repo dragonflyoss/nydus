@@ -7,11 +7,13 @@
 //! consumed the tree is flattened through the same [`flatten_tree`] pass as
 //! the directory builder, so both sources render identical bootstraps.
 
-use crate::build::blob_chunk::{BlobWriter, ZFileRef};
-use crate::build::inode::{flatten_tree, InodeData, InodeInfo, NamedChildren, NodeAttrs, TreeNode};
 use base64::engine::{general_purpose::GeneralPurposeConfig, DecodePaddingMode, GeneralPurpose};
 use base64::Engine;
 use flate2::read::MultiGzDecoder;
+use nydus_core::build::blob_chunk::{BlobWriter, ZFileRef};
+use nydus_core::build::inode::{
+    flatten_tree, InodeData, InodeInfo, NamedChildren, NodeAttrs, TreeNode,
+};
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
     erofs_xattr_name_split, ErofsChunkAddr, XattrEntry, EROFS_XATTR_INDEX_SECURITY,
@@ -786,7 +788,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("layer.tar");
         std::fs::write(&path, tar_bytes).unwrap();
-        let mut blob_writer = BlobWriter::plain(Vec::new(), EROFS_BLOCK_SIZE);
+        let mut blob_writer = crate::build::plain_blob_writer(Vec::new(), EROFS_BLOCK_SIZE);
         build_tar_layer_tree(&path, &mut blob_writer, EROFS_BLOCK_SIZE)
     }
 

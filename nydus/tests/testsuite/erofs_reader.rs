@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use tempfile::{tempdir, NamedTempFile, TempDir};
 
-use nydus::build::blob_chunk::{BlobLayout, BlobWriter};
-use nydus::build::bootstrap::render_bootstrap;
-use nydus::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeData, InodeInfo};
 use nydus::build::{build_image, BuildImageOptions, NativeLayout};
 use nydus_backend::{BlobBackend, Local, ReadContext};
+use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
+use nydus_core::build::bootstrap::render_bootstrap;
+use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeData, InodeInfo};
 use nydus_core::ErofsReader;
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{

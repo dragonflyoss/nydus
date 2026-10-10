@@ -1233,6 +1233,9 @@ impl BlobMetadataWriter {
     }
 }
 
+/// The blob stores incremental upper data without an embedded bootstrap.
+const NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL: u32 = 1 << 0;
+
 /// The header every blob meta starts with, sealed with a crc32c over the
 /// whole serialized metadata. It holds only what concerns the whole file,
 /// each table's parameters living in that table's own header extension.
@@ -1274,7 +1277,7 @@ impl BlobMetadataHeader {
     /// Every incompat bit this reader understands, none so far. A file
     /// setting a bit outside this mask was written by a newer nydus and is
     /// rejected by [`FeatureFlags::validate_incompat`].
-    const INCOMPAT_SUPPORTED: u32 = 0;
+    const INCOMPAT_SUPPORTED: u32 = NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL;
 
     /// The `feature_compat` word a writer declares, no compat feature yet.
     pub const DEFAULT_FEATURE_COMPAT: u32 = 0;
@@ -1567,6 +1570,38 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
+    /// Create metadata for incremental upper data without an embedded
+    /// bootstrap. Incremental and redirect metadata are mutually exclusive.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_incremental(
+        max_blocks_per_chunk_group: u32,
+        blocks_per_chunk_group_index: u32,
+        compressor: BlobMetadataCompressor,
+        digester: Option<BlobMetadataDigester>,
+        chunk_groups: Vec<BlobMetadataChunkGroup>,
+        chunk_lengths: Vec<BlobMetadataChunkLength>,
+        chunk_group_digests: Vec<BlobMetadataChunkGroupDigest>,
+    ) -> Result<Self> {
+        let mut metadata = Self::new(
+            max_blocks_per_chunk_group,
+            blocks_per_chunk_group_index,
+            compressor,
+            digester,
+            chunk_groups,
+            chunk_lengths,
+            chunk_group_digests,
+            Vec::new(),
+        )?;
+        metadata.header = BlobMetadataHeader::new(
+            BlobMetadataHeader::DEFAULT_FEATURE_COMPAT,
+            NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL,
+            metadata.header.table_count,
+            &metadata.bytes[BlobMetadataHeader::SIZE..],
+        );
+        write_bytes_at(&mut metadata.bytes, 0, &metadata.header.to_bytes());
+        Ok(metadata)
+    }
+
     /// Parse a blob meta from its bytes, which it keeps. The header, the table
     /// walk, the supported tables and their header extensions, then
     /// `validate_fields`.
@@ -1688,6 +1723,12 @@ impl BlobMetadata {
     /// call for. Runs on both sides, so a constructed blob meta is valid by
     /// definition.
     fn validate_fields(&self) -> Result<()> {
+        if self.is_incremental() && self.is_redirect() {
+            return Err(Error::InvalidImage(
+                "blob metadata cannot be both redirect and incremental".to_string(),
+            ));
+        }
+
         if self.max_blocks_per_chunk_group > Self::MAX_BLOCKS_PER_CHUNK_GROUP {
             return Err(Error::InvalidImage(format!(
                 "blob meta max blocks per chunk group {} exceeds {}",
@@ -1954,6 +1995,12 @@ impl BlobMetadata {
     /// blobs named in ChunkGroupRedirectTable.
     pub fn is_redirect(&self) -> bool {
         self.chunk_group_redirects.is_some()
+    }
+
+    /// Whether this metadata belongs to an incremental upper data blob that
+    /// has no embedded bootstrap and must be used with its child bootstrap.
+    pub fn is_incremental(&self) -> bool {
+        self.header.feature_incompat & NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL != 0
     }
 }
 
@@ -2428,8 +2475,8 @@ mod tests {
             (8, (1u32 << 31).to_le_bytes().to_vec(), Ok(())),
             (
                 12,
-                1u32.to_le_bytes().to_vec(),
-                Err("unsupported incompat flags 0x1 (image is newer than this reader)"),
+                2u32.to_le_bytes().to_vec(),
+                Err("unsupported incompat flags 0x2 (image is newer than this reader)"),
             ),
             (
                 20,
