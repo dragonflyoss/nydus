@@ -15,7 +15,8 @@ required-features = ["cli"]
 [features]
 default = ["backend-registry"]
 # FUSE mount support (ErofsFs over fuser).
-fuse = ["dep:fuser", "dep:signal-hook", "dep:uuid"]
+fuse = ["api-server", "dep:fuser", "dep:signal-hook", "dep:uuid"]
+api-server = ["dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:tokio"]
 # The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
 cli = [
   "fuse",
@@ -23,9 +24,6 @@ cli = [
   "dep:anstyle",
   "dep:bytesize",
   "dep:clap",
-  "dep:http-body-util",
-  "dep:hyper",
-  "dep:hyper-util",
   "dep:signal-hook",
   "dep:tabled",
   "dep:tokio",
@@ -98,6 +96,7 @@ tokio = { workspace = true, features = [
   "rt",
   "rt-multi-thread",
   "sync",
+  "time",
 ], optional = true }
 tracing = { workspace = true }
 uuid = { version = "1", features = ["serde", "v4"], optional = true }
