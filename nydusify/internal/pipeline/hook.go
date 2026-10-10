@@ -24,7 +24,7 @@ import (
 // ConvertHookFunc returns a converter.ConvertHookFunc invoked after each blob
 // is converted. It hooks index and manifest conversion to merge the per-layer
 // nydus blobs into a single bootstrap layer.
-func ConvertHookFunc(opt nydus.MergeOption) converter.ConvertHookFunc {
+func ConvertHookFunc(opt nydus.MergeOption, manifestAnnotations map[string]string) converter.ConvertHookFunc {
 	return func(ctx context.Context, cs content.Store, orgDesc ocispec.Descriptor, newDesc *ocispec.Descriptor) (*ocispec.Descriptor, error) {
 		// No conversion happened for this blob: return nil so the parent does
 		// not consider it modified. Returning a non-nil descriptor here would
@@ -32,17 +32,50 @@ func ConvertHookFunc(opt nydus.MergeOption) converter.ConvertHookFunc {
 		// converted, causing their parent manifests to be rewritten and then
 		// mistakenly merged as nydus manifests.
 		if newDesc == nil {
+			if images.IsManifestType(orgDesc.MediaType) {
+				return rewriteNydusManifestAnnotations(ctx, cs, orgDesc, manifestAnnotations)
+			}
 			return nil, nil
 		}
 		switch {
 		case images.IsIndexType(newDesc.MediaType):
 			return convertIndex(ctx, cs, newDesc)
 		case images.IsManifestType(newDesc.MediaType):
-			return convertManifest(ctx, cs, newDesc, opt)
+			return convertManifest(ctx, cs, newDesc, opt, manifestAnnotations)
 		default:
 			return newDesc, nil
 		}
 	}
+}
+
+// rewriteNydusManifestAnnotations rewrites an already-complete nydus manifest
+// only when annotations were requested. Returning nil leaves ordinary OCI and
+// attestation manifests untouched by the converter.
+func rewriteNydusManifestAnnotations(ctx context.Context, cs content.Store, desc ocispec.Descriptor, annotations map[string]string) (*ocispec.Descriptor, error) {
+	if len(annotations) == 0 {
+		return nil, nil
+	}
+
+	var manifest ocispec.Manifest
+	if err := oci.ReadJSON(ctx, cs, desc, &manifest); err != nil {
+		return nil, errors.Wrap(err, "read manifest json")
+	}
+	_, bootstrap, _, err := nydus.SplitLayers(manifest.Layers)
+	if err != nil || bootstrap == nil {
+		return nil, nil
+	}
+
+	labels, err := oci.Labels(ctx, cs, desc.Digest)
+	if err != nil {
+		return nil, err
+	}
+	applyManifestAnnotations(&manifest, annotations)
+	newDesc, err := oci.WriteJSON(ctx, cs, manifest, desc, labels)
+	if err != nil {
+		return nil, errors.Wrap(err, "write manifest")
+	}
+	newDesc.Platform = desc.Platform
+	return newDesc, nil
 }
 
 // convertIndex collapses a converted manifest list to a single manifest when it
@@ -60,7 +93,7 @@ func convertIndex(ctx context.Context, cs content.Store, newDesc *ocispec.Descri
 
 // convertManifest merges all nydus blob layers in the manifest into a single
 // nydus bootstrap layer, rewrites the image config, and rewrites the manifest.
-func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Descriptor, opt nydus.MergeOption) (*ocispec.Descriptor, error) {
+func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Descriptor, opt nydus.MergeOption, manifestAnnotations map[string]string) (*ocispec.Descriptor, error) {
 	var manifest ocispec.Manifest
 	manifestLabels, err := oci.Labels(ctx, cs, newDesc.Digest)
 	if err != nil {
@@ -75,6 +108,16 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	// in-toto JSON layers, or already-merged nydus manifests) is passed
 	// through unchanged.
 	if !isMergeableBlobManifest(manifest) {
+		_, bootstrap, _, splitErr := nydus.SplitLayers(manifest.Layers)
+		if splitErr == nil && bootstrap != nil && len(manifestAnnotations) > 0 {
+			applyManifestAnnotations(&manifest, manifestAnnotations)
+			rewritten, err := oci.WriteJSON(ctx, cs, manifest, *newDesc, manifestLabels)
+			if err != nil {
+				return nil, errors.Wrap(err, "write manifest")
+			}
+			rewritten.Platform = newDesc.Platform
+			return rewritten, nil
+		}
 		return newDesc, nil
 	}
 
@@ -122,6 +165,7 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	newConfigDesc.MediaType = ocispec.MediaTypeImageConfig
 	manifest.Config = *newConfigDesc
 	manifest.Layers = layers
+	applyManifestAnnotations(&manifest, manifestAnnotations)
 	manifestLabels["containerd.io/gc.ref.content.config"] = newConfigDesc.Digest.String()
 
 	newManifestDesc, err := oci.WriteJSON(ctx, cs, manifest, *newDesc, manifestLabels)
