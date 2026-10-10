@@ -1,6 +1,4 @@
-//! Signal lifecycle shared by the uffd/nbd/ublk/fanotify daemons: the
-//! termination-signal registration done first in every daemon's startup
-//! preamble, and the signal thread that drives the graceful shutdown.
+//! Termination-signal registration and graceful-shutdown threads for frontends.
 
 use nydus_error::{Context, Error, Result};
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
@@ -59,7 +57,7 @@ impl SignalThread {
     }
 }
 
-/// Spawn the signal thread shared by the uffd/nbd/ublk/fanotify daemons: the
+/// Spawn the signal thread shared by the frontends: the
 /// first termination signal is logged and runs `on_first` (the daemon's
 /// graceful shutdown). A second signal while the graceful shutdown is in
 /// progress forces an immediate exit straight from the signal handler — see

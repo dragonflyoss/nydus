@@ -1,7 +1,9 @@
 use clap::Parser;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::error::{Context, Error, Result};
-use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
+use nydus::fuse::upgrade::Startup;
+use nydus::fuse::ErofsFs;
+use nydus::signal;
 use nydus_backend::{build_backend_with_metrics, metered_with_metrics, BlobBackend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_retry_delay_max,
@@ -12,10 +14,11 @@ use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
 use nydus_telemetry::metrics::ImageMetrics;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{error, info, warn, Level};
+use tracing::{info, warn, Level};
 
-use super::*;
+use super::{default_log_dir, default_parallelism, NAME};
 
 /// The subcommand of fuse.
 #[derive(Debug, Clone, Parser)]
@@ -91,7 +94,7 @@ pub struct FuseCommand {
     #[arg(
         long,
         env = "NYDUS_FUSE_APISERVER",
-        help = "Specify the address to serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics`"
+        help = "Optionally serve metrics and live FUSE upgrade control on this Unix socket, e.g. `unix:///run/nydus/api.sock`. Without it no API listener or direct hot upgrade is enabled"
     )]
     apiserver: Option<String>,
 
@@ -141,9 +144,23 @@ impl FuseCommand {
     /// Executes the fuse sub command, mounting the nydus image through FUSE
     /// and serving it until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
-        // Block termination signals before starting any helper threads so later
-        // sigwait-based handling is the only path that consumes them.
-        let _blocked_signals = TermSignalMask::block()?;
+        let signals = signal::register_termination_signals()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = shutdown.clone();
+        let signal_thread = signal::spawn_signal_thread("fuse", signals, move || {
+            stop.store(true, Ordering::Relaxed);
+        })?;
+        let result = self.run(shutdown);
+        signal_thread.shutdown()?;
+        result
+    }
+
+    fn run(&self, shutdown: Arc<AtomicBool>) -> Result<()> {
+        let api_socket = self
+            .apiserver
+            .as_deref()
+            .map(nydus::parse_unix_address)
+            .transpose()?;
 
         // Initialize tracing.
         let _guards = init_tracing(
@@ -153,9 +170,6 @@ impl FuseCommand {
             self.log_max_files,
             self.console,
         );
-
-        // Validates the mountpoint before any expensive work.
-        self.validate()?;
 
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-dir/--cache-dir override the backend/cache directories.
@@ -168,27 +182,6 @@ impl FuseCommand {
             nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
         }
 
-        // Runs the FUSE service until shutdown.
-        self.run(storage_config)
-    }
-
-    /// Validates that the mountpoint is an existing directory.
-    fn validate(&self) -> Result<()> {
-        if !self.mountpoint.is_dir() {
-            return Err(Error::InvalidParameter(format!(
-                "mountpoint {} is not a directory",
-                self.mountpoint.display()
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Runs the FUSE service: resolves the cache, prefetch, and backend
-    /// settings, opens the EROFS image, mounts it, and serves until a
-    /// termination signal stops it.
-    fn run(&self, storage_config: Option<Config>) -> Result<()> {
-        let mountpoint = &self.mountpoint;
         let metrics = Arc::new(ImageMetrics::new());
 
         let cache_dir = if let Some(dir) = self.cache_dir.clone() {
@@ -309,8 +302,13 @@ impl FuseCommand {
         ];
         config.n_threads = Some(self.threads);
         config.clone_fd = true;
-
-        let session = FuseService::mount(fs, mountpoint, &config)?;
+        let startup = Startup::new(
+            &self.mountpoint,
+            api_socket,
+            &reader.image_digest(),
+            metrics.clone(),
+        )?;
+        let session = startup.start(fs, &config, shutdown)?;
 
         let mut prefetch_stop = None;
         if prefetch_scope == PrefetchScope::None {
@@ -340,20 +338,7 @@ impl FuseCommand {
             }
         }
 
-        // Optionally expose Prometheus metrics over a Unix socket. A failure here is
-        // non-fatal: the mount keeps serving without metrics.
-        let api_server = match self.apiserver.as_deref() {
-            Some(address) => match api_server::ApiServer::start(address, metrics.clone()) {
-                Ok(server) => Some(server),
-                Err(err) => {
-                    warn!("failed to start metrics apiserver: {}", err.report());
-                    None
-                }
-            },
-            None => None,
-        };
-
-        let join_result = session.serve()?;
+        let result = session.serve();
 
         // The filesystem is unmounted: wind down the detached prefetch thread
         // (it may be sleeping towards a rescheduled throttled-blob retry).
@@ -361,18 +346,6 @@ impl FuseCommand {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Tear down the metrics server before reporting the mount result.
-        if let Some(server) = api_server {
-            server.stop();
-        }
-
-        match &join_result {
-            Ok(()) => {}
-            Err(err) => error!("background fuse session join returned error: {:?}", err),
-        }
-
-        join_result.context("failed to join fuse session thread")?;
-
-        Ok(())
+        result
     }
 }
