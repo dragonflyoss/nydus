@@ -10,7 +10,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.35"
-base64 = "0.21"
+base64 = "0.22"
 hex = "0.4.3"
 indexmap = "2"
 libc = "0.2"

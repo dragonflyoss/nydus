@@ -10,7 +10,7 @@ edition = "2021"
 
 [dependencies]
 arc-swap = "1.5"
-base64 = { version = "0.21", optional = true }
+base64 = { version = "0.22", optional = true }
 bitflags = "1.2.1"
 hex = "0.4.3"
 hmac = { version = "0.12.1", optional = true }
