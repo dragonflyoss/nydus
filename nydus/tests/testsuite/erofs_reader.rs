@@ -437,6 +437,22 @@ fn z_reader_validates_tail_fragments_and_packed_recursion() {
 
 #[test]
 fn z_compr_cfgs_reads_exact_embedded_offsets() {
+    let metadata = BlobMetadata::new(
+        1,
+        1,
+        BlobMetadataCompressor::None,
+        None,
+        vec![nydus_format::blob::BlobMetadataChunkGroup::new(
+            0, 0, 0, 0, 0,
+        )],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let mut metadata_bytes = Vec::new();
+    metadata.write_to(&mut metadata_bytes).unwrap();
+
     for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
         let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
         let config = match algorithm {
@@ -468,13 +484,13 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
                     region.len() as u64,
                     crc32c::crc32c(&region),
                     (offset + region.len()) as u64,
-                    4096,
+                    metadata_bytes.len() as u64,
                     compressed_size,
                 )
                 .unwrap();
                 let mut blob = vec![0u8; offset];
                 blob.extend_from_slice(&region);
-                blob.resize(blob.len() + 4096, 0);
+                blob.extend_from_slice(&metadata_bytes);
                 footer.write_to(&mut blob).unwrap();
                 let path = dir.path().join(format!("embedded-{offset}-{compressed}"));
                 fs::write(&path, &blob).unwrap();
@@ -498,6 +514,58 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
                     reader.z_compr_cfgs().unwrap_err().kind(),
                     io::ErrorKind::InvalidData
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn z_compr_cfgs_reads_raw_device_embedded_offsets() {
+    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+        let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
+        let config = match algorithm {
+            ZAlgorithm::Lz4 => ZComprCfgs {
+                lz4_max_pclusterblks: Some(7),
+                zstd_windowlog: None,
+            },
+            ZAlgorithm::Zstd => ZComprCfgs {
+                lz4_max_pclusterblks: None,
+                zstd_windowlog: Some(20),
+            },
+        };
+        let config_offset = EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE;
+        let config_bytes = config.to_bytes();
+        bootstrap[config_offset..config_offset + config_bytes.len()].copy_from_slice(&config_bytes);
+
+        for offset in [0, 4096, 12288] {
+            for compressed in [false, true] {
+                let mut region = if compressed {
+                    zstd::stream::encode_all(bootstrap.as_slice(), 1).unwrap()
+                } else {
+                    bootstrap.clone()
+                };
+                let compressed_size = compressed.then_some(region.len() as u64);
+                region.resize(region.len().div_ceil(4096) * 4096, 0);
+                let footer = BlobFooter::new(
+                    0,
+                    offset as u64,
+                    offset as u64,
+                    region.len() as u64,
+                    crc32c::crc32c(&region),
+                    (offset + region.len()) as u64,
+                    0,
+                    compressed_size,
+                )
+                .unwrap();
+                let mut blob = vec![0u8; offset];
+                blob.extend_from_slice(&region);
+                footer.write_to(&mut blob).unwrap();
+                let path = dir
+                    .path()
+                    .join(format!("raw-embedded-{offset}-{compressed}"));
+                fs::write(&path, blob).unwrap();
+                let reader = ErofsReader::open_metadata_only(&path).unwrap();
+                assert_eq!(reader.z_compr_cfgs().unwrap(), Some(config));
             }
         }
     }
