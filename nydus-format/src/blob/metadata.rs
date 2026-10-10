@@ -1602,6 +1602,27 @@ impl BlobMetadata {
         Ok(metadata)
     }
 
+    /// Inspect data-only artifact features without allocating or decoding
+    /// metadata tables. Returns `(incremental, redirect)`.
+    pub fn artifact_features_from_bytes(bytes: &[u8]) -> Result<(bool, bool)> {
+        let header = BlobMetadataHeader::from_bytes(bytes)?;
+        let mut end = BlobMetadataHeader::SIZE;
+        let mut redirect = false;
+        for _ in 0..header.table_count {
+            let table = BlobMetadataTable::from_bytes(bytes, end)?;
+            redirect |= table.table_type() == BlobMetadataTableType::CHUNK_GROUP_REDIRECT;
+            end = table.range().end;
+        }
+        let incremental = header.feature_incompat & NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL != 0;
+        if incremental && redirect {
+            return Err(Error::InvalidImage(
+                "blob metadata cannot be both redirect and incremental".to_string(),
+            ));
+        }
+
+        Ok((incremental, redirect))
+    }
+
     /// Parse a blob meta from its bytes, which it keeps. The header, the table
     /// walk, the supported tables and their header extensions, then
     /// `validate_fields`.

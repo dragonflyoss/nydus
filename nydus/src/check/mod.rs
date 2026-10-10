@@ -158,6 +158,8 @@ pub struct BlobMetadataSummary {
     pub bytes_per_chunk_group_index: u32,
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
+    pub is_redirect: bool,
+    pub is_incremental: bool,
     pub total_compressed_size: u64,
     /// Bytes the chunk groups decode to: the padded size minus the tail
     /// padding the encoding leaves out.
@@ -673,6 +675,8 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.logical_size(),
         total_compressed_size: blob_metadata.compressed_size(),
+        is_redirect: blob_metadata.is_redirect(),
+        is_incremental: blob_metadata.is_incremental(),
         total_payload_size: blob_metadata.uncompressed_size(),
         chunk_count: blob_metadata.chunk_count(),
         digester: match blob_metadata.digester() {
@@ -691,7 +695,9 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::BlobMetadataChunkGroup;
+    use nydus_format::blob::{
+        BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -761,19 +767,100 @@ mod tests {
         assert!(!resolved.contains_key(&2));
     }
 
+    #[test]
+    fn resolve_blobs_reports_incremental_blob_metadata_flag() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("incremental-blob");
+        let (full_blob_digest, _) = write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
+        let blob_info = RawBlobInfo {
+            blob_index: 1,
+            blob_id: full_blob_digest,
+            blocks: 1,
+            mapped_blkaddr: 0,
+        };
+        let resolved = resolve_blobs(
+            ImageKind::Bootstrap,
+            Path::new("bootstrap.boot"),
+            Some(dir.path()),
+            &[blob_info],
+        )
+        .unwrap();
+        let metadata = resolved.get(&1).unwrap().blob_metadata.as_ref().unwrap();
+        assert!(metadata.is_incremental);
+        assert!(!metadata.is_redirect);
+    }
+
+    #[test]
+    fn reader_rejects_data_only_blobs_as_standalone() {
+        for (kind, expected) in [
+            (BlobKind::Incremental, "incremental blob"),
+            (BlobKind::Redirect, "redirect blob"),
+        ] {
+            let dir = tempdir().unwrap();
+            let blob_path = dir.path().join("data-only-blob");
+            write_minimal_blob_with_kind(&blob_path, kind);
+            let err = ErofsReader::open_blob(&blob_path, None)
+                .err()
+                .expect("data-only blob must be rejected");
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
     fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
+        write_minimal_blob_with_kind(path, BlobKind::Full)
+    }
+
+    #[derive(Clone, Copy)]
+    enum BlobKind {
+        Full,
+        Incremental,
+        Redirect,
+    }
+
+    fn write_minimal_blob_with_kind(
+        path: &Path,
+        kind: BlobKind,
+    ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let data_digest = sha256_bytes(&data);
-        let blob_metadata = BlobMetadata::new(
-            BlobMetadata::DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE,
-            1,
-            BlobMetadataCompressor::None,
-            None,
-            vec![BlobMetadataChunkGroup::new(0, 0, 0, 0, 0)],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+        let groups = || {
+            vec![
+                BlobMetadataChunkGroup::new(0, 0, 0, data.len() as u32, crc32c::crc32c(&data)),
+                BlobMetadataChunkGroup::new(data.len() as u64, 1, 1, 0, 0),
+            ]
+        };
+        let lengths = || vec![BlobMetadataChunkLength::new(data.len() as u32)];
+        let blob_metadata = match kind {
+            BlobKind::Full => BlobMetadata::new(
+                1,
+                1,
+                BlobMetadataCompressor::None,
+                None,
+                groups(),
+                lengths(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            BlobKind::Incremental => BlobMetadata::new_incremental(
+                1,
+                1,
+                BlobMetadataCompressor::None,
+                None,
+                groups(),
+                lengths(),
+                Vec::new(),
+            ),
+            BlobKind::Redirect => BlobMetadata::new(
+                1,
+                1,
+                BlobMetadataCompressor::None,
+                None,
+                groups(),
+                lengths(),
+                Vec::new(),
+                vec![BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()],
+            ),
+        }
         .unwrap();
         let mut blob_metadata_bytes = Vec::new();
         blob_metadata.write_to(&mut blob_metadata_bytes).unwrap();
