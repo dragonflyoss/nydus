@@ -10,16 +10,44 @@ use nydus_format::erofs::{
 };
 use nydus_format::utils::write_zeros;
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
+
+pub(crate) fn validate_chunk_size(chunk_size: u32) -> Result<()> {
+    if chunk_size < EROFS_BLOCK_SIZE {
+        return Err(Error::InvalidParameter(format!(
+            "chunk size {chunk_size} must be >= block size {EROFS_BLOCK_SIZE}"
+        )));
+    }
+    if !chunk_size.is_power_of_two() {
+        return Err(Error::InvalidParameter(format!(
+            "chunk size {chunk_size} must be a power of two"
+        )));
+    }
+    if chunk_size % EROFS_BLOCK_SIZE != 0 {
+        return Err(Error::InvalidParameter(format!(
+            "chunk size {chunk_size} must be block aligned"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_chunk_group_min_size(chunk_group_min_size: u32) -> Result<()> {
+    if !chunk_group_min_size.is_power_of_two()
+        || !(EROFS_BLOCK_SIZE..=MAX_CHUNK_GROUP_MIN_SIZE).contains(&chunk_group_min_size)
+    {
+        return Err(Error::InvalidParameter(format!(
+            "chunk group minimum size {chunk_group_min_size} must be a power of two between {EROFS_BLOCK_SIZE} and {MAX_CHUNK_GROUP_MIN_SIZE} bytes"
+        )));
+    }
+    Ok(())
+}
 
 /// Manages writing chunk data to a separate blob device. Every file is cut
 /// into chunks of at most the chunk size, and the chunk groups tile the
@@ -210,24 +238,26 @@ fn z_map_header(algorithm: ZAlgorithm) -> Vec<u8> {
 /// committed. Handles are cheap to clone (hardlinks share one) and resolve
 /// only after [`BlobWriter::finish`]; the tree keeps them until then.
 #[derive(Clone)]
-pub struct ZFileRef(Rc<RefCell<Option<ZFileMeta>>>);
+pub struct ZFileRef(Arc<OnceLock<ZFileMeta>>);
 
 impl ZFileRef {
     fn pending() -> Self {
-        Self(Rc::new(RefCell::new(None)))
+        Self(Arc::new(OnceLock::new()))
     }
 
     fn ready(meta: ZFileMeta) -> Self {
-        Self(Rc::new(RefCell::new(Some(meta))))
+        Self(Arc::new(OnceLock::from(meta)))
     }
 
-    fn set(&self, meta: ZFileMeta) {
-        *self.0.borrow_mut() = Some(meta);
+    fn set(&self, meta: ZFileMeta) -> Result<()> {
+        self.0
+            .set(meta)
+            .map_err(|_| Error::Runtime("z_erofs file metadata published twice".to_string()))
     }
 
     /// The published metadata; an error while the file is still in flight.
-    pub fn resolve(&self) -> Result<ZFileMeta> {
-        self.0.borrow().clone().ok_or_else(|| {
+    pub(crate) fn resolve(&self) -> Result<ZFileMeta> {
+        self.0.get().cloned().ok_or_else(|| {
             Error::Runtime("z_erofs file metadata read before the blob was finished".to_string())
         })
     }
@@ -930,15 +960,7 @@ impl<W: Write> BlobWriter<W> {
         hash_data: bool,
         layout: BlobLayout,
     ) -> Result<Self> {
-        if chunk_size < EROFS_BLOCK_SIZE
-            || !chunk_size.is_power_of_two()
-            || chunk_size % EROFS_BLOCK_SIZE != 0
-        {
-            return Err(Error::InvalidParameter(
-                "blob writer chunk size must be a block-aligned power of two of at least one block"
-                    .to_string(),
-            ));
-        }
+        validate_chunk_size(chunk_size)?;
         let alignment = |alignment: u32| -> Result<u32> {
             if alignment != 0 && (!alignment.is_power_of_two() || alignment % EROFS_BLOCK_SIZE != 0)
             {
@@ -984,14 +1006,7 @@ impl<W: Write> BlobWriter<W> {
             BlobLayout::ChunkGroups {
                 chunk_group_min_size,
             } => {
-                if !chunk_group_min_size.is_power_of_two()
-                    || !(EROFS_BLOCK_SIZE..=MAX_CHUNK_GROUP_MIN_SIZE)
-                        .contains(&chunk_group_min_size)
-                {
-                    return Err(Error::InvalidParameter(format!(
-                        "chunk group minimum size {chunk_group_min_size} must be a power of two between {EROFS_BLOCK_SIZE} and {MAX_CHUNK_GROUP_MIN_SIZE} bytes"
-                    )));
-                }
+                validate_chunk_group_min_size(chunk_group_min_size)?;
                 writer.chunk_group_min_size = chunk_group_min_size;
                 writer.pack_min_blocks = u64::from(chunk_group_min_size / EROFS_BLOCK_SIZE);
                 writer.pack_target_blocks = writer.pack_min_blocks * PACK_TARGET_MULTIPLE;
@@ -1171,7 +1186,7 @@ impl<W: Write> BlobWriter<W> {
         let handle = ZFileRef::pending();
         if file_size == 0 {
             let meta = ZAccum::new(self.z_algorithm, handle.clone()).into_meta()?;
-            handle.set(meta);
+            handle.set(meta)?;
             return Ok(handle);
         }
         // Aligned placement (dedup phase): the committer pads the compressed
@@ -1307,7 +1322,7 @@ impl<W: Write> BlobWriter<W> {
         if placement.at_eof && placement.target == ZTarget::File {
             let accum = self.z_open_files.pop_front().expect("checked above");
             let handle = accum.handle.clone();
-            handle.set(accum.into_meta()?);
+            handle.set(accum.into_meta()?)?;
         }
         let src = mem::take(&mut segment.src);
         self.z_pipeline().recycle_buffer(src);
@@ -1322,6 +1337,10 @@ impl<W: Write> BlobWriter<W> {
         self.next_compressed_offset
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.placements.is_empty()
+    }
+
     pub fn data_digest(&self) -> Option<[u8; EROFS_BLOB_ID_SIZE]> {
         let hasher = self.data_hasher.as_ref()?;
         let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
@@ -1334,12 +1353,14 @@ impl<W: Write> BlobWriter<W> {
     }
 
     /// Lengths of all sealed chunks in group order, including lone chunks.
-    pub fn blob_metadata_chunk_lengths(&self) -> &[u32] {
+    #[cfg(test)]
+    fn blob_metadata_chunk_lengths(&self) -> &[u32] {
         &self.members
     }
 
     /// The sealed groups so far, in group order.
-    pub fn blob_metadata_chunk_groups(&self) -> &[BlobMetadataChunkGroup] {
+    #[cfg(test)]
+    fn blob_metadata_chunk_groups(&self) -> &[BlobMetadataChunkGroup] {
         &self.blob_metadata_chunk_groups
     }
 
@@ -1385,7 +1406,39 @@ impl<W: Write> BlobWriter<W> {
         )?)
     }
 
-    pub fn write_blob_metadata(&mut self, path: &Path) -> Result<()> {
+    pub(crate) fn incremental_blob_metadata(&self) -> Result<BlobMetadata> {
+        if self.raw_device {
+            return Err(Error::InvalidParameter(
+                "a raw device blob carries no blob meta".to_string(),
+            ));
+        }
+        let mut chunk_groups = self.blob_metadata_chunk_groups.clone();
+        chunk_groups.push(BlobMetadataChunkGroup::new(
+            self.next_compressed_offset,
+            u32::try_from(self.next_blkaddr)
+                .map_err(|_| Error::Overflow("blob exceeds 32-bit block count".to_string()))?,
+            u32::try_from(self.members.len())
+                .map_err(|_| Error::Overflow("blob holds too many chunks".to_string()))?,
+            0,
+            0,
+        ));
+        Ok(BlobMetadata::new_incremental(
+            self.max_blocks_per_chunk_group(),
+            self.chunk_group_min_size / EROFS_BLOCK_SIZE,
+            self.compressor,
+            self.digester,
+            chunk_groups,
+            self.members
+                .iter()
+                .copied()
+                .map(BlobMetadataChunkLength::new)
+                .collect(),
+            self.digests.clone(),
+        )?)
+    }
+
+    #[cfg(test)]
+    fn write_blob_metadata(&mut self, path: &Path) -> Result<()> {
         self.finish()?;
         Ok(self.blob_metadata()?.save(path)?)
     }
@@ -1405,7 +1458,15 @@ impl<W: Write> BlobWriter<W> {
     /// holes, raw device chunks and other devices' chunks. Only valid after
     /// [`Self::finish`].
     pub fn resolve_chunk_addr(&self, addr: &mut ErofsChunkAddr) -> Result<()> {
-        if self.raw_device || addr.device_id != 1 || addr.blkaddr == EROFS_NULL_ADDR {
+        self.resolve_chunk_addr_for_device(addr, 1)
+    }
+
+    pub(crate) fn resolve_chunk_addr_for_device(
+        &self,
+        addr: &mut ErofsChunkAddr,
+        device_id: u16,
+    ) -> Result<()> {
+        if self.raw_device || addr.device_id != device_id || addr.blkaddr == EROFS_NULL_ADDR {
             return Ok(());
         }
         let resolved = usize::try_from(addr.blkaddr)
@@ -1419,6 +1480,22 @@ impl<W: Write> BlobWriter<W> {
                 ))
             })?;
         addr.blkaddr = resolved;
+        Ok(())
+    }
+
+    /// Append one caller-provided file chunk as real blob data.
+    pub(crate) fn write_data_chunk(&mut self, data: &[u8]) -> Result<u64> {
+        self.validate_data_chunk_len(data.len())?;
+        self.append_chunk(data)
+    }
+
+    fn validate_data_chunk_len(&self, len: usize) -> Result<()> {
+        if len == 0 || len > self.file_chunk_size as usize {
+            return Err(Error::InvalidParameter(format!(
+                "chunk payload {len} must be between 1 and {} bytes",
+                self.file_chunk_size
+            )));
+        }
         Ok(())
     }
 
@@ -2409,16 +2486,17 @@ mod tests {
                 (Mark::Plain, Some(BlobMetadataDigester::Blake3), 32),
                 (Mark::Strict, None, 32),
             ] {
-                let options = crate::build::BuildImageOptions::new(
-                    ".".into(),
+                let mut writer = BlobWriter::new(
+                    Vec::new(),
                     chunk_size,
                     compressor,
-                    Default::default(),
-                    false,
+                    digester,
+                    true,
+                    BlobLayout::ChunkGroups {
+                        chunk_group_min_size: minimum,
+                    },
                 )
-                .unwrap()
-                .with_digester(digester);
-                let mut writer = options.chunk_blob_writer(Vec::new()).unwrap();
+                .unwrap();
                 let data = filled(chunk_size as usize, b'g', mark).repeat(33);
                 let tail = filled(123, b't', Mark::Strict);
                 let mut addrs = write(&mut writer, &data);

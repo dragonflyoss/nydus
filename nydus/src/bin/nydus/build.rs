@@ -1,7 +1,8 @@
 use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
 use nydus::build::{
-    build_image, build_image_from_tar_layer, BuildImageOptions, Image, NativeLayout,
+    blob_metadata_sidecar_path, build_image, build_image_from_tar_layer,
+    save_blob_metadata_sidecar, BuildImageOptions, Image, NativeLayout,
 };
 use nydus::error::{Context, Error, Result};
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
@@ -468,15 +469,14 @@ impl BuildCommand {
         let Some(blob_metadata) = image.blob_metadata.as_ref() else {
             return Ok(None);
         };
-        let blob_metadata_path = Self::blob_metadata_path(full_blob_path);
-        blob_metadata.save(&blob_metadata_path)?;
-        Ok(Some(blob_metadata_path))
+        Ok(Some(save_blob_metadata_sidecar(
+            blob_metadata,
+            full_blob_path,
+        )?))
     }
 
     fn blob_metadata_path(full_blob_path: &Path) -> PathBuf {
-        let mut path = full_blob_path.to_path_buf().into_os_string();
-        path.push(BlobMetadata::SUFFIX);
-        path.into()
+        blob_metadata_sidecar_path(full_blob_path)
     }
 
     /// Persists the standalone bootstrap rendered during the build when
