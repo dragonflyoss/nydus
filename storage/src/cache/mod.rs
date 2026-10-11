@@ -676,7 +676,7 @@ impl Iterator for ChunkDecompressState<'_, '_> {
 ///
 /// The main responsibility of the blob cache manager is to create blob cache objects for blobs,
 /// all IO requests should be issued to the blob cache object directly.
-pub(crate) trait BlobCacheMgr: Send + Sync {
+pub trait BlobCacheMgr: Send + Sync {
     /// Initialize the blob cache manager.
     fn init(&self) -> Result<()>;
 
