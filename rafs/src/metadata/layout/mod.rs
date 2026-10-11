@@ -5,7 +5,7 @@
 
 //! Rafs filesystem metadata layout and data structures.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Formatter};
@@ -226,7 +226,7 @@ pub const RAFS_XATTR_PREFIXES: [&str; 5] = [
 /// An extended attribute is a (String, String) pair associated with a inode.
 #[derive(Clone, Default)]
 pub struct RafsXAttrs {
-    pairs: HashMap<OsString, XattrValue>,
+    pairs: BTreeMap<OsString, XattrValue>,
 }
 
 impl Debug for RafsXAttrs {
@@ -239,7 +239,7 @@ impl RafsXAttrs {
     /// Create a new instance of `RafsXattrs`.
     pub fn new() -> Self {
         Self {
-            pairs: HashMap::new(),
+            pairs: BTreeMap::new(),
         }
     }
 
