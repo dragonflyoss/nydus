@@ -2416,14 +2416,11 @@ mod tests {
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut xattrs = RafsXAttrs::new();
-        // These xattrs are in "e_name_index" order for easier reading:
-        xattrs
-            .add(OsString::from("security.rafs"), vec![2u8, 3u8])
-            .unwrap();
+        xattrs.add(OsString::from("user.nydus"), vec![1u8]).unwrap();
         xattrs
             .add(
-                OsString::from("system.posix_acl_access"),
-                vec![4u8, 5u8, 6u8],
+                OsString::from("trusted.abc"),
+                vec![11u8, 12u8, 13u8, 14u8, 15u8],
             )
             .unwrap();
         xattrs
@@ -2434,11 +2431,13 @@ mod tests {
             .unwrap();
         xattrs
             .add(
-                OsString::from("trusted.abc"),
-                vec![11u8, 12u8, 13u8, 14u8, 15u8],
+                OsString::from("system.posix_acl_access"),
+                vec![4u8, 5u8, 6u8],
             )
             .unwrap();
-        xattrs.add(OsString::from("user.nydus"), vec![1u8]).unwrap();
+        xattrs
+            .add(OsString::from("security.rafs"), vec![2u8, 3u8])
+            .unwrap();
         xattrs.store_v6(&mut writer).unwrap();
         writer.flush().unwrap();
 
@@ -2478,7 +2477,7 @@ mod tests {
             e_value_size: u16::to_le(2u16),
         };
 
-        let targets = [target1, target2, target3, target4, target5];
+        let targets = [target5, target2, target3, target4, target1];
 
         let mut entries: Vec<RafsV6XattrEntry> = Vec::with_capacity(targets.len());
         for _i in 0..targets.len() {
@@ -2494,14 +2493,7 @@ mod tests {
             entries.push(entry);
         }
 
-        for (i, target) in targets.iter().enumerate() {
-            let j = entries
-                .iter()
-                .position(|entry| entry == target)
-                .unwrap_or_else(|| panic!("Test failed for: target{}", i + 1));
-            // Note: swap_remove() is faster than remove() when order doesn't matter:
-            entries.swap_remove(j);
-        }
+        assert!(entries == targets);
     }
 
     #[test]
