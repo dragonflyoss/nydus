@@ -18,7 +18,7 @@ use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
@@ -42,12 +42,34 @@ use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFA
 
 const DOWNLOAD_META_RETRY_COUNT: u32 = 5;
 const DOWNLOAD_META_RETRY_DELAY: u64 = 400;
+const RELOAD_META_COOLDOWN: Duration = Duration::from_secs(5);
 const ENCRYPTION_PAGE_SIZE: usize = 4096;
 
 #[derive(Default, Clone)]
 pub(crate) struct FileCacheMeta {
     has_error: Arc<AtomicBool>,
     meta: Arc<Mutex<Option<Arc<BlobCompressionContextInfo>>>>,
+    // Kept after the background load gives up so later reads can reload the metadata.
+    loader: Option<Arc<FileCacheMetaLoader>>,
+}
+
+struct FileCacheMetaLoader {
+    blob_file: String,
+    blob_info: Arc<BlobInfo>,
+    reader: Option<Arc<dyn BlobReader>>,
+    validation: bool,
+    next_retry: Mutex<Instant>,
+}
+
+impl FileCacheMetaLoader {
+    fn load(&self) -> Result<BlobCompressionContextInfo> {
+        BlobCompressionContextInfo::new(
+            &self.blob_file,
+            &self.blob_info,
+            self.reader.as_ref(),
+            self.validation,
+        )
+    }
 }
 
 impl FileCacheMeta {
@@ -69,13 +91,22 @@ impl FileCacheMeta {
                 Ok(m) => Ok(FileCacheMeta {
                     has_error: Arc::new(AtomicBool::new(false)),
                     meta: Arc::new(Mutex::new(Some(Arc::new(m)))),
+                    loader: None,
                 }),
                 Err(e) => Err(e),
             }
         } else {
+            let loader = Arc::new(FileCacheMetaLoader {
+                blob_file,
+                blob_info,
+                reader,
+                validation,
+                next_retry: Mutex::new(Instant::now()),
+            });
             let meta = FileCacheMeta {
                 has_error: Arc::new(AtomicBool::new(false)),
                 meta: Arc::new(Mutex::new(None)),
+                loader: Some(loader.clone()),
             };
             let meta1 = meta.clone();
 
@@ -87,12 +118,7 @@ impl FileCacheMeta {
                         Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
                     );
                     while retry < DOWNLOAD_META_RETRY_COUNT {
-                        match BlobCompressionContextInfo::new(
-                            &blob_file,
-                            &blob_info,
-                            reader.as_ref(),
-                            validation,
-                        ) {
+                        match loader.load() {
                             Ok(m) => {
                                 *meta1.meta.lock().unwrap() = Some(Arc::new(m));
                                 return;
@@ -123,9 +149,39 @@ impl FileCacheMeta {
             }
             drop(meta);
             if self.has_error.load(Ordering::Acquire) {
-                return None;
+                return self.reload_blob_meta();
             }
             std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    // Serialize reloads after background failure, with a fixed cooldown on reload errors.
+    fn reload_blob_meta(&self) -> Option<Arc<BlobCompressionContextInfo>> {
+        let loader = self.loader.as_ref()?;
+        let mut next_retry = match loader.next_retry.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                panic!("blob metadata reload lock poisoned: {}", e)
+            }
+        };
+        if let Some(m) = self.meta.lock().unwrap().as_ref() {
+            return Some(m.clone());
+        }
+        if Instant::now() < *next_retry {
+            return None;
+        }
+        match loader.load() {
+            Ok(m) => {
+                let m = Arc::new(m);
+                *self.meta.lock().unwrap() = Some(m.clone());
+                Some(m)
+            }
+            Err(e) => {
+                *next_retry = Instant::now() + RELOAD_META_COOLDOWN;
+                warn!("failed to reload blob.meta, {}", e);
+                None
+            }
         }
     }
 }
@@ -2300,6 +2356,66 @@ mod tests {
     }
 
     #[test]
+    fn test_file_cache_meta_reloads_after_background_load_failed() {
+        use vmm_sys_util::tempdir::TempDir;
+
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let fixture = std::path::PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a.blob.meta");
+        let dir = TempDir::new().unwrap();
+        let path = dir.as_path().join("cached");
+        let mut blob_info = BlobInfo::new(
+            0,
+            "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
+            0x16c6000,
+            9839040,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0xa3,
+            BlobFeatures::ALIGNED
+                | BlobFeatures::INLINED_FS_META
+                | BlobFeatures::CHUNK_INFO_V2
+                | BlobFeatures::ZRAN,
+        );
+        blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
+
+        // Simulate the background loader having exhausted its retries.
+        let file_cache_meta = FileCacheMeta {
+            has_error: Arc::new(AtomicBool::new(true)),
+            meta: Arc::new(Mutex::new(None)),
+            loader: Some(Arc::new(FileCacheMetaLoader {
+                blob_file: path.display().to_string(),
+                blob_info: Arc::new(blob_info),
+                reader: None,
+                validation: false,
+                next_retry: Mutex::new(Instant::now()),
+            })),
+        };
+
+        let started = Instant::now();
+        assert!(file_cache_meta.get_blob_meta().is_none());
+        let loader = file_cache_meta.loader.as_ref().unwrap();
+        let deadline = *loader.next_retry.lock().unwrap();
+        assert!(deadline >= started + RELOAD_META_COOLDOWN);
+        assert!(deadline <= Instant::now() + RELOAD_META_COOLDOWN);
+
+        std::fs::copy(fixture, path.with_extension("blob.meta")).unwrap();
+        // Control the deadline to check cooldown and expiry without sleeping.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        *loader.next_retry.lock().unwrap() = deadline;
+        assert!(file_cache_meta.clone().get_blob_meta().is_none());
+        assert_eq!(*loader.next_retry.lock().unwrap(), deadline);
+        *loader.next_retry.lock().unwrap() = Instant::now();
+
+        let reloaded = file_cache_meta
+            .get_blob_meta()
+            .expect("a later read must reload blob.meta instead of failing forever");
+        assert_eq!(reloaded.state.chunk_info_array.len(), 0xa3);
+        assert!(Arc::ptr_eq(
+            &reloaded,
+            &file_cache_meta.get_blob_meta().unwrap()
+        ));
+    }
+
+    #[test]
     fn test_file_cache_meta_get_blob_meta_immediate_success() {
         let meta = Arc::new(BlobCompressionContextInfo {
             state: Arc::new(BlobCompressionContext::default()),
@@ -2307,6 +2423,7 @@ mod tests {
         let file_cache_meta = FileCacheMeta {
             has_error: Arc::new(AtomicBool::new(false)),
             meta: Arc::new(Mutex::new(Some(meta.clone()))),
+            loader: None,
         };
 
         let result = file_cache_meta.get_blob_meta();
@@ -2319,6 +2436,7 @@ mod tests {
         let file_cache_meta = FileCacheMeta {
             has_error: Arc::new(AtomicBool::new(false)),
             meta: Arc::new(Mutex::new(None)),
+            loader: None,
         };
         let meta_clone = file_cache_meta.clone();
         let expected = Arc::new(BlobCompressionContextInfo {
@@ -2341,6 +2459,7 @@ mod tests {
         let file_cache_meta = FileCacheMeta {
             has_error: Arc::new(AtomicBool::new(true)),
             meta: Arc::new(Mutex::new(None)),
+            loader: None,
         };
 
         assert!(file_cache_meta.get_blob_meta().is_none());
@@ -2351,6 +2470,7 @@ mod tests {
         let file_cache_meta = FileCacheMeta {
             has_error: Arc::new(AtomicBool::new(false)),
             meta: Arc::new(Mutex::new(None)),
+            loader: None,
         };
         let cloned = file_cache_meta.clone();
         let shared = Arc::new(BlobCompressionContextInfo {
