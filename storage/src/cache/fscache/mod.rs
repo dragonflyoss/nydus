@@ -333,9 +333,12 @@ impl FileCacheEntry {
         chunk_map: &BlobStateMap<IndexedChunkMap, u32>,
     ) {
         let blob_meta = match meta.get_blob_meta() {
-            Some(v) => v,
-            None => {
-                warn!("failed to get blob meta object for blob, skip chunkmap recover");
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "failed to get blob meta object for blob, skip chunkmap recover: {}",
+                    e
+                );
                 return;
             }
         };

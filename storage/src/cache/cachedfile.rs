@@ -11,14 +11,14 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{ErrorKind, Read, Result};
+use std::io::{Error, ErrorKind, Read, Result};
 use std::mem::ManuallyDrop;
 #[cfg(feature = "dedup")]
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
@@ -42,12 +42,29 @@ use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFA
 
 const DOWNLOAD_META_RETRY_COUNT: u32 = 5;
 const DOWNLOAD_META_RETRY_DELAY: u64 = 400;
+const DOWNLOAD_META_INITIAL_RETRY_DELAY: u64 = 10_000;
+const DOWNLOAD_META_MAX_RETRY_DELAY: u64 = 120_000;
 const ENCRYPTION_PAGE_SIZE: usize = 4096;
 
-#[derive(Default, Clone)]
+type FileCacheMetaLoader =
+    dyn Fn() -> Result<Arc<BlobCompressionContextInfo>> + Send + Sync + 'static;
+
+enum FileCacheMetaState {
+    Loading,
+    Ready(Arc<BlobCompressionContextInfo>),
+    Failed {
+        error_kind: ErrorKind,
+        error_message: String,
+        retry_at: Instant,
+        failures: u32,
+    },
+}
+
+#[derive(Clone)]
 pub(crate) struct FileCacheMeta {
-    has_error: Arc<AtomicBool>,
-    meta: Arc<Mutex<Option<Arc<BlobCompressionContextInfo>>>>,
+    state: Arc<Mutex<FileCacheMetaState>>,
+    loader: Arc<FileCacheMetaLoader>,
+    runtime: Option<Arc<Runtime>>,
 }
 
 impl FileCacheMeta {
@@ -59,73 +76,144 @@ impl FileCacheMeta {
         sync: bool,
         validation: bool,
     ) -> Result<Self> {
+        let loader = Arc::new(move || {
+            BlobCompressionContextInfo::new(&blob_file, &blob_info, reader.as_ref(), validation)
+                .map(Arc::new)
+        });
+
         if sync {
-            match BlobCompressionContextInfo::new(
-                &blob_file,
-                &blob_info,
-                reader.as_ref(),
-                validation,
-            ) {
-                Ok(m) => Ok(FileCacheMeta {
-                    has_error: Arc::new(AtomicBool::new(false)),
-                    meta: Arc::new(Mutex::new(Some(Arc::new(m)))),
-                }),
-                Err(e) => Err(e),
-            }
+            let meta = loader()?;
+            Ok(Self::with_state(
+                loader,
+                FileCacheMetaState::Ready(meta),
+                runtime,
+            ))
         } else {
-            let meta = FileCacheMeta {
-                has_error: Arc::new(AtomicBool::new(false)),
-                meta: Arc::new(Mutex::new(None)),
-            };
+            let meta = Self::with_state(loader, FileCacheMetaState::Loading, runtime.clone());
             let meta1 = meta.clone();
 
             if let Some(r) = runtime {
                 r.as_ref().spawn_blocking(move || {
-                    let mut retry = 0;
-                    let mut delayer = Delayer::new(
-                        DelayType::BackOff,
-                        Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
-                    );
-                    while retry < DOWNLOAD_META_RETRY_COUNT {
-                        match BlobCompressionContextInfo::new(
-                            &blob_file,
-                            &blob_info,
-                            reader.as_ref(),
-                            validation,
-                        ) {
-                            Ok(m) => {
-                                *meta1.meta.lock().unwrap() = Some(Arc::new(m));
-                                return;
-                            }
-                            Err(e) => {
-                                info!("temporarily failed to get blob.meta, {}", e);
-                                delayer.delay();
-                                retry += 1;
-                            }
-                        }
-                    }
-                    warn!("failed to get blob.meta");
-                    meta1.has_error.store(true, Ordering::Release);
+                    meta1.load_and_publish(0);
                 });
             } else {
                 warn!("Want download blob meta asynchronously but no runtime.");
+                meta.finish_load(
+                    Err(Error::other(
+                        "blob metadata asynchronous runtime is unavailable",
+                    )),
+                    0,
+                );
             }
 
             Ok(meta)
         }
     }
 
-    pub(crate) fn get_blob_meta(&self) -> Option<Arc<BlobCompressionContextInfo>> {
+    fn with_state(
+        loader: Arc<FileCacheMetaLoader>,
+        state: FileCacheMetaState,
+        runtime: Option<Arc<Runtime>>,
+    ) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
+            loader,
+            runtime,
+        }
+    }
+
+    fn load(&self) -> Result<Arc<BlobCompressionContextInfo>> {
+        let mut last_error = None;
+        let mut delayer = Delayer::new(
+            DelayType::BackOff,
+            Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
+        );
+
+        for attempt in 0..DOWNLOAD_META_RETRY_COUNT {
+            match (self.loader)() {
+                Ok(meta) => return Ok(meta),
+                Err(e) => {
+                    info!("temporarily failed to get blob.meta, {}", e);
+                    last_error = Some(e);
+                    if attempt + 1 < DOWNLOAD_META_RETRY_COUNT {
+                        delayer.delay();
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| Error::other("failed to get blob.meta")))
+    }
+
+    fn retry_delay(failures: u32) -> Duration {
+        let multiplier = 1u64 << failures.saturating_sub(1).min(16);
+        Duration::from_millis(
+            DOWNLOAD_META_INITIAL_RETRY_DELAY
+                .saturating_mul(multiplier)
+                .min(DOWNLOAD_META_MAX_RETRY_DELAY),
+        )
+    }
+
+    fn finish_load(&self, result: Result<Arc<BlobCompressionContextInfo>>, previous_failures: u32) {
+        let mut state = self.state.lock().unwrap();
+        *state = match result {
+            Ok(meta) => FileCacheMetaState::Ready(meta),
+            Err(e) => {
+                let failures = previous_failures.saturating_add(1);
+                let error_kind = e.kind();
+                let error_message = e.to_string();
+                let retry_delay = Self::retry_delay(failures);
+                warn!(
+                    "failed to get blob.meta, retry after {:?}: {}",
+                    retry_delay, error_message
+                );
+                FileCacheMetaState::Failed {
+                    error_kind,
+                    error_message,
+                    retry_at: Instant::now() + retry_delay,
+                    failures,
+                }
+            }
+        };
+    }
+
+    fn load_and_publish(&self, previous_failures: u32) {
+        let result = self.load();
+        self.finish_load(result, previous_failures);
+    }
+
+    pub(crate) fn get_blob_meta(&self) -> Result<Arc<BlobCompressionContextInfo>> {
         loop {
-            let meta = self.meta.lock().unwrap();
-            if meta.is_some() {
-                return meta.clone();
+            let mut state = self.state.lock().unwrap();
+            match &*state {
+                FileCacheMetaState::Ready(meta) => return Ok(meta.clone()),
+                FileCacheMetaState::Loading => {
+                    drop(state);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                FileCacheMetaState::Failed {
+                    error_kind,
+                    error_message,
+                    retry_at,
+                    failures,
+                } => {
+                    if Instant::now() < *retry_at {
+                        return Err(Error::new(*error_kind, error_message.clone()));
+                    }
+
+                    let previous_failures = *failures;
+                    let runtime = self.runtime.clone().ok_or_else(|| {
+                        Error::other("blob metadata asynchronous runtime is unavailable")
+                    })?;
+                    *state = FileCacheMetaState::Loading;
+                    drop(state);
+
+                    let meta = self.clone();
+                    runtime.spawn_blocking(move || {
+                        meta.load_and_publish(previous_failures);
+                    });
+                }
             }
-            drop(meta);
-            if self.has_error.load(Ordering::Acquire) {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(2));
         }
     }
 }
@@ -612,7 +700,7 @@ impl BlobCache for FileCacheEntry {
     fn get_chunk_info(&self, chunk_index: u32) -> Option<Arc<dyn BlobChunkInfo>> {
         self.meta
             .as_ref()
-            .and_then(|v| v.get_blob_meta())
+            .and_then(|v| v.get_blob_meta().ok())
             .map(|v| BlobMetaChunk::new(chunk_index as usize, &v.state))
     }
 
@@ -793,11 +881,12 @@ impl BlobCache for FileCacheEntry {
 
     fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobCompressionContextInfo>>> {
         if let Some(meta) = self.meta.as_ref() {
-            if let Some(bm) = meta.get_blob_meta() {
-                Ok(Some(bm))
-            } else {
-                Err(einval!("failed to get blob meta object for cache file"))
-            }
+            meta.get_blob_meta().map(Some).map_err(|e| {
+                eio!(format!(
+                    "failed to get blob meta object for cache file: {}",
+                    e
+                ))
+            })
         } else {
             Ok(None)
         }
@@ -903,7 +992,7 @@ impl BlobObject for FileCacheEntry {
         }
 
         let meta = self.meta.as_ref().ok_or_else(|| enoent!())?;
-        let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
+        let meta = meta.get_blob_meta()?;
         let mut chunks =
             meta.get_chunks_compressed(offset, size, self.prefetch_batch_size(), prefetch)?;
         if !chunks.is_empty() {
@@ -930,7 +1019,7 @@ impl BlobObject for FileCacheEntry {
         }
 
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
-        let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
+        let meta = meta.get_blob_meta()?;
         let mut chunks = meta.get_chunks_uncompressed(offset, size, self.user_io_batch_size())?;
         if let Some(meta) = self.get_blob_meta_info()? {
             chunks = self.strip_ready_chunks(meta, None, chunks);
@@ -2299,68 +2388,162 @@ mod tests {
         );
     }
 
+    fn new_test_file_cache_meta(
+        loader: Arc<FileCacheMetaLoader>,
+        state: FileCacheMetaState,
+    ) -> FileCacheMeta {
+        FileCacheMeta::with_state(loader, state, Some(Arc::new(Runtime::new().unwrap())))
+    }
+
     #[test]
     fn test_file_cache_meta_get_blob_meta_immediate_success() {
         let meta = Arc::new(BlobCompressionContextInfo {
             state: Arc::new(BlobCompressionContext::default()),
         });
-        let file_cache_meta = FileCacheMeta {
-            has_error: Arc::new(AtomicBool::new(false)),
-            meta: Arc::new(Mutex::new(Some(meta.clone()))),
-        };
+        let loader: Arc<FileCacheMetaLoader> = Arc::new(|| panic!("loader should not be called"));
+        let file_cache_meta =
+            new_test_file_cache_meta(loader, FileCacheMetaState::Ready(meta.clone()));
 
         let result = file_cache_meta.get_blob_meta();
-        assert!(result.is_some());
         assert!(Arc::ptr_eq(&result.unwrap(), &meta));
     }
 
     #[test]
     fn test_file_cache_meta_get_blob_meta_waits_until_meta_ready() {
-        let file_cache_meta = FileCacheMeta {
-            has_error: Arc::new(AtomicBool::new(false)),
-            meta: Arc::new(Mutex::new(None)),
-        };
+        let loader: Arc<FileCacheMetaLoader> = Arc::new(|| panic!("loader should not be called"));
+        let file_cache_meta = new_test_file_cache_meta(loader, FileCacheMetaState::Loading);
         let meta_clone = file_cache_meta.clone();
         let expected = Arc::new(BlobCompressionContextInfo {
             state: Arc::new(BlobCompressionContext::default()),
         });
         let expected_clone = expected.clone();
 
-        std::thread::spawn(move || {
+        let loader_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(10));
-            *meta_clone.meta.lock().unwrap() = Some(expected_clone);
+            meta_clone.finish_load(Ok(expected_clone), 0);
         });
 
         let result = file_cache_meta.get_blob_meta();
-        assert!(result.is_some());
+        loader_thread.join().unwrap();
         assert!(Arc::ptr_eq(&result.unwrap(), &expected));
     }
 
     #[test]
-    fn test_file_cache_meta_get_blob_meta_returns_none_on_error() {
-        let file_cache_meta = FileCacheMeta {
-            has_error: Arc::new(AtomicBool::new(true)),
-            meta: Arc::new(Mutex::new(None)),
-        };
+    fn test_file_cache_meta_get_blob_meta_returns_failure_after_load() {
+        let loader: Arc<FileCacheMetaLoader> = Arc::new(|| panic!("loader should not be called"));
+        let file_cache_meta = new_test_file_cache_meta(loader, FileCacheMetaState::Loading);
+        let meta_clone = file_cache_meta.clone();
 
-        assert!(file_cache_meta.get_blob_meta().is_none());
+        let loader_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            meta_clone.finish_load(Err(Error::other("injected failure")), 0);
+        });
+
+        let error = match file_cache_meta.get_blob_meta() {
+            Ok(_) => panic!("metadata loading should fail"),
+            Err(e) => e,
+        };
+        loader_thread.join().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected failure");
     }
 
     #[test]
-    fn test_file_cache_meta_clone_shares_state() {
-        let file_cache_meta = FileCacheMeta {
-            has_error: Arc::new(AtomicBool::new(false)),
-            meta: Arc::new(Mutex::new(None)),
-        };
-        let cloned = file_cache_meta.clone();
-        let shared = Arc::new(BlobCompressionContextInfo {
+    fn test_file_cache_meta_retry_delay() {
+        for (failures, seconds) in [(1, 10), (2, 20), (3, 40), (4, 80), (5, 120), (6, 120)] {
+            assert_eq!(
+                FileCacheMeta::retry_delay(failures),
+                Duration::from_secs(seconds)
+            );
+        }
+    }
+
+    #[test]
+    fn test_file_cache_meta_respects_retry_delay() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let loader: Arc<FileCacheMetaLoader> = Arc::new(move || {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            Err(Error::other("injected failure"))
+        });
+        let file_cache_meta = new_test_file_cache_meta(
+            loader,
+            FileCacheMetaState::Failed {
+                error_kind: ErrorKind::Other,
+                error_message: "previous failure".to_string(),
+                retry_at: Instant::now() + Duration::from_secs(1),
+                failures: 1,
+            },
+        );
+
+        assert!(file_cache_meta.get_blob_meta().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_file_cache_meta_retries_after_failure() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let expected = Arc::new(BlobCompressionContextInfo {
             state: Arc::new(BlobCompressionContext::default()),
         });
+        let expected_clone = expected.clone();
+        let loader: Arc<FileCacheMetaLoader> = Arc::new(move || {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(expected_clone.clone())
+        });
+        let file_cache_meta = new_test_file_cache_meta(
+            loader,
+            FileCacheMetaState::Failed {
+                error_kind: ErrorKind::Other,
+                error_message: "previous failure".to_string(),
+                retry_at: Instant::now(),
+                failures: 1,
+            },
+        );
 
-        *cloned.meta.lock().unwrap() = Some(shared.clone());
         assert!(Arc::ptr_eq(
             &file_cache_meta.get_blob_meta().unwrap(),
-            &shared,
+            &expected,
         ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_file_cache_meta_concurrent_retry_is_single_flight() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let expected = Arc::new(BlobCompressionContextInfo {
+            state: Arc::new(BlobCompressionContext::default()),
+        });
+        let expected_clone = expected.clone();
+        let loader: Arc<FileCacheMetaLoader> = Arc::new(move || {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(expected_clone.clone())
+        });
+        let file_cache_meta = new_test_file_cache_meta(
+            loader,
+            FileCacheMetaState::Failed {
+                error_kind: ErrorKind::Other,
+                error_message: "previous failure".to_string(),
+                retry_at: Instant::now(),
+                failures: 1,
+            },
+        );
+
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let meta = file_cache_meta.clone();
+            let expected = expected.clone();
+            threads.push(std::thread::spawn(move || {
+                assert!(Arc::ptr_eq(&meta.get_blob_meta().unwrap(), &expected));
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
