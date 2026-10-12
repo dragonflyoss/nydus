@@ -1,14 +1,15 @@
 //! Streaming OCI layer conversion: consume one gzip/plain tar layer stream in
 //! order and chunk regular-file data into the blob the moment it is read — no
-//! rootfs is ever staged on disk. Whiteout entries are kept as regular files
-//! for `merge` to apply across layers.
+//! rootfs is ever staged on disk. Members are read and resolved by
+//! [`super::tar_normalize`] as containerd's `archive.Apply` lands them.
+//! Whiteout entries are kept as regular files for `merge` to apply across
+//! layers.
 //!
 //! Directory metadata is kept in a small in-memory tree; when the layer is
 //! consumed the tree is flattened through the same [`flatten_tree`] pass as
 //! the directory builder, so both sources render identical bootstraps.
 
-use base64::engine::{general_purpose::GeneralPurposeConfig, DecodePaddingMode, GeneralPurpose};
-use base64::Engine;
+use super::tar_normalize::{self as norm, Kind, Member};
 use flate2::read::MultiGzDecoder;
 use nydus_core::build::blob_chunk::{BlobWriter, ZFileRef};
 use nydus_core::build::inode::{
@@ -23,21 +24,8 @@ use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
 
-const PAX_XATTR_PREFIX: &str = "SCHILY.xattr.";
-const PAX_LIBARCHIVE_XATTR_PREFIX: &str = "LIBARCHIVE.xattr.";
-
 /// Name suffix of `security.capability`, the file capabilities xattr.
 const XATTR_CAPABILITY_SUFFIX: &[u8] = b"capability";
-
-/// The longest file name EROFS directories and Linux accept.
-const NAME_MAX: usize = 255;
-
-/// libarchive writes base64 values without padding while nydusify pads them
-/// (Go's `base64.StdEncoding`); both are accepted.
-const LIBARCHIVE_BASE64: GeneralPurpose = GeneralPurpose::new(
-    &base64::alphabet::STANDARD,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
-);
 
 /// One filesystem object accumulated from the layer streams.
 struct TarNode {
@@ -145,32 +133,9 @@ impl TreeNode<()> for TarNode {
     }
 }
 
-/// Splits a tar path into normalized components (drops `.`, empty and
-/// trailing-slash artifacts).
-fn path_components(raw: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let components: Vec<Vec<u8>> = raw
-        .split(|&b| b == b'/')
-        .filter(|c| !c.is_empty() && *c != b".")
-        .map(|c| c.to_vec())
-        .collect();
-    if components
-        .iter()
-        .any(|component| component == b".." || component.contains(&0))
-    {
-        return Err(Error::InvalidParameter(
-            "invalid tar path component".to_string(),
-        ));
-    }
-    if components.iter().any(|c| c.len() > NAME_MAX) {
-        return Err(Error::InvalidParameter(format!(
-            "tar path component longer than {NAME_MAX} bytes"
-        )));
-    }
-    Ok(components)
-}
-
 /// Walks (creating implicit directories) down to the directory that will
-/// contain `comps`' last component, replacing any non-directory on the way.
+/// contain `comps`' last component. A non-directory on the way is one a
+/// global header removed, which an implicit directory replaces.
 fn ensure_dir<'a>(root: &'a mut TarNode, comps: &[Vec<u8>]) -> &'a mut TarNode {
     let mut current = root;
     for comp in comps {
@@ -188,59 +153,21 @@ fn ensure_dir<'a>(root: &'a mut TarNode, comps: &[Vec<u8>]) -> &'a mut TarNode {
     current
 }
 
-/// Reads the `SCHILY.xattr.*` and libarchive `LIBARCHIVE.xattr.*` PAX
-/// extensions of a tar entry into EROFS xattr entries, sorted for
-/// deterministic bootstraps. A name carried both ways keeps the SCHILY value.
-fn pax_xattrs<R: Read>(entry: &mut tar::Entry<R>) -> Result<Vec<XattrEntry>> {
-    let mut xattrs: BTreeMap<(u8, Vec<u8>), Vec<u8>> = BTreeMap::new();
-    if let Some(extensions) = entry
-        .pax_extensions()
-        .context("failed to read pax extensions")?
-    {
-        for extension in extensions {
-            let extension = extension.context("failed to parse pax extension")?;
-            let key = extension.key_bytes();
-            if let Some(name) = key.strip_prefix(PAX_XATTR_PREFIX.as_bytes()) {
-                if let Some((index, suffix)) = erofs_xattr_name_split(name) {
-                    xattrs.insert((index, suffix.to_vec()), extension.value_bytes().to_vec());
-                }
-            } else if let Some(name) = key.strip_prefix(PAX_LIBARCHIVE_XATTR_PREFIX.as_bytes()) {
-                // libarchive percent-encodes the name and base64-encodes the value.
-                let invalid = || Error::InvalidParameter("invalid libarchive xattr".to_string());
-                let name = percent_decode(name).ok_or_else(invalid)?;
-                let value = LIBARCHIVE_BASE64
-                    .decode(extension.value_bytes())
-                    .map_err(|_| invalid())?;
-                if let Some((index, suffix)) = erofs_xattr_name_split(&name) {
-                    xattrs.entry((index, suffix.to_vec())).or_insert(value);
-                }
-            }
-        }
-    }
-    Ok(xattrs
+/// Converts xattrs to EROFS entries, sorted for deterministic bootstraps.
+fn erofs_xattrs(xattrs: norm::Xattrs) -> Vec<XattrEntry> {
+    let mut entries: Vec<XattrEntry> = xattrs
         .into_iter()
-        .map(|((name_index, suffix), value)| XattrEntry {
-            name_index,
-            suffix,
-            value,
+        .filter_map(|(name, value)| {
+            let (name_index, suffix) = erofs_xattr_name_split(&name)?;
+            Some(XattrEntry {
+                name_index,
+                suffix: suffix.to_vec(),
+                value,
+            })
         })
-        .collect())
-}
-
-/// Decodes a libarchive percent-encoded xattr name, where `%` must be
-/// followed by exactly two ASCII hex digits. Returns `None` if it is not.
-fn percent_decode(raw: &[u8]) -> Option<Vec<u8>> {
-    let mut decoded = Vec::with_capacity(raw.len());
-    let mut bytes = raw.iter();
-    while let Some(&byte) = bytes.next() {
-        if byte != b'%' {
-            decoded.push(byte);
-            continue;
-        }
-        let mut hex = || char::from(*bytes.next()?).to_digit(16);
-        decoded.push((hex()? * 16 + hex()?) as u8);
-    }
-    Some(decoded)
+        .collect();
+    entries.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
+    entries
 }
 
 /// Looks up an existing node by path for hardlink resolution.
@@ -320,7 +247,7 @@ struct LinkMeta {
 
 /// Consumes one OCI layer tarball (gzip or plain) and returns the flattened
 /// inode table, streaming regular-file contents into `blob_writer` as each
-/// tar entry is read. OCI whiteout entries (`.wh.*`) are kept as regular
+/// tar member is read. OCI whiteout entries (`.wh.*`) are kept as regular
 /// files, exactly like a directory source, for `merge` to apply across
 /// layers.
 pub fn build_tar_layer_tree<W: Write>(
@@ -334,24 +261,17 @@ pub fn build_tar_layer_tree<W: Write>(
     let mut link_counts = HashMap::new();
 
     let reader = open_layer(layer)?;
-    let mut archive = tar::Archive::new(reader);
-    archive.set_ignore_zeros(true);
-
-    for entry in archive
-        .entries()
-        .with_context(|| format!("failed to read layer: {}", layer.display()))?
-    {
-        let mut entry =
-            entry.with_context(|| format!("failed to read entry: {}", layer.display()))?;
-        apply_entry(
+    norm::normalize(reader, |member, data| {
+        apply_member(
             &mut root,
-            &mut entry,
+            member,
+            data,
             blob_writer,
             chunk_size_bits,
             &mut groups,
         )
-        .with_context(|| format!("failed to apply layer entry: {}", layer.display()))?;
-    }
+    })
+    .with_context(|| format!("failed to apply layer: {}", layer.display()))?;
 
     count_links(&root, &mut link_counts);
     fixup_links(&mut root, &link_counts, &groups.meta);
@@ -391,50 +311,47 @@ fn open_layer(path: &Path) -> Result<Box<dyn Read>> {
     }
 }
 
-/// Applies a single tar entry to the in-memory tree, streaming file data into
-/// the blob writer.
-fn apply_entry<R: Read, W: Write>(
+/// Applies a single normalized member to the in-memory tree, streaming file
+/// data into the blob writer.
+fn apply_member<W: Write>(
     root: &mut TarNode,
-    entry: &mut tar::Entry<R>,
+    member: Member,
+    data: &mut dyn Read,
     blob_writer: &mut BlobWriter<W>,
     chunk_size_bits: u32,
     groups: &mut LinkGroups,
 ) -> Result<()> {
-    use tar::EntryType;
+    let Member {
+        path,
+        kind,
+        mode,
+        uid,
+        gid,
+        mtime,
+        mtime_nsec,
+        xattrs,
+    } = member;
+    let xattrs = erofs_xattrs(xattrs);
+    let (name, parent_comps) = path
+        .split_last()
+        .expect("normalized members are below the root");
 
-    let entry_type = entry.header().entry_type();
-    match entry_type {
-        EntryType::XHeader
-        | EntryType::XGlobalHeader
-        | EntryType::GNULongName
-        | EntryType::GNULongLink => return Ok(()),
-        _ => {}
-    }
-
-    let comps = path_components(&entry.path_bytes())?;
-    let Some((name, parent_comps)) = comps.split_last() else {
-        if entry_type != EntryType::Directory {
-            return Err(Error::InvalidParameter(
-                "tar root must be a directory".to_string(),
-            ));
+    let node = match kind {
+        Kind::Restamp => {
+            let node = find_node_mut(root, &path)
+                .ok_or_else(|| Error::InvalidParameter("restamped member not found".to_string()))?;
+            node.mtime = mtime;
+            node.mtime_nsec = mtime_nsec;
+            if let Some(meta) = node
+                .link_group
+                .and_then(|group| groups.meta.get_mut(&group))
+            {
+                meta.mtime = mtime;
+                meta.mtime_nsec = mtime_nsec;
+            }
+            return Ok(());
         }
-        // The "./" root entry only carries metadata for the root directory.
-        let (mode, uid, gid, mtime, mtime_nsec) = entry_meta(entry)?;
-        root.mode = 0o040000 | (mode & 0o7777);
-        root.uid = uid;
-        root.gid = gid;
-        root.mtime = mtime;
-        root.mtime_nsec = mtime_nsec;
-        root.xattrs = pax_xattrs(entry)?;
-        return Ok(());
-    };
-
-    let (mode, uid, gid, mtime, mtime_nsec) = entry_meta(entry)?;
-    let xattrs = pax_xattrs(entry)?;
-    let size = entry.size();
-
-    let node = match entry_type {
-        EntryType::Directory => {
+        Kind::Dir => {
             let parent = ensure_dir(root, parent_comps);
             let TarNodeData::Dir(children) = &mut parent.data else {
                 unreachable!("ensure_dir returns a directory");
@@ -453,13 +370,13 @@ fn apply_entry<R: Read, W: Write>(
             dir.xattrs = xattrs;
             return Ok(());
         }
-        EntryType::Regular | EntryType::Continuous => {
+        Kind::Reg(size) => {
             // Stream the file data into the blob right now; this is where
             // aligned placement happens for the streaming path too.
             let data = if blob_writer.z_erofs_enabled() {
-                TarNodeData::ZFile(blob_writer.write_reader_z(entry, size)?)
+                TarNodeData::ZFile(blob_writer.write_reader_z(data, size)?)
             } else {
-                let chunks = blob_writer.write_reader_chunks(entry, size)?;
+                let chunks = blob_writer.write_reader_chunks(data, size)?;
                 TarNodeData::File {
                     chunks,
                     chunk_size_bits,
@@ -478,20 +395,12 @@ fn apply_entry<R: Read, W: Write>(
                 data,
             }
         }
-        EntryType::Link => {
-            let target_raw = entry
-                .link_name_bytes()
-                .ok_or_else(|| Error::InvalidParameter("hardlink without target".to_string()))?;
-            let target_comps = path_components(&target_raw)?;
+        Kind::Link(target_comps) => {
             // Assign (or reuse) the target's hardlink group, then insert a
             // full copy so the group survives even if the target is later
             // replaced by an upper layer.
-            let target = find_node_mut(root, &target_comps).ok_or_else(|| {
-                Error::InvalidParameter(format!(
-                    "hardlink target not found: {}",
-                    String::from_utf8_lossy(&target_raw)
-                ))
-            })?;
+            let target = find_node_mut(root, &target_comps)
+                .ok_or_else(|| Error::InvalidParameter("hardlink target not found".to_string()))?;
             if target.is_dir() {
                 return Err(Error::InvalidParameter(
                     "hardlink to a directory".to_string(),
@@ -581,58 +490,35 @@ fn apply_entry<R: Read, W: Write>(
                 },
             }
         }
-        EntryType::Symlink => {
-            let target = entry
-                .link_name_bytes()
-                .ok_or_else(|| Error::InvalidParameter("symlink without target".to_string()))?
-                .to_vec();
-            TarNode {
-                mode: 0o120000 | 0o777,
-                uid,
-                gid,
-                size: target.len() as u64,
-                mtime,
-                mtime_nsec,
-                nlink: 1,
-                xattrs,
-                link_group: None,
-                data: TarNodeData::Symlink { target },
-            }
-        }
-        EntryType::Char | EntryType::Block => {
-            let major = entry
-                .header()
-                .device_major()
-                .context("bad device major")?
-                .unwrap_or(0);
-            let minor = entry
-                .header()
-                .device_minor()
-                .context("bad device minor")?
-                .unwrap_or(0);
-            let type_bits = if entry_type == EntryType::Char {
+        Kind::Symlink(target) => TarNode {
+            mode: 0o120000 | 0o777,
+            uid,
+            gid,
+            size: target.len() as u64,
+            mtime,
+            mtime_nsec,
+            nlink: 1,
+            xattrs,
+            link_group: None,
+            data: TarNodeData::Symlink { target },
+        },
+        Kind::Char(rdev) | Kind::Block(rdev) => TarNode {
+            mode: if matches!(kind, Kind::Char(_)) {
                 0o020000
             } else {
                 0o060000
-            };
-            TarNode {
-                mode: type_bits | (mode & 0o7777),
-                uid,
-                gid,
-                size: 0,
-                mtime,
-                mtime_nsec,
-                nlink: 1,
-                xattrs,
-                link_group: None,
-                // SAFETY-free rdev packing: same encoding the kernel reports
-                // in stat.st_rdev for major/minor pairs of this range.
-                data: TarNodeData::Device {
-                    rdev: libc::makedev(major, minor) as u32,
-                },
-            }
-        }
-        EntryType::Fifo => TarNode {
+            } | (mode & 0o7777),
+            uid,
+            gid,
+            size: 0,
+            mtime,
+            mtime_nsec,
+            nlink: 1,
+            xattrs,
+            link_group: None,
+            data: TarNodeData::Device { rdev },
+        },
+        Kind::Fifo => TarNode {
             mode: 0o010000 | (mode & 0o7777),
             uid,
             gid,
@@ -644,13 +530,6 @@ fn apply_entry<R: Read, W: Write>(
             link_group: None,
             data: TarNodeData::Fifo,
         },
-        // Silently dropping an entry would yield a wrong image.
-        other => {
-            return Err(Error::Unsupported(format!(
-                "unsupported tar entry type {other:?}: {}",
-                String::from_utf8_lossy(&entry.path_bytes())
-            )))
-        }
     };
 
     let parent = ensure_dir(root, parent_comps);
@@ -659,77 +538,6 @@ fn apply_entry<R: Read, W: Write>(
     };
     children.insert(name.clone(), node);
     Ok(())
-}
-
-/// Extracts ownership and nanosecond timestamps with PAX overrides.
-fn entry_meta<R: Read>(entry: &mut tar::Entry<R>) -> Result<(u16, u32, u32, u64, u32)> {
-    let header = entry.header();
-    let mode = header.mode().context("bad entry mode")? as u16;
-    let mut uid = header.uid().context("bad entry uid")?;
-    let mut gid = header.gid().context("bad entry gid")?;
-    let mut mtime = header.mtime().context("bad entry mtime")?;
-    let mut mtime_nsec = 0;
-    if let Some(extensions) = entry.pax_extensions().context("bad pax metadata")? {
-        for extension in extensions {
-            let extension = extension.context("bad pax metadata")?;
-            let invalid = || Error::InvalidParameter("invalid pax metadata value".to_string());
-            match extension.key().map_err(|_| invalid())? {
-                "uid" => {
-                    uid = extension
-                        .value()
-                        .map_err(|_| invalid())?
-                        .parse()
-                        .map_err(|_| invalid())?
-                }
-                "gid" => {
-                    gid = extension
-                        .value()
-                        .map_err(|_| invalid())?
-                        .parse()
-                        .map_err(|_| invalid())?
-                }
-                "mtime" => {
-                    let value = extension.value().map_err(|_| invalid())?;
-                    (mtime, mtime_nsec) = parse_pax_time(value).ok_or_else(invalid)?;
-                }
-                _ => {}
-            }
-        }
-    }
-    let uid = u32::try_from(uid)
-        .map_err(|_| Error::InvalidParameter("entry uid exceeds u32".to_string()))?;
-    let gid = u32::try_from(gid)
-        .map_err(|_| Error::InvalidParameter("entry gid exceeds u32".to_string()))?;
-    Ok((mode, uid, gid, mtime, mtime_nsec))
-}
-
-/// Parses a PAX time the way Go's archive/tar does. A time before the epoch
-/// is kept in two's complement, which EROFS readers take as signed seconds.
-fn parse_pax_time(value: &str) -> Option<(u64, u32)> {
-    let (seconds, fraction) = value.split_once('.').unwrap_or((value, ""));
-    let digits = seconds.strip_prefix('-').unwrap_or(seconds);
-    let negative = digits.len() != seconds.len();
-    if digits.is_empty()
-        || !digits.bytes().all(|digit| digit.is_ascii_digit())
-        || !fraction.bytes().all(|digit| digit.is_ascii_digit())
-    {
-        return None;
-    }
-    let seconds: i64 = digits.parse().ok()?;
-    let mut nsec = fraction
-        .bytes()
-        .chain(std::iter::repeat(b'0'))
-        .take(9)
-        .fold(0, |nsec, digit| nsec * 10 + u32::from(digit - b'0'));
-    let seconds = match (negative, nsec) {
-        (false, _) => seconds,
-        (true, 0) => -seconds,
-        (true, _) => {
-            nsec = 1_000_000_000 - nsec;
-            -seconds - 1
-        }
-    };
-    Some((seconds as u64, nsec))
 }
 
 #[cfg(test)]
@@ -762,7 +570,7 @@ mod tests {
         let mut body = Vec::new();
         for (name, value) in xattrs {
             let record = [
-                format!("{PAX_XATTR_PREFIX}{name}=").into_bytes(),
+                format!("SCHILY.xattr.{name}=").into_bytes(),
                 value.to_vec(),
                 b"\n".to_vec(),
             ]
@@ -875,8 +683,9 @@ mod tests {
         builder.append(&h, &b""[..]).unwrap();
         let inodes = build(&builder.into_inner().unwrap()).unwrap();
 
-        assert_eq!(inodes[0].mode, 0o040711, "root entry sets root mode");
-        assert_eq!((inodes[0].uid, inodes[0].gid), (1000, 2000));
+        // Apply ignores the root member.
+        assert_eq!(inodes[0].mode, 0o040755);
+        assert_eq!((inodes[0].uid, inodes[0].gid), (0, 0));
         let a = child(&inodes, 0, "a").0.inode_index;
         let (_, b) = child(&inodes, a, "b");
         assert_eq!(b.mode, 0o040700);
@@ -1004,63 +813,6 @@ mod tests {
     }
 
     #[test]
-    fn libarchive_xattrs_are_decoded_and_schily_values_win() {
-        let mut builder = tar::Builder::new(Vec::new());
-        builder
-            .append_pax_extensions([
-                ("LIBARCHIVE.xattr.user.a%0Ab", b"dmFsdWUKbGluZQ".as_slice()),
-                ("LIBARCHIVE.xattr.user.both", b"bGli".as_slice()),
-                ("SCHILY.xattr.user.both", b"schily".as_slice()),
-            ])
-            .unwrap();
-        let mut h = header(tar::EntryType::Regular, "file", 1, 0o644);
-        h.set_cksum();
-        builder.append(&h, &b"x"[..]).unwrap();
-        let inodes = build(&builder.into_inner().unwrap()).unwrap();
-
-        let xattrs: Vec<(&[u8], &[u8])> = child(&inodes, 0, "file")
-            .1
-            .xattrs
-            .iter()
-            .map(|x| (x.suffix.as_slice(), x.value.as_slice()))
-            .collect();
-        assert_eq!(
-            xattrs,
-            vec![
-                (&b"a\nb"[..], &b"value\nline"[..]),
-                (&b"both"[..], &b"schily"[..])
-            ]
-        );
-    }
-
-    #[test]
-    fn malformed_libarchive_xattrs_fail_the_build() {
-        for (key, value) in [
-            ("LIBARCHIVE.xattr.user.a", b"not base64!".as_slice()),
-            ("LIBARCHIVE.xattr.user.a%", b"dmFsdWU".as_slice()),
-            ("LIBARCHIVE.xattr.user.a%4", b"dmFsdWU".as_slice()),
-            ("LIBARCHIVE.xattr.user.a%zz", b"dmFsdWU".as_slice()),
-            ("LIBARCHIVE.xattr.user.a%+1", b"dmFsdWU".as_slice()),
-        ] {
-            let mut builder = tar::Builder::new(Vec::new());
-            builder.append_pax_extensions([(key, value)]).unwrap();
-            let mut h = header(tar::EntryType::Regular, "file", 1, 0o644);
-            h.set_cksum();
-            builder.append(&h, &b"x"[..]).unwrap();
-            let Err(err) = build(&builder.into_inner().unwrap()) else {
-                panic!("{key} must be rejected");
-            };
-            assert!(
-                err.report()
-                    .to_string()
-                    .contains("invalid libarchive xattr"),
-                "{key}: {}",
-                err.report()
-            );
-        }
-    }
-
-    #[test]
     fn oversized_xattr_value_fails_bootstrap_rendering() {
         use crate::build::bootstrap::render_bootstrap;
 
@@ -1074,29 +826,6 @@ mod tests {
             let rendered = render_bootstrap(&mut inodes, 0, &[], &[0; 16]);
             assert_eq!(rendered.is_ok(), ok, "len {len}");
         }
-    }
-
-    #[test]
-    fn pax_times_parse_like_go_including_negative_ones() {
-        let at = |secs: i64, nsec: u32| Some((secs as u64, nsec));
-        assert_eq!(
-            parse_pax_time("1350244992.023960108"),
-            at(1350244992, 23960108)
-        );
-        assert_eq!(parse_pax_time("1."), at(1, 0));
-        assert_eq!(parse_pax_time("-1"), at(-1, 0));
-        assert_eq!(parse_pax_time("-1.3"), at(-2, 700_000_000));
-        assert_eq!(parse_pax_time("-0.1"), at(-1, 900_000_000));
-        assert_eq!(parse_pax_time("-0.0"), at(0, 0));
-        for invalid in ["", ".5", "-", "+", "-1.-1", "foo", "0.123456789abcdef"] {
-            assert_eq!(parse_pax_time(invalid), None, "{invalid}");
-        }
-    }
-
-    #[test]
-    fn name_components_longer_than_name_max_are_rejected() {
-        assert!(path_components(&[b'a'; NAME_MAX]).is_ok());
-        assert!(path_components(&[b'a'; NAME_MAX + 1]).is_err());
     }
 
     #[test]
@@ -1132,7 +861,10 @@ mod tests {
             .err()
             .expect("must fail");
         let report = err.report().to_string();
-        assert!(report.contains("hardlink target not found"), "{report}");
+        assert!(
+            report.contains("hardlink target \"busybox\" not found"),
+            "{report}"
+        );
     }
 
     #[test]
@@ -1244,7 +976,6 @@ mod tests {
         let file = child(&inodes, 0, "file").1;
         assert_eq!((file.uid, file.gid), (1234, 5678));
         assert_eq!((file.mtime, file.mtime_nsec), (1700000001, 123456789));
-        assert!(path_components(b"a/../b").is_err());
     }
 
     #[test]
