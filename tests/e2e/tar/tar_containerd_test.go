@@ -223,7 +223,7 @@ func writeDiff(t *testing.T, dir string) []byte {
 // TestContinuityFSSuite runs continuity's filesystem suite, which
 // containerd's differ is tested with, against nydus: after every step the
 // whole tree is written as one layer by containerd's archive.WriteDiff,
-// converted by nydus.Pack, and the suite compares the FUSE mount with its
+// converted by nydus build, and the suite compares the FUSE mount with its
 // own copy of the tree.
 func TestContinuityFSSuite(t *testing.T) {
 	if os.Getuid() != 0 {

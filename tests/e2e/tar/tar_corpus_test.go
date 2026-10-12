@@ -8,19 +8,16 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	"github.com/dragonflyoss/nydus/tests/e2e"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/unix"
 )
 
 // goTarCorpusBudget bounds the bytes a corpus archive may expand to: the
@@ -36,7 +33,7 @@ type tarLayout struct {
 }
 
 // TestGoTarCorpus converts every archive of Go's archive/tar test corpus
-// through nydus.Pack, the streaming layer conversion nydusify uses, and
+// through nydus build, the streaming layer conversion nydusify uses, and
 // checks the FUSE-mounted result against the reference tree containerd
 // applies from the same archive. Archives Go or the reference rejects must
 // be rejected by the conversion too, never turned into an image.
@@ -59,10 +56,10 @@ func TestGoTarCorpus(t *testing.T) {
 	}
 }
 
-// checkTarConversion converts data through nydus.Pack and asserts the mount
+// checkTarConversion converts data through nydus build and asserts the mount
 // reproduces the reference tree extractReference applies from it, or that
 // the conversion fails cleanly when Go or the reference rejects the archive.
-// data may be gzipped, which Pack accepts too. It reports whether the
+// data may be gzipped, which nydus build accepts too. It reports whether the
 // archive was converted and compared rather than rejected.
 func checkTarConversion(t *testing.T, nydusBin string, data []byte, layout tarLayout) bool {
 	t.Helper()
@@ -92,7 +89,7 @@ func checkTarConversion(t *testing.T, nydusBin string, data []byte, layout tarLa
 		requireRejected(t, packErr, "containerd rejects the archive (%v)", err)
 		return false
 	}
-	require.NoError(t, packErr, "nydus.Pack")
+	require.NoError(t, packErr, "nydus build")
 
 	mnt := filepath.Join(work, "mnt")
 	defer e2e.MountNydus(t, nydusBin, "", blob, mnt)()
@@ -104,55 +101,13 @@ func checkTarConversion(t *testing.T, nydusBin string, data []byte, layout tarLa
 // exit, not a panic (exit 101) or a signal.
 func requireRejected(t *testing.T, packErr error, format string, args ...any) {
 	t.Helper()
-	require.Error(t, packErr, append([]any{format + " but nydus.Pack accepted it"}, args...)...)
+	require.Error(t, packErr, append([]any{format + " but nydus build accepted it"}, args...)...)
 	var exitErr *exec.ExitError
 	if errors.As(packErr, &exitErr) {
 		code := exitErr.ExitCode()
 		require.True(t, code != 101 && code != -1,
 			append([]any{format + " and the builder crashed: %v"}, append(args, packErr)...)...)
 	}
-}
-
-// TestBuilderRawTar feeds `nydus build` archives the Pack normalizer would
-// have rewritten or rejected, so the builder and reader stand on their own:
-// a pre-epoch mtime must survive to the mount and an over-long name must be
-// refused rather than crash the builder.
-func TestBuilderRawTar(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("requires root: the mount runs nydus fuse")
-	}
-	t.Parallel()
-	nydusBin := e2e.MustLookupExecutable(t, "nydus")
-	build := func(t *testing.T, hdr *tar.Header) (string, error) {
-		var buf bytes.Buffer
-		tw := tar.NewWriter(&buf)
-		require.NoError(t, tw.WriteHeader(hdr))
-		require.NoError(t, tw.Close())
-		work := t.TempDir()
-		layer, blob := filepath.Join(work, "layer.tar"), filepath.Join(work, "layer.blob")
-		require.NoError(t, os.WriteFile(layer, buf.Bytes(), 0o644))
-		out, err := exec.Command(nydusBin, "build", layer, "--source-type", "tar", "--blob", blob).CombinedOutput()
-		if err != nil {
-			err = fmt.Errorf("%w: %s", err, out)
-		}
-		return blob, err
-	}
-
-	t.Run("pre-epoch-mtime", func(t *testing.T) {
-		blob, err := build(t, &tar.Header{Name: "f", Typeflag: tar.TypeReg, Mode: 0o644,
-			ModTime: time.Unix(-1, 0), Format: tar.FormatGNU})
-		require.NoError(t, err)
-		mnt := filepath.Join(t.TempDir(), "mnt")
-		defer e2e.MountNydus(t, nydusBin, "", blob, mnt)()
-		var st unix.Stat_t
-		require.NoError(t, unix.Lstat(filepath.Join(mnt, "f"), &st))
-		require.Equal(t, int64(-1), st.Mtim.Sec)
-	})
-
-	t.Run("name-longer-than-255", func(t *testing.T) {
-		_, err := build(t, &tar.Header{Name: strings.Repeat("n", 256), Typeflag: tar.TypeReg, Mode: 0o644})
-		requireRejected(t, err, "the name is longer than NAME_MAX")
-	})
 }
 
 // goTarTestdata locates the corpus: GO_TAR_TESTDATA, else the testdata of
@@ -240,25 +195,16 @@ func gunzipLayer(data []byte) ([]byte, error) {
 	return io.ReadAll(zr)
 }
 
-// packLayer streams r through nydus.Pack into blob, working in blob's
-// directory, and returns the first write or build error.
+// packLayer streams r through `nydus build` into blob.
 func packLayer(t *testing.T, nydusBin string, r io.Reader, blob string, layout tarLayout) error {
 	t.Helper()
-	out, err := os.Create(blob)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, out.Close()) }()
-
-	writer, err := nydus.Pack(context.Background(), out, nydus.PackOption{
+	return nydus.RunNydusBuild(context.Background(), nydus.BuildOption{
 		BuilderPath: nydusBin,
-		WorkDir:     filepath.Dir(blob),
-		Compressor:  layout.compressor,
+		SourceDir:   "/dev/stdin",
+		SourceType:  "tar",
+		Stdin:       r,
+		BlobPath:    blob,
 		ChunkSize:   layout.chunkSize,
+		Compressor:  layout.compressor,
 	})
-	require.NoError(t, err)
-	_, writeErr := io.Copy(writer, r)
-	closeErr := writer.Close()
-	if writeErr != nil {
-		return writeErr
-	}
-	return closeErr
 }
