@@ -976,8 +976,18 @@ impl RegistryReader {
             }
         }
 
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(RegistryError::Request(ConnectionError::ErrorWithMsg(
+                format!("unexpected HTTP {status} response to Range {range}"),
+            )));
+        }
         resp.copy_to(buf)
-            .map_err(|e| RegistryError::Transport(std::io::Error::other(e)))
+            .map_err(|e| {
+                RegistryError::Transport(std::io::Error::other(format!(
+                    "HTTP {status} response to Range {range}; copying blob body failed: {e}"
+                )))
+            })
             .map(|size| size as usize)
     }
 
