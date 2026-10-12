@@ -63,6 +63,15 @@ type Committer struct {
 	manager *Manager
 }
 
+func startCommitStep(stage string) time.Time {
+	logrus.WithFields(logrus.Fields{"commit_stage": stage, "commit_stage_state": "started"}).Info("nydusify commit stage started")
+	return time.Now()
+}
+
+func completeCommitStep(stage string) {
+	logrus.WithFields(logrus.Fields{"commit_stage": stage, "commit_stage_state": "completed"}).Info("nydusify commit stage completed")
+}
+
 // NewCommitter creates a new Committer instance
 func NewCommitter(opt Opt) (*Committer, error) {
 	if err := os.MkdirAll(opt.WorkDir, 0755); err != nil {
@@ -88,9 +97,11 @@ func NewCommitter(opt Opt) (*Committer, error) {
 
 func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 	// Resolve container ID first
+	startCommitStep("resolve_container")
 	if err := cm.resolveContainerID(ctx, &opt); err != nil {
 		return errors.Wrap(err, "failed to resolve container ID")
 	}
+	completeCommitStep("resolve_container")
 
 	ctx = namespaces.WithNamespace(ctx, opt.Namespace)
 	targetRef, err := ValidateRef(opt.TargetRef)
@@ -98,29 +109,33 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "parse target image name")
 	}
 
+	startCommitStep("inspect_container")
 	inspect, err := cm.manager.Inspect(ctx, opt.ContainerID)
 	if err != nil {
 		return errors.Wrap(err, "inspect container")
 	}
+	completeCommitStep("inspect_container")
 
 	originalSourceRef := inspect.Image
 
-	logrus.Infof("pulling base bootstrap")
-	start := time.Now()
+	startCommitStep("pull_base_bootstrap")
 	image, committedLayers, err := cm.pullBootstrap(ctx, originalSourceRef, "bootstrap-base", opt.SourceInsecure)
 	if err != nil {
 		return errors.Wrap(err, "pull base bootstrap")
 	}
-	logrus.Infof("pulled base bootstrap, elapsed: %s", time.Since(start))
+	completeCommitStep("pull_base_bootstrap")
 
 	if committedLayers >= opt.MaximumTimes {
 		return fmt.Errorf("reached maximum committed times %d", opt.MaximumTimes)
 	}
+	startCommitStep("read_base_bootstrap_metadata")
 	if opt.FsVersion, opt.Compressor, err = cm.obtainBootStrapInfo(ctx, "bootstrap-base"); err != nil {
 		return errors.Wrap(err, "obtain bootstrap FsVersion and Compressor")
 	}
+	completeCommitStep("read_base_bootstrap_metadata")
 
 	// Push lower blobs
+	startCommitStep("mount_base_blobs")
 	for idx, layer := range image.Manifest.Layers {
 		if layer.MediaType == utils.MediaTypeNydusBlob {
 			name := fmt.Sprintf("blob-mount-%d", idx)
@@ -129,6 +144,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 			}
 		}
 	}
+	completeCommitStep("mount_base_blobs")
 
 	mountList := NewMountList()
 
@@ -138,14 +154,16 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		eg := errgroup.Group{}
 		eg.Go(func() error {
 			var upperBlobDigest *digest.Digest
+			startCommitStep("build_upper_blob")
 			if err := withRetry(func() error {
 				upperBlobDigest, err = cm.commitUpperByDiff(ctx, mountList.Add, opt.WithPaths, opt.WithoutPaths, inspect.LowerDirs, inspect.UpperDir, "blob-upper", opt.FsVersion, opt.Compressor)
 				return err
 			}, 3); err != nil {
 				return errors.Wrap(err, "commit upper")
 			}
+			completeCommitStep("build_upper_blob")
 			logrus.Infof("pushing blob for upper")
-			start := time.Now()
+			startCommitStep("push_upper_blob")
 			upperBlobDesc, err := cm.pushBlob(ctx, "blob-upper", *upperBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image)
 			if err != nil {
 				return errors.Wrap(err, "push upper blob")
@@ -154,7 +172,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 				Name: "blob-upper",
 				Desc: *upperBlobDesc,
 			}
-			logrus.Infof("pushed blob for upper, elapsed: %s", time.Since(start))
+			completeCommitStep("push_upper_blob")
 			return nil
 		})
 
@@ -238,20 +256,24 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "failed to sync filesystem")
 	}
 
+	startCommitStep("pause_and_commit_layers")
 	if err := cm.pause(ctx, opt.ContainerID, commit); err != nil {
 		return errors.Wrap(err, "pause container to commit")
 	}
+	completeCommitStep("pause_and_commit_layers")
 
-	logrus.Infof("merging base and upper bootstraps")
+	startCommitStep("merge_bootstrap")
 	_, bootstrapDiffID, err := cm.mergeBootstrap(ctx, *upperBlob, mountBlobs, "bootstrap-base", "bootstrap-merged.tar")
 	if err != nil {
 		return errors.Wrap(err, "merge bootstrap")
 	}
+	completeCommitStep("merge_bootstrap")
 
-	logrus.Infof("pushing committed image to %s", targetRef)
+	startCommitStep("push_manifest")
 	if err := cm.pushManifest(ctx, *image, *bootstrapDiffID, targetRef, "bootstrap-merged.tar", opt.FsVersion, upperBlob, mountBlobs, opt.TargetInsecure); err != nil {
 		return errors.Wrap(err, "push manifest")
 	}
+	completeCommitStep("push_manifest")
 
 	return nil
 }
