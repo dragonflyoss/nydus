@@ -58,7 +58,7 @@ var tarLayouts = map[string]tarLayout{
 
 // TestGoTarVectors converts archives built from the in-memory test vectors
 // of Go's archive/tar and containerd's archive packages, plus an edge-case
-// matrix, through nydus.Pack and checks each mount against the tree
+// matrix, through nydus build and checks each mount against the tree
 // containerd applies from the same bytes, as TestGoTarCorpus does for the
 // on-disk corpus.
 func TestGoTarVectors(t *testing.T) {
