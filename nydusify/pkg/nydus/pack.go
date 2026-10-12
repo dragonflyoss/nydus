@@ -41,8 +41,7 @@ func (opt *PackOption) applyDefaults() {
 	}
 }
 
-// Pack streams an OCI diff tar, normalized to the tree containerd applies from
-// it (see normalizeTar), into nydus build without extracting a rootfs.
+// Pack streams an OCI diff tar into nydus build without extracting a rootfs.
 // Close waits for the build and output copy; neither requires root privileges.
 func Pack(ctx context.Context, dest io.Writer, opt PackOption) (io.WriteCloser, error) {
 	opt.applyDefaults()
@@ -67,30 +66,6 @@ func Pack(ctx context.Context, dest io.Writer, opt PackOption) (io.WriteCloser, 
 		pack.done <- err
 	}()
 	return pack, nil
-}
-
-// pipeIO joins the layer input and builder stdin, remembering the first I/O
-// failure on either so it is not mistaken for a rejected layer.
-type pipeIO struct {
-	r   io.Reader
-	w   io.Writer
-	err error
-}
-
-func (p *pipeIO) Read(b []byte) (int, error) {
-	n, err := p.r.Read(b)
-	if err != nil && err != io.EOF && p.err == nil {
-		p.err = err
-	}
-	return n, err
-}
-
-func (p *pipeIO) Write(b []byte) (int, error) {
-	n, err := p.w.Write(b)
-	if err != nil && p.err == nil {
-		p.err = err
-	}
-	return n, err
 }
 
 type packWriter struct {
@@ -178,17 +153,8 @@ func buildBlob(ctx context.Context, dest io.Writer, sourcePath string, input *io
 			growPipe(writer)
 			inputDone = make(chan error, 1)
 			go func() {
-				pipe := &pipeIO{r: input, w: writer}
-				err := normalizeTar(pipe, pipe)
-				if err != nil {
-					_ = input.CloseWithError(err)
-				}
+				_, err := io.Copy(writer, input)
 				_ = writer.Close()
-				if pipe.err != nil {
-					// A pipe closed by the builder or the caller; their own
-					// error explains why.
-					err = nil
-				}
 				inputDone <- err
 			}()
 		}
@@ -205,9 +171,7 @@ func buildBlob(ctx context.Context, dest io.Writer, sourcePath string, input *io
 		if input != nil {
 			_ = sourceFile.Close()
 			_ = input.CloseWithError(berr)
-			if inputErr := <-inputDone; inputErr != nil {
-				// A rejected layer tar overrides whatever the builder made of
-				// the truncated stream.
+			if inputErr := <-inputDone; berr == nil && inputErr != nil {
 				berr = inputErr
 			}
 		}
