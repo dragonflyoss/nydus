@@ -343,10 +343,17 @@ func compatTarSafe(s string) bool {
 	return !strings.Contains(s, "\n")
 }
 
+// compatTarXattr reports whether compatWriteTar carries the xattr name=value.
+// trusted.* is left out: the builder drops it from a layer tar as
+// containerd's Apply does, while older releases keep it.
+func compatTarXattr(name string, value compatBytes) bool {
+	return !strings.HasPrefix(name, "trusted.") && compatTarSafe(name) && compatTarSafe(string(value))
+}
+
 // compatWriteTar writes the tree under root as an OCI layer tarball: PAX
 // headers carrying xattrs and nanosecond mtimes, and hardlinks as link entries
 // to the first path of the inode. It leaves out sockets, which tar cannot
-// carry, and what compatTarSafe rejects.
+// carry, what compatTarSafe rejects and the xattrs compatTarXattr rejects.
 func compatWriteTar(w io.Writer, root string) error {
 	tw := tar.NewWriter(w)
 	first := map[uint64]string{}
@@ -395,7 +402,7 @@ func compatWriteTar(w io.Writer, root string) error {
 			return err
 		}
 		for name, value := range xattrs {
-			if !compatTarSafe(name) || !compatTarSafe(string(value)) {
+			if !compatTarXattr(name, value) {
 				continue
 			}
 			if hdr.PAXRecords == nil {
@@ -665,7 +672,7 @@ func compatTarSource(entries []compatEntry) []compatEntry {
 		xattrs := entry.Xattrs
 		entry.Xattrs = nil
 		for name, value := range xattrs {
-			if compatTarSafe(name) && compatTarSafe(string(value)) {
+			if compatTarXattr(name, value) {
 				if entry.Xattrs == nil {
 					entry.Xattrs = map[string]compatBytes{}
 				}

@@ -7,6 +7,7 @@
 
 pub mod merge;
 pub mod tar;
+mod tar_normalize;
 
 pub use nydus_core::build::{blob_metadata_sidecar_path, save_blob_metadata_sidecar};
 
