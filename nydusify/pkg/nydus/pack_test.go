@@ -1,7 +1,6 @@
 package nydus
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -32,20 +31,14 @@ func TestPackStreamsTarWithoutExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	member := tarReg("f")
-	member.Size = 180000
-	if _, err := writer.Write(encodeTar(t, member)); err != nil {
+	payload := bytes.Repeat([]byte("tar-bytes"), 20000)
+	if _, err := writer.Write(payload); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	tr := tar.NewReader(&output)
-	hdr, err := tr.Next()
-	if err != nil || hdr.Name != "f" {
-		t.Fatalf("normalized stream lost the member: %v %v", hdr, err)
-	}
-	if got, err := io.ReadAll(tr); err != nil || !bytes.Equal(got, bytes.Repeat([]byte("x"), int(member.Size))) {
+	if !bytes.Equal(output.Bytes(), payload) {
 		t.Fatal("stream changed")
 	}
 	if err := writer.Close(); err != nil {
@@ -64,10 +57,7 @@ func TestPackUnblocksWhenBuilderExitsEarly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Write past any pipe's capacity so the write must see the builder go.
-	hdr := tarReg("f")
-	hdr.Size = 16 << 20
-	if _, err := writer.Write(encodeTar(t, hdr)); err == nil {
+	if _, err := writer.Write(make([]byte, 1<<20)); err == nil {
 		t.Fatal("expected failed input stream")
 	}
 	if err := writer.Close(); err == nil || !strings.Contains(err.Error(), "rejected") {
