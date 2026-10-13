@@ -29,9 +29,9 @@ use nydus_format::blob::{
     BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
-use nydus_format::utils::sha256_bytes;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
 use nydus_storage::cache::{decode_chunk_group_from_window, LocalBlobCache};
+use sha2::{Digest, Sha256};
 
 /// Longest contiguous run of source chunk groups fetched in one backend
 /// read while copying them into the ondemand blob.
@@ -56,7 +56,7 @@ fn assemble_ondemand_artifact(
         Some(blob_metadata),
     )?;
 
-    let digest = sha256_bytes(&artifact);
+    let digest = Sha256::digest(&artifact).into();
     Ok((artifact, digest, footer))
 }
 

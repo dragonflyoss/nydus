@@ -24,7 +24,9 @@ use nydus_core::build::inode::{build_tree, choose_epoch, set_root_prefetch_blobs
 use nydus_core::build::{bootstrap, inode, HashingWriter};
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
-use nydus_format::erofs::{ErofsDeviceSlot, ZAlgorithm, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
+use nydus_format::erofs::{
+    ErofsDeviceSlot, ZErofsCompressor, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
+};
 #[cfg(test)]
 pub(crate) fn plain_blob_writer<W: Write>(writer: W, chunk_size: u32) -> BlobWriter<W> {
     BlobWriter::new(
@@ -51,7 +53,7 @@ pub enum NativeLayout {
     Plain,
     /// z_erofs pclusters of this algorithm that the kernel decompresses, with
     /// small files packed into the shared fragment inode.
-    Compressed(ZAlgorithm),
+    Compressed(ZErofsCompressor),
 }
 
 /// Options for [`build_image`].
@@ -219,7 +221,7 @@ impl BuildImageOptions {
 
     /// The z_erofs pcluster algorithm when the options select compressed
     /// native output.
-    pub fn z_erofs(&self) -> Option<ZAlgorithm> {
+    pub fn z_erofs(&self) -> Option<ZErofsCompressor> {
         match self.native {
             Some(NativeLayout::Compressed(algorithm)) => Some(algorithm),
             Some(NativeLayout::Plain) | None => None,
@@ -646,7 +648,7 @@ mod tests {
     /// data is one device mapped past the bootstrap, and `--blob-id` names it.
     #[test]
     fn build_erofs_layer_from_dir_renders_a_single_device_z_image() {
-        for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+        for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
             build_erofs_layer_from_dir_with(algorithm);
         }
     }
@@ -709,7 +711,7 @@ mod tests {
         // The store layout: bootstrap plus the full blob named by its digest.
         let store = dir.path().join("store");
         std::fs::create_dir(&store).unwrap();
-        let blob_path = store.join(nydus_format::utils::hex_string(&layer.full_blob_digest));
+        let blob_path = store.join(hex::encode(layer.full_blob_digest));
         std::fs::write(&blob_path, &data).unwrap();
         let bootstrap = dir.path().join("bootstrap");
         std::fs::write(&bootstrap, layer.standalone_bootstrap.unwrap()).unwrap();
@@ -759,7 +761,7 @@ mod tests {
         assert_eq!(out, &big[4096..14_096]);
     }
 
-    fn build_erofs_layer_from_dir_with(algorithm: ZAlgorithm) {
+    fn build_erofs_layer_from_dir_with(algorithm: ZErofsCompressor) {
         use nydus_core::ErofsReader;
         use nydus_format::erofs::{EROFS_INODE_COMPRESSED_FULL, Z_EROFS_MAP_HEADER_SIZE};
 
@@ -807,10 +809,10 @@ mod tests {
         std::fs::write(&meta_path, &bootstrap).unwrap();
         let reader = ErofsReader::open_metadata_only(&meta_path).unwrap();
         let cfgs = reader.z_compr_cfgs().unwrap().expect("z image");
-        assert!(cfgs.has(algorithm));
+        assert!(cfgs.contains(algorithm));
         assert_eq!(
             reader.superblock().available_compr_algs(),
-            1 << algorithm.as_type()
+            1 << algorithm.code()
         );
         let [device] = reader.blob_infos().unwrap() else {
             panic!("one device");
@@ -837,7 +839,7 @@ mod tests {
         let big_tail = reader
             .read_z_inode_tail(lookup(root_nid, "big"), &big)
             .unwrap();
-        assert_eq!(big_tail[6], algorithm.as_type());
+        assert_eq!(big_tail[6], algorithm.code());
         // Aligned to 8 blocks of the device data.
         let first = u32::from_le_bytes(
             big_tail[Z_EROFS_MAP_HEADER_SIZE + 12..][..4]

@@ -6,8 +6,7 @@ use nydus::build::{
 };
 use nydus::error::{Context, Error, Result};
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
-use nydus_format::erofs::{ZAlgorithm, EROFS_BLOB_ID_SIZE};
-use nydus_format::utils::hex_string;
+use nydus_format::erofs::{ZErofsCompressor, EROFS_BLOB_ID_SIZE};
 use nydus_telemetry::logging::init_command_tracing;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -164,8 +163,8 @@ impl Compressor {
     fn native(self) -> Option<NativeLayout> {
         match self {
             Self::ErofsNone => Some(NativeLayout::Plain),
-            Self::ErofsLz4 => Some(NativeLayout::Compressed(ZAlgorithm::Lz4)),
-            Self::ErofsZstd => Some(NativeLayout::Compressed(ZAlgorithm::Zstd)),
+            Self::ErofsLz4 => Some(NativeLayout::Compressed(ZErofsCompressor::Lz4)),
+            Self::ErofsZstd => Some(NativeLayout::Compressed(ZErofsCompressor::Zstd)),
             Self::None | Self::Zstd | Self::Lz4 => None,
         }
     }
@@ -246,7 +245,7 @@ impl BuildCommand {
             self.blob_dir
                 .as_ref()
                 .zip(self.blob_id.as_ref())
-                .map(|(dir, id)| dir.join(hex_string(id)))
+                .map(|(dir, id)| dir.join(hex::encode(id)))
         });
         self.validate_output_paths(full_blob_path.as_deref())?;
         if self.erofs_data_alignment.as_u64() != 0 && self.compressor.native().is_none() {
@@ -433,7 +432,7 @@ impl BuildCommand {
 
         let final_path = match &blob_output {
             BlobOutput::File(path) => path.clone(),
-            BlobOutput::Store { dir, .. } => dir.join(hex_string(&image.full_blob_digest)),
+            BlobOutput::Store { dir, .. } => dir.join(hex::encode(image.full_blob_digest)),
         };
         if let Err(err) = self.validate_output_paths(Some(&final_path)) {
             if let BlobOutput::Store { temp, .. } = &blob_output {
@@ -566,7 +565,7 @@ impl BlobOutput {
         match self {
             Self::File(path) => Ok(path),
             Self::Store { dir, temp } => {
-                let full_blob_path = dir.join(hex_string(full_blob_digest));
+                let full_blob_path = dir.join(hex::encode(full_blob_digest));
                 if !replace && full_blob_path.exists() {
                     fs::remove_file(&temp).with_context(|| {
                         format!(
@@ -663,8 +662,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
     };
     let row = BlobRow {
         blob_index: summary.index.to_string(),
-        data_blob_digest: hex_string(summary.data_blob_digest),
-        full_blob_digest: hex_string(summary.full_blob_digest),
+        data_blob_digest: hex::encode(summary.data_blob_digest),
+        full_blob_digest: hex::encode(summary.full_blob_digest),
         data_layout: match summary.native {
             Some(NativeLayout::Plain) => "erofs plain device".to_string(),
             Some(NativeLayout::Compressed(algorithm)) => format!("z_erofs {algorithm} device"),
@@ -709,7 +708,7 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
 mod tests {
     use super::*;
     use nydus_format::erofs::{
-        cast_ref, ErofsDeviceSlot, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET,
+        ErofsDeviceSlot, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET,
     };
     use std::io::{Read, Write};
     use std::os::unix::fs::{symlink, FileTypeExt};
@@ -776,8 +775,11 @@ mod tests {
         fs::create_dir(&source).unwrap();
         for (value, layout) in [
             ("erofs-none", NativeLayout::Plain),
-            ("erofs-lz4", NativeLayout::Compressed(ZAlgorithm::Lz4)),
-            ("erofs-zstd", NativeLayout::Compressed(ZAlgorithm::Zstd)),
+            ("erofs-lz4", NativeLayout::Compressed(ZErofsCompressor::Lz4)),
+            (
+                "erofs-zstd",
+                NativeLayout::Compressed(ZErofsCompressor::Zstd),
+            ),
         ] {
             let cmd = BuildCommand::try_parse_from([
                 "build",
@@ -873,7 +875,7 @@ mod tests {
                 for alias in ["direct", "symlink", "hardlink"] {
                     let dir = tempdir().unwrap();
                     let blob_id = [0xab; EROFS_BLOB_ID_SIZE];
-                    let blob = dir.path().join(hex_string(&blob_id));
+                    let blob = dir.path().join(hex::encode(blob_id));
                     let bootstrap = dir.path().join("bootstrap");
                     let sidecar = BuildCommand::blob_metadata_path(&blob);
                     let target = match output {
@@ -940,7 +942,7 @@ mod tests {
                             fs::write(&source, tar_contents()).unwrap();
                         }
                         let blob_id = [0xcd; EROFS_BLOB_ID_SIZE];
-                        let blob = dir.path().join(hex_string(&blob_id));
+                        let blob = dir.path().join(hex::encode(blob_id));
                         let sidecar = BuildCommand::blob_metadata_path(&blob);
                         let mut cmd = tar_command(&source, &blob);
                         cmd.source_type = source_type;
@@ -1038,7 +1040,7 @@ mod tests {
                 let image =
                     build_image_from_tar_layer(&cmd.prepare().unwrap(), &source, Vec::new())
                         .unwrap();
-                let blob = store.join(hex_string(&image.full_blob_digest));
+                let blob = store.join(hex::encode(image.full_blob_digest));
                 let sidecar = BuildCommand::blob_metadata_path(&blob);
                 fs::write(&blob, b"existing blob").unwrap();
                 fs::write(&sidecar, b"existing sidecar").unwrap();
@@ -1096,7 +1098,7 @@ mod tests {
             cmd.bootstrap = Some(dir.path().join("bootstrap"));
             let image =
                 build_image_from_tar_layer(&cmd.prepare().unwrap(), &source, Vec::new()).unwrap();
-            let blob = store.join(hex_string(&image.full_blob_digest));
+            let blob = store.join(hex::encode(image.full_blob_digest));
             cmd.bootstrap = Some(if sidecar {
                 BuildCommand::blob_metadata_path(&blob)
             } else {
@@ -1305,7 +1307,7 @@ mod tests {
 
         let final_path = output.finalize(&digest, false).unwrap();
 
-        assert_eq!(final_path, store.join(hex_string(&digest)));
+        assert_eq!(final_path, store.join(hex::encode(digest)));
         assert_eq!(fs::read(&final_path).unwrap(), b"blob bytes");
         assert_eq!(fs::read_dir(&store).unwrap().count(), 1);
     }
@@ -1316,7 +1318,7 @@ mod tests {
         let store = dir.path().join("store");
         let output = BlobOutput::new(None, Some(&store)).unwrap();
         let digest = [0xcd_u8; EROFS_BLOB_ID_SIZE];
-        let existing = store.join(hex_string(&digest));
+        let existing = store.join(hex::encode(digest));
         fs::write(&existing, b"already stored").unwrap();
         fs::write(output.path(), b"duplicate bytes").unwrap();
 
@@ -1358,10 +1360,11 @@ mod tests {
             .unwrap();
         let bootstrap_bytes = fs::read(&bootstrap).unwrap();
         let slot_offset = EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE;
-        let slot = cast_ref::<ErofsDeviceSlot>(
+        let slot = ErofsDeviceSlot::from_bytes(
             &bootstrap_bytes[slot_offset..slot_offset + EROFS_DEVICESLOT_SIZE],
-        );
+        )
+        .unwrap();
 
-        assert_eq!(hex_string(&slot.blob_id().unwrap()), full_blob_digest);
+        assert_eq!(hex::encode(slot.blob_id().unwrap()), full_blob_digest);
     }
 }

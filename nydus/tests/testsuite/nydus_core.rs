@@ -2,8 +2,6 @@
 //! built through the nydus-core build helpers and served back through
 //! `NydusCore`.
 
-use crate::fixture;
-
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -20,7 +18,7 @@ use nydus_core::{BlobId, FileType, NydusCore};
 use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::ErofsDeviceSlot;
 use nydus_format::erofs::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
-use nydus_format::utils::hex_string;
+use nydus_test_utils::blob::FullBlob;
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -229,11 +227,11 @@ fn write_full_blob(
     blob_metadata: &nydus_format::blob::BlobMetadata,
 ) -> [u8; EROFS_BLOB_ID_SIZE] {
     let data = fs::read(data_path).unwrap();
-    let full_blob_digest =
-        fixture::assemble_full_blob(blob_dir, &data, bootstrap_bytes, blob_metadata);
-    blob_metadata
-        .save(&blob_dir.join(format!("{}.blob.meta", hex_string(&full_blob_digest))))
-        .unwrap();
+    let full_blob_digest = FullBlob::new(&data)
+        .with_bootstrap(bootstrap_bytes)
+        .with_metadata(blob_metadata)
+        .with_sidecar()
+        .save_in(blob_dir);
     fs::remove_file(data_path).unwrap();
     full_blob_digest
 }
@@ -335,7 +333,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
 fn flat_geometry_does_not_prepare_caches_for_bootstrap_or_holes() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, blob_id, _) = build_flattened_test_image(dir.path());
-    fs::remove_file(dir.path().join("blobs").join(hex_string(&blob_id))).unwrap();
+    fs::remove_file(dir.path().join("blobs").join(hex::encode(blob_id))).unwrap();
     let core = NydusCore::new(&bootstrap, config).unwrap();
     let start = FLATTENED_BLOB_ALIGNMENT;
     assert!(start > core.bootstrap_size);
@@ -371,7 +369,7 @@ fn build_native_layer(store: &Path, name: &str, files: &[(&str, &[u8])]) -> Path
     .unwrap();
     let staging = store.join(format!("{name}.tmp"));
     let image = build_image(&options, fs::File::create(&staging).unwrap()).unwrap();
-    let path = store.join(hex_string(&image.full_blob_digest));
+    let path = store.join(hex::encode(image.full_blob_digest));
     fs::rename(staging, &path).unwrap();
     path
 }
@@ -460,7 +458,7 @@ fn core_maps_local_native_layers_without_a_cache() {
         assert_eq!(extents[0].len, blob.cache_size);
         assert_eq!(extents[0].source_offset, blob.mapped_offset);
         let mut mapped = vec![0u8; blob.cache_size as usize];
-        nydus_format::utils::pread_exact(extents[0].fd, &mut mapped, 0).unwrap();
+        nydus_storage::io::pread_exact(extents[0].fd, &mut mapped, 0).unwrap();
         assert_eq!(
             mapped,
             fs::read(source).unwrap()[..blob.cache_size as usize]
@@ -765,7 +763,7 @@ fn core_reads_back_small_files_image() {
     let blob_metadata = nydus_format::blob::BlobMetadata::from_path(
         &dir.path()
             .join("blobs")
-            .join(format!("{}.blob.meta", hex_string(&blob_id))),
+            .join(format!("{}.blob.meta", hex::encode(blob_id))),
     )
     .unwrap();
     // One chunk per small file (zeros is a hole) plus the chunks of the

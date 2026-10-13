@@ -21,12 +21,10 @@ use crate::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{self, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{
-    erofs_xattr_name_split, mode_to_erofs_file_type, needs_erofs_extended_inode, ErofsChunkAddr,
-    ErofsDeviceSlot, ErofsInode, XattrEntry, EROFS_BLOB_ID_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
-    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
-    EROFS_INODE_CHUNK_BASED, EROFS_NULL_ADDR,
+    ErofsChunkAddr, ErofsDeviceSlot, ErofsInode, ErofsInodeExtended, XattrEntry,
+    EROFS_BLOB_ID_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO,
+    EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_NULL_ADDR,
 };
-use nydus_format::utils::hex_string;
 
 struct FinishedUpperBlob {
     full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
@@ -474,7 +472,7 @@ impl IncrementalWriter {
             ino,
             nid: 0,
             meta_offset: 0,
-            is_extended: needs_erofs_extended_inode(size, options.uid, options.gid, 1),
+            is_extended: ErofsInodeExtended::is_needed(size, options.uid, options.gid, 1),
             data: InodeData::RegularFile {
                 chunk_index_entries: vec![
                     ErofsChunkAddr {
@@ -1156,7 +1154,7 @@ impl IncrementalWriter {
             }
             let inode = &mut self.inodes[inode_index];
             inode.size = replacement_size;
-            inode.is_extended |= needs_erofs_extended_inode(
+            inode.is_extended |= ErofsInodeExtended::is_needed(
                 replacement_size,
                 inode.uid,
                 inode.gid,
@@ -1451,7 +1449,7 @@ fn read_exact_from_file_at(file: &File, mut offset: u64, mut data: &mut [u8]) ->
 }
 
 fn digest_named_blob_path(blob_dir: &Path, full_blob_digest: &[u8; EROFS_BLOB_ID_SIZE]) -> PathBuf {
-    blob_dir.join(hex_string(full_blob_digest))
+    blob_dir.join(hex::encode(full_blob_digest))
 }
 
 fn finalize_digest_named_blob(
@@ -1538,25 +1536,9 @@ impl<'a> ParentTreeNode<'a> {
     }
 
     fn read_xattrs(&self, inode: &ErofsInode<'_>) -> Result<Vec<XattrEntry>> {
-        let mut entries = Vec::new();
-        for (name, value) in self
-            .reader
+        self.reader
             .read_xattrs(self.nid, inode)
-            .context("failed to read xattrs")?
-        {
-            let (name_index, suffix) = erofs_xattr_name_split(&name).ok_or_else(|| {
-                Error::Unsupported(format!(
-                    "unsupported parent xattr name: {}",
-                    String::from_utf8_lossy(&name)
-                ))
-            })?;
-            entries.push(XattrEntry {
-                name_index,
-                suffix: suffix.to_vec(),
-                value,
-            });
-        }
-        Ok(entries)
+            .context("failed to read xattrs")
     }
 }
 
@@ -1574,7 +1556,7 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
             gid: inode.gid(),
             size: inode.size(),
             mtime: inode.mtime(self.epoch),
-            mtime_nsec: inode.effective_mtime_nsec(self.reader.superblock().fixed_nsec()),
+            mtime_nsec: inode.mtime_nsec(self.reader.superblock().fixed_nsec()),
             nlink: inode.nlink(),
             xattrs: self.read_xattrs(&inode)?,
         })
@@ -1585,10 +1567,7 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
             .reader
             .inode(self.nid)
             .context("failed to read parent inode")?;
-        Ok(
-            (mode_to_erofs_file_type(inode.mode()) != EROFS_FT_DIR && inode.nlink() > 1)
-                .then_some(self.nid),
-        )
+        Ok((inode.file_type() != EROFS_FT_DIR && inode.nlink() > 1).then_some(self.nid))
     }
 
     fn children(&mut self, _ctx: &mut ParentTreeContext) -> Result<Option<NamedChildren<Self>>> {
@@ -1596,7 +1575,7 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
             .reader
             .inode(self.nid)
             .context("failed to read parent inode")?;
-        if mode_to_erofs_file_type(inode.mode()) != EROFS_FT_DIR {
+        if inode.file_type() != EROFS_FT_DIR {
             return Ok(None);
         }
 
@@ -1632,7 +1611,7 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
             .reader
             .inode(self.nid)
             .context("failed to read parent inode")?;
-        match mode_to_erofs_file_type(inode.mode()) {
+        match inode.file_type() {
             EROFS_FT_REG_FILE => {
                 if inode.size() == 0 {
                     return Ok(InodeData::RegularFile {

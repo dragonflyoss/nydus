@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{BlobBackend, RawDeviceFile, ReadContext};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
-use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
+use nydus_format::utils::{sha256_reader, SHA256_DIGEST_SIZE};
 
 #[derive(Clone)]
 struct ResolvedSource {
@@ -71,17 +71,23 @@ impl Local {
     ) -> io::Result<Self> {
         // `blob_id` only covers the data region here, so the cache key is the
         // digest of the whole file and has to be computed.
-        let cache_key = sha256_file(path).map_err(io::Error::other)?;
+        let mut file = File::open(path).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("failed to open full blob {}: {err}", path.display()),
+            )
+        })?;
+        let cache_key = sha256_reader(&file).map_err(io::Error::other)?;
         let source = probe_full_blob_source(path, cache_key)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("nydus blob footer not found: {}", path.display()),
             )
         })?;
-        if sha256_file_range(path, source.data_offset, source.data_size)
-            .map_err(io::Error::other)?
-            != blob_id
-        {
+        file.seek(SeekFrom::Start(source.data_offset))?;
+        let data_digest =
+            sha256_reader((&file).take(source.data_size)).map_err(io::Error::other)?;
+        if data_digest != blob_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("full blob data digest mismatch: {}", path.display()),
@@ -133,7 +139,7 @@ impl Local {
             return Ok(entry);
         }
 
-        let exact = self.root.join(hex_string(blob_id));
+        let exact = self.root.join(hex::encode(blob_id));
         if exact.is_file() {
             // The store is content-addressed: the file name is the digest
             // claim and doubles as the cache key. No full-file hash here —
@@ -156,7 +162,7 @@ impl Local {
             io::ErrorKind::NotFound,
             format!(
                 "failed to resolve local source blob {}",
-                hex_string(blob_id)
+                hex::encode(blob_id)
             ),
         ))
     }
@@ -286,40 +292,18 @@ fn probe_full_blob_source(
 mod tests {
     use super::*;
     use crate::ReadKind;
-    use nydus_format::blob::{
-        BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataChunkLength,
-        BlobMetadataCompressor, BlobMetadataDigester,
-    };
-    use nydus_format::utils::sha256_bytes;
+    use nydus_test_utils::blob::FullBlob;
+    use nydus_test_utils::metadata::single_chunk;
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
-
-    fn blob_metadata(payload: &[u8]) -> BlobMetadata {
-        BlobMetadata::new(
-            1,
-            1,
-            BlobMetadataCompressor::None,
-            Some(BlobMetadataDigester::Blake3),
-            vec![
-                BlobMetadataChunkGroup::new(0, 0, 0, 4096, crc32c::crc32c(payload)),
-                BlobMetadataChunkGroup::new(4096, 1, 1, 0, 0),
-            ],
-            vec![BlobMetadataChunkLength::new(4096)],
-            vec![BlobMetadataChunkGroupDigest::new(
-                *blake3::hash(payload).as_bytes(),
-            )],
-            Vec::new(),
-        )
-        .unwrap()
-    }
-
-    use nydus_format::utils::write_minimal_full_blob;
 
     #[test]
     fn local_backend_reads_full_blob_file_and_sidecar_meta() {
         let dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let full_blob_id =
-            write_minimal_full_blob(dir.path(), &payload, &blob_metadata(&payload), true);
+        let full_blob_id = FullBlob::minimal(&payload, &single_chunk(&payload))
+            .with_sidecar()
+            .save_in(dir.path());
 
         let backend = Local::new(dir.path().to_path_buf());
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();
@@ -341,9 +325,8 @@ mod tests {
     fn local_backend_reads_embedded_blob_metadata_from_full_blob() {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
-        let data_blob_id = sha256_bytes(&payload);
-        let full_blob_id =
-            write_minimal_full_blob(dir.path(), &payload, &blob_metadata(&payload), false);
+        let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
+        let full_blob_id = FullBlob::minimal(&payload, &single_chunk(&payload)).save_in(dir.path());
         let backend = Local::new(dir.path().to_path_buf());
 
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();

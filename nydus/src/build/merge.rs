@@ -11,16 +11,15 @@ use nydus_core::build::inode::{
     NamedChildren, NodeAttrs, TreeNode,
 };
 use nydus_core::reader::RawDirEntry;
-use nydus_core::ErofsReader;
+use nydus_core::{BlobId, ErofsReader};
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::BlobFooter;
 use nydus_format::erofs::{
-    erofs_xattr_name_split, mode_to_erofs_file_type, ErofsChunkAddr, ErofsDeviceSlot, XattrEntry,
-    ZComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
-    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL, EROFS_NULL_ADDR, Z_EROFS_MAP_HEADER_SIZE,
+    ErofsChunkAddr, ErofsDeviceSlot, ZErofsComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
+    EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
+    EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
+    EROFS_NULL_ADDR, Z_EROFS_MAP_HEADER_SIZE,
 };
-use nydus_format::utils::parse_sha256_hex;
 
 const OCI_WHITEOUT_PREFIX: &[u8] = b".wh.";
 const OCI_OPAQUE_MARKER: &[u8] = b".wh..wh..opq";
@@ -106,18 +105,7 @@ impl TreeNode<()> for KWayNode<'_> {
             .reader
             .inode(nid)
             .with_context(|| format!("failed to read inode: {nid}"))?;
-        let mut xattrs: Vec<XattrEntry> = layer
-            .reader
-            .read_xattrs(nid, &inode)?
-            .into_iter()
-            .filter_map(|(name, value)| {
-                erofs_xattr_name_split(&name).map(|(index, suffix)| XattrEntry {
-                    name_index: index,
-                    suffix: suffix.to_vec(),
-                    value,
-                })
-            })
-            .collect();
+        let mut xattrs = layer.reader.read_xattrs(nid, &inode)?;
         xattrs.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
         Ok(NodeAttrs {
             mode: inode.mode(),
@@ -125,7 +113,7 @@ impl TreeNode<()> for KWayNode<'_> {
             gid: inode.gid(),
             size: inode.size(),
             mtime: inode.mtime(layer.epoch),
-            mtime_nsec: inode.effective_mtime_nsec(layer.fixed_nsec),
+            mtime_nsec: inode.mtime_nsec(layer.fixed_nsec),
             nlink: inode.nlink(),
             xattrs,
         })
@@ -186,7 +174,7 @@ impl TreeNode<()> for KWayNode<'_> {
             .reader
             .inode(nid)
             .with_context(|| format!("failed to read inode: {nid}"))?;
-        Ok(match mode_to_erofs_file_type(inode.mode()) {
+        Ok(match inode.file_type() {
             EROFS_FT_REG_FILE if inode.data_layout() == EROFS_INODE_COMPRESSED_FULL => {
                 let z = layer.z.as_ref().ok_or_else(|| {
                     Error::InvalidImage(
@@ -416,7 +404,7 @@ fn merge_z_sources_to_bootstrap_writer(
     writer: &mut impl std::io::Write,
 ) -> Result<()> {
     let mut device_slots = Vec::with_capacity(sources.len());
-    let mut z_cfgs = ZComprCfgs::default();
+    let mut z_cfgs = ZErofsComprCfgs::default();
     let mut packed_algorithms: Option<(u8, &Path)> = None;
     for (source, reader) in sources.iter().zip(&readers) {
         let cfgs = reader.z_compr_cfgs()?.ok_or_else(|| {
@@ -746,7 +734,10 @@ fn parse_source_blob_id(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
                 "merge source file name must be valid UTF-8 sha256 hex".to_string(),
             )
         })?;
-    parse_sha256_hex(file_name).context("merge source file name must be a sha256 hex string")
+    file_name
+        .parse::<BlobId>()
+        .map(BlobId::into_bytes)
+        .context("merge source file name must be a sha256 hex string")
 }
 
 fn validate_single_layer_blob_source(path: &Path, reader: &ErofsReader) -> Result<()> {
@@ -785,8 +776,7 @@ mod tests {
     use std::fs;
 
     use nydus_format::erofs::{
-        needs_erofs_extended_inode, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
-        EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
+        ErofsInodeExtended, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
     };
 
     const OPAQUE: &str = ".wh..wh..opq";
@@ -794,12 +784,11 @@ mod tests {
     fn build_merge_layer(
         directory: &Path,
         name: &str,
-        algorithm: Option<nydus_format::erofs::ZAlgorithm>,
+        algorithm: Option<nydus_format::erofs::ZErofsCompressor>,
         files: &[(&str, &[u8])],
     ) -> PathBuf {
         use crate::build::{build_image, BuildImageOptions, NativeLayout};
         use nydus_format::blob::BlobMetadataCompressor;
-        use nydus_format::utils::hex_string;
         use std::collections::HashSet;
 
         let source = directory.join(name);
@@ -822,26 +811,26 @@ mod tests {
         }
         let blob = directory.join(format!("{name}.blob"));
         let image = build_image(&options, fs::File::create(&blob).unwrap()).unwrap();
-        let path = directory.join(hex_string(&image.full_blob_digest));
+        let path = directory.join(hex::encode(image.full_blob_digest));
         fs::rename(blob, &path).unwrap();
         path
     }
 
     fn assert_mixed_packed_algorithms_rejected(reverse: bool) {
-        use nydus_format::erofs::ZAlgorithm;
+        use nydus_format::erofs::ZErofsCompressor;
 
         let directory = tempfile::tempdir().unwrap();
         let mut sources = [
             build_merge_layer(
                 directory.path(),
                 "lz4",
-                Some(ZAlgorithm::Lz4),
+                Some(ZErofsCompressor::Lz4),
                 &[("lower", &vec![b'a'; 8193])],
             ),
             build_merge_layer(
                 directory.path(),
                 "zstd",
-                Some(ZAlgorithm::Zstd),
+                Some(ZErofsCompressor::Zstd),
                 &[("upper", &vec![b'b'; 8193])],
             ),
         ];
@@ -884,9 +873,9 @@ mod tests {
     }
 
     fn assert_mixed_layouts_rejected(reverse: bool) {
-        use nydus_format::erofs::ZAlgorithm;
+        use nydus_format::erofs::ZErofsCompressor;
 
-        for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+        for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
             let directory = tempfile::tempdir().unwrap();
             let mut sources = [
                 build_merge_layer(
@@ -936,7 +925,7 @@ mod tests {
         assert_mixed_layouts_rejected(true);
     }
 
-    fn assert_same_algorithm_merge_contents(algorithm: nydus_format::erofs::ZAlgorithm) {
+    fn assert_same_algorithm_merge_contents(algorithm: nydus_format::erofs::ZErofsCompressor) {
         use nydus_backend::Local;
         use nydus_format::erofs::{
             Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LI_D0_CBLKCNT,
@@ -1061,12 +1050,12 @@ mod tests {
 
     #[test]
     fn merge_same_algorithm_lz4_preserves_contents_and_packed_deltas() {
-        assert_same_algorithm_merge_contents(nydus_format::erofs::ZAlgorithm::Lz4);
+        assert_same_algorithm_merge_contents(nydus_format::erofs::ZErofsCompressor::Lz4);
     }
 
     #[test]
     fn merge_same_algorithm_zstd_preserves_contents_and_packed_deltas() {
-        assert_same_algorithm_merge_contents(nydus_format::erofs::ZAlgorithm::Zstd);
+        assert_same_algorithm_merge_contents(nydus_format::erofs::ZErofsCompressor::Zstd);
     }
 
     fn entries(items: &[(&str, u8)]) -> Vec<RawDirEntry> {
@@ -1093,7 +1082,6 @@ mod tests {
         use crate::build::{build_image, BuildImageOptions};
         use nydus_format::blob::BlobMetadataCompressor;
         use nydus_format::erofs::EROFS_INODE_COMPACT_SIZE;
-        use nydus_format::utils::hex_string;
         use std::collections::HashSet;
         use std::os::unix::fs::MetadataExt;
 
@@ -1117,7 +1105,7 @@ mod tests {
         let verify = |path: &Path, expected: &BTreeMap<&str, (u64, u32, u32, u32, u32)>| {
             let mut counts = BTreeMap::<u64, usize>::new();
             for &(seconds, nanoseconds, nlink, uid, gid) in expected.values() {
-                if nanoseconds == 0 && !needs_erofs_extended_inode(8, uid, gid, nlink as u64) {
+                if nanoseconds == 0 && !ErofsInodeExtended::is_needed(8, uid, gid, nlink as u64) {
                     *counts.entry(seconds).or_default() += 1;
                 }
             }
@@ -1130,10 +1118,7 @@ mod tests {
             let root_nid = reader.superblock().root_nid();
             let root = reader.inode(root_nid).unwrap();
             assert_eq!(root.mtime(epoch), 0);
-            assert_eq!(
-                root.effective_mtime_nsec(reader.superblock().fixed_nsec()),
-                0
-            );
+            assert_eq!(root.mtime_nsec(reader.superblock().fixed_nsec()), 0);
             let mut actual = BTreeMap::new();
             for entry in reader.read_dir(root_nid, &root).unwrap() {
                 if entry.name == b"." || entry.name == b".." {
@@ -1144,7 +1129,7 @@ mod tests {
                 let &(seconds, nanoseconds, nlink, uid, gid) = expected.get(name.as_str()).unwrap();
                 assert_eq!(inode.mtime(epoch), seconds);
                 assert_eq!(
-                    inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                    inode.mtime_nsec(reader.superblock().fixed_nsec()),
                     nanoseconds
                 );
                 assert_eq!(inode.nlink(), nlink);
@@ -1154,7 +1139,7 @@ mod tests {
                     inode.header_size() == EROFS_INODE_COMPACT_SIZE,
                     seconds == epoch
                         && nanoseconds == 0
-                        && !needs_erofs_extended_inode(8, uid, gid, nlink as u64),
+                        && !ErofsInodeExtended::is_needed(8, uid, gid, nlink as u64),
                     "{name}"
                 );
                 actual.insert(name, (seconds, nanoseconds, nlink));
@@ -1208,7 +1193,7 @@ mod tests {
             fs::write(&standalone, image.standalone_bootstrap.unwrap()).unwrap();
             verify(&blob, &layer_expected);
             verify(&standalone, &layer_expected);
-            let source_blob = directory.path().join(hex_string(&image.full_blob_digest));
+            let source_blob = directory.path().join(hex::encode(image.full_blob_digest));
             fs::rename(blob, &source_blob).unwrap();
             sources.push(source_blob);
             expected.extend(layer_expected);
@@ -1233,11 +1218,10 @@ mod tests {
     fn merge_and_optimize_reselect_epoch_and_reencode_parent_inodes() {
         use nydus_core::build::bootstrap::render_bootstrap;
         use nydus_core::build::inode::{ChildRef, InodeInfo};
-        use nydus_format::blob::finish_full_blob;
         use nydus_format::erofs::{
             EROFS_INODE_COMPACT_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
         };
-        use nydus_format::utils::{hex_string, sha256_bytes};
+        use nydus_test_utils::blob::FullBlob;
 
         for (uid, gid) in [(0, 0), (u16::MAX as u32 + 1, 0), (0, u16::MAX as u32 + 1)] {
             let directory = tempfile::tempdir().unwrap();
@@ -1294,7 +1278,7 @@ mod tests {
                     ino: index as u32 + 1,
                     nid: 0,
                     meta_offset: 0,
-                    is_extended: needs_erofs_extended_inode(size, uid, gid, 1),
+                    is_extended: ErofsInodeExtended::is_needed(size, uid, gid, 1),
                     data: if is_symlink {
                         InodeData::Symlink {
                             target: target.clone(),
@@ -1321,16 +1305,11 @@ mod tests {
             let parent_bytes = render_bootstrap(&mut inodes, 100, &slots, &[0; 16]).unwrap();
             fs::write(&parent, &parent_bytes).unwrap();
             let blob_writer = crate::build::plain_blob_writer(Vec::new(), EROFS_BLOCK_SIZE);
-            let mut full_blob = Vec::new();
-            finish_full_blob(
-                &mut full_blob,
-                0,
-                Some(&parent_bytes),
-                Some(&blob_writer.blob_metadata().unwrap()),
-            )
-            .unwrap();
-            let source = directory.path().join(hex_string(&sha256_bytes(&full_blob)));
-            fs::write(&source, full_blob).unwrap();
+            let full_blob_id = FullBlob::new(&[])
+                .with_bootstrap(&parent_bytes)
+                .with_metadata(&blob_writer.blob_metadata().unwrap())
+                .save_in(directory.path());
+            let source = directory.path().join(hex::encode(full_blob_id));
             let merged = directory.path().join("merged");
             fs::write(
                 &merged,
@@ -1344,7 +1323,7 @@ mod tests {
             )
             .unwrap();
 
-            let eligible = !needs_erofs_extended_inode(target.len() as u64, uid, gid, 1);
+            let eligible = !ErofsInodeExtended::is_needed(target.len() as u64, uid, gid, 1);
             let chosen_epoch = if eligible { 300 } else { 0 };
             for (path, epoch) in [
                 (&parent, 100),
@@ -1368,10 +1347,7 @@ mod tests {
                     let compact = eligible && seconds == epoch;
                     assert_eq!(inode.header_size() == EROFS_INODE_COMPACT_SIZE, compact);
                     assert_eq!(inode.mtime(epoch), seconds);
-                    assert_eq!(
-                        inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
-                        0
-                    );
+                    assert_eq!(inode.mtime_nsec(reader.superblock().fixed_nsec()), 0);
                     assert_eq!((inode.uid(), inode.gid(), inode.nlink()), (uid, gid, 1));
                     if entry.name == b"link" {
                         assert_eq!(
@@ -1467,8 +1443,6 @@ mod tests {
     fn no_xattr_marker_is_recomputed_after_merge_and_optimize() {
         use crate::build::{build_image, BuildImageOptions};
         use nydus_format::blob::BlobMetadataCompressor;
-        use nydus_format::erofs::is_nydus_xattr;
-        use nydus_format::utils::hex_string;
         use std::collections::HashSet;
 
         for (operation, source_has_xattrs, expected_no_xattr) in [
@@ -1521,13 +1495,11 @@ mod tests {
                             .read_xattrs(root_nid, &root)
                             .unwrap()
                             .iter()
-                            .any(|(name, value)| {
-                                name == b"trusted.nydus.no_xattr" && value == b"1"
-                            }),
+                            .any(|entry| entry.is_nydus_no_xattr() && entry.value == b"1"),
                         index == 1 || !source_has_xattrs
                     );
                 }
-                let source = directory.path().join(hex_string(&image.full_blob_digest));
+                let source = directory.path().join(hex::encode(image.full_blob_digest));
                 fs::rename(blob, &source).unwrap();
                 sources.push(source);
             }
@@ -1552,9 +1524,7 @@ mod tests {
                         .read_xattrs(root_nid, &root)
                         .unwrap()
                         .iter()
-                        .any(|(name, value)| {
-                            name == b"trusted.nydus.no_xattr" && value == b"1"
-                        }),
+                        .any(|entry| entry.is_nydus_no_xattr() && entry.value == b"1"),
                     expected_no_xattr,
                     "{operation}: {}",
                     path.display()
@@ -1564,15 +1534,18 @@ mod tests {
                 let mut pending = vec![(Vec::new(), root_nid)];
                 while let Some((relative_path, nid)) = pending.pop() {
                     let inode = reader.inode(nid).unwrap();
-                    let mut xattrs = reader.read_xattrs(nid, &inode).unwrap();
-                    if nid == root_nid {
-                        xattrs.retain(|(name, _)| !is_nydus_xattr(name));
-                    }
+                    let mut xattrs: Vec<(Vec<u8>, Vec<u8>)> = reader
+                        .read_xattrs(nid, &inode)
+                        .unwrap()
+                        .into_iter()
+                        .filter(|entry| nid != root_nid || !entry.is_nydus())
+                        .map(|entry| (entry.name(), entry.value))
+                        .collect();
                     if !xattrs.is_empty() {
                         xattrs.sort();
                         visible_xattrs.insert(relative_path.clone(), xattrs);
                     }
-                    if mode_to_erofs_file_type(inode.mode()) == EROFS_FT_DIR {
+                    if inode.file_type() == EROFS_FT_DIR {
                         for entry in reader.read_dir(nid, &inode).unwrap() {
                             if entry.name == b"." || entry.name == b".." {
                                 continue;
@@ -1752,7 +1725,6 @@ mod tests {
         use crate::build::{build_image, BuildImageOptions};
         use nydus_core::build::inode::build_tree;
         use nydus_format::blob::BlobMetadataCompressor;
-        use nydus_format::utils::hex_string;
         use std::collections::HashSet;
         use std::os::unix::ffi::OsStrExt;
 
@@ -1821,7 +1793,7 @@ mod tests {
             fs::File::create(&blob_path).unwrap(),
         )
         .unwrap();
-        let merge_source = dir.path().join(hex_string(&image.full_blob_digest));
+        let merge_source = dir.path().join(hex::encode(image.full_blob_digest));
         fs::rename(&blob_path, &merge_source).unwrap();
 
         let source_blob_id = parse_source_blob_id(&merge_source).unwrap();
@@ -1858,10 +1830,9 @@ mod tests {
 
         // The layer bootstrap carries the prefetch xattr the build stamps on
         // its root after flattening; drop it so the roots compare equal.
-        merged[0].xattrs.retain(|entry| {
-            !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED
-                && entry.suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
-        });
+        merged[0]
+            .xattrs
+            .retain(|entry| !entry.is_nydus_prefetch_blobs());
 
         assert_eq!(built.len(), merged.len(), "inode count differs");
         for (i, (a, b)) in built.iter().zip(merged.iter()).enumerate() {
@@ -1976,7 +1947,7 @@ mod tests {
                 );
                 assert_eq!(
                     inode.is_extended,
-                    needs_erofs_extended_inode(0, inode.uid, inode.gid, inode.nlink as u64),
+                    ErofsInodeExtended::is_needed(0, inode.uid, inode.gid, inode.nlink as u64),
                     "directory format policy at inode {i}"
                 );
             }
@@ -1992,7 +1963,7 @@ mod tests {
             let inode = reader.inode(rendered.nid).unwrap();
             assert_eq!(inode.mtime(reader.superblock().epoch()), expected.mtime);
             assert_eq!(
-                inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                inode.mtime_nsec(reader.superblock().fixed_nsec()),
                 expected.mtime_nsec
             );
         }
@@ -2036,7 +2007,6 @@ mod tests {
     fn merge_preserves_hardlink_groups_across_layers() {
         use crate::build::{build_image, BuildImageOptions};
         use nydus_format::blob::BlobMetadataCompressor;
-        use nydus_format::utils::hex_string;
         use std::collections::HashSet;
         use std::os::unix::ffi::OsStrExt;
 
@@ -2056,7 +2026,7 @@ mod tests {
             )
             .unwrap();
             // Merge sources are named by their full blob digest.
-            let merge_source = dir.path().join(hex_string(&image.full_blob_digest));
+            let merge_source = dir.path().join(hex::encode(image.full_blob_digest));
             fs::rename(&blob_path, &merge_source).unwrap();
             merge_source
         };
@@ -2188,8 +2158,9 @@ mod tests {
     fn z_layers_merge_into_one_device_table_with_relocated_addresses() {
         use crate::build::{build_image_from_tar_layer, BuildImageOptions, NativeLayout};
         use nydus_format::blob::BlobMetadataCompressor;
-        use nydus_format::erofs::{ZAlgorithm, EROFS_FT_REG_FILE, Z_EROFS_FRAGMENT_INODE_FLAG};
-        use nydus_format::utils::hex_string;
+        use nydus_format::erofs::{
+            ZErofsCompressor, EROFS_FT_REG_FILE, Z_EROFS_FRAGMENT_INODE_FLAG,
+        };
         use std::collections::HashSet;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2226,7 +2197,7 @@ mod tests {
             true,
         )
         .unwrap()
-        .with_native(NativeLayout::Compressed(ZAlgorithm::Lz4), 0)
+        .with_native(NativeLayout::Compressed(ZErofsCompressor::Lz4), 0)
         .unwrap();
 
         // Merge sources are the full blobs named by their digest, like chunk
@@ -2240,7 +2211,7 @@ mod tests {
             let layer =
                 build_image_from_tar_layer(&options, layer, fs::File::create(&tmp_path).unwrap())
                     .unwrap();
-            let blob_path = store.join(hex_string(&layer.full_blob_digest));
+            let blob_path = store.join(hex::encode(layer.full_blob_digest));
             fs::rename(&tmp_path, &blob_path).unwrap();
             // A full blob: the layer data leads, a footer trails.
             let footer = nydus_format::blob::BlobFooter::from_blob_path(&blob_path).unwrap();
@@ -2314,7 +2285,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let inode = reader.inode(nid).unwrap();
-            assert_eq!(mode_to_erofs_file_type(inode.mode()), EROFS_FT_REG_FILE);
+            assert_eq!(inode.file_type(), EROFS_FT_REG_FILE);
             assert_eq!(inode.data_layout(), EROFS_INODE_COMPRESSED_FULL);
             let tail = reader.read_z_inode_tail(nid, &inode).unwrap().to_vec();
             (inode.size(), tail)

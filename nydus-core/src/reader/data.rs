@@ -3,7 +3,7 @@ use std::io;
 use std::io::Write;
 
 use nydus_format::erofs::{
-    cast_ref, ErofsChunkAddr, ErofsChunkIndex, ErofsInode, ZAlgorithm, EROFS_BLOCK_SIZE,
+    ErofsChunkAddr, ErofsChunkIndex, ErofsInode, ZErofsCompressor, EROFS_BLOCK_SIZE,
     EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
     Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
@@ -121,7 +121,9 @@ pub(crate) fn for_each_chunk_span<E>(
 impl ErofsReader {
     /// Log2 of the chunk size for a chunk-based inode.
     pub fn chunk_bits(&self, inode: &ErofsInode<'_>) -> u32 {
-        self.superblock().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F)
+        inode
+            .chunk_format()
+            .chunk_bits(u32::from(self.superblock().blkszbits))
     }
 
     /// Chunk size in bytes for a chunk-based inode.
@@ -146,9 +148,9 @@ impl ErofsReader {
         self.mmap_slice(index_offset, index_total)
     }
 
-    fn chunk_index_entry_at(index_bytes: &[u8], i: usize) -> &ErofsChunkIndex {
-        let off = i * EROFS_CHUNK_INDEX_SIZE;
-        cast_ref::<ErofsChunkIndex>(&index_bytes[off..])
+    fn chunk_index_entry_at(index_bytes: &[u8], i: usize) -> io::Result<&ErofsChunkIndex> {
+        ErofsChunkIndex::from_bytes(&index_bytes[i * EROFS_CHUNK_INDEX_SIZE..])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
     /// The raw inode tail of a z_erofs COMPRESSED_FULL inode: either the
@@ -205,11 +207,7 @@ impl ErofsReader {
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
         let mut result = Vec::with_capacity(nchunks);
         for index in 0..nchunks {
-            let entry = Self::chunk_index_entry_at(index_bytes, index);
-            result.push(ErofsChunkAddr {
-                blkaddr: entry.blkaddr(),
-                device_id: entry.device_id(),
-            });
+            result.push(Self::chunk_index_entry_at(index_bytes, index)?.addr());
         }
         Ok(result)
     }
@@ -307,7 +305,7 @@ impl ErofsReader {
             |span| -> io::Result<()> {
                 let chunk_off = span.chunk_off;
                 let to_read = span.len as usize;
-                let entry = Self::chunk_index_entry_at(index_bytes, span.index);
+                let entry = Self::chunk_index_entry_at(index_bytes, span.index)?;
                 match locate_chunk(blob_layout, entry.blkaddr(), entry.device_id())? {
                     ChunkLocation::Hole => {
                         // Hole — write zeros (use small stack buffer to avoid large alloc)
@@ -427,12 +425,8 @@ impl ErofsReader {
         };
         // Tail fragment: the last extent is served from the packed inode.
         let h_advise = u16::from_le_bytes(tail[4..6].try_into().unwrap());
-        let algorithm = ZAlgorithm::from_type(tail[6] & 0x0f).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unsupported z_erofs algorithm {}", tail[6] & 0x0f),
-            )
-        })?;
+        let algorithm = ZErofsCompressor::from_code(tail[6] & 0x0f)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         let tail_fragment = if h_advise & Z_EROFS_ADVISE_FRAGMENT_PCLUSTER != 0 {
             if depth > 0 || self.superblock().packed_nid() == Some(nid) {
                 return Err(io::Error::new(
@@ -611,9 +605,9 @@ impl ErofsReader {
                     decoded.resize(logical_len, 0);
                     let payload = &compressed[payload_start..phys_len];
                     let n = match algorithm {
-                        ZAlgorithm::Lz4 => lz4_flex::block::decompress_into(payload, decoded)
+                        ZErofsCompressor::Lz4 => lz4_flex::block::decompress_into(payload, decoded)
                             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
-                        ZAlgorithm::Zstd => {
+                        ZErofsCompressor::Zstd => {
                             if zstd.is_none() {
                                 *zstd = Some(zstd::bulk::Decompressor::new()?);
                             }
@@ -699,7 +693,7 @@ impl ErofsReader {
 
         let mut result = vec![0u8; size];
         for_each_chunk_span(offset, size as u64, chunk_size, nchunks, |span| {
-            let entry = Self::chunk_index_entry_at(index_bytes, span.index);
+            let entry = Self::chunk_index_entry_at(index_bytes, span.index)?;
             let buf_pos = (span.file_pos - offset) as usize;
             self.read_chunk_slice(
                 blob_layout,

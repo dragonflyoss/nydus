@@ -5,7 +5,7 @@ use crc32c::crc32c_append;
 
 use nydus_error::{Error, Result};
 use nydus_format::erofs::{
-    ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
+    ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
     EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM,
     EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
     EROFS_FEATURE_INCOMPAT_COMPR_CFGS, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
@@ -51,7 +51,7 @@ pub(crate) fn write_image(
         epoch,
         device_slots,
         uuid,
-        ZComprCfgs::default(),
+        ZErofsComprCfgs::default(),
         0,
         None,
     )?;
@@ -86,7 +86,7 @@ pub(crate) fn fill_image_head(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
-    z_cfgs: ZComprCfgs,
+    z_cfgs: ZErofsComprCfgs,
     min_total_blocks: u64,
     packed_nid: Option<u64>,
 ) -> Result<()> {
@@ -251,7 +251,7 @@ mod tests {
             0,
             &slots,
             &[0; 16],
-            ZComprCfgs::default(),
+            ZErofsComprCfgs::default(),
             0,
             None,
         )
@@ -270,7 +270,7 @@ mod tests {
             0,
             &[],
             &[0; 16],
-            ZComprCfgs::default(),
+            ZErofsComprCfgs::default(),
             0,
             None,
         )
@@ -284,7 +284,7 @@ mod tests {
             0,
             &[],
             &[0; 16],
-            ZComprCfgs::default(),
+            ZErofsComprCfgs::default(),
             0,
             None,
         )

@@ -2,9 +2,7 @@ use crate::build::blob_chunk::{BlobWriter, ZFileRef};
 use crate::build::dir::directory_size;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
-    erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_ibody_size,
-    erofs_xattr_icount, erofs_xattr_name_split, erofs_xattr_prefix, mode_to_erofs_file_type,
-    needs_erofs_extended_inode, ErofsChunkAddr, ErofsChunkIndex, ErofsInodeCompact,
+    ErofsChunkAddr, ErofsChunkIndex, ErofsDirent, ErofsInodeChunkFormat, ErofsInodeCompact,
     ErofsInodeExtended, XattrEntry, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE,
     EROFS_FT_DIR, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_COMPRESSED_FULL,
     EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
@@ -213,7 +211,7 @@ pub fn choose_epoch(inodes: &[InodeInfo]) -> u64 {
     let mut counts = HashMap::<u64, usize>::new();
     for inode in inodes {
         if inode.mtime_nsec == 0
-            && !needs_erofs_extended_inode(inode.size, inode.uid, inode.gid, inode.nlink as u64)
+            && !ErofsInodeExtended::is_needed(inode.size, inode.uid, inode.gid, inode.nlink as u64)
         {
             *counts.entry(inode.mtime).or_default() += 1;
         }
@@ -238,7 +236,7 @@ pub(crate) fn erofs_inode_size(inode: &InodeInfo) -> usize {
         EROFS_INODE_COMPACT_SIZE
     };
 
-    let xattr_isize = erofs_xattr_ibody_size(&inode.xattrs);
+    let xattr_isize = XattrEntry::ibody_size(&inode.xattrs);
     match &inode.data {
         InodeData::RegularFile {
             chunk_index_entries,
@@ -286,7 +284,7 @@ pub(crate) fn symlink_is_inline(inode: &InodeInfo) -> bool {
     };
     match &inode.data {
         InodeData::Symlink { target, .. } => symlink_fits_inline(
-            header_size + erofs_xattr_ibody_size(&inode.xattrs),
+            header_size + XattrEntry::ibody_size(&inode.xattrs),
             target.len(),
         ),
         _ => false,
@@ -307,7 +305,7 @@ pub(crate) fn directory_inline_len(inode: &InodeInfo) -> usize {
         EROFS_INODE_EXTENDED_SIZE
     } else {
         EROFS_INODE_COMPACT_SIZE
-    } + erofs_xattr_ibody_size(&inode.xattrs);
+    } + XattrEntry::ibody_size(&inode.xattrs);
     if tail != 0 && header + tail <= EROFS_BLOCK_SIZE as usize {
         tail
     } else {
@@ -350,10 +348,9 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]
         ));
     }
 
-    inode.xattrs.retain(|entry| {
-        !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED
-            && entry.suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
-    });
+    inode
+        .xattrs
+        .retain(|entry| !entry.is_nydus_prefetch_blobs());
 
     inode.xattrs.push(XattrEntry {
         name_index: EROFS_XATTR_INDEX_TRUSTED,
@@ -365,10 +362,7 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]
 }
 
 fn set_root_no_xattr_marker(root: &mut InodeInfo, no_xattr: bool) {
-    root.xattrs.retain(|entry| {
-        !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED
-            && entry.suffix == NYDUS_XATTR_SUFFIX_NO_XATTR)
-    });
+    root.xattrs.retain(|entry| !entry.is_nydus_no_xattr());
     if no_xattr {
         root.xattrs.push(XattrEntry {
             name_index: EROFS_XATTR_INDEX_TRUSTED,
@@ -577,7 +571,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
                 hardlink_map,
                 has_visible_xattrs,
             )?;
-            let file_type = mode_to_erofs_file_type(inodes[child_index].mode);
+            let file_type = ErofsDirent::file_type_from_mode(inodes[child_index].mode);
             if file_type == EROFS_FT_DIR {
                 subdir_count += 1;
             }
@@ -595,7 +589,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
         let nlink = 2 + subdir_count;
         inodes[inode_index].nlink = nlink;
         inodes[inode_index].is_extended =
-            needs_erofs_extended_inode(0, attrs.uid, attrs.gid, nlink as u64);
+            ErofsInodeExtended::is_needed(0, attrs.uid, attrs.gid, nlink as u64);
         if let InodeData::Directory {
             children: ref mut dir_children,
             ..
@@ -627,7 +621,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
             ino,
             nid: 0,
             meta_offset: 0,
-            is_extended: needs_erofs_extended_inode(size, attrs.uid, attrs.gid, nlink as u64),
+            is_extended: ErofsInodeExtended::is_needed(size, attrs.uid, attrs.gid, nlink as u64),
             data,
             xattrs: attrs.xattrs,
         });
@@ -758,7 +752,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
     let inode_size = erofs_inode_size(inode);
     let mut buf = vec![0u8; inode_size];
 
-    let xattr_size = erofs_xattr_ibody_size(&inode.xattrs);
+    let xattr_size = XattrEntry::ibody_size(&inode.xattrs);
     let i_xattr_icount = checked_xattr_icount(inode, xattr_size)?;
 
     match &inode.data {
@@ -767,13 +761,11 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             chunk_size_bits,
         } => {
             let datalayout = EROFS_INODE_CHUNK_BASED;
-            let cf = erofs_chunk_format(*chunk_size_bits, blkszbits);
-            let i_u = cf as u32;
+            let i_u = u32::from(ErofsInodeChunkFormat::new(*chunk_size_bits, blkszbits).bits());
 
             if inode.is_extended {
-                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     0,
                     inode.size,
@@ -788,10 +780,9 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     1,
                     inode.size as u32,
@@ -813,7 +804,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             let extent_offset = align_up_usize(base + xattr_size, EROFS_CHUNK_INDEX_SIZE)
                 .expect("alignment overflowed");
             for (i, entry) in chunk_index_entries.iter().enumerate() {
-                let index = ErofsChunkIndex::new(entry.blkaddr, entry.device_id)?;
+                let index = ErofsChunkIndex::new(*entry)?;
                 let off = extent_offset + i * EROFS_CHUNK_INDEX_SIZE;
                 buf[off..off + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(index.as_bytes());
             }
@@ -827,9 +818,8 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             let i_u = *compressed_blocks;
 
             if inode.is_extended {
-                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     0,
                     inode.size,
@@ -844,10 +834,9 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     1,
                     inode.size as u32,
@@ -890,9 +879,8 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             })?;
 
             if inode.is_extended {
-                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     0,
                     inode.size,
@@ -907,10 +895,9 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     u16::try_from(inode.nlink).map_err(|_| {
                         Error::Overflow("compact link count exceeds u16".to_string())
@@ -958,9 +945,8 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             };
 
             if inode.is_extended {
-                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     0,
                     inode.size,
@@ -975,10 +961,9 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     1,
                     inode.size as u32,
@@ -999,9 +984,8 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             let datalayout = EROFS_INODE_FLAT_PLAIN;
 
             if inode.is_extended {
-                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     0,
                     0,
@@ -1016,10 +1000,9 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     1,
                     0,
@@ -1037,9 +1020,8 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             let datalayout = EROFS_INODE_FLAT_PLAIN;
 
             if inode.is_extended {
-                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     0,
                     0,
@@ -1054,10 +1036,9 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
-                    i_format,
+                    datalayout,
                     inode.mode,
                     1,
                     0,
@@ -1092,10 +1073,7 @@ const EROFS_XATTR_IBODY_MAX_SIZE: usize =
 /// e_name_len, `u16` e_value_size and `u16` i_xattr_icount) instead of
 /// truncating them into a corrupt image.
 fn checked_xattr_icount(inode: &InodeInfo, xattr_size: usize) -> Result<u16> {
-    let xattr_name = |entry: &XattrEntry| {
-        let prefix = erofs_xattr_prefix(entry.name_index).unwrap_or_default();
-        String::from_utf8_lossy(&[prefix, entry.suffix.as_slice()].concat()).into_owned()
-    };
+    let xattr_name = |entry: &XattrEntry| String::from_utf8_lossy(&entry.name()).into_owned();
     for entry in &inode.xattrs {
         if entry.suffix.len() > u8::MAX as usize {
             return Err(Error::InvalidImage(format!(
@@ -1122,7 +1100,7 @@ fn checked_xattr_icount(inode: &InodeInfo, xattr_size: usize) -> Result<u16> {
             inode.ino
         )));
     }
-    Ok(erofs_xattr_icount(xattr_size))
+    Ok(XattrEntry::icount(&inode.xattrs))
 }
 
 /// Write the EROFS xattr inline body (ibody) into `buf` at `offset`.
@@ -1140,7 +1118,7 @@ fn write_erofs_xattr_ibody(buf: &mut [u8], offset: usize, xattrs: &[XattrEntry])
 
     // Carve out the whole ibody region up front: bounds are checked exactly
     // once and fail fast; every write below stays inside this region.
-    let ibody_size = erofs_xattr_ibody_size(xattrs);
+    let ibody_size = XattrEntry::ibody_size(xattrs);
     let ibody = &mut buf[offset..offset + ibody_size];
 
     // Entries start right after the header; `entry_start` stays 4-byte aligned.
@@ -1175,13 +1153,8 @@ fn read_xattrs_from_path(path: &Path) -> Vec<XattrEntry> {
 
     let mut xattrs: Vec<XattrEntry> = names
         .filter_map(|name| {
-            let (prefix_index, suffix) = erofs_xattr_name_split(name.as_bytes())?;
             let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
-            Some(XattrEntry {
-                name_index: prefix_index,
-                suffix: suffix.to_vec(),
-                value,
-            })
+            XattrEntry::new(name.as_bytes(), value)
         })
         .collect();
     // listxattr returns attributes in whatever order the source filesystem
@@ -1279,10 +1252,7 @@ mod tests {
         let prefetch_xattrs = inode
             .xattrs
             .iter()
-            .filter(|entry| {
-                entry.name_index == EROFS_XATTR_INDEX_TRUSTED
-                    && entry.suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS
-            })
+            .filter(|entry| entry.is_nydus_prefetch_blobs())
             .collect::<Vec<_>>();
         assert_eq!(prefetch_xattrs.len(), 1);
         assert_eq!(prefetch_xattrs[0].value, b"2,5,1");
@@ -1443,9 +1413,9 @@ mod tests {
                 let root = reader.inode(root_nid).unwrap();
                 let xattrs = reader.read_xattrs(root_nid, &root).unwrap();
                 assert_eq!(
-                    xattrs.iter().any(|(name, value)| {
-                        name == b"trusted.nydus.no_xattr" && value == b"1"
-                    }),
+                    xattrs
+                        .iter()
+                        .any(|entry| entry.is_nydus_no_xattr() && entry.value == b"1"),
                     !visible,
                 );
             }
@@ -1507,9 +1477,9 @@ mod tests {
         assert!(serialize_inode(&inode, 100).is_err());
         inode.is_extended = true;
         let bytes = serialize_inode(&inode, 0).unwrap();
-        let parsed = ErofsInode::parse(&bytes).unwrap();
+        let parsed = ErofsInode::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.mtime(0), 100);
-        assert_eq!(parsed.effective_mtime_nsec(0), 1);
+        assert_eq!(parsed.mtime_nsec(0), 1);
     }
 
     #[test]
@@ -1529,7 +1499,7 @@ mod tests {
                 let encoded = serialize_inode(&inode, 0);
                 if address <= u32::MAX as u64 {
                     let bytes = encoded.unwrap();
-                    let parsed = ErofsInode::parse(&bytes).unwrap();
+                    let parsed = ErofsInode::from_bytes(&bytes).unwrap();
                     assert_eq!(parsed.startblk(), address);
                     assert_eq!(parsed.nlink(), inode.nlink);
                 } else {
@@ -1556,10 +1526,10 @@ mod tests {
         }]);
 
         let bytes = serialize_inode(&inode, 0).unwrap();
-        let parsed = ErofsInode::parse(&bytes).unwrap();
+        let parsed = ErofsInode::from_bytes(&bytes).unwrap();
         let entry_offset = parsed.header_size() + EROFS_XATTR_IBODY_HEADER_SIZE;
 
-        assert_eq!(parsed.xattr_size(), erofs_xattr_ibody_size(&inode.xattrs));
+        assert_eq!(parsed.xattr_size(), XattrEntry::ibody_size(&inode.xattrs));
         assert_eq!(bytes[entry_offset], 3);
         assert_eq!(bytes[entry_offset + 1], EROFS_XATTR_INDEX_USER);
         assert_eq!(
@@ -1583,7 +1553,7 @@ mod tests {
         };
         let icount = |xattrs: Vec<XattrEntry>| {
             serialize_inode(&root_inode_with_xattrs(xattrs), 0)
-                .map(|bytes| ErofsInode::parse(&bytes).unwrap().xattr_icount())
+                .map(|bytes| ErofsInode::from_bytes(&bytes).unwrap().xattr_icount())
         };
 
         assert!(icount(vec![entry(u8::MAX as usize, 0)]).is_ok());
@@ -1617,7 +1587,7 @@ mod tests {
             ]
         };
         assert_eq!(
-            erofs_xattr_ibody_size(&xattrs(last)),
+            XattrEntry::ibody_size(&xattrs(last)),
             EROFS_XATTR_IBODY_MAX_SIZE
         );
         assert_eq!(icount(xattrs(last)).unwrap(), u16::MAX);

@@ -1,0 +1,19 @@
+[package]
+name = "nydus-test-utils"
+version = "3.0.0-beta.2"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+publish = false
+description = "Test utilities for the nydus crates."
+
+[dependencies]
+crc32c = "0.6"
+hex = { workspace = true }
+lz4_flex = "0.11"
+nydus-format = { path = "../nydus-format" }
+sha2 = { workspace = true }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = { workspace = true }
