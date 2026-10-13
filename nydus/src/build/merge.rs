@@ -1307,7 +1307,7 @@ mod tests {
             let blob_writer = crate::build::plain_blob_writer(Vec::new(), EROFS_BLOCK_SIZE);
             let full_blob_id = FullBlob::new(&[])
                 .with_bootstrap(&parent_bytes)
-                .with_metadata(&blob_writer.blob_metadata().unwrap())
+                .with_blob_metadata(&blob_writer.blob_metadata().unwrap())
                 .save_in(directory.path());
             let source = directory.path().join(hex::encode(full_blob_id));
             let merged = directory.path().join("merged");

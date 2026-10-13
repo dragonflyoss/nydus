@@ -229,8 +229,8 @@ fn write_full_blob(
     let data = fs::read(data_path).unwrap();
     let full_blob_digest = FullBlob::new(&data)
         .with_bootstrap(bootstrap_bytes)
-        .with_metadata(blob_metadata)
-        .with_sidecar()
+        .with_blob_metadata(blob_metadata)
+        .with_blob_metadata_file()
         .save_in(blob_dir);
     fs::remove_file(data_path).unwrap();
     full_blob_digest
@@ -394,7 +394,8 @@ fn flat_ranges_leave_unrelated_blobs_unopened() {
     let infos = reader.blob_infos().unwrap();
     let config = Config::from_yaml(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
-        store.display(), dir.path().join("cache").display(),
+        store.display(),
+        dir.path().join("cache").display(),
     ))
     .unwrap();
     // A partial request must work even if an unrelated blob is unavailable.

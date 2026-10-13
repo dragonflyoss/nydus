@@ -3035,7 +3035,6 @@ dependencies = [
  "nydus-format",
  "nydus-storage",
  "nydus-telemetry",
- "nydus-test-utils",
  "sha2 0.10.9",
  "tempfile",
  "tracing",

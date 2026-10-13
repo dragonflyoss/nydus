@@ -1574,10 +1574,10 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
-    /// Creates metadata for incremental upper data without an embedded
-    /// bootstrap. Incremental and redirect metadata are mutually exclusive.
+    /// Creates metadata for an upper blob, the data an incremental build
+    /// writes on top of a parent image, with the INCREMENTAL flag set.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_incremental(
+    pub fn new_upper(
         max_blocks_per_chunk_group: u32,
         blocks_per_chunk_group_index: u32,
         compressor: BlobMetadataCompressor,
@@ -1602,6 +1602,7 @@ impl BlobMetadata {
             metadata.header.table_count,
             &metadata.bytes[BlobMetadataHeader::SIZE..],
         );
+
         write_bytes_at(&mut metadata.bytes, 0, &metadata.header.to_bytes());
         Ok(metadata)
     }

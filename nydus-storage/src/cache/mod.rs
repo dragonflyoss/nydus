@@ -558,7 +558,8 @@ mod tests {
     use nydus_format::blob::{BlobMetadataDigester, BlobMetadataTableType};
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
-    use nydus_test_utils::metadata::{encode, padded_image};
+    use nydus_test_utils::blob::uncompressed_data;
+    use nydus_test_utils::metadata::from_chunk_groups;
 
     #[test]
     fn group_buffer_reuses_and_releases_large_mappings() {
@@ -643,7 +644,8 @@ mod tests {
             BlobMetadataCompressor::Zstd,
             BlobMetadataCompressor::Lz4Block,
         ] {
-            let (data, metadata) = encode(compressor, 4096, &[vec![payload.clone()]], false);
+            let (data, metadata) =
+                from_chunk_groups(compressor, 4096, &[vec![payload.clone()]], None);
             let group = metadata.chunk_group(0).unwrap();
             // The window starts 37 bytes before the group.
             let mut window = vec![0; 37];
@@ -704,7 +706,12 @@ mod tests {
     fn digests_are_checked_when_verification_is_on() {
         set_skip_verify_checksums(false);
         let chunks = vec![vec![1u8; 100], vec![2u8; 5000]];
-        let (data, metadata) = encode(BlobMetadataCompressor::None, 16384, &[chunks], true);
+        let (data, metadata) = from_chunk_groups(
+            BlobMetadataCompressor::None,
+            16384,
+            &[chunks],
+            Some(BlobMetadataDigester::Blake3),
+        );
         let group = metadata.chunk_group(0).unwrap();
         validate_decoded_chunk_group(&metadata, &group, &data).unwrap();
 
@@ -772,8 +779,9 @@ mod tests {
     #[test]
     fn inflate_scatters_chunks_onto_their_blocks() {
         let groups = vec![vec![vec![7u8; 100], vec![8u8; 4097]], vec![vec![9u8; 1]]];
-        let (data, metadata) = encode(BlobMetadataCompressor::None, 16384, &groups, false);
-        let image = padded_image(&groups);
+        let (data, metadata) =
+            from_chunk_groups(BlobMetadataCompressor::None, 16384, &groups, None);
+        let image = uncompressed_data(&groups);
         assert_eq!(image.len(), 4 * 4096);
         let group0 = metadata.chunk_group(0).unwrap();
         let group1 = metadata.chunk_group(1).unwrap();
@@ -792,7 +800,7 @@ mod tests {
     #[test]
     fn prefetch_batches_follow_the_compressed_target() {
         let groups: Vec<Vec<Vec<u8>>> = (0..5u8).map(|i| vec![vec![i; 4096]]).collect();
-        let (_, metadata) = encode(BlobMetadataCompressor::None, 4096, &groups, false);
+        let (_, metadata) = from_chunk_groups(BlobMetadataCompressor::None, 4096, &groups, None);
         assert_eq!(
             plan_prefetch_batches(&metadata, 0, 0),
             vec![0..1, 1..2, 2..3, 3..4, 4..5]
@@ -819,7 +827,7 @@ mod tests {
             plan_prefetch_batches(&metadata, u64::MAX, 9),
             vec![0..1, 1..2, 2..3, 3..4, 4..5]
         );
-        let (_, empty) = encode(BlobMetadataCompressor::None, 4096, &[], false);
+        let (_, empty) = from_chunk_groups(BlobMetadataCompressor::None, 4096, &[], None);
         assert!(plan_prefetch_batches(&empty, 4096, 4).is_empty());
     }
 

@@ -82,12 +82,6 @@ fn incremental_writer_options_match_build_defaults() {
     assert_eq!(options.digester, Some(BlobMetadataDigester::Blake3));
 }
 
-fn create_parentless_writer(temp: &tempfile::TempDir) -> (IncrementalWriter, PathBuf) {
-    let output_dir = temp.path().to_path_buf();
-    let writer = IncrementalWriter::create(writer_options(output_dir.clone())).unwrap();
-    (writer, output_dir)
-}
-
 fn local_config(blob_dir: &Path, cache_dir: &Path) -> Config {
     Config::from_yaml(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
@@ -95,6 +89,12 @@ fn local_config(blob_dir: &Path, cache_dir: &Path) -> Config {
         cache_dir.display(),
     ))
     .unwrap()
+}
+
+fn create_parentless_writer(temp: &tempfile::TempDir) -> (IncrementalWriter, PathBuf) {
+    let output_dir = temp.path().to_path_buf();
+    let writer = IncrementalWriter::create(writer_options(output_dir.clone())).unwrap();
+    (writer, output_dir)
 }
 
 fn open_metadata_writer(
@@ -1051,12 +1051,7 @@ fn nydus_core_creates_incremental_writer_reusing_parent_reader() {
     let mut parent_data = vec![b'A'; chunk_size];
     parent_data.extend(vec![b'B'; chunk_size]);
     let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
-    let config = Config::from_yaml(&format!(
-        "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
-        temp.path().display(),
-        temp.path().join("cache").display(),
-    ))
-    .unwrap();
+    let config = local_config(temp.path(), &temp.path().join("cache"));
     let core = NydusCore::new(&parent_bootstrap, config).unwrap();
 
     let output_dir = temp.path().to_path_buf();

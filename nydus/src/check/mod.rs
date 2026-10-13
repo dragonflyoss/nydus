@@ -726,8 +726,7 @@ mod tests {
     #[test]
     fn resolve_bootstrap_blob_dir_by_full_blob_digest_only() {
         let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob");
-        let (full_blob_digest, data_blob_digest) = write_minimal_blob(&blob_path);
+        let (full_blob_digest, data_blob_digest) = write_minimal_blob(dir.path());
 
         let full_blob_info = RawBlobInfo {
             blob_index: 1,
@@ -768,9 +767,7 @@ mod tests {
     #[test]
     fn resolve_blobs_reports_incremental_blob_metadata_flag() {
         let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("incremental-blob");
-
-        let (full_blob_digest, _) = write_minimal_blob_with_kind(&blob_path, BlobKind::Incremental);
+        let (full_blob_digest, _) = write_minimal_blob_with_kind(dir.path(), BlobKind::Incremental);
         let blob_info = RawBlobInfo {
             blob_index: 1,
             blob_id: full_blob_digest,
@@ -796,8 +793,8 @@ mod tests {
             (BlobKind::Redirect, "redirect blob"),
         ] {
             let dir = tempdir().unwrap();
-            let blob_path = dir.path().join("data-only-blob");
-            write_minimal_blob_with_kind(&blob_path, kind);
+            let (full_blob_digest, _) = write_minimal_blob_with_kind(dir.path(), kind);
+            let blob_path = dir.path().join(hex::encode(full_blob_digest));
             let err = ErofsReader::open_blob(&blob_path, None)
                 .err()
                 .expect("data-only blob must be rejected");
@@ -805,8 +802,8 @@ mod tests {
         }
     }
 
-    fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
-        write_minimal_blob_with_kind(path, BlobKind::Full)
+    fn write_minimal_blob(dir: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
+        write_minimal_blob_with_kind(dir, BlobKind::Full)
     }
 
     #[derive(Clone, Copy)]
@@ -817,18 +814,19 @@ mod tests {
     }
 
     fn write_minimal_blob_with_kind(
-        path: &Path,
+        dir: &Path,
         kind: BlobKind,
     ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
         let blob_metadata = match kind {
-            BlobKind::Full => metadata::single_chunk(&data),
-            BlobKind::Incremental => metadata::incremental(&data),
-            BlobKind::Redirect => metadata::redirect(&data, 1),
+            BlobKind::Full => metadata::single_chunk_group(&data),
+            BlobKind::Incremental => metadata::single_chunk_group_upper(&data),
+            BlobKind::Redirect => metadata::single_chunk_group_redirect(&data, 1),
         };
         let full_blob_id = FullBlob::new(&data)
-            .with_metadata(&blob_metadata)
-            .save(path);
+            .without_bootstrap()
+            .with_blob_metadata(&blob_metadata)
+            .save_in(dir);
         (full_blob_id, Sha256::digest(data).into())
     }
 }
