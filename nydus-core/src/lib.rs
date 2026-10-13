@@ -28,16 +28,21 @@
 #![warn(unreachable_pub)]
 
 pub mod blob;
+#[doc(hidden)]
+pub mod build;
 pub mod entry;
 pub mod extent;
 pub mod flat;
+mod layout;
 pub mod reader;
+pub mod writer;
 
 pub use blob::{BlobId, BlobInfo, Blobs};
 pub use entry::FileType;
 pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
 pub use reader::ErofsReader;
+pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
@@ -49,10 +54,10 @@ use nydus_config::Config;
 use nydus_error::{Context, Error, Result};
 
 use entry::ImageFs;
-use extent::{clamped_range_end, mapped_range_offset, BlobRangeSpec, ExtentResolver};
+use extent::{BlobRangeSpec, ExtentResolver};
+use layout::{FlatLayout, Segment};
 use nydus_backend::build_backend;
 use nydus_config::PrefetchScope;
-use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
 
@@ -67,9 +72,10 @@ pub struct NydusCore {
     pub blobs: Blobs,
     /// Static path-based filesystem APIs.
     pub fs: ImageFs,
+    reader: Arc<ErofsReader>,
     bootstrap: Arc<File>,
     zero_file: Arc<File>,
-    flat_size: u64,
+    address_layout: FlatLayout,
     trace_recorder: Arc<TraceRecorder>,
     /// Stop flag of the detached background prefetch worker, raised on drop
     /// so the worker exits its retry/reschedule loop instead of holding the
@@ -84,13 +90,13 @@ impl NydusCore {
     /// first touches a blob.
     ///
     /// `config` uses the same structure as `nydus fuse --config` and must
-    /// provide both the backend serving the blobs and a persistent local cache
-    /// directory.
+    /// provide the backend serving the blobs. A persistent cache directory is
+    /// required unless every blob is a directly mappable local raw device.
     ///
     /// Unless `config.prefetch.scope` is `none`, a background prefetch worker is
     /// spawned before returning: for an optimized image it streams the
-    /// "ondemand" redirect blob first (priority) to warm the source blobs'
-    /// caches in recorded access order, then prefetches the remaining blobs.
+    /// "ondemand" blob first (priority), which holds the recorded working set
+    /// in access order, then prefetches the remaining blobs.
     /// Dropping the core raises the worker's stop flag so it winds down
     /// instead of retrying throttled prefetches forever.
     /// The worker shares the reader's blob cache set, so callers that want
@@ -121,24 +127,20 @@ impl NydusCore {
         let prefetch_scope = config.prefetch.scope;
         let prefetch_timeout = config.prefetch.timeout;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
+        nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
-        // The multi-device model hands each blob's cache file to the kernel
-        // (as an EROFS device or fill target), so diskless mode cannot apply.
-        let Some(cache_dir) = config.storage.dir.clone() else {
-            return Err(Error::InvalidConfig(
-                "storage.dir is required: the blob cache files back the kernel-served devices"
-                    .to_string(),
-            ));
-        };
-        std::fs::create_dir_all(&cache_dir).with_context(|| {
-            format!("failed to create cache directory: {}", cache_dir.display())
-        })?;
+        let cache_dir = config.storage.dir.clone();
+        if let Some(cache_dir) = &cache_dir {
+            std::fs::create_dir_all(cache_dir).with_context(|| {
+                format!("failed to create cache directory: {}", cache_dir.display())
+            })?;
+        }
 
         let trace_recorder = Arc::new(TraceRecorder::default());
         let reader = ErofsReader::open_bootstrap(
             bootstrap,
-            backend,
-            Some(&cache_dir),
+            backend.clone(),
+            cache_dir.as_deref(),
             Some(trace_recorder.clone()),
         )
         .context("failed to open nydus bootstrap")?;
@@ -151,25 +153,21 @@ impl NydusCore {
                 "bootstrap contains no blobs".to_string(),
             ));
         }
-        let flat_size = raw_blob_infos
-            .iter()
-            .try_fold(bootstrap_size, |size, info| {
-                let offset = info
-                    .mapped_blkaddr
-                    .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .ok_or_else(|| Error::Overflow("mapped blob offset overflow".to_string()))?;
-                let len = info
-                    .blocks
-                    .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .ok_or_else(|| Error::Overflow("blob size overflow".to_string()))?;
-                Ok::<u64, Error>(
-                    size.max(
-                        offset.checked_add(len).ok_or_else(|| {
-                            Error::Overflow("flat blob range overflow".to_string())
-                        })?,
-                    ),
-                )
-            })?;
+        if cache_dir.is_none() {
+            for info in &raw_blob_infos {
+                let mapped = backend
+                    .raw_device_file(&info.blob_id)
+                    .with_context(|| format!("failed to resolve blob {}", info.blob_index))?
+                    .is_some_and(|file| file.data_offset == 0);
+                if !mapped {
+                    return Err(Error::InvalidConfig(format!(
+                        "storage.dir is required: blob {} has no directly mappable local device",
+                        BlobId::from(info.blob_id)
+                    )));
+                }
+            }
+        }
+        let address_layout = FlatLayout::new(bootstrap_size, &raw_blob_infos)?;
         let index_by_blob_id = raw_blob_infos
             .iter()
             .map(|info| (BlobId::from(info.blob_id), info.blob_index))
@@ -216,13 +214,26 @@ impl NydusCore {
                 flat_layout: OnceLock::new(),
                 flat_layout_init: Mutex::new(()),
             },
-            fs: ImageFs::new(reader, zero_file.clone()),
+            fs: ImageFs::new(reader.clone(), zero_file.clone()),
+            reader,
             bootstrap: bootstrap_file,
             zero_file,
-            flat_size,
+            address_layout,
             trace_recorder,
             prefetch_stop,
         })
+    }
+
+    /// Create an incremental writer that reuses this core's parent reader, backend, and cache.
+    ///
+    /// Each call returns an independent writer with its own staged overlay and
+    /// output blob/bootstrap paths. The returned writer is a single-writer
+    /// builder; serialize access externally if it is shared across threads.
+    /// Reads through this `NydusCore` continue to expose the parent image and do
+    /// not include staged writer changes. Open the committed child bootstrap to
+    /// read the merged result.
+    pub fn writer(&self, options: IncrementalWriterOptions) -> Result<IncrementalWriter> {
+        IncrementalWriter::from_parent_reader(self.reader.clone(), options)
     }
 
     /// Return the bootstrap file backing this core.
@@ -232,7 +243,7 @@ impl NydusCore {
 
     /// Return the size of the flattened device view.
     pub fn flat_size(&self) -> u64 {
-        self.flat_size
+        self.address_layout.size()
     }
 
     /// Return the core-owned `/dev/zero` fd used for zero-filled ranges.
@@ -251,97 +262,48 @@ impl NydusCore {
     /// downloading missing blob data. Bootstrap and gaps are returned when
     /// ready; cold blob cache ranges are omitted, so the result may be
     /// discontinuous.
+    /// Only blobs intersecting the requested range are opened. Opening a
+    /// blob may load its metadata, but does not fetch missing payload data.
     pub fn probe_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<Extent>> {
         self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
 
-    /// Return a stable snapshot of this core's on-demand block group trace.
+    /// Return a stable snapshot of this core's on-demand chunk group trace.
     pub fn trace_snapshot(&self) -> TraceDocument {
         self.trace_recorder.snapshot()
     }
 
-    /// Serialize this core's on-demand block group trace as optimize-compatible JSON.
+    /// Serialize this core's on-demand chunk group trace as optimize-compatible JSON.
     pub fn trace_json(&self) -> String {
         self.trace_recorder.encode_json()
     }
 
     fn resolve_flat_ranges(&self, offset: u64, len: u64, mode: ResolveMode) -> Result<Vec<Extent>> {
-        let Some(end) = clamped_range_end(offset, len, self.flat_size)? else {
-            return Ok(Vec::new());
-        };
-
+        // Device geometry comes from the bootstrap. Resolving one range must
+        // not prepare caches for unrelated devices, even on the first request.
+        let segments = self.address_layout.segments(offset, len)?;
         let mut resolver = ExtentResolver::new(&self.blobs.reader, self.zero_file.as_raw_fd());
-        let mut pos = offset;
-        let bootstrap_end = end.min(self.bootstrap_size);
-        if pos < bootstrap_end {
-            resolver.push(Extent::new(
-                self.bootstrap.as_raw_fd(),
-                pos,
-                bootstrap_end - pos,
-                pos,
-            ));
-            pos = bootstrap_end;
+        if mode == ResolveMode::Fetch {
+            let specs: Vec<BlobRangeSpec> = segments
+                .clone()
+                .filter_map(|segment| match segment {
+                    Segment::Blob { range } => Some(range),
+                    _ => None,
+                })
+                .collect();
+            resolver.fetch_blobs(&specs)?;
         }
-        if pos >= end {
-            return Ok(resolver.finish());
-        }
-
-        let blobs = self
-            .blobs
-            .flat_layout()
-            .context("failed to describe blob device layout")?;
-
-        while pos < end {
-            // `blobs` is sorted by `mapped_offset` and blob ranges never
-            // overlap (device-table layout), so the only candidate containing
-            // `pos` is the last blob starting at or before it — found with a
-            // binary search instead of a linear scan (this runs per I/O).
-            let after = blobs.partition_point(|blob| blob.mapped_offset <= pos);
-            let covering = after
-                .checked_sub(1)
-                .map(|index| &blobs[index])
-                .filter(|blob| {
-                    mapped_range_offset(blob.mapped_offset, blob.cache_size, pos).is_some()
-                });
-
-            if let Some(blob) = covering {
-                let blob_end = blob
-                    .mapped_offset
-                    .checked_add(blob.cache_size)
-                    .ok_or_else(|| Error::Overflow("blob device range overflow".to_string()))?;
-                let seg_end = end.min(blob_end);
-                let blob_offset = pos - blob.mapped_offset;
-                resolver.push_blob(
-                    BlobRangeSpec {
-                        index: blob.index,
-                        offset: blob_offset,
-                        len: seg_end - pos,
-                        source_offset: pos,
-                    },
-                    mode,
-                )?;
-                pos = seg_end;
-            } else {
-                // `blobs[after]` is the first blob starting after `pos`, so it
-                // bounds the hole (or the view ends first).
-                let next_blob = blobs
-                    .get(after)
-                    .map(|blob| blob.mapped_offset)
-                    .unwrap_or(end);
-                let hole_end = end.min(next_blob);
-                if hole_end <= pos {
-                    break;
+        for segment in segments {
+            match segment {
+                Segment::Bootstrap { offset, len } => {
+                    resolver.push(Extent::new(self.bootstrap.as_raw_fd(), offset, len, offset))
                 }
-                resolver.push(Extent::new(
-                    self.zero_file.as_raw_fd(),
-                    0,
-                    hole_end - pos,
-                    pos,
-                ));
-                pos = hole_end;
+                Segment::Zero { offset, len } => {
+                    resolver.push(Extent::new(self.zero_file.as_raw_fd(), 0, len, offset))
+                }
+                Segment::Blob { range } => resolver.push_blob(range, mode)?,
             }
         }
-
         Ok(resolver.finish())
     }
 }

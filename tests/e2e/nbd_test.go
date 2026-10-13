@@ -257,11 +257,12 @@ func (e *nbdEnv) caseReadiness(t *testing.T) { // C0
 	// whole-blob prefetch may have happened. Some blob-tail allocation IS
 	// expected before any file read: the core validates each blob's
 	// footer (at the blob's tail) on its first flat-range resolve, and the
-	// kernel's block-device open scans the device tail too — every such read
-	// rounds outward to whole blob-meta block groups. Bound the cache well below a
-	// whole-blob pull rather than at ~zero.
+	// kernel's block-device open scans the device head and tail too — every
+	// such read pulls the chunk groups overlapping its 2 MiB (compressed)
+	// fetch-size cell. Bound the cache well below a whole-blob pull rather
+	// than at ~zero.
 	for _, m := range e.cacheBlobs() {
-		assert.Less(t, usedBytes(m), int64(8<<20), "cache %s holds only tail block group fill before any file read", filepath.Base(m))
+		assert.Less(t, usedBytes(m), int64(16<<20), "cache %s holds only fetch-size fills before any file read", filepath.Base(m))
 	}
 }
 
@@ -402,7 +403,7 @@ func (e *nbdEnv) casePersistence(t *testing.T) { // C9 — warm cache survives a
 	assert.Equal(t, want, got, "large.bin still byte-exact after restart")
 	after := e.cacheUsed()
 	// Warm cache: re-reading the same data should not grow the cache (the
-	// core's persisted block group map short-circuits the fetch).
+	// core's persisted chunk map short-circuits the fetch).
 	assert.Less(t, after-before, int64(1<<20), "warm cache re-serves with no new cache allocation after restart")
 }
 

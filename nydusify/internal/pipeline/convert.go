@@ -22,24 +22,23 @@ import (
 type Option struct {
 	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
 	BuilderPath string
-	// WorkDir is a scratch directory for layer extraction, FIFOs and staging.
+	// WorkDir is a scratch directory for FIFOs and metadata staging.
 	WorkDir string
 	// OnBlobConverted, when set, is called once per converted layer blob as
 	// soon as it is committed to the content store, so uploads can overlap
 	// with the remaining conversion work. Must be safe for concurrent calls.
 	OnBlobConverted func(desc ocispec.Descriptor)
-	// ChunkSize is the nydus file chunk size in bytes.
+	// ChunkSize is the file chunk size in bytes.
 	ChunkSize uint32
-	// BlockGroupSize is the nydus block group uncompressed size in bytes (a multiple of
-	// 1MiB). Controls the uncompressed size of each blob meta block group.
-	BlockGroupSize uint32
-	// Compressor is the chunk data compressor ("none" or "zstd").
+	// Compressor selects the builder's chunk-based or native-z data layout.
 	Compressor string
 	// LogLevel is the log level forwarded to the `nydus` subprocesses
 	// (trace/debug/info/warn/error). Defaults to "info" when empty.
 	LogLevel string
 	// PlatformMC selects which platforms to convert. Defaults to all.
 	PlatformMC platforms.MatchComparer
+	// Annotations are added to each generated OCI image manifest.
+	Annotations map[string]string
 }
 
 // Convert converts the image rooted at srcDesc (already present in cs) into a
@@ -52,21 +51,17 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 	if opt.ChunkSize == 0 {
 		opt.ChunkSize = nydus.DefaultChunkSize
 	}
-	if opt.BlockGroupSize == 0 {
-		opt.BlockGroupSize = nydus.DefaultBlockGroupSize
-	}
 	platformMC := opt.PlatformMC
 	if platformMC == nil {
 		platformMC = platforms.All
 	}
 
 	layerFn := LayerConvertFunc(nydus.PackOption{
-		BuilderPath:    opt.BuilderPath,
-		WorkDir:        opt.WorkDir,
-		ChunkSize:      opt.ChunkSize,
-		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:     opt.Compressor,
-		LogLevel:       opt.LogLevel,
+		BuilderPath: opt.BuilderPath,
+		WorkDir:     opt.WorkDir,
+		ChunkSize:   opt.ChunkSize,
+		Compressor:  opt.Compressor,
+		LogLevel:    opt.LogLevel,
 	})
 	if opt.OnBlobConverted != nil {
 		inner := layerFn
@@ -82,7 +77,7 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		BuilderPath: opt.BuilderPath,
 		WorkDir:     opt.WorkDir,
 		LogLevel:    opt.LogLevel,
-	})
+	}, opt.Annotations)
 
 	indexConvertFn := converter.IndexConvertFuncWithHook(
 		layerFn,

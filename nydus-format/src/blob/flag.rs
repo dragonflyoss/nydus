@@ -1,23 +1,19 @@
-//! Conventions shared by the nydus on-disk record formats (blob meta, blob
-//! footer): a `magic + version + flags` header prefix where `flags` is split
-//! EROFS-style — the low 16 bits are incompatible features (unknown bits
-//! reject the file), the high 16 bits are compatible features (unknown bits
-//! are ignored) — and a crc32c computed over the record with the crc field
-//! zeroed.
+//! The frozen prefix shared by the blob meta and the blob footer,
+//! `magic[0..8] + feature_compat[8..12] + feature_incompat[12..16] +
+//! crc32[16..20]`. There is no version field. Compatibility is decided by
+//! the feature words alone, EROFS-style. Unknown `feature_compat` bits are
+//! ignored, unknown `feature_incompat` bits reject the record, so an
+//! incompatible change sets a new incompat bit.
 
 use crate::error::{Error, Result};
 
-/// A format `flags` word, split EROFS-style into the incompatible low half
-/// (unknown bits reject the file) and the compatible high half (unknown bits
-/// are ignored). Wraps the raw on-disk word verbatim, so compat bits written
-/// by a newer writer survive a round trip through this reader.
+/// A `feature_incompat` word, the raw on-disk word verbatim. Every bit is
+/// an incompatible feature and an unknown bit rejects the record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FeatureFlags(u32);
 
+/// Builds, queries and checks a feature word.
 impl FeatureFlags {
-    /// The incompatible (reject-when-unknown) half of the word.
-    pub const INCOMPAT_MASK: u32 = 0x0000_FFFF;
-
     /// A word with no feature bits set.
     pub const fn empty() -> Self {
         Self(0)
@@ -49,9 +45,9 @@ impl FeatureFlags {
         }
     }
 
-    /// Reject a word whose incompat half carries bits outside `supported`.
+    /// Reject a word carrying bits outside `supported`.
     pub fn validate_incompat(self, supported: u32) -> Result<()> {
-        let unknown_incompat = self.0 & Self::INCOMPAT_MASK & !supported;
+        let unknown_incompat = self.0 & !supported;
         if unknown_incompat != 0 {
             return Err(Error::Unsupported(format!(
                 "unsupported incompat flags {unknown_incompat:#x} (image is newer than this reader)"
@@ -67,7 +63,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_bits_round_trip_verbatim() {
+    fn from_bits_keeps_the_bits() {
+        assert_eq!(FeatureFlags::empty().bits(), 0);
         assert_eq!(FeatureFlags::from_bits(0xdead_beef).bits(), 0xdead_beef);
     }
 
@@ -75,59 +72,59 @@ mod tests {
     fn contains_requires_every_bit() {
         let flags = FeatureFlags::from_bits(0b011);
 
-        assert!(flags.contains(0b001));
-        assert!(flags.contains(0b011));
-        assert!(!flags.contains(0b100));
-        assert!(!flags.contains(0b101));
-    }
+        let test_cases = vec![(0b001, true), (0b011, true), (0b100, false), (0b101, false)];
 
-    #[test]
-    fn set_sets_or_clears_only_the_given_bits() {
-        let mut flags = FeatureFlags::from_bits(0x8000_0000);
-
-        flags.set(0b001, true);
-        flags.set(0b110, true);
-        assert_eq!(flags.bits(), 0x8000_0007);
-
-        flags.set(0b010, false);
-        assert_eq!(flags.bits(), 0x8000_0005);
-
-        flags.set(0b010, false);
-        assert_eq!(flags.bits(), 0x8000_0005);
-    }
-
-    #[test]
-    fn incompat_validation_follows_the_split_word_rules() {
-        let supported = 0b1;
-        let cases: [(&str, u32, Option<&str>); 4] = [
-            ("empty word", 0, None),
-            ("supported incompat bit", 0b1, None),
-            ("unknown compat bits are ignored", 0xffff_0001, None),
-            (
-                "unknown incompat bit",
-                0b10,
-                Some("unsupported incompat flags"),
-            ),
-        ];
-
-        for (case, bits, expected) in cases {
-            let result = FeatureFlags::from_bits(bits).validate_incompat(supported);
-            match expected {
-                None => assert!(result.is_ok(), "{case}"),
-                Some(message) => {
-                    let err = result.unwrap_err();
-                    assert!(err.to_string().contains(message), "{case}: {err}");
-                }
-            }
+        for (bits, expected) in test_cases {
+            assert_eq!(flags.contains(bits), expected);
         }
     }
 
     #[test]
-    fn the_rejection_names_only_the_unknown_bits() {
-        let err = FeatureFlags::from_bits(0b111)
-            .validate_incompat(0b001)
-            .unwrap_err();
+    fn set_changes_only_the_given_bits() {
+        let mut flags = FeatureFlags::from_bits(0x8000_0000);
 
-        assert!(err.to_string().contains("0x6"), "{err}");
+        let test_cases = vec![
+            (0b001, true, 0x8000_0001),
+            (0b110, true, 0x8000_0007),
+            (0b010, false, 0x8000_0005),
+            (0b010, false, 0x8000_0005),
+        ];
+
+        for (bits, value, expected) in test_cases {
+            flags.set(bits, value);
+            assert_eq!(flags.bits(), expected);
+        }
+    }
+
+    #[test]
+    fn validate_incompat_rejects_unknown_bits() {
+        let test_cases = vec![
+            (0, 0b1, Ok(())),
+            (0b1, 0b1, Ok(())),
+            (
+                0b10,
+                0b1,
+                Err("unsupported incompat flags 0x2 (image is newer than this reader)"),
+            ),
+            (
+                0x8000_0001,
+                0b1,
+                Err("unsupported incompat flags 0x80000000 (image is newer than this reader)"),
+            ),
+            (
+                0b111,
+                0b001,
+                Err("unsupported incompat flags 0x6 (image is newer than this reader)"),
+            ),
+        ];
+
+        for (bits, supported, expected) in test_cases {
+            assert_eq!(
+                FeatureFlags::from_bits(bits)
+                    .validate_incompat(supported)
+                    .map_err(|err| err.to_string()),
+                expected.map_err(String::from)
+            );
+        }
     }
 }

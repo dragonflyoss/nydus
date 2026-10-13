@@ -14,8 +14,9 @@ mod local;
 #[cfg(feature = "backend-registry")]
 mod registry;
 
+use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nydus_config::BackendConfig;
@@ -27,7 +28,24 @@ pub use local::Local;
 #[cfg(feature = "backend-registry")]
 pub(crate) use registry::Registry;
 
+/// The registry backend's shared tokio runtime is process-wide; an embedding
+/// process bounds its threads and pins their network namespace with
+/// [`configure_runtime`] before constructing any registry backend.
+#[cfg(feature = "backend-registry")]
+pub use registry::{
+    configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
+};
+
 pub use nydus_config::{Backend, Protocol, ReadKind};
+
+/// A raw EROFS device backed by the range
+/// `[data_offset, data_offset + data_size)` of a local file.
+pub struct RawDeviceFile {
+    pub path: PathBuf,
+    pub file: Arc<File>,
+    pub data_offset: u64,
+    pub data_size: u64,
+}
 
 /// A blob backend resolves blob data and metadata by content digest.
 ///
@@ -64,6 +82,23 @@ pub trait BlobBackend: Send + Sync {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
     ) -> io::Result<BlobMetadata>;
+
+    /// Whether the blob is a raw EROFS device without blob meta (a native
+    /// `erofs-*` layer): its bytes are read as-is and never cached or
+    /// decoded by nydus. Backends that cannot serve such blobs report an
+    /// error instead of `Ok(true)`.
+    fn is_raw_device(&self, _blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    /// The local file backing a raw device, `None` for a streamed or chunked
+    /// blob. File resolution and open errors are propagated.
+    fn raw_device_file(
+        &self,
+        _blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<Option<RawDeviceFile>> {
+        Ok(None)
+    }
 
     /// Write the blob's metadata to `dst`, `kind` attributing the reads that
     /// recover it.

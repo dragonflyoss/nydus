@@ -43,7 +43,7 @@ pub fn default_log_dir() -> PathBuf {
 }
 
 /// Returns the default per-request timeout of the registry backend. Kept
-/// short because a read holds the block group's fetch claim for its whole duration,
+/// short because a read holds the chunk group's fetch claim for its whole duration,
 /// and the readers waiting behind that claim are FUSE worker threads.
 #[inline]
 fn default_registry_http_timeout() -> Duration {
@@ -64,7 +64,7 @@ pub fn default_prefetch_concurrent_blob_count() -> usize {
 }
 
 /// Returns the default per-blob prefetch timeout. Generous, because a blob
-/// prefetch downloads every block group of the blob in the background; the bound
+/// prefetch downloads every chunk group of the blob in the background; the bound
 /// only exists to unwedge a stalled blob.
 #[inline]
 pub fn default_prefetch_timeout() -> Duration {
@@ -93,7 +93,7 @@ fn default_registry_dragonfly_back_to_source_request_rate_limit() -> u64 {
     1
 }
 
-/// Returns the default for skipping decoded block group checksum
+/// Returns the default for skipping decoded chunk group checksum
 /// verification.
 #[inline]
 fn default_storage_skip_verify_checksums() -> bool {
@@ -197,8 +197,8 @@ pub struct RegistryConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     /// The per-request timeout (connect + read), e.g. `5s` or `1m`; `0s`
-    /// disables the timeout. A request fetches one chunk block group, so this
-    /// bounds a single block group download.
+    /// disables the timeout. A request fetches one chunk group, so this
+    /// bounds a single chunk group download.
     #[serde(default = "default_registry_http_timeout", with = "humantime_serde")]
     pub timeout: Duration,
 
@@ -218,6 +218,21 @@ pub struct HttpConfig {
     /// The TLS configuration for connections to the registry.
     #[serde(default)]
     pub tls: TlsConfig,
+
+    /// The async worker threads of the process-wide runtime that drives the
+    /// registry client's sockets; `0` selects the backend's default (2). The
+    /// runtime is shared by every registry backend in the process, so only
+    /// the first backend constructed with a non-zero value can configure it;
+    /// a later, different value is logged and ignored.
+    #[serde(default)]
+    pub worker_threads: usize,
+
+    /// The upper bound on the runtime's on-demand blocking threads, which
+    /// serve DNS lookups and are released after 10 s idle; `0` selects the
+    /// backend's default (8). Shares the first-backend-wins rule of
+    /// [`worker_threads`](Self::worker_threads).
+    #[serde(default)]
+    pub max_blocking_threads: usize,
 }
 
 /// The proxy configuration for the registry backend's HTTP client.
@@ -238,6 +253,8 @@ impl Default for HttpConfig {
             max_retries: default_registry_http_max_retries(),
             proxy: None,
             tls: TlsConfig::default(),
+            worker_threads: 0,
+            max_blocking_threads: 0,
         }
     }
 }
@@ -342,8 +359,8 @@ pub struct DragonflyConfig {
     pub scheduler_endpoint: String,
 
     /// The timeout of each attempt of a request through the seed peers, e.g.
-    /// `30s` or `1m`. A request fetches one chunk block group, so this bounds a
-    /// single block group download from a seed peer.
+    /// `30s` or `1m`. A request fetches one chunk group, so this bounds a
+    /// single chunk group download from a seed peer.
     #[serde(
         default = "default_registry_dragonfly_timeout",
         with = "humantime_serde"
@@ -398,11 +415,24 @@ pub struct StorageConfig {
     #[serde(default)]
     pub dir: Option<PathBuf>,
 
-    /// Skip verifying decoded block groups against their stored checksums
+    /// Skip verifying decoded chunk groups against their stored checksums
     /// before they are served (the default). Set to `false` to verify every
-    /// decoded block group when the transport is not trusted end to end.
+    /// decoded chunk group when the transport is not trusted end to end.
     #[serde(default = "default_storage_skip_verify_checksums")]
     pub skip_verify_checksums: bool,
+
+    /// Compressed bytes one on-demand backend read covers: the chunk groups
+    /// whose compressed ranges overlap the fetch-size-aligned cell holding the
+    /// missed group, trimmed at groups already cached or being fetched.
+    /// Larger sizes make fewer, larger requests (better over high latency),
+    /// smaller sizes transfer fewer unused bytes (better over limited
+    /// bandwidth). Zero fetches the missed group alone. Default 2 MiB.
+    #[serde(default = "default_storage_fetch_size")]
+    pub fetch_size: u64,
+}
+
+fn default_storage_fetch_size() -> u64 {
+    2 * 1024 * 1024
 }
 
 /// Implement Default for StorageConfig.
@@ -411,6 +441,7 @@ impl Default for StorageConfig {
         Self {
             dir: None,
             skip_verify_checksums: default_storage_skip_verify_checksums(),
+            fetch_size: default_storage_fetch_size(),
         }
     }
 }
@@ -424,13 +455,14 @@ pub struct PrefetchConfig {
     pub concurrent_blob_count: usize,
 
     /// The per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching
-    /// one whole blob may take, while `http.timeout` bounds each block group
+    /// one whole blob may take, while `http.timeout` bounds each chunk group
     /// request within it; `0s` disables the bound.
     #[serde(default = "default_prefetch_timeout", with = "humantime_serde")]
     pub timeout: Duration,
 
-    /// The scope of blob prefetch: nothing, only the "ondemand" redirect blob
-    /// (the default), or all blobs.
+    /// The scope of blob prefetch: nothing, only the "ondemand" blob, all
+    /// blobs, or `auto` (the default): the "ondemand" blob when the image has
+    /// one, otherwise all blobs.
     #[serde(default)]
     pub scope: PrefetchScope,
 }
@@ -439,19 +471,30 @@ pub struct PrefetchConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PrefetchScope {
-    /// Disable prefetch: nothing is pulled ahead of demand.
+    /// Disable prefetch: nothing is pulled ahead of demand, not even an
+    /// "ondemand" blob.
     None,
 
-    /// Pull only the "ondemand" redirect blob (produced by `nydus optimize`),
-    /// which warms the hot working set in recorded access order without
-    /// pulling the whole image. On an image without a redirect blob nothing
-    /// is prefetched.
-    #[default]
+    /// Pull only the "ondemand" blob (produced by `nydus optimize`), which
+    /// holds the recorded working set in access order, without pulling the
+    /// whole image. On an image without an ondemand blob nothing is
+    /// prefetched.
     Ondemand,
 
-    /// Pull all blobs: the priority blobs first, in declared order, then
-    /// every remaining blob — the entire image ends up in the local cache.
+    /// Pull all blobs: the priority blobs first, in declared order (an
+    /// optimized image lists its ondemand blob first), then every remaining
+    /// blob — the entire image ends up in the local cache.
     All,
+
+    /// Decide per image once the blob metadata is available: [`Ondemand`]
+    /// when a priority blob is an ondemand blob, otherwise [`All`], so an
+    /// optimized image streams only its recorded working set while an
+    /// unoptimized one streams every blob like a classic nydusd mount.
+    ///
+    /// [`Ondemand`]: PrefetchScope::Ondemand
+    /// [`All`]: PrefetchScope::All
+    #[default]
+    Auto,
 }
 
 /// Implement Default for PrefetchConfig.
@@ -477,7 +520,7 @@ impl Default for PrefetchConfig {
 /// storage:
 ///   dir: /path/to/cache
 /// prefetch:
-///   scope: ondemand
+///   scope: auto
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -715,8 +758,32 @@ config:
         assert!(registry.http.proxy.is_none());
         assert!(!registry.http.tls.skip_verify);
         assert!(registry.http.tls.ca_cert.is_none());
+        assert_eq!(registry.http.worker_threads, 0);
+        assert_eq!(registry.http.max_blocking_threads, 0);
         assert!(registry.auth.is_none());
         assert!(registry.dragonfly.is_none());
+    }
+
+    #[test]
+    fn deserialize_registry_http_runtime_threads() {
+        let yaml = r#"
+type: registry
+config:
+  addr: https://registry-1.docker.io
+  repository: library/ubuntu
+  http:
+    worker_threads: 4
+    max_blocking_threads: 16
+"#;
+
+        let backend: BackendConfig = serde_yaml::from_str(yaml).unwrap();
+        let BackendConfig::Registry(registry) = &backend else {
+            panic!("expected a registry backend, got {backend:?}");
+        };
+        assert_eq!(registry.http.worker_threads, 4);
+        assert_eq!(registry.http.max_blocking_threads, 16);
+        // The other http fields keep their defaults alongside the new keys.
+        assert_eq!(registry.http.timeout, default_registry_http_timeout());
     }
 
     #[test]
@@ -809,7 +876,26 @@ scope: all
             default_prefetch_concurrent_blob_count()
         );
         assert_eq!(prefetch.timeout, default_prefetch_timeout());
-        assert_eq!(prefetch.scope, PrefetchScope::Ondemand);
+        assert_eq!(prefetch.scope, PrefetchScope::Auto);
+    }
+
+    #[test]
+    fn prefetch_scope_accepts_every_spelling() {
+        for (yaml, scope) in [
+            ("scope: none\n", PrefetchScope::None),
+            ("scope: ondemand\n", PrefetchScope::Ondemand),
+            ("scope: all\n", PrefetchScope::All),
+            ("scope: auto\n", PrefetchScope::Auto),
+        ] {
+            let prefetch: PrefetchConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(prefetch.scope, scope, "{yaml}");
+        }
+        for yaml in ["scope: everything\n", "scope: opt\n"] {
+            assert!(
+                serde_yaml::from_str::<PrefetchConfig>(yaml).is_err(),
+                "{yaml}"
+            );
+        }
     }
 
     #[test]
@@ -887,7 +973,7 @@ storage:
             config.prefetch.concurrent_blob_count,
             default_prefetch_concurrent_blob_count()
         );
-        assert_eq!(config.prefetch.scope, PrefetchScope::Ondemand);
+        assert_eq!(config.prefetch.scope, PrefetchScope::Auto);
     }
 
     #[test]

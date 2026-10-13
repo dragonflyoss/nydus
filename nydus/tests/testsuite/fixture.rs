@@ -19,8 +19,8 @@ pub fn assemble_full_blob(
     nydus_format::blob::finish_full_blob(
         &mut full_blob,
         data.len() as u64,
-        bootstrap_bytes,
-        blob_metadata,
+        Some(bootstrap_bytes),
+        Some(blob_metadata),
     )
     .expect("assemble full blob");
     drop(full_blob);

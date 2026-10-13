@@ -48,6 +48,18 @@ NBD_TIMEOUT ?= 600s
 NBD_COUNT ?= 1
 NBD_GO_TEST_ARGS ?=
 
+COMPAT_TIMEOUT ?= 1800s
+COMPAT_COUNT ?= 1
+COMPAT_GO_TEST_ARGS ?=
+# Absolute paths of the nydus binaries for the cross-version compatibility
+# check: images are built with COMPAT_BUILDER, then checked and read with
+# COMPAT_READER. Each defaults to the in-tree release build.
+COMPAT_BUILDER ?=
+COMPAT_READER ?=
+# Directory the compatibility images and their manifest are built into by
+# test-compat-build and read from by test-compat-read.
+COMPAT_IMAGES ?=
+
 FS_TIMEOUT ?= 1800s
 FS_COUNT ?= 1
 FS_GO_TEST_ARGS ?=
@@ -73,12 +85,13 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH
 	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
 TEST_SUPPORT_FILES = harness.go optimize.go diff.go
-E2E_TEST_FILES = roundtrip_test.go $(TEST_SUPPORT_FILES)
+E2E_TEST_FILES = roundtrip_test.go no_xattr_test.go $(TEST_SUPPORT_FILES)
 TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
 UFFD_TEST_FILES = uffd_test.go uffd_fault_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
 CACHE_SHARING_TEST_FILES = cache_sharing_test.go $(TEST_SUPPORT_FILES)
 FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
+COMPAT_TEST_FILES = compat_test.go compat_images_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 # NBD and bench use whole-package compilation: nbd_test.go and bench_test.go
@@ -88,7 +101,7 @@ FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 NBD_TEST_PKG = .
 BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-nydusify test-e2e test-tooci test-tar-corpus test-compat test-compat-build test-compat-read test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -108,8 +121,12 @@ nydusify:
 test:
 	$(CARGO) test --workspace
 
+test-nydusify:
+	$(CARGO) build -p nydus --features cli
+	cd nydusify && NYDUS_TEST_BUILDER="$(abspath $(or $(CARGO_TARGET_DIR),target))/debug/nydus" $(GO_BIN) test -race -count=1 ./...
+
 # Run end-to-end integration tests (requires root, builds release first).
-# Only runs tests/e2e/roundtrip_test.go.
+# Runs roundtrip and automatic no-xattr tests with their shared helpers.
 test-e2e: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
@@ -125,6 +142,59 @@ test-tooci: release nydusify
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestNydusifyToOCI$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
+
+# Convert Go's archive/tar test corpus and vectors, containerd's archive
+# tests, generated and mutated layers, and 8 GiB files through nydus.Pack,
+# and diff each FUSE mount against the containerd archive.Apply tree.
+# Requires root and FUSE. NYDUS_E2E_TAR_SEEDS sets how many random layers
+# to generate; NYDUS_E2E_HUGE_TAR=1 also streams the 60 GB sparse corpus.
+# GO_TAR_TESTDATA points at a Go archive/tar testdata directory other than
+# the one in GOROOT. TMPDIR is set to the repo's .test-tmp/.
+test-tar-corpus: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	mkdir -p $(CURDIR)/.test-tmp
+	cd tests/e2e && \
+		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
+		"NYDUS_E2E_TAR_SEEDS=$(NYDUS_E2E_TAR_SEEDS)" "NYDUS_E2E_HUGE_TAR=$(NYDUS_E2E_HUGE_TAR)" \
+		"GO_TAR_TESTDATA=$(GO_TAR_TESTDATA)" \
+		$(GO_BIN) test -v -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) ./tar
+
+# Cross-version on-disk compatibility check (requires root): builds images of
+# a corpus covering data, hole and metadata edge cases in every layout, plus
+# merged layers, with COMPAT_BUILDER and runs `check`, FUSE mounts and
+# `export` on them with COMPAT_READER. CI runs it in both directions against
+# the last released version, e.g.
+#   make test-compat COMPAT_BUILDER=/abs/old/nydus
+#   make test-compat COMPAT_READER=/abs/old/nydus
+test-compat: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	cd tests/e2e && \
+		$(GO_TEST_ENV) \
+		NYDUS_COMPAT_BUILDER="$(COMPAT_BUILDER)" \
+		NYDUS_COMPAT_READER="$(COMPAT_READER)" \
+		$(GO_BIN) test -v -run '^TestCrossVersionCompatibility$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) $(COMPAT_TEST_FILES)
+
+# The two halves of test-compat, run separately so the images of a released
+# version can be built once and kept, e.g.
+#   make test-compat-build COMPAT_BUILDER=/abs/old/nydus COMPAT_IMAGES=/abs/images
+#   make test-compat-read COMPAT_IMAGES=/abs/images
+test-compat-build: $(if $(COMPAT_BUILDER),,release)
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	@test -n "$(COMPAT_IMAGES)" || { echo "set COMPAT_IMAGES=/abs/path/to/images"; exit 1; }
+	cd tests/e2e && \
+		$(GO_TEST_ENV) \
+		NYDUS_COMPAT_BUILDER="$(COMPAT_BUILDER)" \
+		NYDUS_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
+		$(GO_BIN) test -v -run '^TestCompatBuildImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) $(COMPAT_TEST_FILES)
+
+test-compat-read: $(if $(COMPAT_READER),,release)
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	@test -n "$(COMPAT_IMAGES)" || { echo "set COMPAT_IMAGES=/abs/path/to/images"; exit 1; }
+	cd tests/e2e && \
+		$(GO_TEST_ENV) \
+		NYDUS_COMPAT_READER="$(COMPAT_READER)" \
+		NYDUS_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
+		$(GO_BIN) test -v -run '^TestCompatReadImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) $(COMPAT_TEST_FILES)
 
 # Run the UFFD test suite: capability preflight, the stateless socket smoke,
 # real userfaultfd fault-completion integration (managed copy/zeropage and

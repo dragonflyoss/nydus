@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10,12 +16,6 @@ checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 dependencies = [
  "memchr",
 ]
-
-[[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android_system_properties"
@@ -265,9 +265,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.18.1"
+version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
+checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -275,9 +275,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.45.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
+checksum = "f1622d8446a2d4b2ce0c7eefc73dd43a99779028d5ee5c2dd8073a658ba8a2bc"
 dependencies = [
  "cc",
  "cmake",
@@ -653,6 +653,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -877,9 +886,9 @@ dependencies = [
 
 [[package]]
 name = "dragonfly-api"
-version = "2.3.6"
+version = "2.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "857f8df2f06356c2486a67d9179e603d570aa2ce757c9b82cc9f028f73670a1d"
+checksum = "c47160f1c750f3db7a489229294542f284ea61a3894cf5a1ac9972e43b256988"
 dependencies = [
  "prost",
  "prost-types",
@@ -1034,6 +1043,17 @@ name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "libz-ng-sys",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "fnv"
@@ -1310,8 +1330,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -1471,9 +1489,9 @@ dependencies = [
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.14"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
+checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
 dependencies = [
  "typenum",
 ]
@@ -1877,6 +1895,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-ng-sys"
+version = "1.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "879917b256f6317769b9f374b435805a8697013098aacce5a38ac106cd6a9469"
+dependencies = [
+ "cmake",
+ "libc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1922,9 +1950,9 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "lru"
-version = "0.18.4"
+version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -1934,6 +1962,16 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "lz4-sys"
+version = "1.11.1+lz4-1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bd8c0d6c6ed0cd30b3652886bb8711dc4bb01d637a68105a3d5158039b418e6"
+dependencies = [
+ "cc",
+ "libc",
+]
 
 [[package]]
 name = "lz4_flex"
@@ -1994,6 +2032,16 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
 
 [[package]]
 name = "mio"
@@ -2129,20 +2177,23 @@ dependencies = [
 
 [[package]]
 name = "nydus"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
+ "base64",
  "blake3",
  "bytesize",
  "clap",
  "crc32c",
+ "flate2",
  "fuser",
  "http-body-util",
  "hyper",
  "hyper-util",
  "libc",
  "libublk",
+ "lz4-sys",
  "lz4_flex",
  "memmap2",
  "nydus-backend",
@@ -2171,7 +2222,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-backend"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2182,6 +2233,7 @@ dependencies = [
  "futures",
  "http",
  "leaky-bucket",
+ "libc",
  "lru",
  "nydus-config",
  "nydus-format",
@@ -2202,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-config"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
  "clap",
  "humantime-serde",
@@ -2215,23 +2267,29 @@ dependencies = [
 
 [[package]]
 name = "nydus-core"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
+ "blake3",
+ "crc32c",
  "libc",
+ "lz4-sys",
+ "lz4_flex",
  "memmap2",
  "nydus-backend",
  "nydus-config",
  "nydus-error",
  "nydus-format",
  "nydus-storage",
+ "sha2 0.10.9",
  "tempfile",
  "tracing",
+ "xattr",
  "zstd",
 ]
 
 [[package]]
 name = "nydus-error"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
  "libc",
  "nydus-format",
@@ -2242,13 +2300,11 @@ dependencies = [
 
 [[package]]
 name = "nydus-format"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
- "bitflags",
  "blake3",
  "crc32c",
  "libc",
- "memmap2",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -2257,9 +2313,8 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
- "blake3",
  "crc32c",
  "libc",
  "lz4_flex",
@@ -2278,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-telemetry"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 dependencies = [
  "nydus-config",
  "prometheus",
@@ -3212,6 +3267,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+ "sha2-asm",
 ]
 
 [[package]]
@@ -3223,6 +3279,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -3259,6 +3324,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "siphasher"

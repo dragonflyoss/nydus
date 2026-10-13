@@ -28,10 +28,11 @@
 //! an on-demand read back to the origin through the rate-limited client.
 //! `HEAD` requests and token fetches always go straight to the origin.
 //!
-//! Every read runs as a task on the backend runtime and the calling thread
-//! waits on its join handle, so the body flows from hyper or tonic to the read
-//! inside the worker pool and the caller is woken once, when the bytes are
-//! ready to copy out.
+//! Every read runs as a task on the shared backend runtime ([`rt`]) and the
+//! calling thread waits on its join handle, so the body flows from hyper or
+//! tonic to the read inside the worker pool, the connection is opened in the
+//! runtime's network namespace, and the caller is woken once, when the bytes
+//! are ready to copy out.
 
 mod auth;
 #[cfg(feature = "backend-dragonfly")]
@@ -40,22 +41,21 @@ mod http;
 mod policy;
 mod redirect;
 mod response;
+mod rt;
 
-use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::{Method, StatusCode};
-use tokio::runtime::Runtime;
 use tracing::warn;
 use url::Url;
 
-use nydus_config::RegistryConfig;
-use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_FOOTER_SIZE};
+use nydus_config::{HttpConfig, RegistryConfig};
+use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
 use nydus_telemetry::metrics::{
     collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
@@ -70,28 +70,31 @@ use self::http::{Http, RateLimit};
 use self::policy::Action;
 use self::redirect::RedirectCache;
 use self::response::{fill_exact, status_error, Response};
+use self::rt::block_on_worker;
+pub use self::rt::{
+    configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
+};
 
-/// The runtime bridging the synchronous [`BlobBackend`] trait to the
-/// asynchronous transports.
-static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("nydus-backend")
-        .enable_all()
-        .build()
-        .expect("failed to build backend tokio runtime")
-});
-
-/// Run `future` as a task on the runtime and wait for it. The whole request
-/// rides the worker pool, hyper and tonic handing it body chunks on the same
-/// worker, and the calling thread is woken once when the task settles.
-fn run<F>(future: F) -> io::Result<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    RUNTIME
-        .block_on(RUNTIME.spawn(future))
-        .map_err(io::Error::other)
+/// Apply the config file's thread bounds to the shared runtime. Only an
+/// explicit (non-zero) setting is forwarded, so a backend built with the
+/// defaults never seals the runtime ahead of an embedder that configures it
+/// itself (with a netns) after building its backend config. The config file
+/// cannot name a netns; that stays an embedder-only option.
+///
+/// The options are process-wide, so this runs only once the rest of the
+/// backend configuration has been accepted: a backend that is rejected must
+/// not seal the runtime for the ones that follow.
+fn apply_runtime_config(http: &HttpConfig) {
+    if http.worker_threads == 0 && http.max_blocking_threads == 0 {
+        return;
+    }
+    if let Err(err) = configure_runtime(RuntimeOptions {
+        worker_threads: http.worker_threads,
+        max_blocking_threads: http.max_blocking_threads,
+        netns: None,
+    }) {
+        warn!("registry backend: http.worker_threads/max_blocking_threads ignored: {err}");
+    }
 }
 
 /// An error of the registry backend. Private to the crate, it folds into an
@@ -247,23 +250,29 @@ impl Registry {
                 .unwrap_or(0),
         );
         let back_to_source = Http::builder(&config.http).rate_limit(rate_limit).build()?;
+        #[cfg(not(feature = "backend-dragonfly"))]
+        if let Some(dragonfly) = &config.dragonfly {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "dragonfly.scheduler_endpoint is set ({}) but this build lacks \
+                     the `backend-dragonfly` feature",
+                    dragonfly.scheduler_endpoint
+                ),
+            ));
+        }
 
+        // Everything that can reject the config has run; Dragonfly::new
+        // below builds the runtime, so the options must be in before it.
+        apply_runtime_config(&config.http);
+
+        #[cfg(feature = "backend-dragonfly")]
         let dragonfly: Option<Box<dyn BlobTransport>> = match &config.dragonfly {
-            #[cfg(feature = "backend-dragonfly")]
             Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly)?)),
-            #[cfg(not(feature = "backend-dragonfly"))]
-            Some(dragonfly) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "dragonfly.scheduler_endpoint is set ({}) but this build lacks \
-                         the `backend-dragonfly` feature",
-                        dragonfly.scheduler_endpoint
-                    ),
-                ))
-            }
             None => None,
         };
+        #[cfg(not(feature = "backend-dragonfly"))]
+        let dragonfly: Option<Box<dyn BlobTransport>> = None;
 
         Ok(Self::from_parts(
             scheme,
@@ -497,14 +506,23 @@ impl Inner {
         kind: ReadKind,
     ) -> RegistryResult<BlobMetadata> {
         let size = self.stat_blob(blob_id, kind).await?;
-        let footer_offset = BlobFooter::offset_from_size(size)
+        let footer_offset = BlobFooter::calculate_offset_by_blob_size(size)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
 
-        let mut footer_bytes = [0u8; NYDUS_BLOB_FOOTER_SIZE];
+        let mut footer_bytes = [0u8; BlobFooter::SIZE];
         self.get_blob(blob_id, footer_offset, &mut footer_bytes, kind)
             .await?;
         let footer = BlobFooter::from_bytes(&footer_bytes)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
+        footer
+            .validate_layout(footer_offset)
+            .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
+        if footer.is_raw_device() {
+            return Err(RegistryError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "native EROFS layers are not served from a registry; mount them through the kernel",
+            )));
+        }
 
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             RegistryError::Io(io::Error::new(
@@ -521,7 +539,7 @@ impl Inner {
         )
         .await?;
 
-        BlobMetadata::from_bytes(&blob_metadata_bytes, false)
+        BlobMetadata::from_bytes(blob_metadata_bytes)
             .map_err(|err| RegistryError::Io(io::Error::other(err)))
     }
 }
@@ -542,7 +560,7 @@ impl BlobBackend for Registry {
     ) -> io::Result<BlobMetadata> {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
-        Ok(run(async move {
+        Ok(block_on_worker(async move {
             inner.get_blob_metadata(&blob_id, kind).await
         })??)
     }
@@ -566,7 +584,7 @@ impl BlobBackend for Registry {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
         let len = dst.len();
-        let result = run(async move {
+        let result = block_on_worker(async move {
             let mut buf = vec![0u8; len];
             let protocol = inner.get_blob(&blob_id, offset, &mut buf, kind).await?;
             Ok::<_, RegistryError>((buf, protocol))
@@ -863,7 +881,7 @@ mod tests {
     /// Read the test blob from offset zero into `dst`, keeping the registry
     /// error and the side that served it.
     fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> RegistryResult<Protocol> {
-        RUNTIME.block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
+        rt::runtime().block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
     }
 
     #[test]
@@ -920,6 +938,26 @@ auth: YWxpY2U6c2VjcmV0
         assert_eq!(registry.inner.scheme, "https");
         assert!(registry.inner.dragonfly.is_none());
         assert_eq!(registry.inner.protocol, Protocol::Http);
+    }
+
+    #[test]
+    fn config_thread_bounds_reach_the_shared_runtime() {
+        apply_runtime_config(&HttpConfig::default());
+
+        let config: RegistryConfig = serde_yaml::from_str(
+            "addr: https://registry.example.com\nrepository: library/ubuntu\nhttp:\n  worker_threads: 3\n  max_blocking_threads: 5\n",
+        )
+        .unwrap();
+        assert_eq!(config.http.worker_threads, 3);
+        apply_runtime_config(&config.http);
+        match configure_runtime(RuntimeOptions {
+            worker_threads: 3,
+            max_blocking_threads: 5,
+            netns: None,
+        }) {
+            Ok(()) => {}
+            Err(err) => assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}"),
+        }
     }
 
     #[cfg(not(feature = "backend-dragonfly"))]
@@ -1124,7 +1162,7 @@ dragonfly:
         ];
 
         for (kind, deferred, origin_hits) in test_cases {
-            let origin = OriginStub::serve(vec![0u8; 2 * NYDUS_BLOB_FOOTER_SIZE]);
+            let origin = OriginStub::serve(vec![0u8; 2 * BlobFooter::SIZE]);
             let transport = ScriptedTransport::new(vec![status(StatusCode::TOO_MANY_REQUESTS)]);
             let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 

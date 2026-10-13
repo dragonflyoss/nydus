@@ -24,7 +24,8 @@ use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 use nydus_config::DragonflyConfig;
 
 use super::response::{log_request_done, Response};
-use super::{BlobTransport, RegistryError, RegistryResult, RUNTIME};
+use super::rt::block_on_worker;
+use super::{BlobTransport, RegistryError, RegistryResult};
 use crate::{Protocol, ReadKind};
 
 /// The priority hint for background prefetch requests.
@@ -71,21 +72,20 @@ impl Dragonfly {
             )
         })?;
         let endpoint = config.scheduler_endpoint.clone();
-        let (ondemand, prefetch) = RUNTIME
-            .block_on(async move {
-                let ondemand = Proxy::builder()
-                    .scheduler_endpoint(endpoint.clone())
-                    .max_retries(max_retries)
-                    .build()
-                    .await?;
-                let prefetch = Proxy::builder()
-                    .scheduler_endpoint(endpoint)
-                    .max_retries(0)
-                    .build()
-                    .await?;
-                Ok::<_, Error>((ondemand, prefetch))
-            })
-            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
+        let (ondemand, prefetch) = block_on_worker(async move {
+            let ondemand = Proxy::builder()
+                .scheduler_endpoint(endpoint.clone())
+                .max_retries(max_retries)
+                .build()
+                .await?;
+            let prefetch = Proxy::builder()
+                .scheduler_endpoint(endpoint)
+                .max_retries(0)
+                .build()
+                .await?;
+            Ok::<_, Error>((ondemand, prefetch))
+        })?
+        .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
         Ok(Dragonfly {
             ondemand,
@@ -197,6 +197,7 @@ impl BlobTransport for Dragonfly {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::rt::runtime;
 
     fn proxy_error(status_code: Option<StatusCode>) -> Error {
         Error::ProxyError(ProxyError {
@@ -223,7 +224,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "payload");
+        assert_eq!(runtime().block_on(response.text()).unwrap(), "payload");
     }
 
     #[test]
@@ -246,7 +247,10 @@ mod tests {
         .unwrap();
         assert_eq!(response.status, StatusCode::FORBIDDEN);
         assert_eq!(response.headers.get("x-served-by").unwrap(), "origin");
-        assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "origin said no");
+        assert_eq!(
+            runtime().block_on(response.text()).unwrap(),
+            "origin said no"
+        );
 
         let response = into_response(
             Err(proxy_error(Some(StatusCode::BAD_GATEWAY))),
@@ -270,7 +274,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(response.status, status);
-            assert_eq!(RUNTIME.block_on(response.text()).unwrap(), "no space");
+            assert_eq!(runtime().block_on(response.text()).unwrap(), "no space");
         }
     }
 

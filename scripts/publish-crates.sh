@@ -23,7 +23,6 @@ CRATES=(
     nydus-backend
     nydus-storage
     nydus-core
-    nydus
 )
 
 DRY_RUN=0

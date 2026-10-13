@@ -38,36 +38,26 @@ func ExtractBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.D
 		return "", nil, errors.Wrap(err, "create bootstrap dir")
 	}
 
-	decompressed, err := oci.OpenDecompressedBlob(ctx, cs, desc)
-	if err != nil {
-		return "", nil, errors.Wrap(err, "open bootstrap layer")
-	}
-	defer func() { _ = decompressed.Close() }()
-
 	bootstrapPath := ""
 	var blobMetaPaths []string
-	tr := tar.NewReader(decompressed)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", nil, errors.Wrap(err, "read bootstrap tar")
-		}
+	err := oci.WalkBootstrapLayer(ctx, cs, desc, func(hdr *tar.Header, tr *tar.Reader) error {
 		switch {
 		case hdr.Name == nydus.BootstrapFileNameInLayer:
 			bootstrapPath = filepath.Join(destDir, "image.boot")
 			if err := WriteTarEntry(tr, bootstrapPath); err != nil {
-				return "", nil, errors.Wrap(err, "write bootstrap file")
+				return errors.Wrap(err, "write bootstrap file")
 			}
 		case strings.HasSuffix(hdr.Name, ".blob.meta"):
 			metaPath := filepath.Join(destDir, path.Base(hdr.Name))
 			if err := WriteTarEntry(tr, metaPath); err != nil {
-				return "", nil, errors.Wrapf(err, "write blob meta %s", hdr.Name)
+				return errors.Wrapf(err, "write blob meta %s", hdr.Name)
 			}
 			blobMetaPaths = append(blobMetaPaths, metaPath)
 		}
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
 	}
 	if bootstrapPath == "" {
 		return "", nil, errors.Errorf("bootstrap entry %q not found in layer", nydus.BootstrapFileNameInLayer)
@@ -159,5 +149,61 @@ func copyFile(src, dst string) error {
 		return errors.Wrap(err, "rename temp file")
 	}
 	committed = true
+	return nil
+}
+
+// HasNativeLayers reports whether any nydus blob layer of img is a native
+// EROFS layer (raw device, no blob meta), which the nydus daemons cannot serve
+// on demand from a registry. The blob layers must be in the content store.
+func HasNativeLayers(ctx context.Context, cs content.Store, img *Image) (bool, error) {
+	for _, desc := range img.Manifest.Layers {
+		if !nydus.IsBlob(desc) {
+			continue
+		}
+		ra, err := cs.ReaderAt(ctx, desc)
+		if err != nil {
+			return false, errors.Wrapf(err, "open blob layer %s", desc.Digest)
+		}
+		native, err := nydus.IsRawDeviceBlob(ra, ra.Size())
+		_ = ra.Close()
+		if err != nil {
+			return false, errors.Wrapf(err, "inspect blob layer %s", desc.Digest)
+		}
+		if native {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// MaterializeBlobLayers writes every nydus blob layer of img from the content
+// store into blobDir, named by its digest as a local nydus store expects.
+func MaterializeBlobLayers(ctx context.Context, cs content.Store, img *Image, blobDir string) error {
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		return errors.Wrap(err, "create blob dir")
+	}
+	for _, desc := range img.Manifest.Layers {
+		if !nydus.IsBlob(desc) {
+			continue
+		}
+		ra, err := cs.ReaderAt(ctx, desc)
+		if err != nil {
+			return errors.Wrapf(err, "open blob layer %s", desc.Digest)
+		}
+		dst, err := os.Create(filepath.Join(blobDir, desc.Digest.Encoded()))
+		if err != nil {
+			_ = ra.Close()
+			return errors.Wrapf(err, "create blob %s", desc.Digest)
+		}
+		_, copyErr := io.Copy(dst, io.NewSectionReader(ra, 0, ra.Size()))
+		closeErr := dst.Close()
+		_ = ra.Close()
+		if copyErr != nil {
+			return errors.Wrapf(copyErr, "write blob %s", desc.Digest)
+		}
+		if closeErr != nil {
+			return errors.Wrapf(closeErr, "close blob %s", desc.Digest)
+		}
+	}
 	return nil
 }

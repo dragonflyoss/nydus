@@ -50,11 +50,9 @@ type MultiSourceOption struct {
 	BuilderPath string
 	// WorkDir is a scratch directory for builds, staging and merging.
 	WorkDir string
-	// ChunkSize is the nydus file chunk size in bytes.
+	// ChunkSize is the file chunk size in bytes.
 	ChunkSize uint32
-	// BlockGroupSize is the nydus block group uncompressed size in bytes.
-	BlockGroupSize uint32
-	// Compressor is the chunk data compressor ("none" or "zstd").
+	// Compressor selects the builder's chunk-based or native-z data layout.
 	Compressor string
 	// LogLevel is forwarded to the `nydus` subprocesses.
 	LogLevel string
@@ -67,6 +65,8 @@ type MultiSourceOption struct {
 	// tar alongside image.boot. Files residing inside a directory source are
 	// excluded from that source's blob data region.
 	AppendInBootstrap []string
+	// Annotations are added to the generated OCI image manifest.
+	Annotations map[string]string
 }
 
 // ConvertMultiSource converts a mixed list of sources (local directories and
@@ -83,9 +83,6 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	}
 	if opt.ChunkSize == 0 {
 		opt.ChunkSize = nydus.DefaultChunkSize
-	}
-	if opt.BlockGroupSize == 0 {
-		opt.BlockGroupSize = nydus.DefaultBlockGroupSize
 	}
 	if opt.Platform.OS == "" {
 		opt.Platform = platforms.DefaultSpec()
@@ -163,52 +160,7 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 		return nil, errors.Wrap(err, "write bootstrap layer")
 	}
 
-	// Assemble the final layer list, diff ids and history.
-	layers := make([]ocispec.Descriptor, 0, len(blobDescs)+1)
-	layers = append(layers, blobDescs...)
-	layers = append(layers, *bootstrapDesc)
-
-	diffIDs := make([]digest.Digest, 0, len(layers))
-	history := make([]ocispec.History, 0, len(layers))
-	for _, l := range layers[:len(layers)-1] {
-		diffIDs = append(diffIDs, digest.Digest(l.Annotations[nydus.LayerAnnotationUncompressed]))
-		history = append(history, ocispec.History{
-			CreatedBy: "Nydus Build", Comment: "Nydus Data Layer",
-		})
-	}
-	diffIDs = append(diffIDs, digest.Digest(bootstrapDesc.Annotations[nydus.LayerAnnotationUncompressed]))
-	history = append(history, ocispec.History{
-		CreatedBy: "Nydus Converter", Comment: "Nydus Bootstrap Layer",
-	})
-
-	configJSON, err := buildImageConfig(baseConfig, opt.Platform, diffIDs, history)
-	if err != nil {
-		return nil, errors.Wrap(err, "build image config")
-	}
-	configDesc, err := oci.WriteJSON(ctx, cs, configJSON, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "write image config")
-	}
-	configDesc.MediaType = ocispec.MediaTypeImageConfig
-
-	labels := map[string]string{
-		"containerd.io/gc.ref.content.config": configDesc.Digest.String(),
-	}
-	for idx, l := range layers {
-		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", idx)] = l.Digest.String()
-	}
-
-	manifest := ocispec.Manifest{
-		Versioned: specs.Versioned{SchemaVersion: 2},
-		MediaType: ocispec.MediaTypeImageManifest,
-		Config:    *configDesc,
-		Layers:    layers,
-	}
-	manifestDesc, err := oci.WriteJSON(ctx, cs, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, labels)
-	if err != nil {
-		return nil, errors.Wrap(err, "write manifest")
-	}
-	return manifestDesc, nil
+	return writeNydusManifest(ctx, cs, blobDescs, *bootstrapDesc, baseConfig, opt.Platform, "Nydus Build", opt.Annotations)
 }
 
 // validateAndReadAppendFiles validates the list of file paths and reads their
@@ -258,14 +210,13 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 	// Rust side resolves each path against the source directory and
 	// canonicalizes it, so files outside the source are simply ignored.
 	if err := nydus.RunNydusBuild(ctx, nydus.BuildOption{
-		BuilderPath:    opt.BuilderPath,
-		SourceDir:      dir,
-		BlobPath:       blobPath,
-		ChunkSize:      opt.ChunkSize,
-		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:     opt.Compressor,
-		LogLevel:       opt.LogLevel,
-		Excludes:       opt.AppendInBootstrap,
+		BuilderPath: opt.BuilderPath,
+		SourceDir:   dir,
+		BlobPath:    blobPath,
+		ChunkSize:   opt.ChunkSize,
+		Compressor:  opt.Compressor,
+		LogLevel:    opt.LogLevel,
+		Excludes:    opt.AppendInBootstrap,
 	}); err != nil {
 		return ocispec.Descriptor{}, err
 	}
@@ -285,12 +236,11 @@ func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	platformMC := platforms.Only(opt.Platform)
 
 	layerFn := LayerConvertFunc(nydus.PackOption{
-		BuilderPath:    opt.BuilderPath,
-		WorkDir:        opt.WorkDir,
-		ChunkSize:      opt.ChunkSize,
-		BlockGroupSize: opt.BlockGroupSize,
-		Compressor:     opt.Compressor,
-		LogLevel:       opt.LogLevel,
+		BuilderPath: opt.BuilderPath,
+		WorkDir:     opt.WorkDir,
+		ChunkSize:   opt.ChunkSize,
+		Compressor:  opt.Compressor,
+		LogLevel:    opt.LogLevel,
 	})
 	// Convert layers only: no post-convert hook, so no per-image bootstrap
 	// merge happens here. The caller merges the blobs of all sources at once.
@@ -354,6 +304,80 @@ func buildImageConfig(base json.RawMessage, platform ocispec.Platform, diffIDs [
 	return patchImageConfig(base, diffIDs, func(_ []ocispec.History, _ bool) ([]ocispec.History, bool) {
 		return history, true
 	})
+}
+
+func writeNydusManifest(
+	ctx context.Context,
+	cs content.Store,
+	blobDescs []ocispec.Descriptor,
+	bootstrapDesc ocispec.Descriptor,
+	baseConfig json.RawMessage,
+	platform ocispec.Platform,
+	dataCreatedBy string,
+	manifestAnnotations map[string]string,
+) (*ocispec.Descriptor, error) {
+	layers := make([]ocispec.Descriptor, 0, len(blobDescs)+1)
+	layers = append(layers, blobDescs...)
+	layers = append(layers, bootstrapDesc)
+
+	diffIDs := make([]digest.Digest, 0, len(layers))
+	history := make([]ocispec.History, 0, len(layers))
+	for _, layer := range blobDescs {
+		diffID, err := layerDiffID(layer)
+		if err != nil {
+			return nil, err
+		}
+		diffIDs = append(diffIDs, diffID)
+		history = append(history, ocispec.History{CreatedBy: dataCreatedBy, Comment: "Nydus Data Layer"})
+	}
+	bootstrapDiffID, err := layerDiffID(bootstrapDesc)
+	if err != nil {
+		return nil, err
+	}
+	diffIDs = append(diffIDs, bootstrapDiffID)
+	history = append(history, ocispec.History{CreatedBy: "Nydus Converter", Comment: "Nydus Bootstrap Layer"})
+
+	configJSON, err := buildImageConfig(baseConfig, platform, diffIDs, history)
+	if err != nil {
+		return nil, errors.Wrap(err, "build image config")
+	}
+	configDesc, err := oci.WriteJSON(ctx, cs, configJSON, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "write image config")
+	}
+	configDesc.MediaType = ocispec.MediaTypeImageConfig
+
+	labels := map[string]string{"containerd.io/gc.ref.content.config": configDesc.Digest.String()}
+	for idx, layer := range layers {
+		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", idx)] = layer.Digest.String()
+	}
+	manifest := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    *configDesc,
+		Layers:    layers,
+	}
+	applyManifestAnnotations(&manifest, manifestAnnotations)
+	return oci.WriteJSON(ctx, cs, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, labels)
+}
+
+func applyManifestAnnotations(manifest *ocispec.Manifest, annotations map[string]string) {
+	if len(annotations) == 0 {
+		return
+	}
+	if manifest.Annotations == nil {
+		manifest.Annotations = make(map[string]string, len(annotations))
+	}
+	for key, value := range annotations {
+		manifest.Annotations[key] = value
+	}
+}
+
+func layerDiffID(desc ocispec.Descriptor) (digest.Digest, error) {
+	if desc.Annotations == nil || desc.Annotations[nydus.LayerAnnotationUncompressed] == "" {
+		return "", errors.Errorf("layer %s missing %s annotation", desc.Digest, nydus.LayerAnnotationUncompressed)
+	}
+	return digest.Digest(desc.Annotations[nydus.LayerAnnotationUncompressed]), nil
 }
 
 // labelNydusBlobDiffIDs sets the containerd.io/uncompressed content-store

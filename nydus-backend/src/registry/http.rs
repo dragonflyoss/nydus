@@ -224,7 +224,7 @@ impl Middleware for RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::RUNTIME;
+    use crate::registry::rt::runtime;
 
     #[test]
     fn builds_with_and_without_a_rate_limit() {
@@ -242,7 +242,7 @@ mod tests {
         let start = Instant::now();
         let limit = RateLimit::with_interval(1, interval);
 
-        RUNTIME.block_on(async {
+        runtime().block_on(async {
             limit.acquire().await;
             assert!(start.elapsed() < interval);
 
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn a_zero_rate_limit_never_waits() {
         let limit = RateLimit::new(0);
-        RUNTIME.block_on(async {
+        runtime().block_on(async {
             let start = Instant::now();
             for _ in 0..3 {
                 assert_eq!(limit.acquire().await, Duration::ZERO);

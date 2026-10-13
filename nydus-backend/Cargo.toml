@@ -1,6 +1,6 @@
 [package]
 name = "nydus-backend"
-version = "3.0.0-alpha.1"
+version = "3.0.0-beta.2"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -44,10 +44,11 @@ dragonfly-client-request = { version = "=1.7.2", optional = true }
 futures = { version = "0.3", optional = true }
 http = { version = "1", optional = true }
 leaky-bucket = { version = "1", optional = true }
+libc = { workspace = true }
 lru = { version = "0.18", optional = true }
-nydus-config = { version = "3.0.0-alpha.1", path = "../nydus-config" }
-nydus-format = { version = "3.0.0-alpha.1", path = "../nydus-format" }
-nydus-telemetry = { version = "3.0.0-alpha.1", path = "../nydus-telemetry" }
+nydus-config = { version = "3.0.0-beta.2", path = "../nydus-config" }
+nydus-format = { version = "3.0.0-beta.2", path = "../nydus-format" }
+nydus-telemetry = { version = "3.0.0-beta.2", path = "../nydus-telemetry" }
 reqwest = { version = "0.12", default-features = false, features = [
   "hickory-dns",
   "rustls-tls",

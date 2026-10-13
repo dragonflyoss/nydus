@@ -19,11 +19,11 @@ type LocalDirOption struct {
 	BuilderPath       string
 	WorkDir           string
 	ChunkSize         uint32
-	BlockGroupSize    uint32
 	Compressor        string
 	LogLevel          string
 	SourceDir         string
 	AppendInBootstrap []string
+	Annotations       map[string]string
 }
 
 // ConvertLocalDir converts a local directory into a single-layer nydus image
@@ -42,11 +42,11 @@ func ConvertLocalDir(ctx context.Context, cs content.Store, opt LocalDirOption) 
 		BuilderPath:       opt.BuilderPath,
 		WorkDir:           opt.WorkDir,
 		ChunkSize:         opt.ChunkSize,
-		BlockGroupSize:    opt.BlockGroupSize,
 		Compressor:        opt.Compressor,
 		LogLevel:          opt.LogLevel,
 		Platform:          platforms.DefaultSpec(),
 		Sources:           []Source{{Dir: opt.SourceDir}},
 		AppendInBootstrap: opt.AppendInBootstrap,
+		Annotations:       opt.Annotations,
 	})
 }

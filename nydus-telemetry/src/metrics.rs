@@ -3,7 +3,7 @@
 //! `/metrics` encodes `REGISTRY.gather()` with a [`prometheus::TextEncoder`].
 //!
 //! Every metric name carries the `nydus_` namespace and is a verb followed by
-//! what it acts on, `read_backend_total`, `validate_block_group_total`,
+//! what it acts on, `read_backend_total`, `validate_chunk_group_total`,
 //! `prefetch_task_total`. Counters end in `_total`, failure counters in
 //! `_failure_total`, byte counters in `_traffic`, duration histograms in
 //! `_duration_milliseconds`. Dimensions are labels, each with a fixed
@@ -13,7 +13,7 @@
 //! type      what triggered the operation           ondemand | prefetch
 //! backend   the blob backend                       local | registry
 //! protocol  how the registry backend fetched       http | dragonfly
-//! storage   where a block group was read from      local | backend
+//! storage   where a chunk group was read from      local | backend
 //! op        the FUSE operation                     lookup | read | getattr | ...
 //! ```
 //!
@@ -21,7 +21,7 @@
 //! `dragonfly` for it reading the Dragonfly seed peers; a read Dragonfly could
 //! not serve that went back to the origin is `http`. The local backend has no
 //! protocol and leaves the label empty.
-//! `storage` is `local` for a block group already in the local cache and
+//! `storage` is `local` for a chunk group already in the local cache and
 //! `backend` for one fetched from the backend into the cache.
 
 use std::fmt;
@@ -92,12 +92,12 @@ pub static READ_BACKEND_TRAFFIC: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric can be created")
 });
 
-/// Used to count the number of validate block groups.
-pub static VALIDATE_BLOCK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
+/// Used to count the number of validate chunk groups.
+pub static VALIDATE_CHUNK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
     IntCounterVec::new(
         Opts::new(
-            "validate_block_group_total",
-            "Counter of the number of the validate block group.",
+            "validate_chunk_group_total",
+            "Counter of the number of the validate chunk group.",
         )
         .namespace(nydus_config::NAME),
         &["backend", "protocol"],
@@ -105,12 +105,12 @@ pub static VALIDATE_BLOCK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|
     .expect("metric can be created")
 });
 
-/// Used to count the failed number of validate block groups.
-pub static VALIDATE_BLOCK_GROUP_FAILURE_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
+/// Used to count the failed number of validate chunk groups.
+pub static VALIDATE_CHUNK_GROUP_FAILURE_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
     IntCounterVec::new(
         Opts::new(
-            "validate_block_group_failure_total",
-            "Counter of the number of failed of the validate block group.",
+            "validate_chunk_group_failure_total",
+            "Counter of the number of failed of the validate chunk group.",
         )
         .namespace(nydus_config::NAME),
         &["backend", "protocol"],
@@ -197,12 +197,12 @@ pub static FS_READ_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     .expect("metric can be created")
 });
 
-/// Used to count the number of read block groups.
-pub static READ_BLOCK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
+/// Used to count the number of read chunk groups.
+pub static READ_CHUNK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
     IntCounterVec::new(
         Opts::new(
-            "read_block_group_total",
-            "Counter of the number of the read block group.",
+            "read_chunk_group_total",
+            "Counter of the number of the read chunk group.",
         )
         .namespace(nydus_config::NAME),
         &["type", "storage", "backend", "protocol"],
@@ -210,13 +210,13 @@ pub static READ_BLOCK_GROUP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric can be created")
 });
 
-/// Used to count the number of fill block groups from redirect blob.
-pub static FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT: LazyLock<IntCounterVec> =
+/// Used to count the number of fill chunk groups from redirect blob.
+pub static FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT: LazyLock<IntCounterVec> =
     LazyLock::new(|| {
         IntCounterVec::new(
             Opts::new(
-                "fill_block_group_from_redirect_blob_total",
-                "Counter of the number of the fill block group from redirect blob.",
+                "fill_chunk_group_from_redirect_blob_total",
+                "Counter of the number of the fill chunk group from redirect blob.",
             )
             .namespace(nydus_config::NAME),
             &[],
@@ -224,13 +224,13 @@ pub static FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT: LazyLock<IntCounterVec> =
         .expect("metric can be created")
     });
 
-/// Used to count the failed number of fill block groups from redirect blob.
-pub static FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT: LazyLock<IntCounterVec> =
+/// Used to count the failed number of fill chunk groups from redirect blob.
+pub static FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT: LazyLock<IntCounterVec> =
     LazyLock::new(|| {
         IntCounterVec::new(
             Opts::new(
-                "fill_block_group_from_redirect_blob_failure_total",
-                "Counter of the number of failed of the fill block group from redirect blob.",
+                "fill_chunk_group_from_redirect_blob_failure_total",
+                "Counter of the number of failed of the fill chunk group from redirect blob.",
             )
             .namespace(nydus_config::NAME),
             &[],
@@ -283,11 +283,11 @@ fn register_custom_metrics(registry: &Registry) {
         .expect("metric can be registered");
 
     registry
-        .register(Box::new(VALIDATE_BLOCK_GROUP_COUNT.clone()))
+        .register(Box::new(VALIDATE_CHUNK_GROUP_COUNT.clone()))
         .expect("metric can be registered");
 
     registry
-        .register(Box::new(VALIDATE_BLOCK_GROUP_FAILURE_COUNT.clone()))
+        .register(Box::new(VALIDATE_CHUNK_GROUP_FAILURE_COUNT.clone()))
         .expect("metric can be registered");
 
     registry
@@ -315,16 +315,16 @@ fn register_custom_metrics(registry: &Registry) {
         .expect("metric can be registered");
 
     registry
-        .register(Box::new(READ_BLOCK_GROUP_COUNT.clone()))
+        .register(Box::new(READ_CHUNK_GROUP_COUNT.clone()))
         .expect("metric can be registered");
 
     registry
-        .register(Box::new(FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT.clone()))
+        .register(Box::new(FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT.clone()))
         .expect("metric can be registered");
 
     registry
         .register(Box::new(
-            FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT.clone(),
+            FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT.clone(),
         ))
         .expect("metric can be registered");
 
@@ -337,7 +337,7 @@ fn register_custom_metrics(registry: &Registry) {
         .expect("metric can be registered");
 }
 
-/// Represents where a block group was read from, the `storage` label.
+/// Represents where a chunk group was read from, the `storage` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Storage {
     /// Already in the local cache, served without a backend read.
@@ -473,16 +473,16 @@ pub fn collect_read_backend_failure_metrics(
         .observe(cost.as_millis() as f64);
 }
 
-/// Collects the validate block group started metrics.
-pub fn collect_validate_block_group_started_metrics(backend: Backend, protocol: Option<Protocol>) {
-    VALIDATE_BLOCK_GROUP_COUNT
+/// Collects the validate chunk group started metrics.
+pub fn collect_validate_chunk_group_started_metrics(backend: Backend, protocol: Option<Protocol>) {
+    VALIDATE_CHUNK_GROUP_COUNT
         .with_label_values(&[backend_label(backend), protocol_label(protocol)])
         .inc();
 }
 
-/// Collects the validate block group failure metrics.
-pub fn collect_validate_block_group_failure_metrics(backend: Backend, protocol: Option<Protocol>) {
-    VALIDATE_BLOCK_GROUP_FAILURE_COUNT
+/// Collects the validate chunk group failure metrics.
+pub fn collect_validate_chunk_group_failure_metrics(backend: Backend, protocol: Option<Protocol>) {
+    VALIDATE_CHUNK_GROUP_FAILURE_COUNT
         .with_label_values(&[backend_label(backend), protocol_label(protocol)])
         .inc();
 }
@@ -528,14 +528,14 @@ pub fn collect_fs_op_failure_metrics(op: FsOp, cost: Duration) {
     }
 }
 
-/// Collects the read block group metrics.
-pub fn collect_read_block_group_metrics(
+/// Collects the read chunk group metrics.
+pub fn collect_read_chunk_group_metrics(
     kind: ReadKind,
     storage: Storage,
     backend: Backend,
     protocol: Option<Protocol>,
 ) {
-    READ_BLOCK_GROUP_COUNT
+    READ_CHUNK_GROUP_COUNT
         .with_label_values(&[
             read_kind_label(kind),
             storage.to_string().as_str(),
@@ -545,16 +545,16 @@ pub fn collect_read_block_group_metrics(
         .inc();
 }
 
-/// Collects the fill block group from redirect blob finished metrics.
-pub fn collect_fill_block_group_from_redirect_blob_finished_metrics() {
-    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT
+/// Collects the fill chunk group from redirect blob finished metrics.
+pub fn collect_fill_chunk_group_from_redirect_blob_finished_metrics() {
+    FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT
         .with_label_values(&[])
         .inc();
 }
 
-/// Collects the fill block group from redirect blob failure metrics.
-pub fn collect_fill_block_group_from_redirect_blob_failure_metrics() {
-    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
+/// Collects the fill chunk group from redirect blob failure metrics.
+pub fn collect_fill_chunk_group_from_redirect_blob_failure_metrics() {
+    FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
         .with_label_values(&[])
         .inc();
 }
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_block_groups_are_counted_by_backend_and_protocol() {
+    fn validate_chunk_groups_are_counted_by_backend_and_protocol() {
         let test_cases = vec![
             (Backend::Local, None),
             (Backend::Registry, Some(Protocol::Http)),
@@ -661,20 +661,20 @@ mod tests {
 
         for (backend, protocol) in test_cases {
             let labels = [backend_label(backend), protocol_label(protocol)];
-            let count_before = VALIDATE_BLOCK_GROUP_COUNT.with_label_values(&labels).get();
-            let failure_before = VALIDATE_BLOCK_GROUP_FAILURE_COUNT
+            let count_before = VALIDATE_CHUNK_GROUP_COUNT.with_label_values(&labels).get();
+            let failure_before = VALIDATE_CHUNK_GROUP_FAILURE_COUNT
                 .with_label_values(&labels)
                 .get();
 
-            collect_validate_block_group_started_metrics(backend, protocol);
-            collect_validate_block_group_failure_metrics(backend, protocol);
+            collect_validate_chunk_group_started_metrics(backend, protocol);
+            collect_validate_chunk_group_failure_metrics(backend, protocol);
 
             assert!(
-                VALIDATE_BLOCK_GROUP_COUNT.with_label_values(&labels).get() > count_before,
+                VALIDATE_CHUNK_GROUP_COUNT.with_label_values(&labels).get() > count_before,
                 "backend: {backend:?}, protocol: {protocol:?}"
             );
             assert!(
-                VALIDATE_BLOCK_GROUP_FAILURE_COUNT
+                VALIDATE_CHUNK_GROUP_FAILURE_COUNT
                     .with_label_values(&labels)
                     .get()
                     > failure_before,
@@ -722,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn read_block_groups_are_counted_by_type_storage_backend_and_protocol() {
+    fn read_chunk_groups_are_counted_by_type_storage_backend_and_protocol() {
         let test_cases = vec![
             (ReadKind::OnDemand, Storage::Local, Backend::Local, None),
             (ReadKind::OnDemand, Storage::Backend, Backend::Local, None),
@@ -748,12 +748,12 @@ mod tests {
                 backend_label(backend),
                 protocol_label(protocol),
             ];
-            let before = READ_BLOCK_GROUP_COUNT.with_label_values(&labels).get();
+            let before = READ_CHUNK_GROUP_COUNT.with_label_values(&labels).get();
 
-            collect_read_block_group_metrics(kind, storage, backend, protocol);
+            collect_read_chunk_group_metrics(kind, storage, backend, protocol);
 
             assert!(
-                READ_BLOCK_GROUP_COUNT.with_label_values(&labels).get() > before,
+                READ_CHUNK_GROUP_COUNT.with_label_values(&labels).get() > before,
                 "kind: {kind:?}, storage: {storage}, backend: {backend:?}, protocol: {protocol:?}"
             );
         }
@@ -786,17 +786,17 @@ mod tests {
     fn unlabeled_counters_move_by_one() {
         let test_cases: Vec<(Collect, Read)> = vec![
             (
-                collect_fill_block_group_from_redirect_blob_finished_metrics,
+                collect_fill_chunk_group_from_redirect_blob_finished_metrics,
                 || {
-                    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_COUNT
+                    FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT
                         .with_label_values(&[])
                         .get()
                 },
             ),
             (
-                collect_fill_block_group_from_redirect_blob_failure_metrics,
+                collect_fill_chunk_group_from_redirect_blob_failure_metrics,
                 || {
-                    FILL_BLOCK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
+                    FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
                         .with_label_values(&[])
                         .get()
                 },
@@ -828,7 +828,7 @@ mod tests {
             3,
             Duration::from_millis(500),
         );
-        collect_validate_block_group_started_metrics(Backend::Local, None);
+        collect_validate_chunk_group_started_metrics(Backend::Local, None);
         collect_fs_op_finished_metrics(FsOp::Statfs, Duration::from_millis(1));
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&REGISTRY.gather())
@@ -838,7 +838,7 @@ mod tests {
             r#"nydus_read_backend_total{backend="local",protocol="",type="prefetch"}"#,
             r#"nydus_read_backend_traffic{backend="local",protocol="",type="prefetch"}"#,
             r#"nydus_read_backend_duration_milliseconds_bucket{"#,
-            r#"nydus_validate_block_group_total{backend="local",protocol=""}"#,
+            r#"nydus_validate_chunk_group_total{backend="local",protocol=""}"#,
             r#"nydus_fs_op_total{op="statfs"}"#,
         ];
 

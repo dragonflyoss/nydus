@@ -211,6 +211,30 @@ func OpenDecompressedBlob(ctx context.Context, cs content.Store, desc ocispec.De
 	return &decompressedBlob{ReadCloser: decompressed, ra: ra}, nil
 }
 
+// WalkBootstrapLayer visits each tar entry in a decompressed nydus bootstrap
+// layer. The visitor must consume the current entry before returning.
+func WalkBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, visit func(*tar.Header, *tar.Reader) error) error {
+	decompressed, err := OpenDecompressedBlob(ctx, cs, desc)
+	if err != nil {
+		return errors.Wrap(err, "open bootstrap layer")
+	}
+	defer func() { _ = decompressed.Close() }()
+
+	tr := tar.NewReader(decompressed)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return errors.Wrap(err, "read bootstrap tar")
+		}
+		if err := visit(hdr, tr); err != nil {
+			return err
+		}
+	}
+}
+
 type decompressedBlob struct {
 	io.ReadCloser
 	ra content.ReaderAt

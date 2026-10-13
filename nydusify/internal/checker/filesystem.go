@@ -122,11 +122,13 @@ func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Sid
 	}, nil
 }
 
-// fuseMount materializes the nydus bootstrap under dir, generates a storage
-// config pointing the registry backend at the image's source registry, starts a
-// `nydus fuse` daemon mounting them, waits for the mount to become ready, and
-// returns the mountpoint with an unmount function. Blob data is fetched on
-// demand from the registry rather than materialized locally.
+// fuseMount materializes the nydus bootstrap under dir, starts a `nydus fuse`
+// daemon mounting it, waits for the mount to become ready, and returns the
+// mountpoint with an unmount function. Chunk-based images are served on
+// demand from the image's registry through a generated storage config. An
+// image with native (raw device) layers cannot be served that way: its blob
+// layers, already in the content store, are written to a local blob dir the
+// daemon reads as-is.
 func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.Side, img *nydusfs.Image) (string, func(), error) {
 	if img.Bootstrap == nil {
 		return "", nil, errors.New("nydus image is missing its bootstrap layer")
@@ -152,19 +154,29 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 		return "", nil, errors.Wrap(err, "link blob meta to cache")
 	}
 
-	configPath := filepath.Join(dir, "config.yaml")
-	_, err = nydusfs.WriteRegistryConfig(r.provider, reg, img, cacheDir, configPath, false)
+	native, err := nydusfs.HasNativeLayers(ctx, r.cs, img)
 	if err != nil {
-		return "", nil, errors.Wrap(err, "generate storage config")
+		return "", nil, errors.Wrap(err, "inspect blob layers")
 	}
-
 	args := []string{
 		"fuse",
 		"--bootstrap", bootstrapPath,
-		"--config", configPath,
 		"--mountpoint", mountpoint,
 		"--log-level", "warn",
 		"--log-dir", filepath.Join(dir, "log"),
+	}
+	if native {
+		blobDir := filepath.Join(dir, "blobs")
+		if err := nydusfs.MaterializeBlobLayers(ctx, r.cs, img, blobDir); err != nil {
+			return "", nil, errors.Wrap(err, "materialize blob layers")
+		}
+		args = append(args, "--blob-dir", blobDir, "--cache-dir", cacheDir)
+	} else {
+		configPath := filepath.Join(dir, "config.yaml")
+		if _, err := nydusfs.WriteRegistryConfig(r.provider, reg, img, cacheDir, configPath, false); err != nil {
+			return "", nil, errors.Wrap(err, "generate storage config")
+		}
+		args = append(args, "--config", configPath)
 	}
 	// nydus fuse runs in the foreground; start it detached and wait for the
 	// mountpoint to become active. Keep its output buffered for startup errors;

@@ -107,6 +107,9 @@ jobs:
         with:
           go-version: '1.25.5'
 
+      - name: Run nydusify streaming and format tests
+        run: make test-nydusify
+
       - name: Start local registry
         run: |
           docker run -d --name registry -p 5000:5000 registry:2
@@ -116,6 +119,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq acl attr erofs-utils fuse3 xfsprogs
+
+      - name: Try loading the erofs kernel module
+        run: sudo modprobe erofs || true
 
       - name: Run e2e tests
         run: |
@@ -128,6 +134,10 @@ jobs:
       - name: Run read-only conformance tests
         run: |
           make test-fs
+
+      - name: Run layer tar conversion tests
+        run: |
+          make test-tar-corpus
 
   nbd-tests:
     name: Run NBD tests

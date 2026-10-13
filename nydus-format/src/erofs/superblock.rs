@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::{Error, Result};
 use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -33,14 +34,27 @@ pub struct ErofsSuperblock {
     pub packed_nid: [u8; 8],
     pub xattr_filter_reserved: u8,
     pub _reserved2: [u8; 3],
-    pub build_time: [u8; 8],
+    pub build_time: [u8; 4],
     pub rootnid_8b: [u8; 8],
-    pub _reserved3: [u8; 4],
+    pub _reserved3: [u8; 8],
 }
 
 const _: () = assert!(mem::size_of::<ErofsSuperblock>() == EROFS_SB_BASE_SIZE);
+const _: () = assert!(mem::offset_of!(ErofsSuperblock, build_time) == 0x6c);
+const _: () = assert!(mem::offset_of!(ErofsSuperblock, rootnid_8b) == 0x70);
+const _: () = assert!(mem::offset_of!(ErofsSuperblock, _reserved3) == 0x78);
 
 impl ErofsSuperblock {
+    /// Every incompat bit this reader understands. The z_erofs bits
+    /// (ZERO_PADDING, BIG_PCLUSTER/COMPR_CFGS, FRAGMENTS) are accepted for
+    /// metadata access (`merge` reads z layer bootstraps); data reads reject
+    /// the COMPRESSED_FULL layout themselves.
+    const INCOMPAT_SUPPORTED: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
+        | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
+        | EROFS_FEATURE_INCOMPAT_ZERO_PADDING
+        | EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER
+        | EROFS_FEATURE_INCOMPAT_FRAGMENTS;
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         feature_compat: u32,
@@ -53,7 +67,12 @@ impl ErofsSuperblock {
         extra_devices: u16,
         devt_slotoff: u16,
         uuid: &[u8; 16],
-    ) -> Self {
+    ) -> Result<Self> {
+        let blocks = u32::try_from(blocks).map_err(|_| {
+            Error::InvalidImage(format!(
+                "EROFS bootstrap block count {blocks} exceeds 32-bit limit"
+            ))
+        })?;
         let mut sb: Self = unsafe { mem::zeroed() };
         write_u32(&mut sb.magic, EROFS_SUPER_MAGIC_V1);
         write_u32(&mut sb.feature_compat, feature_compat);
@@ -61,17 +80,30 @@ impl ErofsSuperblock {
         write_u16(&mut sb.rootnid_2b, root_nid);
         write_u64(&mut sb.inos, inos);
         write_u64(&mut sb.epoch, epoch);
-        write_u32(&mut sb.blocks_lo, blocks as u32);
+        write_u32(&mut sb.blocks_lo, blocks);
         write_u32(&mut sb.meta_blkaddr, meta_blkaddr);
         sb.uuid = *uuid;
         write_u32(&mut sb.feature_incompat, feature_incompat);
         write_u16(&mut sb.extra_devices, extra_devices);
         write_u16(&mut sb.devt_slotoff, devt_slotoff);
-        sb
+        validate_superblock(&sb).map_err(|err| Error::InvalidImage(err.to_string()))?;
+        Ok(sb)
     }
 
     pub fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_SB_BASE_SIZE) }
+    }
+
+    /// Records the available compression algorithm bitmap (bit 0 = LZ4),
+    /// valid when the COMPR_CFGS incompat feature is set.
+    pub fn set_available_compr_algs(&mut self, algs: u16) {
+        write_u16(&mut self.compr_or_distance, algs);
+    }
+
+    /// Records the packed inode holding fragment data, valid when the
+    /// FRAGMENTS incompat feature is set.
+    pub fn set_packed_nid(&mut self, nid: u64) {
+        write_u64(&mut self.packed_nid, nid);
     }
 
     pub fn magic(&self) -> u32 {
@@ -106,6 +138,12 @@ impl ErofsSuperblock {
         read_u32(&self.blocks_lo) as u64
     }
 
+    /// On-disk superblock size, extension slots included; what follows it
+    /// (the COMPR_CFGS records) starts this far past `EROFS_SUPER_OFFSET`.
+    pub fn size(&self) -> usize {
+        EROFS_SB_BASE_SIZE + self.sb_extslots as usize * EROFS_SB_EXTSLOT_SIZE
+    }
+
     pub fn meta_blkaddr(&self) -> u32 {
         read_u32(&self.meta_blkaddr)
     }
@@ -116,6 +154,18 @@ impl ErofsSuperblock {
 
     pub fn devt_slotoff(&self) -> u16 {
         read_u16(&self.devt_slotoff)
+    }
+
+    /// Available compression algorithm bitmap (bit 0 = LZ4); non-zero only
+    /// for z_erofs images declaring COMPR_CFGS.
+    pub fn available_compr_algs(&self) -> u16 {
+        read_u16(&self.compr_or_distance)
+    }
+
+    /// The packed inode holding fragment data, or `None` without FRAGMENTS.
+    pub fn packed_nid(&self) -> Option<u64> {
+        (self.feature_incompat() & EROFS_FEATURE_INCOMPAT_FRAGMENTS != 0)
+            .then(|| read_u64(&self.packed_nid))
     }
 }
 
@@ -165,10 +215,7 @@ pub fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
             format!("unsupported EROFS block size bits: {}", sb.blkszbits),
         ));
     }
-    const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
-        | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
-        | EROFS_FEATURE_INCOMPAT_48BIT;
-    let unknown = sb.feature_incompat() & !SUPPORTED_INCOMPAT;
+    let unknown = sb.feature_incompat() & !ErofsSuperblock::INCOMPAT_SUPPORTED;
     if unknown != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -183,23 +230,31 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn superblock_tail_uses_standard_field_offsets() {
+        let mut sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 1, 1, 0, 0, &[0; 16]).unwrap();
+        assert_eq!(&sb.as_bytes()[0x68..0x80], &[0; 24]);
+
+        sb.build_time = 0x1234_5678u32.to_le_bytes();
+        sb.rootnid_8b = 0x90ab_cdef_1234_5678u64.to_le_bytes();
+        sb._reserved3 = [0xa5; 8];
+
+        assert_eq!(&sb.as_bytes()[0x6c..0x70], &0x1234_5678u32.to_le_bytes());
+        assert_eq!(
+            &sb.as_bytes()[0x70..0x78],
+            &0x90ab_cdef_1234_5678u64.to_le_bytes()
+        );
+        assert_eq!(&sb.as_bytes()[0x78..0x80], &[0xa5; 8]);
+    }
+
     fn write_bootstrap(
         feature_compat: u32,
         feature_incompat: u32,
         magic: Option<u32>,
     ) -> tempfile::NamedTempFile {
-        let mut sb = ErofsSuperblock::new(
-            feature_compat,
-            feature_incompat,
-            0,
-            0,
-            0,
-            1,
-            1,
-            0,
-            0,
-            &[0u8; 16],
-        );
+        let mut sb =
+            ErofsSuperblock::new(feature_compat, 0, 0, 0, 0, 1, 1, 0, 0, &[0u8; 16]).unwrap();
+        write_u32(&mut sb.feature_incompat, feature_incompat);
         if let Some(m) = magic {
             write_u32(&mut sb.magic, m);
         }
@@ -208,6 +263,30 @@ mod tests {
         file.write_all(sb.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn checks_block_count_and_rejects_48bit_features() {
+        for blocks in [u32::MAX as u64 - 1, u32::MAX as u64] {
+            let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, blocks, 1, 0, 0, &[0; 16]).unwrap();
+            assert_eq!(sb.blocks(), blocks);
+        }
+        assert!(ErofsSuperblock::new(0, 0, 0, 0, 0, 1u64 << 32, 1, 0, 0, &[0; 16]).is_err());
+        assert!(ErofsSuperblock::new(
+            0,
+            EROFS_FEATURE_INCOMPAT_48BIT,
+            0,
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            &[0; 16]
+        )
+        .is_err());
+        let image = write_bootstrap(0, EROFS_FEATURE_INCOMPAT_48BIT, None);
+        assert!(is_rafs_v7_bootstrap(image.path()).is_err());
     }
 
     #[test]

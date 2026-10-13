@@ -163,6 +163,7 @@ impl FuseCommand {
         };
         if let Some(config) = storage_config.as_ref() {
             nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
+            nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
         }
 
         // Runs the FUSE service until shutdown.
@@ -250,7 +251,7 @@ impl FuseCommand {
         }
 
         let reader = match (&self.blob, &self.bootstrap, backend) {
-            // A self-contained full blob still wants the decoded-block-group
+            // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
             (Some(blob), None, _) => ErofsReader::open_blob(blob, cache_dir.as_deref()),
             (None, Some(bootstrap), Some(backend)) => {
@@ -265,7 +266,7 @@ impl FuseCommand {
         .context("failed to open EROFS image")?;
 
         let reader = Arc::new(reader);
-        let fs = ErofsFs::new(reader.clone());
+        let fs = ErofsFs::new(reader.clone()).context("failed to initialize FUSE filesystem")?;
         let mut config = FuseConfig::default();
         // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
         // other than the daemon's, setuid binaries in the image have to keep

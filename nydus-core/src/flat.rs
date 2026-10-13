@@ -41,8 +41,7 @@ pub const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 /// A nydus image presented as one linear, read-only byte range.
 ///
 /// The layout is the one `nydus-core` defines: the bootstrap at the head,
-/// then each blob at its mapped offset, with gaps and redirect blobs reading
-/// as zeros.
+/// then each blob at its mapped offset, with gaps reading as zeros.
 pub struct FlatImage {
     core: Arc<NydusCore>,
     size: u64,
@@ -109,11 +108,11 @@ impl FlatImage {
     }
 
     /// Fetch `[offset, offset + buf.len())` and copy the resident bytes into
-    /// `buf`, serving holes, redirect slots, gaps and any range past the end
-    /// of the image as zeros.
+    /// `buf`, serving holes, gaps and any range past the end of the image as
+    /// zeros.
     ///
     /// `offset` and `buf.len()` must both be [`BLOCK_SIZE`]-aligned: the fetch
-    /// path rounds outward to whole block groups, so an unaligned window
+    /// path rounds outward to whole chunk groups, so an unaligned window
     /// would silently pull in neighbouring data. On success every byte of
     /// `buf` has been written.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {

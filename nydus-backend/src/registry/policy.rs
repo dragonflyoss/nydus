@@ -61,7 +61,7 @@ pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::RUNTIME;
+    use crate::registry::rt::runtime;
     use crate::Protocol;
     use reqwest::header::HeaderMap;
     use std::io;
@@ -91,7 +91,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    RUNTIME.block_on(classify(response(status))),
+                    runtime().block_on(classify(response(status))),
                     Err(RegistryError::UnexpectedStatus(got, _)) if got == status
                 ),
                 "status={status}"
@@ -107,7 +107,10 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY,
         ] {
             assert_eq!(
-                RUNTIME.block_on(classify(response(status))).unwrap().status,
+                runtime()
+                    .block_on(classify(response(status)))
+                    .unwrap()
+                    .status,
                 status
             );
         }
@@ -126,7 +129,7 @@ mod tests {
             ] {
                 assert!(
                     matches!(
-                        RUNTIME.block_on(decide(kind, Ok(response(status)))),
+                        runtime().block_on(decide(kind, Ok(response(status)))),
                         Action::Serve(r) if r.status == status
                     ),
                     "kind={kind:?} status={status}"
@@ -146,11 +149,11 @@ mod tests {
         ];
         for failure in failures {
             assert!(matches!(
-                RUNTIME.block_on(decide(ReadKind::Prefetch, failure())),
+                runtime().block_on(decide(ReadKind::Prefetch, failure())),
                 Action::Defer(RegistryError::PrefetchDeferred(_))
             ));
             assert!(matches!(
-                RUNTIME.block_on(decide(ReadKind::OnDemand, failure())),
+                runtime().block_on(decide(ReadKind::OnDemand, failure())),
                 Action::Fallback(_)
             ));
         }

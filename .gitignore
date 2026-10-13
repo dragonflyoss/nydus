@@ -56,3 +56,6 @@ scripts/certs
 
 # Graphify
 graphify-out
+
+# Scratch TMPDIR used by the root e2e make targets
+/.test-tmp/

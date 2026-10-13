@@ -10,13 +10,13 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use std::time::Instant;
 
-use nydus_format::blob::{BlobFooter, BlobMetadata, NYDUS_BLOB_METADATA_SUFFIX};
+use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 use nydus_telemetry::metrics::{
     collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
 };
 
-use crate::{Backend, BlobBackend, Protocol, ReadKind};
+use crate::{Backend, BlobBackend, Protocol, RawDeviceFile, ReadKind};
 
 /// A byte region embedded in a larger file.
 #[derive(Clone, Copy)]
@@ -34,8 +34,12 @@ struct Source {
     cache_key: [u8; SHA256_DIGEST_SIZE],
     data_offset: u64,
     data_size: u64,
-    /// The embedded blob metadata, absent for a bare data file.
+    /// The embedded blob metadata, absent for a bare data file and for a
+    /// raw device blob.
     blob_metadata_region: Option<EmbeddedRegion>,
+    /// Whether the data region is a raw EROFS device, the footer's
+    /// `RAW_DEVICE` flag.
+    raw_device: bool,
 }
 
 /// A source and its lazily opened file, looked up together so a read pays a
@@ -111,10 +115,7 @@ impl Local {
             )
         })?;
 
-        let blob_metadata_name = format!(
-            "{}{NYDUS_BLOB_METADATA_SUFFIX}",
-            file_name.to_string_lossy()
-        );
+        let blob_metadata_name = format!("{}{}", file_name.to_string_lossy(), BlobMetadata::SUFFIX);
         Ok(self.root.join(blob_metadata_name))
     }
 
@@ -137,7 +138,7 @@ impl Local {
     /// The slot of `blob_id`, resolved from `root/<hex>` on first use. The
     /// store is content-addressed, so the file name is trusted as the cache
     /// key rather than hashing the file on every daemon start, corruption
-    /// being caught by the CRC over every block group read.
+    /// being caught by the CRC over every chunk group read.
     fn source(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<SourceSlot>> {
         if let Some(slot) = self.sources.read().unwrap().get(blob_id).cloned() {
             return Ok(slot);
@@ -187,6 +188,15 @@ impl Local {
     /// The raw blob metadata of `source`: the sidecar file when present,
     /// otherwise the region embedded in the full blob.
     fn read_blob_metadata_bytes(&self, source: &Source) -> io::Result<Vec<u8>> {
+        if source.raw_device {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "native EROFS layer has no blob meta: {}",
+                    source.path.display()
+                ),
+            ));
+        }
         let blob_metadata_path = self.blob_metadata_path(&source.path)?;
         if blob_metadata_path.is_file() {
             return fs::read(&blob_metadata_path);
@@ -229,7 +239,27 @@ impl BlobBackend for Local {
     ) -> io::Result<BlobMetadata> {
         let slot = self.source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&slot.source)?;
-        BlobMetadata::from_bytes(&data, false).map_err(io::Error::other)
+        BlobMetadata::from_bytes(data).map_err(io::Error::other)
+    }
+
+    fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
+        Ok(self.source(blob_id)?.source.raw_device)
+    }
+
+    fn raw_device_file(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<Option<RawDeviceFile>> {
+        let slot = self.source(blob_id)?;
+        if !slot.source.raw_device {
+            return Ok(None);
+        }
+        Ok(Some(RawDeviceFile {
+            path: slot.source.path.clone(),
+            file: slot.open_file()?,
+            data_offset: slot.source.data_offset,
+            data_size: slot.source.data_size,
+        }))
     }
 
     fn save_blob_metadata(
@@ -285,10 +315,11 @@ fn parse_full_blob(path: &Path, cache_key: [u8; SHA256_DIGEST_SIZE]) -> io::Resu
         cache_key,
         data_offset: footer.compressed_data_offset(),
         data_size: footer.compressed_data_size(),
-        blob_metadata_region: Some(EmbeddedRegion {
+        blob_metadata_region: (!footer.is_raw_device()).then_some(EmbeddedRegion {
             offset: footer.blob_metadata_offset(),
             size: footer.blob_metadata_size(),
         }),
+        raw_device: footer.is_raw_device(),
     }))
 }
 
@@ -297,22 +328,27 @@ mod tests {
     use super::*;
 
     use nydus_format::blob::{
-        BlobMetadataBlockGroup, BlobMetadataChunk, BlobMetadataCompressor, BlobMetadataDigester,
+        BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest, BlobMetadataChunkLength,
+        BlobMetadataCompressor, BlobMetadataDigester,
     };
     use nydus_format::utils::{sha256_bytes, write_minimal_full_blob};
     use tempfile::tempdir;
 
     fn blob_metadata(payload: &[u8]) -> BlobMetadata {
         BlobMetadata::new(
-            BlobMetadataCompressor::None,
-            BlobMetadataDigester::Blake3,
             1,
-            vec![BlobMetadataChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
+            1,
+            BlobMetadataCompressor::None,
+            Some(BlobMetadataDigester::Blake3),
             vec![
-                BlobMetadataBlockGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload), 0, 0, false)
-                    .unwrap(),
+                BlobMetadataChunkGroup::new(0, 0, 0, 4096, crc32c::crc32c(payload)),
+                BlobMetadataChunkGroup::new(4096, 1, 1, 0, 0),
             ],
-            false,
+            vec![BlobMetadataChunkLength::new(4096)],
+            vec![BlobMetadataChunkGroupDigest::new(
+                *blake3::hash(payload).as_bytes(),
+            )],
+            Vec::new(),
         )
         .unwrap()
     }
@@ -333,7 +369,7 @@ mod tests {
             .read_range_into(&full_blob_id, 0, &mut data, ReadKind::OnDemand)
             .unwrap();
 
-        assert_eq!(blob_metadata.header().chunk_count(), 1);
+        assert_eq!(blob_metadata.chunk_count(), 1);
         assert_eq!(data, payload);
     }
 
@@ -354,7 +390,7 @@ mod tests {
             .read_range_into(&full_blob_id, 0, &mut data, ReadKind::OnDemand)
             .unwrap();
 
-        assert_eq!(blob_metadata.header().chunk_count(), 1);
+        assert_eq!(blob_metadata.chunk_count(), 1);
         assert_eq!(data, payload);
         assert!(backend
             .blob_metadata(&data_blob_id, ReadKind::OnDemand)
