@@ -3,17 +3,23 @@
 //! These are nydus's own on-disk formats layered next to the EROFS data —
 //! the `.blob.meta` sidecar ([`metadata`]) and the trailing blob footer
 //! ([`footer`]) — not part of the EROFS metadata format itself.
+//!
+//! Both start with the same frozen prefix, `magic[0..8] +
+//! feature_compat[8..12] + feature_incompat[12..16] + crc32[16..20]`, and
+//! decide compatibility by the feature words alone, see
+//! [`FeatureFlags`](crate::utils::FeatureFlags).
 
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Error, Result};
-use crate::utils::{align_up_u64, write_zeros};
-use std::io::Write;
+use crate::utils::align_up_u64;
+use std::io::{self, Read, Write};
 
-pub mod algorithm;
-pub mod flag;
+pub mod compressor;
+pub mod digester;
 pub mod footer;
 pub mod metadata;
-pub use algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
+pub use compressor::BlobMetadataCompressor;
+pub use digester::BlobMetadataDigester;
 pub use footer::BlobFooter;
 pub use metadata::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
@@ -21,7 +27,7 @@ pub use metadata::{
     BlobMetadataChunkLength, BlobMetadataHeader, BlobMetadataTable, BlobMetadataTableType,
 };
 
-/// Finish a full blob by appending everything behind the data region to
+/// Finishes a full blob by appending everything behind the data region to
 /// `writer`, which already holds the `compressed_data_size` bytes of blob
 /// data, and return the sealed footer describing the finished blob.
 ///
@@ -73,10 +79,16 @@ pub fn finish_full_blob(
         }
     };
 
-    write_zeros(writer, bootstrap_offset - compressed_data_size)?;
+    io::copy(
+        &mut io::repeat(0).take(bootstrap_offset - compressed_data_size),
+        writer,
+    )?;
     if let Some(compressed_bootstrap) = &compressed_bootstrap {
         writer.write_all(compressed_bootstrap)?;
-        write_zeros(writer, bootstrap_size - compressed_bootstrap.len() as u64)?;
+        io::copy(
+            &mut io::repeat(0).take(bootstrap_size - compressed_bootstrap.len() as u64),
+            writer,
+        )?;
     }
 
     if let Some(blob_metadata) = blob_metadata {

@@ -7,7 +7,6 @@ use nydus::optimize::{
 use nydus_backend::{build_backend, BlobBackend};
 use nydus_config::Config;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
-use nydus_format::utils::hex_string;
 use nydus_telemetry::logging::init_command_tracing;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -157,7 +156,7 @@ impl OptimizeCommand {
         })?;
 
         let ondemand = build_ondemand_blob(&self.parent_bootstrap, patterns, backend, cache_dir)?;
-        let digest_hex = hex_string(&ondemand.full_blob_digest);
+        let digest_hex = hex::encode(ondemand.full_blob_digest);
 
         fs::create_dir_all(&self.blob_dir).with_context(|| {
             format!(

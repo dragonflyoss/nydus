@@ -10,7 +10,7 @@ use std::sync::RwLock;
 
 use crate::reader::ErofsReader;
 use nydus_error::{Context, Error, Result};
-use nydus_format::utils::pread_exact;
+use nydus_storage::io::pread_exact;
 
 /// One resolved extent: maps `[source_offset, source_offset + len)` of the
 /// source view to its mmap-ready backing location `(fd, offset)`, in the

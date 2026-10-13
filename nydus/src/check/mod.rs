@@ -9,14 +9,14 @@ use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor};
 use nydus_format::erofs::{
-    mode_to_erofs_file_type, ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
-    EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
-    EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
+    ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV,
+    EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK,
+    EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
     Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
     Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
 };
-use nydus_format::utils::{hex_string, sha256_bytes};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -328,7 +328,7 @@ fn walk_inode(
     let inode = reader
         .inode(nid)
         .with_context(|| format!("failed to read inode: {nid}"))?;
-    let file_type = mode_to_erofs_file_type(inode.mode());
+    let file_type = inode.file_type();
 
     stats.visited_inodes += 1;
     stats.max_depth = stats.max_depth.max(depth);
@@ -484,7 +484,7 @@ fn resolve_z_devices(
         return Ok(resolved);
     };
     for blob in blob_infos {
-        let path = blob_dir.join(hex_string(&blob.blob_id));
+        let path = blob_dir.join(hex::encode(blob.blob_id));
         if !path.is_file() {
             continue;
         }
@@ -506,7 +506,7 @@ fn resolve_z_devices(
                     .with_context(|| format!("failed to open layer device: {}", path.display()))?;
                 let mmap = unsafe { Mmap::map(&file) }
                     .with_context(|| format!("failed to map layer device: {}", path.display()))?;
-                let sha256 = sha256_bytes(&mmap);
+                let sha256 = Sha256::digest(&mmap).into();
                 let size = mmap.len() as u64;
                 ResolvedBlob {
                     path,
@@ -598,7 +598,7 @@ fn resolve_blobs(
         // Blobs built with `--blob-id` carry a caller-chosen ID (e.g. the OCI
         // layer digest) that no digest of the file reproduces; fall back to
         // the store entry of that name and report it as unverified.
-        let named = blob_dir.join(hex_string(&blob.blob_id));
+        let named = blob_dir.join(hex::encode(blob.blob_id));
         if !named.is_file() {
             continue;
         }
@@ -647,8 +647,8 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
         .checked_add(footer.blob_metadata_size() as usize)
         .ok_or_else(|| Error::Overflow("blob meta range overflow".to_string()))?;
 
-    let data_digest = sha256_bytes(&mmap[data_start..data_end]);
-    let blob_sha256 = sha256_bytes(&mmap);
+    let data_digest: [u8; EROFS_BLOB_ID_SIZE] = Sha256::digest(&mmap[data_start..data_end]).into();
+    let blob_sha256: [u8; EROFS_BLOB_ID_SIZE] = Sha256::digest(&mmap).into();
     // A raw device blob (native layer) carries no blob meta to summarize.
     let blob_metadata = if footer.is_raw_device() {
         None
@@ -695,10 +695,8 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::{
-        BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
-    };
-    use std::fs;
+    use nydus_test_utils::blob::FullBlob;
+    use nydus_test_utils::metadata;
     use tempfile::tempdir;
 
     #[test]
@@ -823,67 +821,14 @@ mod tests {
         kind: BlobKind,
     ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
         let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
-        let data_digest = sha256_bytes(&data);
-        let groups = || {
-            vec![
-                BlobMetadataChunkGroup::new(0, 0, 0, data.len() as u32, crc32c::crc32c(&data)),
-                BlobMetadataChunkGroup::new(data.len() as u64, 1, 1, 0, 0),
-            ]
-        };
-        let lengths = || vec![BlobMetadataChunkLength::new(data.len() as u32)];
         let blob_metadata = match kind {
-            BlobKind::Full => BlobMetadata::new(
-                1,
-                1,
-                BlobMetadataCompressor::None,
-                None,
-                groups(),
-                lengths(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            BlobKind::Incremental => BlobMetadata::new_incremental(
-                1,
-                1,
-                BlobMetadataCompressor::None,
-                None,
-                groups(),
-                lengths(),
-                Vec::new(),
-            ),
-            BlobKind::Redirect => BlobMetadata::new(
-                1,
-                1,
-                BlobMetadataCompressor::None,
-                None,
-                groups(),
-                lengths(),
-                Vec::new(),
-                vec![BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()],
-            ),
-        }
-        .unwrap();
-        let mut blob_metadata_bytes = Vec::new();
-        blob_metadata.write_to(&mut blob_metadata_bytes).unwrap();
-        assert_eq!(blob_metadata_bytes.len(), EROFS_BLOCK_SIZE as usize);
-
-        let footer = BlobFooter::new(
-            0,
-            data.len() as u64,
-            data.len() as u64,
-            0,
-            0,
-            data.len() as u64,
-            u64::from(EROFS_BLOCK_SIZE),
-            None,
-        )
-        .unwrap();
-        let mut blob = Vec::new();
-        blob.extend_from_slice(&data);
-        blob.extend_from_slice(&blob_metadata_bytes);
-        footer.write_to(&mut blob).unwrap();
-        fs::write(path, &blob).unwrap();
-
-        (sha256_bytes(&blob), data_digest)
+            BlobKind::Full => metadata::single_chunk(&data),
+            BlobKind::Incremental => metadata::incremental(&data),
+            BlobKind::Redirect => metadata::redirect(&data, 1),
+        };
+        let full_blob_id = FullBlob::new(&data)
+            .with_metadata(&blob_metadata)
+            .save(path);
+        (full_blob_id, Sha256::digest(data).into())
     }
 }

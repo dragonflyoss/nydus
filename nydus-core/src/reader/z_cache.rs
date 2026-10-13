@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use nydus_format::erofs::ZAlgorithm;
+use nydus_format::erofs::ZErofsCompressor;
 
 const MAX_BYTES: usize = 32 << 20;
 const MAX_ENTRIES: usize = 128;
@@ -12,7 +12,7 @@ pub(super) struct PclusterKey {
     pub offset: u64,
     pub physical_len: usize,
     pub logical_len: usize,
-    pub algorithm: ZAlgorithm,
+    pub algorithm: ZErofsCompressor,
 }
 
 #[derive(Default)]
@@ -64,7 +64,7 @@ mod tests {
             offset,
             physical_len: 4096,
             logical_len,
-            algorithm: ZAlgorithm::Zstd,
+            algorithm: ZErofsCompressor::Zstd,
         }
     }
 
@@ -106,7 +106,7 @@ mod tests {
             .is_none());
         assert!(cache
             .get(PclusterKey {
-                algorithm: ZAlgorithm::Lz4,
+                algorithm: ZErofsCompressor::Lz4,
                 ..last
             })
             .is_none());

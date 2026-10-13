@@ -1,9 +1,7 @@
-//! The frozen prefix shared by the blob meta and the blob footer,
-//! `magic[0..8] + feature_compat[8..12] + feature_incompat[12..16] +
-//! crc32[16..20]`. There is no version field. Compatibility is decided by
-//! the feature words alone, EROFS-style. Unknown `feature_compat` bits are
-//! ignored, unknown `feature_incompat` bits reject the record, so an
-//! incompatible change sets a new incompat bit.
+//! The `feature_incompat` word EROFS and the nydus blob formats decide
+//! compatibility with, there being no version field. Unknown
+//! `feature_compat` bits are ignored, unknown `feature_incompat` bits reject
+//! the record, so an incompatible change sets a new incompat bit.
 
 use crate::error::{Error, Result};
 
@@ -19,7 +17,7 @@ impl FeatureFlags {
         Self(0)
     }
 
-    /// Wrap a raw on-disk word. Nothing is rejected here, unknown incompat
+    /// Wraps a raw on-disk word. Nothing is rejected here, unknown incompat
     /// bits are caught by [`Self::validate_incompat`].
     pub const fn from_bits(bits: u32) -> Self {
         Self(bits)
@@ -35,7 +33,7 @@ impl FeatureFlags {
         self.0 & bits == bits
     }
 
-    /// Set or clear every bit of `bits` per `value` (`bitflags::Flags::set`
+    /// Sets or clears every bit of `bits` per `value` (`bitflags::Flags::set`
     /// semantics).
     pub fn set(&mut self, bits: u32, value: bool) {
         if value {
@@ -45,7 +43,7 @@ impl FeatureFlags {
         }
     }
 
-    /// Reject a word carrying bits outside `supported`.
+    /// Rejects a word carrying bits outside `supported`.
     pub fn validate_incompat(self, supported: u32) -> Result<()> {
         let unknown_incompat = self.0 & !supported;
         if unknown_incompat != 0 {

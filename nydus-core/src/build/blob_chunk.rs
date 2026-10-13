@@ -5,10 +5,10 @@ use nydus_format::blob::{
     BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::{
-    ErofsChunkAddr, ZAlgorithm, ZComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
-    Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
+    ErofsChunkAddr, ZErofsComprCfgs, ZErofsCompressor, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
+    EROFS_NULL_ADDR, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
 };
-use nydus_format::utils::write_zeros;
+use nydus_storage::io::write_zeros;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
@@ -125,7 +125,7 @@ pub struct BlobWriter<W> {
     // `z_base_blkaddr` is where the device starts in that space, so
     // `z_next_blkaddr - z_base_blkaddr` is the offset within the device data.
     z_pcluster: u32,
-    z_algorithm: ZAlgorithm,
+    z_algorithm: ZErofsCompressor,
     z_base_blkaddr: u64,
     z_next_blkaddr: u64,
     // Lazily started z_erofs compression pipeline (see `ZPipeline`) and the
@@ -214,7 +214,7 @@ struct ZAccum {
 }
 
 impl ZAccum {
-    fn new(algorithm: ZAlgorithm, handle: ZFileRef) -> Self {
+    fn new(algorithm: ZErofsCompressor, handle: ZFileRef) -> Self {
         Self {
             tail: z_map_header(algorithm),
             blocks: 0,
@@ -237,12 +237,12 @@ impl ZAccum {
 /// algorithm in the low nibble of `h_algorithmtype`, lclusterbits ==
 /// blkszbits, followed by the 8 reserved bytes; full lcluster indexes start
 /// right after (the legacy layout).
-fn z_map_header(algorithm: ZAlgorithm) -> Vec<u8> {
+fn z_map_header(algorithm: ZErofsCompressor) -> Vec<u8> {
     use nydus_format::erofs::{Z_EROFS_ADVISE_BIG_PCLUSTER_1, Z_EROFS_MAP_HEADER_SIZE};
     let mut tail = Vec::with_capacity(Z_EROFS_MAP_HEADER_SIZE + 8 + 64);
     tail.extend_from_slice(&[0u8; 4]);
     tail.extend_from_slice(&Z_EROFS_ADVISE_BIG_PCLUSTER_1.to_le_bytes());
-    tail.push(algorithm.as_type());
+    tail.push(algorithm.code());
     tail.push(0);
     tail.extend_from_slice(&[0u8; 8]);
     tail
@@ -337,7 +337,7 @@ struct ZPipeline {
 }
 
 impl ZPipeline {
-    fn new(algorithm: ZAlgorithm, pcluster: usize) -> Self {
+    fn new(algorithm: ZErofsCompressor, pcluster: usize) -> Self {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -462,12 +462,12 @@ enum ZCompressor {
 }
 
 impl ZCompressor {
-    fn new(algorithm: ZAlgorithm, pcluster: usize) -> Self {
+    fn new(algorithm: ZErofsCompressor, pcluster: usize) -> Self {
         match algorithm {
-            ZAlgorithm::Lz4 => Self::Lz4 {
+            ZErofsCompressor::Lz4 => Self::Lz4 {
                 dst: vec![0u8; lz4_compress_bound(Z_SEGMENT_SIZE)],
             },
-            ZAlgorithm::Zstd => {
+            ZErofsCompressor::Zstd => {
                 let mut cctx =
                     zstd::bulk::Compressor::new(Z_ZSTD_LEVEL).expect("zstd compression context");
                 cctx.set_parameter(zstd::zstd_safe::CParameter::WindowLog(
@@ -930,7 +930,7 @@ pub enum BlobLayout {
     /// of at most `fragment_threshold` bytes (zero: none) are packed into the
     /// shared fragment inode. Alignment as for [`Self::RawDevice`].
     ZErofs {
-        algorithm: ZAlgorithm,
+        algorithm: ZErofsCompressor,
         pcluster: u32,
         base_blkaddr: u64,
         fragment_threshold: u64,
@@ -1008,7 +1008,7 @@ impl<W: Write> BlobWriter<W> {
             data_alignment: 0,
             data_alignment_threshold: 0,
             z_pcluster: 0,
-            z_algorithm: ZAlgorithm::Lz4,
+            z_algorithm: ZErofsCompressor::Lz4,
             z_base_blkaddr: 0,
             z_next_blkaddr: 0,
             z_pipeline: None,
@@ -1088,13 +1088,13 @@ impl<W: Write> BlobWriter<W> {
     }
 
     /// The superblock compression config this writer's pclusters need.
-    pub fn z_compr_cfgs(&self) -> ZComprCfgs {
+    pub fn z_compr_cfgs(&self) -> ZErofsComprCfgs {
         match self.z_algorithm {
-            ZAlgorithm::Lz4 => ZComprCfgs {
+            ZErofsCompressor::Lz4 => ZErofsComprCfgs {
                 lz4_max_pclusterblks: Some((self.z_pcluster / EROFS_BLOCK_SIZE) as u16),
                 zstd_windowlog: None,
             },
-            ZAlgorithm::Zstd => ZComprCfgs {
+            ZErofsCompressor::Zstd => ZErofsComprCfgs {
                 lz4_max_pclusterblks: None,
                 zstd_windowlog: Some(Z_ZSTD_WINDOWLOG),
             },
@@ -2139,7 +2139,7 @@ mod tests {
         assert_eq!(metadata.chunk_group_count(), 2);
         assert_eq!(metadata.chunk_group_index(0), Some(0));
         assert_eq!(metadata.chunk_group_index(4096), Some(1));
-        for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+        for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
             assert!(BlobWriter::new(
                 Vec::new(),
                 EROFS_BLOCK_SIZE,
@@ -2217,7 +2217,7 @@ mod tests {
         );
         assert!(addrs
             .iter()
-            .any(|addr| writer.resolve_chunk_addr(&mut addr.clone()).is_err()));
+            .any(|&addr| writer.resolve_chunk_addr(&mut { addr }).is_err()));
         writer.finish().unwrap();
         assert_eq!(writer.total_block_count(), 28 + 8);
         assert_eq!(resolve(&writer, &mut addrs), vec![0, 7, 14, 21, 28, 33, 35]);
@@ -2446,9 +2446,7 @@ mod tests {
         assert!(data[EROFS_BLOCK_SIZE as usize..].iter().all(|&b| b == b'c'));
 
         // The on-disk null index encodes the all-ones sentinel.
-        let raw =
-            nydus_format::erofs::ErofsChunkIndex::new(indexes[1].blkaddr, indexes[1].device_id)
-                .unwrap();
+        let raw = nydus_format::erofs::ErofsChunkIndex::new(indexes[1]).unwrap();
         assert_eq!(raw.blkaddr(), EROFS_NULL_ADDR);
     }
 
@@ -2855,15 +2853,15 @@ mod tests {
     const BLOCK: usize = EROFS_BLOCK_SIZE as usize;
 
     fn z_writer() -> BlobWriter<Vec<u8>> {
-        z_writer_with(ZAlgorithm::Lz4)
+        z_writer_with(ZErofsCompressor::Lz4)
     }
 
-    fn z_writer_with(algorithm: ZAlgorithm) -> BlobWriter<Vec<u8>> {
+    fn z_writer_with(algorithm: ZErofsCompressor) -> BlobWriter<Vec<u8>> {
         z_writer_configured(algorithm, 0, 0, 0)
     }
 
     fn z_writer_configured(
-        algorithm: ZAlgorithm,
+        algorithm: ZErofsCompressor,
         fragment_threshold: u64,
         data_alignment: u32,
         data_alignment_threshold: u64,
@@ -2941,9 +2939,11 @@ mod tests {
                     let payload_start = pcluster.iter().position(|b| *b != 0).unwrap();
                     let logical = remaining.min(lclusters * BLOCK);
                     let payload = &pcluster[payload_start..];
-                    let decoded = match ZAlgorithm::from_type(tail[6] & 0x0f).unwrap() {
-                        ZAlgorithm::Lz4 => lz4_flex::block::decompress(payload, logical).unwrap(),
-                        ZAlgorithm::Zstd => zstd::bulk::decompress(payload, logical).unwrap(),
+                    let decoded = match ZErofsCompressor::from_code(tail[6] & 0x0f).unwrap() {
+                        ZErofsCompressor::Lz4 => {
+                            lz4_flex::block::decompress(payload, logical).unwrap()
+                        }
+                        ZErofsCompressor::Zstd => zstd::bulk::decompress(payload, logical).unwrap(),
                     };
                     assert_eq!(decoded.len(), logical);
                     out.extend_from_slice(&decoded);
@@ -2961,7 +2961,7 @@ mod tests {
         let mut source = pseudo_random_bytes(2 * pcluster);
         source[..1280].fill(0);
         source[pcluster..].fill(0);
-        let mut compressor = ZCompressor::new(ZAlgorithm::Zstd, pcluster);
+        let mut compressor = ZCompressor::new(ZErofsCompressor::Zstd, pcluster);
         let (take, size, compressed) = compressor.fit_pcluster(&source, true, pcluster, pcluster);
         assert_eq!(take, pcluster);
         assert!((pcluster * 98 / 100..=pcluster).contains(&size));
@@ -2978,7 +2978,7 @@ mod tests {
         source[..256 << 10].fill(0);
         source[512 << 10..768 << 10].fill(0x33);
         source.extend_from_slice(&pseudo_random_bytes(BLOCK + 37));
-        let mut writer = z_writer_with(ZAlgorithm::Zstd);
+        let mut writer = z_writer_with(ZErofsCompressor::Zstd);
         let handle = writer
             .write_reader_z(&mut &source[..], source.len() as u64)
             .unwrap();
@@ -2992,7 +2992,7 @@ mod tests {
             if !at_eof {
                 input.truncate(input.len() / BLOCK * BLOCK);
             }
-            let mut compressor = ZCompressor::new(ZAlgorithm::Zstd, pcluster);
+            let mut compressor = ZCompressor::new(ZErofsCompressor::Zstd, pcluster);
             let first = z_compress_segment(input.clone(), at_eof, pcluster, &mut compressor);
             z_compress_segment(vec![0; Z_SEGMENT_SIZE], false, pcluster, &mut compressor);
             z_compress_segment(
@@ -3007,7 +3007,7 @@ mod tests {
             assert_eq!(first.phys_blocks, repeated.phys_blocks);
         }
 
-        let mut compressor = ZCompressor::new(ZAlgorithm::Zstd, pcluster);
+        let mut compressor = ZCompressor::new(ZErofsCompressor::Zstd, pcluster);
         for suggested_len in [0, 1, pcluster, usize::MAX] {
             let (take, size, compressed) =
                 compressor.fit_pcluster(&source, true, pcluster, suggested_len);
@@ -3023,10 +3023,10 @@ mod tests {
 
     #[test]
     fn z_erofs_zstd_pclusters_round_trip_and_declare_the_algorithm() {
-        let mut writer = z_writer_with(ZAlgorithm::Zstd);
+        let mut writer = z_writer_with(ZErofsCompressor::Zstd);
         assert_eq!(
             writer.z_compr_cfgs(),
-            ZComprCfgs {
+            ZErofsComprCfgs {
                 lz4_max_pclusterblks: None,
                 zstd_windowlog: Some(Z_ZSTD_WINDOWLOG),
             }
@@ -3054,7 +3054,7 @@ mod tests {
         let (data, _) = writer.into_parts();
 
         for meta in &metas {
-            assert_eq!(meta.tail[6], ZAlgorithm::Zstd.as_type());
+            assert_eq!(meta.tail[6], ZErofsCompressor::Zstd.code());
         }
         let noise_indexes = lclusters(&metas[0].tail);
         assert!(noise_indexes
@@ -3165,8 +3165,12 @@ mod tests {
 
     #[test]
     fn z_erofs_alignment_pads_files_at_or_above_the_threshold() {
-        let mut writer =
-            z_writer_configured(ZAlgorithm::Lz4, 0, 8 * EROFS_BLOCK_SIZE, 2 * BLOCK as u64);
+        let mut writer = z_writer_configured(
+            ZErofsCompressor::Lz4,
+            0,
+            8 * EROFS_BLOCK_SIZE,
+            2 * BLOCK as u64,
+        );
         let small = pseudo_random_bytes(BLOCK);
         let big = pseudo_random_bytes(3 * BLOCK);
         let small_meta = writer
@@ -3206,7 +3210,7 @@ mod tests {
 
     #[test]
     fn z_erofs_fragments_pack_small_files_into_a_block_padded_packed_inode() {
-        let mut writer = z_writer_configured(ZAlgorithm::Lz4, BLOCK as u64, 0, 0);
+        let mut writer = z_writer_configured(ZErofsCompressor::Lz4, BLOCK as u64, 0, 0);
         let a = b"first small file".to_vec();
         let b = pseudo_random_bytes(BLOCK);
         let c = b"third".to_vec();
@@ -3260,7 +3264,7 @@ mod tests {
 
     #[test]
     fn z_erofs_fragments_recover_from_a_short_read_and_keep_content_in_order() {
-        for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+        for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
             let mut writer = z_writer_configured(algorithm, 64 << 10, 0, 0);
             let content = pseudo_random_bytes(64 << 10);
             let mut distinct = content.clone();
@@ -3306,7 +3310,7 @@ mod tests {
 
     #[test]
     fn z_erofs_fragments_beyond_the_pipeline_depth_commit_while_packing() {
-        let mut writer = z_writer_configured(ZAlgorithm::Lz4, 64 << 10, 0, 0);
+        let mut writer = z_writer_configured(ZErofsCompressor::Lz4, 64 << 10, 0, 0);
         // Enough small files to fill more segments than the pipeline holds,
         // so submitting a packed segment has to commit an earlier packed one
         // while the packed stream is being appended to.

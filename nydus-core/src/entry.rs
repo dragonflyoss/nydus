@@ -260,9 +260,14 @@ impl Node {
     /// Read inline xattrs as `(full_name, value)` byte vectors.
     pub fn xattrs(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let inode = self.inode()?;
-        self.reader
+        let xattrs = self
+            .reader
             .read_xattrs(self.ino, &inode)
-            .with_context(|| format!("failed to read xattrs for inode {}", self.ino))
+            .with_context(|| format!("failed to read xattrs for inode {}", self.ino))?;
+        Ok(xattrs
+            .into_iter()
+            .map(|entry| (entry.name(), entry.value))
+            .collect())
     }
 
     fn inode(&self) -> Result<ErofsInode<'_>> {
@@ -406,7 +411,7 @@ fn metadata_from_inode(reader: &ErofsReader, ino: u64, inode: &ErofsInode<'_>) -
         gid: inode.gid(),
         nlink: inode.nlink(),
         mtime: inode.mtime(reader.superblock().epoch()),
-        mtime_nsec: inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+        mtime_nsec: inode.mtime_nsec(reader.superblock().fixed_nsec()),
         rdev: inode.rdev(),
     })
 }

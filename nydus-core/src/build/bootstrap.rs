@@ -9,10 +9,10 @@ use crate::build::inode::{
 };
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
-    cast_ref, ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs, EROFS_BLOCK_SIZE,
-    EROFS_DEVICESLOT_SIZE, EROFS_FT_DIR, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET,
-    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
-    Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
+    ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
+    EROFS_FT_DIR, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET, Z_EROFS_ADVISE_FRAGMENT_PCLUSTER,
+    Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
+    Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
 use std::io::Write;
@@ -60,7 +60,7 @@ pub fn render_flattened_bootstrap_to(
         epoch,
         device_slots,
         uuid,
-        ZComprCfgs::default(),
+        ZErofsComprCfgs::default(),
         0,
         None,
     )
@@ -77,7 +77,7 @@ pub fn render_z_device_bootstrap(
     inodes: &mut [InodeInfo],
     epoch: u64,
     uuid: &[u8; 16],
-    z_cfgs: ZComprCfgs,
+    z_cfgs: ZErofsComprCfgs,
     device_slots: &[ErofsDeviceSlot],
     packed_index: Option<usize>,
 ) -> Result<Vec<u8>> {
@@ -318,7 +318,7 @@ fn render_flattened_bootstrap_to_inner(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
-    z_cfgs: ZComprCfgs,
+    z_cfgs: ZErofsComprCfgs,
     min_total_blocks: u64,
     packed_index: Option<usize>,
 ) -> Result<u64> {
@@ -468,7 +468,7 @@ fn place_dir_data(
 }
 
 fn write_zeros(writer: &mut impl Write, n: usize) -> Result<()> {
-    nydus_format::utils::write_zeros(writer, n as u64).context("failed to write bootstrap padding")
+    nydus_storage::io::write_zeros(writer, n as u64).context("failed to write bootstrap padding")
 }
 
 /// Rewrite a rendered bootstrap's device table with flattened mapped block
@@ -539,7 +539,7 @@ pub fn patch_device_slots(bootstrap: &mut [u8], device_slots: &[ErofsDeviceSlot]
             "bootstrap too small for a superblock".to_string(),
         ));
     }
-    let devslot_offset = cast_ref::<ErofsSuperblock>(&bootstrap[sb_offset..]).devt_slotoff()
+    let devslot_offset = ErofsSuperblock::from_bytes(&bootstrap[sb_offset..])?.devt_slotoff()
         as usize
         * EROFS_DEVICESLOT_SIZE;
     let device_table_size = device_slots
@@ -663,7 +663,7 @@ fn render_bootstrap_inner(
         epoch,
         device_slots,
         uuid,
-        ZComprCfgs::default(),
+        ZErofsComprCfgs::default(),
         0,
         None,
     )?;
@@ -777,7 +777,7 @@ mod tests {
     use crate::build::inode::{build_tree, choose_epoch, resolve_chunk_addrs, ChildRef};
     use crate::ErofsReader;
     use nydus_format::erofs::{
-        erofs_xattr_ibody_size, ErofsInode, XattrEntry, EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE,
+        ErofsInode, XattrEntry, EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE,
         EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_SLOTSIZE,
         EROFS_XATTR_INDEX_USER,
     };
@@ -858,7 +858,7 @@ mod tests {
 
         let block_size = EROFS_BLOCK_SIZE as usize;
         let inode_offset = block_size + inodes[1].meta_offset;
-        let inode = ErofsInode::parse(&image[inode_offset..]).unwrap();
+        let inode = ErofsInode::from_bytes(&image[inode_offset..]).unwrap();
         assert_eq!(inode.data_layout(), expected_layout);
         assert_eq!(inodes[1].is_extended, expected_extended);
         assert_eq!(
@@ -873,7 +873,7 @@ mod tests {
         assert_eq!(inode.gid(), inodes[1].gid);
         assert_eq!(inode.nlink(), inodes[1].nlink);
         assert_eq!(inode.mtime(0), inodes[1].mtime);
-        assert_eq!(inode.effective_mtime_nsec(0), inodes[1].mtime_nsec);
+        assert_eq!(inode.mtime_nsec(0), inodes[1].mtime_nsec);
         let InodeData::Symlink { target, .. } = &inodes[1].data else {
             unreachable!();
         };
@@ -953,16 +953,13 @@ mod tests {
         assert!(new.len() < old.len());
         for (old_inode, new_inode) in before.iter().zip(&after) {
             let old_parsed =
-                ErofsInode::parse(&old[EROFS_BLOCK_SIZE as usize + old_inode.meta_offset..])
+                ErofsInode::from_bytes(&old[EROFS_BLOCK_SIZE as usize + old_inode.meta_offset..])
                     .unwrap();
             let new_parsed =
-                ErofsInode::parse(&new[EROFS_BLOCK_SIZE as usize + new_inode.meta_offset..])
+                ErofsInode::from_bytes(&new[EROFS_BLOCK_SIZE as usize + new_inode.meta_offset..])
                     .unwrap();
             assert_eq!(old_parsed.mtime(0), new_parsed.mtime(epoch));
-            assert_eq!(
-                old_parsed.effective_mtime_nsec(0),
-                new_parsed.effective_mtime_nsec(0)
-            );
+            assert_eq!(old_parsed.mtime_nsec(0), new_parsed.mtime_nsec(0));
         }
         println!("1024 empty files + root: bootstrap {} -> {} bytes; compact {old_compact} -> {new_compact}; extended {} -> {}",
             old.len(), new.len(), before.len() - old_compact, after.len() - new_compact);
@@ -1011,7 +1008,7 @@ mod tests {
                 );
                 assert_eq!(parsed.mtime(reader.superblock().epoch()), seconds);
                 assert_eq!(
-                    parsed.effective_mtime_nsec(reader.superblock().fixed_nsec()),
+                    parsed.mtime_nsec(reader.superblock().fixed_nsec()),
                     nanoseconds
                 );
                 assert_eq!(
@@ -1069,7 +1066,7 @@ mod tests {
                     EROFS_INODE_COMPACT_SIZE
                 };
                 let limit =
-                    EROFS_BLOCK_SIZE as usize - header_size - erofs_xattr_ibody_size(&xattrs);
+                    EROFS_BLOCK_SIZE as usize - header_size - XattrEntry::ibody_size(&xattrs);
                 for (target_len, expected_layout) in [
                     (limit, EROFS_INODE_FLAT_INLINE),
                     (limit + 1, EROFS_INODE_FLAT_PLAIN),
@@ -1095,7 +1092,7 @@ mod tests {
 
     #[test]
     fn non_inline_symlinks_preserve_header_constraints_and_metadata() {
-        use nydus_format::erofs::needs_erofs_extended_inode;
+        use nydus_format::erofs::ErofsInodeExtended;
 
         for (uid, gid, nlink, seconds, nanoseconds, expected_extended) in [
             (0, 0, 1, 0, 0, false),
@@ -1114,7 +1111,7 @@ mod tests {
                     inode.nlink = nlink;
                     inode.mtime_nsec = nanoseconds;
                     inode.is_extended =
-                        needs_erofs_extended_inode(inode.size, uid, gid, nlink as u64);
+                        ErofsInodeExtended::is_needed(inode.size, uid, gid, nlink as u64);
                     inodes
                 },
                 EROFS_INODE_FLAT_PLAIN,
@@ -1149,7 +1146,7 @@ mod tests {
                 inode.gid = 1000;
                 inode.mtime = 1_700_000_000;
                 inode.mtime_nsec = 0;
-                inode.is_extended = nydus_format::erofs::needs_erofs_extended_inode(
+                inode.is_extended = nydus_format::erofs::ErofsInodeExtended::is_needed(
                     inode.size,
                     inode.uid,
                     inode.gid,
@@ -1212,7 +1209,7 @@ mod tests {
             inode.gid = 1000;
             inode.mtime = 1_700_000_000;
             inode.mtime_nsec = 0;
-            inode.is_extended = nydus_format::erofs::needs_erofs_extended_inode(
+            inode.is_extended = nydus_format::erofs::ErofsInodeExtended::is_needed(
                 inode.size,
                 inode.uid,
                 inode.gid,

@@ -10,4 +10,5 @@
 pub mod access_trace;
 pub mod cache;
 pub mod chunk_group_map;
+pub mod io;
 pub mod prefetch;

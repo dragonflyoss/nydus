@@ -13,9 +13,8 @@ use memmap2::Mmap;
 use nydus_backend::{BlobBackend, Local};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::erofs::{
-    cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, ZComprCfgs,
-    EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE,
-    EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
+    ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
+    EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
 use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
@@ -329,13 +328,15 @@ impl ErofsReader {
                 "image too small for superblock",
             ));
         }
-        Ok(cast_ref::<ErofsSuperblock>(&mmap[sb_offset..]))
+        ErofsSuperblock::from_bytes(&mmap[sb_offset..])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
-    /// Validate the superblock; see [`nydus_format::erofs::validate_superblock`]
-    /// for the supported-incompat contract (single source of truth).
+    /// Validate the superblock; see [`ErofsSuperblock::validate`] for the
+    /// supported-incompat contract (single source of truth).
     fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
-        nydus_format::erofs::validate_superblock(sb)
+        sb.validate()
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
     fn blob_infos_from(mmap: &[u8], sb_offset: usize) -> io::Result<Vec<RawBlobInfo>> {
@@ -378,17 +379,19 @@ impl ErofsReader {
             ));
         }
 
-        Ok(cast_ref::<ErofsDeviceSlot>(&mmap[slot_offset..]))
+        ErofsDeviceSlot::from_bytes(&mmap[slot_offset..])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
     /// Get a zero-copy reference to the on-disk superblock.
     pub fn superblock(&self) -> &ErofsSuperblock {
-        cast_ref::<ErofsSuperblock>(&self.mmap[self.sb_offset..])
+        ErofsSuperblock::from_bytes(&self.mmap[self.sb_offset..])
+            .expect("superblock bounds were checked when the image was opened")
     }
 
     /// The z_erofs compression configs (COMPR_CFGS records after the
     /// superblock), or `None` for images without compressed data.
-    pub fn z_compr_cfgs(&self) -> io::Result<Option<ZComprCfgs>> {
+    pub fn z_compr_cfgs(&self) -> io::Result<Option<ZErofsComprCfgs>> {
         let sb = self.superblock();
         let algs = sb.available_compr_algs();
         if algs == 0 {
@@ -396,9 +399,9 @@ impl ErofsReader {
         }
         let bytes = self.mmap_slice(
             EROFS_SUPER_OFFSET as usize + sb.size(),
-            ZComprCfgs::MAX_SIZE,
+            ZErofsComprCfgs::MAX_SIZE,
         )?;
-        let (cfgs, _) = ZComprCfgs::parse(algs, bytes)
+        let (cfgs, _) = ZErofsComprCfgs::from_bytes(bytes, algs)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         Ok(Some(cfgs))
     }
@@ -487,13 +490,10 @@ impl ErofsReader {
             Err(_) => return Vec::new(),
         };
 
-        for (name, value) in xattrs {
-            if is_nydus_prefetch_blobs_xattr(&name) {
-                return parse_prefetch_blobs_value(&value);
-            }
-        }
-
-        Vec::new()
+        xattrs
+            .iter()
+            .find(|entry| entry.is_nydus_prefetch_blobs())
+            .map_or_else(Vec::new, |entry| parse_prefetch_blobs_value(&entry.value))
     }
 
     pub(crate) fn mmap_slice(&self, offset: usize, len: usize) -> io::Result<&[u8]> {

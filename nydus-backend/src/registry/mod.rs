@@ -42,7 +42,7 @@ use url::Url;
 use crate::{BlobBackend, ReadContext, ReadKind};
 use nydus_config::{DragonflyConfig, RegistryConfig};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
-use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
+use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use self::http::HTTP;
 use self::rt::{block_on_worker, runtime};
@@ -965,7 +965,7 @@ impl Registry {
         dst: &mut [u8],
         context: ReadContext,
     ) -> RegistryResult<()> {
-        let hex = hex_string(blob_id);
+        let hex = hex::encode(blob_id);
         let end = offset + dst.len() as u64 - 1;
         let range = format!("bytes={offset}-{end}");
 
@@ -1029,7 +1029,7 @@ impl Registry {
     /// Resolve the total size of a blob via a `HEAD` request, following a single
     /// redirect to a signed CDN URL if necessary.
     fn fetch_blob_size(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> RegistryResult<u64> {
-        let hex = hex_string(blob_id);
+        let hex = hex::encode(blob_id);
         let url = self.blob_url(&hex)?;
         let response = self.authorized_request(
             Method::HEAD,
@@ -2324,7 +2324,7 @@ dragonfly:
         let origin = OriginStub::serve(b"unused".to_vec());
         let transport = Arc::new(ScriptedTransport::new(vec![Ok(body.clone())]));
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-        let hex = hex_string(&TEST_BLOB_ID);
+        let hex = hex::encode(TEST_BLOB_ID);
         registry.set_redirect_url(&hex, "http://cdn.example.com/signed".to_string());
 
         let mut dst = vec![0u8; body.len()];
@@ -2354,7 +2354,7 @@ dragonfly:
             Ok(body.clone()),
         ]));
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-        let hex = hex_string(&TEST_BLOB_ID);
+        let hex = hex::encode(TEST_BLOB_ID);
         registry.set_redirect_url(&hex, "http://cdn.example.com/expired".to_string());
 
         let mut dst = vec![0u8; body.len()];

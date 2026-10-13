@@ -2944,6 +2944,7 @@ dependencies = [
  "crc32c",
  "flate2",
  "fuser",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2959,6 +2960,7 @@ dependencies = [
  "nydus-format",
  "nydus-storage",
  "nydus-telemetry",
+ "nydus-test-utils",
  "sendfd",
  "serde",
  "serde_json",
@@ -2980,20 +2982,21 @@ name = "nydus-backend"
 version = "3.0.0-beta.2"
 dependencies = [
  "arc-swap",
- "blake3",
- "crc32c",
  "dragonfly-client-request",
  "futures",
+ "hex",
  "libc",
  "nydus-config",
  "nydus-format",
  "nydus-telemetry",
+ "nydus-test-utils",
  "reqwest 0.12.28",
  "reqwest-middleware",
  "reqwest-retry",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3021,6 +3024,7 @@ version = "3.0.0-beta.2"
 dependencies = [
  "blake3",
  "crc32c",
+ "hex",
  "libc",
  "lz4-sys",
  "lz4_flex",
@@ -3031,6 +3035,7 @@ dependencies = [
  "nydus-format",
  "nydus-storage",
  "nydus-telemetry",
+ "nydus-test-utils",
  "sha2 0.10.9",
  "tempfile",
  "tracing",
@@ -3055,10 +3060,12 @@ version = "3.0.0-beta.2"
 dependencies = [
  "blake3",
  "crc32c",
+ "hex",
  "libc",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "zerocopy",
  "zstd",
 ]
 
@@ -3067,6 +3074,7 @@ name = "nydus-storage"
 version = "3.0.0-beta.2"
 dependencies = [
  "crc32c",
+ "hex",
  "libc",
  "lz4_flex",
  "memmap2",
@@ -3074,8 +3082,10 @@ dependencies = [
  "nydus-config",
  "nydus-format",
  "nydus-telemetry",
+ "nydus-test-utils",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tracing",
  "xattr",
@@ -3095,6 +3105,19 @@ dependencies = [
  "tracing-appender",
  "tracing-panic",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nydus-test-utils"
+version = "3.0.0-beta.2"
+dependencies = [
+ "crc32c",
+ "hex",
+ "lz4_flex",
+ "nydus-format",
+ "sha2 0.10.9",
+ "tempfile",
+ "zstd",
 ]
 
 [[package]]
