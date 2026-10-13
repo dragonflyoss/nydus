@@ -1165,8 +1165,8 @@ mod tests {
     use super::*;
     use nydus_backend::Local;
     use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
-    use nydus_test_utils::blob::FullBlob;
-    use nydus_test_utils::metadata::{encode, padded_image, single_chunk};
+    use nydus_test_utils::blob::{uncompressed_data, FullBlob};
+    use nydus_test_utils::metadata::{from_chunk_groups, single_chunk_group};
     use sha2::{Digest, Sha256};
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
@@ -1199,8 +1199,13 @@ mod tests {
                 ]
             })
             .collect();
-        let (data, meta) = encode(BlobMetadataCompressor::Zstd, 16384, &groups, true);
-        let image = padded_image(&groups);
+        let (data, meta) = from_chunk_groups(
+            BlobMetadataCompressor::Zstd,
+            16384,
+            &groups,
+            Some(BlobMetadataDigester::Blake3),
+        );
+        let image = uncompressed_data(&groups);
         (data, meta, groups, image)
     }
 
@@ -1220,8 +1225,9 @@ mod tests {
         let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
-        let full_blob_id = FullBlob::minimal(&data, &meta)
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         super::super::set_fetch_size(0);
@@ -1269,8 +1275,9 @@ mod tests {
         let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
-        let full_blob_id = FullBlob::minimal(&data, &meta)
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
@@ -1347,8 +1354,9 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let full_blob_id = FullBlob::minimal(&data, &meta)
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         let cache_dir = tempdir().unwrap();
@@ -1373,8 +1381,9 @@ mod tests {
         let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
-        let full_blob_id = FullBlob::minimal(&data, &meta)
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
@@ -1421,8 +1430,9 @@ mod tests {
         let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
-        let full_blob_id = FullBlob::minimal(&data, &meta)
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
@@ -1552,9 +1562,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xceu8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1574,9 +1585,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x3du8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
@@ -1614,9 +1626,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x2eu8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
 
@@ -1653,9 +1666,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x5au8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1685,9 +1699,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x21u8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1708,9 +1723,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x77u8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1732,9 +1748,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x42u8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         let backend = CountingBackend::new(backend_dir.path());
@@ -1770,9 +1787,10 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let payload = vec![0xbdu8; 4096];
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
         let blob_metadata_path = backend_dir
             .path()
@@ -1823,8 +1841,9 @@ mod tests {
             vec![],
         )
         .unwrap();
-        let full_blob_id = FullBlob::minimal(&payload, &meta)
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
@@ -1843,8 +1862,10 @@ mod tests {
         let cache_dir = tempdir().unwrap();
         let payload = vec![0x3du8; 4096];
         let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
-        let meta = single_chunk(&payload);
-        let full_blob_id = FullBlob::minimal(&payload, &meta).save_in(backend_dir.path());
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();

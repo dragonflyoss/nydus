@@ -378,7 +378,7 @@ mod tests {
     use nydus_format::blob::BlobMetadata;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
     use nydus_test_utils::blob::FullBlob;
-    use nydus_test_utils::metadata::{redirect, single_chunk};
+    use nydus_test_utils::metadata::{single_chunk_group, single_chunk_group_redirect};
     use tempfile::tempdir;
 
     /// Wraps a local backend and fails the first `failures` data reads with
@@ -434,8 +434,9 @@ mod tests {
         payload: &[u8],
         meta: &BlobMetadata,
     ) -> BlobPrefetcher {
-        let full_blob_id = FullBlob::minimal(payload, meta)
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(payload)
+            .with_blob_metadata(meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir);
         let caches = Arc::new(
             BlobCaches::new([(0u16, full_blob_id)], backend, Some(cache_dir), None).unwrap(),
@@ -456,7 +457,7 @@ mod tests {
 
     fn test_payload() -> (Vec<u8>, BlobMetadata) {
         let payload = vec![0xabu8; 4096];
-        let meta = single_chunk(&payload);
+        let meta = single_chunk_group(&payload);
         (payload, meta)
     }
 
@@ -578,13 +579,15 @@ mod tests {
         [[u8; SHA256_DIGEST_SIZE]; 2],
     ) {
         let (payload, plain_meta) = test_payload();
-        let plain_id = FullBlob::minimal(&payload, &plain_meta)
-            .with_sidecar()
+        let plain_id = FullBlob::new(&payload)
+            .with_blob_metadata(&plain_meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir);
-        let redirect_meta = redirect(&payload, 1);
+        let redirect_meta = single_chunk_group_redirect(&payload, 1);
         assert!(redirect_meta.is_redirect());
-        let redirect_id = FullBlob::minimal(&payload, &redirect_meta)
-            .with_sidecar()
+        let redirect_id = FullBlob::new(&payload)
+            .with_blob_metadata(&redirect_meta)
+            .with_blob_metadata_file()
             .save_in(backend_dir);
         let backend = Arc::new(RecordingBackend {
             inner: Local::new(backend_dir.to_path_buf()),

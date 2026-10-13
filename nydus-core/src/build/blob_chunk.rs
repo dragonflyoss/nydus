@@ -1460,7 +1460,7 @@ impl<W: Write> BlobWriter<W> {
             .map(BlobMetadataChunkLength::new)
             .collect();
         let blob_metadata = if incremental {
-            BlobMetadata::new_incremental(
+            BlobMetadata::new_upper(
                 max_blocks_per_chunk_group,
                 blocks_per_chunk_group_index,
                 self.compressor,

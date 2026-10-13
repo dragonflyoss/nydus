@@ -113,9 +113,7 @@ mod tests {
 
     fn write_raw_device_blob(dir: &std::path::Path) -> (Vec<u8>, [u8; SHA256_DIGEST_SIZE]) {
         let payload: Vec<u8> = (0..8192u32).map(|index| (index % 251) as u8).collect();
-        let blob_id = FullBlob::new(&payload)
-            .with_minimal_bootstrap()
-            .save_in(dir);
+        let blob_id = FullBlob::new(&payload).save_in(dir);
         (payload, blob_id)
     }
 

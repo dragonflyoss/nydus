@@ -397,13 +397,35 @@ impl ErofsReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::erofs::{EROFS_FT_DIR, EROFS_FT_REG_FILE};
+    use nydus_format::erofs::{
+        ErofsInodeCompact, ErofsSuperblock, EROFS_FT_DIR, EROFS_FT_REG_FILE, EROFS_SUPER_OFFSET,
+    };
     use std::io::Write;
 
     fn directory_reader(data: &[u8]) -> ErofsReader {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let blocks = (2 * block_size + data.len()).div_ceil(block_size) as u64;
+        let superblock = ErofsSuperblock::new(0, 0, 0, 1, 0, blocks, 1, 0, 0, &[0u8; 16]).unwrap();
+        let root = ErofsInodeCompact::new(
+            EROFS_INODE_FLAT_PLAIN,
+            0o040755,
+            2,
+            data.len() as u32,
+            0,
+            2,
+            0,
+            0,
+            0,
+        );
+        let mut bootstrap = vec![0u8; 2 * block_size + data.len()];
+        let offset = EROFS_SUPER_OFFSET as usize;
+        bootstrap[offset..offset + superblock.as_bytes().len()]
+            .copy_from_slice(superblock.as_bytes());
+        bootstrap[block_size..block_size + root.as_bytes().len()].copy_from_slice(root.as_bytes());
+        bootstrap[2 * block_size..].copy_from_slice(data);
+
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&nydus_test_utils::erofs::directory_image(data))
-            .unwrap();
+        file.write_all(&bootstrap).unwrap();
         ErofsReader::open_metadata_only(file.path()).unwrap()
     }
 

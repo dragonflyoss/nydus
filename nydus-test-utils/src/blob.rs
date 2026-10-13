@@ -1,111 +1,137 @@
 //! Full blob files on disk, named by their SHA-256 the way a blob store
-//! names them.
+//! names them, and the uncompressed data their data region decodes to.
 
-use crate::erofs;
 use nydus_format::blob::{finish_full_blob, BlobMetadata};
+use nydus_format::erofs::{ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use sha2::{Digest, Sha256};
-use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 
-/// A full blob to write: `data`, then whatever regions the test asks for,
+/// The bootstrap region of a [`FullBlob`].
+#[derive(Clone, Copy, Debug)]
+enum Bootstrap<'a> {
+    /// A superblock-only image no test reads, present so the blob has the
+    /// ordinary layout.
+    SuperblockOnly,
+
+    /// No region, the ondemand layout.
+    None,
+
+    /// A real bootstrap the test rendered.
+    Bytes(&'a [u8]),
+}
+
+/// A full blob to save: `data`, then the regions the test asks for,
 /// assembled by the production [`finish_full_blob`].
 ///
-/// Without a bootstrap the blob has the ondemand layout, without metadata
-/// the raw device layout. [`Self::minimal`] is the common store entry: a
-/// bootstrap no test reads plus the metadata describing `data`.
+/// A new blob carries a superblock-only bootstrap and no blob meta, which
+/// is the raw device layout. [`Self::with_blob_metadata`] makes it an
+/// ordinary full blob, [`Self::without_bootstrap`] an ondemand one.
 #[derive(Clone, Debug)]
 pub struct FullBlob<'a> {
     data: &'a [u8],
-    bootstrap: Option<Cow<'a, [u8]>>,
-    metadata: Option<&'a BlobMetadata>,
-    sidecar: bool,
+    bootstrap: Bootstrap<'a>,
+    blob_metadata: Option<&'a BlobMetadata>,
+    save_blob_metadata_file: bool,
 }
 
 /// Configures the regions and saves the blob.
 impl<'a> FullBlob<'a> {
-    /// A blob of `data` with no other region yet.
+    /// Creates a blob of `data` with a superblock-only bootstrap.
     pub fn new(data: &'a [u8]) -> Self {
         Self {
             data,
-            bootstrap: None,
-            metadata: None,
-            sidecar: false,
+            bootstrap: Bootstrap::SuperblockOnly,
+            blob_metadata: None,
+            save_blob_metadata_file: false,
         }
     }
 
-    /// A blob of `data` described by `metadata`, with a superblock-only
-    /// bootstrap embedded.
-    pub fn minimal(data: &'a [u8], metadata: &'a BlobMetadata) -> Self {
-        Self::new(data)
-            .with_minimal_bootstrap()
-            .with_metadata(metadata)
-    }
-
-    /// Embeds `bootstrap`.
+    /// Embeds `bootstrap` instead of the superblock-only one.
     pub fn with_bootstrap(mut self, bootstrap: &'a [u8]) -> Self {
-        self.bootstrap = Some(Cow::Borrowed(bootstrap));
+        self.bootstrap = Bootstrap::Bytes(bootstrap);
         self
     }
 
-    /// Embeds a two-block bootstrap holding nothing but a superblock.
-    pub fn with_minimal_bootstrap(mut self) -> Self {
-        self.bootstrap = Some(Cow::Owned(erofs::superblock_image(2)));
+    /// Embeds no bootstrap, the ondemand layout.
+    pub fn without_bootstrap(mut self) -> Self {
+        self.bootstrap = Bootstrap::None;
         self
     }
 
-    /// Embeds `metadata`.
-    pub fn with_metadata(mut self, metadata: &'a BlobMetadata) -> Self {
-        self.metadata = Some(metadata);
+    /// Embeds `blob_metadata`.
+    pub fn with_blob_metadata(mut self, blob_metadata: &'a BlobMetadata) -> Self {
+        self.blob_metadata = Some(blob_metadata);
         self
     }
 
-    /// Also saves the metadata as the `.blob.meta` sidecar next to the blob.
-    pub fn with_sidecar(mut self) -> Self {
-        self.sidecar = true;
+    /// Also saves the blob meta to the `<blob>.blob.meta` file next to the
+    /// blob, the one [`BlobMetadata::save`] writes.
+    pub fn with_blob_metadata_file(mut self) -> Self {
+        self.save_blob_metadata_file = true;
         self
     }
 
-    /// The blob's bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Saves the blob into `dir` under its hex SHA-256 and returns that
+    /// digest, the blob id. The blob meta file goes next to it when asked.
+    pub fn save_in(&self, dir: &Path) -> [u8; SHA256_DIGEST_SIZE] {
+        let bootstrap = match self.bootstrap {
+            Bootstrap::SuperblockOnly => Some(superblock_only()),
+            Bootstrap::None => None,
+            Bootstrap::Bytes(bytes) => Some(bytes.to_vec()),
+        };
         let mut blob = self.data.to_vec();
         finish_full_blob(
             &mut blob,
             self.data.len() as u64,
-            self.bootstrap.as_deref(),
-            self.metadata,
+            bootstrap.as_deref(),
+            self.blob_metadata,
         )
         .unwrap();
-        blob
-    }
 
-    /// Saves the blob into `dir` under its hex SHA-256 and returns that
-    /// digest, the blob id.
-    pub fn save_in(&self, dir: &Path) -> [u8; SHA256_DIGEST_SIZE] {
-        let blob = self.to_bytes();
         let blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&blob).into();
-        self.save_bytes(&blob, &dir.join(hex::encode(blob_id)));
+        let path = dir.join(hex::encode(blob_id));
+        fs::write(&path, &blob).unwrap();
+        if self.save_blob_metadata_file {
+            let blob_metadata = self
+                .blob_metadata
+                .expect("a blob meta file needs blob meta");
+            let mut blob_metadata_path = path.into_os_string();
+            blob_metadata_path.push(BlobMetadata::SUFFIX);
+            blob_metadata.save(Path::new(&blob_metadata_path)).unwrap();
+        }
         blob_id
     }
+}
 
-    /// Saves the blob to `path` and returns its SHA-256, the blob id.
-    pub fn save(&self, path: &Path) -> [u8; SHA256_DIGEST_SIZE] {
-        let blob = self.to_bytes();
-        self.save_bytes(&blob, path);
-        Sha256::digest(&blob).into()
+/// The uncompressed data the data region of `chunk_groups` decodes to,
+/// every chunk padded to its own blocks and the groups back to back: what a
+/// fully filled cache file holds.
+pub fn uncompressed_data(chunk_groups: &[Vec<Vec<u8>>]) -> Vec<u8> {
+    let block_size = EROFS_BLOCK_SIZE as usize;
+    let block_count: usize = chunk_groups
+        .iter()
+        .flatten()
+        .map(|chunk| chunk.len().div_ceil(block_size))
+        .sum();
+    let mut data = vec![0u8; block_count * block_size];
+    let mut offset = 0;
+    for chunk in chunk_groups.iter().flatten() {
+        data[offset..offset + chunk.len()].copy_from_slice(chunk);
+        offset += chunk.len().div_ceil(block_size) * block_size;
     }
+    data
+}
 
-    /// Saves `blob` to `path`, and the sidecar next to it when asked.
-    fn save_bytes(&self, blob: &[u8], path: &Path) {
-        fs::write(path, blob).unwrap();
-        if self.sidecar {
-            let metadata = self.metadata.expect("a sidecar needs metadata");
-            let mut sidecar = path.as_os_str().to_owned();
-            sidecar.push(BlobMetadata::SUFFIX);
-            metadata.save(Path::new(&sidecar)).unwrap();
-        }
-    }
+/// Two blocks holding nothing but a valid superblock, the bootstrap a full
+/// blob embeds when no test reads it.
+fn superblock_only() -> Vec<u8> {
+    let superblock = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]).unwrap();
+    let mut bootstrap = vec![0u8; 2 * EROFS_BLOCK_SIZE as usize];
+    let offset = EROFS_SUPER_OFFSET as usize;
+    bootstrap[offset..offset + superblock.as_bytes().len()].copy_from_slice(superblock.as_bytes());
+    bootstrap
 }
 
 #[cfg(test)]
@@ -116,21 +142,20 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn save_in_names_the_blob_by_its_digest_and_saves_the_sidecar_on_request() {
+    fn save_in_names_the_blob_by_its_digest_and_saves_the_blob_meta_file_on_request() {
         let payload = vec![0xab; 4096];
-        let metadata = metadata::single_chunk(&payload);
+        let blob_metadata = metadata::single_chunk_group(&payload);
 
         let test_cases = vec![(false, false), (true, false), (true, true)];
 
-        for (minimal, sidecar) in test_cases {
+        for (bootstrap, blob_metadata_file) in test_cases {
             let dir = tempdir().unwrap();
-            let mut blob = if minimal {
-                FullBlob::minimal(&payload, &metadata)
-            } else {
-                FullBlob::new(&payload).with_metadata(&metadata)
-            };
-            if sidecar {
-                blob = blob.with_sidecar();
+            let mut blob = FullBlob::new(&payload).with_blob_metadata(&blob_metadata);
+            if !bootstrap {
+                blob = blob.without_bootstrap();
+            }
+            if blob_metadata_file {
+                blob = blob.with_blob_metadata_file();
             }
             let blob_id = blob.save_in(dir.path());
             let path = dir.path().join(hex::encode(blob_id));
@@ -141,8 +166,8 @@ mod tests {
             assert_eq!(digest, blob_id);
             assert_eq!(&bytes[..4096], &payload[..]);
             assert_eq!(footer.compressed_data_size(), 4096);
-            assert_eq!(footer.bootstrap_size() > 0, minimal);
-            assert_eq!(footer.blob_metadata_size(), metadata.size());
+            assert_eq!(footer.bootstrap_size() > 0, bootstrap);
+            assert_eq!(footer.blob_metadata_size(), blob_metadata.size());
             assert_eq!(
                 BlobMetadata::from_path(Path::new(&format!(
                     "{}{}",
@@ -150,30 +175,37 @@ mod tests {
                     BlobMetadata::SUFFIX
                 )))
                 .is_ok(),
-                sidecar
+                blob_metadata_file
             );
         }
     }
 
     #[test]
-    fn save_lays_out_raw_device_and_ondemand_blobs() {
+    fn save_in_lays_out_raw_device_and_ondemand_blobs() {
         let payload = vec![0xcd; 100];
-        let metadata = metadata::single_chunk(&payload);
-        let bootstrap = erofs::superblock_image(1);
+        let blob_metadata = metadata::single_chunk_group(&payload);
+        let bootstrap = superblock_only();
         let dir = tempdir().unwrap();
 
         let test_cases: Vec<(FullBlob<'_>, bool, u64)> = vec![
+            (FullBlob::new(&payload), true, 4096),
             (
                 FullBlob::new(&payload).with_bootstrap(&bootstrap),
                 true,
                 4096,
             ),
-            (FullBlob::new(&payload).with_metadata(&metadata), false, 0),
+            (
+                FullBlob::new(&payload)
+                    .without_bootstrap()
+                    .with_blob_metadata(&blob_metadata),
+                false,
+                0,
+            ),
         ];
 
         for (blob, raw_device, bootstrap_size) in test_cases {
-            let path = dir.path().join("blob");
-            let blob_id = blob.save(&path);
+            let blob_id = blob.save_in(dir.path());
+            let path = dir.path().join(hex::encode(blob_id));
             let footer = BlobFooter::from_blob_path(&path).unwrap();
 
             let digest: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(fs::read(&path).unwrap()).into();
@@ -182,5 +214,20 @@ mod tests {
             assert_eq!(footer.bootstrap_size(), bootstrap_size);
             assert_eq!(footer.compressed_data_size(), 100);
         }
+    }
+
+    #[test]
+    fn uncompressed_data_pads_every_chunk_to_its_own_blocks() {
+        let chunk_groups = vec![
+            vec![vec![0x11; 4096], vec![0x22; 100]],
+            vec![vec![0x33; 4096 - 1]],
+        ];
+        let data = uncompressed_data(&chunk_groups);
+        assert_eq!(data.len(), 3 * 4096);
+        assert_eq!(&data[..4096], &[0x11; 4096]);
+        assert_eq!(&data[4096..4096 + 100], &[0x22; 100]);
+        assert!(data[4096 + 100..8192].iter().all(|byte| *byte == 0));
+        assert_eq!(&data[8192..8192 + 4095], &[0x33; 4095]);
+        assert_eq!(data[12287], 0);
     }
 }

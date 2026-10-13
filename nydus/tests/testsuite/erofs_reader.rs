@@ -1174,7 +1174,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let data = fs::read(&data_path).expect("read data blob");
     let full_blob_digest = FullBlob::new(&data)
         .with_bootstrap(&embedded_bootstrap)
-        .with_metadata(&blob_metadata)
+        .with_blob_metadata(&blob_metadata)
         .save_in(dir.path());
 
     let standalone_device_slots =

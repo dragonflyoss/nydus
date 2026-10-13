@@ -293,7 +293,7 @@ mod tests {
     use super::*;
     use crate::ReadKind;
     use nydus_test_utils::blob::FullBlob;
-    use nydus_test_utils::metadata::single_chunk;
+    use nydus_test_utils::metadata::single_chunk_group;
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
@@ -301,8 +301,9 @@ mod tests {
     fn local_backend_reads_full_blob_file_and_sidecar_meta() {
         let dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let full_blob_id = FullBlob::minimal(&payload, &single_chunk(&payload))
-            .with_sidecar()
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&single_chunk_group(&payload))
+            .with_blob_metadata_file()
             .save_in(dir.path());
 
         let backend = Local::new(dir.path().to_path_buf());
@@ -326,7 +327,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
-        let full_blob_id = FullBlob::minimal(&payload, &single_chunk(&payload)).save_in(dir.path());
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&single_chunk_group(&payload))
+            .save_in(dir.path());
         let backend = Local::new(dir.path().to_path_buf());
 
         let blob_metadata = backend.blob_metadata(&full_blob_id).unwrap();
