@@ -261,9 +261,6 @@ mod tests {
         }
     }
 
-    /// A private shared runtime with the process lifetime [`SharedRuntime`]
-    /// requires, so a test never touches the one every test in the binary
-    /// shares. Thread names are truncated to 15 bytes in `/proc`.
     fn leaked(thread_name: &'static str) -> &'static SharedRuntime {
         Box::leak(Box::new(SharedRuntime::new(thread_name)))
     }
@@ -313,8 +310,6 @@ mod tests {
     fn a_losing_configure_is_not_probed() {
         let shared = SharedRuntime::new("nb-rt-losing");
         shared.configure(with_workers(3)).unwrap();
-        // Not a namespace, so a probe would fail with EINVAL; the installed
-        // configuration must be reported instead.
         let netns = Netns::new(tempfile::tempfile().unwrap().into()).unwrap();
         let err = shared
             .configure(RuntimeOptions {
@@ -335,8 +330,6 @@ mod tests {
             .count()
     }
 
-    /// Thread names are set by the new thread itself and threads exit
-    /// asynchronously, so wait for the count to settle.
     #[cfg(target_os = "linux")]
     fn assert_threads_named(name: &str, expected: usize, what: &str) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -402,11 +395,7 @@ mod tests {
             })
             .unwrap();
 
-        // block_on alone polls on this thread, which never entered the
-        // namespace: exactly what a request must not do.
         assert_eq!(shared.runtime().block_on(async { current_netns() }), caller);
-        // block_on_worker moves the poll onto a runtime thread, and the
-        // blocking pool (DNS) enters the namespace too.
         assert_eq!(
             shared.block_on_worker(async { current_netns() }).unwrap(),
             configured
@@ -419,7 +408,6 @@ mod tests {
                 .unwrap(),
             configured
         );
-        // The caller is still where it started.
         assert_eq!(current_netns(), caller);
     }
 }

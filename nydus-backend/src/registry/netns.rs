@@ -104,20 +104,15 @@ impl Netns {
 
 #[cfg(all(test, target_os = "linux"))]
 impl Netns {
-    /// The calling thread's network namespace.
     pub(super) fn current() -> io::Result<Self> {
         Self::new(File::open("/proc/thread-self/ns/net")?.into())
     }
 
-    /// A network namespace of our own, distinguishable from the one the test
-    /// process runs in. Needs the same privilege as `setns`, so a
-    /// `PermissionDenied` here means the test cannot run in this environment.
     pub(super) fn unshared() -> io::Result<Self> {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     // SAFETY: unshare only affects this scratch thread, which
-                    // exits right after; the descriptor keeps the namespace.
                     if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
                         return Err(io::Error::last_os_error());
                     }
