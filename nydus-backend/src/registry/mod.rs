@@ -38,6 +38,7 @@ mod auth;
 #[cfg(feature = "backend-dragonfly")]
 mod dragonfly;
 mod http;
+mod netns;
 mod policy;
 mod redirect;
 mod response;
