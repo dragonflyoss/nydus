@@ -20,9 +20,8 @@ use dragonfly_client_request::{Body, Builder, GetRequest, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
 
-use super::{
-    block_on_worker, DragonflyError, DragonflyFailure, DragonflyTransport, Response, RetryableCause,
-};
+use super::rt::RUNTIME;
+use super::{DragonflyError, DragonflyFailure, DragonflyTransport, Response, RetryableCause};
 use crate::ReadKind;
 
 /// The fallback request timeout when the configured timeout is `0` (disabled):
@@ -67,14 +66,17 @@ impl Dragonfly {
     /// module owns retry counts, so they stay exact and observable.
     pub(crate) fn new(config: &DragonflyConfig, timeout: Duration) -> std::io::Result<Dragonfly> {
         let endpoint = config.scheduler_endpoint.clone();
-        let client = block_on_worker(async move {
-            Builder::default()
-                .scheduler_endpoint(endpoint)
-                .max_retries(0)
-                .build()
-                .await
-        })?
-        .map_err(|err| std::io::Error::other(format!("failed to build dragonfly client: {err}")))?;
+        let client = RUNTIME
+            .block_on_worker(async move {
+                Builder::default()
+                    .scheduler_endpoint(endpoint)
+                    .max_retries(0)
+                    .build()
+                    .await
+            })?
+            .map_err(|err| {
+                std::io::Error::other(format!("failed to build dragonfly client: {err}"))
+            })?;
 
         let timeout = if timeout.is_zero() {
             DEFAULT_TIMEOUT
@@ -136,7 +138,7 @@ impl DragonflyTransport for Dragonfly {
 
         let client = self.client.clone();
         let response: Result<dragonfly_client_request::GetResponse<Body>, Error> =
-            match block_on_worker(async move { client.get(&request).await }) {
+            match RUNTIME.block_on_worker(async move { client.get(&request).await }) {
                 Ok(response) => response,
                 // The runtime task itself failed, not the SDK: a transport
                 // failure like any other for the policy.

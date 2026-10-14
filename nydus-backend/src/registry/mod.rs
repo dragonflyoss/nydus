@@ -46,7 +46,8 @@ use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use self::http::HTTP;
-use self::rt::{block_on_worker, runtime};
+pub use self::netns::{Netns, NetnsId};
+use self::rt::RUNTIME;
 pub use self::rt::{
     configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
 };
@@ -391,7 +392,7 @@ struct Response {
 impl Response {
     /// Read the body into `buf`, returning the number of bytes filled.
     fn read_into(mut self, buf: &mut [u8]) -> io::Result<usize> {
-        runtime().block_on(async move {
+        RUNTIME.get().block_on(async move {
             let mut filled = 0usize;
             while filled < buf.len() {
                 let n = self.reader.read(&mut buf[filled..]).await?;
@@ -406,7 +407,7 @@ impl Response {
 
     /// Read the body as a UTF-8 string.
     fn text(mut self) -> io::Result<String> {
-        runtime().block_on(async move {
+        RUNTIME.get().block_on(async move {
             let mut body = String::new();
             self.reader.read_to_string(&mut body).await?;
             Ok(body)
@@ -423,7 +424,7 @@ impl Response {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
-        let body = runtime().block_on(async {
+        let body = RUNTIME.get().block_on(async {
             let mut body = Vec::with_capacity(capacity);
             self.reader.read_to_end(&mut body).await?;
             io::Result::Ok(body)
@@ -819,7 +820,8 @@ impl Registry {
             .client()
             .request(method.clone(), url)
             .headers(headers.clone());
-        let result = block_on_worker(async move { request.send().await.map_err(io::Error::other) })
+        let result = RUNTIME
+            .block_on_worker(async move { request.send().await.map_err(io::Error::other) })
             .and_then(|result| result);
         self.finish_http_request(method, url, headers, context, start, result)
     }
@@ -839,7 +841,8 @@ impl Registry {
             .raw_client()
             .request(method.clone(), url)
             .headers(headers.clone());
-        let result = block_on_worker(async move { request.send().await.map_err(io::Error::other) })
+        let result = RUNTIME
+            .block_on_worker(async move { request.send().await.map_err(io::Error::other) })
             .and_then(|result| result);
         self.finish_http_request(method, url, headers, context, start, result)
     }

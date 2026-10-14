@@ -34,7 +34,8 @@ pub(crate) use registry::Registry;
 /// [`configure_runtime`] before constructing any registry backend.
 #[cfg(feature = "backend-registry")]
 pub use registry::{
-    configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
+    configure_runtime, Netns, NetnsId, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS,
+    DEFAULT_WORKER_THREADS,
 };
 
 /// What kind of backend read this is, shared with the metrics layer. Policy
