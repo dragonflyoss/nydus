@@ -18,7 +18,8 @@
 //! inline in the request future, so a request handed straight to `block_on`
 //! would still create its socket in the caller's namespace. Requests
 //! therefore go through [`block_on_worker`], which spawns the future onto a
-//! runtime thread and only waits on the caller.
+//! runtime thread and only waits on the caller. The namespace syscalls
+//! themselves live in [`netns`](super::netns).
 
 use std::future::Future;
 use std::io;
@@ -29,6 +30,8 @@ use std::time::Duration;
 
 use tokio::runtime::{Builder, Runtime};
 use tracing::{error, info};
+
+use super::netns;
 
 /// Async worker threads when [`configure_runtime`] is not called or asks for
 /// `0`. The workers only drive socket I/O for the connection pool; the
@@ -78,7 +81,7 @@ impl RuntimeOptions {
     /// `(st_dev, st_ino)` of the namespace inode, the identity `setns`
     /// compares by; `None` when no namespace is configured.
     fn netns_identity(&self) -> io::Result<Option<(u64, u64)>> {
-        self.netns.as_ref().map(inode_identity).transpose()
+        self.netns.as_ref().map(netns::identity).transpose()
     }
 
     fn same_as(&self, other: &RuntimeOptions) -> bool {
@@ -118,7 +121,7 @@ impl ConfigCell {
         // Only an option that can still win is probed, so a repeated call
         // keeps succeeding after the caller dropped the privilege setns needs.
         if let Some(netns) = &options.netns {
-            probe_netns(netns)?;
+            netns::probe(netns)?;
         }
         match self.options.set(options) {
             Ok(()) => Ok(()),
@@ -250,7 +253,7 @@ fn build_runtime(options: &'static RuntimeOptions, thread_name: &str) -> io::Res
     if let Some(netns) = &options.netns {
         let fd = netns.as_raw_fd();
         builder.on_thread_start(move || {
-            if let Err(err) = enter_netns(fd) {
+            if let Err(err) = netns::enter(fd) {
                 error!("nydus-backend runtime thread cannot enter the configured netns: {err}");
                 // configure_runtime() probed this exact descriptor, so this is
                 // unreachable in practice; a thread left in the wrong namespace
@@ -261,58 +264,6 @@ fn build_runtime(options: &'static RuntimeOptions, thread_name: &str) -> io::Res
         });
     }
     builder.build()
-}
-
-/// Verify that `netns` can be entered, on a scratch thread whose namespace
-/// change dies with it.
-fn probe_netns(netns: &OwnedFd) -> io::Result<()> {
-    let fd = netns.as_raw_fd();
-    std::thread::scope(|scope| {
-        scope
-            .spawn(move || enter_netns(fd))
-            .join()
-            .map_err(|_| io::Error::other("netns probe thread panicked"))?
-    })
-    .map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!("cannot enter the configured netns for the backend runtime: {err}"),
-        )
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn enter_netns(fd: std::os::fd::RawFd) -> io::Result<()> {
-    // SAFETY: setns only takes the descriptor and a flag; the descriptor is
-    // owned by the process-wide RuntimeOptions and stays open for the life of
-    // the process, so it cannot have been reused for anything else.
-    let rc = unsafe { libc::setns(fd, libc::CLONE_NEWNET) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn enter_netns(_fd: std::os::fd::RawFd) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "network namespaces are only supported on linux",
-    ))
-}
-
-fn inode_identity(fd: &OwnedFd) -> io::Result<(u64, u64)> {
-    // SAFETY: fstat writes only into the zeroed stat buffer we hand it and the
-    // descriptor is owned (open) for the duration of the call.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstat(fd.as_raw_fd(), &mut st) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // Field widths differ across targets; widen them uniformly.
-    #[allow(clippy::unnecessary_cast)]
-    Ok((st.st_dev as u64, st.st_ino as u64))
 }
 
 #[cfg(test)]
@@ -429,42 +380,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn netns_probe_rejects_a_non_namespace_descriptor() {
-        let file = tempfile::tempfile().unwrap();
-        let err = probe_netns(&OwnedFd::from(file)).unwrap_err();
-        assert!(err.to_string().contains("netns"), "{err}");
-    }
-
-    #[cfg(target_os = "linux")]
-    fn current_netns() -> (u64, u64) {
-        let ns = std::fs::File::open("/proc/thread-self/ns/net").unwrap();
-        inode_identity(&OwnedFd::from(ns)).unwrap()
-    }
-
-    /// A network namespace of our own, distinguishable from the one the test
-    /// process runs in. Needs the same privilege as `setns`, so a
-    /// `PermissionDenied` here means the test cannot run in this environment.
-    #[cfg(target_os = "linux")]
-    fn fresh_netns() -> io::Result<OwnedFd> {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    // SAFETY: unshare only affects this scratch thread, which
-                    // exits right after; the descriptor keeps the namespace.
-                    if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    std::fs::File::open("/proc/thread-self/ns/net").map(OwnedFd::from)
-                })
-                .join()
-                .unwrap()
-        })
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn only_worker_polls_run_in_the_configured_netns() {
-        let netns = match fresh_netns() {
+        let netns = match netns::fresh() {
             Ok(netns) => netns,
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
                 eprintln!("skipped: cannot create a netns ({err})");
@@ -472,8 +389,8 @@ mod tests {
             }
             Err(err) => panic!("unshare(CLONE_NEWNET): {err}"),
         };
-        let configured = inode_identity(&netns).unwrap();
-        let caller = current_netns();
+        let configured = netns::identity(&netns).unwrap();
+        let caller = netns::current();
         assert_ne!(caller, configured);
 
         // Leaked on purpose: the hook borrows the descriptor for the runtime's
@@ -483,26 +400,26 @@ mod tests {
             max_blocking_threads: 1,
             netns: Some(netns),
         }));
-        probe_netns(options.netns.as_ref().unwrap()).unwrap();
+        netns::probe(options.netns.as_ref().unwrap()).unwrap();
         let runtime = build_runtime(options, "nb-rt-netns").unwrap();
 
         // block_on alone polls on this thread, which never entered the
         // namespace: exactly what a request must not do.
-        assert_eq!(runtime.block_on(async { current_netns() }), caller);
+        assert_eq!(runtime.block_on(async { netns::current() }), caller);
         // block_on_worker moves the poll onto a runtime thread, and the
         // blocking pool (DNS) enters the namespace too.
         assert_eq!(
-            block_on_worker_of(&runtime, async { current_netns() }).unwrap(),
+            block_on_worker_of(&runtime, async { netns::current() }).unwrap(),
             configured
         );
         assert_eq!(
             block_on_worker_of(&runtime, async {
-                tokio::task::spawn_blocking(current_netns).await.unwrap()
+                tokio::task::spawn_blocking(netns::current).await.unwrap()
             })
             .unwrap(),
             configured
         );
         // The caller is still where it started.
-        assert_eq!(current_netns(), caller);
+        assert_eq!(netns::current(), caller);
     }
 }

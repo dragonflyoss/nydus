@@ -19,6 +19,7 @@ mod dns;
 #[cfg(feature = "backend-dragonfly-proxy")]
 mod dragonfly;
 mod http;
+mod netns;
 mod rt;
 
 use std::collections::HashMap;
