@@ -61,7 +61,7 @@ pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::rt::runtime;
+    use crate::registry::rt::RUNTIME;
     use crate::Protocol;
     use reqwest::header::HeaderMap;
     use std::io;
@@ -91,7 +91,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    runtime().block_on(classify(response(status))),
+                    RUNTIME.get().block_on(classify(response(status))),
                     Err(RegistryError::UnexpectedStatus(got, _)) if got == status
                 ),
                 "status={status}"
@@ -107,7 +107,8 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY,
         ] {
             assert_eq!(
-                runtime()
+                RUNTIME
+                    .get()
                     .block_on(classify(response(status)))
                     .unwrap()
                     .status,
@@ -129,7 +130,7 @@ mod tests {
             ] {
                 assert!(
                     matches!(
-                        runtime().block_on(decide(kind, Ok(response(status)))),
+                        RUNTIME.get().block_on(decide(kind, Ok(response(status)))),
                         Action::Serve(r) if r.status == status
                     ),
                     "kind={kind:?} status={status}"
@@ -149,11 +150,15 @@ mod tests {
         ];
         for failure in failures {
             assert!(matches!(
-                runtime().block_on(decide(ReadKind::Prefetch, failure())),
+                RUNTIME
+                    .get()
+                    .block_on(decide(ReadKind::Prefetch, failure())),
                 Action::Defer(RegistryError::PrefetchDeferred(_))
             ));
             assert!(matches!(
-                runtime().block_on(decide(ReadKind::OnDemand, failure())),
+                RUNTIME
+                    .get()
+                    .block_on(decide(ReadKind::OnDemand, failure())),
                 Action::Fallback(_)
             ));
         }

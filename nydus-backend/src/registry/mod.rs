@@ -68,10 +68,11 @@ use self::auth::Auth;
 #[cfg(feature = "backend-dragonfly")]
 use self::dragonfly::Dragonfly;
 use self::http::{Http, RateLimit};
+pub use self::netns::{Netns, NetnsId};
 use self::policy::Action;
 use self::redirect::RedirectCache;
 use self::response::{fill_exact, status_error, Response};
-use self::rt::block_on_worker;
+use self::rt::RUNTIME;
 pub use self::rt::{
     configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
 };
@@ -561,9 +562,8 @@ impl BlobBackend for Registry {
     ) -> io::Result<BlobMetadata> {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
-        Ok(block_on_worker(async move {
-            inner.get_blob_metadata(&blob_id, kind).await
-        })??)
+        Ok(RUNTIME
+            .block_on_worker(async move { inner.get_blob_metadata(&blob_id, kind).await })??)
     }
 
     /// Reads are serialized until the first one succeeds, so a cold-start
@@ -585,12 +585,13 @@ impl BlobBackend for Registry {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
         let len = dst.len();
-        let result = block_on_worker(async move {
-            let mut buf = vec![0u8; len];
-            let protocol = inner.get_blob(&blob_id, offset, &mut buf, kind).await?;
-            Ok::<_, RegistryError>((buf, protocol))
-        })
-        .and_then(|result| Ok(result?));
+        let result = RUNTIME
+            .block_on_worker(async move {
+                let mut buf = vec![0u8; len];
+                let protocol = inner.get_blob(&blob_id, offset, &mut buf, kind).await?;
+                Ok::<_, RegistryError>((buf, protocol))
+            })
+            .and_then(|result| Ok(result?));
 
         match result {
             Ok((buf, protocol)) => {
@@ -882,7 +883,9 @@ mod tests {
     /// Read the test blob from offset zero into `dst`, keeping the registry
     /// error and the side that served it.
     fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> RegistryResult<Protocol> {
-        rt::runtime().block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
+        RUNTIME
+            .get()
+            .block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
     }
 
     #[test]

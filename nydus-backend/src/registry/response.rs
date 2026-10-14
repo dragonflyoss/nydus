@@ -135,7 +135,7 @@ fn format_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::rt::runtime;
+    use crate::registry::rt::RUNTIME;
 
     fn response(status: StatusCode, body: &[u8]) -> Response {
         Response {
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn fill_exact_rejects_a_short_body() {
-        runtime().block_on(async {
+        RUNTIME.get().block_on(async {
             let mut dst = [0u8; 4];
             let protocol = fill_exact(response(StatusCode::OK, b"abcd"), &mut dst)
                 .await
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn status_error_carries_the_status_and_body() {
-        runtime().block_on(async {
+        RUNTIME.get().block_on(async {
             let err = status_error(response(StatusCode::NOT_FOUND, b"no such blob")).await;
             assert!(matches!(
                 err,

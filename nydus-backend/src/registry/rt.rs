@@ -17,21 +17,19 @@
 //! its future on the *calling* thread, and hyper opens the TCP connection
 //! inline in the request future, so a request handed straight to `block_on`
 //! would still create its socket in the caller's namespace. Requests
-//! therefore go through [`block_on_worker`], which spawns the future onto a
-//! runtime thread and only waits on the caller. The namespace syscalls
-//! themselves live in [`netns`](super::netns).
+//! therefore go through [`SharedRuntime::block_on_worker`], which spawns the
+//! future onto a runtime thread and only waits on the caller.
 
+use std::fmt;
 use std::future::Future;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::runtime::{Builder, Runtime};
 use tracing::{error, info};
 
-use super::netns;
+use super::netns::Netns;
 
 /// Async worker threads when [`configure_runtime`] is not called or asks for
 /// `0`. The workers only drive socket I/O for the connection pool; the
@@ -45,6 +43,7 @@ pub const DEFAULT_MAX_BLOCKING_THREADS: usize = 8;
 /// Idle blocking threads are released after this long.
 const BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
 
+/// The name of the shared runtime's threads.
 const THREAD_NAME: &str = "nydus-backend";
 
 /// How the shared backend runtime is built.
@@ -53,17 +52,20 @@ pub struct RuntimeOptions {
     /// Async worker threads, spawned when the runtime is first used and kept
     /// for the life of the process. `0` selects [`DEFAULT_WORKER_THREADS`].
     pub worker_threads: usize,
+
     /// Upper bound on the blocking pool. `0` selects
     /// [`DEFAULT_MAX_BLOCKING_THREADS`].
     pub max_blocking_threads: usize,
+
     /// Network namespace every runtime thread enters before it does any work,
     /// so sockets and DNS queries never depend on the caller's namespace.
     /// `None` keeps tokio's behaviour: threads inherit the namespace of the
     /// thread that first uses the runtime.
-    pub netns: Option<OwnedFd>,
+    pub netns: Option<Netns>,
 }
 
 impl RuntimeOptions {
+    /// The worker thread count with the default applied.
     fn worker_threads(&self) -> usize {
         match self.worker_threads {
             0 => DEFAULT_WORKER_THREADS,
@@ -71,6 +73,7 @@ impl RuntimeOptions {
         }
     }
 
+    /// The blocking thread bound with the default applied.
     fn max_blocking_threads(&self) -> usize {
         match self.max_blocking_threads {
             0 => DEFAULT_MAX_BLOCKING_THREADS,
@@ -78,50 +81,86 @@ impl RuntimeOptions {
         }
     }
 
-    /// `(st_dev, st_ino)` of the namespace inode, the identity `setns`
-    /// compares by; `None` when no namespace is configured.
-    fn netns_identity(&self) -> io::Result<Option<(u64, u64)>> {
-        self.netns.as_ref().map(netns::identity).transpose()
-    }
-
-    fn same_as(&self, other: &RuntimeOptions) -> bool {
+    /// Whether `other` would build the same runtime, defaults applied and
+    /// namespaces compared by identity.
+    fn same_as(&self, other: &Self) -> bool {
         self.worker_threads() == other.worker_threads()
             && self.max_blocking_threads() == other.max_blocking_threads()
-            && match (self.netns_identity(), other.netns_identity()) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => false,
-            }
+            && self.netns == other.netns
+    }
+
+    /// Build a runtime whose threads are named `thread_name`. The options
+    /// are borrowed for the whole process because the thread start hook keeps
+    /// entering the namespace for as long as the runtime spawns threads.
+    fn build(&'static self, thread_name: &str) -> io::Result<Runtime> {
+        let mut builder = Builder::new_multi_thread();
+        builder
+            .thread_name(thread_name)
+            .worker_threads(self.worker_threads())
+            .max_blocking_threads(self.max_blocking_threads())
+            .thread_keep_alive(BLOCKING_KEEP_ALIVE)
+            .enable_all();
+        if let Some(netns) = &self.netns {
+            builder.on_thread_start(move || {
+                if let Err(err) = netns.enter() {
+                    error!("nydus-backend runtime thread cannot enter the configured netns: {err}");
+                    // configure_runtime() probed this exact descriptor, so this
+                    // is unreachable in practice; a thread left in the wrong
+                    // namespace would silently route registry traffic there,
+                    // which is worse than losing the thread.
+                    panic!("nydus-backend runtime thread cannot enter the configured netns: {err}");
+                }
+            });
+        }
+        builder.build()
     }
 }
 
-/// The configuration cell the shared runtime is built from. Separate from the
-/// static so the first-come/idempotent rules can be tested on a private cell
-/// instead of the process-wide one every test in the binary shares.
-struct ConfigCell {
-    options: OnceLock<RuntimeOptions>,
-    /// Set once the runtime has been built from `options`, to tell a caller
-    /// whose request lost whether it is merely late or the runtime is live.
-    sealed: AtomicBool,
+impl fmt::Display for RuntimeOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} worker(s), {} blocking, ",
+            self.worker_threads(),
+            self.max_blocking_threads()
+        )?;
+        match &self.netns {
+            Some(netns) => write!(f, "netns {}", netns.id()),
+            None => f.write_str("inherited netns"),
+        }
+    }
 }
 
-impl ConfigCell {
-    const fn new() -> Self {
-        ConfigCell {
+/// The process-wide runtime: options installed by the first caller, and the
+/// tokio runtime built from them on first use.
+pub(crate) struct SharedRuntime {
+    options: OnceLock<RuntimeOptions>,
+    runtime: OnceLock<Runtime>,
+    thread_name: &'static str,
+}
+
+impl SharedRuntime {
+    /// An unconfigured, unbuilt runtime whose threads will be named
+    /// `thread_name`.
+    pub(crate) const fn new(thread_name: &'static str) -> Self {
+        Self {
             options: OnceLock::new(),
-            sealed: AtomicBool::new(false),
+            runtime: OnceLock::new(),
+            thread_name,
         }
     }
 
-    /// Install `options` unless something is installed already, in which case
-    /// the same options are a no-op and different ones are rejected.
-    fn configure(&self, options: RuntimeOptions) -> io::Result<()> {
+    /// Install `options` unless some are installed already, in which case
+    /// the same options are a no-op and different ones are rejected with
+    /// [`io::ErrorKind::AlreadyExists`].
+    pub(crate) fn configure(&self, options: RuntimeOptions) -> io::Result<()> {
         if let Some(current) = self.options.get() {
-            return self.check_installed(current, &options);
+            return self.check(current, &options);
         }
         // Only an option that can still win is probed, so a repeated call
         // keeps succeeding after the caller dropped the privilege setns needs.
         if let Some(netns) = &options.netns {
-            netns::probe(netns)?;
+            netns.probe()?;
         }
         match self.options.set(options) {
             Ok(()) => Ok(()),
@@ -131,99 +170,65 @@ impl ConfigCell {
                     .options
                     .get()
                     .expect("set() failed, so a value is present");
-                self.check_installed(current, &options)
+                self.check(current, &options)
             }
         }
     }
 
-    fn check_installed(
-        &self,
-        current: &RuntimeOptions,
-        requested: &RuntimeOptions,
-    ) -> io::Result<()> {
+    /// Accept `requested` when it matches the installed `current`, otherwise
+    /// say whether the runtime is merely configured or already running.
+    fn check(&self, current: &RuntimeOptions, requested: &RuntimeOptions) -> io::Result<()> {
         if current.same_as(requested) {
             return Ok(());
         }
-        let what = if self.sealed.load(Ordering::Acquire) {
+        let what = if self.runtime.get().is_some() {
             "already running"
         } else {
             "already configured"
         };
         Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            format!(
-                "nydus-backend runtime {what} with {} worker(s), {} blocking, netns {:?}; requested {} worker(s), {} blocking, netns {:?}",
-                current.worker_threads(),
-                current.max_blocking_threads(),
-                current.netns_identity().ok().flatten(),
-                requested.worker_threads(),
-                requested.max_blocking_threads(),
-                requested.netns_identity().ok().flatten(),
-            ),
+            format!("nydus-backend runtime {what} with {current}; requested {requested}"),
         ))
     }
 
-    /// Fix the options for good (defaulting them if nothing was installed)
-    /// and hand them out for building the runtime.
-    fn seal(&self) -> &RuntimeOptions {
-        let options = self.options.get_or_init(RuntimeOptions::default);
-        self.sealed.store(true, Ordering::Release);
-        options
+    /// The tokio runtime, built on first use from the installed options or
+    /// the defaults. Building it fixes the options for good: a later
+    /// [`configure`](Self::configure) can no longer take effect and reports
+    /// that instead of silently doing nothing.
+    pub(crate) fn get(&'static self) -> &'static Runtime {
+        self.runtime.get_or_init(|| {
+            let options = self.options.get_or_init(RuntimeOptions::default);
+            // The builder never fails on a supported platform (the only
+            // errors are thread spawn failures) and a backend without its
+            // runtime cannot serve any read anyway.
+            let runtime = options
+                .build(self.thread_name)
+                .expect("failed to build backend tokio runtime");
+            info!("nydus-backend runtime: {options}");
+            runtime
+        })
+    }
+
+    /// Run `future` on a runtime thread and wait for its result. This is
+    /// what puts DNS and TCP connect on a thread that entered the configured
+    /// netns, where `Runtime::block_on` alone would poll on the caller.
+    pub(crate) fn block_on_worker<T>(
+        &'static self,
+        future: impl Future<Output = T> + Send + 'static,
+    ) -> io::Result<T>
+    where
+        T: Send + 'static,
+    {
+        let runtime = self.get();
+        runtime
+            .block_on(runtime.spawn(future))
+            .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))
     }
 }
 
-static CONFIG: ConfigCell = ConfigCell::new();
-static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
-    // Sealing here means a later configure_runtime() can no longer take
-    // effect and reports that instead of silently doing nothing.
-    let options = CONFIG.seal();
-    // The builder never fails on a supported platform (the only errors are
-    // thread spawn failures) and a backend without its runtime cannot serve
-    // any read anyway.
-    let runtime =
-        build_runtime(options, THREAD_NAME).expect("failed to build backend tokio runtime");
-    match options.netns_identity() {
-        Ok(Some((dev, ino))) => info!(
-            "nydus-backend runtime: {} worker thread(s), up to {} blocking, netns dev {dev} ino {ino}",
-            options.worker_threads(),
-            options.max_blocking_threads()
-        ),
-        _ => info!(
-            "nydus-backend runtime: {} worker thread(s), up to {} blocking, inherited netns",
-            options.worker_threads(),
-            options.max_blocking_threads()
-        ),
-    }
-    runtime
-});
-
-/// Access the shared backend runtime, building it on first use.
-pub(crate) fn runtime() -> &'static Runtime {
-    &RUNTIME
-}
-
-/// Run `future` on a thread of the shared runtime and wait for its result.
-/// `Runtime::block_on` alone would poll it on the calling thread, and hyper
-/// connects inline in the request future, so this is what puts DNS and TCP
-/// connect on a thread that entered the configured netns.
-pub(crate) fn block_on_worker<T>(future: impl Future<Output = T> + Send + 'static) -> io::Result<T>
-where
-    T: Send + 'static,
-{
-    block_on_worker_of(runtime(), future)
-}
-
-fn block_on_worker_of<T>(
-    runtime: &Runtime,
-    future: impl Future<Output = T> + Send + 'static,
-) -> io::Result<T>
-where
-    T: Send + 'static,
-{
-    runtime
-        .block_on(runtime.spawn(future))
-        .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))
-}
+/// The runtime every registry backend in the process shares.
+pub(crate) static RUNTIME: SharedRuntime = SharedRuntime::new(THREAD_NAME);
 
 /// Fix how the shared backend runtime is built. Must run before the first
 /// registry backend is constructed in the process (a Dragonfly-backed one
@@ -237,46 +242,12 @@ where
 /// a scratch thread first so an unusable descriptor or missing privilege
 /// fails here rather than inside the runtime's thread start hook.
 pub fn configure_runtime(options: RuntimeOptions) -> io::Result<()> {
-    CONFIG.configure(options)
-}
-
-/// Build a runtime from `options`. Separate from the shared static so tests
-/// can observe a runtime's threads without touching process-wide state.
-fn build_runtime(options: &'static RuntimeOptions, thread_name: &str) -> io::Result<Runtime> {
-    let mut builder = Builder::new_multi_thread();
-    builder
-        .thread_name(thread_name)
-        .worker_threads(options.worker_threads())
-        .max_blocking_threads(options.max_blocking_threads())
-        .thread_keep_alive(BLOCKING_KEEP_ALIVE)
-        .enable_all();
-    if let Some(netns) = &options.netns {
-        let fd = netns.as_raw_fd();
-        builder.on_thread_start(move || {
-            if let Err(err) = netns::enter(fd) {
-                error!("nydus-backend runtime thread cannot enter the configured netns: {err}");
-                // configure_runtime() probed this exact descriptor, so this is
-                // unreachable in practice; a thread left in the wrong namespace
-                // would silently route registry traffic there, which is worse
-                // than losing the thread.
-                panic!("nydus-backend runtime thread cannot enter the configured netns: {err}");
-            }
-        });
-    }
-    builder.build()
+    RUNTIME.configure(options)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn zero_selects_the_bounded_defaults() {
-        let options = RuntimeOptions::default();
-        assert_eq!(options.worker_threads(), DEFAULT_WORKER_THREADS);
-        assert_eq!(options.max_blocking_threads(), DEFAULT_MAX_BLOCKING_THREADS);
-        assert!(options.netns.is_none());
-    }
 
     fn with_workers(worker_threads: usize) -> RuntimeOptions {
         RuntimeOptions {
@@ -285,46 +256,66 @@ mod tests {
         }
     }
 
+    /// A private shared runtime with the process lifetime [`SharedRuntime`]
+    /// requires, so a test never touches the one every test in the binary
+    /// shares. Thread names are truncated to 15 bytes in `/proc`.
+    fn leaked(thread_name: &'static str) -> &'static SharedRuntime {
+        Box::leak(Box::new(SharedRuntime::new(thread_name)))
+    }
+
+    #[test]
+    fn zero_selects_the_bounded_defaults() {
+        let options = RuntimeOptions::default();
+        assert_eq!(options.worker_threads(), DEFAULT_WORKER_THREADS);
+        assert_eq!(options.max_blocking_threads(), DEFAULT_MAX_BLOCKING_THREADS);
+        assert!(options.netns.is_none());
+        assert_eq!(
+            options.to_string(),
+            "2 worker(s), 8 blocking, inherited netns"
+        );
+    }
+
     #[test]
     fn configure_is_first_come_and_idempotent() {
-        let cell = ConfigCell::new();
-        cell.configure(with_workers(3)).unwrap();
-        cell.configure(with_workers(3)).unwrap();
-        let err = cell.configure(with_workers(4)).unwrap_err();
+        let shared = leaked("nb-rt-config");
+        shared.configure(with_workers(3)).unwrap();
+        shared.configure(with_workers(3)).unwrap();
+        let err = shared.configure(with_workers(4)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(err.to_string().contains("already configured"), "{err}");
         assert!(err.to_string().contains("3 worker"), "{err}");
         assert!(err.to_string().contains("requested 4 worker"), "{err}");
 
-        assert_eq!(cell.seal().worker_threads(), 3);
-        cell.configure(with_workers(3)).unwrap();
-        let err = cell.configure(with_workers(4)).unwrap_err();
+        shared.get();
+        shared.configure(with_workers(3)).unwrap();
+        let err = shared.configure(with_workers(4)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(err.to_string().contains("already running"), "{err}");
     }
 
     #[test]
-    fn sealing_an_unconfigured_cell_installs_the_defaults() {
-        let cell = ConfigCell::new();
-        assert_eq!(cell.seal().worker_threads(), DEFAULT_WORKER_THREADS);
-        cell.configure(RuntimeOptions::default()).unwrap();
-        cell.configure(with_workers(0)).unwrap();
-        let err = cell.configure(with_workers(1)).unwrap_err();
+    fn an_unconfigured_runtime_installs_the_defaults() {
+        let shared = leaked("nb-rt-default");
+        shared.get();
+        shared.configure(RuntimeOptions::default()).unwrap();
+        shared.configure(with_workers(0)).unwrap();
+        let err = shared.configure(with_workers(1)).unwrap_err();
         assert!(err.to_string().contains("already running"), "{err}");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn a_losing_configure_is_not_probed() {
-        let cell = ConfigCell::new();
-        cell.configure(with_workers(3)).unwrap();
+        let shared = SharedRuntime::new("nb-rt-losing");
+        shared.configure(with_workers(3)).unwrap();
         // Not a namespace, so a probe would fail with EINVAL; the installed
         // configuration must be reported instead.
-        let err = cell
+        let netns = Netns::new(tempfile::tempfile().unwrap().into()).unwrap();
+        let err = shared
             .configure(RuntimeOptions {
                 worker_threads: 3,
                 max_blocking_threads: 0,
-                netns: Some(OwnedFd::from(tempfile::tempfile().unwrap())),
+                netns: Some(netns),
             })
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
@@ -359,16 +350,15 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn runtime_spawns_exactly_the_configured_workers() {
+    fn build_spawns_exactly_the_configured_workers() {
         static OPTIONS: RuntimeOptions = RuntimeOptions {
             worker_threads: 3,
             max_blocking_threads: 2,
             netns: None,
         };
-        // Thread names are truncated to 15 bytes in /proc, keep it short.
         let name = "nb-rt-workers";
         assert_eq!(threads_named(name), 0);
-        let runtime = build_runtime(&OPTIONS, name).unwrap();
+        let runtime = OPTIONS.build(name).unwrap();
         assert_threads_named(name, 3, "workers are spawned eagerly");
         runtime.block_on(async {
             tokio::task::spawn_blocking(|| ()).await.unwrap();
@@ -379,9 +369,14 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn current_netns() -> super::super::netns::NetnsId {
+        Netns::current().unwrap().id()
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn only_worker_polls_run_in_the_configured_netns() {
-        let netns = match netns::fresh() {
+        let netns = match Netns::unshared() {
             Ok(netns) => netns,
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
                 eprintln!("skipped: cannot create a netns ({err})");
@@ -389,37 +384,37 @@ mod tests {
             }
             Err(err) => panic!("unshare(CLONE_NEWNET): {err}"),
         };
-        let configured = netns::identity(&netns).unwrap();
-        let caller = netns::current();
+        let configured = netns.id();
+        let caller = current_netns();
         assert_ne!(caller, configured);
 
-        // Leaked on purpose: the hook borrows the descriptor for the runtime's
-        // lifetime, mirroring the process-wide CONFIG.
-        let options: &'static RuntimeOptions = Box::leak(Box::new(RuntimeOptions {
-            worker_threads: 1,
-            max_blocking_threads: 1,
-            netns: Some(netns),
-        }));
-        netns::probe(options.netns.as_ref().unwrap()).unwrap();
-        let runtime = build_runtime(options, "nb-rt-netns").unwrap();
+        let shared = leaked("nb-rt-netns");
+        shared
+            .configure(RuntimeOptions {
+                worker_threads: 1,
+                max_blocking_threads: 1,
+                netns: Some(netns),
+            })
+            .unwrap();
 
         // block_on alone polls on this thread, which never entered the
         // namespace: exactly what a request must not do.
-        assert_eq!(runtime.block_on(async { netns::current() }), caller);
+        assert_eq!(shared.get().block_on(async { current_netns() }), caller);
         // block_on_worker moves the poll onto a runtime thread, and the
         // blocking pool (DNS) enters the namespace too.
         assert_eq!(
-            block_on_worker_of(&runtime, async { netns::current() }).unwrap(),
+            shared.block_on_worker(async { current_netns() }).unwrap(),
             configured
         );
         assert_eq!(
-            block_on_worker_of(&runtime, async {
-                tokio::task::spawn_blocking(netns::current).await.unwrap()
-            })
-            .unwrap(),
+            shared
+                .block_on_worker(async {
+                    tokio::task::spawn_blocking(current_netns).await.unwrap()
+                })
+                .unwrap(),
             configured
         );
         // The caller is still where it started.
-        assert_eq!(netns::current(), caller);
+        assert_eq!(current_netns(), caller);
     }
 }

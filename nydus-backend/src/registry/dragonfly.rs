@@ -24,7 +24,7 @@ use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 use nydus_config::DragonflyConfig;
 
 use super::response::{log_request_done, Response};
-use super::rt::block_on_worker;
+use super::rt::RUNTIME;
 use super::{BlobTransport, RegistryError, RegistryResult};
 use crate::{Protocol, ReadKind};
 
@@ -72,20 +72,21 @@ impl Dragonfly {
             )
         })?;
         let endpoint = config.scheduler_endpoint.clone();
-        let (ondemand, prefetch) = block_on_worker(async move {
-            let ondemand = Proxy::builder()
-                .scheduler_endpoint(endpoint.clone())
-                .max_retries(max_retries)
-                .build()
-                .await?;
-            let prefetch = Proxy::builder()
-                .scheduler_endpoint(endpoint)
-                .max_retries(0)
-                .build()
-                .await?;
-            Ok::<_, Error>((ondemand, prefetch))
-        })?
-        .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
+        let (ondemand, prefetch) = RUNTIME
+            .block_on_worker(async move {
+                let ondemand = Proxy::builder()
+                    .scheduler_endpoint(endpoint.clone())
+                    .max_retries(max_retries)
+                    .build()
+                    .await?;
+                let prefetch = Proxy::builder()
+                    .scheduler_endpoint(endpoint)
+                    .max_retries(0)
+                    .build()
+                    .await?;
+                Ok::<_, Error>((ondemand, prefetch))
+            })?
+            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
         Ok(Dragonfly {
             ondemand,
@@ -197,7 +198,7 @@ impl BlobTransport for Dragonfly {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::rt::runtime;
+    use crate::registry::rt::RUNTIME;
 
     fn proxy_error(status_code: Option<StatusCode>) -> Error {
         Error::ProxyError(ProxyError {
@@ -224,7 +225,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(runtime().block_on(response.text()).unwrap(), "payload");
+        assert_eq!(RUNTIME.get().block_on(response.text()).unwrap(), "payload");
     }
 
     #[test]
@@ -248,7 +249,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::FORBIDDEN);
         assert_eq!(response.headers.get("x-served-by").unwrap(), "origin");
         assert_eq!(
-            runtime().block_on(response.text()).unwrap(),
+            RUNTIME.get().block_on(response.text()).unwrap(),
             "origin said no"
         );
 
@@ -274,7 +275,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(response.status, status);
-            assert_eq!(runtime().block_on(response.text()).unwrap(), "no space");
+            assert_eq!(RUNTIME.get().block_on(response.text()).unwrap(), "no space");
         }
     }
 
