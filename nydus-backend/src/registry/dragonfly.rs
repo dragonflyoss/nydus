@@ -197,12 +197,21 @@ impl BlobTransport for Dragonfly {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::*;
-    use crate::registry::rt::RUNTIME;
 
     fn proxy_error(status_code: Option<StatusCode>) -> Error {
         Error::ProxyError(ProxyError {
             message: Some("proxy".to_string()),
+            header: HashMap::new(),
+            status_code,
+        })
+    }
+
+    fn dfdaemon_error(status_code: Option<StatusCode>, message: &str) -> Error {
+        Error::DfdaemonError(DfdaemonError {
+            message: Some(message.to_string()),
             header: HashMap::new(),
             status_code,
         })
@@ -217,98 +226,112 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_success_carries_the_buffered_body() {
-        let response = into_response(
-            Ok(ok_response(StatusCode::PARTIAL_CONTENT)),
-            BytesMut::from(&b"payload"[..]),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(
-            RUNTIME.runtime().block_on(response.text()).unwrap(),
-            "payload"
-        );
-    }
-
-    #[test]
-    fn answers_with_a_status_become_responses() {
-        let response = into_response(
-            Err(proxy_error(Some(StatusCode::TOO_MANY_REQUESTS))),
-            BytesMut::new(),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
-
-        let response = into_response(
-            Err(Error::BackendError(BackendError {
-                message: Some("origin said no".to_string()),
-                header: HashMap::from([("x-served-by".to_string(), "origin".to_string())]),
-                status_code: Some(StatusCode::FORBIDDEN),
-            })),
-            BytesMut::new(),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::FORBIDDEN);
-        assert_eq!(response.headers.get("x-served-by").unwrap(), "origin");
-        assert_eq!(
-            RUNTIME.runtime().block_on(response.text()).unwrap(),
-            "origin said no"
-        );
-
-        let response = into_response(
-            Err(proxy_error(Some(StatusCode::BAD_GATEWAY))),
-            BytesMut::new(),
-        )
-        .unwrap();
-        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-
-        for status in [
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::INSUFFICIENT_STORAGE,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ] {
-            let response = into_response(
-                Err(Error::DfdaemonError(DfdaemonError {
-                    message: Some("no space".to_string()),
-                    header: HashMap::new(),
-                    status_code: Some(status),
+    #[tokio::test]
+    async fn into_response_rebuilds_answers_that_carry_a_status() {
+        let test_cases: Vec<(
+            Result<GetResponse, Error>,
+            BytesMut,
+            StatusCode,
+            &str,
+            Option<(&str, &str)>,
+        )> = vec![
+            (
+                Ok(ok_response(StatusCode::PARTIAL_CONTENT)),
+                BytesMut::from(&b"payload"[..]),
+                StatusCode::PARTIAL_CONTENT,
+                "payload",
+                None,
+            ),
+            (
+                Err(proxy_error(Some(StatusCode::TOO_MANY_REQUESTS))),
+                BytesMut::new(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "proxy",
+                None,
+            ),
+            (
+                Err(proxy_error(Some(StatusCode::BAD_GATEWAY))),
+                BytesMut::new(),
+                StatusCode::BAD_GATEWAY,
+                "proxy",
+                None,
+            ),
+            (
+                Err(Error::BackendError(BackendError {
+                    message: Some("origin said no".to_string()),
+                    header: HashMap::from([("x-served-by".to_string(), "origin".to_string())]),
+                    status_code: Some(StatusCode::FORBIDDEN),
                 })),
                 BytesMut::new(),
-            )
-            .unwrap();
+                StatusCode::FORBIDDEN,
+                "origin said no",
+                Some(("x-served-by", "origin")),
+            ),
+            (
+                Err(dfdaemon_error(
+                    Some(StatusCode::INTERNAL_SERVER_ERROR),
+                    "no space",
+                )),
+                BytesMut::new(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "no space",
+                None,
+            ),
+            (
+                Err(dfdaemon_error(
+                    Some(StatusCode::INSUFFICIENT_STORAGE),
+                    "no space",
+                )),
+                BytesMut::new(),
+                StatusCode::INSUFFICIENT_STORAGE,
+                "no space",
+                None,
+            ),
+            (
+                Err(dfdaemon_error(
+                    Some(StatusCode::UNPROCESSABLE_ENTITY),
+                    "no space",
+                )),
+                BytesMut::new(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "no space",
+                None,
+            ),
+        ];
+
+        for (result, body, status, text, header) in test_cases {
+            let response = into_response(result, body).unwrap();
             assert_eq!(response.status, status);
-            assert_eq!(
-                RUNTIME.runtime().block_on(response.text()).unwrap(),
-                "no space"
-            );
+            assert_eq!(response.protocol, Protocol::Dragonfly);
+            if let Some((name, value)) = header {
+                assert_eq!(response.headers.get(name).unwrap(), value);
+            }
+            assert_eq!(response.text().await.unwrap(), text, "status={status}");
         }
     }
 
     #[test]
-    fn failures_without_a_status_are_transport_errors() {
-        let err = into_response(
-            Err(Error::RequestTimeout("deadline exceeded".to_string())),
-            BytesMut::new(),
-        )
-        .err()
-        .unwrap();
-        assert!(
-            matches!(&err, RegistryError::Io(io_err) if io_err.kind() == io::ErrorKind::TimedOut)
-        );
+    fn into_response_turns_failures_without_a_status_into_transport_errors() {
+        let test_cases = vec![
+            (
+                Error::RequestTimeout("deadline exceeded".to_string()),
+                io::ErrorKind::TimedOut,
+            ),
+            (proxy_error(None), io::ErrorKind::Other),
+            (
+                dfdaemon_error(None, "connection refused"),
+                io::ErrorKind::Other,
+            ),
+            (
+                Error::Internal("failed to read response body".to_string()),
+                io::ErrorKind::Other,
+            ),
+        ];
 
-        for err in [
-            proxy_error(None),
-            Error::DfdaemonError(DfdaemonError {
-                message: Some("connection refused".to_string()),
-                header: HashMap::new(),
-                status_code: None,
-            }),
-            Error::Internal("failed to read response body".to_string()),
-        ] {
+        for (err, kind) in test_cases {
             assert!(matches!(
                 into_response(Err(err), BytesMut::new()),
-                Err(RegistryError::Io(_))
+                Err(RegistryError::Io(io_err)) if io_err.kind() == kind
             ));
         }
     }

@@ -220,58 +220,71 @@ impl Auth {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::*;
 
     #[test]
-    fn parses_bearer_challenge() {
-        let header = r#"Bearer realm="https://auth.example.com/token",service="example.com",scope="repository:library/ubuntu:pull""#;
-        match Auth::parse_challenge(header).unwrap() {
-            AuthChallenge::Bearer {
-                realm,
-                service,
-                scope,
-            } => {
-                assert_eq!(realm, "https://auth.example.com/token");
-                assert_eq!(service, "example.com");
-                assert_eq!(scope, "repository:library/ubuntu:pull");
-            }
-            _ => panic!("expected bearer challenge"),
+    fn parse_challenge_reads_the_scheme_and_its_parameters() {
+        let test_cases: Vec<(&str, fn(Option<AuthChallenge>))> = vec![
+            (
+                r#"Bearer realm="https://auth.example.com/token",service="example.com",scope="repository:library/ubuntu:pull""#,
+                |challenge| match challenge.unwrap() {
+                    AuthChallenge::Bearer {
+                        realm,
+                        service,
+                        scope,
+                    } => {
+                        assert_eq!(realm, "https://auth.example.com/token");
+                        assert_eq!(service, "example.com");
+                        assert_eq!(scope, "repository:library/ubuntu:pull");
+                    }
+                    AuthChallenge::Basic => panic!("expected a bearer challenge"),
+                },
+            ),
+            (r#"Basic realm="registry""#, |challenge| {
+                assert!(matches!(challenge.unwrap(), AuthChallenge::Basic));
+            }),
+            (r#"Digest realm="registry""#, |challenge| {
+                assert!(challenge.is_none());
+            }),
+        ];
+
+        for (header, assert_fn) in test_cases {
+            assert_fn(Auth::parse_challenge(header));
         }
     }
 
     #[test]
-    fn parses_basic_challenge() {
-        assert!(matches!(
-            Auth::parse_challenge(r#"Basic realm="registry""#).unwrap(),
-            AuthChallenge::Basic
-        ));
-        assert!(Auth::parse_challenge(r#"Digest realm="registry""#).is_none());
-    }
+    fn current_serves_a_cached_token_until_it_nears_expiry() {
+        let test_cases = vec![(3600, "Bearer xyz"), (TOKEN_REFRESH_MARGIN, ""), (0, "")];
 
-    #[test]
-    fn expired_token_is_cleared() {
-        let auth = Auth::new(None);
-        auth.set("Bearer xyz".to_string());
-        auth.token_expires_at.store(Some(Arc::new(now_secs())));
-        assert_eq!(auth.current(), "");
-        assert!(auth.cached.read().unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_fresh_token_is_served_from_the_cache() {
-        let auth = Auth::new(None);
-        auth.set("Bearer xyz".to_string());
-        auth.token_expires_at
-            .store(Some(Arc::new(now_secs() + 3600)));
-        assert_eq!(auth.current(), "Bearer xyz");
+        for (expires_in, expected) in test_cases {
+            let auth = Auth::new(None);
+            auth.set("Bearer xyz".to_string());
+            auth.token_expires_at
+                .store(Some(Arc::new(now_secs() + expires_in)));
+            assert_eq!(auth.current(), expected, "expires_in={expires_in}");
+            assert_eq!(
+                auth.cached.read().unwrap().is_empty(),
+                expected.is_empty(),
+                "expires_in={expires_in}"
+            );
+        }
     }
 
     #[test]
     fn header_value_rejects_bytes_a_header_cannot_carry() {
-        assert!(header_value("Bearer ok").is_ok());
-        assert!(matches!(
-            header_value("Bearer bad\nvalue"),
-            Err(RegistryError::Unauthorized(_))
-        ));
+        let test_cases = vec![("Bearer ok", true), ("Bearer bad\nvalue", false)];
+
+        for (value, ok) in test_cases {
+            match header_value(value) {
+                Ok(_) => assert!(ok, "value={value:?}"),
+                Err(err) => {
+                    assert!(!ok, "value={value:?}");
+                    assert!(matches!(err, RegistryError::Unauthorized(_)));
+                }
+            }
+        }
     }
 }

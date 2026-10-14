@@ -61,7 +61,6 @@ pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::rt::RUNTIME;
     use crate::Protocol;
     use reqwest::header::HeaderMap;
     use std::io;
@@ -79,59 +78,56 @@ mod tests {
         RegistryError::Io(io::Error::other("connection reset"))
     }
 
-    #[test]
-    fn classify_folds_transient_answers_into_errors() {
-        for status in [
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::BAD_GATEWAY,
-            StatusCode::SERVICE_UNAVAILABLE,
-            StatusCode::INSUFFICIENT_STORAGE,
-            StatusCode::REQUEST_TIMEOUT,
-            StatusCode::TOO_MANY_REQUESTS,
-        ] {
-            assert!(
-                matches!(
-                    RUNTIME.runtime().block_on(classify(response(status))),
-                    Err(RegistryError::UnexpectedStatus(got, _)) if got == status
-                ),
-                "status={status}"
-            );
+    #[tokio::test]
+    async fn classify_folds_transient_answers_into_errors() {
+        let test_cases = vec![
+            (StatusCode::INTERNAL_SERVER_ERROR, true),
+            (StatusCode::BAD_GATEWAY, true),
+            (StatusCode::SERVICE_UNAVAILABLE, true),
+            (StatusCode::INSUFFICIENT_STORAGE, true),
+            (StatusCode::REQUEST_TIMEOUT, true),
+            (StatusCode::TOO_MANY_REQUESTS, true),
+            (StatusCode::OK, false),
+            (StatusCode::PARTIAL_CONTENT, false),
+            (StatusCode::TEMPORARY_REDIRECT, false),
+            (StatusCode::UNAUTHORIZED, false),
+            (StatusCode::FORBIDDEN, false),
+            (StatusCode::NOT_FOUND, false),
+            (StatusCode::UNPROCESSABLE_ENTITY, false),
+        ];
+
+        for (status, transient) in test_cases {
+            match classify(response(status)).await {
+                Ok(served) => {
+                    assert!(!transient, "status={status}");
+                    assert_eq!(served.status, status);
+                }
+                Err(RegistryError::UnexpectedStatus(got, _)) => {
+                    assert!(transient, "status={status}");
+                    assert_eq!(got, status);
+                }
+                Err(err) => panic!("status={status}: {err}"),
+            }
         }
-        for status in [
+    }
+
+    #[tokio::test]
+    async fn decide_serves_definitive_answers_for_both_read_kinds() {
+        let test_cases = vec![
             StatusCode::OK,
-            StatusCode::PARTIAL_CONTENT,
             StatusCode::TEMPORARY_REDIRECT,
             StatusCode::UNAUTHORIZED,
             StatusCode::FORBIDDEN,
             StatusCode::NOT_FOUND,
             StatusCode::UNPROCESSABLE_ENTITY,
-        ] {
-            assert_eq!(
-                RUNTIME
-                    .runtime()
-                    .block_on(classify(response(status)))
-                    .unwrap()
-                    .status,
-                status
-            );
-        }
-    }
+        ];
 
-    #[test]
-    fn decide_serves_definitive_answers_for_both_read_kinds() {
         for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
-            for status in [
-                StatusCode::OK,
-                StatusCode::TEMPORARY_REDIRECT,
-                StatusCode::UNAUTHORIZED,
-                StatusCode::FORBIDDEN,
-                StatusCode::NOT_FOUND,
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ] {
+            for &status in &test_cases {
                 assert!(
                     matches!(
-                        RUNTIME.runtime().block_on(decide(kind, Ok(response(status)))),
-                        Action::Serve(r) if r.status == status
+                        decide(kind, Ok(response(status))).await,
+                        Action::Serve(served) if served.status == status
                     ),
                     "kind={kind:?} status={status}"
                 );
@@ -139,26 +135,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn decide_defers_prefetch_and_falls_back_ondemand_on_failures() {
-        let failures: [fn() -> RegistryResult<Response>; 5] = [
+    #[tokio::test]
+    async fn decide_defers_prefetch_and_falls_back_ondemand_on_failures() {
+        let test_cases: Vec<fn() -> RegistryResult<Response>> = vec![
             || Ok(response(StatusCode::TOO_MANY_REQUESTS)),
             || Ok(response(StatusCode::SERVICE_UNAVAILABLE)),
             || Ok(response(StatusCode::INSUFFICIENT_STORAGE)),
             || Ok(response(StatusCode::REQUEST_TIMEOUT)),
             || Err(transport_error()),
         ];
-        for failure in failures {
+
+        for failure in test_cases {
             assert!(matches!(
-                RUNTIME
-                    .runtime()
-                    .block_on(decide(ReadKind::Prefetch, failure())),
+                decide(ReadKind::Prefetch, failure()).await,
                 Action::Defer(RegistryError::PrefetchDeferred(_))
             ));
             assert!(matches!(
-                RUNTIME
-                    .runtime()
-                    .block_on(decide(ReadKind::OnDemand, failure())),
+                decide(ReadKind::OnDemand, failure()).await,
                 Action::Fallback(_)
             ));
         }

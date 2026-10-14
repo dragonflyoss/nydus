@@ -645,9 +645,6 @@ mod tests {
         }
     }
 
-    /// One scripted outcome of a Dragonfly `get`: the SDK has spent its
-    /// retries and hands back a `200` with `body`, an answer with `status`,
-    /// or a transport failure.
     enum Scripted {
         Body(Vec<u8>),
         Status(StatusCode, HeaderMap),
@@ -658,8 +655,6 @@ mod tests {
         Scripted::Status(status, HeaderMap::new())
     }
 
-    /// A Dragonfly transport popping one scripted outcome per `get`, counting
-    /// the calls.
     struct ScriptedTransport {
         script: Mutex<VecDeque<Scripted>>,
         calls: AtomicU32,
@@ -711,9 +706,6 @@ mod tests {
         }
     }
 
-    /// A Dragonfly transport answering `401` with a basic challenge until the
-    /// request carries `Authorization`, holding its first answer for `delay`
-    /// so a second reader piles up behind it. Counts the challenges issued.
     struct AuthGate {
         delay: Duration,
         first: AtomicBool,
@@ -768,8 +760,6 @@ mod tests {
         }
     }
 
-    /// A minimal origin on a loopback listener answering every request with
-    /// `status` and `body`, counting the requests served.
     struct OriginStub {
         addr: SocketAddr,
         hits: Arc<AtomicU32>,
@@ -818,8 +808,6 @@ mod tests {
         }
     }
 
-    /// A loopback address with nothing listening behind it: bound to claim a
-    /// free port, then dropped so connections to it are refused.
     fn dead_addr() -> SocketAddr {
         TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -827,9 +815,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A registry over the config `yaml` with `transport` as its Dragonfly
-    /// and a back-to-source rate limit of one slot per `interval`, zero
-    /// disabling it.
     fn scripted_registry_from(
         yaml: &str,
         transport: impl BlobTransport + 'static,
@@ -853,9 +838,6 @@ mod tests {
         )
     }
 
-    /// A registry whose origin is `addr` with `origin_max_retries` HTTP
-    /// retries, `transport` as its Dragonfly, and a back-to-source rate limit
-    /// of one slot per `interval`, zero disabling it.
     fn scripted_registry_at(
         addr: SocketAddr,
         transport: impl BlobTransport + 'static,
@@ -871,7 +853,6 @@ mod tests {
         )
     }
 
-    /// A registry whose origin is `origin`, with the default HTTP retries.
     fn scripted_registry(
         origin: &OriginStub,
         transport: impl BlobTransport + 'static,
@@ -880,8 +861,6 @@ mod tests {
         scripted_registry_at(origin.addr, transport, interval, 3)
     }
 
-    /// Read the test blob from offset zero into `dst`, keeping the registry
-    /// error and the side that served it.
     fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> RegistryResult<Protocol> {
         RUNTIME
             .runtime()
@@ -974,33 +953,41 @@ dragonfly:
   scheduler_endpoint: http://127.0.0.1:65000
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = Registry::new(config)
-            .err()
-            .expect("dragonfly endpoint must be rejected without the feature");
+        let err = Registry::new(config).err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("backend-dragonfly"));
     }
 
     #[test]
-    fn registry_error_to_io_error_preserves_dragonfly_messages() {
-        let deferred: io::Error = RegistryError::PrefetchDeferred(Box::new(
-            RegistryError::UnexpectedStatus(StatusCode::TOO_MANY_REQUESTS, "slow down".to_string()),
-        ))
-        .into();
-        assert_eq!(deferred.kind(), io::ErrorKind::QuotaExceeded);
-        assert!(
-            deferred.to_string().contains("prefetch deferred"),
-            "unexpected error: {deferred}"
-        );
-        assert!(
-            deferred.to_string().contains("429"),
-            "unexpected error: {deferred}"
-        );
+    fn registry_errors_fold_into_io_errors_by_kind() {
+        let test_cases = vec![
+            (
+                RegistryError::PrefetchDeferred(Box::new(RegistryError::UnexpectedStatus(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "slow down".to_string(),
+                ))),
+                io::ErrorKind::QuotaExceeded,
+                vec!["prefetch deferred", "429"],
+            ),
+            (
+                RegistryError::Io(io::Error::new(io::ErrorKind::TimedOut, "timed out")),
+                io::ErrorKind::TimedOut,
+                vec!["timed out"],
+            ),
+            (
+                RegistryError::Unauthorized("no token".to_string()),
+                io::ErrorKind::Other,
+                vec!["unauthorized", "no token"],
+            ),
+        ];
 
-        let inner = io::Error::new(io::ErrorKind::TimedOut, "timed out");
-        let passthrough: io::Error = RegistryError::Io(inner).into();
-        assert_eq!(passthrough.kind(), io::ErrorKind::TimedOut);
-        assert!(passthrough.to_string().contains("timed out"));
+        for (err, kind, fragments) in test_cases {
+            let err: io::Error = err.into();
+            assert_eq!(err.kind(), kind, "{err}");
+            for fragment in fragments {
+                assert!(err.to_string().contains(fragment), "{err}");
+            }
+        }
     }
 
     #[test]

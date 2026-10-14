@@ -134,8 +134,9 @@ fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::*;
-    use crate::registry::rt::RUNTIME;
 
     fn response(status: StatusCode, body: &[u8]) -> Response {
         Response {
@@ -146,34 +147,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fill_exact_rejects_a_short_body() {
-        RUNTIME.runtime().block_on(async {
-            let mut dst = [0u8; 4];
-            let protocol = fill_exact(response(StatusCode::OK, b"abcd"), &mut dst)
-                .await
-                .unwrap();
-            assert_eq!(protocol, Protocol::Http);
-            assert_eq!(&dst, b"abcd");
+    #[tokio::test]
+    async fn fill_exact_fills_the_buffer_or_rejects_a_short_body() {
+        let test_cases: Vec<(&[u8], fn(RegistryResult<Protocol>, &[u8; 4]))> = vec![
+            (b"abcd", |result, dst| {
+                assert_eq!(result.unwrap(), Protocol::Http);
+                assert_eq!(dst, b"abcd");
+            }),
+            (b"ab", |result, _| {
+                assert!(matches!(
+                    result,
+                    Err(RegistryError::Io(err)) if err.kind() == io::ErrorKind::UnexpectedEof
+                ));
+            }),
+        ];
 
-            let err = fill_exact(response(StatusCode::OK, b"ab"), &mut dst)
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(err, RegistryError::Io(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof)
-            );
-        });
+        for (body, assert_fn) in test_cases {
+            let mut dst = [0u8; 4];
+            let result = fill_exact(response(StatusCode::OK, body), &mut dst).await;
+            assert_fn(result, &dst);
+        }
     }
 
-    #[test]
-    fn status_error_carries_the_status_and_body() {
-        RUNTIME.runtime().block_on(async {
-            let err = status_error(response(StatusCode::NOT_FOUND, b"no such blob")).await;
-            assert!(matches!(
-                err,
-                RegistryError::UnexpectedStatus(StatusCode::NOT_FOUND, body) if body == "no such blob"
-            ));
-        });
+    #[tokio::test]
+    async fn status_error_carries_the_status_and_body() {
+        let err = status_error(response(StatusCode::NOT_FOUND, b"no such blob")).await;
+        assert!(matches!(
+            err,
+            RegistryError::UnexpectedStatus(StatusCode::NOT_FOUND, body) if body == "no such blob"
+        ));
     }
 
     #[test]
@@ -184,6 +186,7 @@ mod tests {
             (Duration::from_millis(2), "2.000ms"),
             (Duration::from_secs(3), "3.000s"),
         ];
+
         for (duration, expected) in test_cases {
             assert_eq!(format_duration(duration), expected);
         }

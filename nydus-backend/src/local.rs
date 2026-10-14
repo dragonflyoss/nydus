@@ -339,49 +339,34 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn reads_full_blob_file_and_sidecar_meta() {
-        let dir = tempdir().unwrap();
-        let payload = vec![0xabu8; 4096];
-        let full_blob_id = FullBlob::new(&payload)
-            .with_blob_metadata(&single_chunk_group(&payload))
-            .with_blob_metadata_file()
-            .save_in(dir.path());
+    fn reads_blob_metadata_from_the_sidecar_file_or_the_full_blob() {
+        let test_cases = vec![true, false];
 
-        let backend = Local::new(dir.path().to_path_buf());
-        let blob_metadata = backend
-            .blob_metadata(&full_blob_id, ReadKind::OnDemand)
-            .unwrap();
-        let mut data = vec![0u8; 4096];
-        backend
-            .read_range_into(&full_blob_id, 0, &mut data, ReadKind::OnDemand)
-            .unwrap();
+        for sidecar in test_cases {
+            let dir = tempdir().unwrap();
+            let payload = vec![0xabu8; 4096];
+            let blob_metadata = single_chunk_group(&payload);
+            let mut blob = FullBlob::new(&payload).with_blob_metadata(&blob_metadata);
+            if sidecar {
+                blob = blob.with_blob_metadata_file();
+            }
+            let full_blob_id = blob.save_in(dir.path());
+            let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
+            let backend = Local::new(dir.path().to_path_buf());
 
-        assert_eq!(blob_metadata.chunk_count(), 1);
-        assert_eq!(data, payload);
-    }
+            let blob_metadata = backend
+                .blob_metadata(&full_blob_id, ReadKind::OnDemand)
+                .unwrap();
+            let mut data = vec![0u8; 4096];
+            backend
+                .read_range_into(&full_blob_id, 0, &mut data, ReadKind::OnDemand)
+                .unwrap();
 
-    #[test]
-    fn reads_embedded_blob_metadata_from_full_blob() {
-        let dir = tempdir().unwrap();
-        let payload = vec![0xcdu8; 4096];
-        let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
-        let full_blob_id = FullBlob::new(&payload)
-            .with_blob_metadata(&single_chunk_group(&payload))
-            .save_in(dir.path());
-        let backend = Local::new(dir.path().to_path_buf());
-
-        let blob_metadata = backend
-            .blob_metadata(&full_blob_id, ReadKind::OnDemand)
-            .unwrap();
-        let mut data = vec![0u8; 4096];
-        backend
-            .read_range_into(&full_blob_id, 0, &mut data, ReadKind::OnDemand)
-            .unwrap();
-
-        assert_eq!(blob_metadata.chunk_count(), 1);
-        assert_eq!(data, payload);
-        assert!(backend
-            .blob_metadata(&data_blob_id, ReadKind::OnDemand)
-            .is_err());
+            assert_eq!(blob_metadata.chunk_count(), 1, "sidecar={sidecar}");
+            assert_eq!(data, payload, "sidecar={sidecar}");
+            assert!(backend
+                .blob_metadata(&data_blob_id, ReadKind::OnDemand)
+                .is_err());
+        }
     }
 }

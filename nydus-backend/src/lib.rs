@@ -169,9 +169,7 @@ mod tests {
             "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
         )
         .unwrap();
-        let err = build_backend(&config)
-            .err()
-            .expect("registry config must be rejected without the feature");
+        let err = build_backend(&config).err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("backend-registry"));
     }
