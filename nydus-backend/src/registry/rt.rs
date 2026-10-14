@@ -18,7 +18,8 @@
 //! inline in the request future, so a request handed straight to `block_on`
 //! would still create its socket in the caller's namespace. Requests
 //! therefore go through [`SharedRuntime::block_on_worker`], which spawns the
-//! future onto a runtime thread and only waits on the caller.
+//! future onto a runtime thread and only waits on the caller. Tests that
+//! need the raw [`Runtime`] take it from [`SharedRuntime::runtime`].
 
 use std::fmt;
 use std::future::Future;
@@ -134,8 +135,12 @@ impl fmt::Display for RuntimeOptions {
 /// The process-wide runtime: options installed by the first caller, and the
 /// tokio runtime built from them on first use.
 pub(crate) struct SharedRuntime {
+    /// The options the first caller installed, the defaults once the runtime
+    /// is built without any.
     options: OnceLock<RuntimeOptions>,
+    /// The runtime built from `options` on first use.
     runtime: OnceLock<Runtime>,
+    /// The name of the runtime's threads.
     thread_name: &'static str,
 }
 
@@ -196,7 +201,7 @@ impl SharedRuntime {
     /// the defaults. Building it fixes the options for good: a later
     /// [`configure`](Self::configure) can no longer take effect and reports
     /// that instead of silently doing nothing.
-    pub(crate) fn get(&'static self) -> &'static Runtime {
+    pub(crate) fn runtime(&'static self) -> &'static Runtime {
         self.runtime.get_or_init(|| {
             let options = self.options.get_or_init(RuntimeOptions::default);
             // The builder never fails on a supported platform (the only
@@ -220,7 +225,7 @@ impl SharedRuntime {
     where
         T: Send + 'static,
     {
-        let runtime = self.get();
+        let runtime = self.runtime();
         runtime
             .block_on(runtime.spawn(future))
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))
@@ -286,7 +291,7 @@ mod tests {
         assert!(err.to_string().contains("3 worker"), "{err}");
         assert!(err.to_string().contains("requested 4 worker"), "{err}");
 
-        shared.get();
+        shared.runtime();
         shared.configure(with_workers(3)).unwrap();
         let err = shared.configure(with_workers(4)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
@@ -296,7 +301,7 @@ mod tests {
     #[test]
     fn an_unconfigured_runtime_installs_the_defaults() {
         let shared = leaked("nb-rt-default");
-        shared.get();
+        shared.runtime();
         shared.configure(RuntimeOptions::default()).unwrap();
         shared.configure(with_workers(0)).unwrap();
         let err = shared.configure(with_workers(1)).unwrap_err();
@@ -399,7 +404,7 @@ mod tests {
 
         // block_on alone polls on this thread, which never entered the
         // namespace: exactly what a request must not do.
-        assert_eq!(shared.get().block_on(async { current_netns() }), caller);
+        assert_eq!(shared.runtime().block_on(async { current_netns() }), caller);
         // block_on_worker moves the poll onto a runtime thread, and the
         // blocking pool (DNS) enters the namespace too.
         assert_eq!(

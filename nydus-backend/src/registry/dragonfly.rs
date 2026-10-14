@@ -225,7 +225,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(RUNTIME.get().block_on(response.text()).unwrap(), "payload");
+        assert_eq!(
+            RUNTIME.runtime().block_on(response.text()).unwrap(),
+            "payload"
+        );
     }
 
     #[test]
@@ -249,7 +252,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::FORBIDDEN);
         assert_eq!(response.headers.get("x-served-by").unwrap(), "origin");
         assert_eq!(
-            RUNTIME.get().block_on(response.text()).unwrap(),
+            RUNTIME.runtime().block_on(response.text()).unwrap(),
             "origin said no"
         );
 
@@ -275,7 +278,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(response.status, status);
-            assert_eq!(RUNTIME.get().block_on(response.text()).unwrap(), "no space");
+            assert_eq!(
+                RUNTIME.runtime().block_on(response.text()).unwrap(),
+                "no space"
+            );
         }
     }
 

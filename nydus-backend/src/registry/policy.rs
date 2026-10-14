@@ -91,7 +91,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    RUNTIME.get().block_on(classify(response(status))),
+                    RUNTIME.runtime().block_on(classify(response(status))),
                     Err(RegistryError::UnexpectedStatus(got, _)) if got == status
                 ),
                 "status={status}"
@@ -108,7 +108,7 @@ mod tests {
         ] {
             assert_eq!(
                 RUNTIME
-                    .get()
+                    .runtime()
                     .block_on(classify(response(status)))
                     .unwrap()
                     .status,
@@ -130,7 +130,7 @@ mod tests {
             ] {
                 assert!(
                     matches!(
-                        RUNTIME.get().block_on(decide(kind, Ok(response(status)))),
+                        RUNTIME.runtime().block_on(decide(kind, Ok(response(status)))),
                         Action::Serve(r) if r.status == status
                     ),
                     "kind={kind:?} status={status}"
@@ -151,13 +151,13 @@ mod tests {
         for failure in failures {
             assert!(matches!(
                 RUNTIME
-                    .get()
+                    .runtime()
                     .block_on(decide(ReadKind::Prefetch, failure())),
                 Action::Defer(RegistryError::PrefetchDeferred(_))
             ));
             assert!(matches!(
                 RUNTIME
-                    .get()
+                    .runtime()
                     .block_on(decide(ReadKind::OnDemand, failure())),
                 Action::Fallback(_)
             ));

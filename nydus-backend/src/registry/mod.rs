@@ -884,7 +884,7 @@ mod tests {
     /// error and the side that served it.
     fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> RegistryResult<Protocol> {
         RUNTIME
-            .get()
+            .runtime()
             .block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
     }
 

@@ -11,7 +11,9 @@ use std::os::unix::fs::MetadataExt;
 /// `/proc/<pid>/ns/net` file, which is what `setns` compares namespaces by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetnsId {
+    /// The device the namespace file lives on.
     dev: u64,
+    /// The inode of the namespace file.
     ino: u64,
 }
 
@@ -26,7 +28,9 @@ impl fmt::Display for NetnsId {
 /// they were opened.
 #[derive(Debug)]
 pub struct Netns {
+    /// The open namespace file, kept for as long as threads may enter it.
     fd: OwnedFd,
+    /// The identity read from `fd` when the value was created.
     id: NetnsId,
 }
 
