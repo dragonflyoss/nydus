@@ -10,9 +10,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use hex::FromHex;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
-use nydus_format::utils::{hex_string, parse_sha256_hex, SHA256_DIGEST_SIZE};
+use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use crate::reader::{ErofsReader, RawBlobInfo};
 
@@ -34,7 +35,7 @@ impl BlobId {
     }
 
     pub fn to_hex(self) -> String {
-        hex_string(&self.0)
+        hex::encode(self.0)
     }
 }
 
@@ -54,13 +55,15 @@ impl FromStr for BlobId {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        Ok(Self(parse_sha256_hex(value)?))
+        <[u8; SHA256_DIGEST_SIZE]>::from_hex(value)
+            .map(Self)
+            .map_err(|err| Error::InvalidParameter(format!("invalid blob id {value:?}: {err}")))
     }
 }
 
 impl fmt::Display for BlobId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex_string(&self.0))
+        f.write_str(&hex::encode(self.0))
     }
 }
 

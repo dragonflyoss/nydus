@@ -1,8 +1,6 @@
 //! Tests for `ErofsReader`: fixture images are built through the public
 //! `build` module and then read back through the reader.
 
-use crate::fixture;
-
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
@@ -19,15 +17,15 @@ use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeD
 use nydus_core::ErofsReader;
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{
-    erofs_extended_i_format, erofs_xattr_ibody_size, ErofsChunkAddr, ErofsDeviceSlot, ErofsInode,
-    ErofsInodeExtended, ErofsSuperblock, XattrEntry, ZAlgorithm, ZComprCfgs, EROFS_BLKSZBITS,
-    EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_INODE_COMPRESSED_FULL, EROFS_SB_BASE_SIZE,
-    EROFS_SLOTSIZE, EROFS_SUPER_OFFSET, EROFS_XATTR_INDEX_USER, Z_EROFS_ADVISE_FRAGMENT_PCLUSTER,
-    Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_HEAD1,
-    Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT,
-    Z_EROFS_MAP_HEADER_SIZE,
+    ErofsChunkAddr, ErofsDeviceSlot, ErofsInode, ErofsInodeExtended, ErofsSuperblock, XattrEntry,
+    ZErofsComprCfgs, ZErofsCompressor, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE,
+    EROFS_INODE_COMPRESSED_FULL, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
+    EROFS_XATTR_INDEX_USER, Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG,
+    Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
+    Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_MAP_HEADER_SIZE,
 };
-use nydus_format::utils::{hex_string, sha256_file};
+use nydus_format::utils::sha256_reader;
+use nydus_test_utils::blob::FullBlob;
 
 struct CountingBackend {
     local: Local,
@@ -35,7 +33,7 @@ struct CountingBackend {
     fail_next: AtomicBool,
 }
 
-fn build_z_reader_fixture(algorithm: ZAlgorithm) -> (TempDir, Vec<u8>) {
+fn build_z_reader_fixture(algorithm: ZErofsCompressor) -> (TempDir, Vec<u8>) {
     let dir = tempdir().unwrap();
     let source = dir.path().join("src");
     fs::create_dir(&source).unwrap();
@@ -53,7 +51,7 @@ fn build_z_reader_fixture(algorithm: ZAlgorithm) -> (TempDir, Vec<u8>) {
     .unwrap();
     let mut blob = Vec::new();
     let image = build_image(&options, &mut blob).unwrap();
-    fs::write(dir.path().join(hex_string(&image.full_blob_digest)), blob).unwrap();
+    fs::write(dir.path().join(hex::encode(image.full_blob_digest)), blob).unwrap();
     let bootstrap = image.standalone_bootstrap.unwrap();
     fs::write(dir.path().join("bootstrap"), &bootstrap).unwrap();
     (dir, bootstrap)
@@ -99,7 +97,7 @@ fn read_z_fixture_range(
 
 #[test]
 fn z_reader_rejects_plain_extent_larger_than_physical_block() {
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
         let reader = ErofsReader::open_metadata_only(&dir.path().join("bootstrap")).unwrap();
         let nid = z_fixture_nid(&reader, b"large");
@@ -113,7 +111,7 @@ fn z_reader_rejects_plain_extent_larger_than_physical_block() {
 
 #[test]
 fn z_reader_rejects_head_distance_before_cached_extent() {
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
         let metadata = ErofsReader::open_metadata_only(&dir.path().join("bootstrap")).unwrap();
         let nid = z_fixture_nid(&metadata, b"large");
@@ -159,7 +157,7 @@ fn z_reader_rejects_head_distance_before_cached_extent() {
 
 #[test]
 fn z_reader_rejects_malformed_indexes_and_packed_nids() {
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, bootstrap) = build_z_reader_fixture(algorithm);
         let reader = ErofsReader::open_metadata_only(&dir.path().join("bootstrap")).unwrap();
         let nid = z_fixture_nid(&reader, b"large");
@@ -249,7 +247,7 @@ fn z_reader_rejects_malformed_indexes_and_packed_nids() {
             io::ErrorKind::InvalidData
         );
         let huge = ErofsInodeExtended::new(
-            erofs_extended_i_format(EROFS_INODE_COMPRESSED_FULL),
+            EROFS_INODE_COMPRESSED_FULL,
             0o100644,
             0,
             u64::MAX,
@@ -261,7 +259,7 @@ fn z_reader_rejects_malformed_indexes_and_packed_nids() {
             0,
             1,
         );
-        let huge_inode = ErofsInode::parse(huge.as_bytes()).unwrap();
+        let huge_inode = ErofsInode::from_bytes(huge.as_bytes()).unwrap();
         assert_eq!(
             reader
                 .write_file_data_to(nid, &huge_inode, 0, 1, &mut Vec::new())
@@ -294,7 +292,7 @@ fn z_reader_rejects_malformed_indexes_and_packed_nids() {
 
 #[test]
 fn z_reader_validates_whole_file_fragments() {
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, bootstrap) = build_z_reader_fixture(algorithm);
         let reader = ErofsReader::open_metadata_only(&dir.path().join("bootstrap")).unwrap();
         let nid = z_fixture_nid(&reader, b"small");
@@ -352,7 +350,7 @@ fn z_reader_validates_whole_file_fragments() {
 
 #[test]
 fn z_reader_validates_tail_fragments_and_packed_recursion() {
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, bootstrap) = build_z_reader_fixture(algorithm);
         let reader = ErofsReader::open_metadata_only(&dir.path().join("bootstrap")).unwrap();
         let small_nid = z_fixture_nid(&reader, b"small");
@@ -453,14 +451,14 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
     let mut metadata_bytes = Vec::new();
     metadata.write_to(&mut metadata_bytes).unwrap();
 
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
         let config = match algorithm {
-            ZAlgorithm::Lz4 => ZComprCfgs {
+            ZErofsCompressor::Lz4 => ZErofsComprCfgs {
                 lz4_max_pclusterblks: Some(7),
                 zstd_windowlog: None,
             },
-            ZAlgorithm::Zstd => ZComprCfgs {
+            ZErofsCompressor::Zstd => ZErofsComprCfgs {
                 lz4_max_pclusterblks: None,
                 zstd_windowlog: Some(20),
             },
@@ -504,7 +502,7 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
                 assert!(err.to_string().contains("bootstrap crc32"), "{err}");
             }
         }
-        if algorithm == ZAlgorithm::Zstd {
+        if algorithm == ZErofsCompressor::Zstd {
             for encoded in [11, 246, u8::MAX] {
                 bootstrap[config_offset + 3] = encoded;
                 let path = dir.path().join(format!("invalid-config-{encoded}"));
@@ -521,14 +519,14 @@ fn z_compr_cfgs_reads_exact_embedded_offsets() {
 
 #[test]
 fn z_compr_cfgs_reads_raw_device_embedded_offsets() {
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
         let config = match algorithm {
-            ZAlgorithm::Lz4 => ZComprCfgs {
+            ZErofsCompressor::Lz4 => ZErofsComprCfgs {
                 lz4_max_pclusterblks: Some(7),
                 zstd_windowlog: None,
             },
-            ZAlgorithm::Zstd => ZComprCfgs {
+            ZErofsCompressor::Zstd => ZErofsComprCfgs {
                 lz4_max_pclusterblks: None,
                 zstd_windowlog: Some(20),
             },
@@ -574,12 +572,12 @@ fn z_compr_cfgs_reads_raw_device_embedded_offsets() {
 #[test]
 fn zstd_config_windowlog_range() {
     use nydus_format::erofs::{
-        ZComprCfgs, Z_EROFS_ZSTD_MAX_WINDOWLOG, Z_EROFS_ZSTD_WINDOWLOG_BASE,
+        ZErofsComprCfgs, Z_EROFS_ZSTD_MAX_WINDOWLOG, Z_EROFS_ZSTD_WINDOWLOG_BASE,
     };
 
     for encoded in 0..=u8::MAX {
         let bytes = [6, 0, 0, encoded, 0, 0, 0, 0];
-        let result = ZComprCfgs::parse(1 << ZAlgorithm::Zstd.as_type(), &bytes);
+        let result = ZErofsComprCfgs::from_bytes(&bytes, 1 << ZErofsCompressor::Zstd.code());
         if encoded <= Z_EROFS_ZSTD_MAX_WINDOWLOG - Z_EROFS_ZSTD_WINDOWLOG_BASE {
             let (config, consumed) = result.unwrap();
             assert_eq!(consumed, bytes.len());
@@ -630,7 +628,7 @@ impl BlobBackend for CountingBackend {
 
 #[test]
 fn z_fragments_reuse_decoded_pclusters_across_files_and_threads() {
-    for algorithm in [ZAlgorithm::Lz4, ZAlgorithm::Zstd] {
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let dir = tempdir().unwrap();
         let source = dir.path().join("src");
         fs::create_dir(&source).unwrap();
@@ -670,7 +668,7 @@ fn z_fragments_reuse_decoded_pclusters_across_files_and_threads() {
         .unwrap();
         let mut blob = Vec::new();
         let image = build_image(&options, &mut blob).unwrap();
-        fs::write(dir.path().join(hex_string(&image.full_blob_digest)), blob).unwrap();
+        fs::write(dir.path().join(hex::encode(image.full_blob_digest)), blob).unwrap();
         let bootstrap = dir.path().join("bootstrap");
         fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
         let backend = Arc::new(CountingBackend {
@@ -797,7 +795,11 @@ fn z_fragments_reuse_decoded_pclusters_across_files_and_threads() {
 fn optimize_preserves_dense_files_and_refuses_native_layers() {
     use nydus::optimize::{build_ondemand_blob, ChunkGroupRef};
 
-    for algorithm in [None, Some(ZAlgorithm::Lz4), Some(ZAlgorithm::Zstd)] {
+    for algorithm in [
+        None,
+        Some(ZErofsCompressor::Lz4),
+        Some(ZErofsCompressor::Zstd),
+    ] {
         let dir = tempdir().unwrap();
         let source = dir.path().join("src");
         fs::create_dir(&source).unwrap();
@@ -821,7 +823,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         };
         let mut blob = Vec::new();
         let image = build_image(&options, &mut blob).unwrap();
-        fs::write(dir.path().join(hex_string(&image.full_blob_digest)), blob).unwrap();
+        fs::write(dir.path().join(hex::encode(image.full_blob_digest)), blob).unwrap();
         let parent = dir.path().join("parent");
         fs::write(&parent, image.standalone_bootstrap.unwrap()).unwrap();
         let backend = Arc::new(Local::new(dir.path().to_path_buf()));
@@ -865,7 +867,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
             (None, result) => result.unwrap(),
         };
         fs::write(
-            dir.path().join(hex_string(&optimized.full_blob_digest)),
+            dir.path().join(hex::encode(optimized.full_blob_digest)),
             &optimized.artifact,
         )
         .unwrap();
@@ -884,7 +886,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         )
         .unwrap();
         if let Some(algorithm) = algorithm {
-            assert!(reader.z_compr_cfgs().unwrap().unwrap().has(algorithm));
+            assert!(reader.z_compr_cfgs().unwrap().unwrap().contains(algorithm));
             assert!(reader.superblock().packed_nid().is_some());
         } else {
             assert!(reader.z_compr_cfgs().unwrap().is_none());
@@ -957,7 +959,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         );
         encoded.push(blob[..meta.compressed_size() as usize].to_vec());
         metadata.push(meta);
-        let path = directory.path().join(hex_string(&image.full_blob_digest));
+        let path = directory.path().join(hex::encode(image.full_blob_digest));
         fs::write(&path, blob).unwrap();
         sources.push(path);
     }
@@ -1014,7 +1016,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         fs::write(
             directory
                 .path()
-                .join(hex_string(&optimized.full_blob_digest)),
+                .join(hex::encode(optimized.full_blob_digest)),
             &optimized.artifact,
         )
         .unwrap();
@@ -1056,7 +1058,7 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
             value: vec![b'A' + index as u8; 700],
         })
         .collect();
-    assert!(erofs_xattr_ibody_size(&file_xattrs) > EROFS_BLOCK_SIZE as usize);
+    assert!(XattrEntry::ibody_size(&file_xattrs) > EROFS_BLOCK_SIZE as usize);
 
     let mut inodes = vec![
         InodeInfo {
@@ -1124,12 +1126,7 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
     let inode = reader.inode(file_nid).expect("read inode");
 
     let xattrs = reader.read_xattrs(file_nid, &inode).expect("read xattrs");
-    assert_eq!(xattrs.len(), file_xattrs.len());
-    for ((name, value), expected) in xattrs.iter().zip(file_xattrs.iter()) {
-        let expected_name = [b"user.".as_slice(), expected.suffix.as_slice()].concat();
-        assert_eq!(name, &expected_name);
-        assert_eq!(value, &expected.value);
-    }
+    assert_eq!(xattrs, file_xattrs);
 
     let chunk_index_entries = reader
         .read_chunk_index_entries(file_nid, &inode)
@@ -1170,7 +1167,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     blob_writer.finish().expect("finish blob writer");
     resolve_chunk_addrs(&mut inodes, &blob_writer).expect("resolve chunk addresses");
 
-    let data_blob_id = sha256_file(&data_path).expect("hash data blob");
+    let data_blob_id = sha256_reader(fs::File::open(&data_path).unwrap()).expect("hash data blob");
     let embedded_device_slots =
         [ErofsDeviceSlot::with_blob_id(blob_writer.total_block_count(), &data_blob_id).unwrap()];
     let embedded_bootstrap = render_bootstrap(
@@ -1183,8 +1180,10 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let blob_metadata = blob_writer.blob_metadata().expect("blob meta");
 
     let data = fs::read(&data_path).expect("read data blob");
-    let full_blob_digest =
-        fixture::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_metadata);
+    let full_blob_digest = FullBlob::new(&data)
+        .with_bootstrap(&embedded_bootstrap)
+        .with_blob_metadata(&blob_metadata)
+        .save_in(dir.path());
 
     let standalone_device_slots =
         [

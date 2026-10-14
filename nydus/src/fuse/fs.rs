@@ -15,9 +15,8 @@ use fuser::{
 };
 
 use nydus_format::erofs::{
-    erofs_xattr_name_split, is_nydus_xattr, ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
-    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
-    EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR,
+    ErofsInode, XattrEntry, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO,
+    EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
 };
 use nydus_telemetry::metrics;
 
@@ -74,11 +73,7 @@ impl ErofsFs {
         let no_xattr = reader
             .read_xattrs(root_nid, &root)?
             .iter()
-            .any(|(name, value)| {
-                erofs_xattr_name_split(name)
-                    == Some((EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_NO_XATTR))
-                    && value == b"1"
-            });
+            .any(|entry| entry.is_nydus_no_xattr() && entry.value == b"1");
         Ok(Self {
             reader,
             dir_handles: Mutex::new(HashMap::new()),
@@ -110,7 +105,7 @@ impl ErofsFs {
         let sb = self.reader.superblock();
         let block_size = 1u64 << sb.blkszbits;
         let mtime_secs = inode.mtime(sb.epoch());
-        let mtime_nsec = inode.effective_mtime_nsec(sb.fixed_nsec());
+        let mtime_nsec = inode.mtime_nsec(sb.fixed_nsec());
         let size = inode.size();
         let blocks = size.div_ceil(block_size) * block_size / 512;
         let time = erofs_time(mtime_secs, mtime_nsec);
@@ -303,8 +298,8 @@ fn erofs_ft_to_kind(ft: u8) -> FileType {
     }
 }
 
-fn should_hide_xattr(ino: u64, name: &[u8]) -> bool {
-    ino == FUSE_ROOT_ID && is_nydus_xattr(name)
+fn should_hide_xattr(ino: u64, entry: &XattrEntry) -> bool {
+    ino == FUSE_ROOT_ID && entry.is_nydus()
 }
 
 impl Filesystem for ErofsFs {
@@ -688,13 +683,6 @@ impl Filesystem for ErofsFs {
                 return;
             }
         };
-        let name_bytes = name.as_bytes();
-        if should_hide_xattr(ino.0, name_bytes) {
-            m.fail();
-            reply.error(Errno::ENODATA);
-            return;
-        }
-
         let xattrs = match self.reader.read_xattrs(nid, &vi) {
             Ok(x) => x,
             Err(err) => {
@@ -703,20 +691,21 @@ impl Filesystem for ErofsFs {
                 return;
             }
         };
-        for (xname, xvalue) in &xattrs {
-            if xname.as_slice() == name_bytes {
-                if size == 0 {
-                    reply.size(xvalue.len() as u32);
-                    return;
-                }
-                if (size as usize) < xvalue.len() {
-                    m.fail();
-                    reply.error(Errno::ERANGE);
-                    return;
-                }
-                reply.data(xvalue);
+        let found = xattrs
+            .iter()
+            .find(|entry| entry.name() == name.as_bytes() && !should_hide_xattr(ino.0, entry));
+        if let Some(entry) = found {
+            if size == 0 {
+                reply.size(entry.value.len() as u32);
                 return;
             }
+            if (size as usize) < entry.value.len() {
+                m.fail();
+                reply.error(Errno::ERANGE);
+                return;
+            }
+            reply.data(&entry.value);
+            return;
         }
 
         m.fail();
@@ -749,11 +738,11 @@ impl Filesystem for ErofsFs {
 
         // Build null-separated list of xattr names
         let mut names_buf: Vec<u8> = Vec::new();
-        for (xname, _) in &xattrs {
-            if should_hide_xattr(ino.0, xname) {
+        for entry in &xattrs {
+            if should_hide_xattr(ino.0, entry) {
                 continue;
             }
-            names_buf.extend_from_slice(xname);
+            names_buf.extend_from_slice(&entry.name());
             names_buf.push(0);
         }
 
@@ -777,7 +766,8 @@ mod tests {
     use nydus_core::build::inode::{build_tree, resolve_chunk_addrs};
     use nydus_format::erofs::{
         XattrEntry, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_INODE_FLAT_INLINE,
-        EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_INDEX_USER,
+        EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_INDEX_TRUSTED, EROFS_XATTR_INDEX_USER,
+        NYDUS_XATTR_SUFFIX_NO_XATTR,
     };
     use std::collections::HashSet;
     use std::fs;
@@ -863,11 +853,9 @@ mod tests {
             let filesystem = ErofsFs::new(Arc::new(reader)).unwrap();
             assert_eq!(filesystem.no_xattr, expected);
         }
-        assert!(should_hide_xattr(FUSE_ROOT_ID, b"trusted.nydus.no_xattr"));
-        assert!(!should_hide_xattr(
-            FUSE_ROOT_ID + 1,
-            b"trusted.nydus.no_xattr"
-        ));
+        let marker = XattrEntry::new(b"trusted.nydus.no_xattr", b"1".to_vec()).unwrap();
+        assert!(should_hide_xattr(FUSE_ROOT_ID, &marker));
+        assert!(!should_hide_xattr(FUSE_ROOT_ID + 1, &marker));
     }
 
     #[test]

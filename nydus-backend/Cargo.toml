@@ -42,6 +42,7 @@ async-trait = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 dragonfly-client-request = { version = "=1.7.2", optional = true }
 futures = { version = "0.3", optional = true }
+hex = { workspace = true }
 http = { version = "1", optional = true }
 leaky-bucket = { version = "1", optional = true }
 libc = { workspace = true }
@@ -69,7 +70,7 @@ tracing = { workspace = true, optional = true }
 url = { version = "2", optional = true }
 
 [dev-dependencies]
-blake3 = "1"
-crc32c = "0.6"
+nydus-test-utils = { path = "../nydus-test-utils" }
 serde_yaml = "0.9"
+sha2 = { workspace = true }
 tempfile = { workspace = true }

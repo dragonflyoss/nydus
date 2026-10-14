@@ -7,12 +7,12 @@ use std::sync::Arc;
 use nydus::build::{build_image, BuildImageOptions, DEFAULT_CHUNK_GROUP_MIN_SIZE};
 use nydus_config::Config;
 use nydus_core::writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
-use nydus_core::{ErofsReader, NydusCore};
+use nydus_core::{BlobId, ErofsReader, NydusCore};
 use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{
-    ErofsChunkIndex, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
+    ErofsChunkAddr, ErofsChunkIndex, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_NULL_ADDR,
+    EROFS_SLOTSIZE,
 };
-use nydus_format::utils::hex_string;
 
 const DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE: u32 = BlobMetadata::DEFAULT_CHUNK_SIZE;
 
@@ -62,7 +62,7 @@ fn build_parent_blob(temp: &tempfile::TempDir, data: &[u8]) -> (PathBuf, [u8; 32
     fs::write(&parent_bootstrap, parent.standalone_bootstrap.unwrap()).unwrap();
     fs::rename(
         &parent_blob,
-        temp.path().join(hex_string(&parent.full_blob_digest)),
+        temp.path().join(hex::encode(parent.full_blob_digest)),
     )
     .unwrap();
     (parent_bootstrap, parent.full_blob_digest)
@@ -82,12 +82,6 @@ fn incremental_writer_options_match_build_defaults() {
     assert_eq!(options.digester, Some(BlobMetadataDigester::Blake3));
 }
 
-fn create_parentless_writer(temp: &tempfile::TempDir) -> (IncrementalWriter, PathBuf) {
-    let output_dir = temp.path().to_path_buf();
-    let writer = IncrementalWriter::create(writer_options(output_dir.clone())).unwrap();
-    (writer, output_dir)
-}
-
 fn local_config(blob_dir: &Path, cache_dir: &Path) -> Config {
     Config::from_yaml(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
@@ -95,6 +89,12 @@ fn local_config(blob_dir: &Path, cache_dir: &Path) -> Config {
         cache_dir.display(),
     ))
     .unwrap()
+}
+
+fn create_parentless_writer(temp: &tempfile::TempDir) -> (IncrementalWriter, PathBuf) {
+    let output_dir = temp.path().to_path_buf();
+    let writer = IncrementalWriter::create(writer_options(output_dir.clone())).unwrap();
+    (writer, output_dir)
 }
 
 fn open_metadata_writer(
@@ -149,7 +149,7 @@ fn commit_upper_blob(output_dir: &Path, writer: IncrementalWriter) -> CommittedI
     let reader = ErofsReader::open_metadata_only(&bootstrap_path).unwrap();
     let blob_infos = reader.blob_infos().unwrap();
     let blob_path = if blob_infos.len() > 1 {
-        let path = output_dir.join(hex_string(&blob_infos.last().unwrap().blob_id));
+        let path = output_dir.join(hex::encode(blob_infos.last().unwrap().blob_id));
         assert!(path.exists());
         Some(path)
     } else {
@@ -219,7 +219,7 @@ fn incremental_writer_creates_parentless_image_with_one_data_blob() {
     assert_eq!(blob_infos.len(), 1);
     assert!(metadata_reader.read_prefetch_order().is_empty());
     for info in blob_infos {
-        let blob = output_dir.join(hex_string(&info.blob_id));
+        let blob = output_dir.join(hex::encode(info.blob_id));
         assert!(blob.exists());
         assert!(blob_metadata_path(&blob).exists());
     }
@@ -268,7 +268,7 @@ fn incremental_writer_parentless_null_only_image_has_empty_blob() {
     let metadata_reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
     let blob_infos = metadata_reader.blob_infos().unwrap();
     assert_eq!(blob_infos.len(), 1);
-    let blob = output_dir.join(hex_string(&blob_infos[0].blob_id));
+    let blob = output_dir.join(hex::encode(blob_infos[0].blob_id));
     assert!(blob.exists());
     assert!(blob_metadata_path(&blob).exists());
 
@@ -353,7 +353,11 @@ fn incremental_writer_preserves_flattened_parent_mapping() {
         .into_iter()
         .next()
         .unwrap();
-    let flattened_chunk = ErofsChunkIndex::new(parent_mapping + parent_chunk.blkaddr, 0).unwrap();
+    let flattened_chunk = ErofsChunkIndex::new(ErofsChunkAddr {
+        blkaddr: parent_mapping + parent_chunk.blkaddr,
+        device_id: 0,
+    })
+    .unwrap();
     let inode_offset = parent_reader.superblock().meta_blkaddr() as usize
         * EROFS_BLOCK_SIZE as usize
         + parent_nid as usize * EROFS_SLOTSIZE as usize;
@@ -493,10 +497,7 @@ fn incremental_writer_create_file_preserves_metadata_order_and_tail() {
     assert_eq!(inode.uid(), 70_000);
     assert_eq!(inode.gid(), 80_000);
     assert_eq!(inode.mtime(reader.superblock().epoch()), 123_456);
-    assert_eq!(
-        inode.effective_mtime_nsec(reader.superblock().fixed_nsec()),
-        789
-    );
+    assert_eq!(inode.mtime_nsec(reader.superblock().fixed_nsec()), 789);
     let data = reader
         .read_file_data(nid, &inode, 0, (chunk_size + 17) as u32)
         .unwrap();
@@ -575,17 +576,17 @@ fn incremental_writer_replaces_one_chunk_with_upper_blob_data() {
     assert_eq!(reader.blob_infos().unwrap().len(), 2);
     assert_eq!(
         reader.blob_infos().unwrap()[1].blob_id,
-        nydus_format::utils::parse_sha256_hex(
-            commit
-                .blob_path
-                .as_ref()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-        )
-        .unwrap()
+        commit
+            .blob_path
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<BlobId>()
+            .unwrap()
+            .into_bytes()
     );
 
     let nid = find_path(&reader, "memory.bin");
@@ -1050,12 +1051,7 @@ fn nydus_core_creates_incremental_writer_reusing_parent_reader() {
     let mut parent_data = vec![b'A'; chunk_size];
     parent_data.extend(vec![b'B'; chunk_size]);
     let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
-    let config = Config::from_yaml(&format!(
-        "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
-        temp.path().display(),
-        temp.path().join("cache").display(),
-    ))
-    .unwrap();
+    let config = local_config(temp.path(), &temp.path().join("cache"));
     let core = NydusCore::new(&parent_bootstrap, config).unwrap();
 
     let output_dir = temp.path().to_path_buf();

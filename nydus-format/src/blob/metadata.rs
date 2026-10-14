@@ -1,11 +1,15 @@
-use crate::blob::algorithm::{BlobMetadataCompressor, BlobMetadataDigester};
-use crate::blob::flag::FeatureFlags;
+//! The `.blob.meta` sidecar: the tables mapping a blob's chunk groups,
+//! chunks and digests.
+
+use crate::blob::compressor::BlobMetadataCompressor;
+use crate::blob::digester::BlobMetadataDigester;
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Context, Error, Result};
-use crate::utils::le::{
+use crate::utils::bytes::{
     read_bytes_at, read_u16_at, read_u32_at, read_u64_at, read_u8_at, write_bytes_at, write_u16_at,
     write_u32_at, write_u64_at, write_u8_at,
 };
+use crate::utils::FeatureFlags;
 use crc32c::{crc32c, crc32c_append};
 use std::fmt;
 use std::fs;
@@ -112,7 +116,7 @@ impl BlobMetadataTable {
     pub const ALIGNMENT: usize = 8;
 
     /// Every incompat bit this reader understands for a table, none yet.
-    const INCOMPAT_SUPPORTED: u16 = 0;
+    const SUPPORTED_INCOMPAT: u16 = 0;
 
     /// The `feature_compat` word a writer declares, no table feature yet.
     pub const DEFAULT_FEATURE_COMPAT: u16 = 0;
@@ -147,7 +151,7 @@ impl BlobMetadataTable {
         Ok(table)
     }
 
-    /// Parse the table header at the next [`Self::ALIGNMENT`] at or after
+    /// Parses the table header at the next [`Self::ALIGNMENT`] at or after
     /// `offset` in the file `bytes`, where the previous table ended. The
     /// raw bytes are checked first (`validate_bytes`), then the decoded
     /// fields (`validate_fields`), then that the table lies within the file.
@@ -178,7 +182,7 @@ impl BlobMetadataTable {
         Ok(table)
     }
 
-    /// Serialize the table as this header, the `header_extension` when the
+    /// Serializes the table as this header, the `header_extension` when the
     /// type has one, then the `entries`.
     fn to_bytes<T: BlobMetadataEntry>(
         self,
@@ -203,7 +207,7 @@ impl BlobMetadataTable {
         data
     }
 
-    /// Validate the raw bytes before decoding them, a whole header at
+    /// Validates the raw bytes before decoding them, a whole header at
     /// `offset` with an aligned `header_size`.
     fn validate_bytes(bytes: &[u8], offset: usize) -> Result<()> {
         if offset + Self::HEADER_SIZE > bytes.len() {
@@ -224,12 +228,12 @@ impl BlobMetadataTable {
         Ok(())
     }
 
-    /// Validate the intrinsic field invariants. Unknown incompat bits reject,
+    /// Validates the intrinsic field invariants. Unknown incompat bits reject,
     /// and a known type's header extension is at least as large as this
     /// reader parses.
     fn validate_fields(&self) -> Result<()> {
         FeatureFlags::from_bits(u32::from(self.feature_incompat))
-            .validate_incompat(u32::from(Self::INCOMPAT_SUPPORTED))
+            .validate_incompat(u32::from(Self::SUPPORTED_INCOMPAT))
             .with_context(|| format!("blob meta table {} incompat flags", self.table_type))?;
 
         let required = match self.table_type {
@@ -303,7 +307,7 @@ impl BlobMetadataTable {
             .ok_or_else(|| Error::InvalidImage(format!("blob meta lacks its {table_type}")))
     }
 
-    /// Read this table as entries of `T`. The declared entry size must cover
+    /// Reads this table as entries of `T`. The declared entry size must cover
     /// `T`, so fields a newer writer appended are skipped rather than read
     /// past.
     fn entries_of<T: BlobMetadataEntry>(self) -> Result<BlobMetadataEntries<T>> {
@@ -329,10 +333,10 @@ trait BlobMetadataEntry: Sized {
     /// entry size.
     const SIZE: usize;
 
-    /// Decode an entry from exactly its [`Self::SIZE`] bytes.
+    /// Decodes an entry from exactly its [`Self::SIZE`] bytes.
     fn from_bytes(bytes: &[u8]) -> Self;
 
-    /// Append the entry's on-disk bytes to `out`.
+    /// Appends the entry's on-disk bytes to `out`.
     fn write_to(&self, out: &mut Vec<u8>);
 }
 
@@ -393,7 +397,7 @@ impl BlobMetadataChunkGroupTableHeaderExtension {
         })
     }
 
-    /// Read the extension behind the header of `table` in the file `bytes`.
+    /// Reads the extension behind the header of `table` in the file `bytes`.
     fn from_bytes(bytes: &[u8], table: &BlobMetadataTable) -> Self {
         let bytes = &bytes[table.header_extension_range(Self::SIZE)];
         Self {
@@ -403,7 +407,7 @@ impl BlobMetadataChunkGroupTableHeaderExtension {
         }
     }
 
-    /// Serialize the extension into the bytes behind the table header.
+    /// Serializes the extension into the bytes behind the table header.
     fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut data = [0u8; Self::SIZE];
         write_u8_at(&mut data, 0, self.max_blocks_per_chunk_group_bits);
@@ -470,7 +474,7 @@ impl BlobMetadataEntry for BlobMetadataChunkGroup {
     /// the group starts in each layer, its uncompressed size and its crc32.
     const SIZE: usize = 24;
 
-    /// Decode the three starts, the uncompressed size and its crc32 from the
+    /// Decodes the three starts, the uncompressed size and its crc32 from the
     /// entry's 24 bytes.
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
@@ -482,7 +486,7 @@ impl BlobMetadataEntry for BlobMetadataChunkGroup {
         }
     }
 
-    /// Append the entry's 24 bytes, the three starts first, then the
+    /// Appends the entry's 24 bytes, the three starts first, then the
     /// uncompressed size and its crc32.
     fn write_to(&self, out: &mut Vec<u8>) {
         let mut data = [0u8; Self::SIZE];
@@ -567,7 +571,7 @@ impl BlobMetadataChunkGroupExtent {
         }
     }
 
-    /// Validate the group against `blob_metadata`. It ends after it starts
+    /// Validates the group against `blob_metadata`. It ends after it starts
     /// in every layer, spans at most `max_blocks_per_chunk_group` blocks
     /// and, unless it is the last group, at least one index entry, is
     /// stored whole without a compressor, and its chunks are non-empty and
@@ -802,12 +806,12 @@ impl BlobMetadataEntry for BlobMetadataChunkLength {
     /// chunk's byte length.
     const SIZE: usize = 4;
 
-    /// Decode the length from the entry's 4 bytes.
+    /// Decodes the length from the entry's 4 bytes.
     fn from_bytes(bytes: &[u8]) -> Self {
         Self(read_u32_at(bytes, 0))
     }
 
-    /// Append the length as 4 bytes.
+    /// Appends the length as 4 bytes.
     fn write_to(&self, out: &mut Vec<u8>) {
         let mut data = [0u8; Self::SIZE];
         write_u32_at(&mut data, 0, self.0);
@@ -861,7 +865,7 @@ impl BlobMetadataChunkGroupIndexTableHeaderExtension {
         })
     }
 
-    /// Read the extension behind the header of `table` in the file `bytes`.
+    /// Reads the extension behind the header of `table` in the file `bytes`.
     fn from_bytes(bytes: &[u8], table: &BlobMetadataTable) -> Self {
         let bytes = &bytes[table.header_extension_range(Self::SIZE)];
         Self {
@@ -870,7 +874,7 @@ impl BlobMetadataChunkGroupIndexTableHeaderExtension {
         }
     }
 
-    /// Serialize the extension into the bytes behind the table header.
+    /// Serializes the extension into the bytes behind the table header.
     fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut data = [0u8; Self::SIZE];
         write_u8_at(&mut data, 0, self.blocks_per_chunk_group_index_bits);
@@ -919,12 +923,12 @@ impl BlobMetadataEntry for BlobMetadataChunkGroupIndex {
     /// the index of the group at one stride's first block.
     const SIZE: usize = 4;
 
-    /// Decode the chunk group index from the entry's 4 bytes.
+    /// Decodes the chunk group index from the entry's 4 bytes.
     fn from_bytes(bytes: &[u8]) -> Self {
         Self(read_u32_at(bytes, 0))
     }
 
-    /// Append the chunk group index as 4 bytes.
+    /// Appends the chunk group index as 4 bytes.
     fn write_to(&self, out: &mut Vec<u8>) {
         let mut data = [0u8; Self::SIZE];
         write_u32_at(&mut data, 0, self.0);
@@ -992,7 +996,7 @@ impl BlobMetadataChunkGroupDigestTableHeaderExtension {
         }
     }
 
-    /// Read the extension behind the header of `table` in the file `bytes`.
+    /// Reads the extension behind the header of `table` in the file `bytes`.
     fn from_bytes(bytes: &[u8], table: &BlobMetadataTable) -> Self {
         let bytes = &bytes[table.header_extension_range(Self::SIZE)];
         Self {
@@ -1001,7 +1005,7 @@ impl BlobMetadataChunkGroupDigestTableHeaderExtension {
         }
     }
 
-    /// Serialize the extension into the bytes behind the table header.
+    /// Serializes the extension into the bytes behind the table header.
     fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut data = [0u8; Self::SIZE];
         write_u8_at(&mut data, 0, self.algorithm);
@@ -1033,12 +1037,12 @@ impl BlobMetadataEntry for BlobMetadataChunkGroupDigest {
     /// one group's digest.
     const SIZE: usize = Self::SIZE;
 
-    /// Copy the digest out of the entry's 32 bytes.
+    /// Copies the digest out of the entry's 32 bytes.
     fn from_bytes(bytes: &[u8]) -> Self {
         Self(read_bytes_at(bytes, 0))
     }
 
-    /// Append the digest's 32 bytes.
+    /// Appends the digest's 32 bytes.
     fn write_to(&self, out: &mut Vec<u8>) {
         let mut data = [0u8; Self::SIZE];
         write_bytes_at(&mut data, 0, &self.0);
@@ -1103,7 +1107,7 @@ impl BlobMetadataEntry for BlobMetadataChunkGroupRedirect {
     /// the source blob slot, two reserved bytes and the source group.
     const SIZE: usize = 8;
 
-    /// Decode the source blob slot, the reserved bytes and the source group
+    /// Decodes the source blob slot, the reserved bytes and the source group
     /// from the entry's 8 bytes.
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
@@ -1113,7 +1117,7 @@ impl BlobMetadataEntry for BlobMetadataChunkGroupRedirect {
         }
     }
 
-    /// Append the entry's 8 bytes, the source blob slot, the reserved bytes and
+    /// Appends the entry's 8 bytes, the source blob slot, the reserved bytes and
     /// the source group.
     fn write_to(&self, out: &mut Vec<u8>) {
         let mut data = [0u8; Self::SIZE];
@@ -1139,7 +1143,7 @@ impl BlobMetadataChunkGroupRedirect {
         Ok(redirect)
     }
 
-    /// Validate that the source blob index is a device slot, since slot zero
+    /// Validates that the source blob index is a device slot, since slot zero
     /// is the bootstrap itself.
     fn validate_fields(&self) -> Result<()> {
         if self.source_blob_index == 0 {
@@ -1180,7 +1184,7 @@ impl BlobMetadataWriter {
         }
     }
 
-    /// Append one table, its header and then `header_extension` when the
+    /// Appends one table, its header and then `header_extension` when the
     /// table type has one and then `entries`. Returns the appended entries
     /// as a typed view over the bytes [`Self::finish`] hands over.
     fn push_table<T: BlobMetadataEntry>(
@@ -1264,7 +1268,7 @@ impl BlobMetadataHeader {
     /// On-disk magic, 8 raw ASCII bytes ("NDBLMETA" = Nydus BLob META) written
     /// as-is so a hexdump of the file starts with the readable string. Same
     /// frozen `magic + feature_compat + feature_incompat + crc32` prefix as the
-    /// blob footer (`NDFOOTER`), see [`crate::blob::flag`].
+    /// blob footer (`NDFOOTER`), see [`crate::blob`].
     pub const MAGIC: [u8; 8] = *b"NDBLMETA";
 
     /// The header's fixed on-disk size, 24 bytes at the start of the blob
@@ -1277,7 +1281,7 @@ impl BlobMetadataHeader {
     /// Every incompat bit this reader understands, none so far. A file
     /// setting a bit outside this mask was written by a newer nydus and is
     /// rejected by [`FeatureFlags::validate_incompat`].
-    const INCOMPAT_SUPPORTED: u32 = NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL;
+    const SUPPORTED_INCOMPAT: u32 = NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL;
 
     /// The `feature_compat` word a writer declares, no compat feature yet.
     pub const DEFAULT_FEATURE_COMPAT: u32 = 0;
@@ -1300,7 +1304,7 @@ impl BlobMetadataHeader {
         header
     }
 
-    /// Parse the header from the start of the file `bytes`. The raw bytes
+    /// Parses the header from the start of the file `bytes`. The raw bytes
     /// are checked first (`validate_bytes`), then the decoded fields
     /// (`validate_fields`).
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
@@ -1317,7 +1321,7 @@ impl BlobMetadataHeader {
         Ok(header)
     }
 
-    /// Serialize the header into its on-disk bytes.
+    /// Serializes the header into its on-disk bytes.
     fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut data = [0u8; Self::SIZE];
         write_bytes_at(&mut data, 0, &Self::MAGIC);
@@ -1329,7 +1333,7 @@ impl BlobMetadataHeader {
         data
     }
 
-    /// Validate the raw on-disk bytes before decoding them, the magic, a
+    /// Validates the raw on-disk bytes before decoding them, the magic, a
     /// whole number of blocks, and the stored crc32 against
     /// [`Self::compute_crc32`] over the whole file.
     fn validate_bytes(bytes: &[u8]) -> Result<()> {
@@ -1354,11 +1358,11 @@ impl BlobMetadataHeader {
         Ok(())
     }
 
-    /// Validate the intrinsic field invariants. Unknown incompat bits
+    /// Validates the intrinsic field invariants. Unknown incompat bits
     /// reject before anything behind the header is trusted, since they may
     /// change the table walk itself.
     fn validate_fields(&self) -> Result<()> {
-        FeatureFlags::from_bits(self.feature_incompat).validate_incompat(Self::INCOMPAT_SUPPORTED)
+        FeatureFlags::from_bits(self.feature_incompat).validate_incompat(Self::SUPPORTED_INCOMPAT)
     }
 
     /// Whether `bytes` starts with the blob meta magic.
@@ -1570,10 +1574,10 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
-    /// Create metadata for incremental upper data without an embedded
-    /// bootstrap. Incremental and redirect metadata are mutually exclusive.
+    /// Creates metadata for an upper blob, the data an incremental build
+    /// writes on top of a parent image, with the INCREMENTAL flag set.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_incremental(
+    pub fn new_upper(
         max_blocks_per_chunk_group: u32,
         blocks_per_chunk_group_index: u32,
         compressor: BlobMetadataCompressor,
@@ -1598,6 +1602,7 @@ impl BlobMetadata {
             metadata.header.table_count,
             &metadata.bytes[BlobMetadataHeader::SIZE..],
         );
+
         write_bytes_at(&mut metadata.bytes, 0, &metadata.header.to_bytes());
         Ok(metadata)
     }
@@ -1623,7 +1628,7 @@ impl BlobMetadata {
         Ok((incremental, redirect))
     }
 
-    /// Parse a blob meta from its bytes, which it keeps. The header, the table
+    /// Parses a blob meta from its bytes, which it keeps. The header, the table
     /// walk, the supported tables and their header extensions, then
     /// `validate_fields`.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
@@ -1737,7 +1742,7 @@ impl BlobMetadata {
         Ok(blob_metadata)
     }
 
-    /// Validate the decoded fields against each other in file order. The
+    /// Validates the decoded fields against each other in file order. The
     /// header extensions bound each other, ChunkGroupTable starts at block and
     /// chunk zero, ends in a last entry that only ends and holds well-formed
     /// groups in between, and every other table holds the entries the groups
@@ -1830,21 +1835,21 @@ impl BlobMetadata {
         Ok(())
     }
 
-    /// Read a blob meta from a file, with the same checks as
+    /// Reads a blob meta from a file, with the same checks as
     /// [`Self::from_bytes`].
     pub fn from_path(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
         Self::from_bytes(bytes)
     }
 
-    /// Write the serialized metadata verbatim, including tables this reader
+    /// Writes the serialized metadata verbatim, including tables this reader
     /// does not know.
     pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
         writer.write_all(&self.bytes)?;
         Ok(())
     }
 
-    /// Write the serialized metadata to a new sidecar file at `path`.
+    /// Writes the serialized metadata to a new sidecar file at `path`.
     pub fn save(&self, path: &Path) -> Result<()> {
         fs::write(path, &self.bytes)?;
         Ok(())

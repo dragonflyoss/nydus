@@ -2188,6 +2188,7 @@ dependencies = [
  "crc32c",
  "flate2",
  "fuser",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2203,6 +2204,7 @@ dependencies = [
  "nydus-format",
  "nydus-storage",
  "nydus-telemetry",
+ "nydus-test-utils",
  "prometheus",
  "sendfd",
  "serde",
@@ -2226,11 +2228,10 @@ version = "3.0.0-beta.2"
 dependencies = [
  "arc-swap",
  "async-trait",
- "blake3",
  "bytes",
- "crc32c",
  "dragonfly-client-request",
  "futures",
+ "hex",
  "http",
  "leaky-bucket",
  "libc",
@@ -2238,12 +2239,14 @@ dependencies = [
  "nydus-config",
  "nydus-format",
  "nydus-telemetry",
+ "nydus-test-utils",
  "reqwest",
  "reqwest-middleware",
  "reqwest-retry",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2271,6 +2274,7 @@ version = "3.0.0-beta.2"
 dependencies = [
  "blake3",
  "crc32c",
+ "hex",
  "libc",
  "lz4-sys",
  "lz4_flex",
@@ -2304,10 +2308,12 @@ version = "3.0.0-beta.2"
 dependencies = [
  "blake3",
  "crc32c",
+ "hex",
  "libc",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "zerocopy",
  "zstd",
 ]
 
@@ -2316,6 +2322,7 @@ name = "nydus-storage"
 version = "3.0.0-beta.2"
 dependencies = [
  "crc32c",
+ "hex",
  "libc",
  "lz4_flex",
  "memmap2",
@@ -2323,8 +2330,10 @@ dependencies = [
  "nydus-config",
  "nydus-format",
  "nydus-telemetry",
+ "nydus-test-utils",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tracing",
  "xattr",
@@ -2343,6 +2352,19 @@ dependencies = [
  "tracing-appender",
  "tracing-panic",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nydus-test-utils"
+version = "3.0.0-beta.2"
+dependencies = [
+ "crc32c",
+ "hex",
+ "lz4_flex",
+ "nydus-format",
+ "sha2 0.10.9",
+ "tempfile",
+ "zstd",
 ]
 
 [[package]]
@@ -3093,9 +3115,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
+checksum = "4a073f5dc7469f984c52ad2752b63b0807745133b6de880b7b64c1ac4c48aec4"
 dependencies = [
  "openssl-probe",
  "rustls-pki-types",

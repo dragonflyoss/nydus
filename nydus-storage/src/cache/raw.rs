@@ -101,24 +101,15 @@ fn unsupported() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::pread_exact;
     use nydus_backend::Local;
     use nydus_format::blob::BlobMetadata;
-    use nydus_format::utils::{hex_string, pread_exact, sha256_bytes};
+    use nydus_test_utils::blob::FullBlob;
     use tempfile::tempdir;
 
     fn write_raw_device_blob(dir: &std::path::Path) -> (Vec<u8>, [u8; SHA256_DIGEST_SIZE]) {
         let payload: Vec<u8> = (0..8192u32).map(|index| (index % 251) as u8).collect();
-        let mut blob = payload.clone();
-        let bootstrap = vec![0u8; 4096];
-        nydus_format::blob::finish_full_blob(
-            &mut blob,
-            payload.len() as u64,
-            Some(&bootstrap),
-            None,
-        )
-        .unwrap();
-        let blob_id = sha256_bytes(&blob);
-        std::fs::write(dir.join(hex_string(&blob_id)), &blob).unwrap();
+        let blob_id = FullBlob::new(&payload).save_in(dir);
         (payload, blob_id)
     }
 
@@ -142,7 +133,7 @@ mod tests {
         assert!(cache.is_all_ready());
         assert_eq!(
             cache.prepare().unwrap(),
-            dir.path().join(hex_string(&blob_id))
+            dir.path().join(hex::encode(blob_id))
         );
         cache.ensure_range(0, 8192).unwrap();
         assert_eq!(

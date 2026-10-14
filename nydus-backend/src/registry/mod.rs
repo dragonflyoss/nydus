@@ -56,7 +56,7 @@ use url::Url;
 
 use nydus_config::{HttpConfig, RegistryConfig};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
-use nydus_format::utils::{hex_string, SHA256_DIGEST_SIZE};
+use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::{
     collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
 };
@@ -433,7 +433,7 @@ impl Inner {
         dst: &mut [u8],
         kind: ReadKind,
     ) -> RegistryResult<Protocol> {
-        let hex = hex_string(blob_id);
+        let hex = hex::encode(blob_id);
         let end = offset + dst.len() as u64 - 1;
         let range: HeaderValue = format!("bytes={offset}-{end}").parse().unwrap();
         let mut headers = HeaderMap::new();
@@ -475,7 +475,7 @@ impl Inner {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
     ) -> RegistryResult<u64> {
-        let url = self.blob_url(&hex_string(blob_id));
+        let url = self.blob_url(&hex::encode(blob_id));
         let response = self
             .authorized_request(Method::HEAD, &url, HeaderMap::new(), kind)
             .await?;
@@ -1301,7 +1301,7 @@ dragonfly:
         let origin = OriginStub::serve(b"unused".to_vec());
         let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-        let hex = hex_string(&TEST_BLOB_ID);
+        let hex = hex::encode(TEST_BLOB_ID);
         registry
             .inner
             .redirects
@@ -1325,7 +1325,7 @@ dragonfly:
             Scripted::Body(body.clone()),
         ]);
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
-        let hex = hex_string(&TEST_BLOB_ID);
+        let hex = hex::encode(TEST_BLOB_ID);
         registry
             .inner
             .redirects

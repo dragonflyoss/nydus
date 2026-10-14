@@ -1,9 +1,8 @@
 use std::io;
 
 use nydus_format::erofs::{
-    cast_ref, erofs_xattr_prefix, mode_to_erofs_file_type, ErofsDirent, ErofsInode,
-    EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT_REG_FILE, EROFS_FT_SYMLINK,
-    EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE,
+    ErofsDirent, ErofsInode, XattrEntry, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT_REG_FILE,
+    EROFS_FT_SYMLINK, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE,
     EROFS_INODE_FLAT_PLAIN, EROFS_INODE_LAYOUT_COMPACT, EROFS_I_VERSION_BIT,
     EROFS_XATTR_ENTRY_HEADER_SIZE, EROFS_XATTR_IBODY_HEADER_SIZE,
 };
@@ -28,7 +27,8 @@ impl ErofsReader {
         } else {
             EROFS_INODE_EXTENDED_SIZE
         };
-        ErofsInode::parse(self.mmap_slice(offset, size)?)
+        ErofsInode::from_bytes(self.mmap_slice(offset, size)?)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
     /// Size of a FLAT_INLINE inode's block-backed region; bytes past it live
@@ -96,12 +96,13 @@ impl ErofsReader {
                     Self::dir_block_entry(block_data, count, i).ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidData, "invalid directory entry")
                     })?;
-                let de: &ErofsDirent = cast_ref(&block_data[i * EROFS_DIRENT_SIZE..]);
+                let de = ErofsDirent::from_bytes(&block_data[i * EROFS_DIRENT_SIZE..])
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
                 // The kernel reports a type it does not know as DT_UNKNOWN,
                 // leaving the answer to the inode's mode; take it from there.
                 let file_type = match de.file_type() {
                     known @ EROFS_FT_REG_FILE..=EROFS_FT_SYMLINK => known,
-                    _ => mode_to_erofs_file_type(self.inode(entry_nid)?.mode()),
+                    _ => self.inode(entry_nid)?.file_type(),
                 };
                 let next_offset = if i + 1 < count {
                     pos + ((i + 1) * EROFS_DIRENT_SIZE) as u64
@@ -166,10 +167,11 @@ impl ErofsReader {
     ) -> Option<(u64, &[u8])> {
         let block_len = block_data.len();
         let de_off = index * EROFS_DIRENT_SIZE;
-        let de: &ErofsDirent = cast_ref(&block_data[de_off..de_off + EROFS_DIRENT_SIZE]);
+        let de = ErofsDirent::from_bytes(&block_data[de_off..]).ok()?;
         let nameoff = de.nameoff() as usize;
         let name_end = if index + 1 < dirent_count {
-            let next: &ErofsDirent = cast_ref(&block_data[(index + 1) * EROFS_DIRENT_SIZE..]);
+            let next =
+                ErofsDirent::from_bytes(&block_data[(index + 1) * EROFS_DIRENT_SIZE..]).ok()?;
             next.nameoff() as usize
         } else {
             let mut end = nameoff.min(block_len);
@@ -194,7 +196,7 @@ impl ErofsReader {
         if block_data.len() < EROFS_DIRENT_SIZE {
             return None;
         }
-        let first: &ErofsDirent = cast_ref(&block_data[..EROFS_DIRENT_SIZE]);
+        let first = ErofsDirent::from_bytes(block_data).ok()?;
         let count = (first.nameoff() as usize / EROFS_DIRENT_SIZE)
             .min(block_data.len() / EROFS_DIRENT_SIZE);
         Some((block_data, count))
@@ -334,13 +336,8 @@ impl ErofsReader {
         self.read_flat_data_vec(nid, inode, 0, size)
     }
 
-    /// Read all inline xattr entries for an inode.
-    /// Returns a list of (full_name_bytes, value) pairs.
-    pub fn read_xattrs(
-        &self,
-        nid: u64,
-        inode: &ErofsInode<'_>,
-    ) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    /// Read all inline xattr entries for an inode, in on-disk order.
+    pub fn read_xattrs(&self, nid: u64, inode: &ErofsInode<'_>) -> io::Result<Vec<XattrEntry>> {
         let xattr_size = inode.xattr_size();
         if xattr_size == 0 {
             return Ok(Vec::new());
@@ -383,15 +380,11 @@ impl ErofsReader {
                 break;
             }
 
-            // Build full name: prefix + suffix (both as bytes)
-            let suffix = &xattr_data[name_start..name_end];
-            let full_name = match erofs_xattr_prefix(e_name_index) {
-                Some(prefix) => [prefix, suffix].concat(),
-                None => suffix.to_vec(),
-            };
-
-            let value = xattr_data[value_start..value_end].to_vec();
-            result.push((full_name, value));
+            result.push(XattrEntry {
+                name_index: e_name_index,
+                suffix: xattr_data[name_start..name_end].to_vec(),
+                value: xattr_data[value_start..value_end].to_vec(),
+            });
 
             // Advance to next entry (4-byte aligned)
             pos = align_up_usize(value_end, XATTR_ENTRY_ALIGN).expect("alignment overflowed");
@@ -411,25 +404,11 @@ mod tests {
 
     fn directory_reader(data: &[u8]) -> ErofsReader {
         let block_size = EROFS_BLOCK_SIZE as usize;
-        let mut image = vec![0; 2 * block_size + data.len()];
-        let sb = ErofsSuperblock::new(
-            0,
-            0,
-            0,
-            1,
-            0,
-            image.len().div_ceil(block_size) as u64,
-            1,
-            0,
-            0,
-            &[0; 16],
-        )
-        .unwrap();
-        let sb_offset = EROFS_SUPER_OFFSET as usize;
-        image[sb_offset..sb_offset + sb.as_bytes().len()].copy_from_slice(sb.as_bytes());
-        let inode = ErofsInodeCompact::new(
-            0,
-            libc::S_IFDIR as u16 | 0o755,
+        let blocks = (2 * block_size + data.len()).div_ceil(block_size) as u64;
+        let superblock = ErofsSuperblock::new(0, 0, 0, 1, 0, blocks, 1, 0, 0, &[0u8; 16]).unwrap();
+        let root = ErofsInodeCompact::new(
+            EROFS_INODE_FLAT_PLAIN,
+            0o040755,
             2,
             data.len() as u32,
             0,
@@ -438,10 +417,15 @@ mod tests {
             0,
             0,
         );
-        image[block_size..block_size + inode.as_bytes().len()].copy_from_slice(inode.as_bytes());
-        image[2 * block_size..].copy_from_slice(data);
+        let mut bootstrap = vec![0u8; 2 * block_size + data.len()];
+        let offset = EROFS_SUPER_OFFSET as usize;
+        bootstrap[offset..offset + superblock.as_bytes().len()]
+            .copy_from_slice(superblock.as_bytes());
+        bootstrap[block_size..block_size + root.as_bytes().len()].copy_from_slice(root.as_bytes());
+        bootstrap[2 * block_size..].copy_from_slice(data);
+
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&image).unwrap();
+        file.write_all(&bootstrap).unwrap();
         ErofsReader::open_metadata_only(file.path()).unwrap()
     }
 

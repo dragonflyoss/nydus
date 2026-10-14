@@ -8,7 +8,6 @@ use nydus_format::erofs::{
     EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
     EROFS_FEATURE_INCOMPAT_FRAGMENTS, EROFS_FEATURE_INCOMPAT_ZERO_PADDING,
 };
-use nydus_format::utils::hex_string;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -171,7 +170,7 @@ fn print_json_report(kind: ImageKind, path: &Path, report: &CheckReport) -> Resu
         .iter()
         .map(|(index, blob)| JsonBlobSummary {
             index: *index,
-            slot_sha256: hex_string(&blob.slot_sha256),
+            slot_sha256: hex::encode(blob.slot_sha256),
             slot_sha256_kind: blob.slot_sha256_kind.as_str(),
             declared_blocks: blob.declared_blocks,
             mapped_blkaddr: blob.mapped_blkaddr,
@@ -318,7 +317,7 @@ fn print_superblock(sb: &ErofsSuperblock) {
         blocks: sb.blocks().to_string(),
         meta_blkaddr: sb.meta_blkaddr().to_string(),
         xattr_blkaddr: u32::from_le_bytes(sb.xattr_blkaddr).to_string(),
-        uuid: hex_string(&sb.uuid),
+        uuid: hex::encode(sb.uuid),
         volume_name: printable_bytes(&sb.volume_name),
         compr_or_distance: u16::from_le_bytes(sb.compr_or_distance).to_string(),
         extra_devices: sb.extra_devices().to_string(),
@@ -619,13 +618,13 @@ fn blob_type(blob: &BlobSummary) -> String {
 
 fn data_blob_digest(blob: &BlobSummary) -> String {
     blob.data_sha256
-        .map(|sha256| hex_string(&sha256))
+        .map(hex::encode)
         .unwrap_or_else(|| digest_or_unknown(&blob.slot_sha256))
 }
 
 fn optional_digest(digest: Option<[u8; EROFS_BLOB_ID_SIZE]>) -> String {
     digest
-        .map(|sha256| hex_string(&sha256))
+        .map(hex::encode)
         .unwrap_or_else(|| "<unresolved>".to_string())
 }
 
@@ -633,7 +632,7 @@ fn digest_or_unknown(digest: &[u8; EROFS_BLOB_ID_SIZE]) -> String {
     if digest.iter().all(|byte| *byte == 0) {
         "<unknown>".to_string()
     } else {
-        hex_string(digest)
+        hex::encode(digest)
     }
 }
 

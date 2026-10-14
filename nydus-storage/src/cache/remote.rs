@@ -129,24 +129,27 @@ impl BlobCache for RemoteBlobCache {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_util::{encode_blob, padded_image};
     use super::*;
     use nydus_backend::Local;
-    use nydus_format::blob::BlobMetadataCompressor;
-    use nydus_format::utils::write_minimal_full_blob;
+    use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
+    use nydus_test_utils::blob::{uncompressed_data, FullBlob};
+    use nydus_test_utils::metadata::from_chunk_groups;
     use tempfile::tempdir;
 
     #[test]
     fn remote_blob_cache_reads_without_touching_disk() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let (data, meta) = encode_blob(
+        let (data, meta) = from_chunk_groups(
             BlobMetadataCompressor::None,
             4096,
             &[vec![payload.clone()]],
-            false,
+            None,
         );
-        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend, ReadKind::OnDemand).unwrap();
@@ -175,10 +178,18 @@ mod tests {
             vec![vec![0xabu8; 100], vec![0xcdu8; 5000], vec![0xefu8; 1]],
             vec![vec![0x12u8; 4097]],
         ];
-        let (data, meta) = encode_blob(BlobMetadataCompressor::Zstd, 16384, &groups, true);
-        let image = padded_image(&groups);
+        let (data, meta) = from_chunk_groups(
+            BlobMetadataCompressor::Zstd,
+            16384,
+            &groups,
+            Some(BlobMetadataDigester::Blake3),
+        );
+        let image = uncompressed_data(&groups);
         assert_eq!(image.len(), 6 * 4096);
-        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
         let backend = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend, ReadKind::OnDemand).unwrap();
         let mut all = vec![0xffu8; image.len()];
@@ -196,8 +207,12 @@ mod tests {
     fn remote_blob_cache_rejects_file_oriented_operations() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0x11u8; 4096];
-        let (data, meta) = encode_blob(BlobMetadataCompressor::None, 4096, &[vec![payload]], false);
-        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &data, &meta, true);
+        let (data, meta) =
+            from_chunk_groups(BlobMetadataCompressor::None, 4096, &[vec![payload]], None);
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
 
         let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend, ReadKind::OnDemand).unwrap();

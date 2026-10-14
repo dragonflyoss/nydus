@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry"]
+members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry", "nydus-test-utils"]
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env", "string"] }
+hex = "0.4"
 libc = "0.2"
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }

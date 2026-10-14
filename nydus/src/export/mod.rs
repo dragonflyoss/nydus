@@ -21,8 +21,8 @@ use tar::{Builder, EntryType, Header};
 
 use nydus_core::ErofsReader;
 use nydus_format::erofs::{
-    is_nydus_xattr, mode_to_erofs_file_type, ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
-    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
+    ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
+    EROFS_FT_SOCK, EROFS_FT_SYMLINK,
 };
 
 /// Guards against unbounded recursion on a corrupted or hostile image.
@@ -99,7 +99,7 @@ impl Unpacker<'_> {
         path: &[u8],
     ) -> Result<bool> {
         let inode = self.reader.inode(nid)?;
-        let file_type = mode_to_erofs_file_type(inode.mode());
+        let file_type = inode.file_type();
 
         // Sockets cannot be represented in tar; container tooling drops them too.
         if file_type == EROFS_FT_SOCK {
@@ -186,19 +186,19 @@ impl Unpacker<'_> {
         mtime: u64,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let mut records = Vec::new();
-        for (name, value) in self.reader.read_xattrs(nid, inode)? {
-            if is_nydus_xattr(&name) {
+        for entry in self.reader.read_xattrs(nid, inode)? {
+            if entry.is_nydus() {
                 continue;
             }
-            match String::from_utf8(name) {
-                Ok(name) => records.push((format!("SCHILY.xattr.{name}"), value)),
+            match String::from_utf8(entry.name()) {
+                Ok(name) => records.push((format!("SCHILY.xattr.{name}"), entry.value)),
                 Err(err) => tracing::warn!(
                     "skipping non-UTF-8 xattr on inode {nid}: {}",
                     String::from_utf8_lossy(err.as_bytes())
                 ),
             }
         }
-        let nsec = inode.effective_mtime_nsec(self.fixed_nsec);
+        let nsec = inode.mtime_nsec(self.fixed_nsec);
         if nsec != 0 {
             records.push((
                 "mtime".to_string(),

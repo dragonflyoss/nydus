@@ -404,8 +404,10 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use nydus_backend::{BlobBackend, Local};
-    use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor};
-    use nydus_format::utils::{write_minimal_full_blob, SHA256_DIGEST_SIZE};
+    use nydus_format::blob::BlobMetadata;
+    use nydus_format::utils::SHA256_DIGEST_SIZE;
+    use nydus_test_utils::blob::FullBlob;
+    use nydus_test_utils::metadata::{single_chunk_group, single_chunk_group_redirect};
     use tempfile::tempdir;
 
     fn deferred_error() -> io::Error {
@@ -477,7 +479,10 @@ mod tests {
         payload: &[u8],
         meta: &BlobMetadata,
     ) -> BlobPrefetcher {
-        let full_blob_id = write_minimal_full_blob(backend_dir, payload, meta, true);
+        let full_blob_id = FullBlob::new(payload)
+            .with_blob_metadata(meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir);
         let caches = Arc::new(
             BlobCaches::new([(0u16, full_blob_id)], backend, Some(cache_dir), None).unwrap(),
         );
@@ -496,12 +501,7 @@ mod tests {
 
     fn test_payload() -> (Vec<u8>, BlobMetadata) {
         let payload = vec![0xabu8; 4096];
-        let (_, meta) = crate::cache::test_util::encode_blob(
-            BlobMetadataCompressor::None,
-            4096,
-            &[vec![payload.clone()]],
-            false,
-        );
+        let meta = single_chunk_group(&payload);
         (payload, meta)
     }
 
@@ -638,40 +638,17 @@ mod tests {
         Arc<BlobCaches>,
         [[u8; SHA256_DIGEST_SIZE]; 2],
     ) {
-        use nydus_format::blob::{
-            BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
-        };
         let (payload, plain_meta) = test_payload();
-        let plain_id = write_minimal_full_blob(backend_dir, &payload, &plain_meta, true);
-        let group = plain_meta.chunk_group(0).unwrap();
-        let redirect_meta = BlobMetadata::new(
-            1,
-            1,
-            BlobMetadataCompressor::None,
-            None,
-            vec![
-                BlobMetadataChunkGroup::new(
-                    0,
-                    0,
-                    0,
-                    group.uncompressed_size(),
-                    group.uncompressed_crc32(),
-                ),
-                BlobMetadataChunkGroup::new(
-                    u64::from(group.compressed_size()),
-                    group.logical_block_count(),
-                    group.chunk_count(),
-                    0,
-                    0,
-                ),
-            ],
-            vec![BlobMetadataChunkLength::new(group.uncompressed_size())],
-            Vec::new(),
-            vec![BlobMetadataChunkGroupRedirect::new(1, 0).unwrap()],
-        )
-        .unwrap();
+        let plain_id = FullBlob::new(&payload)
+            .with_blob_metadata(&plain_meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir);
+        let redirect_meta = single_chunk_group_redirect(&payload, 1);
         assert!(redirect_meta.is_redirect());
-        let redirect_id = write_minimal_full_blob(backend_dir, &payload, &redirect_meta, true);
+        let redirect_id = FullBlob::new(&payload)
+            .with_blob_metadata(&redirect_meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir);
         let backend = Arc::new(RecordingBackend {
             inner: Local::new(backend_dir.to_path_buf()),
             reads: Mutex::new(Vec::new()),

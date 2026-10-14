@@ -16,9 +16,7 @@ use nydus_core::build::inode::{
     flatten_tree, InodeData, InodeInfo, NamedChildren, NodeAttrs, TreeNode,
 };
 use nydus_error::{Context, Error, Result};
-use nydus_format::erofs::{
-    erofs_xattr_name_split, ErofsChunkAddr, XattrEntry, EROFS_XATTR_INDEX_SECURITY,
-};
+use nydus_format::erofs::{ErofsChunkAddr, XattrEntry, EROFS_XATTR_INDEX_SECURITY};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
@@ -157,14 +155,7 @@ fn ensure_dir<'a>(root: &'a mut TarNode, comps: &[Vec<u8>]) -> &'a mut TarNode {
 fn erofs_xattrs(xattrs: norm::Xattrs) -> Vec<XattrEntry> {
     let mut entries: Vec<XattrEntry> = xattrs
         .into_iter()
-        .filter_map(|(name, value)| {
-            let (name_index, suffix) = erofs_xattr_name_split(&name)?;
-            Some(XattrEntry {
-                name_index,
-                suffix: suffix.to_vec(),
-                value,
-            })
-        })
+        .filter_map(|(name, value)| XattrEntry::new(&name, value))
         .collect();
     entries.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
     entries

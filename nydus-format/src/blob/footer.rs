@@ -1,7 +1,9 @@
-use crate::blob::flag::FeatureFlags;
+//! The trailing footer of a nydus full blob.
+
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Error, Result};
-use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
+use crate::utils::bytes::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
+use crate::utils::FeatureFlags;
 use crc32c::crc32c;
 use std::fs::File;
 use std::io::Write;
@@ -59,7 +61,7 @@ pub struct BlobFooter {
 impl BlobFooter {
     /// On-disk magic, 8 raw ASCII bytes written as-is so a hexdump of the
     /// footer starts with the readable string. Same frozen prefix as the
-    /// blob meta (`NDBLMETA`), see [`crate::blob::flag`].
+    /// blob meta (`NDBLMETA`), see [`crate::blob`].
     pub const MAGIC: [u8; 8] = *b"NDFOOTER";
 
     /// The footer's fixed on-disk size, one EROFS block at the blob's tail.
@@ -81,7 +83,7 @@ impl BlobFooter {
     /// Every incompat bit this reader understands. A footer setting a bit
     /// outside this mask was written by a newer nydus and is rejected by
     /// [`FeatureFlags::validate_incompat`].
-    const INCOMPAT_SUPPORTED: u32 = Self::INCOMPAT_BOOTSTRAP_ZSTD | Self::INCOMPAT_RAW_DEVICE;
+    const SUPPORTED_INCOMPAT: u32 = Self::INCOMPAT_BOOTSTRAP_ZSTD | Self::INCOMPAT_RAW_DEVICE;
 
     /// Byte range of the crc32 field within the footer.
     const CRC32_FIELD: Range<usize> = 16..20;
@@ -128,7 +130,7 @@ impl BlobFooter {
         Ok(footer)
     }
 
-    /// Parse a footer from exactly its [`Self::SIZE`] bytes. The raw bytes
+    /// Parses a footer from exactly its [`Self::SIZE`] bytes. The raw bytes
     /// are checked first (`validate_bytes`), then the decoded fields against
     /// each other (`validate_fields`).
     ///
@@ -156,7 +158,7 @@ impl BlobFooter {
         Ok(footer)
     }
 
-    /// Serialize the footer into its on-disk bytes. The reserved tail is
+    /// Serializes the footer into its on-disk bytes. The reserved tail is
     /// zeroed, so this is only the writer's view. Raw bytes read from disk
     /// may carry newer fields there that this type does not model.
     fn to_bytes(self) -> [u8; Self::SIZE] {
@@ -176,7 +178,7 @@ impl BlobFooter {
         data
     }
 
-    /// Parse the trailing footer of a whole blob's bytes and anchor its
+    /// Parses the trailing footer of a whole blob's bytes and anchors its
     /// declared layout against the blob's size. Errors when the bytes are
     /// too short for a footer, the tail carries no footer magic (the input
     /// is not a full blob, e.g. a bare bootstrap), or the footer is
@@ -193,7 +195,7 @@ impl BlobFooter {
         Ok(footer)
     }
 
-    /// Read and fully validate the footer of the blob file at `path`,
+    /// Reads and fully validates the footer of the blob file at `path`,
     /// without reading the rest of the blob.
     pub fn from_blob_path(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
@@ -218,7 +220,7 @@ impl BlobFooter {
         flags
     }
 
-    /// Validate the raw on-disk bytes before decoding them, the magic and
+    /// Validates the raw on-disk bytes before decoding them, the magic and
     /// the stored crc32 against [`Self::compute_crc32`]. Runs over the
     /// incoming bytes, never over `to_bytes()`, which would zero a newer
     /// writer's fields in the reserved tail and reject a valid image.
@@ -238,7 +240,7 @@ impl BlobFooter {
         Ok(())
     }
 
-    /// Validate the intrinsic field invariants, needing nothing beyond the
+    /// Validates the intrinsic field invariants, needing nothing beyond the
     /// fields themselves. Run by [`Self::from_bytes`] on the read side and
     /// by [`Self::new`] on the write side.
     ///
@@ -247,7 +249,7 @@ impl BlobFooter {
     /// redirect blob embeds no bootstrap image.
     fn validate_fields(&self) -> Result<()> {
         self.feature_incompat
-            .validate_incompat(Self::INCOMPAT_SUPPORTED)?;
+            .validate_incompat(Self::SUPPORTED_INCOMPAT)?;
 
         // RAW_DEVICE has no blob meta region and a mandatory bootstrap.
         // Every other blob carries blob meta.
@@ -338,7 +340,7 @@ impl BlobFooter {
         Ok(())
     }
 
-    /// Validate the declared region layout against `offset`, the footer's
+    /// Validates the declared region layout against `offset`, the footer's
     /// actual position, an external fact the footer cannot fake. The regions
     /// must tile the blob in order and end at or before the footer; the gaps
     /// hold alignment padding or regions a newer writer adds.
@@ -388,7 +390,7 @@ impl BlobFooter {
         bytes.starts_with(&Self::MAGIC)
     }
 
-    /// Write the footer's on-disk bytes to `writer`.
+    /// Writes the footer's on-disk bytes to `writer`.
     pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
         writer.write_all(&self.to_bytes())?;
         Ok(())
