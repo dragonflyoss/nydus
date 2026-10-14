@@ -392,7 +392,7 @@ struct Response {
 impl Response {
     /// Read the body into `buf`, returning the number of bytes filled.
     fn read_into(mut self, buf: &mut [u8]) -> io::Result<usize> {
-        RUNTIME.get().block_on(async move {
+        RUNTIME.runtime().block_on(async move {
             let mut filled = 0usize;
             while filled < buf.len() {
                 let n = self.reader.read(&mut buf[filled..]).await?;
@@ -407,7 +407,7 @@ impl Response {
 
     /// Read the body as a UTF-8 string.
     fn text(mut self) -> io::Result<String> {
-        RUNTIME.get().block_on(async move {
+        RUNTIME.runtime().block_on(async move {
             let mut body = String::new();
             self.reader.read_to_string(&mut body).await?;
             Ok(body)
@@ -424,7 +424,7 @@ impl Response {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
-        let body = RUNTIME.get().block_on(async {
+        let body = RUNTIME.runtime().block_on(async {
             let mut body = Vec::with_capacity(capacity);
             self.reader.read_to_end(&mut body).await?;
             io::Result::Ok(body)

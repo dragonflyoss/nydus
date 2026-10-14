@@ -18,7 +18,8 @@
 //! inline in the request future, so a request handed straight to `block_on`
 //! would still create its socket in the caller's namespace. Requests
 //! therefore go through [`SharedRuntime::block_on_worker`], which spawns the
-//! future onto a runtime thread and only waits on the caller.
+//! future onto a runtime thread and only waits on the caller. Tests that
+//! need the raw [`Runtime`] take it from [`SharedRuntime::runtime`].
 
 use std::fmt;
 use std::future::Future;
@@ -133,16 +134,20 @@ impl fmt::Display for RuntimeOptions {
 
 /// The process-wide runtime: options installed by the first caller, and the
 /// tokio runtime built from them on first use.
-pub(super) struct SharedRuntime {
+pub(crate) struct SharedRuntime {
+    /// The options the first caller installed, the defaults once the runtime
+    /// is built without any.
     options: OnceLock<RuntimeOptions>,
+    /// The runtime built from `options` on first use.
     runtime: OnceLock<Runtime>,
+    /// The name of the runtime's threads.
     thread_name: &'static str,
 }
 
 impl SharedRuntime {
     /// An unconfigured, unbuilt runtime whose threads will be named
     /// `thread_name`.
-    pub(super) const fn new(thread_name: &'static str) -> Self {
+    pub(crate) const fn new(thread_name: &'static str) -> Self {
         Self {
             options: OnceLock::new(),
             runtime: OnceLock::new(),
@@ -153,7 +158,7 @@ impl SharedRuntime {
     /// Install `options` unless some are installed already, in which case
     /// the same options are a no-op and different ones are rejected with
     /// [`io::ErrorKind::AlreadyExists`].
-    pub(super) fn configure(&self, options: RuntimeOptions) -> io::Result<()> {
+    pub(crate) fn configure(&self, options: RuntimeOptions) -> io::Result<()> {
         if let Some(current) = self.options.get() {
             return self.check(current, &options);
         }
@@ -196,7 +201,7 @@ impl SharedRuntime {
     /// the defaults. Building it fixes the options for good: a later
     /// [`configure`](Self::configure) can no longer take effect and reports
     /// that instead of silently doing nothing.
-    pub(super) fn get(&'static self) -> &'static Runtime {
+    pub(crate) fn runtime(&'static self) -> &'static Runtime {
         self.runtime.get_or_init(|| {
             let options = self.options.get_or_init(RuntimeOptions::default);
             // The builder never fails on a supported platform (the only
@@ -213,14 +218,14 @@ impl SharedRuntime {
     /// Run `future` on a runtime thread and wait for its result. This is
     /// what puts DNS and TCP connect on a thread that entered the configured
     /// netns, where `Runtime::block_on` alone would poll on the caller.
-    pub(super) fn block_on_worker<T>(
+    pub(crate) fn block_on_worker<T>(
         &'static self,
         future: impl Future<Output = T> + Send + 'static,
     ) -> io::Result<T>
     where
         T: Send + 'static,
     {
-        let runtime = self.get();
+        let runtime = self.runtime();
         runtime
             .block_on(runtime.spawn(future))
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))
@@ -228,7 +233,7 @@ impl SharedRuntime {
 }
 
 /// The runtime every registry backend in the process shares.
-pub(super) static RUNTIME: SharedRuntime = SharedRuntime::new(THREAD_NAME);
+pub(crate) static RUNTIME: SharedRuntime = SharedRuntime::new(THREAD_NAME);
 
 /// Fix how the shared backend runtime is built. Must run before the first
 /// registry backend is constructed in the process (a Dragonfly-backed one
@@ -286,7 +291,7 @@ mod tests {
         assert!(err.to_string().contains("3 worker"), "{err}");
         assert!(err.to_string().contains("requested 4 worker"), "{err}");
 
-        shared.get();
+        shared.runtime();
         shared.configure(with_workers(3)).unwrap();
         let err = shared.configure(with_workers(4)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
@@ -296,7 +301,7 @@ mod tests {
     #[test]
     fn an_unconfigured_runtime_installs_the_defaults() {
         let shared = leaked("nb-rt-default");
-        shared.get();
+        shared.runtime();
         shared.configure(RuntimeOptions::default()).unwrap();
         shared.configure(with_workers(0)).unwrap();
         let err = shared.configure(with_workers(1)).unwrap_err();
@@ -399,7 +404,7 @@ mod tests {
 
         // block_on alone polls on this thread, which never entered the
         // namespace: exactly what a request must not do.
-        assert_eq!(shared.get().block_on(async { current_netns() }), caller);
+        assert_eq!(shared.runtime().block_on(async { current_netns() }), caller);
         // block_on_worker moves the poll onto a runtime thread, and the
         // blocking pool (DNS) enters the namespace too.
         assert_eq!(
