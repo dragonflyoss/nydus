@@ -181,47 +181,30 @@ impl HttpBuilder {
     }
 }
 
-/// A fair leaky bucket handing out one slot per request per interval, the
-/// same limiter dfdaemon puts in front of its own proxy.
+/// A fair leaky bucket handing out one slot per request, the limiter dfdaemon
+/// puts in front of its own proxy.
 ///
 /// As a middleware it sits inside the retry middleware so every retry attempt
-/// waits for its own slot. A zero limit disables it.
+/// waits for its own slot.
 pub(crate) struct RateLimit {
-    /// The bucket, `None` when the limit is disabled.
-    limiter: Option<RateLimiter>,
+    /// The request rate limiter.
+    limiter: RateLimiter,
 }
 
 /// Implements the rate limit.
 impl RateLimit {
-    /// Creates a limit of `requests_per_second`, zero disabling it.
-    pub(crate) fn new(requests_per_second: u64) -> Self {
-        Self::with_interval(requests_per_second, Duration::from_secs(1))
-    }
-
-    /// Creates a limit of `requests` per `interval`, a zero limit or interval
-    /// disabling it.
-    pub(crate) fn with_interval(requests: u64, interval: Duration) -> Self {
-        let limiter = (requests > 0 && !interval.is_zero()).then(|| {
-            let limit = usize::try_from(requests).unwrap_or(usize::MAX);
-            RateLimiter::builder()
-                .max(limit)
-                .initial(limit)
-                .refill(limit)
+    /// Creates a limit of `request_rate_limit` requests per `interval`, both
+    /// at least one.
+    pub(crate) fn new(request_rate_limit: u64, interval: Duration) -> Self {
+        Self {
+            limiter: RateLimiter::builder()
+                .initial(request_rate_limit as usize)
+                .refill(request_rate_limit as usize)
+                .max(request_rate_limit as usize)
                 .interval(interval)
                 .fair(true)
-                .build()
-        });
-        Self { limiter }
-    }
-
-    /// Waits for this caller's slot, returning how long it waited.
-    async fn acquire(&self) -> Duration {
-        let Some(limiter) = &self.limiter else {
-            return Duration::ZERO;
-        };
-        let start = Instant::now();
-        limiter.acquire_one().await;
-        start.elapsed()
+                .build(),
+        }
     }
 }
 
@@ -235,7 +218,7 @@ impl Middleware for RateLimit {
         extensions: &mut Extensions,
         next: Next<'_>,
     ) -> reqwest_middleware::Result<reqwest::Response> {
-        self.acquire().await;
+        self.limiter.acquire_one().await;
         next.run(req, extensions).await
     }
 }
@@ -249,32 +232,18 @@ mod tests {
         let config = HttpConfig::default();
         assert!(Http::builder(&config).build().is_ok());
         assert!(Http::builder(&config)
-            .rate_limit(RateLimit::new(10))
+            .rate_limit(RateLimit::new(10, Duration::from_secs(1)))
             .build()
             .is_ok());
     }
 
-    #[tokio::test]
-    async fn acquire_spaces_slots_by_the_interval() {
-        let interval = Duration::from_millis(40);
-        let start = Instant::now();
-        let limit = RateLimit::with_interval(1, interval);
-
-        limit.acquire().await;
-        assert!(start.elapsed() < interval);
-
-        let waited = limit.acquire().await;
-        assert!(start.elapsed() >= interval);
-        assert!(waited > Duration::ZERO);
-    }
-
-    #[tokio::test]
-    async fn acquire_never_waits_on_a_zero_limit() {
-        let limit = RateLimit::new(0);
-        let start = Instant::now();
-        for _ in 0..3 {
-            assert_eq!(limit.acquire().await, Duration::ZERO);
-        }
-        assert!(start.elapsed() < Duration::from_millis(20));
+    #[test]
+    fn new_fills_a_fair_bucket_to_the_limit() {
+        let limit = RateLimit::new(10, Duration::from_millis(100));
+        assert_eq!(limit.limiter.max(), 10);
+        assert_eq!(limit.limiter.refill(), 10);
+        assert_eq!(limit.limiter.balance(), 10);
+        assert_eq!(limit.limiter.interval(), Duration::from_millis(100));
+        assert!(limit.limiter.is_fair());
     }
 }

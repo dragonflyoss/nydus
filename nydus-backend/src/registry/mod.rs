@@ -285,15 +285,18 @@ impl Registry {
     pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
         let http = Http::builder(&config.http).build()?;
-        // Throttle the origin fallback by the configured back-to-source rate.
-        let rate_limit = RateLimit::new(
-            config
-                .dragonfly
-                .as_ref()
-                .map(|dragonfly| dragonfly.back_to_source.request_rate_limit)
-                .unwrap_or(0),
-        );
-        let back_to_source = Http::builder(&config.http).rate_limit(rate_limit).build()?;
+        // Throttle the origin fallback by the configured back-to-source rate,
+        // zero leaving it unthrottled.
+        let request_rate_limit = config
+            .dragonfly
+            .as_ref()
+            .map_or(0, |dragonfly| dragonfly.back_to_source.request_rate_limit);
+        let mut back_to_source = Http::builder(&config.http);
+        if request_rate_limit > 0 {
+            back_to_source = back_to_source
+                .rate_limit(RateLimit::new(request_rate_limit, Duration::from_secs(1)));
+        }
+        let back_to_source = back_to_source.build()?;
         // Reject a Dragonfly configuration this build cannot honour.
         #[cfg(not(feature = "backend-dragonfly"))]
         if let Some(dragonfly) = &config.dragonfly {
@@ -932,10 +935,11 @@ mod tests {
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
         let (scheme, host) = parse_registry_addr(&config.addr).unwrap();
         let http = Http::builder(&config.http).build().unwrap();
-        let back_to_source = Http::builder(&config.http)
-            .rate_limit(RateLimit::with_interval(1, interval))
-            .build()
-            .unwrap();
+        let mut back_to_source = Http::builder(&config.http);
+        if !interval.is_zero() {
+            back_to_source = back_to_source.rate_limit(RateLimit::new(1, interval));
+        }
+        let back_to_source = back_to_source.build().unwrap();
         Registry::from_parts(
             scheme,
             host,
