@@ -84,6 +84,7 @@ impl Runtime {
                         error!(
                             "nydus-backend runtime thread cannot enter the configured netns: {err}"
                         );
+
                         // Abort the thread rather than leave it in the wrong
                         // namespace, where it would silently route registry
                         // traffic. The probe above entered this exact
