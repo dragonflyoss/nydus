@@ -14,6 +14,7 @@ use nydus_error::{Context, Error, Result};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use serde::Deserialize;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -172,6 +173,17 @@ pub enum ReadKind {
 
     /// A background prefetch read after mount.
     Prefetch,
+}
+
+/// Implements the display of a read kind as its `ondemand` or `prefetch`
+/// label, the value metrics and logs carry.
+impl fmt::Display for ReadKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ReadKind::OnDemand => "ondemand",
+            ReadKind::Prefetch => "prefetch",
+        })
+    }
 }
 
 /// The registry backend configuration, serving blobs from an OCI image
@@ -1140,5 +1152,17 @@ Y+f+/xlWpHEkSQ==
         let result = parser.parse_ref(&cmd, None, value);
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn read_kind_displays_its_label() {
+        let test_cases = vec![
+            (ReadKind::OnDemand, "ondemand"),
+            (ReadKind::Prefetch, "prefetch"),
+        ];
+
+        for (kind, expected) in test_cases {
+            assert_eq!(kind.to_string(), expected);
+        }
     }
 }

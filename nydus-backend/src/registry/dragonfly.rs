@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::{Method, StatusCode};
+use reqwest::StatusCode;
+use tracing::debug;
 
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
 use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
@@ -139,11 +140,6 @@ impl Dragonfly {
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl Transport for Dragonfly {
-    /// Returns `dragonfly_sdk`.
-    fn label(&self) -> &'static str {
-        "dragonfly_sdk"
-    }
-
     /// Fetches `url` through the client of the read kind with its priority
     /// hint, the SDK adding the P2P and priority headers itself, and logs the
     /// outcome.
@@ -164,7 +160,17 @@ impl Transport for Dragonfly {
         let start = Instant::now();
         let mut body = BytesMut::new();
         let result = Self::response(client.get_into(&request, &mut body).await, body);
-        self.log_request_done(&Method::GET, url, &headers, kind, &result, start.elapsed());
+
+        match &result {
+            Ok(response) => debug!(
+                "backend request done: read_kind={kind} transport=dragonfly_sdk method=GET url={url} headers={headers:?} status={} response_headers={:?} duration={:?}",
+                response.status, response.headers, start.elapsed()
+            ),
+            Err(err) => debug!(
+                "backend request failed: read_kind={kind} transport=dragonfly_sdk method=GET url={url} headers={headers:?} error={err} duration={:?}",
+                start.elapsed()
+            ),
+        }
         result
     }
 }

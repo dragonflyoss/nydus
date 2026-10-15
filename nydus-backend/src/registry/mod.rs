@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::{Method, StatusCode};
-use tracing::{debug, warn};
+use tracing::warn;
 use url::Url;
 
 #[cfg(test)]
@@ -84,39 +84,8 @@ pub use self::rt::Runtime;
 /// here rather than while the caller consumes it.
 #[async_trait]
 trait Transport: Send + Sync {
-    /// Returns the `transport` label of the request log: `none` for the origin
-    /// and `dragonfly_sdk` for Dragonfly. Log consumers read it, so it must
-    /// not change.
-    fn label(&self) -> &'static str;
-
     /// Sends a `GET` for `url` with `headers`, `kind` attributing the read.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response>;
-
-    /// Logs a completed request at debug level: the read kind, the transport,
-    /// the method, URL and request headers, then the status and headers of
-    /// the answer or the error, and how long it took.
-    fn log_request_done(
-        &self,
-        method: &Method,
-        url: &str,
-        headers: &HeaderMap,
-        kind: ReadKind,
-        result: &io::Result<Response>,
-        duration: Duration,
-    ) {
-        let read_kind = match kind {
-            ReadKind::OnDemand => "ondemand",
-            ReadKind::Prefetch => "prefetch",
-        };
-        let (status, response_headers, error) = match result {
-            Ok(response) => (Some(response.status), Some(&response.headers), None),
-            Err(err) => (None, None, Some(err.to_string())),
-        };
-        debug!(
-            "backend request done: read_kind={read_kind} transport={} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={duration:?}",
-            self.label(),
-        );
-    }
 }
 
 /// Splits a registry `addr` such as `http://127.0.0.1:5000` into its scheme
@@ -676,10 +645,6 @@ mod tests {
 
     #[async_trait]
     impl<T: Transport> Transport for Arc<T> {
-        fn label(&self) -> &'static str {
-            (**self).label()
-        }
-
         async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
             (**self).get(url, headers, kind).await
         }
@@ -715,10 +680,6 @@ mod tests {
 
     #[async_trait]
     impl Transport for ScriptedTransport {
-        fn label(&self) -> &'static str {
-            "scripted"
-        }
-
         async fn get(
             &self,
             _url: &str,
@@ -772,10 +733,6 @@ mod tests {
 
     #[async_trait]
     impl Transport for AuthGate {
-        fn label(&self) -> &'static str {
-            "auth_gate"
-        }
-
         async fn get(
             &self,
             _url: &str,

@@ -13,6 +13,7 @@ use reqwest::{Certificate, Client, Method, Request};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::io::StreamReader;
+use tracing::debug;
 
 use nydus_config::HttpConfig;
 
@@ -78,11 +79,11 @@ impl Http {
         }
         let client = builder.build().map_err(io::Error::other)?;
 
-        // Retry transient failures, every attempt claiming a rate limit slot
-        // first.
+        // Retry transient failures, every attempt claiming a rate limit slot first.
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(config.max_retries);
         let mut client = ClientBuilder::new(client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy));
+
         if let Some(rate_limit) = rate_limit {
             client = client.with(rate_limit);
         }
@@ -117,7 +118,16 @@ impl Http {
             })
             .map_err(io::Error::other);
 
-        self.log_request_done(&method, url, &headers, kind, &result, start.elapsed());
+        match &result {
+            Ok(response) => debug!(
+                "backend request done: read_kind={kind} transport=none method={method} url={url} headers={headers:?} status={} response_headers={:?} duration={:?}",
+                response.status, response.headers, start.elapsed()
+            ),
+            Err(err) => debug!(
+                "backend request failed: read_kind={kind} transport=none method={method} url={url} headers={headers:?} error={err} duration={:?}",
+                start.elapsed()
+            ),
+        }
         result
     }
 }
@@ -125,11 +135,6 @@ impl Http {
 /// Implements the blob transport over the origin HTTP client.
 #[async_trait]
 impl Transport for Http {
-    /// Returns `none`, the label of a request that rode no P2P transport.
-    fn label(&self) -> &'static str {
-        "none"
-    }
-
     /// Sends a `GET` to `url`.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
         self.request(Method::GET, url, headers, kind).await
