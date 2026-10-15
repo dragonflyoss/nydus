@@ -150,6 +150,7 @@ impl Authorization {
                 "credentials contain bytes that are invalid in an HTTP header".to_string(),
             )
         })?;
+
         value.set_sensitive(true);
         Ok(value)
     }
@@ -197,15 +198,18 @@ impl FetchTokenResponse {
         } else {
             self.token
         };
+
         if token.is_empty() {
             return Err(RegistryError::UnexpectedResponse(
                 "empty token from registry".to_string(),
             ));
         }
-        let expires_in = self
-            .expires_in
-            .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs);
-        Authorization::bearer(&token, expires_in)
+
+        Authorization::bearer(
+            &token,
+            self.expires_in
+                .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs),
+        )
     }
 }
 
