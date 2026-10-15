@@ -40,8 +40,9 @@ pub(crate) struct Dragonfly {
     /// is rescheduled hours later instead.
     prefetch: Proxy,
 
-    /// The per-attempt timeout.
-    timeout: Duration,
+    /// The timeout of each attempt of a request, the config's
+    /// `dragonfly.timeout`.
+    request_timeout: Duration,
 }
 
 /// Implements the Dragonfly transport.
@@ -80,7 +81,7 @@ impl Dragonfly {
         Ok(Self {
             ondemand,
             prefetch,
-            timeout: config.timeout,
+            request_timeout: config.timeout,
         })
     }
 
@@ -153,7 +154,7 @@ impl Transport for Dragonfly {
             header: headers.clone(),
             filtered_query_params: Vec::new(),
             priority: Some(priority),
-            timeout: self.timeout,
+            timeout: self.request_timeout,
             ..Default::default()
         };
 
