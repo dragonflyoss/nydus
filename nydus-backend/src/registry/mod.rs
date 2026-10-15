@@ -84,7 +84,15 @@ pub use self::rt::Runtime;
 pub(crate) enum RegistryError {
     /// The error when the transport or local I/O fails.
     #[error(transparent)]
-    Io(io::Error),
+    Io(#[from] io::Error),
+
+    /// The error when the HTTP client cannot be built.
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+
+    /// The error when a blob footer or blob metadata is malformed.
+    #[error(transparent)]
+    Format(#[from] nydus_format::Error),
 
     /// The error when a URL cannot be parsed.
     #[error("invalid url: {0}")]
@@ -590,17 +598,13 @@ impl Inner {
         kind: ReadKind,
     ) -> RegistryResult<BlobMetadata> {
         let size = self.stat_blob(blob_id, kind).await?;
-        let footer_offset = BlobFooter::calculate_offset_by_blob_size(size)
-            .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
+        let footer_offset = BlobFooter::calculate_offset_by_blob_size(size)?;
 
         let mut footer_bytes = [0u8; BlobFooter::SIZE];
         self.get_blob(blob_id, footer_offset, &mut footer_bytes, kind)
             .await?;
-        let footer = BlobFooter::from_bytes(&footer_bytes)
-            .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
-        footer
-            .validate_layout(footer_offset)
-            .map_err(|err| RegistryError::Io(io::Error::other(err)))?;
+        let footer = BlobFooter::from_bytes(&footer_bytes)?;
+        footer.validate_layout(footer_offset)?;
         if footer.is_raw_device() {
             return Err(RegistryError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -623,8 +627,7 @@ impl Inner {
         )
         .await?;
 
-        BlobMetadata::from_bytes(blob_metadata_bytes)
-            .map_err(|err| RegistryError::Io(io::Error::other(err)))
+        Ok(BlobMetadata::from_bytes(blob_metadata_bytes)?)
     }
 }
 

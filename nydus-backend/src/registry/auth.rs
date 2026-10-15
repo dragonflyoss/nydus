@@ -319,7 +319,7 @@ impl Authorizer {
         }
 
         // Parse the token out of the body.
-        let body = response.text().await.map_err(RegistryError::Io)?;
+        let body = response.text().await?;
         let token: FetchTokenResponse = serde_json::from_str(&body).map_err(|err| {
             RegistryError::UnexpectedResponse(format!("invalid token response: {err}"))
         })?;

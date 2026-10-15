@@ -46,20 +46,14 @@ impl Http {
     /// returned rather than followed so the caller can cache the signed URL a
     /// blob `GET` is redirected to. Transient failures are retried up to the
     /// configured `max_retries`.
-    pub(crate) fn new(config: &HttpConfig, rate_limit: Option<RateLimit>) -> io::Result<Self> {
+    pub(crate) fn new(config: &HttpConfig, rate_limit: Option<RateLimit>) -> RegistryResult<Self> {
         let mut builder = Client::builder().redirect(Policy::none()).hickory_dns(true);
 
         // Route through the configured proxy, or ignore any ambient one.
         builder = match &config.proxy {
-            Some(proxy) => {
-                let proxy = reqwest::Proxy::all(&proxy.addr).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("invalid proxy addr {}: {err}", proxy.addr),
-                    )
-                })?;
-                builder.proxy(proxy)
-            }
+            Some(proxy) => builder.proxy(reqwest::Proxy::all(&proxy.addr).map_err(|err| {
+                RegistryError::InvalidUrl(format!("proxy addr {}: {err}", proxy.addr))
+            })?),
             None => builder.no_proxy(),
         };
 
@@ -75,19 +69,10 @@ impl Http {
 
         if let Some(certs) = config.tls.load_ca_cert_der().map_err(io::Error::other)? {
             for cert in certs {
-                builder =
-                    builder.add_root_certificate(Certificate::from_der(&cert).map_err(|err| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("invalid CA cert: {err}"),
-                        )
-                    })?);
+                builder = builder.add_root_certificate(Certificate::from_der(&cert)?);
             }
         }
-
-        let client = builder
-            .build()
-            .map_err(|err| io::Error::other(format!("failed to build http client: {err}")))?;
+        let client = builder.build()?;
 
         // Retry transient failures, every attempt claiming a rate limit slot
         // first.

@@ -32,10 +32,7 @@ impl Response {
     /// Reads the body so it exactly fills `buf`, a short body being an
     /// [`io::ErrorKind::UnexpectedEof`].
     pub(crate) async fn read_exact(mut self, buf: &mut [u8]) -> RegistryResult<()> {
-        self.reader
-            .read_exact(buf)
-            .await
-            .map_err(RegistryError::Io)?;
+        self.reader.read_exact(buf).await?;
         Ok(())
     }
 
