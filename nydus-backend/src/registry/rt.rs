@@ -368,13 +368,31 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn current_netns() -> super::super::netns::NetnsId {
-        Netns::current().unwrap().id()
+        let file = std::fs::File::open("/proc/thread-self/ns/net").unwrap();
+        Netns::new(file.into()).unwrap().id()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unshared_netns() -> io::Result<Netns> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    // SAFETY: unshare only affects this scratch thread, which
+                    // exits right after; the descriptor keeps the namespace.
+                    if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Netns::new(std::fs::File::open("/proc/thread-self/ns/net")?.into())
+                })
+                .join()
+                .unwrap()
+        })
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn only_worker_polls_run_in_the_configured_netns() {
-        let netns = match Netns::unshared() {
+        let netns = match unshared_netns() {
             Ok(netns) => netns,
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
                 eprintln!("skipped: cannot create a netns ({err})");
