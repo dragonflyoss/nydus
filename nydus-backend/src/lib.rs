@@ -40,9 +40,16 @@ pub use nydus_config::{Backend, Protocol, ReadKind};
 /// A raw EROFS device backed by the range
 /// `[data_offset, data_offset + data_size)` of a local file.
 pub struct RawDeviceFile {
+    /// The path of the local file.
     pub path: PathBuf,
+
+    /// The open file.
     pub file: Arc<File>,
+
+    /// The offset of the device data in the file.
     pub data_offset: u64,
+
+    /// The size of the device data.
     pub data_size: u64,
 }
 
@@ -58,16 +65,16 @@ pub struct RawDeviceFile {
 /// Every implementation reports its reads to [`nydus_telemetry::metrics`]
 /// itself, once per [`read_range_into`](Self::read_range_into) call.
 pub trait BlobBackend: Send + Sync {
-    /// Which backend this is, the `backend` label of its metrics.
+    /// Returns which backend this is, the `backend` label of its metrics.
     fn backend(&self) -> Backend;
 
-    /// How this backend fetches bytes when nothing else is known, the
-    /// `protocol` label of the metrics recorded outside a read. `None` for a
+    /// Returns how this backend fetches bytes when nothing else is known, the
+    /// `protocol` label of the metrics recorded outside a read, `None` for a
     /// backend without a protocol.
     fn protocol(&self) -> Option<Protocol>;
 
-    /// The digest naming the blob's cache files, the blob digest itself unless
-    /// the backend stores the blob under another name.
+    /// Returns the digest naming the blob's cache files, the blob digest itself
+    /// unless the backend stores the blob under another name.
     fn cache_key(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -75,23 +82,27 @@ pub trait BlobBackend: Send + Sync {
         Ok(*blob_id)
     }
 
-    /// The blob's metadata, `kind` attributing the reads that recover it.
+    /// Returns the blob's metadata, `kind` attributing the reads that recover it.
     fn blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
     ) -> io::Result<BlobMetadata>;
 
-    /// Whether the blob is a raw EROFS device without blob meta (a native
-    /// `erofs-*` layer): its bytes are read as-is and never cached or
-    /// decoded by nydus. Backends that cannot serve such blobs report an
-    /// error instead of `Ok(true)`.
+    /// Returns whether the blob is a raw EROFS device without blob meta, a
+    /// native `erofs-*` layer whose bytes are read as-is and never cached or
+    /// decoded by nydus.
+    ///
+    /// Backends that cannot serve such blobs report an error instead of
+    /// `Ok(true)`.
     fn is_raw_device(&self, _blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
         Ok(false)
     }
 
-    /// The local file backing a raw device, `None` for a streamed or chunked
-    /// blob. File resolution and open errors are propagated.
+    /// Returns the local file backing a raw device, `None` for a streamed or
+    /// chunked blob.
+    ///
+    /// File resolution and open errors are propagated.
     fn raw_device_file(
         &self,
         _blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -99,7 +110,7 @@ pub trait BlobBackend: Send + Sync {
         Ok(None)
     }
 
-    /// Write the blob's metadata to `dst`, `kind` attributing the reads that
+    /// Writes the blob's metadata to `dst`, `kind` attributing the reads that
     /// recover it.
     fn save_blob_metadata(
         &self,
@@ -111,7 +122,7 @@ pub trait BlobBackend: Send + Sync {
         blob_metadata.save(dst).map_err(io::Error::other)
     }
 
-    /// Fill `dst` with the blob bytes from `offset`, `kind` attributing the
+    /// Fills `dst` with the blob bytes from `offset`, `kind` attributing the
     /// read.
     fn read_range_into(
         &self,
@@ -122,8 +133,10 @@ pub trait BlobBackend: Send + Sync {
     ) -> io::Result<()>;
 }
 
-/// Construct a blob backend from its configuration. A registry backend runs
-/// on a runtime of its own, built from the `http` section.
+/// Creates a blob backend from its configuration.
+///
+/// A registry backend runs on a runtime of its own, built from the `http`
+/// section.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
     match config {
         BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
@@ -144,10 +157,11 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>>
     }
 }
 
-/// Construct a blob backend from its configuration, a registry backend on
-/// `runtime` rather than on one of its own: an embedder builds the runtime
-/// with the namespace its registries must be reached from and hands it to
-/// every backend it opens.
+/// Creates a blob backend from its configuration, a registry backend on
+/// `runtime` rather than on one of its own.
+///
+/// An embedder builds the runtime with the namespace its registries must be
+/// reached from and hands it to every backend it opens.
 #[cfg(feature = "backend-registry")]
 pub fn build_backend_with_runtime(
     config: &BackendConfig,

@@ -12,18 +12,26 @@ use super::{RegistryError, RegistryResult};
 use crate::{Protocol, ReadKind};
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
-/// and headers up front, plus the body as an async reader. Origin bodies
-/// stream, Dragonfly bodies are already buffered by the SDK.
+/// and headers up front, plus the body as an async reader.
+///
+/// Origin bodies stream, Dragonfly bodies are already buffered by the SDK.
 pub(crate) struct Response {
+    /// The HTTP status.
     pub(crate) status: StatusCode,
+
+    /// The response headers.
     pub(crate) headers: HeaderMap,
+
+    /// The body, streamed from the origin or buffered by the Dragonfly SDK.
     pub(crate) reader: Box<dyn AsyncRead + Send + Unpin>,
+
     /// How the answer was fetched: the origin over HTTP, or Dragonfly.
     pub(crate) protocol: Protocol,
 }
 
+/// Implements the response.
 impl Response {
-    /// Read the body into `buf`, returning how many bytes were filled.
+    /// Reads the body into `buf`, returning how many bytes were filled.
     pub(crate) async fn read_into(mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut filled = 0usize;
         while filled < buf.len() {
@@ -36,14 +44,14 @@ impl Response {
         Ok(filled)
     }
 
-    /// Read the body as a UTF-8 string.
+    /// Reads the body as a UTF-8 string.
     pub(crate) async fn text(mut self) -> io::Result<String> {
         let mut body = String::new();
         self.reader.read_to_string(&mut body).await?;
         Ok(body)
     }
 
-    /// The `Location` a redirect points at.
+    /// Returns the `Location` a redirect points at.
     pub(crate) fn location(&self) -> RegistryResult<String> {
         self.headers
             .get(LOCATION)
@@ -54,7 +62,7 @@ impl Response {
             })
     }
 
-    /// The `Content-Length` a `HEAD` answered with.
+    /// Returns the `Content-Length` a `HEAD` answered with.
     pub(crate) fn content_length(&self) -> RegistryResult<u64> {
         self.headers
             .get(CONTENT_LENGTH)
@@ -69,8 +77,8 @@ impl Response {
     }
 }
 
-/// Read the body so it exactly fills `dst`, a short body being an
-/// [`io::ErrorKind::UnexpectedEof`], and return the protocol that served it.
+/// Reads the body so it exactly fills `dst` and returns the protocol that
+/// served it, a short body being an [`io::ErrorKind::UnexpectedEof`].
 pub(crate) async fn fill_exact(response: Response, dst: &mut [u8]) -> RegistryResult<Protocol> {
     let protocol = response.protocol;
     let n = response.read_into(dst).await.map_err(RegistryError::Io)?;
@@ -83,7 +91,7 @@ pub(crate) async fn fill_exact(response: Response, dst: &mut [u8]) -> RegistryRe
     Ok(protocol)
 }
 
-/// Turn a non-success response into [`RegistryError::UnexpectedStatus`],
+/// Turns a non-success response into [`RegistryError::UnexpectedStatus`],
 /// consuming the body as the message.
 pub(crate) async fn status_error(response: Response) -> RegistryError {
     let status = response.status;
@@ -91,10 +99,12 @@ pub(crate) async fn status_error(response: Response) -> RegistryError {
     RegistryError::UnexpectedStatus(status, body)
 }
 
-/// Log a completed request at debug level: the read kind, the transport, the
-/// method, URL and request headers, then the status and headers of the answer
-/// or the error, and how long it took. The transport labels `none` and
-/// `dragonfly_sdk` are read by log consumers and must not change.
+/// Logs a completed request at debug level.
+///
+/// The line carries the read kind, the transport, the method, URL and request
+/// headers, then the status and headers of the answer or the error, and how
+/// long it took. The transport labels `none` and `dragonfly_sdk` are read by
+/// log consumers and must not change.
 pub(crate) fn log_request_done(
     transport: &'static str,
     method: &Method,
@@ -118,7 +128,7 @@ pub(crate) fn log_request_done(
     );
 }
 
-/// Format a duration in the largest unit that keeps three decimals readable.
+/// Formats a duration in the largest unit that keeps three decimals readable.
 fn format_duration(d: Duration) -> String {
     let nanos = d.as_nanos();
     if nanos < 1_000 {

@@ -11,19 +11,21 @@ use crate::ReadKind;
 
 /// What a read does with the outcome of its Dragonfly request.
 pub(super) enum Action {
-    /// Hand the answer to the caller: a success, a redirect, the `401` auth
+    /// Hands the answer to the caller: a success, a redirect, the `401` auth
     /// handshake, or a definitive `4xx` such as `403` or `404` that no retry
     /// or fallback would change.
     Serve(Response),
-    /// Give up on Dragonfly and read from the origin through the fallback
+
+    /// Gives up on Dragonfly and reads from the origin through the fallback
     /// throttle.
     Fallback(RegistryError),
-    /// Fail the read without touching the origin, marked for the storage
+
+    /// Fails the read without touching the origin, marked for the storage
     /// layer to reschedule the blob's prefetch hours later.
     Defer(RegistryError),
 }
 
-/// Fold a transient answer into its error: `429`, `5xx` and `408` become
+/// Folds a transient answer into its error: `429`, `5xx` and `408` become
 /// [`RegistryError::UnexpectedStatus`], a dfdaemon `507` among them since
 /// another seed peer may have room. Every other status passes through,
 /// including a dfdaemon `422` that no retry or fallback would change.
@@ -40,10 +42,12 @@ pub(super) async fn classify(response: Response) -> RegistryResult<Response> {
     }
 }
 
-/// Decide what a read of `kind` does with the outcome of its Dragonfly
-/// request. Prefetch reads never touch the origin, so a Dragonfly outage
-/// degrades prefetch instead of flooding the registry, while on-demand reads
-/// fall back on every failure the SDK's retries did not cure.
+/// Decides what a read of `kind` does with the outcome of its Dragonfly
+/// request.
+///
+/// Prefetch reads never touch the origin, so a Dragonfly outage degrades
+/// prefetch instead of flooding the registry, while on-demand reads fall back
+/// on every failure the SDK's retries did not cure.
 pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) -> Action {
     let outcome = match outcome {
         Ok(response) => classify(response).await,

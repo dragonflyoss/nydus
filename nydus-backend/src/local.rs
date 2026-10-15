@@ -21,22 +21,33 @@ use crate::{Backend, BlobBackend, Protocol, RawDeviceFile, ReadKind};
 /// A byte region embedded in a larger file.
 #[derive(Clone, Copy)]
 struct EmbeddedRegion {
+    /// The offset of the region in the file.
     offset: u64,
+
+    /// The size of the region.
     size: u64,
 }
 
 /// A full blob file and where its data and blob metadata sit inside it.
 #[derive(Clone)]
 struct Source {
+    /// The path of the full blob file.
     path: PathBuf,
+
     /// The digest naming this blob's cache files, resolved once since it can
     /// mean hashing the whole file.
     cache_key: [u8; SHA256_DIGEST_SIZE],
+
+    /// The offset of the data region in the file.
     data_offset: u64,
+
+    /// The size of the data region.
     data_size: u64,
+
     /// The embedded blob metadata, absent for a bare data file and for a
     /// raw device blob.
     blob_metadata_region: Option<EmbeddedRegion>,
+
     /// Whether the data region is a raw EROFS device, the footer's
     /// `RAW_DEVICE` flag.
     raw_device: bool,
@@ -45,13 +56,17 @@ struct Source {
 /// A source and its lazily opened file, looked up together so a read pays a
 /// single lock round-trip.
 struct SourceSlot {
+    /// The source.
     source: Source,
-    /// Opened on the first data read, a failed open being retried.
+
+    /// The source file, opened on the first data read, a failed open being
+    /// retried.
     file: OnceLock<Arc<File>>,
 }
 
+/// Implements the source slot.
 impl SourceSlot {
-    /// The open source file, opening it on first use.
+    /// Returns the open source file, opening it on first use.
     fn open_file(&self) -> io::Result<Arc<File>> {
         if let Some(file) = self.file.get() {
             return Ok(file.clone());
@@ -63,12 +78,16 @@ impl SourceSlot {
 
 /// A blob backend over a directory of full blobs named by their digest.
 pub struct Local {
+    /// The directory of full blobs named by their digest.
     root: PathBuf,
+
+    /// The resolved sources by blob digest.
     sources: RwLock<HashMap<[u8; SHA256_DIGEST_SIZE], Arc<SourceSlot>>>,
 }
 
+/// Implements the local directory backend.
 impl Local {
-    /// A backend over the full blobs in `root`.
+    /// Creates a backend over the full blobs in `root`.
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -76,14 +95,17 @@ impl Local {
         }
     }
 
-    /// A backend over `root` that also serves `blob_id`, the digest of a full
-    /// blob's data region, from the full blob at `path`. The data region is
-    /// verified against `blob_id` and the whole file hashed for the cache key.
+    /// Creates a backend over `root` that also serves `blob_id`, the digest of
+    /// a full blob's data region, from the full blob at `path`.
+    ///
+    /// The data region is verified against `blob_id` and the whole file hashed
+    /// for the cache key.
     pub fn with_full_blob_source(
         root: PathBuf,
         blob_id: [u8; SHA256_DIGEST_SIZE],
         path: &Path,
     ) -> io::Result<Self> {
+        // Hash the whole file for the cache key and locate its footer.
         let mut file = File::open(path).map_err(|err| {
             io::Error::new(
                 err.kind(),
@@ -97,6 +119,7 @@ impl Local {
                 format!("nydus blob footer not found: {}", path.display()),
             )
         })?;
+        // Verify the data region against the blob id.
         file.seek(SeekFrom::Start(source.data_offset))?;
         let data_digest =
             sha256_reader((&file).take(source.data_size)).map_err(io::Error::other)?;
@@ -112,7 +135,7 @@ impl Local {
         Ok(backend)
     }
 
-    /// The sidecar blob metadata path of the source at `path`, in `root`.
+    /// Returns the sidecar blob metadata path of the source at `path`, in `root`.
     fn blob_metadata_path(&self, path: &Path) -> io::Result<PathBuf> {
         let file_name = path.file_name().ok_or_else(|| {
             io::Error::new(
@@ -125,7 +148,7 @@ impl Local {
         Ok(self.root.join(blob_metadata_name))
     }
 
-    /// Remember `source` as `blob_id`, keeping an existing slot and its open
+    /// Remembers `source` as `blob_id`, keeping an existing slot and its open
     /// file when a racing resolution won.
     fn insert_source(&self, blob_id: [u8; SHA256_DIGEST_SIZE], source: Source) -> Arc<SourceSlot> {
         self.sources
@@ -141,15 +164,17 @@ impl Local {
             .clone()
     }
 
-    /// The slot of `blob_id`, resolved from `root/<hex>` on first use. The
-    /// store is content-addressed, so the file name is trusted as the cache
-    /// key rather than hashing the file on every daemon start, corruption
-    /// being caught by the CRC over every chunk group read.
+    /// Returns the slot of `blob_id`, resolved from `root/<hex>` on first use.
+    ///
+    /// The store is content-addressed, so the file name is trusted as the
+    /// cache key rather than hashing the file on every daemon start,
+    /// corruption being caught by the CRC over every chunk group read.
     fn source(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<SourceSlot>> {
         if let Some(slot) = self.sources.read().unwrap().get(blob_id).cloned() {
             return Ok(slot);
         }
 
+        // Resolve the source from the content-addressed file on first use.
         let path = self.root.join(hex::encode(blob_id));
         if path.is_file() {
             let source = parse_full_blob(&path, *blob_id)?.ok_or_else(|| {
@@ -170,7 +195,7 @@ impl Local {
         ))
     }
 
-    /// Fill `dst` with the blob bytes from `offset` of the data region.
+    /// Fills `dst` with the blob bytes from `offset` of the data region.
     fn read_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -191,7 +216,7 @@ impl Local {
             .read_exact_at(dst, slot.source.data_offset + offset)
     }
 
-    /// The raw blob metadata of `source`: the sidecar file when present,
+    /// Reads the raw blob metadata of `source`: the sidecar file when present,
     /// otherwise the region embedded in the full blob.
     fn read_blob_metadata_bytes(&self, source: &Source) -> io::Result<Vec<u8>> {
         if source.raw_device {
@@ -222,15 +247,19 @@ impl Local {
     }
 }
 
+/// Implements the blob backend over the local directory.
 impl BlobBackend for Local {
+    /// Returns [`Backend::Local`].
     fn backend(&self) -> Backend {
         Backend::Local
     }
 
+    /// Returns `None`, a local read having no protocol.
     fn protocol(&self) -> Option<Protocol> {
         None
     }
 
+    /// Returns the digest naming the source's cache files.
     fn cache_key(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -238,6 +267,7 @@ impl BlobBackend for Local {
         Ok(self.source(blob_id)?.source.cache_key)
     }
 
+    /// Reads the blob's metadata from the sidecar file or the full blob.
     fn blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -248,10 +278,12 @@ impl BlobBackend for Local {
         BlobMetadata::from_bytes(data).map_err(io::Error::other)
     }
 
+    /// Returns the footer's `RAW_DEVICE` flag.
     fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
         Ok(self.source(blob_id)?.source.raw_device)
     }
 
+    /// Returns the full blob file and its data region for a raw device blob.
     fn raw_device_file(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -268,6 +300,7 @@ impl BlobBackend for Local {
         }))
     }
 
+    /// Copies the raw blob metadata to `dst`.
     fn save_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -281,6 +314,7 @@ impl BlobBackend for Local {
         file.flush()
     }
 
+    /// Fills `dst` from the data region, recording the read's metrics.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -309,7 +343,7 @@ impl BlobBackend for Local {
     }
 }
 
-/// Parse the full blob at `path` into a source named by `cache_key`, `None`
+/// Parses the full blob at `path` into a source named by `cache_key`, `None`
 /// when the file carries no nydus footer.
 fn parse_full_blob(path: &Path, cache_key: [u8; SHA256_DIGEST_SIZE]) -> io::Result<Option<Source>> {
     let footer = match BlobFooter::from_blob_path(path) {
@@ -339,7 +373,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn reads_blob_metadata_from_the_sidecar_file_or_the_full_blob() {
+    fn blob_metadata_reads_the_sidecar_file_or_the_embedded_region() {
         let test_cases = vec![true, false];
 
         for sidecar in test_cases {

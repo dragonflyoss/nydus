@@ -76,34 +76,47 @@ use self::redirect::RedirectCache;
 use self::response::{fill_exact, status_error, Response};
 pub use self::rt::Runtime;
 
-/// An error of the registry backend. Private to the crate, it folds into an
-/// [`io::Error`] at the [`BlobBackend`] boundary.
+/// An error of the registry backend.
+///
+/// Private to the crate, it folds into an [`io::Error`] at the
+/// [`BlobBackend`] boundary.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RegistryError {
+    /// The error when the transport or local I/O fails.
     #[error(transparent)]
     Io(io::Error),
 
+    /// The error when a URL cannot be parsed.
     #[error("invalid url: {0}")]
     InvalidUrl(String),
 
+    /// The error when the registry's challenge cannot be answered.
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// The error when a response lacks what the request needed.
     #[error("unexpected response: {0}")]
     UnexpectedResponse(String),
 
+    /// The error when the registry answers with a status the request did not
+    /// expect, carrying the body.
     #[error("unexpected status {0}: {1}")]
     UnexpectedStatus(StatusCode, String),
 
-    /// A prefetch read Dragonfly could not serve: a `429`, `5xx` or `408`
-    /// answer, or a transport failure. Folds into
-    /// [`io::ErrorKind::QuotaExceeded`] so the storage layer reschedules the
-    /// blob's prefetch hours later instead of retrying now.
+    /// The error when Dragonfly could not serve a prefetch read: a `429`,
+    /// `5xx` or `408` answer, or a transport failure.
+    ///
+    /// Folds into [`io::ErrorKind::QuotaExceeded`] so the storage layer
+    /// reschedules the blob's prefetch hours later instead of retrying now.
     #[error("prefetch deferred: {0}")]
     PrefetchDeferred(Box<RegistryError>),
 }
 
+/// Implements the fold of a registry error into an I/O error at the trait
+/// boundary.
 impl From<RegistryError> for io::Error {
+    /// Converts the error, a deferred prefetch becoming
+    /// [`io::ErrorKind::QuotaExceeded`] and an I/O error passing through.
     fn from(err: RegistryError) -> Self {
         match err {
             RegistryError::Io(err) => err,
@@ -115,18 +128,22 @@ impl From<RegistryError> for io::Error {
     }
 }
 
+/// The result of a registry operation.
 pub(crate) type RegistryResult<T> = Result<T, RegistryError>;
 
 /// The transport a blob `GET` rides on: the origin registry over HTTP, or the
-/// Dragonfly seed peers. One call spends the transport's own retries and hands
-/// back a settled answer, a Dragonfly body already buffered so a mid-stream
-/// failure surfaces here rather than while the caller consumes it.
+/// Dragonfly seed peers.
+///
+/// One call spends the transport's own retries and hands back a settled
+/// answer, a Dragonfly body already buffered so a mid-stream failure surfaces
+/// here rather than while the caller consumes it.
 #[async_trait]
 trait BlobTransport: Send + Sync {
+    /// Sends a `GET` for `url` with `headers`, `kind` attributing the read.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response>;
 }
 
-/// Split a registry `addr` such as `http://127.0.0.1:5000` into its scheme
+/// Splits a registry `addr` such as `http://127.0.0.1:5000` into its scheme
 /// and `host[:port]` authority.
 fn parse_registry_addr(addr: &str) -> io::Result<(&'static str, String)> {
     let invalid = |reason: &str| {
@@ -163,12 +180,15 @@ fn parse_registry_addr(addr: &str) -> io::Result<(&'static str, String)> {
 ///   └─ copy into dst, note who served it
 /// ```
 pub(crate) struct Registry {
+    /// The client every read shares.
     inner: Arc<Inner>,
+
     /// Whether a read has succeeded, so later reads skip [`Self::first_read`].
     first_read_done: AtomicBool,
-    /// Serializes reads until the first one succeeds, so a cold-start burst
-    /// performs one auth handshake and reuses its token instead of one per
-    /// read.
+
+    /// The lock serializing reads until the first one succeeds, so a
+    /// cold-start burst performs one auth handshake and reuses its token
+    /// instead of one per read.
     first_read: Mutex<()>,
 }
 
@@ -195,35 +215,46 @@ pub(crate) struct Registry {
 struct Inner {
     /// The scheme of the configured `addr`, `http` or `https`.
     scheme: &'static str,
+
     /// The registry `host[:port]` authority.
     host: String,
+
     /// The image repository, such as `library/ubuntu`.
     repository: String,
+
     /// The credentials and the `Authorization` the last challenge produced.
     authorizer: Authorizer,
+
     /// The signed URLs blob `GET`s were redirected to, by blob hex digest.
     redirects: RedirectCache,
+
     /// The direct client to the origin.
     http: Http,
+
     /// The origin client an on-demand read falls back to when Dragonfly
     /// cannot serve it, every attempt claiming a rate limit slot first.
     back_to_source: Http,
+
     /// The Dragonfly transport when configured, always `None` without the
     /// `backend-dragonfly` feature since the config is rejected.
     dragonfly: Option<Box<dyn BlobTransport>>,
+
     /// How reads are fetched when nothing else is known, the `protocol` label
     /// of a failed read: Dragonfly when configured, otherwise HTTP.
     protocol: Protocol,
+
     /// The runtime every request runs on, last so the transports above drop
     /// before it.
     runtime: Arc<Runtime>,
 }
 
+/// Implements the registry backend construction.
 impl Registry {
-    /// Build a registry backend from its configuration, running on `runtime`.
+    /// Creates a registry backend from its configuration, running on `runtime`.
     pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
         let http = Http::builder(&config.http).build()?;
+        // Throttle the origin fallback by the configured back-to-source rate.
         let rate_limit = RateLimit::new(
             config
                 .dragonfly
@@ -232,6 +263,7 @@ impl Registry {
                 .unwrap_or(0),
         );
         let back_to_source = Http::builder(&config.http).rate_limit(rate_limit).build()?;
+        // Reject a Dragonfly configuration this build cannot honour.
         #[cfg(not(feature = "backend-dragonfly"))]
         if let Some(dragonfly) = &config.dragonfly {
             return Err(io::Error::new(
@@ -244,6 +276,7 @@ impl Registry {
             ));
         }
 
+        // Connect the Dragonfly transport when configured.
         #[cfg(feature = "backend-dragonfly")]
         let dragonfly: Option<Box<dyn BlobTransport>> = match &config.dragonfly {
             Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, &runtime)?)),
@@ -264,7 +297,7 @@ impl Registry {
         ))
     }
 
-    /// Assemble a registry backend from its parts.
+    /// Assembles a registry backend from its parts.
     #[allow(clippy::too_many_arguments)]
     fn from_parts(
         scheme: &'static str,
@@ -300,8 +333,9 @@ impl Registry {
     }
 }
 
+/// Implements the registry requests.
 impl Inner {
-    /// The URL of the blob with hex digest `hex`.
+    /// Returns the URL of the blob with hex digest `hex`.
     fn blob_url(&self, hex: &str) -> String {
         format!(
             "{}://{}/v2/{}/blobs/sha256:{}",
@@ -309,9 +343,10 @@ impl Inner {
         )
     }
 
-    /// Send a request. A `GET` rides Dragonfly when it is configured and
-    /// [`policy::decide`] settles the answer, everything else goes straight to
-    /// the origin.
+    /// Sends a request.
+    ///
+    /// A `GET` rides Dragonfly when it is configured and [`policy::decide`]
+    /// settles the answer, everything else goes straight to the origin.
     async fn send(
         &self,
         method: Method,
@@ -349,7 +384,7 @@ impl Inner {
         }
     }
 
-    /// Send a request, answering a `401` with the auth handshake.
+    /// Sends a request, answering a `401` with the auth handshake.
     ///
     /// ```text
     /// send with cached Authorization ──▶ not 401 ──▶ answer
@@ -367,8 +402,8 @@ impl Inner {
         mut headers: HeaderMap,
         kind: ReadKind,
     ) -> RegistryResult<Response> {
+        // Send with the cached Authorization, when one is still valid.
         self.authorizer.authorize(&mut headers);
-
         let response = self
             .send(method.clone(), url, headers.clone(), kind)
             .await?;
@@ -376,6 +411,7 @@ impl Inner {
             return Ok(response);
         }
 
+        // Resend without the stale Authorization to get a fresh challenge.
         let challenge_response = if headers.remove(AUTHORIZATION).is_some() {
             self.send(method.clone(), url, headers.clone(), kind)
                 .await?
@@ -383,6 +419,7 @@ impl Inner {
             response
         };
 
+        // Answer the challenge and resend authorized.
         let challenge = challenge_response
             .headers
             .get(WWW_AUTHENTICATE)
@@ -397,9 +434,11 @@ impl Inner {
         self.send(method, url, headers, kind).await
     }
 
-    /// Fill `dst` with the blob bytes from `offset`, through the cached
-    /// redirect when there is one and otherwise through the blob URL, caching
-    /// the redirect it answers with. Returns the protocol that served the bytes.
+    /// Fills `dst` with the blob bytes from `offset` and returns the protocol
+    /// that served them.
+    ///
+    /// The read goes through the cached redirect when there is one and
+    /// otherwise through the blob URL, caching the redirect it answers with.
     async fn get_blob(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -413,6 +452,8 @@ impl Inner {
         let mut headers = HeaderMap::new();
         headers.insert(RANGE, range);
 
+        // Read through the cached redirect, evicting one the CDN no longer
+        // honours.
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = self
                 .send(Method::GET, &redirect, headers.clone(), kind)
@@ -424,6 +465,7 @@ impl Inner {
             }
         }
 
+        // Read through the blob URL, caching the redirect it answers with.
         let url = self.blob_url(&hex);
         let response = self
             .authorized_request(Method::GET, &url, headers.clone(), kind)
@@ -443,7 +485,7 @@ impl Inner {
         }
     }
 
-    /// The size of a blob, from a `HEAD` request following one redirect.
+    /// Returns the size of a blob, from a `HEAD` request following one redirect.
     async fn stat_blob(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -472,7 +514,7 @@ impl Inner {
         response.content_length()
     }
 
-    /// Recover a blob's metadata from its trailing footer: `HEAD` for the
+    /// Recovers a blob's metadata from its trailing footer: `HEAD` for the
     /// size, read the footer, then read the blob metadata region it points at.
     async fn get_blob_metadata(
         &self,
@@ -518,15 +560,20 @@ impl Inner {
     }
 }
 
+/// Implements the blob backend over the registry.
 impl BlobBackend for Registry {
+    /// Returns [`Backend::Registry`].
     fn backend(&self) -> Backend {
         Backend::Registry
     }
 
+    /// Returns the configured transport: Dragonfly when configured, otherwise
+    /// HTTP.
     fn protocol(&self) -> Option<Protocol> {
         Some(self.inner.protocol)
     }
 
+    /// Recovers the blob's metadata from the registry on the runtime.
     fn blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -540,6 +587,9 @@ impl BlobBackend for Registry {
             .block_on_worker(async move { inner.get_blob_metadata(&blob_id, kind).await })??)
     }
 
+    /// Fills `dst` with the blob bytes from `offset` on the runtime, recording
+    /// the read's metrics.
+    ///
     /// Reads are serialized until the first one succeeds, so a cold-start
     /// burst waits for one auth handshake and reuses its token.
     fn read_range_into(
@@ -552,9 +602,11 @@ impl BlobBackend for Registry {
         if dst.is_empty() {
             return Ok(());
         }
+        // Hold the first-read lock until a read has succeeded.
         let _first = (!self.first_read_done.load(Ordering::Acquire))
             .then(|| self.first_read.lock().unwrap());
 
+        // Read into an owned buffer on a runtime thread.
         let start = Instant::now();
         let inner = self.inner.clone();
         let blob_id = *blob_id;
@@ -569,6 +621,7 @@ impl BlobBackend for Registry {
             })
             .and_then(|result| Ok(result?));
 
+        // Record the metrics and copy the bytes out.
         match result {
             Ok((buf, protocol)) => {
                 collect_read_backend_finished_metrics(
@@ -852,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_blob_url() {
+    fn blob_url_names_the_blob_under_the_repository() {
         let config: RegistryConfig = serde_yaml::from_str(
             "addr: https://registry.example.com\nrepository: library/ubuntu\n",
         )
@@ -865,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_registry_addr() {
+    fn parse_registry_addr_splits_the_scheme_and_authority() {
         let test_cases = vec![
             ("http://127.0.0.1:5000", Some(("http", "127.0.0.1:5000"))),
             (

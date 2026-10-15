@@ -47,6 +47,7 @@ pub(crate) enum Challenge {
 
 /// Implements parsing from a `WWW-Authenticate` value.
 impl FromStr for Challenge {
+    /// The error of a malformed or unsupported challenge.
     type Err = RegistryError;
 
     /// Parses the challenge list in `value` and picks the one to answer: a

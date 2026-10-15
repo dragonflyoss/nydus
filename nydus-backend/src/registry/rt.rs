@@ -31,36 +31,41 @@ use tracing::{error, info};
 
 use super::netns::Netns;
 
-/// Idle blocking threads are released after this long.
+/// The time an idle blocking thread is kept before it is released.
 const BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
 
 /// The name of the runtime's threads.
 const THREAD_NAME: &str = "nydus-backend";
 
-/// The runtime a registry backend runs its requests on. One is built per
-/// backend from its `http` configuration unless an embedder hands the same
-/// one to several backends.
+/// The runtime a registry backend runs its requests on.
+///
+/// One is built per backend from its `http` configuration unless an embedder
+/// hands the same one to several backends.
 #[derive(Debug)]
 pub struct Runtime {
     /// The tokio runtime, its threads pinned to the configured namespace.
     inner: tokio::runtime::Runtime,
 }
 
+/// Implements the backend runtime.
 impl Runtime {
-    /// Build a runtime with `worker_threads` async workers, spawned now and
-    /// kept for the runtime's life, and at most `max_blocking_threads` in the
-    /// blocking pool, both at least `1` as the configuration guarantees. Every
-    /// runtime thread enters `netns` before it does any work, so sockets and
-    /// DNS queries never depend on the caller's namespace; `None` keeps
-    /// tokio's behaviour, threads inheriting the namespace of the thread
-    /// that builds the runtime. A namespace is probed on a scratch thread
-    /// first, so an unusable descriptor or a missing privilege fails here
-    /// rather than inside a runtime thread.
+    /// Creates a runtime with `worker_threads` async workers and at most
+    /// `max_blocking_threads` in the blocking pool, every thread entering
+    /// `netns` before it does any work.
+    ///
+    /// The workers are spawned now and kept for the runtime's life; both
+    /// bounds are at least `1` as the configuration guarantees. With a
+    /// namespace, sockets and DNS queries never depend on the caller's
+    /// namespace; `None` keeps tokio's behaviour, threads inheriting the
+    /// namespace of the thread that builds the runtime. A namespace is probed
+    /// on a scratch thread first, so an unusable descriptor or a missing
+    /// privilege fails here rather than inside a runtime thread.
     pub fn new(
         worker_threads: usize,
         max_blocking_threads: usize,
         netns: Option<Netns>,
     ) -> io::Result<Self> {
+        // Bound the runtime by the configured thread counts.
         let mut builder = Builder::new_multi_thread();
         builder
             .thread_name(THREAD_NAME)
@@ -68,6 +73,7 @@ impl Runtime {
             .max_blocking_threads(max_blocking_threads)
             .thread_keep_alive(BLOCKING_KEEP_ALIVE)
             .enable_all();
+        // Pin every runtime thread to the namespace, when one is configured.
         let namespace = match netns {
             Some(netns) => {
                 netns.probe()?;
@@ -78,11 +84,10 @@ impl Runtime {
                         error!(
                             "nydus-backend runtime thread cannot enter the configured netns: {err}"
                         );
-                        // The probe above entered this exact descriptor, so
-                        // this is unreachable in practice; a thread left in
-                        // the wrong namespace would silently route registry
-                        // traffic there, which is worse than losing the
-                        // thread.
+                        // Abort the thread rather than leave it in the wrong
+                        // namespace, where it would silently route registry
+                        // traffic. The probe above entered this exact
+                        // descriptor, so this is unreachable in practice.
                         panic!(
                             "nydus-backend runtime thread cannot enter the configured netns: {err}"
                         );
@@ -97,9 +102,11 @@ impl Runtime {
         Ok(Self { inner })
     }
 
-    /// Run `future` on a runtime thread and wait for its result. This is
-    /// what puts DNS and TCP connect on a thread that entered the configured
-    /// netns, where `Runtime::block_on` alone would poll on the caller.
+    /// Runs `future` on a runtime thread and waits for its result.
+    ///
+    /// This is what puts DNS and TCP connect on a thread that entered the
+    /// configured netns, where `Runtime::block_on` alone would poll on the
+    /// caller.
     pub(crate) fn block_on_worker<T>(
         &self,
         future: impl Future<Output = T> + Send + 'static,
@@ -112,8 +119,8 @@ impl Runtime {
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))
     }
 
-    /// The tokio runtime itself, for tests that poll a future on the calling
-    /// thread.
+    /// Returns the tokio runtime itself, for tests that poll a future on the
+    /// calling thread.
     #[cfg(test)]
     pub(crate) fn tokio(&self) -> &tokio::runtime::Runtime {
         &self.inner

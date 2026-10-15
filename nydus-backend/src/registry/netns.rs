@@ -18,7 +18,9 @@ pub struct NetnsId {
     ino: u64,
 }
 
+/// Implements the display of a namespace identity.
 impl fmt::Display for NetnsId {
+    /// Formats the identity as its device and inode.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "dev {} ino {}", self.dev, self.ino)
     }
@@ -36,17 +38,24 @@ pub struct Netns {
     id: NetnsId,
 }
 
+/// Implements equality by namespace identity, however the descriptors were
+/// opened.
 impl PartialEq for Netns {
+    /// Returns whether both values name the same namespace.
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
+/// Implements [Eq] for the namespace.
 impl Eq for Netns {}
 
+/// Implements the network namespace.
 impl Netns {
-    /// Wrap an open namespace descriptor, recording its identity. Entering
-    /// it is not checked here, see [`probe`](Self::probe).
+    /// Creates a namespace from an open descriptor on its `ns/net` file,
+    /// recording its identity.
+    ///
+    /// Entering it is not checked here, see [`probe`](Self::probe).
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
         let metadata = File::from(fd.try_clone()?).metadata()?;
         Ok(Self {
@@ -58,12 +67,12 @@ impl Netns {
         })
     }
 
-    /// The namespace's identity.
+    /// Returns the namespace's identity.
     pub fn id(&self) -> NetnsId {
         self.id
     }
 
-    /// Move the calling thread into the namespace.
+    /// Moves the calling thread into the namespace.
     #[cfg(target_os = "linux")]
     pub fn enter(&self) -> io::Result<()> {
         // SAFETY: setns only takes the descriptor and a flag, and the
@@ -76,7 +85,7 @@ impl Netns {
         }
     }
 
-    /// Move the calling thread into the namespace.
+    /// Moves the calling thread into the namespace.
     #[cfg(not(target_os = "linux"))]
     pub fn enter(&self) -> io::Result<()> {
         Err(io::Error::new(
@@ -85,9 +94,11 @@ impl Netns {
         ))
     }
 
-    /// Verify the namespace can be entered, on a scratch thread whose
-    /// namespace change dies with it, so an unusable descriptor or a missing
-    /// privilege fails here rather than inside a runtime thread.
+    /// Verifies the namespace can be entered.
+    ///
+    /// The check runs on a scratch thread whose namespace change dies with
+    /// it, so an unusable descriptor or a missing privilege fails here rather
+    /// than inside a runtime thread.
     pub fn probe(&self) -> io::Result<()> {
         std::thread::scope(|scope| {
             scope

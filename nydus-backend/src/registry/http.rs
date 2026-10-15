@@ -20,9 +20,10 @@ use super::response::{log_request_done, Response};
 use super::{BlobTransport, RegistryError, RegistryResult};
 use crate::{Protocol, ReadKind};
 
-/// An HTTP client talking straight to the origin registry. Its middleware
-/// stack retries transient failures with exponential backoff and, when built
-/// with a [`RateLimit`], claims a slot before every attempt.
+/// An HTTP client talking straight to the origin registry.
+///
+/// Its middleware stack retries transient failures with exponential backoff
+/// and, when built with a [`RateLimit`], claims a slot before every attempt.
 ///
 /// ```text
 /// request ──▶ RetryTransientMiddleware ──▶ RateLimit ──▶ reqwest::Client ──▶ origin
@@ -30,11 +31,13 @@ use crate::{Protocol, ReadKind};
 ///                 └── retry ─────────────────┘  every attempt claims its own slot
 /// ```
 pub(crate) struct Http {
+    /// The reqwest client behind the retry and rate limit middleware.
     client: ClientWithMiddleware,
 }
 
+/// Implements the origin HTTP client.
 impl Http {
-    /// Start building a client from the HTTP configuration.
+    /// Creates a builder from the HTTP configuration.
     pub(crate) fn builder(config: &HttpConfig) -> HttpBuilder {
         HttpBuilder {
             config: config.clone(),
@@ -42,9 +45,10 @@ impl Http {
         }
     }
 
-    /// Send `method` to `url` with `headers` and log the outcome. Redirects
-    /// are returned rather than followed so the caller can cache the signed
-    /// URL a blob `GET` is redirected to.
+    /// Sends `method` to `url` with `headers` and logs the outcome.
+    ///
+    /// Redirects are returned rather than followed so the caller can cache
+    /// the signed URL a blob `GET` is redirected to.
     pub(crate) async fn request(
         &self,
         method: Method,
@@ -87,35 +91,44 @@ impl Http {
     }
 }
 
+/// Implements the blob transport over the origin HTTP client.
 #[async_trait]
 impl BlobTransport for Http {
+    /// Sends a `GET` to `url`.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
         self.request(Method::GET, url, headers, kind).await
     }
 }
 
-/// Builds an [`Http`] client: the connection settings from the configuration,
-/// plus an optional rate limit on every attempt.
+/// The builder of an [`Http`] client: the connection settings from the
+/// configuration, plus an optional rate limit on every attempt.
 pub(crate) struct HttpBuilder {
+    /// The connection settings.
     config: HttpConfig,
+
+    /// The limit every attempt claims a slot from, when set.
     rate_limit: Option<RateLimit>,
 }
 
+/// Implements the HTTP client builder.
 impl HttpBuilder {
-    /// Make every attempt the client sends claim a slot from `limit` first.
+    /// Makes every attempt the client sends claim a slot from `limit` first.
     pub(crate) fn rate_limit(mut self, limit: RateLimit) -> Self {
         self.rate_limit = Some(limit);
         self
     }
 
-    /// Build the client. Requests go through the configured proxy or, without
-    /// one, straight to the origin with any ambient proxy ignored. Names are
-    /// resolved by hickory, which caches lookups and honours record TTLs.
-    /// Transient failures are retried up to the configured `max_retries`.
+    /// Builds the client.
+    ///
+    /// Requests go through the configured proxy or, without one, straight to
+    /// the origin with any ambient proxy ignored. Names are resolved by
+    /// hickory, which caches lookups and honours record TTLs. Transient
+    /// failures are retried up to the configured `max_retries`.
     pub(crate) fn build(self) -> io::Result<Http> {
         let config = &self.config;
         let mut builder = Client::builder().redirect(Policy::none()).hickory_dns(true);
 
+        // Route through the configured proxy, or ignore any ambient one.
         builder = match &config.proxy {
             Some(proxy) => {
                 let proxy = reqwest::Proxy::all(&proxy.addr).map_err(|err| {
@@ -129,12 +142,14 @@ impl HttpBuilder {
             None => builder.no_proxy(),
         };
 
+        // Bound each request and its connect by the configured timeout.
         if !config.timeout.is_zero() {
             builder = builder
                 .timeout(config.timeout)
                 .connect_timeout(config.timeout);
         }
 
+        // Apply the TLS settings.
         if config.tls.skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
@@ -155,6 +170,8 @@ impl HttpBuilder {
             .build()
             .map_err(|err| io::Error::other(format!("failed to build http client: {err}")))?;
 
+        // Retry transient failures, every attempt claiming a rate limit slot
+        // first.
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(config.max_retries);
         let mut client = ClientBuilder::new(client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy));
@@ -168,20 +185,23 @@ impl HttpBuilder {
 }
 
 /// A fair leaky bucket handing out one slot per request per interval, the
-/// same limiter dfdaemon puts in front of its own proxy. As a middleware it
-/// sits inside the retry middleware so every retry attempt waits for its own
-/// slot. A zero limit disables it.
+/// same limiter dfdaemon puts in front of its own proxy.
+///
+/// As a middleware it sits inside the retry middleware so every retry attempt
+/// waits for its own slot. A zero limit disables it.
 pub(crate) struct RateLimit {
+    /// The bucket, `None` when the limit is disabled.
     limiter: Option<RateLimiter>,
 }
 
+/// Implements the rate limit.
 impl RateLimit {
-    /// A limit of `requests_per_second`, zero disabling it.
+    /// Creates a limit of `requests_per_second`, zero disabling it.
     pub(crate) fn new(requests_per_second: u64) -> Self {
         Self::with_interval(requests_per_second, Duration::from_secs(1))
     }
 
-    /// A limit of `requests` per `interval`, a zero limit or interval
+    /// Creates a limit of `requests` per `interval`, a zero limit or interval
     /// disabling it.
     pub(crate) fn with_interval(requests: u64, interval: Duration) -> Self {
         let limiter = (requests > 0 && !interval.is_zero()).then(|| {
@@ -197,7 +217,7 @@ impl RateLimit {
         Self { limiter }
     }
 
-    /// Wait for this caller's slot, returning how long it waited.
+    /// Waits for this caller's slot, returning how long it waited.
     async fn acquire(&self) -> Duration {
         let Some(limiter) = &self.limiter else {
             return Duration::ZERO;
@@ -208,8 +228,10 @@ impl RateLimit {
     }
 }
 
+/// Implements the rate limit as a reqwest middleware.
 #[async_trait]
 impl Middleware for RateLimit {
+    /// Claims a slot, then runs the request.
     async fn handle(
         &self,
         req: Request,
@@ -226,7 +248,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_with_and_without_a_rate_limit() {
+    fn build_accepts_an_optional_rate_limit() {
         let config = HttpConfig::default();
         assert!(Http::builder(&config).build().is_ok());
         assert!(Http::builder(&config)
@@ -236,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rate_limit_spaces_slots_by_the_interval() {
+    async fn acquire_spaces_slots_by_the_interval() {
         let interval = Duration::from_millis(40);
         let start = Instant::now();
         let limit = RateLimit::with_interval(1, interval);
@@ -250,7 +272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_zero_rate_limit_never_waits() {
+    async fn acquire_never_waits_on_a_zero_limit() {
         let limit = RateLimit::new(0);
         let start = Instant::now();
         for _ in 0..3 {

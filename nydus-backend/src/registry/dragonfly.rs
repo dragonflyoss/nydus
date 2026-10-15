@@ -34,7 +34,7 @@ const PRIORITY_PREFETCH: i32 = 3;
 /// The priority hint for on-demand (foreground) requests.
 const PRIORITY_ONDEMAND: i32 = 6;
 
-/// The Dragonfly priority of a read kind.
+/// Returns the Dragonfly priority of a read kind.
 fn priority(kind: ReadKind) -> i32 {
     match kind {
         ReadKind::Prefetch => PRIORITY_PREFETCH,
@@ -58,9 +58,13 @@ pub(crate) struct Dragonfly {
     timeout: Duration,
 }
 
+/// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Connect to the configured scheduler on `runtime`. Only the on-demand
-    /// client retries, `max_retries` times across seed peers.
+    /// Creates the transport, connecting to the configured scheduler on
+    /// `runtime`.
+    ///
+    /// Only the on-demand client retries, `max_retries` times across seed
+    /// peers.
     pub(crate) fn new(config: &DragonflyConfig, runtime: &Runtime) -> io::Result<Dragonfly> {
         let max_retries = u8::try_from(config.max_retries).map_err(|_| {
             io::Error::new(
@@ -95,7 +99,7 @@ impl Dragonfly {
         })
     }
 
-    /// The client serving reads of `kind`.
+    /// Returns the client serving reads of `kind`.
     fn client(&self, kind: ReadKind) -> &Proxy {
         match kind {
             ReadKind::OnDemand => &self.ondemand,
@@ -104,12 +108,14 @@ impl Dragonfly {
     }
 }
 
-/// Convert an SDK outcome into a transport outcome. A success carries the
-/// buffered `body`. A proxy, backend or dfdaemon error carrying an HTTP
-/// status is an answer, rebuilt as a [`Response`] with its status, headers and
-/// message, so a `429`, `403` or a dfdaemon `422` reaches the policy the same
-/// way an origin answer does. Anything else, a request timeout, seed peer
-/// connectivity, a failed body stream, is a transport failure.
+/// Converts an SDK outcome into a transport outcome.
+///
+/// A success carries the buffered `body`. A proxy, backend or dfdaemon error
+/// carrying an HTTP status is an answer, rebuilt as a [`Response`] with its
+/// status, headers and message, so a `429`, `403` or a dfdaemon `422` reaches
+/// the policy the same way an origin answer does. Anything else, a request
+/// timeout, seed peer connectivity, a failed body stream, is a transport
+/// failure.
 fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> RegistryResult<Response> {
     match result {
         Ok(response) => Ok(Response {
@@ -150,7 +156,7 @@ fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> Registry
     }
 }
 
-/// Rebuild a header map from the SDK's string map, dropping entries that are
+/// Rebuilds a header map from the SDK's string map, dropping entries that are
 /// not valid HTTP headers.
 fn header_map(headers: HashMap<String, String>) -> HeaderMap {
     headers
@@ -164,10 +170,11 @@ fn header_map(headers: HashMap<String, String>) -> HeaderMap {
         .collect()
 }
 
+/// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl BlobTransport for Dragonfly {
-    /// Fetch `url` through the client of the read kind with its priority
-    /// hint, the SDK adding the P2P and priority headers itself, and log the
+    /// Fetches `url` through the client of the read kind with its priority
+    /// hint, the SDK adding the P2P and priority headers itself, and logs the
     /// outcome.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
         let request = GetRequest {
