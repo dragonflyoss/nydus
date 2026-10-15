@@ -73,28 +73,18 @@ use self::policy::Action;
 use self::redirect::RedirectCache;
 use self::response::{fill_exact, status_error, Response};
 use self::rt::RUNTIME;
-pub use self::rt::{
-    configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
-};
+pub use self::rt::{configure_runtime, RuntimeOptions};
 
-/// Apply the config file's thread bounds to the shared runtime. Only an
-/// explicit (non-zero) setting is forwarded, so a backend built with the
-/// defaults never seals the runtime ahead of an embedder that configures it
-/// itself (with a netns) after building its backend config. The config file
-/// cannot name a netns; that stays an embedder-only option.
+/// Apply the config file's thread bounds to the shared runtime. The config
+/// file cannot name a netns, so its request accepts whichever namespace an
+/// embedder installed through [`configure_runtime`] and only the thread
+/// bounds have to agree.
 ///
 /// The options are process-wide, so this runs only once the rest of the
 /// backend configuration has been accepted: a backend that is rejected must
 /// not seal the runtime for the ones that follow.
 fn apply_runtime_config(http: &HttpConfig) {
-    if http.worker_threads == 0 && http.max_blocking_threads == 0 {
-        return;
-    }
-    if let Err(err) = configure_runtime(RuntimeOptions {
-        worker_threads: http.worker_threads,
-        max_blocking_threads: http.max_blocking_threads,
-        netns: None,
-    }) {
+    if let Err(err) = configure_runtime(RuntimeOptions::from(http)) {
         warn!("registry backend: http.worker_threads/max_blocking_threads ignored: {err}");
     }
 }
@@ -921,26 +911,6 @@ auth: YWxpY2U6c2VjcmV0
         assert_eq!(registry.inner.scheme, "https");
         assert!(registry.inner.dragonfly.is_none());
         assert_eq!(registry.inner.protocol, Protocol::Http);
-    }
-
-    #[test]
-    fn config_thread_bounds_reach_the_shared_runtime() {
-        apply_runtime_config(&HttpConfig::default());
-
-        let config: RegistryConfig = serde_yaml::from_str(
-            "addr: https://registry.example.com\nrepository: library/ubuntu\nhttp:\n  worker_threads: 3\n  max_blocking_threads: 5\n",
-        )
-        .unwrap();
-        assert_eq!(config.http.worker_threads, 3);
-        apply_runtime_config(&config.http);
-        match configure_runtime(RuntimeOptions {
-            worker_threads: 3,
-            max_blocking_threads: 5,
-            netns: None,
-        }) {
-            Ok(()) => {}
-            Err(err) => assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}"),
-        }
     }
 
     #[cfg(not(feature = "backend-dragonfly"))]

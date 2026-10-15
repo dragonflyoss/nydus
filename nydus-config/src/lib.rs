@@ -57,6 +57,21 @@ fn default_registry_http_max_retries() -> u32 {
     3
 }
 
+/// Returns the default async worker thread count of the registry backend's
+/// shared runtime. The workers only drive socket I/O for the connection
+/// pool; the synchronous callers block on their own threads.
+#[inline]
+pub fn default_registry_http_worker_threads() -> usize {
+    2
+}
+
+/// Returns the default upper bound on the shared runtime's on-demand
+/// blocking pool, where only DNS lookups (`getaddrinfo`) run.
+#[inline]
+pub fn default_registry_http_max_blocking_threads() -> usize {
+    8
+}
+
 /// Returns the default number of concurrently prefetched blobs.
 #[inline]
 pub fn default_prefetch_concurrent_blob_count() -> usize {
@@ -220,18 +235,18 @@ pub struct HttpConfig {
     pub tls: TlsConfig,
 
     /// The async worker threads of the process-wide runtime that drives the
-    /// registry client's sockets; `0` selects the backend's default (2). The
-    /// runtime is shared by every registry backend in the process, so only
-    /// the first backend constructed with a non-zero value can configure it;
-    /// a later, different value is logged and ignored.
-    #[serde(default)]
+    /// registry client's sockets, `2` by default; `0` selects the default.
+    /// The runtime is shared by every registry backend in the process, so
+    /// only the first backend constructed can configure it; a later,
+    /// different value is logged and ignored.
+    #[serde(default = "default_registry_http_worker_threads")]
     pub worker_threads: usize,
 
     /// The upper bound on the runtime's on-demand blocking threads, which
-    /// serve DNS lookups and are released after 10 s idle; `0` selects the
-    /// backend's default (8). Shares the first-backend-wins rule of
+    /// serve DNS lookups and are released after 10 s idle, `8` by default;
+    /// `0` selects the default. Shares the first-backend-wins rule of
     /// [`worker_threads`](Self::worker_threads).
-    #[serde(default)]
+    #[serde(default = "default_registry_http_max_blocking_threads")]
     pub max_blocking_threads: usize,
 }
 
@@ -253,8 +268,8 @@ impl Default for HttpConfig {
             max_retries: default_registry_http_max_retries(),
             proxy: None,
             tls: TlsConfig::default(),
-            worker_threads: 0,
-            max_blocking_threads: 0,
+            worker_threads: default_registry_http_worker_threads(),
+            max_blocking_threads: default_registry_http_max_blocking_threads(),
         }
     }
 }
@@ -758,8 +773,14 @@ config:
         assert!(registry.http.proxy.is_none());
         assert!(!registry.http.tls.skip_verify);
         assert!(registry.http.tls.ca_cert.is_none());
-        assert_eq!(registry.http.worker_threads, 0);
-        assert_eq!(registry.http.max_blocking_threads, 0);
+        assert_eq!(
+            registry.http.worker_threads,
+            default_registry_http_worker_threads()
+        );
+        assert_eq!(
+            registry.http.max_blocking_threads,
+            default_registry_http_max_blocking_threads()
+        );
         assert!(registry.auth.is_none());
         assert!(registry.dragonfly.is_none());
     }

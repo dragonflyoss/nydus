@@ -64,9 +64,9 @@ backend:
       # Thread bounds of the process-wide async runtime behind the registry
       # client. Workers only move bytes for the connection pool (readers
       # block on their own threads); the blocking pool serves DNS lookups
-      # and shrinks again after 10 s idle. 0 selects the defaults (2 and 8).
+      # and shrinks again after 10 s idle. Defaults: 2 and 8.
       # The runtime is shared by every registry backend in the process, so
-      # only the first backend constructed with non-zero values applies.
+      # only the first backend constructed applies.
       #
       # worker_threads: 2
       # max_blocking_threads: 8

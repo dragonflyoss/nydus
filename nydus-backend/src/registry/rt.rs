@@ -10,8 +10,8 @@
 //! drives a handful of connections, so a couple of workers are plenty, and
 //! the registry must be reached from the host namespace no matter which
 //! thread issues the first read. [`configure_runtime`] lets the embedder fix
-//! both before the runtime exists; standalone services get the bounded
-//! defaults without calling it.
+//! both before the runtime exists; standalone services get the bounds from
+//! their `http` configuration, whose defaults live in [`nydus_config`].
 //!
 //! Pinning the runtime threads is only half of it: `Runtime::block_on` polls
 //! its future on the *calling* thread, and hyper opens the TCP connection
@@ -30,16 +30,11 @@ use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 use tracing::{error, info};
 
+use nydus_config::{
+    default_registry_http_max_blocking_threads, default_registry_http_worker_threads, HttpConfig,
+};
+
 use super::netns::Netns;
-
-/// Async worker threads when [`configure_runtime`] is not called or asks for
-/// `0`. The workers only drive socket I/O for the connection pool; the
-/// synchronous callers block on their own threads.
-pub const DEFAULT_WORKER_THREADS: usize = 2;
-
-/// Upper bound on the on-demand blocking pool when not configured. Only DNS
-/// lookups (`getaddrinfo`) run there.
-pub const DEFAULT_MAX_BLOCKING_THREADS: usize = 8;
 
 /// Idle blocking threads are released after this long.
 const BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
@@ -51,11 +46,12 @@ const THREAD_NAME: &str = "nydus-backend";
 #[derive(Debug, Default)]
 pub struct RuntimeOptions {
     /// Async worker threads, spawned when the runtime is first used and kept
-    /// for the life of the process. `0` selects [`DEFAULT_WORKER_THREADS`].
+    /// for the life of the process. `0` selects the configuration default,
+    /// [`default_registry_http_worker_threads`].
     pub worker_threads: usize,
 
-    /// Upper bound on the blocking pool. `0` selects
-    /// [`DEFAULT_MAX_BLOCKING_THREADS`].
+    /// Upper bound on the blocking pool. `0` selects the configuration
+    /// default, [`default_registry_http_max_blocking_threads`].
     pub max_blocking_threads: usize,
 
     /// Network namespace every runtime thread enters before it does any work,
@@ -69,7 +65,7 @@ impl RuntimeOptions {
     /// The worker thread count with the default applied.
     fn worker_threads(&self) -> usize {
         match self.worker_threads {
-            0 => DEFAULT_WORKER_THREADS,
+            0 => default_registry_http_worker_threads(),
             n => n,
         }
     }
@@ -77,17 +73,23 @@ impl RuntimeOptions {
     /// The blocking thread bound with the default applied.
     fn max_blocking_threads(&self) -> usize {
         match self.max_blocking_threads {
-            0 => DEFAULT_MAX_BLOCKING_THREADS,
+            0 => default_registry_http_max_blocking_threads(),
             n => n,
         }
     }
 
-    /// Whether `other` would build the same runtime, defaults applied and
-    /// namespaces compared by identity.
-    fn same_as(&self, other: &Self) -> bool {
-        self.worker_threads() == other.worker_threads()
-            && self.max_blocking_threads() == other.max_blocking_threads()
-            && self.netns == other.netns
+    /// Whether these installed options satisfy `requested`: the same thread
+    /// bounds with defaults applied, and the same namespace by identity. A
+    /// request that names no namespace accepts whichever one is installed,
+    /// since the config file cannot name one and must not contradict the
+    /// embedder that did.
+    fn accepts(&self, requested: &Self) -> bool {
+        self.worker_threads() == requested.worker_threads()
+            && self.max_blocking_threads() == requested.max_blocking_threads()
+            && match &requested.netns {
+                Some(netns) => self.netns.as_ref() == Some(netns),
+                None => true,
+            }
     }
 
     /// Build a runtime whose threads are named `thread_name`. The options
@@ -114,6 +116,17 @@ impl RuntimeOptions {
             });
         }
         builder.build()
+    }
+}
+
+/// The thread bounds of a registry's `http` configuration, with no namespace.
+impl From<&HttpConfig> for RuntimeOptions {
+    fn from(http: &HttpConfig) -> Self {
+        Self {
+            worker_threads: http.worker_threads,
+            max_blocking_threads: http.max_blocking_threads,
+            netns: None,
+        }
     }
 }
 
@@ -183,7 +196,7 @@ impl SharedRuntime {
     /// Accept `requested` when it matches the installed `current`, otherwise
     /// say whether the runtime is merely configured or already running.
     fn check(&self, current: &RuntimeOptions, requested: &RuntimeOptions) -> io::Result<()> {
-        if current.same_as(requested) {
+        if current.accepts(requested) {
             return Ok(());
         }
         let what = if self.runtime.get().is_some() {
@@ -266,15 +279,52 @@ mod tests {
     }
 
     #[test]
-    fn zero_selects_the_bounded_defaults() {
-        let options = RuntimeOptions::default();
-        assert_eq!(options.worker_threads(), DEFAULT_WORKER_THREADS);
-        assert_eq!(options.max_blocking_threads(), DEFAULT_MAX_BLOCKING_THREADS);
-        assert!(options.netns.is_none());
-        assert_eq!(
-            options.to_string(),
-            "2 worker(s), 8 blocking, inherited netns"
-        );
+    fn zero_selects_the_configuration_defaults() {
+        let test_cases = vec![
+            RuntimeOptions::default(),
+            RuntimeOptions::from(&HttpConfig::default()),
+        ];
+
+        for options in test_cases {
+            assert_eq!(
+                options.worker_threads(),
+                default_registry_http_worker_threads()
+            );
+            assert_eq!(
+                options.max_blocking_threads(),
+                default_registry_http_max_blocking_threads()
+            );
+            assert!(options.netns.is_none());
+            assert_eq!(
+                options.to_string(),
+                "2 worker(s), 8 blocking, inherited netns"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_without_a_namespace_accepts_the_installed_one() {
+        let pinned = || RuntimeOptions {
+            worker_threads: 2,
+            max_blocking_threads: 8,
+            netns: Some(Netns::new(tempfile::tempfile().unwrap().into()).unwrap()),
+        };
+        let test_cases = vec![
+            (pinned(), with_workers(2), true),
+            (pinned(), with_workers(0), true),
+            (pinned(), with_workers(3), false),
+            (pinned(), pinned(), false),
+            (with_workers(2), pinned(), false),
+            (with_workers(2), with_workers(0), true),
+        ];
+
+        for (installed, requested, accepted) in test_cases {
+            assert_eq!(
+                installed.accepts(&requested),
+                accepted,
+                "installed={installed}, requested={requested}"
+            );
+        }
     }
 
     #[test]
