@@ -29,11 +29,11 @@ pub(crate) struct Response {
 
 /// Implements the response.
 impl Response {
-    /// Reads the body so it exactly fills `dst` and returns the protocol that
+    /// Reads the body so it exactly fills `buf` and returns the protocol that
     /// served it, a short body being an [`io::ErrorKind::UnexpectedEof`].
-    pub(crate) async fn read_exact(mut self, dst: &mut [u8]) -> RegistryResult<Protocol> {
+    pub(crate) async fn read_exact(mut self, buf: &mut [u8]) -> RegistryResult<Protocol> {
         self.reader
-            .read_exact(dst)
+            .read_exact(buf)
             .await
             .map_err(RegistryError::Io)?;
         Ok(self.protocol)
@@ -126,9 +126,9 @@ mod tests {
     #[tokio::test]
     async fn read_exact_fills_the_buffer_or_rejects_a_short_body() {
         let test_cases: Vec<(&[u8], fn(RegistryResult<Protocol>, &[u8; 4]))> = vec![
-            (b"abcd", |result, dst| {
+            (b"abcd", |result, buf| {
                 assert_eq!(result.unwrap(), Protocol::Http);
-                assert_eq!(dst, b"abcd");
+                assert_eq!(buf, b"abcd");
             }),
             (b"ab", |result, _| {
                 assert!(matches!(
@@ -145,9 +145,9 @@ mod tests {
                 reader: Box::new(io::Cursor::new(body.to_vec())),
                 protocol: Protocol::Http,
             };
-            let mut dst = [0u8; 4];
-            let result = response.read_exact(&mut dst).await;
-            assert_fn(result, &dst);
+            let mut buf = [0u8; 4];
+            let result = response.read_exact(&mut buf).await;
+            assert_fn(result, &buf);
         }
     }
 
