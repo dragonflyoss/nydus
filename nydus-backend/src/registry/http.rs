@@ -120,12 +120,12 @@ impl Http {
 
         match &result {
             Ok(response) => debug!(
-                "{method} {url} ({kind}) answered {} from the origin in {:?}",
+                "{method} {url} ({kind}) from the origin returned {} in {:?}",
                 response.status,
                 start.elapsed()
             ),
             Err(err) => debug!(
-                "{method} {url} ({kind}) to the origin failed in {:?}: {err}",
+                "{method} {url} ({kind}) from the origin failed in {:?}: {err}",
                 start.elapsed()
             ),
         }

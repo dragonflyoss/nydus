@@ -163,7 +163,7 @@ impl Transport for Dragonfly {
 
         match &result {
             Ok(response) => debug!(
-                "GET {url} ({kind}) answered {} through dragonfly in {:?}",
+                "GET {url} ({kind}) through dragonfly returned {} in {:?}",
                 response.status,
                 start.elapsed()
             ),
