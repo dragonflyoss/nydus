@@ -173,6 +173,11 @@ fn header_map(headers: HashMap<String, String>) -> HeaderMap {
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl BlobTransport for Dragonfly {
+    /// Returns `dragonfly_sdk`.
+    fn label(&self) -> &'static str {
+        "dragonfly_sdk"
+    }
+
     /// Fetches `url` through the client of the read kind with its priority
     /// hint, the SDK adding the P2P and priority headers itself, and logs the
     /// outcome.
@@ -189,15 +194,7 @@ impl BlobTransport for Dragonfly {
         let mut body = BytesMut::new();
         let result = self.client(kind).get_into(&request, &mut body).await;
         let result = into_response(result, body);
-        Response::log(
-            &result,
-            "dragonfly_sdk",
-            &Method::GET,
-            url,
-            &headers,
-            kind,
-            start.elapsed(),
-        );
+        self.log_request_done(&Method::GET, url, &headers, kind, &result, start.elapsed());
         result
     }
 }

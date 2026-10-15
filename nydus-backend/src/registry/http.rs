@@ -78,15 +78,7 @@ impl Http {
             }
             Err(err) => Err(RegistryError::Io(io::Error::other(err))),
         };
-        Response::log(
-            &result,
-            "none",
-            &method,
-            url,
-            &headers,
-            kind,
-            start.elapsed(),
-        );
+        self.log_request_done(&method, url, &headers, kind, &result, start.elapsed());
         result
     }
 }
@@ -94,6 +86,11 @@ impl Http {
 /// Implements the blob transport over the origin HTTP client.
 #[async_trait]
 impl BlobTransport for Http {
+    /// Returns `none`, the label of a request that rode no P2P transport.
+    fn label(&self) -> &'static str {
+        "none"
+    }
+
     /// Sends a `GET` to `url`.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
         self.request(Method::GET, url, headers, kind).await

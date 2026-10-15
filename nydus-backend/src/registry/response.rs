@@ -1,15 +1,13 @@
 //! The answer a transport hands back.
 
 use std::io;
-use std::time::Duration;
 
 use reqwest::header::{HeaderMap, CONTENT_LENGTH, LOCATION};
-use reqwest::{Method, StatusCode};
+use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tracing::debug;
 
 use super::{RegistryError, RegistryResult};
-use crate::{Protocol, ReadKind};
+use crate::Protocol;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
 /// and headers up front, plus the body as an async reader.
@@ -87,34 +85,6 @@ impl Response {
                     "registry HEAD response missing a valid content-length",
                 ))
             })
-    }
-
-    /// Logs a completed request at debug level.
-    ///
-    /// The line carries the read kind, the transport, the method, URL and
-    /// request headers, then the status and headers of the answer or the
-    /// error, and how long it took. The transport labels `none` and
-    /// `dragonfly_sdk` are read by log consumers and must not change.
-    pub(crate) fn log(
-        result: &RegistryResult<Self>,
-        transport: &'static str,
-        method: &Method,
-        url: &str,
-        headers: &HeaderMap,
-        kind: ReadKind,
-        duration: Duration,
-    ) {
-        let read_kind = match kind {
-            ReadKind::OnDemand => "ondemand",
-            ReadKind::Prefetch => "prefetch",
-        };
-        let (status, response_headers, error) = match result {
-            Ok(response) => (Some(response.status), Some(&response.headers), None),
-            Err(err) => (None, None, Some(err.to_string())),
-        };
-        debug!(
-            "backend request done: read_kind={read_kind} transport={transport} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={duration:?}"
-        );
     }
 }
 
