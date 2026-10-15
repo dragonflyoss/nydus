@@ -51,9 +51,6 @@ impl FromStr for Challenge {
     /// Parses the scheme and its `key="value"` parameters, rejecting a scheme
     /// other than `Basic` or `Bearer` and a `Bearer` without a realm.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let unsupported =
-            || RegistryError::Unauthorized(format!("unsupported auth challenge: {value}"));
-
         // Split the scheme from its comma-separated parameters.
         let (scheme, params) = value.split_once(' ').unwrap_or((value, ""));
         let param = |name: &str| {
@@ -67,11 +64,15 @@ impl FromStr for Challenge {
         match scheme.trim() {
             "Basic" => Ok(Self::Basic),
             "Bearer" => Ok(Self::Bearer {
-                realm: param("realm").ok_or_else(unsupported)?,
+                realm: param("realm").ok_or_else(|| {
+                    RegistryError::Unauthorized(format!("bearer challenge without realm: {value}"))
+                })?,
                 service: param("service").unwrap_or_default(),
                 scope: param("scope").unwrap_or_default(),
             }),
-            _ => Err(unsupported()),
+            _ => Err(RegistryError::Unauthorized(format!(
+                "unsupported auth challenge: {value}"
+            ))),
         }
     }
 }
