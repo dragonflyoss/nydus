@@ -320,7 +320,7 @@ impl Registry {
                 host,
                 repository,
                 authorizer,
-                redirects: RedirectCache::new(),
+                redirects: RedirectCache::new(redirect::DEFAULT_TTL),
                 http,
                 back_to_source,
                 dragonfly,
