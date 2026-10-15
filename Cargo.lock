@@ -2228,6 +2228,7 @@ version = "3.0.0-beta.2"
 dependencies = [
  "async-trait",
  "bytes",
+ "dragonfly-api",
  "dragonfly-client-request",
  "futures",
  "hex",

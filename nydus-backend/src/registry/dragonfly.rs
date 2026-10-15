@@ -18,6 +18,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
 use tracing::debug;
 
+use dragonfly_api::common::v2::Priority;
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
 use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 
@@ -47,12 +48,6 @@ pub(crate) struct Dragonfly {
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// The priority hint of a background prefetch request.
-    const PRIORITY_PREFETCH: i32 = 3;
-
-    /// The priority hint of an on-demand request a FUSE reader waits on.
-    const PRIORITY_ONDEMAND: i32 = 6;
-
     /// Creates the transport, connecting to the configured scheduler on
     /// `runtime`.
     ///
@@ -60,21 +55,18 @@ impl Dragonfly {
     /// peers.
     pub(crate) fn new(config: &DragonflyConfig, runtime: &Runtime) -> io::Result<Self> {
         // Config::validate bounds max_retries to 3, so it fits the SDK's u8.
-        let max_retries = config.max_retries as u8;
-        let endpoint = config.scheduler_endpoint.clone();
+        let ondemand = Proxy::builder()
+            .scheduler_endpoint(config.scheduler_endpoint.clone())
+            .max_retries(config.max_retries as u8);
+        let prefetch = Proxy::builder()
+            .scheduler_endpoint(config.scheduler_endpoint.clone())
+            .max_retries(0);
+
+        // Connect on a runtime thread so the scheduler is reached from the
+        // runtime's netns.
         let (ondemand, prefetch) = runtime
             .block_on_worker(async move {
-                let ondemand = Proxy::builder()
-                    .scheduler_endpoint(endpoint.clone())
-                    .max_retries(max_retries)
-                    .build()
-                    .await?;
-                let prefetch = Proxy::builder()
-                    .scheduler_endpoint(endpoint)
-                    .max_retries(0)
-                    .build()
-                    .await?;
-                Ok::<_, Error>((ondemand, prefetch))
+                Ok::<_, Error>((ondemand.build().await?, prefetch.build().await?))
             })?
             .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
@@ -141,18 +133,22 @@ impl Dragonfly {
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl Transport for Dragonfly {
-    /// Fetches `url` through the client of the read kind with its priority
-    /// hint, the SDK adding the P2P and priority headers itself, and logs the
-    /// outcome.
+    /// Fetches `url` through the client of the read kind at its scheduling
+    /// priority, the SDK adding the P2P and priority headers itself, and
+    /// logs the outcome.
+    ///
+    /// An on-demand read a FUSE reader waits on goes at `Level6`, the SDK's
+    /// default, a background prefetch at `Level3` so a first download lets a
+    /// normal peer go back to source ahead of it.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
         let (client, priority) = match kind {
-            ReadKind::OnDemand => (&self.ondemand, Self::PRIORITY_ONDEMAND),
-            ReadKind::Prefetch => (&self.prefetch, Self::PRIORITY_PREFETCH),
+            ReadKind::OnDemand => (&self.ondemand, Priority::Level6),
+            ReadKind::Prefetch => (&self.prefetch, Priority::Level3),
         };
         let request = GetRequest {
             url: url.to_string(),
             header: headers,
-            priority: Some(priority),
+            priority: Some(priority as i32),
             timeout: self.request_timeout,
             ..Default::default()
         };
