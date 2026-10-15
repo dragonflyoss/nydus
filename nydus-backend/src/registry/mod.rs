@@ -359,8 +359,8 @@ impl Inner {
             _ => return self.http.request(method, url, headers, kind).await,
         };
 
-        let outcome = dragonfly.get(url, headers.clone(), kind).await;
-        match Action::decide(kind, outcome).await {
+        let result = dragonfly.get(url, headers.clone(), kind).await;
+        match Action::decide(kind, result).await {
             Action::Serve(response) => Ok(response),
             Action::Fallback(err) => {
                 warn!("dragonfly request failed, falling back to the origin: {err}");
@@ -716,13 +716,13 @@ mod tests {
             _kind: ReadKind,
         ) -> RegistryResult<Response> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let outcome = self
+            let scripted = self
                 .script
                 .lock()
                 .unwrap()
                 .pop_front()
                 .expect("transport called more times than scripted");
-            match outcome {
+            match scripted {
                 Scripted::Body(body) => Ok(Response {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
@@ -1058,9 +1058,9 @@ dragonfly:
             (status(StatusCode::INSUFFICIENT_STORAGE), "507"),
         ];
 
-        for (outcome, expected) in test_cases {
+        for (scripted, expected) in test_cases {
             let origin = OriginStub::serve(b"unused".to_vec());
-            let transport = ScriptedTransport::new(vec![outcome]);
+            let transport = ScriptedTransport::new(vec![scripted]);
             let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
             let mut dst = vec![0u8; 4];
@@ -1090,9 +1090,9 @@ dragonfly:
             Scripted::Transport,
         ];
 
-        for outcome in test_cases {
+        for scripted in test_cases {
             let origin = OriginStub::serve(body.clone());
-            let transport = ScriptedTransport::new(vec![outcome]);
+            let transport = ScriptedTransport::new(vec![scripted]);
             let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
             let mut dst = vec![0u8; body.len()];

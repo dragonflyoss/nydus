@@ -7,7 +7,7 @@ use super::response::{status_error, Response};
 use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
 
-/// What a read does with the outcome of its Dragonfly request.
+/// What a read does with the result of its Dragonfly request.
 pub(super) enum Action {
     /// Hands the answer to the caller: a success, a redirect, the `401` auth
     /// handshake, or a definitive `4xx` such as `403` or `404` that no retry
@@ -25,7 +25,7 @@ pub(super) enum Action {
 
 /// Implements the action.
 impl Action {
-    /// Decides what a read of `kind` does with the outcome of its Dragonfly
+    /// Decides what a read of `kind` does with the result of its Dragonfly
     /// request.
     ///
     /// A transient answer is folded into its error first, a dfdaemon `507`
@@ -34,8 +34,8 @@ impl Action {
     /// origin, so a Dragonfly outage degrades prefetch instead of flooding the
     /// registry, while on-demand reads fall back on every failure the SDK's
     /// retries did not cure.
-    pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) -> Self {
-        let err = match outcome {
+    pub(super) async fn decide(kind: ReadKind, result: RegistryResult<Response>) -> Self {
+        let err = match result {
             Ok(response) if response.is_transient() => status_error(response).await,
             Ok(response) => return Self::Serve(response),
             Err(err) => err,
@@ -98,7 +98,7 @@ mod tests {
 
         for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
             for &status in &test_cases {
-                let outcome = match status {
+                let result = match status {
                     Some(status) => Ok(Response {
                         status,
                         headers: HeaderMap::new(),
@@ -107,7 +107,7 @@ mod tests {
                     }),
                     None => Err(RegistryError::Io(io::Error::other("connection reset"))),
                 };
-                let action = Action::decide(kind, outcome).await;
+                let action = Action::decide(kind, result).await;
                 match kind {
                     ReadKind::OnDemand => {
                         assert!(matches!(action, Action::Fallback(_)), "status={status:?}")
