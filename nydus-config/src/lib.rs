@@ -211,9 +211,9 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
-    /// The per-request timeout (connect + read), e.g. `5s` or `1m`; `0s`
-    /// disables the timeout. A request fetches one chunk group, so this
-    /// bounds a single chunk group download.
+    /// The per-request timeout (connect + read), e.g. `5s` or `1m`, greater
+    /// than zero. A request fetches one chunk group, so this bounds a single
+    /// chunk group download.
     #[serde(default = "default_registry_http_timeout", with = "humantime_serde")]
     pub timeout: Duration,
 
@@ -577,6 +577,11 @@ impl Config {
         }
 
         if let BackendConfig::Registry(registry) = &self.backend {
+            if registry.http.timeout.is_zero() {
+                return Err(Error::InvalidConfig(
+                    "http.timeout must be greater than 0s".to_string(),
+                ));
+            }
             if registry.http.worker_threads == 0 {
                 return Err(Error::InvalidConfig(
                     "http.worker_threads must be at least 1".to_string(),
@@ -928,8 +933,9 @@ scope: all
     }
 
     #[test]
-    fn rejects_zero_registry_runtime_thread_bounds() {
+    fn rejects_zero_registry_http_bounds() {
         let test_cases = vec![
+            ("timeout: 0s", "http.timeout must be greater than 0s"),
             (
                 "worker_threads: 0",
                 "http.worker_threads must be at least 1",

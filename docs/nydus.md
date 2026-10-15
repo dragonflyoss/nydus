@@ -1006,7 +1006,7 @@ Options:
   (default `max(ncpu, 64)`). A busy pool queues tasks — backpressure —
   rather than denying reads. Admission is unbounded; there is no per-event
   byte cap or timeout (bounded fetch time comes from the backend's HTTP
-  timeout + retries; a registry `timeout: 0s` is rejected for this mode).
+  timeout + retries).
 - `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
 
 The service marks every blob device and runs an event coordinator whose fetch
@@ -1200,7 +1200,7 @@ Fields under `backend.config`:
 - `http` (optional): the HTTP client settings of requests to the origin
 	registry — timeouts, retries, and TLS trust.
 	- `timeout` (default `5s`): per-request timeout in humantime format (e.g.
-		`5s`, `1m`); `0s` disables it. Kept short because a read holds the
+		`5s`, `1m`), greater than zero. Kept short because a read holds the
 		chunk group's cross-process fetch claim for its whole duration, and what
 		queues up behind that claim are reader threads in the other instances
 		sharing the cache directory.

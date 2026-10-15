@@ -29,8 +29,8 @@ backend:
     # HTTP client settings of requests to the origin registry: timeouts,
     # retries, and TLS trust. The whole block and every field are optional.
     http:
-      # Per-request timeout (connect + read), e.g. `5s` or `1m`; `0s` disables
-      # it. Default: 5s. Kept short because a read holds its chunk group's
+      # Per-request timeout (connect + read), e.g. `5s` or `1m`, greater than
+      # zero. Default: 5s. Kept short because a read holds its chunk group's
       # fetch claim for its whole duration, and the readers waiting behind
       # that claim are FUSE worker threads.
       timeout: 5s

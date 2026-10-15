@@ -64,11 +64,9 @@ impl Http {
         };
 
         // Bound each request and its connect by the configured timeout.
-        if !config.timeout.is_zero() {
-            builder = builder
-                .timeout(config.timeout)
-                .connect_timeout(config.timeout);
-        }
+        builder = builder
+            .timeout(config.timeout)
+            .connect_timeout(config.timeout);
 
         // Apply the TLS settings.
         if config.tls.skip_verify {
