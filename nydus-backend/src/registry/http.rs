@@ -17,7 +17,7 @@ use tokio_util::io::StreamReader;
 use nydus_config::HttpConfig;
 
 use super::response::Response;
-use super::{BlobTransport, RegistryError, RegistryResult};
+use super::{RegistryError, RegistryResult, Transport};
 use crate::{Protocol, ReadKind};
 
 /// An HTTP client talking straight to the origin registry.
@@ -85,7 +85,7 @@ impl Http {
 
 /// Implements the blob transport over the origin HTTP client.
 #[async_trait]
-impl BlobTransport for Http {
+impl Transport for Http {
     /// Returns `none`, the label of a request that rode no P2P transport.
     fn label(&self) -> &'static str {
         "none"

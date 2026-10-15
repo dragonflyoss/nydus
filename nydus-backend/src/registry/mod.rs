@@ -138,7 +138,7 @@ pub(crate) type RegistryResult<T> = Result<T, RegistryError>;
 /// answer, a Dragonfly body already buffered so a mid-stream failure surfaces
 /// here rather than while the caller consumes it.
 #[async_trait]
-trait BlobTransport: Send + Sync {
+trait Transport: Send + Sync {
     /// Returns the `transport` label of the request log: `none` for the origin
     /// and `dragonfly_sdk` for Dragonfly. Log consumers read it, so it must
     /// not change.
@@ -268,7 +268,7 @@ struct Inner {
 
     /// The Dragonfly transport when configured, always `None` without the
     /// `backend-dragonfly` feature since the config is rejected.
-    dragonfly: Option<Box<dyn BlobTransport>>,
+    dragonfly: Option<Box<dyn Transport>>,
 
     /// How reads are fetched when nothing else is known, the `protocol` label
     /// of a failed read: Dragonfly when configured, otherwise HTTP.
@@ -309,12 +309,12 @@ impl Registry {
 
         // Connect the Dragonfly transport when configured.
         #[cfg(feature = "backend-dragonfly")]
-        let dragonfly: Option<Box<dyn BlobTransport>> = match &config.dragonfly {
+        let dragonfly: Option<Box<dyn Transport>> = match &config.dragonfly {
             Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, &runtime)?)),
             None => None,
         };
         #[cfg(not(feature = "backend-dragonfly"))]
-        let dragonfly: Option<Box<dyn BlobTransport>> = None;
+        let dragonfly: Option<Box<dyn Transport>> = None;
 
         Ok(Self::from_parts(
             scheme,
@@ -337,7 +337,7 @@ impl Registry {
         authorizer: Authorizer,
         http: Http,
         back_to_source: Http,
-        dragonfly: Option<Box<dyn BlobTransport>>,
+        dragonfly: Option<Box<dyn Transport>>,
         runtime: Arc<Runtime>,
     ) -> Self {
         let protocol = if dragonfly.is_some() {
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T: BlobTransport> BlobTransport for Arc<T> {
+    impl<T: Transport> Transport for Arc<T> {
         fn label(&self) -> &'static str {
             (**self).label()
         }
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl BlobTransport for ScriptedTransport {
+    impl Transport for ScriptedTransport {
         fn label(&self) -> &'static str {
             "scripted"
         }
@@ -832,7 +832,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl BlobTransport for AuthGate {
+    impl Transport for AuthGate {
         fn label(&self) -> &'static str {
             "auth_gate"
         }
@@ -926,7 +926,7 @@ mod tests {
 
     fn scripted_registry_from(
         yaml: &str,
-        transport: impl BlobTransport + 'static,
+        transport: impl Transport + 'static,
         interval: Duration,
     ) -> Registry {
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
@@ -950,7 +950,7 @@ mod tests {
 
     fn scripted_registry_at(
         addr: SocketAddr,
-        transport: impl BlobTransport + 'static,
+        transport: impl Transport + 'static,
         interval: Duration,
         origin_max_retries: u32,
     ) -> Registry {
@@ -965,7 +965,7 @@ mod tests {
 
     fn scripted_registry(
         origin: &OriginStub,
-        transport: impl BlobTransport + 'static,
+        transport: impl Transport + 'static,
         interval: Duration,
     ) -> Registry {
         scripted_registry_at(origin.addr, transport, interval, 3)

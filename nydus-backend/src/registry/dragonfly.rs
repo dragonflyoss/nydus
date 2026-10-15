@@ -25,7 +25,7 @@ use nydus_config::DragonflyConfig;
 
 use super::response::Response;
 use super::rt::Runtime;
-use super::{BlobTransport, RegistryError, RegistryResult};
+use super::{RegistryError, RegistryResult, Transport};
 use crate::{Protocol, ReadKind};
 
 /// The priority hint for background prefetch requests.
@@ -172,7 +172,7 @@ fn header_map(headers: HashMap<String, String>) -> HeaderMap {
 
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
-impl BlobTransport for Dragonfly {
+impl Transport for Dragonfly {
     /// Returns `dragonfly_sdk`.
     fn label(&self) -> &'static str {
         "dragonfly_sdk"
