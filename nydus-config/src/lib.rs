@@ -43,11 +43,11 @@ pub fn default_log_dir() -> PathBuf {
     PathBuf::from("/var/log/nydus/")
 }
 
-/// Returns the default per-request timeout of the registry backend. Kept
+/// Returns the default timeout of a request to the origin registry. Kept
 /// short because a read holds the chunk group's fetch claim for its whole duration,
 /// and the readers waiting behind that claim are FUSE worker threads.
 #[inline]
-fn default_registry_http_timeout() -> Duration {
+fn default_registry_http_request_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
@@ -79,18 +79,18 @@ pub fn default_prefetch_concurrent_blob_count() -> usize {
     10
 }
 
-/// Returns the default per-blob prefetch timeout. Generous, because a blob
-/// prefetch downloads every chunk group of the blob in the background; the bound
-/// only exists to unwedge a stalled blob.
+/// Returns the default timeout of prefetching one blob. Generous, because a
+/// blob prefetch downloads every chunk group of the blob in the background; the
+/// bound only exists to unwedge a stalled blob.
 #[inline]
-pub fn default_prefetch_timeout() -> Duration {
+pub fn default_prefetch_blob_timeout() -> Duration {
     Duration::from_secs(60 * 60)
 }
 
 /// Returns the default timeout of each attempt of a request through the
 /// Dragonfly seed peers.
 #[inline]
-fn default_registry_dragonfly_timeout() -> Duration {
+fn default_registry_dragonfly_request_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
@@ -223,11 +223,14 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
-    /// The per-request timeout (connect + read), e.g. `5s` or `1m`, greater
-    /// than zero. A request fetches one chunk group, so this bounds a single
-    /// chunk group download.
-    #[serde(default = "default_registry_http_timeout", with = "humantime_serde")]
-    pub timeout: Duration,
+    /// The timeout of a request to the origin registry (connect + read), e.g.
+    /// `5s` or `1m`, greater than zero. A request fetches one chunk group, so
+    /// this bounds a single chunk group download.
+    #[serde(
+        default = "default_registry_http_request_timeout",
+        with = "humantime_serde"
+    )]
+    pub request_timeout: Duration,
 
     /// The maximum number of retry attempts per request, applied by the HTTP
     /// client's retry middleware on direct origin requests and on origin
@@ -274,7 +277,7 @@ pub struct ProxyConfig {
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            timeout: default_registry_http_timeout(),
+            request_timeout: default_registry_http_request_timeout(),
             max_retries: default_registry_http_max_retries(),
             proxy: None,
             tls: TlsConfig::default(),
@@ -387,10 +390,10 @@ pub struct DragonflyConfig {
     /// `30s` or `1m`. A request fetches one chunk group, so this bounds a
     /// single chunk group download from a seed peer.
     #[serde(
-        default = "default_registry_dragonfly_timeout",
+        default = "default_registry_dragonfly_request_timeout",
         with = "humantime_serde"
     )]
-    pub timeout: Duration,
+    pub request_timeout: Duration,
 
     /// The maximum number of retries of an on-demand blob `GET` through
     /// Dragonfly on a transient failure (timeout, connection, dfdaemon, `5xx`,
@@ -479,11 +482,11 @@ pub struct PrefetchConfig {
     #[serde(default = "default_prefetch_concurrent_blob_count")]
     pub concurrent_blob_count: usize,
 
-    /// The per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching
-    /// one whole blob may take, while `http.timeout` bounds each chunk group
-    /// request within it; `0s` disables the bound.
-    #[serde(default = "default_prefetch_timeout", with = "humantime_serde")]
-    pub timeout: Duration,
+    /// The timeout of prefetching one whole blob, e.g. `1h`, while
+    /// `http.request_timeout` bounds each chunk group request within it; `0s`
+    /// disables the bound.
+    #[serde(default = "default_prefetch_blob_timeout", with = "humantime_serde")]
+    pub blob_timeout: Duration,
 
     /// The scope of blob prefetch: nothing, only the "ondemand" blob, all
     /// blobs, or `auto` (the default): the "ondemand" blob when the image has
@@ -527,7 +530,7 @@ impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
             concurrent_blob_count: default_prefetch_concurrent_blob_count(),
-            timeout: default_prefetch_timeout(),
+            blob_timeout: default_prefetch_blob_timeout(),
             scope: PrefetchScope::default(),
         }
     }
@@ -589,9 +592,9 @@ impl Config {
         }
 
         if let BackendConfig::Registry(registry) = &self.backend {
-            if registry.http.timeout.is_zero() {
+            if registry.http.request_timeout.is_zero() {
                 return Err(Error::InvalidConfig(
-                    "http.timeout must be greater than 0s".to_string(),
+                    "http.request_timeout must be greater than 0s".to_string(),
                 ));
             }
             if registry.http.worker_threads == 0 {
@@ -669,7 +672,7 @@ mod tests {
             registry.auth.as_deref(),
             Some("dGVzdHVzZXI6dGVzdHBhc3N3b3Jk")
         );
-        assert_eq!(registry.http.timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert_eq!(
             registry.http.proxy.as_ref().unwrap().addr,
@@ -682,7 +685,7 @@ mod tests {
         );
         let dragonfly = registry.dragonfly.as_ref().unwrap();
         assert_eq!(dragonfly.scheduler_endpoint, "http://127.0.0.1:8002");
-        assert_eq!(dragonfly.timeout, Duration::from_secs(10));
+        assert_eq!(dragonfly.request_timeout, Duration::from_secs(10));
         assert_eq!(dragonfly.max_retries, 2);
         assert_eq!(dragonfly.back_to_source.request_rate_limit, 2);
 
@@ -693,7 +696,7 @@ mod tests {
         assert!(!config.storage.skip_verify_checksums);
 
         assert_eq!(config.prefetch.concurrent_blob_count, 4);
-        assert_eq!(config.prefetch.timeout, Duration::from_secs(120));
+        assert_eq!(config.prefetch.blob_timeout, Duration::from_secs(120));
         assert_eq!(config.prefetch.scope, PrefetchScope::All);
     }
 
@@ -721,7 +724,7 @@ config:
   repository: library/ubuntu
   auth: YWxpY2U6c2VjcmV0
   http:
-    timeout: 30s
+    request_timeout: 30s
     max_retries: 5
     tls:
       skip_verify: true
@@ -737,7 +740,7 @@ config:
         assert_eq!(registry.addr, "http://127.0.0.1:5000");
         assert_eq!(registry.repository, "library/ubuntu");
         assert_eq!(registry.auth.as_deref(), Some("YWxpY2U6c2VjcmV0"));
-        assert_eq!(registry.http.timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert!(registry.http.tls.skip_verify);
         assert_eq!(
@@ -754,7 +757,10 @@ config:
     fn dragonfly_knobs_default_and_deserialize() {
         let defaults: DragonflyConfig =
             serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:8002\n").unwrap();
-        assert_eq!(defaults.timeout, default_registry_dragonfly_timeout());
+        assert_eq!(
+            defaults.request_timeout,
+            default_registry_dragonfly_request_timeout()
+        );
         assert_eq!(
             defaults.max_retries,
             default_registry_dragonfly_max_retries()
@@ -766,13 +772,13 @@ config:
 
         let yaml = r#"
 scheduler_endpoint: http://127.0.0.1:8002
-timeout: 5s
+request_timeout: 5s
 max_retries: 0
 back_to_source:
   request_rate_limit: 0
 "#;
         let dragonfly: DragonflyConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(dragonfly.timeout, Duration::from_secs(5));
+        assert_eq!(dragonfly.request_timeout, Duration::from_secs(5));
         assert_eq!(dragonfly.max_retries, 0);
         assert_eq!(dragonfly.back_to_source.request_rate_limit, 0);
     }
@@ -790,7 +796,10 @@ config:
         let BackendConfig::Registry(registry) = &backend else {
             panic!("expected a registry backend, got {backend:?}");
         };
-        assert_eq!(registry.http.timeout, default_registry_http_timeout());
+        assert_eq!(
+            registry.http.request_timeout,
+            default_registry_http_request_timeout()
+        );
         assert_eq!(
             registry.http.max_retries,
             default_registry_http_max_retries()
@@ -829,7 +838,10 @@ config:
         assert_eq!(registry.http.worker_threads, 4);
         assert_eq!(registry.http.max_blocking_threads, 16);
         // The other http fields keep their defaults alongside the new keys.
-        assert_eq!(registry.http.timeout, default_registry_http_timeout());
+        assert_eq!(
+            registry.http.request_timeout,
+            default_registry_http_request_timeout()
+        );
     }
 
     #[test]
@@ -904,13 +916,13 @@ backend:
     fn deserialize_prefetch_correctly() {
         let yaml = r#"
 concurrent_blob_count: 8
-timeout: 2m
+blob_timeout: 2m
 scope: all
 "#;
 
         let prefetch: PrefetchConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(prefetch.concurrent_blob_count, 8);
-        assert_eq!(prefetch.timeout, Duration::from_secs(120));
+        assert_eq!(prefetch.blob_timeout, Duration::from_secs(120));
         assert_eq!(prefetch.scope, PrefetchScope::All);
     }
 
@@ -921,7 +933,7 @@ scope: all
             prefetch.concurrent_blob_count,
             default_prefetch_concurrent_blob_count()
         );
-        assert_eq!(prefetch.timeout, default_prefetch_timeout());
+        assert_eq!(prefetch.blob_timeout, default_prefetch_blob_timeout());
         assert_eq!(prefetch.scope, PrefetchScope::Auto);
     }
 
@@ -947,7 +959,10 @@ scope: all
     #[test]
     fn rejects_zero_registry_http_bounds() {
         let test_cases = vec![
-            ("timeout: 0s", "http.timeout must be greater than 0s"),
+            (
+                "request_timeout: 0s",
+                "http.request_timeout must be greater than 0s",
+            ),
             (
                 "worker_threads: 0",
                 "http.worker_threads must be at least 1",

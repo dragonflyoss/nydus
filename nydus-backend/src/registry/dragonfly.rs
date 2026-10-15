@@ -41,8 +41,7 @@ pub(crate) struct Dragonfly {
     /// is rescheduled hours later instead.
     prefetch: Proxy,
 
-    /// The timeout of each attempt of a request, the config's
-    /// `dragonfly.timeout`.
+    /// The timeout of each attempt of a request.
     request_timeout: Duration,
 }
 
@@ -73,7 +72,7 @@ impl Dragonfly {
         Ok(Self {
             ondemand,
             prefetch,
-            request_timeout: config.timeout,
+            request_timeout: config.request_timeout,
         })
     }
 

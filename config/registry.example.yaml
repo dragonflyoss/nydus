@@ -29,11 +29,11 @@ backend:
     # HTTP client settings of requests to the origin registry: timeouts,
     # retries, and TLS trust. The whole block and every field are optional.
     http:
-      # Per-request timeout (connect + read), e.g. `5s` or `1m`, greater than
-      # zero. Default: 5s. Kept short because a read holds its chunk group's
-      # fetch claim for its whole duration, and the readers waiting behind
-      # that claim are FUSE worker threads.
-      timeout: 5s
+      # Timeout of a request to the origin registry (connect + read), e.g.
+      # `5s` or `1m`, greater than zero. Default: 5s. Kept short because a
+      # read holds its chunk group's fetch claim for its whole duration, and
+      # the readers waiting behind that claim are FUSE worker threads.
+      request_timeout: 5s
 
       # Maximum number of retry attempts per request, applied by the HTTP
       # client's retry middleware on direct origin requests and on origin
@@ -83,7 +83,7 @@ backend:
     #
     #   # Timeout of each attempt of a request through the seed peers, e.g.
     #   # `30s` or `1m`. Default: 30s.
-    #   timeout: 30s
+    #   request_timeout: 30s
     #
     #   # Retries of an on-demand read on a transient failure (timeout,
     #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer.
@@ -120,10 +120,10 @@ storage:
 prefetch:
   # Number of concurrently prefetched blobs.
   concurrent_blob_count: 10
-  # Per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching one
-  # whole blob may take, while `http.timeout` bounds each backend request
-  # within it. `0s` disables the bound. Default: 1h.
-  timeout: 1h
+  # Timeout of prefetching one whole blob, e.g. `1h`, while
+  # `http.request_timeout` bounds each backend request within it. `0s`
+  # disables the bound. Default: 1h.
+  blob_timeout: 1h
   # Which blobs to pull: `none` disables prefetch; `ondemand` (default)
   # prefetches only the "ondemand" blob produced by `nydus optimize`, which
   # holds the recorded hot set in access order, without pulling the whole

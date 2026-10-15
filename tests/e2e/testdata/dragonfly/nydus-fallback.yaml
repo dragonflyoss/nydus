@@ -4,11 +4,11 @@ backend:
     addr: http://172.30.0.1:5000
     repository: nydus-e2e/dragonfly
     http:
-      timeout: 5s
+      request_timeout: 5s
       max_retries: 1
     dragonfly:
       scheduler_endpoint: http://127.0.0.1:8002
-      timeout: 5s
+      request_timeout: 5s
       max_retries: 3
       back_to_source:
         request_rate_limit: 1

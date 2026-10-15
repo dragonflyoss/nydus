@@ -4,7 +4,7 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{build_backend, BlobBackend, Local};
 use nydus_config::{
-    default_prefetch_concurrent_blob_count, default_prefetch_timeout, Config, PrefetchScope,
+    default_prefetch_blob_timeout, default_prefetch_concurrent_blob_count, Config, PrefetchScope,
 };
 use nydus_core::ErofsReader;
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -208,7 +208,7 @@ impl FuseCommand {
                     (
                         scope,
                         config.prefetch.concurrent_blob_count,
-                        config.prefetch.timeout,
+                        config.prefetch.blob_timeout,
                     )
                 }
                 None => (
@@ -218,7 +218,7 @@ impl FuseCommand {
                         PrefetchScope::None
                     },
                     default_prefetch_concurrent_blob_count(),
-                    default_prefetch_timeout(),
+                    default_prefetch_blob_timeout(),
                 ),
             };
 

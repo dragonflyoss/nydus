@@ -125,7 +125,7 @@ impl NydusCore {
             .len();
         let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
         let prefetch_scope = config.prefetch.scope;
-        let prefetch_timeout = config.prefetch.timeout;
+        let prefetch_timeout = config.prefetch.blob_timeout;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;

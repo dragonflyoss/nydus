@@ -1127,10 +1127,10 @@ Fields:
 	for the trade-off.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
-- `prefetch.timeout` (default `1h`) bounds how long prefetching one whole
-	blob may take, while `http.timeout` bounds each backend request within it;
-	`0s` disables the bound. A blob that exceeds it is aborted with a warning
-	and prefetch moves on.
+- `prefetch.blob_timeout` (default `1h`) bounds how long prefetching one
+	whole blob may take, while `http.request_timeout` bounds each backend
+	request within it; `0s` disables the bound. A blob that exceeds it is
+	aborted with a warning and prefetch moves on.
 - `prefetch.scope` (default `auto`) selects which blobs to pull. `none`
 	disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
 	`nydus optimize` emits (if any), landing the access-ordered hot set in the
@@ -1175,14 +1175,14 @@ backend:
     # base64-encoded `username:password`
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     http:
-      timeout: 5s
+      request_timeout: 5s
       max_retries: 3
       tls:
         skip_verify: false
         ca_cert: /etc/nydus/certs/registry-ca.pem
     # dragonfly:
     #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
-    #   timeout: 30s
+    #   request_timeout: 30s
     #   max_retries: 1
     #   back_to_source:
     #     request_rate_limit: 1
@@ -1199,8 +1199,9 @@ Fields under `backend.config`:
 	Omit for anonymous / token-only registries.
 - `http` (optional): the HTTP client settings of requests to the origin
 	registry — timeouts, retries, and TLS trust.
-	- `timeout` (default `5s`): per-request timeout in humantime format (e.g.
-		`5s`, `1m`), greater than zero. Kept short because a read holds the
+	- `request_timeout` (default `5s`): the timeout of a request to the origin
+		registry in humantime format (e.g. `5s`, `1m`), greater than zero. Kept
+		short because a read holds the
 		chunk group's cross-process fetch claim for its whole duration, and what
 		queues up behind that claim are reader threads in the other instances
 		sharing the cache directory.
@@ -1239,7 +1240,7 @@ Fields under `backend.config`:
 - `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
 	(crate `dragonfly-client-request`) for P2P distribution, carrying a
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
-	configured `timeout` per attempt; every other request (`HEAD`, auth token
+	configured `request_timeout` per attempt; every other request (`HEAD`, auth token
 	fetches) goes directly to the origin registry. Only available when the
 	binary is built with the `backend-dragonfly` feature. Omit to talk
 	to the origin directly. Each read is counted under the backend that served
@@ -1265,8 +1266,8 @@ Fields under `backend.config`:
 
 	- `scheduler_endpoint` (required): the Dragonfly scheduler service address
 		with the scheme, e.g. `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
-	- `timeout` (default `30s`): the timeout of each attempt of a request
-		through the seed peers, one chunk group per request.
+	- `request_timeout` (default `30s`): the timeout of each attempt of a
+		request through the seed peers, one chunk group per request.
 	- `max_retries` (default `1`, at most `3`): Dragonfly retries of an
 		on-demand read on a transient failure, each on the next seed peer.
 		Prefetch reads never retry.
@@ -2557,8 +2558,8 @@ than one per instance.
 	mid-flight hands the group to a waiter instead of wedging it.
 - Waiting blocks in the kernel rather than polling, so the handover follows the
 	release immediately. What bounds the wait is the fetcher, not the waiter:
-	every backend read carries a timeout (hence the short registry `timeout`
-	default), so a claim is always released. **A claim must never be held across
+	every backend read carries a timeout (hence the short registry
+	`request_timeout` default), so a claim is always released. **A claim must never be held across
 	an operation that cannot time out** — what queues up behind it are reader
 	threads. The wait is interruptible, so shutdown still works.
 - The in-process fetch flight elects a single fetcher per group before any of
