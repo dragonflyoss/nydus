@@ -33,10 +33,7 @@ pub(crate) use registry::Registry;
 /// process bounds its threads and pins their network namespace with
 /// [`configure_runtime`] before constructing any registry backend.
 #[cfg(feature = "backend-registry")]
-pub use registry::{
-    configure_runtime, Netns, NetnsId, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS,
-    DEFAULT_WORKER_THREADS,
-};
+pub use registry::{configure_runtime, Netns, NetnsId, RuntimeOptions};
 
 /// What kind of backend read this is, shared with the metrics layer. Policy
 /// (retry, throttling, Dragonfly priority) keys off it here; its definition
