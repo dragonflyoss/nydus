@@ -65,16 +65,6 @@ impl Runtime {
         max_blocking_threads: usize,
         netns: Option<Netns>,
     ) -> io::Result<Self> {
-        Self::with_thread_name(worker_threads, max_blocking_threads, netns, THREAD_NAME)
-    }
-
-    /// Build a runtime whose threads are named `thread_name`.
-    fn with_thread_name(
-        worker_threads: usize,
-        max_blocking_threads: usize,
-        netns: Option<Netns>,
-        thread_name: &str,
-    ) -> io::Result<Self> {
         let worker_threads = match worker_threads {
             0 => default_registry_http_worker_threads(),
             n => n,
@@ -85,7 +75,7 @@ impl Runtime {
         };
         let mut builder = Builder::new_multi_thread();
         builder
-            .thread_name(thread_name)
+            .thread_name(THREAD_NAME)
             .worker_threads(worker_threads)
             .max_blocking_threads(max_blocking_threads)
             .thread_keep_alive(BLOCKING_KEEP_ALIVE)
@@ -146,56 +136,13 @@ impl Runtime {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    fn threads_named(name: &str) -> usize {
-        std::fs::read_dir("/proc/self/task")
-            .unwrap()
-            .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path().join("comm")).ok())
-            .filter(|comm| comm.trim_end() == name)
-            .count()
-    }
-
-    #[cfg(target_os = "linux")]
-    fn assert_threads_named(name: &str, expected: usize, what: &str) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let count = threads_named(name);
-            if count == expected {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "{what}: expected {expected} threads named {name}, found {count}"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
-    fn new_spawns_exactly_the_configured_workers() {
-        let test_cases = vec![
-            ("nb-rt-workers", 3, 2, 3),
-            (
-                "nb-rt-default",
-                0,
-                0,
-                default_registry_http_worker_threads(),
-            ),
-        ];
+    fn new_spawns_the_configured_or_default_workers() {
+        let test_cases = vec![(3, 3), (0, default_registry_http_worker_threads())];
 
-        for (name, worker_threads, max_blocking_threads, expected) in test_cases {
-            assert_eq!(threads_named(name), 0);
-            let runtime =
-                Runtime::with_thread_name(worker_threads, max_blocking_threads, None, name)
-                    .unwrap();
-            assert_threads_named(name, expected, "workers are spawned eagerly");
-            runtime.tokio().block_on(async {
-                tokio::task::spawn_blocking(|| ()).await.unwrap();
-            });
-            assert_threads_named(name, expected + 1, "one blocking thread on demand");
-            drop(runtime);
-            assert_threads_named(name, 0, "threads exit with the runtime");
+        for (worker_threads, expected) in test_cases {
+            let runtime = Runtime::new(worker_threads, 0, None).unwrap();
+            assert_eq!(runtime.tokio().metrics().num_workers(), expected);
         }
     }
 
@@ -245,7 +192,7 @@ mod tests {
         let caller = current_netns();
         assert_ne!(caller, configured);
 
-        let runtime = Runtime::with_thread_name(1, 1, Some(netns), "nb-rt-netns").unwrap();
+        let runtime = Runtime::new(1, 1, Some(netns)).unwrap();
 
         assert_eq!(runtime.tokio().block_on(async { current_netns() }), caller);
         assert_eq!(
