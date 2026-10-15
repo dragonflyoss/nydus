@@ -327,12 +327,6 @@ mod tests {
     use super::*;
     use nydus_config::HttpConfig;
 
-    fn authorization_header(authorizer: &Authorizer) -> Option<HeaderValue> {
-        let mut headers = HeaderMap::new();
-        authorizer.authorize(&mut headers);
-        headers.get(AUTHORIZATION).cloned()
-    }
-
     #[test]
     fn from_str_picks_the_challenge_to_answer() {
         let test_cases: Vec<(&str, fn(RegistryResult<Challenge>))> = vec![
@@ -432,12 +426,15 @@ mod tests {
 
         for (authorization, expected) in test_cases {
             let authorizer = Authorizer::new(None).unwrap();
-            assert_eq!(authorization_header(&authorizer), None);
+            let mut headers = HeaderMap::new();
+            authorizer.authorize(&mut headers);
+            assert_eq!(headers.get(AUTHORIZATION), None);
 
             *authorizer.authorization.write().unwrap() = Some(authorization);
+            authorizer.authorize(&mut headers);
             assert_eq!(
-                authorization_header(&authorizer),
-                expected.map(HeaderValue::from_static)
+                headers.get(AUTHORIZATION),
+                expected.map(HeaderValue::from_static).as_ref()
             );
         }
     }
@@ -459,7 +456,9 @@ mod tests {
         for (basic, assert_fn) in test_cases {
             let authorizer = Authorizer::new(basic).unwrap();
             let result = authorizer.authenticate(&http, Challenge::Basic).await;
-            assert_fn(result, authorization_header(&authorizer));
+            let mut headers = HeaderMap::new();
+            authorizer.authorize(&mut headers);
+            assert_fn(result, headers.get(AUTHORIZATION).cloned());
         }
     }
 
