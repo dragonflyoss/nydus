@@ -16,7 +16,7 @@ use tokio_util::io::StreamReader;
 
 use nydus_config::HttpConfig;
 
-use super::response::{log_request_done, Response};
+use super::response::Response;
 use super::{BlobTransport, RegistryError, RegistryResult};
 use crate::{Protocol, ReadKind};
 
@@ -78,13 +78,13 @@ impl Http {
             }
             Err(err) => Err(RegistryError::Io(io::Error::other(err))),
         };
-        log_request_done(
+        Response::log(
+            &result,
             "none",
             &method,
             url,
             &headers,
             kind,
-            &result,
             start.elapsed(),
         );
         result

@@ -1,4 +1,4 @@
-//! The answer a transport hands back and the helpers that consume it.
+//! The answer a transport hands back.
 
 use std::io;
 use std::time::Duration;
@@ -31,17 +31,14 @@ pub(crate) struct Response {
 
 /// Implements the response.
 impl Response {
-    /// Reads the body into `buf`, returning how many bytes were filled.
-    pub(crate) async fn read_into(mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut filled = 0usize;
-        while filled < buf.len() {
-            let n = self.reader.read(&mut buf[filled..]).await?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        Ok(filled)
+    /// Reads the body so it exactly fills `dst` and returns the protocol that
+    /// served it, a short body being an [`io::ErrorKind::UnexpectedEof`].
+    pub(crate) async fn read_exact(mut self, dst: &mut [u8]) -> RegistryResult<Protocol> {
+        self.reader
+            .read_exact(dst)
+            .await
+            .map_err(RegistryError::Io)?;
+        Ok(self.protocol)
     }
 
     /// Reads the body as a UTF-8 string.
@@ -49,6 +46,14 @@ impl Response {
         let mut body = String::new();
         self.reader.read_to_string(&mut body).await?;
         Ok(body)
+    }
+
+    /// Consumes a non-success response into the error carrying its status and
+    /// body.
+    pub(crate) async fn into_error(self) -> RegistryError {
+        let status = self.status;
+        let body = self.text().await.unwrap_or_default();
+        RegistryError::UnexpectedStatus(status, body)
     }
 
     /// Returns whether the status is one another attempt might change: `429`,
@@ -83,70 +88,33 @@ impl Response {
                 ))
             })
     }
-}
 
-/// Reads the body so it exactly fills `dst` and returns the protocol that
-/// served it, a short body being an [`io::ErrorKind::UnexpectedEof`].
-pub(crate) async fn fill_exact(response: Response, dst: &mut [u8]) -> RegistryResult<Protocol> {
-    let protocol = response.protocol;
-    let n = response.read_into(dst).await.map_err(RegistryError::Io)?;
-    if n != dst.len() {
-        return Err(RegistryError::Io(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            format!("registry returned {} bytes, expected {}", n, dst.len()),
-        )));
-    }
-    Ok(protocol)
-}
-
-/// Turns a non-success response into [`RegistryError::UnexpectedStatus`],
-/// consuming the body as the message.
-pub(crate) async fn status_error(response: Response) -> RegistryError {
-    let status = response.status;
-    let body = response.text().await.unwrap_or_default();
-    RegistryError::UnexpectedStatus(status, body)
-}
-
-/// Logs a completed request at debug level.
-///
-/// The line carries the read kind, the transport, the method, URL and request
-/// headers, then the status and headers of the answer or the error, and how
-/// long it took. The transport labels `none` and `dragonfly_sdk` are read by
-/// log consumers and must not change.
-pub(crate) fn log_request_done(
-    transport: &'static str,
-    method: &Method,
-    url: &str,
-    headers: &HeaderMap,
-    kind: ReadKind,
-    result: &RegistryResult<Response>,
-    duration: Duration,
-) {
-    let read_kind = match kind {
-        ReadKind::OnDemand => "ondemand",
-        ReadKind::Prefetch => "prefetch",
-    };
-    let (status, response_headers, error) = match result {
-        Ok(response) => (Some(response.status), Some(&response.headers), None),
-        Err(err) => (None, None, Some(err.to_string())),
-    };
-    debug!(
-        "backend request done: read_kind={read_kind} transport={transport} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={}",
-        format_duration(duration),
-    );
-}
-
-/// Formats a duration in the largest unit that keeps three decimals readable.
-fn format_duration(d: Duration) -> String {
-    let nanos = d.as_nanos();
-    if nanos < 1_000 {
-        format!("{nanos}ns")
-    } else if nanos < 1_000_000 {
-        format!("{:.3}µs", nanos as f64 / 1_000.0)
-    } else if nanos < 1_000_000_000 {
-        format!("{:.3}ms", nanos as f64 / 1_000_000.0)
-    } else {
-        format!("{:.3}s", d.as_secs_f64())
+    /// Logs a completed request at debug level.
+    ///
+    /// The line carries the read kind, the transport, the method, URL and
+    /// request headers, then the status and headers of the answer or the
+    /// error, and how long it took. The transport labels `none` and
+    /// `dragonfly_sdk` are read by log consumers and must not change.
+    pub(crate) fn log(
+        result: &RegistryResult<Self>,
+        transport: &'static str,
+        method: &Method,
+        url: &str,
+        headers: &HeaderMap,
+        kind: ReadKind,
+        duration: Duration,
+    ) {
+        let read_kind = match kind {
+            ReadKind::OnDemand => "ondemand",
+            ReadKind::Prefetch => "prefetch",
+        };
+        let (status, response_headers, error) = match result {
+            Ok(response) => (Some(response.status), Some(&response.headers), None),
+            Err(err) => (None, None, Some(err.to_string())),
+        };
+        debug!(
+            "backend request done: read_kind={read_kind} transport={transport} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={duration:?}"
+        );
     }
 }
 
@@ -155,15 +123,6 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::*;
-
-    fn response(status: StatusCode, body: &[u8]) -> Response {
-        Response {
-            status,
-            headers: HeaderMap::new(),
-            reader: Box::new(std::io::Cursor::new(body.to_vec())),
-            protocol: Protocol::Http,
-        }
-    }
 
     #[test]
     fn is_transient_marks_the_statuses_another_attempt_might_change() {
@@ -184,12 +143,18 @@ mod tests {
         ];
 
         for (status, expected) in test_cases {
-            assert_eq!(response(status, b"").is_transient(), expected, "{status}");
+            let response = Response {
+                status,
+                headers: HeaderMap::new(),
+                reader: Box::new(io::Cursor::new(Vec::new())),
+                protocol: Protocol::Http,
+            };
+            assert_eq!(response.is_transient(), expected, "{status}");
         }
     }
 
     #[tokio::test]
-    async fn fill_exact_fills_the_buffer_or_rejects_a_short_body() {
+    async fn read_exact_fills_the_buffer_or_rejects_a_short_body() {
         let test_cases: Vec<(&[u8], fn(RegistryResult<Protocol>, &[u8; 4]))> = vec![
             (b"abcd", |result, dst| {
                 assert_eq!(result.unwrap(), Protocol::Http);
@@ -204,32 +169,29 @@ mod tests {
         ];
 
         for (body, assert_fn) in test_cases {
+            let response = Response {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                reader: Box::new(io::Cursor::new(body.to_vec())),
+                protocol: Protocol::Http,
+            };
             let mut dst = [0u8; 4];
-            let result = fill_exact(response(StatusCode::OK, body), &mut dst).await;
+            let result = response.read_exact(&mut dst).await;
             assert_fn(result, &dst);
         }
     }
 
     #[tokio::test]
-    async fn status_error_carries_the_status_and_body() {
-        let err = status_error(response(StatusCode::NOT_FOUND, b"no such blob")).await;
+    async fn into_error_carries_the_status_and_body() {
+        let response = Response {
+            status: StatusCode::NOT_FOUND,
+            headers: HeaderMap::new(),
+            reader: Box::new(io::Cursor::new(b"no such blob".to_vec())),
+            protocol: Protocol::Http,
+        };
         assert!(matches!(
-            err,
+            response.into_error().await,
             RegistryError::UnexpectedStatus(StatusCode::NOT_FOUND, body) if body == "no such blob"
         ));
-    }
-
-    #[test]
-    fn format_duration_picks_the_unit() {
-        let test_cases = vec![
-            (Duration::from_nanos(999), "999ns"),
-            (Duration::from_micros(1500), "1.500ms"),
-            (Duration::from_millis(2), "2.000ms"),
-            (Duration::from_secs(3), "3.000s"),
-        ];
-
-        for (duration, expected) in test_cases {
-            assert_eq!(format_duration(duration), expected);
-        }
     }
 }

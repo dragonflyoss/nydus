@@ -23,7 +23,7 @@ use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
 
-use super::response::{log_request_done, Response};
+use super::response::Response;
 use super::rt::Runtime;
 use super::{BlobTransport, RegistryError, RegistryResult};
 use crate::{Protocol, ReadKind};
@@ -189,13 +189,13 @@ impl BlobTransport for Dragonfly {
         let mut body = BytesMut::new();
         let result = self.client(kind).get_into(&request, &mut body).await;
         let result = into_response(result, body);
-        log_request_done(
+        Response::log(
+            &result,
             "dragonfly_sdk",
             &Method::GET,
             url,
             &headers,
             kind,
-            &result,
             start.elapsed(),
         );
         result

@@ -11,7 +11,6 @@ use serde::Deserialize;
 use url::Url;
 
 use super::http::Http;
-use super::response::status_error;
 use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
 
@@ -316,7 +315,7 @@ impl Authorizer {
             .request(Method::GET, url.as_str(), headers, ReadKind::OnDemand)
             .await?;
         if !response.status.is_success() {
-            return Err(status_error(response).await);
+            return Err(response.into_error().await);
         }
 
         // Parse the token out of the body.

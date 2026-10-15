@@ -3,7 +3,7 @@
 //! An on-demand read falls back to the origin on any failure, a prefetch read
 //! is deferred to the storage layer's delayed reschedule instead.
 
-use super::response::{status_error, Response};
+use super::response::Response;
 use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
 
@@ -36,7 +36,7 @@ impl Action {
     /// retries did not cure.
     pub(super) async fn decide(kind: ReadKind, result: RegistryResult<Response>) -> Self {
         let err = match result {
-            Ok(response) if response.is_transient() => status_error(response).await,
+            Ok(response) if response.is_transient() => response.into_error().await,
             Ok(response) => return Self::Serve(response),
             Err(err) => err,
         };

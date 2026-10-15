@@ -73,7 +73,7 @@ use self::http::{Http, RateLimit};
 pub use self::netns::{Netns, NetnsId};
 use self::policy::Action;
 use self::redirect::RedirectCache;
-use self::response::{fill_exact, status_error, Response};
+use self::response::Response;
 pub use self::rt::Runtime;
 
 /// An error of the registry backend.
@@ -203,7 +203,7 @@ pub(crate) struct Registry {
 ///   └─ blob URL ──▶ authorized_request(GET) ─┬─ 3xx ──▶ send(GET location), cache it
 ///                                            └─ 2xx ──────────────────┐
 ///                                                                     ▼
-///                                                                fill_exact
+///                                                                read_exact
 ///
 /// send(method, url)
 ///   ├─ GET, Dragonfly configured ──▶ dragonfly.get ──▶ Action::decide
@@ -460,8 +460,8 @@ impl Inner {
                 .await?;
             match response.status {
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
-                status if status.is_success() => return fill_exact(response, dst).await,
-                _ => return Err(status_error(response).await),
+                status if status.is_success() => return response.read_exact(dst).await,
+                _ => return Err(response.into_error().await),
             }
         }
 
@@ -474,14 +474,14 @@ impl Inner {
             let location = response.location()?;
             let redirected = self.send(Method::GET, &location, headers, kind).await?;
             if !redirected.status.is_success() {
-                return Err(status_error(redirected).await);
+                return Err(redirected.into_error().await);
             }
             self.redirects.insert(&hex, location);
-            fill_exact(redirected, dst).await
+            redirected.read_exact(dst).await
         } else if response.status.is_success() {
-            fill_exact(response, dst).await
+            response.read_exact(dst).await
         } else {
-            Err(status_error(response).await)
+            Err(response.into_error().await)
         }
     }
 
@@ -502,13 +502,13 @@ impl Inner {
                 .send(Method::HEAD, &location, HeaderMap::new(), kind)
                 .await?;
             if !redirected.status.is_success() {
-                return Err(status_error(redirected).await);
+                return Err(redirected.into_error().await);
             }
             redirected
         } else if response.status.is_success() {
             response
         } else {
-            return Err(status_error(response).await);
+            return Err(response.into_error().await);
         };
 
         response.content_length()
