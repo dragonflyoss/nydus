@@ -15,9 +15,6 @@ use super::response::status_error;
 use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
 
-/// The `client_id` nydus reports to a registry token server.
-const CLIENT_ID: &str = "nydus-registry-client";
-
 /// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
@@ -62,6 +59,7 @@ impl FromStr for Challenge {
             let challenge = challenge.map_err(|err| {
                 RegistryError::Unauthorized(format!("invalid auth challenge: {err}"))
             })?;
+
             if challenge.scheme.eq_ignore_ascii_case("Bearer") {
                 let param = |name: &str| {
                     challenge
@@ -70,6 +68,7 @@ impl FromStr for Challenge {
                         .find(|(key, _)| key.eq_ignore_ascii_case(name))
                         .map(|(_, value)| value.to_unescaped())
                 };
+
                 return Ok(Self::Bearer {
                     realm: param("realm").ok_or_else(|| {
                         RegistryError::Unauthorized(format!(
@@ -80,6 +79,7 @@ impl FromStr for Challenge {
                     scope: param("scope").unwrap_or_default(),
                 });
             }
+
             basic |= challenge.scheme.eq_ignore_ascii_case("Basic");
         }
 
@@ -278,7 +278,6 @@ impl Authorizer {
             if !scope.is_empty() {
                 query.append_pair("scope", scope);
             }
-            query.append_pair("client_id", CLIENT_ID);
         }
 
         // Present the configured credentials to the token server.
