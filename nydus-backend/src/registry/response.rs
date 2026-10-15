@@ -34,14 +34,14 @@ pub(crate) struct Response {
 
 /// Implements the response.
 impl Response {
-    /// Reads the body so it exactly fills `buf` and returns the protocol that
-    /// served it, a short body being an [`io::ErrorKind::UnexpectedEof`].
-    pub(crate) async fn read_exact(mut self, buf: &mut [u8]) -> RegistryResult<Protocol> {
+    /// Reads the body so it exactly fills `buf`, a short body being an
+    /// [`io::ErrorKind::UnexpectedEof`].
+    pub(crate) async fn read_exact(mut self, buf: &mut [u8]) -> RegistryResult<()> {
         self.reader
             .read_exact(buf)
             .await
             .map_err(RegistryError::Io)?;
-        Ok(self.protocol)
+        Ok(())
     }
 
     /// Reads the body as a UTF-8 string.
@@ -142,9 +142,9 @@ mod tests {
 
     #[tokio::test]
     async fn read_exact_fills_the_buffer_or_rejects_a_short_body() {
-        let test_cases: Vec<(&[u8], fn(RegistryResult<Protocol>, &[u8; 4]))> = vec![
+        let test_cases: Vec<(&[u8], fn(RegistryResult<()>, &[u8; 4]))> = vec![
             (b"abcd", |result, buf| {
-                assert_eq!(result.unwrap(), Protocol::Http);
+                assert!(result.is_ok());
                 assert_eq!(buf, b"abcd");
             }),
             (b"ab", |result, _| {

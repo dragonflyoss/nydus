@@ -483,37 +483,69 @@ impl Inner {
         let mut headers = HeaderMap::new();
         headers.insert(RANGE, range);
 
-        // Read through the cached redirect, evicting one the CDN no longer
-        // honours.
-        if let Some(redirect) = self.redirects.get(&hex) {
-            let response = self
-                .send(Method::GET, &redirect, headers.clone(), kind)
-                .await?;
-            match response.status {
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
-                status if status.is_success() => return response.read_exact(dst).await,
-                _ => return Err(response.into_status_error().await),
-            }
-        }
+        let response = match self.get_through_redirect(&hex, &headers, kind).await? {
+            Some(response) => response,
+            None => self.get_through_blob_url(&hex, headers, kind).await?,
+        };
 
-        // Read through the blob URL, caching the redirect it answers with.
-        let url = self.blob_url(&hex);
+        let protocol = response.protocol;
+        response.read_exact(dst).await?;
+        Ok(protocol)
+    }
+
+    /// Sends the blob `GET` through the redirect cached for `hex`, `None`
+    /// when none is cached or the link answered `401` or `403`, which evicts
+    /// it so the read falls through to the blob URL.
+    async fn get_through_redirect(
+        &self,
+        hex: &str,
+        headers: &HeaderMap,
+        kind: ReadKind,
+    ) -> RegistryResult<Option<Response>> {
+        let Some(redirect) = self.redirects.get(hex) else {
+            return Ok(None);
+        };
+
+        let response = self
+            .send(Method::GET, &redirect, headers.clone(), kind)
+            .await?;
+        match response.status {
+            status if status.is_success() => Ok(Some(response)),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                self.redirects.remove(hex);
+                Ok(None)
+            }
+            _ => Err(response.into_status_error().await),
+        }
+    }
+
+    /// Sends the blob `GET` through the blob URL of `hex`, following the
+    /// redirect it answers with and caching it for the reads that follow.
+    async fn get_through_blob_url(
+        &self,
+        hex: &str,
+        headers: HeaderMap,
+        kind: ReadKind,
+    ) -> RegistryResult<Response> {
+        let url = self.blob_url(hex);
         let response = self
             .authorized_request(Method::GET, &url, headers.clone(), kind)
             .await?;
-        if response.status.is_redirection() {
-            let location = response.location()?;
-            let redirected = self.send(Method::GET, &location, headers, kind).await?;
-            if !redirected.status.is_success() {
-                return Err(redirected.into_status_error().await);
-            }
-            self.redirects.insert(&hex, location);
-            redirected.read_exact(dst).await
-        } else if response.status.is_success() {
-            response.read_exact(dst).await
-        } else {
-            Err(response.into_status_error().await)
+        if response.status.is_success() {
+            return Ok(response);
         }
+        if !response.status.is_redirection() {
+            return Err(response.into_status_error().await);
+        }
+
+        let location = response.location()?;
+        let redirected = self.send(Method::GET, &location, headers, kind).await?;
+        if !redirected.status.is_success() {
+            return Err(redirected.into_status_error().await);
+        }
+
+        self.redirects.insert(hex, location);
+        Ok(redirected)
     }
 
     /// Returns the size of a blob, from a `HEAD` request following one redirect.
