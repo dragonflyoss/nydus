@@ -28,7 +28,7 @@ impl Action {
     /// Decides what a read of `kind` does with the result of its Dragonfly
     /// request.
     ///
-    /// A transient answer is folded into its error first, a dfdaemon `507`
+    /// A retryable answer is folded into its error first, a dfdaemon `507`
     /// among them since another seed peer may have room, while a dfdaemon
     /// `422` is definitive and served as is. Prefetch reads never touch the
     /// origin, so a Dragonfly outage degrades prefetch instead of flooding the
@@ -36,7 +36,7 @@ impl Action {
     /// retries did not cure.
     pub(super) async fn decide(kind: ReadKind, result: RegistryResult<Response>) -> Self {
         let err = match result {
-            Ok(response) if response.is_transient() => response.into_status_error().await,
+            Ok(response) if response.is_retryable() => response.into_status_error().await,
             Ok(response) => return Self::Serve(response),
             Err(err) => err,
         };

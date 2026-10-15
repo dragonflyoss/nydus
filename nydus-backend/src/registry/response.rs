@@ -71,9 +71,9 @@ impl Response {
         RegistryError::UnexpectedStatus(self.status, String::from_utf8_lossy(&body).into_owned())
     }
 
-    /// Returns whether the status is one another attempt might change: `429`,
-    /// `5xx` and `408`. Every other status is definitive.
-    pub(crate) fn is_transient(&self) -> bool {
+    /// Returns whether another attempt might get a different answer: a `429`,
+    /// `5xx` or `408`. Every other status is definitive.
+    pub(crate) fn is_retryable(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT
             || self.status == StatusCode::TOO_MANY_REQUESTS
@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_transient_marks_the_statuses_another_attempt_might_change() {
+    fn is_retryable_marks_the_statuses_another_attempt_might_change() {
         let test_cases = vec![
             (StatusCode::INTERNAL_SERVER_ERROR, true),
             (StatusCode::BAD_GATEWAY, true),
@@ -136,7 +136,7 @@ mod tests {
                 reader: Box::new(io::Cursor::new(Vec::new())),
                 protocol: Protocol::Http,
             };
-            assert_eq!(response.is_transient(), expected, "{status}");
+            assert_eq!(response.is_retryable(), expected, "{status}");
         }
     }
 
