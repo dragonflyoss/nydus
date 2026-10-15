@@ -20,7 +20,6 @@ backend-registry = [
   "dep:reqwest-middleware",
   "dep:reqwest-retry",
   "dep:url",
-  "dep:arc-swap",
   "dep:async-trait",
   "dep:futures",
   "dep:http",
@@ -37,7 +36,6 @@ backend-dragonfly = [
 ]
 
 [dependencies]
-arc-swap = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 dragonfly-client-request = { version = "=1.7.2", optional = true }

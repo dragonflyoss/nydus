@@ -66,7 +66,7 @@ use nydus_telemetry::metrics::{
 
 use crate::{Backend, BlobBackend, Protocol, ReadKind};
 
-use self::auth::Auth;
+use self::auth::{Auth, Challenge};
 #[cfg(feature = "backend-dragonfly")]
 use self::dragonfly::Dragonfly;
 use self::http::{Http, RateLimit};
@@ -79,7 +79,7 @@ pub use self::rt::Runtime;
 /// An error of the registry backend. Private to the crate, it folds into an
 /// [`io::Error`] at the [`BlobBackend`] boundary.
 #[derive(Debug, thiserror::Error)]
-enum RegistryError {
+pub(crate) enum RegistryError {
     #[error(transparent)]
     Io(io::Error),
 
@@ -115,7 +115,7 @@ impl From<RegistryError> for io::Error {
     }
 }
 
-type RegistryResult<T> = Result<T, RegistryError>;
+pub(crate) type RegistryResult<T> = Result<T, RegistryError>;
 
 /// The transport a blob `GET` rides on: the origin registry over HTTP, or the
 /// Dragonfly seed peers. One call spends the transport's own retries and hands
@@ -256,7 +256,7 @@ impl Registry {
             scheme,
             host,
             config.repository,
-            config.auth,
+            Auth::new(config.auth.as_deref())?,
             http,
             back_to_source,
             dragonfly,
@@ -264,14 +264,13 @@ impl Registry {
         ))
     }
 
-    /// Assemble a registry backend from its parts. `basic_auth` is the
-    /// `base64(user:pass)` of the config, sent verbatim after `Basic `.
+    /// Assemble a registry backend from its parts.
     #[allow(clippy::too_many_arguments)]
     fn from_parts(
         scheme: &'static str,
         host: String,
         repository: String,
-        basic_auth: Option<String>,
+        auth: Auth,
         http: Http,
         back_to_source: Http,
         dragonfly: Option<Box<dyn BlobTransport>>,
@@ -287,7 +286,7 @@ impl Registry {
                 scheme,
                 host,
                 repository,
-                auth: Auth::new(basic_auth),
+                auth,
                 redirects: RedirectCache::new(),
                 http,
                 back_to_source,
@@ -359,7 +358,7 @@ impl Inner {
     /// resend without Authorization when one was sent, to get a fresh challenge
     ///   │
     ///   ▼
-    /// WWW-Authenticate ──▶ Auth::obtain ──▶ resend with it ──▶ 2xx/3xx caches it
+    /// WWW-Authenticate ──▶ Auth::answer ──▶ resend with it
     /// ```
     async fn authorized_request(
         &self,
@@ -368,9 +367,8 @@ impl Inner {
         mut headers: HeaderMap,
         kind: ReadKind,
     ) -> RegistryResult<Response> {
-        let cached = self.auth.current();
-        if !cached.is_empty() {
-            headers.insert(AUTHORIZATION, auth::header_value(&cached)?);
+        if let Some(authorization) = self.auth.current() {
+            headers.insert(AUTHORIZATION, authorization);
         }
 
         let response = self
@@ -391,18 +389,16 @@ impl Inner {
             .headers
             .get(WWW_AUTHENTICATE)
             .and_then(|value| value.to_str().ok())
-            .and_then(Auth::parse_challenge);
+            .and_then(|value| value.parse::<Challenge>().ok());
         let Some(challenge) = challenge else {
             return Ok(challenge_response);
         };
 
-        let authorization = self.auth.obtain(&self.http, challenge).await?;
-        headers.insert(AUTHORIZATION, auth::header_value(&authorization)?);
-        let response = self.send(method, url, headers, kind).await?;
-        if response.status.is_success() || response.status.is_redirection() {
-            self.auth.set(authorization);
-        }
-        Ok(response)
+        headers.insert(
+            AUTHORIZATION,
+            self.auth.answer(&self.http, challenge).await?,
+        );
+        self.send(method, url, headers, kind).await
     }
 
     /// Fill `dst` with the blob bytes from `offset`, through the cached
@@ -820,7 +816,7 @@ mod tests {
             scheme,
             host,
             config.repository,
-            config.auth,
+            Auth::new(config.auth.as_deref()).unwrap(),
             http,
             back_to_source,
             Some(Box::new(transport)),
@@ -1113,7 +1109,10 @@ dragonfly:
             assert_eq!(dst, body, "kind={kind:?}");
             assert_eq!(transport.calls(), 2, "kind={kind:?}");
             assert_eq!(origin.hits(), 0, "kind={kind:?}");
-            assert_eq!(registry.inner.auth.current(), "Basic YWxpY2U6c2VjcmV0");
+            assert_eq!(
+                registry.inner.auth.current().unwrap(),
+                "Basic YWxpY2U6c2VjcmV0"
+            );
         }
     }
 
