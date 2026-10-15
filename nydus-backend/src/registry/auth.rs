@@ -315,7 +315,7 @@ impl Authorizer {
             .request(Method::GET, url.as_str(), headers, ReadKind::OnDemand)
             .await?;
         if !response.status.is_success() {
-            return Err(response.into_status_error().await);
+            return Err(response.into_registry_error().await);
         }
 
         // Parse the token out of the body.

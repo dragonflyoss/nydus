@@ -515,7 +515,7 @@ impl Inner {
                 self.redirects.remove(hex);
                 Ok(None)
             }
-            _ => Err(response.into_status_error().await),
+            _ => Err(response.into_registry_error().await),
         }
     }
 
@@ -535,13 +535,13 @@ impl Inner {
             return Ok(response);
         }
         if !response.status.is_redirection() {
-            return Err(response.into_status_error().await);
+            return Err(response.into_registry_error().await);
         }
 
         let location = response.location()?;
         let redirected = self.send(Method::GET, &location, headers, kind).await?;
         if !redirected.status.is_success() {
-            return Err(redirected.into_status_error().await);
+            return Err(redirected.into_registry_error().await);
         }
 
         self.redirects.insert(hex, location);
@@ -565,13 +565,13 @@ impl Inner {
                 .send(Method::HEAD, &location, HeaderMap::new(), kind)
                 .await?;
             if !redirected.status.is_success() {
-                return Err(redirected.into_status_error().await);
+                return Err(redirected.into_registry_error().await);
             }
             redirected
         } else if response.status.is_success() {
             response
         } else {
-            return Err(response.into_status_error().await);
+            return Err(response.into_registry_error().await);
         };
 
         response.content_length()

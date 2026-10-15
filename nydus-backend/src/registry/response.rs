@@ -51,7 +51,7 @@ impl Response {
     ///
     /// The status is the error, so a body that cannot be read only blanks
     /// the message.
-    pub(crate) async fn into_status_error(self) -> RegistryError {
+    pub(crate) async fn into_registry_error(self) -> RegistryError {
         let status = self.status;
         let body = self.text().await.unwrap_or_default();
         RegistryError::UnexpectedStatus(status, body)
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn into_status_error_keeps_the_status_and_body() {
+    async fn into_registry_error_keeps_the_status_and_body() {
         let response = Response {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
@@ -163,7 +163,7 @@ mod tests {
             protocol: Protocol::Http,
         };
         assert!(matches!(
-            response.into_status_error().await,
+            response.into_registry_error().await,
             RegistryError::UnexpectedStatus(StatusCode::NOT_FOUND, body) if body == "no such blob"
         ));
     }
