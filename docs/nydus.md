@@ -225,8 +225,9 @@ process-wide Tokio multi-thread runtime:
 The registry `http.worker_threads` and `http.max_blocking_threads` settings
 set these bounds; every registry backend built from a configuration runs on a
 runtime of its own. Embedders may instead build one `nydus_backend::Runtime`
-from `RuntimeOptions`, including an optional network namespace that every
-runtime thread enters, and hand it to every backend they open through
+with `Runtime::new(worker_threads, max_blocking_threads, netns)`, the optional
+network namespace being one every runtime thread enters, and hand it to every
+backend they open through
 `nydus_backend::build_backend_with_runtime`; because requests run on those
 threads, registry sockets are created in that namespace regardless of the
 caller's. A process using only local blobs never creates a Tokio runtime.

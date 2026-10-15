@@ -72,7 +72,7 @@ pub use self::netns::{Netns, NetnsId};
 use self::policy::Action;
 use self::redirect::RedirectCache;
 use self::response::{fill_exact, status_error, Response};
-pub use self::rt::{Runtime, RuntimeOptions};
+pub use self::rt::Runtime;
 
 /// An error of the registry backend. Private to the crate, it folds into an
 /// [`io::Error`] at the [`BlobBackend`] boundary.
@@ -616,7 +616,7 @@ mod tests {
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
     fn test_runtime() -> Arc<Runtime> {
-        Arc::new(Runtime::new(RuntimeOptions::default()).unwrap())
+        Arc::new(Runtime::new(0, 0, None).unwrap())
     }
 
     #[async_trait]

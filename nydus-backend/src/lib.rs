@@ -33,7 +33,7 @@ pub(crate) use registry::Registry;
 /// bounds and network namespace it needs, and shares it across its backends
 /// through [`build_backend_with_runtime`].
 #[cfg(feature = "backend-registry")]
-pub use registry::{Netns, NetnsId, Runtime, RuntimeOptions};
+pub use registry::{Netns, NetnsId, Runtime};
 
 pub use nydus_config::{Backend, Protocol, ReadKind};
 
@@ -129,7 +129,11 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>>
         BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
         #[cfg(feature = "backend-registry")]
         BackendConfig::Registry(registry) => {
-            let runtime = Runtime::new(RuntimeOptions::from(&registry.http))?;
+            let runtime = Runtime::new(
+                registry.http.worker_threads,
+                registry.http.max_blocking_threads,
+                None,
+            )?;
             build_backend_with_runtime(config, Arc::new(runtime))
         }
         #[cfg(not(feature = "backend-registry"))]
