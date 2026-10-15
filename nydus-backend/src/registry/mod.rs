@@ -492,7 +492,7 @@ impl Inner {
             match response.status {
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 status if status.is_success() => return response.read_exact(dst).await,
-                _ => return Err(response.into_error().await),
+                _ => return Err(response.into_status_error().await),
             }
         }
 
@@ -505,14 +505,14 @@ impl Inner {
             let location = response.location()?;
             let redirected = self.send(Method::GET, &location, headers, kind).await?;
             if !redirected.status.is_success() {
-                return Err(redirected.into_error().await);
+                return Err(redirected.into_status_error().await);
             }
             self.redirects.insert(&hex, location);
             redirected.read_exact(dst).await
         } else if response.status.is_success() {
             response.read_exact(dst).await
         } else {
-            Err(response.into_error().await)
+            Err(response.into_status_error().await)
         }
     }
 
@@ -533,13 +533,13 @@ impl Inner {
                 .send(Method::HEAD, &location, HeaderMap::new(), kind)
                 .await?;
             if !redirected.status.is_success() {
-                return Err(redirected.into_error().await);
+                return Err(redirected.into_status_error().await);
             }
             redirected
         } else if response.status.is_success() {
             response
         } else {
-            return Err(response.into_error().await);
+            return Err(response.into_status_error().await);
         };
 
         response.content_length()

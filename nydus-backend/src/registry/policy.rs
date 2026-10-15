@@ -36,7 +36,7 @@ impl Action {
     /// retries did not cure.
     pub(super) async fn decide(kind: ReadKind, result: RegistryResult<Response>) -> Self {
         let err = match result {
-            Ok(response) if response.is_transient() => response.into_error().await,
+            Ok(response) if response.is_transient() => response.into_status_error().await,
             Ok(response) => return Self::Serve(response),
             Err(err) => err,
         };
