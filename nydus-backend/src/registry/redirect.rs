@@ -5,21 +5,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
-
-/// The number of blobs whose redirect URLs are remembered at once.
-const CAPACITY: usize = 1000;
-
-/// The default time a redirect URL is trusted before the next read re-resolves
-/// it.
-///
-/// Signed CDN links expire on their own schedule, this only bounds how stale
-/// a hit can be, an expired link is also evicted the moment it answers `401`
-/// or `403`.
-pub(super) const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
+use tracing::debug;
 
 /// A cached redirect and when it was learned.
 #[derive(Debug, Clone)]
-struct Entry {
+struct RedirectEntry {
     /// The signed URL the blob `GET` was redirected to.
     url: String,
 
@@ -32,41 +22,57 @@ struct Entry {
 /// Bounded and aged so a long-lived mount does not hoard expired links.
 pub(crate) struct RedirectCache {
     /// The redirects by blob hex digest, least recently used first out.
-    entries: Mutex<LruCache<String, Entry>>,
+    redirects: Mutex<LruCache<String, RedirectEntry>>,
 
-    /// The time an entry is trusted after it was cached.
+    /// The time a redirect is trusted after it was cached.
     ttl: Duration,
 }
 
 /// Implements the redirect cache.
 impl RedirectCache {
-    /// Creates an empty cache whose entries expire after `ttl`.
+    /// The default capacity of the redirect cache.
+    const DEFAULT_CAPACITY: usize = 1000;
+
+    /// The default time a redirect is trusted before the next read re-resolves
+    /// it.
+    ///
+    /// Signed CDN links expire on their own schedule, this only bounds how
+    /// stale a hit can be, an expired link is also evicted the moment it
+    /// answers `401` or `403`.
+    pub(super) const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
+
+    /// Creates an empty cache whose redirects expire after `ttl`.
     pub(crate) fn new(ttl: Duration) -> Self {
         Self {
-            entries: Mutex::new(LruCache::new(NonZeroUsize::new(CAPACITY).unwrap())),
+            redirects: Mutex::new(LruCache::new(
+                NonZeroUsize::new(Self::DEFAULT_CAPACITY).unwrap(),
+            )),
             ttl,
         }
     }
 
     /// Returns the redirect URL of `hex` when one is cached and still fresh,
-    /// dropping an expired entry on the way.
+    /// dropping an expired one on the way.
     pub(crate) fn get(&self, hex: &str) -> Option<String> {
-        let mut entries = self.entries.lock().unwrap();
-        let entry = entries.get(hex)?;
+        let mut redirects = self.redirects.lock().unwrap();
+        let entry = redirects.get(hex)?;
         if entry.created_at.elapsed() >= self.ttl {
-            entries.pop(hex);
+            debug!("cached redirect for blob {hex} expired");
+            redirects.pop(hex);
             return None;
         }
 
+        debug!("found cached redirect for blob {hex} -> {}", entry.url);
         Some(entry.url.clone())
     }
 
     /// Remembers `url` as the redirect of `hex`, evicting the least recently
     /// used blob when full.
     pub(crate) fn insert(&self, hex: &str, url: String) {
-        self.entries.lock().unwrap().put(
+        debug!("caching redirect for blob {hex} -> {url}");
+        self.redirects.lock().unwrap().put(
             hex.to_string(),
-            Entry {
+            RedirectEntry {
                 url,
                 created_at: Instant::now(),
             },
@@ -75,7 +81,8 @@ impl RedirectCache {
 
     /// Forgets the redirect of `hex`, after the link answered `401` or `403`.
     pub(crate) fn remove(&self, hex: &str) {
-        self.entries.lock().unwrap().pop(hex);
+        debug!("evicting cached redirect for blob {hex}");
+        self.redirects.lock().unwrap().pop(hex);
     }
 }
 
@@ -85,7 +92,7 @@ mod tests {
 
     #[test]
     fn get_returns_what_insert_stored_until_remove() {
-        let cache = RedirectCache::new(DEFAULT_TTL);
+        let cache = RedirectCache::new(RedirectCache::DEFAULT_TTL);
         assert_eq!(cache.get("a"), None);
 
         cache.insert("a", "http://cdn/a".to_string());
@@ -96,20 +103,20 @@ mod tests {
     }
 
     #[test]
-    fn get_drops_an_expired_entry() {
+    fn get_drops_an_expired_redirect() {
         let cache = RedirectCache::new(Duration::from_millis(20));
         cache.insert("a", "http://cdn/a".to_string());
         assert!(cache.get("a").is_some());
 
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(cache.get("a"), None);
-        assert_eq!(cache.entries.lock().unwrap().len(), 0);
+        assert_eq!(cache.redirects.lock().unwrap().len(), 0);
     }
 
     #[test]
-    fn insert_evicts_the_least_recently_used_entry_when_full() {
-        let cache = RedirectCache::new(DEFAULT_TTL);
-        for i in 0..CAPACITY {
+    fn insert_evicts_the_least_recently_used_redirect_when_full() {
+        let cache = RedirectCache::new(RedirectCache::DEFAULT_TTL);
+        for i in 0..RedirectCache::DEFAULT_CAPACITY {
             cache.insert(&format!("blob-{i}"), format!("http://cdn/{i}"));
         }
         assert!(cache.get("blob-0").is_some());
@@ -117,6 +124,9 @@ mod tests {
         cache.insert("blob-new", "http://cdn/new".to_string());
         assert!(cache.get("blob-0").is_some());
         assert_eq!(cache.get("blob-1"), None);
-        assert_eq!(cache.entries.lock().unwrap().len(), CAPACITY);
+        assert_eq!(
+            cache.redirects.lock().unwrap().len(),
+            RedirectCache::DEFAULT_CAPACITY
+        );
     }
 }
