@@ -1,6 +1,4 @@
-//! Registry authentication: the `WWW-Authenticate` challenge a registry
-//! answers an unauthenticated request with, and the `Authorization` that
-//! answers it, kept until it nears expiry.
+//! Registry authentication: the `WWW-Authenticate` challenge and the header that answers it.
 
 use std::str::FromStr;
 use std::sync::RwLock;
@@ -19,37 +17,44 @@ use crate::ReadKind;
 /// The `client_id` nydus reports to a registry token server.
 const CLIENT_ID: &str = "nydus-registry-client";
 
-/// How long a bearer token lives when the token server does not say.
+/// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
-/// How long before its expiry a token is treated as expired, so a request in
-/// flight never arrives with a token that has just lapsed.
+/// The margin before its expiry within which a token counts as expired, so a
+/// request in flight never arrives with one that has just lapsed.
 const TOKEN_EXPIRY_LEEWAY: Duration = Duration::from_secs(20);
 
 /// The challenge a registry sends in `WWW-Authenticate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Challenge {
-    /// `Basic realm="..."`, answered with the configured credentials.
+    /// A `Basic realm="..."` challenge, answered with the configured credentials.
     Basic,
 
-    /// `Bearer realm="...",service="...",scope="..."`, answered with a token
-    /// fetched from `realm`.
+    /// A `Bearer realm="...",service="...",scope="..."` challenge, answered
+    /// with a token fetched from `realm`.
     Bearer {
         /// The token server URL.
         realm: String,
+
         /// The service the token is for, empty when the registry names none.
         service: String,
+
         /// The access the token grants, empty when the registry names none.
         scope: String,
     },
 }
 
+/// Implements parsing from a `WWW-Authenticate` value.
 impl FromStr for Challenge {
     type Err = RegistryError;
 
+    /// Parses the scheme and its `key="value"` parameters, rejecting a scheme
+    /// other than `Basic` or `Bearer` and a `Bearer` without a realm.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let unsupported =
             || RegistryError::Unauthorized(format!("unsupported auth challenge: {value}"));
+
+        // Split the scheme from its comma-separated parameters.
         let (scheme, params) = value.split_once(' ').unwrap_or((value, ""));
         let param = |name: &str| {
             params
@@ -58,6 +63,7 @@ impl FromStr for Challenge {
                 .find(|(key, _)| key.trim() == name)
                 .map(|(_, value)| value.trim().trim_matches('"').to_string())
         };
+
         match scheme.trim() {
             "Basic" => Ok(Self::Basic),
             "Bearer" => Ok(Self::Bearer {
@@ -70,8 +76,8 @@ impl FromStr for Challenge {
     }
 }
 
-/// The `Authorization` that answers a challenge. The header value is marked
-/// sensitive so request logs redact it.
+/// The header value that answers a challenge, marked sensitive so request
+/// logs redact it.
 #[derive(Debug, Clone)]
 enum Authorization {
     /// The configured basic credentials, which never expire.
@@ -81,20 +87,24 @@ enum Authorization {
     Bearer {
         /// The `Bearer ...` header value.
         value: HeaderValue,
-        /// When the token server said the token expires.
+
+        /// The instant the token server said the token expires.
         expires_at: Instant,
     },
 }
 
+/// Implements the authorization header value.
 impl Authorization {
-    /// The basic credentials `encoded`, the config's `base64(user:pass)`.
+    /// Creates the basic authorization for `encoded`, the config's
+    /// `base64(user:pass)`.
     fn basic(encoded: &str) -> RegistryResult<Self> {
         Ok(Self::Basic(Self::header_value(&format!(
             "Basic {encoded}"
         ))?))
     }
 
-    /// A bearer `token` that expires `expires_in` from now.
+    /// Creates a bearer authorization for `token` that expires `expires_in`
+    /// from now.
     fn bearer(token: &str, expires_in: Duration) -> RegistryResult<Self> {
         Ok(Self::Bearer {
             value: Self::header_value(&format!("Bearer {token}"))?,
@@ -102,9 +112,11 @@ impl Authorization {
         })
     }
 
-    /// Parse an `Authorization` value. Tokens come from the token server and
-    /// basic credentials from the config, so bytes a header cannot carry
-    /// surface as an auth error instead of a panic.
+    /// Parses `value` into a sensitive header value.
+    ///
+    /// Tokens come from the token server and basic credentials from the
+    /// config, so bytes a header cannot carry surface as an auth error
+    /// instead of a panic.
     fn header_value(value: &str) -> RegistryResult<HeaderValue> {
         let mut value: HeaderValue = value.parse().map_err(|_| {
             RegistryError::Unauthorized(
@@ -115,15 +127,16 @@ impl Authorization {
         Ok(value)
     }
 
-    /// The header value to send.
+    /// Returns the header value to send.
     fn value(&self) -> &HeaderValue {
         match self {
             Self::Basic(value) | Self::Bearer { value, .. } => value,
         }
     }
 
-    /// Whether this is still good to send: basic credentials always, a
-    /// bearer token until it is within the leeway of expiring.
+    /// Returns whether the authorization is still good to send: basic
+    /// credentials always, a bearer token until it is within the leeway of
+    /// expiring.
     fn is_valid(&self) -> bool {
         match self {
             Self::Basic(_) => true,
@@ -138,15 +151,18 @@ struct TokenResponse {
     /// The token, as the distribution spec names it.
     #[serde(default)]
     token: String,
+
     /// The token, as OAuth2 names it.
     #[serde(default)]
     access_token: String,
+
     /// The token's lifetime in seconds, when the server says.
     expires_in: Option<u64>,
 }
 
+/// Implements the token response.
 impl TokenResponse {
-    /// The bearer `Authorization` this response carries.
+    /// Converts the response into the bearer [Authorization] it carries.
     fn into_authorization(self) -> RegistryResult<Authorization> {
         let token = if self.token.is_empty() {
             self.access_token
@@ -165,18 +181,22 @@ impl TokenResponse {
     }
 }
 
-/// Authorizes requests to one registry: the configured basic credentials
-/// and the `Authorization` the last challenge produced.
+/// The authentication state of one registry: the configured basic
+/// credentials and the answer to the last challenge.
 pub(crate) struct Authorizer {
     /// The configured credentials, `None` for an anonymous registry.
     basic: Option<Authorization>,
-    /// What the last challenge produced, kept until it expires.
+
+    /// The answer to the last challenge, kept until it expires.
     authorization: RwLock<Option<Authorization>>,
 }
 
+/// Implements the registry authorizer.
 impl Authorizer {
-    /// An authorizer for a registry whose config carries `basic`, its
-    /// `base64(user:pass)`, validated here so a bad value fails when the
+    /// Creates an authorizer for a registry whose config carries `basic`, its
+    /// `base64(user:pass)`.
+    ///
+    /// The credentials are validated here so a bad value fails when the
     /// backend is built rather than on the first read.
     pub(crate) fn new(basic: Option<&str>) -> RegistryResult<Self> {
         Ok(Self {
@@ -185,7 +205,7 @@ impl Authorizer {
         })
     }
 
-    /// Add the `Authorization` header to `headers`, when a challenge has been
+    /// Adds the `Authorization` header to `headers` when a challenge has been
     /// answered and the answer has not expired.
     pub(crate) fn authorize(&self, headers: &mut HeaderMap) {
         if let Some(value) = self
@@ -200,7 +220,7 @@ impl Authorizer {
         }
     }
 
-    /// Answer `challenge` and keep the answer for the requests that follow:
+    /// Answers `challenge` and keeps the answer for the requests that follow:
     /// the configured basic credentials, or a bearer token fetched from the
     /// realm through `http`.
     pub(crate) async fn authenticate(
@@ -222,9 +242,11 @@ impl Authorizer {
         Ok(())
     }
 
-    /// Fetch a bearer token from the realm, always straight from the token
-    /// server and never through Dragonfly, with the basic credentials when
+    /// Fetches a bearer token from the realm, with the basic credentials when
     /// the config has them.
+    ///
+    /// The request goes straight to the token server through `http`, never
+    /// through Dragonfly.
     async fn fetch_token(
         &self,
         http: &Http,
@@ -232,6 +254,7 @@ impl Authorizer {
         service: &str,
         scope: &str,
     ) -> RegistryResult<Authorization> {
+        // Build the token URL from the realm and the challenge's parameters.
         let mut url = Url::parse(realm)
             .map_err(|err| RegistryError::InvalidUrl(format!("{realm}: {err}")))?;
         {
@@ -245,11 +268,13 @@ impl Authorizer {
             query.append_pair("client_id", CLIENT_ID);
         }
 
+        // Present the configured credentials to the token server.
         let mut headers = HeaderMap::new();
         if let Some(basic) = &self.basic {
             headers.insert(AUTHORIZATION, basic.value().clone());
         }
 
+        // Request the token from the realm.
         let response = http
             .request(Method::GET, url.as_str(), headers, ReadKind::OnDemand)
             .await?;
@@ -257,6 +282,7 @@ impl Authorizer {
             return Err(status_error(response).await);
         }
 
+        // Parse the token out of the body.
         let body = response.text().await.map_err(RegistryError::Io)?;
         serde_json::from_str::<TokenResponse>(&body)
             .map_err(|err| {
@@ -273,8 +299,14 @@ mod tests {
     use super::*;
     use nydus_config::HttpConfig;
 
+    fn authorization_header(authorizer: &Authorizer) -> Option<HeaderValue> {
+        let mut headers = HeaderMap::new();
+        authorizer.authorize(&mut headers);
+        headers.get(AUTHORIZATION).cloned()
+    }
+
     #[test]
-    fn challenge_parses_the_scheme_and_its_parameters() {
+    fn from_str_parses_the_scheme_and_its_parameters() {
         let test_cases: Vec<(&str, fn(RegistryResult<Challenge>))> = vec![
             (
                 r#"Bearer realm="https://auth.example.com/token",service="example.com",scope="repository:library/ubuntu:pull""#,
@@ -321,24 +353,17 @@ mod tests {
         }
     }
 
-    fn authorization_header(authorizer: &Authorizer) -> Option<HeaderValue> {
-        let mut headers = HeaderMap::new();
-        authorizer.authorize(&mut headers);
-        headers.get(AUTHORIZATION).cloned()
-    }
-
     #[test]
-    fn authorizations_reject_bytes_a_header_cannot_carry() {
+    fn new_rejects_credentials_a_header_cannot_carry() {
         let test_cases = vec![("YWxpY2U6c2VjcmV0", true), ("bad\nvalue", false)];
 
-        for (encoded, ok) in test_cases {
-            assert_eq!(Authorization::basic(encoded).is_ok(), ok, "{encoded:?}");
-            assert_eq!(Authorizer::new(Some(encoded)).is_ok(), ok, "{encoded:?}");
+        for (basic, ok) in test_cases {
+            assert_eq!(Authorizer::new(Some(basic)).is_ok(), ok);
         }
     }
 
     #[test]
-    fn authorizations_are_sensitive_in_logs() {
+    fn basic_marks_the_header_value_sensitive() {
         let authorization = Authorization::basic("YWxpY2U6c2VjcmV0").unwrap();
         assert!(authorization.value().is_sensitive());
         assert_eq!(format!("{authorization:?}"), "Basic(Sensitive)");
@@ -365,13 +390,11 @@ mod tests {
         for (authorization, expected) in test_cases {
             let authorizer = Authorizer::new(None).unwrap();
             assert_eq!(authorization_header(&authorizer), None);
-            *authorizer.authorization.write().unwrap() = Some(authorization.clone());
+
+            *authorizer.authorization.write().unwrap() = Some(authorization);
             assert_eq!(
-                authorization_header(&authorizer)
-                    .as_ref()
-                    .map(|value| value.to_str().unwrap()),
-                expected,
-                "{authorization:?}"
+                authorization_header(&authorizer),
+                expected.map(HeaderValue::from_static)
             );
         }
     }
@@ -381,7 +404,7 @@ mod tests {
         let http = Http::builder(&HttpConfig::default()).build().unwrap();
         let test_cases: Vec<(Option<&str>, fn(RegistryResult<()>, Option<HeaderValue>))> = vec![
             (Some("YWxpY2U6c2VjcmV0"), |result, header| {
-                result.unwrap();
+                assert!(result.is_ok());
                 assert_eq!(header.unwrap(), "Basic YWxpY2U6c2VjcmV0");
             }),
             (None, |result, header| {
@@ -398,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn token_responses_name_the_token_either_way() {
+    fn into_authorization_accepts_either_token_field() {
         let test_cases: Vec<(&str, fn(RegistryResult<Authorization>))> = vec![
             (r#"{"token":"abc","expires_in":300}"#, |authorization| {
                 let authorization = authorization.unwrap();
