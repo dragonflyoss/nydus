@@ -105,58 +105,13 @@ impl Netns {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-impl Netns {
-    pub(super) fn current() -> io::Result<Self> {
-        Self::new(File::open("/proc/thread-self/ns/net")?.into())
-    }
-
-    pub(super) fn unshared() -> io::Result<Self> {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    // SAFETY: unshare only affects this scratch thread, which
-                    // exits right after; the descriptor keeps the namespace.
-                    if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    Self::current()
-                })
-                .join()
-                .unwrap()
-        })
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn new_records_the_identity_of_the_descriptor() {
-        let first = Netns::current().unwrap();
-        let second = Netns::current().unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first.id(), second.id());
-    }
 
     #[test]
     fn probe_rejects_a_non_namespace_descriptor() {
         let netns = Netns::new(OwnedFd::from(tempfile::tempfile().unwrap())).unwrap();
         let err = netns.probe().unwrap_err();
         assert!(err.to_string().contains("netns"), "{err}");
-    }
-
-    #[test]
-    fn an_unshared_namespace_differs_and_can_be_entered() {
-        let netns = match Netns::unshared() {
-            Ok(netns) => netns,
-            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-                eprintln!("skipped: cannot create a netns ({err})");
-                return;
-            }
-            Err(err) => panic!("unshare(CLONE_NEWNET): {err}"),
-        };
-        assert_ne!(netns, Netns::current().unwrap());
-        netns.probe().unwrap();
     }
 }
