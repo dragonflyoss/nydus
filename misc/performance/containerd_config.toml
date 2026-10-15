@@ -15,6 +15,10 @@ oom_score = 0
   platform = "linux"
   snapshotter = "nydus"
 
+[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+  platform = "linux"
+  snapshotter = "overlayfs"
+
 [proxy_plugins]
   [proxy_plugins.nydus]
       type = "snapshot"
