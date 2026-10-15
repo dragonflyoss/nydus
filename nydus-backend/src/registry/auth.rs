@@ -53,38 +53,53 @@ impl FromStr for Challenge {
     /// Rejects a malformed list, one with neither scheme, and a `Bearer`
     /// without a realm.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let mut basic = false;
+        let mut has_basic = false;
         for challenge in ChallengeParser::new(value) {
             let challenge = challenge.map_err(|err| {
                 RegistryError::Unauthorized(format!("invalid auth challenge: {err}"))
             })?;
 
+            // Answer a bearer challenge as soon as one appears.
             if challenge.scheme.eq_ignore_ascii_case("Bearer") {
-                let param = |name: &str| {
-                    challenge
-                        .params
-                        .iter()
-                        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                        .map(|(_, value)| value.to_unescaped())
+                let mut realm = None;
+                let mut service = String::new();
+                let mut scope = String::new();
+                for (key, param) in &challenge.params {
+                    if key.eq_ignore_ascii_case("realm") {
+                        realm = Some(param.to_unescaped());
+                    } else if key.eq_ignore_ascii_case("service") {
+                        service = param.to_unescaped();
+                    } else if key.eq_ignore_ascii_case("scope") {
+                        scope = param.to_unescaped();
+                    }
+                }
+
+                let Some(realm) = realm else {
+                    return Err(RegistryError::Unauthorized(format!(
+                        "bearer challenge without realm: {value}"
+                    )));
                 };
 
                 return Ok(Self::Bearer {
-                    realm: param("realm").ok_or_else(|| {
-                        RegistryError::Unauthorized(format!(
-                            "bearer challenge without realm: {value}"
-                        ))
-                    })?,
-                    service: param("service").unwrap_or_default(),
-                    scope: param("scope").unwrap_or_default(),
+                    realm,
+                    service,
+                    scope,
                 });
             }
 
-            basic |= challenge.scheme.eq_ignore_ascii_case("Basic");
+            if challenge.scheme.eq_ignore_ascii_case("Basic") {
+                has_basic = true;
+            }
         }
 
-        basic.then_some(Self::Basic).ok_or_else(|| {
-            RegistryError::Unauthorized(format!("unsupported auth challenge: {value}"))
-        })
+        // Fall back to a basic challenge when the list carried one.
+        if has_basic {
+            return Ok(Self::Basic);
+        }
+
+        Err(RegistryError::Unauthorized(format!(
+            "unsupported auth challenge: {value}"
+        )))
     }
 }
 
