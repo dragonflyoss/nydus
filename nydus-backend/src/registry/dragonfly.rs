@@ -24,7 +24,7 @@ use nydus_config::DragonflyConfig;
 
 use super::response::Response;
 use super::rt::Runtime;
-use super::{RegistryError, RegistryResult, Transport};
+use super::Transport;
 use crate::{Protocol, ReadKind};
 
 /// The Dragonfly SDK transport, one client per read kind so each kind keeps
@@ -91,7 +91,7 @@ impl Dragonfly {
     /// `422` reaches the policy the same way an origin answer does. Anything
     /// else, a request timeout, seed peer connectivity, a failed body stream,
     /// is a transport failure.
-    fn response(result: Result<GetResponse, Error>, body: BytesMut) -> RegistryResult<Response> {
+    fn response(result: Result<GetResponse, Error>, body: BytesMut) -> io::Result<Response> {
         match result {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
@@ -127,13 +127,11 @@ impl Dragonfly {
                 reader: Box::new(io::Cursor::new(message.unwrap_or_default().into_bytes())),
                 protocol: Protocol::Dragonfly,
             }),
-            Err(Error::RequestTimeout(message)) => Err(RegistryError::Io(io::Error::new(
+            Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("dragonfly request timed out: {message}"),
-            ))),
-            Err(err) => Err(RegistryError::Io(io::Error::other(format!(
-                "dragonfly error: {err}"
-            )))),
+            )),
+            Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
         }
     }
 }
@@ -149,7 +147,7 @@ impl Transport for Dragonfly {
     /// Fetches `url` through the client of the read kind with its priority
     /// hint, the SDK adding the P2P and priority headers itself, and logs the
     /// outcome.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
         let (client, priority) = match kind {
             ReadKind::OnDemand => (&self.ondemand, Self::PRIORITY_ONDEMAND),
             ReadKind::Prefetch => (&self.prefetch, Self::PRIORITY_PREFETCH),
@@ -315,7 +313,7 @@ mod tests {
         for (err, kind) in test_cases {
             assert!(matches!(
                 Dragonfly::response(Err(err), BytesMut::new()),
-                Err(RegistryError::Io(io_err)) if io_err.kind() == kind
+                Err(err) if err.kind() == kind
             ));
         }
     }

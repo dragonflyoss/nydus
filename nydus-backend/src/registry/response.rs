@@ -6,7 +6,6 @@ use reqwest::header::{HeaderMap, CONTENT_LENGTH, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::{RegistryError, RegistryResult};
 use crate::Protocol;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
@@ -31,7 +30,7 @@ pub(crate) struct Response {
 impl Response {
     /// Reads the body so it exactly fills `buf`, a short body being an
     /// [`io::ErrorKind::UnexpectedEof`].
-    pub(crate) async fn read_exact(mut self, buf: &mut [u8]) -> RegistryResult<()> {
+    pub(crate) async fn read_exact(mut self, buf: &mut [u8]) -> io::Result<()> {
         self.reader.read_exact(buf).await?;
         Ok(())
     }
@@ -43,15 +42,15 @@ impl Response {
         Ok(body)
     }
 
-    /// Consumes a response of a status the request did not expect into
-    /// [`RegistryError::UnexpectedStatus`], the body as the message.
+    /// Consumes a response of a status the request did not expect into an
+    /// error naming the status, the body as the rest of the message.
     ///
-    /// The status is the error, so a body that cannot be read only blanks
+    /// The status is the error, so a body that cannot be read only shortens
     /// the message.
-    pub(crate) async fn into_registry_error(self) -> RegistryError {
+    pub(crate) async fn into_io_error(self) -> io::Error {
         let status = self.status;
         let body = self.text().await.unwrap_or_default();
-        RegistryError::UnexpectedStatus(status, body)
+        io::Error::other(format!("unexpected status {status}: {body}"))
     }
 
     /// Returns whether another attempt might get a different answer: a `429`,
@@ -63,30 +62,30 @@ impl Response {
     }
 
     /// Returns the `Location` a redirect points at.
-    pub(crate) fn location(&self) -> RegistryResult<String> {
+    pub(crate) fn location(&self) -> io::Result<String> {
         self.headers
             .get(LOCATION)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
             .ok_or_else(|| {
-                RegistryError::Io(io::Error::new(
+                io::Error::new(
                     io::ErrorKind::InvalidData,
                     "registry redirect missing a valid location",
-                ))
+                )
             })
     }
 
     /// Returns the `Content-Length` a `HEAD` answered with.
-    pub(crate) fn content_length(&self) -> RegistryResult<u64> {
+    pub(crate) fn content_length(&self) -> io::Result<u64> {
         self.headers
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse().ok())
             .ok_or_else(|| {
-                RegistryError::Io(io::Error::new(
+                io::Error::new(
                     io::ErrorKind::InvalidData,
                     "registry HEAD response missing a valid content-length",
-                ))
+                )
             })
     }
 }
@@ -128,7 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_exact_fills_the_buffer_or_rejects_a_short_body() {
-        let test_cases: Vec<(&[u8], fn(RegistryResult<()>, &[u8; 4]))> = vec![
+        let test_cases: Vec<(&[u8], fn(io::Result<()>, &[u8; 4]))> = vec![
             (b"abcd", |result, buf| {
                 assert!(result.is_ok());
                 assert_eq!(buf, b"abcd");
@@ -136,7 +135,7 @@ mod tests {
             (b"ab", |result, _| {
                 assert!(matches!(
                     result,
-                    Err(RegistryError::Io(err)) if err.kind() == io::ErrorKind::UnexpectedEof
+                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof
                 ));
             }),
         ];
@@ -155,16 +154,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn into_registry_error_keeps_the_status_and_body() {
+    async fn into_io_error_names_the_status_and_carries_the_body() {
         let response = Response {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
             reader: Box::new(io::Cursor::new(b"no such blob".to_vec())),
             protocol: Protocol::Http,
         };
-        assert!(matches!(
-            response.into_registry_error().await,
-            RegistryError::UnexpectedStatus(StatusCode::NOT_FOUND, body) if body == "no such blob"
-        ));
+        assert_eq!(
+            response.into_io_error().await.to_string(),
+            "unexpected status 404 Not Found: no such blob"
+        );
     }
 }

@@ -3,11 +3,11 @@
 //!
 //! Every API here returns `io::Result` so the OS errno survives to the
 //! service edges, and this crate never depends on the control-plane error
-//! type. Backend-private errors, registry auth and Dragonfly classification,
-//! are matched internally and fold into `io::Error` at the trait boundary. A
-//! prefetch read Dragonfly could not serve, a `429`, `5xx`, `408` or a
-//! transport failure, folds into [`io::ErrorKind::QuotaExceeded`] so the
-//! storage layer reschedules it hours later without a cross-crate error type.
+//! type. Registry auth and Dragonfly failures are `io::Error`s too, carrying
+//! their message; the one kind the storage layer acts on is
+//! [`io::ErrorKind::QuotaExceeded`], a prefetch read Dragonfly could not
+//! serve, a `429`, `5xx`, `408` or a transport failure, which the storage
+//! layer reschedules hours later instead of retrying now.
 
 mod local;
 

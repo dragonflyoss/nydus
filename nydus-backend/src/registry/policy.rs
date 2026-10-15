@@ -3,8 +3,9 @@
 //! An on-demand read falls back to the origin on any failure, a prefetch read
 //! is deferred to the storage layer's delayed reschedule instead.
 
+use std::io;
+
 use super::response::Response;
-use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
 
 /// What a read does with the result of its Dragonfly request.
@@ -16,11 +17,12 @@ pub(super) enum Action {
 
     /// Gives up on Dragonfly and reads from the origin through the fallback
     /// throttle.
-    Fallback(RegistryError),
+    Fallback(io::Error),
 
-    /// Fails the read without touching the origin, marked for the storage
-    /// layer to reschedule the blob's prefetch hours later.
-    Defer(RegistryError),
+    /// Fails the read without touching the origin, as an
+    /// [`io::ErrorKind::QuotaExceeded`] so the storage layer reschedules the
+    /// blob's prefetch hours later instead of retrying now.
+    Defer(io::Error),
 }
 
 /// Implements the action.
@@ -34,15 +36,18 @@ impl Action {
     /// origin, so a Dragonfly outage degrades prefetch instead of flooding the
     /// registry, while on-demand reads fall back on every failure the SDK's
     /// retries did not cure.
-    pub(super) async fn decide(kind: ReadKind, result: RegistryResult<Response>) -> Self {
+    pub(super) async fn decide(kind: ReadKind, result: io::Result<Response>) -> Self {
         let err = match result {
-            Ok(response) if response.is_retryable() => response.into_registry_error().await,
+            Ok(response) if response.is_retryable() => response.into_io_error().await,
             Ok(response) => return Self::Serve(response),
             Err(err) => err,
         };
 
         match kind {
-            ReadKind::Prefetch => Self::Defer(RegistryError::PrefetchDeferred(Box::new(err))),
+            ReadKind::Prefetch => Self::Defer(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                format!("prefetch deferred: {err}"),
+            )),
             ReadKind::OnDemand => Self::Fallback(err),
         }
     }
@@ -54,7 +59,6 @@ mod tests {
     use crate::Protocol;
     use reqwest::header::HeaderMap;
     use reqwest::StatusCode;
-    use std::io;
 
     #[tokio::test]
     async fn decide_serves_definitive_answers_for_both_read_kinds() {
@@ -105,7 +109,7 @@ mod tests {
                         reader: Box::new(io::Cursor::new(Vec::new())),
                         protocol: Protocol::Dragonfly,
                     }),
-                    None => Err(RegistryError::Io(io::Error::other("connection reset"))),
+                    None => Err(io::Error::other("connection reset")),
                 };
                 let action = Action::decide(kind, result).await;
                 match kind {
@@ -113,7 +117,7 @@ mod tests {
                         assert!(matches!(action, Action::Fallback(_)), "status={status:?}")
                     }
                     ReadKind::Prefetch => assert!(
-                        matches!(action, Action::Defer(RegistryError::PrefetchDeferred(_))),
+                        matches!(action, Action::Defer(err) if err.kind() == io::ErrorKind::QuotaExceeded),
                         "status={status:?}"
                     ),
                 }

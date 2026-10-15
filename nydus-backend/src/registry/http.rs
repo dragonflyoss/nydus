@@ -17,7 +17,7 @@ use tokio_util::io::StreamReader;
 use nydus_config::HttpConfig;
 
 use super::response::Response;
-use super::{RegistryError, RegistryResult, Transport};
+use super::Transport;
 use crate::{Protocol, ReadKind};
 
 /// An HTTP client talking straight to the origin registry.
@@ -46,7 +46,7 @@ impl Http {
     /// returned rather than followed so the caller can cache the signed URL a
     /// blob `GET` is redirected to. Transient failures are retried up to the
     /// configured `max_retries`.
-    pub(crate) fn new(config: &HttpConfig, rate_limit: Option<RateLimit>) -> RegistryResult<Self> {
+    pub(crate) fn new(config: &HttpConfig, rate_limit: Option<RateLimit>) -> io::Result<Self> {
         let mut builder = Client::builder().redirect(Policy::none()).hickory_dns(true);
 
         // Route through the configured proxy, or ignore any ambient one.
@@ -72,10 +72,11 @@ impl Http {
 
         if let Some(certs) = config.tls.load_ca_cert_der().map_err(io::Error::other)? {
             for cert in certs {
-                builder = builder.add_root_certificate(Certificate::from_der(&cert)?);
+                builder = builder
+                    .add_root_certificate(Certificate::from_der(&cert).map_err(io::Error::other)?);
             }
         }
-        let client = builder.build()?;
+        let client = builder.build().map_err(io::Error::other)?;
 
         // Retry transient failures, every attempt claiming a rate limit slot
         // first.
@@ -98,7 +99,7 @@ impl Http {
         url: &str,
         headers: HeaderMap,
         kind: ReadKind,
-    ) -> RegistryResult<Response> {
+    ) -> io::Result<Response> {
         let start = Instant::now();
         let result = self
             .client
@@ -114,7 +115,7 @@ impl Http {
                 )),
                 protocol: Protocol::Http,
             })
-            .map_err(|err| RegistryError::Io(io::Error::other(err)));
+            .map_err(io::Error::other);
 
         self.log_request_done(&method, url, &headers, kind, &result, start.elapsed());
         result
@@ -130,7 +131,7 @@ impl Transport for Http {
     }
 
     /// Sends a `GET` to `url`.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
         self.request(Method::GET, url, headers, kind).await
     }
 }

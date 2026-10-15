@@ -14,7 +14,6 @@ default = []
 backend-registry = [
   "dep:serde",
   "dep:serde_json",
-  "dep:thiserror",
   "dep:tracing",
   "dep:reqwest",
   "dep:reqwest-middleware",
@@ -59,7 +58,6 @@ reqwest-middleware = { version = "0.4", optional = true }
 reqwest-retry = { version = "0.8", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = [
   "io-util",
   "rt",

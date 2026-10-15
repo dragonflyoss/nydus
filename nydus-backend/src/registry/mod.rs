@@ -76,63 +76,6 @@ use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
 
-/// An error of the registry backend.
-///
-/// Private to the crate, it folds into an [`io::Error`] at the
-/// [`BlobBackend`] boundary.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum RegistryError {
-    /// The error when the transport or local I/O fails.
-    #[error(transparent)]
-    Io(#[from] io::Error),
-
-    /// The error when the HTTP client cannot be built.
-    #[error(transparent)]
-    Reqwest(#[from] reqwest::Error),
-
-    /// The error when a blob footer or blob metadata is malformed.
-    #[error(transparent)]
-    Format(#[from] nydus_format::Error),
-
-    /// The error when the registry's challenge cannot be answered: the
-    /// challenge or the token server's answer is unusable, or the config
-    /// lacks the credentials it asks for.
-    #[error("unauthorized: {0}")]
-    Unauthorized(String),
-
-    /// The error when the registry answers with a status the request did not
-    /// expect, carrying the body.
-    #[error("unexpected status {0}: {1}")]
-    UnexpectedStatus(StatusCode, String),
-
-    /// The error when Dragonfly could not serve a prefetch read: a `429`,
-    /// `5xx` or `408` answer, or a transport failure.
-    ///
-    /// Folds into [`io::ErrorKind::QuotaExceeded`] so the storage layer
-    /// reschedules the blob's prefetch hours later instead of retrying now.
-    #[error("prefetch deferred: {0}")]
-    PrefetchDeferred(Box<RegistryError>),
-}
-
-/// Implements the fold of a registry error into an I/O error at the trait
-/// boundary.
-impl From<RegistryError> for io::Error {
-    /// Converts the error, a deferred prefetch becoming
-    /// [`io::ErrorKind::QuotaExceeded`] and an I/O error passing through.
-    fn from(err: RegistryError) -> Self {
-        match err {
-            RegistryError::Io(err) => err,
-            err @ RegistryError::PrefetchDeferred(_) => {
-                io::Error::new(io::ErrorKind::QuotaExceeded, err)
-            }
-            err => io::Error::other(err),
-        }
-    }
-}
-
-/// The result of a registry operation.
-pub(crate) type RegistryResult<T> = Result<T, RegistryError>;
-
 /// The transport a blob `GET` rides on: the origin registry over HTTP, or the
 /// Dragonfly seed peers.
 ///
@@ -147,7 +90,7 @@ trait Transport: Send + Sync {
     fn label(&self) -> &'static str;
 
     /// Sends a `GET` for `url` with `headers`, `kind` attributing the read.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response>;
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response>;
 
     /// Logs a completed request at debug level: the read kind, the transport,
     /// the method, URL and request headers, then the status and headers of
@@ -158,7 +101,7 @@ trait Transport: Send + Sync {
         url: &str,
         headers: &HeaderMap,
         kind: ReadKind,
-        result: &RegistryResult<Response>,
+        result: &io::Result<Response>,
         duration: Duration,
     ) {
         let read_kind = match kind {
@@ -242,7 +185,7 @@ pub(crate) struct Registry {
 ///   ├─ GET, Dragonfly configured ──▶ dragonfly.get ──▶ Action::decide
 ///   │                                   Serve ──▶ answer
 ///   │                                   Fallback ──▶ back_to_source.get (on-demand)
-///   │                                   Defer ──▶ Err(PrefetchDeferred) (prefetch)
+///   │                                   Defer ──▶ Err(QuotaExceeded) (prefetch)
 ///   └─ otherwise ──▶ http.request
 /// ```
 struct Inner {
@@ -391,7 +334,7 @@ impl Inner {
         url: &str,
         headers: HeaderMap,
         kind: ReadKind,
-    ) -> RegistryResult<Response> {
+    ) -> io::Result<Response> {
         let dragonfly = match (&self.dragonfly, &method) {
             (Some(dragonfly), &Method::GET) => dragonfly,
             _ => return self.http.request(method, url, headers, kind).await,
@@ -439,7 +382,7 @@ impl Inner {
         url: &str,
         mut headers: HeaderMap,
         kind: ReadKind,
-    ) -> RegistryResult<Response> {
+    ) -> io::Result<Response> {
         // Send with the cached Authorization, when one is still valid.
         self.authorizer.authorize(&mut headers);
         let response = self
@@ -483,7 +426,7 @@ impl Inner {
         offset: u64,
         dst: &mut [u8],
         kind: ReadKind,
-    ) -> RegistryResult<Protocol> {
+    ) -> io::Result<Protocol> {
         let hex = hex::encode(blob_id);
         let end = offset + dst.len() as u64 - 1;
         let range: HeaderValue = format!("bytes={offset}-{end}").parse().unwrap();
@@ -508,7 +451,7 @@ impl Inner {
         hex: &str,
         headers: &HeaderMap,
         kind: ReadKind,
-    ) -> RegistryResult<Option<Response>> {
+    ) -> io::Result<Option<Response>> {
         let Some(redirect) = self.redirects.get(hex) else {
             return Ok(None);
         };
@@ -522,7 +465,7 @@ impl Inner {
                 self.redirects.remove(hex);
                 Ok(None)
             }
-            _ => Err(response.into_registry_error().await),
+            _ => Err(response.into_io_error().await),
         }
     }
 
@@ -533,7 +476,7 @@ impl Inner {
         hex: &str,
         headers: HeaderMap,
         kind: ReadKind,
-    ) -> RegistryResult<Response> {
+    ) -> io::Result<Response> {
         let url = self.blob_url(hex);
         let response = self
             .authorized_request(Method::GET, &url, headers.clone(), kind)
@@ -542,13 +485,13 @@ impl Inner {
             return Ok(response);
         }
         if !response.status.is_redirection() {
-            return Err(response.into_registry_error().await);
+            return Err(response.into_io_error().await);
         }
 
         let location = response.location()?;
         let redirected = self.send(Method::GET, &location, headers, kind).await?;
         if !redirected.status.is_success() {
-            return Err(redirected.into_registry_error().await);
+            return Err(redirected.into_io_error().await);
         }
 
         self.redirects.insert(hex, location);
@@ -560,7 +503,7 @@ impl Inner {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
-    ) -> RegistryResult<u64> {
+    ) -> io::Result<u64> {
         let url = self.blob_url(&hex::encode(blob_id));
         let response = self
             .authorized_request(Method::HEAD, &url, HeaderMap::new(), kind)
@@ -572,13 +515,13 @@ impl Inner {
                 .send(Method::HEAD, &location, HeaderMap::new(), kind)
                 .await?;
             if !redirected.status.is_success() {
-                return Err(redirected.into_registry_error().await);
+                return Err(redirected.into_io_error().await);
             }
             redirected
         } else if response.status.is_success() {
             response
         } else {
-            return Err(response.into_registry_error().await);
+            return Err(response.into_io_error().await);
         };
 
         response.content_length()
@@ -590,27 +533,27 @@ impl Inner {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
-    ) -> RegistryResult<BlobMetadata> {
+    ) -> io::Result<BlobMetadata> {
         let size = self.stat_blob(blob_id, kind).await?;
-        let footer_offset = BlobFooter::calculate_offset_by_blob_size(size)?;
+        let footer_offset =
+            BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
 
         let mut footer_bytes = [0u8; BlobFooter::SIZE];
         self.get_blob(blob_id, footer_offset, &mut footer_bytes, kind)
             .await?;
-        let footer = BlobFooter::from_bytes(&footer_bytes)?;
-        footer.validate_layout(footer_offset)?;
+        let footer = BlobFooter::from_bytes(&footer_bytes).map_err(io::Error::other)?;
+        footer
+            .validate_layout(footer_offset)
+            .map_err(io::Error::other)?;
         if footer.is_raw_device() {
-            return Err(RegistryError::Io(io::Error::new(
+            return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "native EROFS layers are not served from a registry; mount them through the kernel",
-            )));
+            ));
         }
 
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
-            RegistryError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "blob meta size exceeds usize",
-            ))
+            io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
         let mut blob_metadata_bytes = vec![0u8; blob_metadata_size];
         self.get_blob(
@@ -621,7 +564,7 @@ impl Inner {
         )
         .await?;
 
-        Ok(BlobMetadata::from_bytes(blob_metadata_bytes)?)
+        BlobMetadata::from_bytes(blob_metadata_bytes).map_err(io::Error::other)
     }
 }
 
@@ -646,10 +589,9 @@ impl BlobBackend for Registry {
     ) -> io::Result<BlobMetadata> {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
-        Ok(self
-            .inner
+        self.inner
             .runtime
-            .block_on_worker(async move { inner.get_blob_metadata(&blob_id, kind).await })??)
+            .block_on_worker(async move { inner.get_blob_metadata(&blob_id, kind).await })?
     }
 
     /// Fills `dst` with the blob bytes from `offset` on the runtime, recording
@@ -682,9 +624,9 @@ impl BlobBackend for Registry {
             .block_on_worker(async move {
                 let mut buf = vec![0u8; len];
                 let protocol = inner.get_blob(&blob_id, offset, &mut buf, kind).await?;
-                Ok::<_, RegistryError>((buf, protocol))
+                Ok::<_, io::Error>((buf, protocol))
             })
-            .and_then(|result| Ok(result?));
+            .and_then(|result| result);
 
         // Record the metrics and copy the bytes out.
         match result {
@@ -738,12 +680,7 @@ mod tests {
             (**self).label()
         }
 
-        async fn get(
-            &self,
-            url: &str,
-            headers: HeaderMap,
-            kind: ReadKind,
-        ) -> RegistryResult<Response> {
+        async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
             (**self).get(url, headers, kind).await
         }
     }
@@ -787,7 +724,7 @@ mod tests {
             _url: &str,
             _headers: HeaderMap,
             _kind: ReadKind,
-        ) -> RegistryResult<Response> {
+        ) -> io::Result<Response> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let scripted = self
                 .script
@@ -808,7 +745,7 @@ mod tests {
                     reader: Box::new(std::io::Cursor::new(Vec::new())),
                     protocol: Protocol::Dragonfly,
                 }),
-                Scripted::Transport => Err(RegistryError::Io(io::Error::other("scripted failure"))),
+                Scripted::Transport => Err(io::Error::other("scripted failure")),
             }
         }
     }
@@ -844,7 +781,7 @@ mod tests {
             _url: &str,
             headers: HeaderMap,
             _kind: ReadKind,
-        ) -> RegistryResult<Response> {
+        ) -> io::Result<Response> {
             if self.first.swap(false, Ordering::SeqCst) {
                 tokio::time::sleep(self.delay).await;
             }
@@ -975,7 +912,7 @@ mod tests {
         scripted_registry_at(origin.addr, transport, interval, 3)
     }
 
-    fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> RegistryResult<Protocol> {
+    fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> io::Result<Protocol> {
         registry
             .inner
             .runtime
@@ -1055,38 +992,6 @@ dragonfly:
     }
 
     #[test]
-    fn registry_errors_fold_into_io_errors_by_kind() {
-        let test_cases = vec![
-            (
-                RegistryError::PrefetchDeferred(Box::new(RegistryError::UnexpectedStatus(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "slow down".to_string(),
-                ))),
-                io::ErrorKind::QuotaExceeded,
-                vec!["prefetch deferred", "429"],
-            ),
-            (
-                RegistryError::Io(io::Error::new(io::ErrorKind::TimedOut, "timed out")),
-                io::ErrorKind::TimedOut,
-                vec!["timed out"],
-            ),
-            (
-                RegistryError::Unauthorized("no token".to_string()),
-                io::ErrorKind::Other,
-                vec!["unauthorized", "no token"],
-            ),
-        ];
-
-        for (err, kind, fragments) in test_cases {
-            let err: io::Error = err.into();
-            assert_eq!(err.kind(), kind, "{err}");
-            for fragment in fragments {
-                assert!(err.to_string().contains(fragment), "{err}");
-            }
-        }
-    }
-
-    #[test]
     fn ondemand_transport_failure_falls_back_to_origin() {
         let body = b"0123456789".to_vec();
         let origin = OriginStub::serve(body.clone());
@@ -1143,9 +1048,7 @@ dragonfly:
             let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
             let mut dst = vec![0u8; 4];
-            let err: io::Error = read(&registry, ReadKind::Prefetch, &mut dst)
-                .unwrap_err()
-                .into();
+            let err = read(&registry, ReadKind::Prefetch, &mut dst).unwrap_err();
 
             assert_eq!(
                 err.kind(),
@@ -1199,8 +1102,8 @@ dragonfly:
                 let err = read(&registry, kind, &mut dst).unwrap_err();
 
                 assert!(
-                    matches!(err, RegistryError::UnexpectedStatus(got, _) if got == terminal),
-                    "kind={kind:?} status={terminal}: {err:?}"
+                    err.to_string().contains(terminal.as_str()),
+                    "kind={kind:?} status={terminal}: {err}"
                 );
                 assert_eq!(transport.calls(), 1, "kind={kind:?} status={terminal}");
                 assert_eq!(origin.hits(), 0, "kind={kind:?} status={terminal}");
@@ -1300,7 +1203,7 @@ dragonfly:
     }
 
     #[test]
-    fn fallback_origin_failure_surfaces_as_an_io_error() {
+    fn fallback_origin_failure_fails_the_read_without_deferring_it() {
         let transport = ScriptedTransport::new(vec![status(StatusCode::TOO_MANY_REQUESTS)]);
         let registry = scripted_registry_at(dead_addr(), transport.clone(), Duration::ZERO, 0);
 
@@ -1310,7 +1213,11 @@ dragonfly:
         let mut dst = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut dst).unwrap_err();
 
-        assert!(matches!(err, RegistryError::Io(_)), "unexpected: {err:?}");
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::QuotaExceeded,
+            "unexpected: {err}"
+        );
         assert_eq!(transport.calls(), 1);
         assert!(
             metrics::READ_BACKEND_FAILURE_COUNT
@@ -1329,13 +1236,7 @@ dragonfly:
         let mut dst = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut dst).unwrap_err();
 
-        assert!(
-            matches!(
-                err,
-                RegistryError::UnexpectedStatus(StatusCode::INTERNAL_SERVER_ERROR, _)
-            ),
-            "unexpected: {err:?}"
-        );
+        assert!(err.to_string().contains("500"), "unexpected: {err}");
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 2);
     }
@@ -1351,13 +1252,7 @@ dragonfly:
         let mut dst = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut dst).unwrap_err();
 
-        assert!(
-            matches!(
-                err,
-                RegistryError::UnexpectedStatus(StatusCode::INTERNAL_SERVER_ERROR, _)
-            ),
-            "unexpected: {err:?}"
-        );
+        assert!(err.to_string().contains("500"), "unexpected: {err}");
         assert_eq!(origin.hits(), 2);
         assert!(start.elapsed() >= interval);
     }

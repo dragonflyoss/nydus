@@ -1,5 +1,6 @@
 //! Registry authentication: the `WWW-Authenticate` challenge and the header that answers it.
 
+use std::io;
 use std::str::FromStr;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -11,7 +12,6 @@ use serde::Deserialize;
 use url::Url;
 
 use super::http::Http;
-use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
 
 /// The lifetime of a bearer token when the token server does not say.
@@ -43,7 +43,7 @@ pub(crate) enum Challenge {
 
 /// Implements parsing from a `WWW-Authenticate` value.
 impl FromStr for Challenge {
-    type Err = RegistryError;
+    type Err = io::Error;
 
     /// Parses the challenge list in `value` and picks the one to answer: a
     /// `Bearer` when there is one, since a token server also serves anonymous
@@ -54,9 +54,8 @@ impl FromStr for Challenge {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut has_basic = false;
         for challenge in ChallengeParser::new(value) {
-            let challenge = challenge.map_err(|err| {
-                RegistryError::Unauthorized(format!("invalid auth challenge: {err}"))
-            })?;
+            let challenge = challenge
+                .map_err(|err| io::Error::other(format!("invalid auth challenge: {err}")))?;
 
             // Answer a bearer challenge as soon as one appears.
             if challenge.scheme.eq_ignore_ascii_case("Bearer") {
@@ -74,7 +73,7 @@ impl FromStr for Challenge {
                 }
 
                 let Some(realm) = realm else {
-                    return Err(RegistryError::Unauthorized(format!(
+                    return Err(io::Error::other(format!(
                         "bearer challenge without realm: {value}"
                     )));
                 };
@@ -96,7 +95,7 @@ impl FromStr for Challenge {
             return Ok(Self::Basic);
         }
 
-        Err(RegistryError::Unauthorized(format!(
+        Err(io::Error::other(format!(
             "unsupported auth challenge: {value}"
         )))
     }
@@ -127,7 +126,7 @@ enum Authorization {
 impl Authorization {
     /// Creates the basic authorization for `encoded`, the config's
     /// `base64(user:pass)`.
-    fn basic(encoded: &str) -> RegistryResult<Self> {
+    fn basic(encoded: &str) -> io::Result<Self> {
         Ok(Self::Basic(Self::header_value(&format!(
             "Basic {encoded}"
         ))?))
@@ -135,7 +134,7 @@ impl Authorization {
 
     /// Creates a bearer authorization for `token` that expires `expires_in`
     /// from now.
-    fn bearer(token: &str, expires_in: Duration) -> RegistryResult<Self> {
+    fn bearer(token: &str, expires_in: Duration) -> io::Result<Self> {
         Ok(Self::Bearer {
             value: Self::header_value(&format!("Bearer {token}"))?,
             created_at: Instant::now(),
@@ -148,9 +147,9 @@ impl Authorization {
     /// Tokens come from the token server and basic credentials from the
     /// config, so bytes a header cannot carry surface as an auth error
     /// instead of a panic.
-    fn header_value(value: &str) -> RegistryResult<HeaderValue> {
+    fn header_value(value: &str) -> io::Result<HeaderValue> {
         let mut value: HeaderValue = value.parse().map_err(|_| {
-            RegistryError::Unauthorized(
+            io::Error::other(
                 "credentials contain bytes that are invalid in an HTTP header".to_string(),
             )
         })?;
@@ -200,7 +199,7 @@ struct FetchTokenResponse {
 /// Implements the token fetch response.
 impl FetchTokenResponse {
     /// Converts the response into the bearer [Authorization] it carries.
-    fn into_authorization(self) -> RegistryResult<Authorization> {
+    fn into_authorization(self) -> io::Result<Authorization> {
         let token = if self.token.is_empty() {
             self.access_token
         } else {
@@ -208,7 +207,7 @@ impl FetchTokenResponse {
         };
 
         if token.is_empty() {
-            return Err(RegistryError::Unauthorized(
+            return Err(io::Error::other(
                 "empty token from token server".to_string(),
             ));
         }
@@ -238,7 +237,7 @@ impl Authorizer {
     ///
     /// The credentials are validated here so a bad value fails when the
     /// backend is built rather than on the first read.
-    pub(crate) fn new(basic: Option<&str>) -> RegistryResult<Self> {
+    pub(crate) fn new(basic: Option<&str>) -> io::Result<Self> {
         Ok(Self {
             basic: basic.map(Authorization::basic).transpose()?,
             authorization: RwLock::new(None),
@@ -263,14 +262,10 @@ impl Authorizer {
     /// Answers `challenge` and keeps the answer for the requests that follow:
     /// the configured basic credentials, or a bearer token fetched from the
     /// realm through `http`.
-    pub(crate) async fn authenticate(
-        &self,
-        http: &Http,
-        challenge: Challenge,
-    ) -> RegistryResult<()> {
+    pub(crate) async fn authenticate(&self, http: &Http, challenge: Challenge) -> io::Result<()> {
         let authorization = match challenge {
             Challenge::Basic => self.basic.clone().ok_or_else(|| {
-                RegistryError::Unauthorized("registry requires basic-auth credentials".to_string())
+                io::Error::other("registry requires basic-auth credentials".to_string())
             })?,
             Challenge::Bearer {
                 realm,
@@ -294,10 +289,10 @@ impl Authorizer {
         realm: &str,
         service: &str,
         scope: &str,
-    ) -> RegistryResult<Authorization> {
+    ) -> io::Result<Authorization> {
         // Build the token URL from the realm and the challenge's parameters.
         let mut url = Url::parse(realm)
-            .map_err(|err| RegistryError::Unauthorized(format!("invalid realm {realm}: {err}")))?;
+            .map_err(|err| io::Error::other(format!("invalid realm {realm}: {err}")))?;
         url.query_pairs_mut().extend_pairs(
             [("service", service), ("scope", scope)]
                 .into_iter()
@@ -315,13 +310,17 @@ impl Authorizer {
             .request(Method::GET, url.as_str(), headers, ReadKind::OnDemand)
             .await?;
         if !response.status.is_success() {
-            return Err(response.into_registry_error().await);
+            return Err(response.into_io_error().await);
         }
 
         // Parse the token out of the body.
         let body = response.text().await?;
-        let token: FetchTokenResponse = serde_json::from_str(&body)
-            .map_err(|err| RegistryError::Unauthorized(format!("invalid token response: {err}")))?;
+        let token: FetchTokenResponse = serde_json::from_str(&body).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid token response: {err}"),
+            )
+        })?;
 
         token.into_authorization()
     }
@@ -336,7 +335,7 @@ mod tests {
 
     #[test]
     fn from_str_picks_the_challenge_to_answer() {
-        let test_cases: Vec<(&str, fn(RegistryResult<Challenge>))> = vec![
+        let test_cases: Vec<(&str, fn(io::Result<Challenge>))> = vec![
             (
                 r#"Bearer realm="https://auth.example.com/token",service="example.com",scope="repository:library/ubuntu:pull,push""#,
                 |challenge| {
@@ -382,13 +381,13 @@ mod tests {
                 },
             ),
             (r#"Bearer service="example.com""#, |challenge| {
-                assert!(matches!(challenge, Err(RegistryError::Unauthorized(_))));
+                assert!(challenge.is_err());
             }),
             (r#"Bearer realm="unterminated"#, |challenge| {
-                assert!(matches!(challenge, Err(RegistryError::Unauthorized(_))));
+                assert!(challenge.is_err());
             }),
             (r#"Digest realm="registry""#, |challenge| {
-                assert!(matches!(challenge, Err(RegistryError::Unauthorized(_))));
+                assert!(challenge.is_err());
             }),
         ];
 
@@ -449,13 +448,13 @@ mod tests {
     #[tokio::test]
     async fn authenticate_answers_a_basic_challenge_from_the_config() {
         let http = Http::new(&HttpConfig::default(), None).unwrap();
-        let test_cases: Vec<(Option<&str>, fn(RegistryResult<()>, Option<HeaderValue>))> = vec![
+        let test_cases: Vec<(Option<&str>, fn(io::Result<()>, Option<HeaderValue>))> = vec![
             (Some("YWxpY2U6c2VjcmV0"), |result, header| {
                 assert!(result.is_ok());
                 assert_eq!(header.unwrap(), "Basic YWxpY2U6c2VjcmV0");
             }),
             (None, |result, header| {
-                assert!(matches!(result, Err(RegistryError::Unauthorized(_))));
+                assert!(result.is_err());
                 assert_eq!(header, None);
             }),
         ];
@@ -471,7 +470,7 @@ mod tests {
 
     #[test]
     fn into_authorization_accepts_either_token_field() {
-        let test_cases: Vec<(&str, fn(RegistryResult<Authorization>))> = vec![
+        let test_cases: Vec<(&str, fn(io::Result<Authorization>))> = vec![
             (r#"{"token":"abc","expires_in":300}"#, |authorization| {
                 let authorization = authorization.unwrap();
                 assert_eq!(authorization.value(), "Bearer abc");
@@ -486,7 +485,7 @@ mod tests {
                 assert!(!authorization.unwrap().is_valid());
             }),
             (r#"{"token":"","access_token":""}"#, |authorization| {
-                assert!(matches!(authorization, Err(RegistryError::Unauthorized(_))));
+                assert!(authorization.is_err());
             }),
         ];
 
