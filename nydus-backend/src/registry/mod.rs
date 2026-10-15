@@ -10,8 +10,8 @@
 //!                             Registry
 //!                                │
 //!            ┌───────────────────┼───────────────────┐
-//!          Auth            RedirectCache           policy
-//!    handshake, token     signed 3xx URLs    settle a Dragonfly answer
+//!       Authorizer         RedirectCache           policy
+//!    challenge, token     signed 3xx URLs    settle a Dragonfly answer
 //!                                │
 //!                      ┌─────────┴─────────┐
 //!                    Http               Dragonfly
@@ -66,7 +66,7 @@ use nydus_telemetry::metrics::{
 
 use crate::{Backend, BlobBackend, Protocol, ReadKind};
 
-use self::auth::{Auth, Challenge};
+use self::auth::{Authorizer, Challenge};
 #[cfg(feature = "backend-dragonfly")]
 use self::dragonfly::Dragonfly;
 use self::http::{Http, RateLimit};
@@ -199,8 +199,8 @@ struct Inner {
     host: String,
     /// The image repository, such as `library/ubuntu`.
     repository: String,
-    /// The credentials and the cached `Authorization` they produced.
-    auth: Auth,
+    /// The credentials and the `Authorization` the last challenge produced.
+    authorizer: Authorizer,
     /// The signed URLs blob `GET`s were redirected to, by blob hex digest.
     redirects: RedirectCache,
     /// The direct client to the origin.
@@ -256,7 +256,7 @@ impl Registry {
             scheme,
             host,
             config.repository,
-            Auth::new(config.auth.as_deref())?,
+            Authorizer::new(config.auth.as_deref())?,
             http,
             back_to_source,
             dragonfly,
@@ -270,7 +270,7 @@ impl Registry {
         scheme: &'static str,
         host: String,
         repository: String,
-        auth: Auth,
+        authorizer: Authorizer,
         http: Http,
         back_to_source: Http,
         dragonfly: Option<Box<dyn BlobTransport>>,
@@ -286,7 +286,7 @@ impl Registry {
                 scheme,
                 host,
                 repository,
-                auth,
+                authorizer,
                 redirects: RedirectCache::new(),
                 http,
                 back_to_source,
@@ -358,7 +358,7 @@ impl Inner {
     /// resend without Authorization when one was sent, to get a fresh challenge
     ///   │
     ///   ▼
-    /// WWW-Authenticate ──▶ Auth::answer ──▶ resend with it
+    /// WWW-Authenticate ──▶ Authorizer::authenticate ──▶ resend authorized
     /// ```
     async fn authorized_request(
         &self,
@@ -367,9 +367,7 @@ impl Inner {
         mut headers: HeaderMap,
         kind: ReadKind,
     ) -> RegistryResult<Response> {
-        if let Some(authorization) = self.auth.current() {
-            headers.insert(AUTHORIZATION, authorization);
-        }
+        self.authorizer.authorize(&mut headers);
 
         let response = self
             .send(method.clone(), url, headers.clone(), kind)
@@ -394,10 +392,8 @@ impl Inner {
             return Ok(challenge_response);
         };
 
-        headers.insert(
-            AUTHORIZATION,
-            self.auth.answer(&self.http, challenge).await?,
-        );
+        self.authorizer.authenticate(&self.http, challenge).await?;
+        self.authorizer.authorize(&mut headers);
         self.send(method, url, headers, kind).await
     }
 
@@ -816,7 +812,7 @@ mod tests {
             scheme,
             host,
             config.repository,
-            Auth::new(config.auth.as_deref()).unwrap(),
+            Authorizer::new(config.auth.as_deref()).unwrap(),
             http,
             back_to_source,
             Some(Box::new(transport)),
@@ -1109,10 +1105,9 @@ dragonfly:
             assert_eq!(dst, body, "kind={kind:?}");
             assert_eq!(transport.calls(), 2, "kind={kind:?}");
             assert_eq!(origin.hits(), 0, "kind={kind:?}");
-            assert_eq!(
-                registry.inner.auth.current().unwrap(),
-                "Basic YWxpY2U6c2VjcmV0"
-            );
+            let mut authorized = HeaderMap::new();
+            registry.inner.authorizer.authorize(&mut authorized);
+            assert_eq!(authorized[AUTHORIZATION], "Basic YWxpY2U6c2VjcmV0");
         }
     }
 
