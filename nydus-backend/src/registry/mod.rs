@@ -228,7 +228,7 @@ impl Registry {
 
         // Connect the Dragonfly transport when configured.
         #[cfg(feature = "backend-dragonfly")]
-        let dragonfly: Option<Box<dyn Transport>> = match &config.dragonfly {
+        let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
             Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, &runtime)?)),
             None => None,
         };

@@ -52,27 +52,32 @@ impl Dragonfly {
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
-    pub(crate) fn new(config: &DragonflyConfig, runtime: &Runtime) -> io::Result<Self> {
-        // Config::validate bounds max_retries to 3, so it fits the SDK's u8.
-        let ondemand = Proxy::builder()
-            .scheduler_endpoint(config.scheduler_endpoint.clone())
-            .max_retries(config.max_retries as u8);
-        let prefetch = Proxy::builder()
-            .scheduler_endpoint(config.scheduler_endpoint.clone())
-            .max_retries(0);
+    pub(crate) fn new(config: DragonflyConfig, runtime: &Runtime) -> io::Result<Self> {
+        let request_timeout = config.request_timeout;
 
         // Connect on a runtime thread so the scheduler is reached from the
-        // runtime's netns.
+        // runtime's netns. Config::validate bounds max_retries to 3, so it
+        // fits the SDK's u8.
         let (ondemand, prefetch) = runtime
             .block_on_worker(async move {
-                Ok::<_, Error>((ondemand.build().await?, prefetch.build().await?))
+                let ondemand = Proxy::builder()
+                    .scheduler_endpoint(config.scheduler_endpoint.clone())
+                    .max_retries(config.max_retries as u8)
+                    .build()
+                    .await?;
+                let prefetch = Proxy::builder()
+                    .scheduler_endpoint(config.scheduler_endpoint)
+                    .max_retries(0)
+                    .build()
+                    .await?;
+                Ok::<_, Error>((ondemand, prefetch))
             })?
             .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
         Ok(Self {
             ondemand,
             prefetch,
-            request_timeout: config.request_timeout,
+            request_timeout,
         })
     }
 
