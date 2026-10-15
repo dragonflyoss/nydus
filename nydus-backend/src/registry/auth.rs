@@ -270,6 +270,7 @@ impl Authorizer {
                 scope,
             } => self.fetch_token(http, &realm, &service, &scope).await?,
         };
+
         *self.authorization.write().unwrap() = Some(authorization);
         Ok(())
     }
@@ -314,6 +315,7 @@ impl Authorizer {
         let token: FetchTokenResponse = serde_json::from_str(&body).map_err(|err| {
             RegistryError::UnexpectedResponse(format!("invalid token response: {err}"))
         })?;
+
         token.into_authorization()
     }
 }
