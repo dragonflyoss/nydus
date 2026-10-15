@@ -9,7 +9,6 @@
 //! that carries an HTTP status is handed back as a [`Response`], so
 //! [`policy`](super::policy) classifies it by status like an origin answer.
 
-use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -27,20 +26,6 @@ use super::response::Response;
 use super::rt::Runtime;
 use super::{RegistryError, RegistryResult, Transport};
 use crate::{Protocol, ReadKind};
-
-/// The priority hint for background prefetch requests.
-const PRIORITY_PREFETCH: i32 = 3;
-
-/// The priority hint for on-demand (foreground) requests.
-const PRIORITY_ONDEMAND: i32 = 6;
-
-/// Returns the Dragonfly priority of a read kind.
-fn priority(kind: ReadKind) -> i32 {
-    match kind {
-        ReadKind::Prefetch => PRIORITY_PREFETCH,
-        ReadKind::OnDemand => PRIORITY_ONDEMAND,
-    }
-}
 
 /// The Dragonfly SDK transport, one client per read kind so each kind keeps
 /// its own retry budget.
@@ -60,21 +45,20 @@ pub(crate) struct Dragonfly {
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
+    /// The priority hint of a background prefetch request.
+    const PRIORITY_PREFETCH: i32 = 3;
+
+    /// The priority hint of an on-demand request a FUSE reader waits on.
+    const PRIORITY_ONDEMAND: i32 = 6;
+
     /// Creates the transport, connecting to the configured scheduler on
     /// `runtime`.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
-    pub(crate) fn new(config: &DragonflyConfig, runtime: &Runtime) -> io::Result<Dragonfly> {
-        let max_retries = u8::try_from(config.max_retries).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "dragonfly.max_retries {} exceeds the SDK limit",
-                    config.max_retries
-                ),
-            )
-        })?;
+    pub(crate) fn new(config: &DragonflyConfig, runtime: &Runtime) -> io::Result<Self> {
+        // Config::validate bounds max_retries to 3, so it fits the SDK's u8.
+        let max_retries = config.max_retries as u8;
         let endpoint = config.scheduler_endpoint.clone();
         let (ondemand, prefetch) = runtime
             .block_on_worker(async move {
@@ -92,82 +76,66 @@ impl Dragonfly {
             })?
             .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
 
-        Ok(Dragonfly {
+        Ok(Self {
             ondemand,
             prefetch,
             timeout: config.timeout,
         })
     }
 
-    /// Returns the client serving reads of `kind`.
-    fn client(&self, kind: ReadKind) -> &Proxy {
-        match kind {
-            ReadKind::OnDemand => &self.ondemand,
-            ReadKind::Prefetch => &self.prefetch,
+    /// Converts the SDK's answer into a transport response.
+    ///
+    /// A success carries the buffered `body`. A proxy, backend or dfdaemon
+    /// error carrying an HTTP status is an answer, rebuilt as a [`Response`]
+    /// with its status, headers and message, so a `429`, `403` or a dfdaemon
+    /// `422` reaches the policy the same way an origin answer does. Anything
+    /// else, a request timeout, seed peer connectivity, a failed body stream,
+    /// is a transport failure.
+    fn response(result: Result<GetResponse, Error>, body: BytesMut) -> RegistryResult<Response> {
+        match result {
+            Ok(response) => Ok(Response {
+                status: response.status_code.unwrap_or(StatusCode::OK),
+                headers: response.header,
+                reader: Box::new(io::Cursor::new(body.freeze())),
+                protocol: Protocol::Dragonfly,
+            }),
+            Err(Error::ProxyError(ProxyError {
+                status_code: Some(status),
+                header,
+                message,
+            }))
+            | Err(Error::BackendError(BackendError {
+                status_code: Some(status),
+                header,
+                message,
+            }))
+            | Err(Error::DfdaemonError(DfdaemonError {
+                status_code: Some(status),
+                header,
+                message,
+            })) => Ok(Response {
+                status,
+                headers: header
+                    .into_iter()
+                    .filter_map(|(name, value)| {
+                        Some((
+                            HeaderName::from_bytes(name.as_bytes()).ok()?,
+                            HeaderValue::from_str(&value).ok()?,
+                        ))
+                    })
+                    .collect(),
+                reader: Box::new(io::Cursor::new(message.unwrap_or_default().into_bytes())),
+                protocol: Protocol::Dragonfly,
+            }),
+            Err(Error::RequestTimeout(message)) => Err(RegistryError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("dragonfly request timed out: {message}"),
+            ))),
+            Err(err) => Err(RegistryError::Io(io::Error::other(format!(
+                "dragonfly error: {err}"
+            )))),
         }
     }
-}
-
-/// Converts an SDK outcome into a transport outcome.
-///
-/// A success carries the buffered `body`. A proxy, backend or dfdaemon error
-/// carrying an HTTP status is an answer, rebuilt as a [`Response`] with its
-/// status, headers and message, so a `429`, `403` or a dfdaemon `422` reaches
-/// the policy the same way an origin answer does. Anything else, a request
-/// timeout, seed peer connectivity, a failed body stream, is a transport
-/// failure.
-fn into_response(result: Result<GetResponse, Error>, body: BytesMut) -> RegistryResult<Response> {
-    match result {
-        Ok(response) => Ok(Response {
-            status: response.status_code.unwrap_or(StatusCode::OK),
-            headers: response.header,
-            reader: Box::new(std::io::Cursor::new(body.freeze())),
-            protocol: Protocol::Dragonfly,
-        }),
-        Err(Error::ProxyError(ProxyError {
-            status_code: Some(status),
-            header,
-            message,
-        }))
-        | Err(Error::BackendError(BackendError {
-            status_code: Some(status),
-            header,
-            message,
-        }))
-        | Err(Error::DfdaemonError(DfdaemonError {
-            status_code: Some(status),
-            header,
-            message,
-        })) => Ok(Response {
-            status,
-            headers: header_map(header),
-            reader: Box::new(std::io::Cursor::new(
-                message.unwrap_or_default().into_bytes(),
-            )),
-            protocol: Protocol::Dragonfly,
-        }),
-        Err(Error::RequestTimeout(message)) => Err(RegistryError::Io(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("dragonfly request timed out: {message}"),
-        ))),
-        Err(err) => Err(RegistryError::Io(io::Error::other(format!(
-            "dragonfly error: {err}"
-        )))),
-    }
-}
-
-/// Rebuilds a header map from the SDK's string map, dropping entries that are
-/// not valid HTTP headers.
-fn header_map(headers: HashMap<String, String>) -> HeaderMap {
-    headers
-        .into_iter()
-        .filter_map(|(name, value)| {
-            Some((
-                HeaderName::from_bytes(name.as_bytes()).ok()?,
-                HeaderValue::from_str(&value).ok()?,
-            ))
-        })
-        .collect()
 }
 
 /// Implements the blob transport over the Dragonfly SDK.
@@ -182,18 +150,22 @@ impl Transport for Dragonfly {
     /// hint, the SDK adding the P2P and priority headers itself, and logs the
     /// outcome.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
+        let (client, priority) = match kind {
+            ReadKind::OnDemand => (&self.ondemand, Self::PRIORITY_ONDEMAND),
+            ReadKind::Prefetch => (&self.prefetch, Self::PRIORITY_PREFETCH),
+        };
         let request = GetRequest {
             url: url.to_string(),
             header: headers.clone(),
             filtered_query_params: Vec::new(),
-            priority: Some(priority(kind)),
+            priority: Some(priority),
             timeout: self.timeout,
             ..Default::default()
         };
+
         let start = Instant::now();
         let mut body = BytesMut::new();
-        let result = self.client(kind).get_into(&request, &mut body).await;
-        let result = into_response(result, body);
+        let result = Self::response(client.get_into(&request, &mut body).await, body);
         self.log_request_done(&Method::GET, url, &headers, kind, &result, start.elapsed());
         result
     }
@@ -204,110 +176,107 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::*;
-
-    fn proxy_error(status_code: Option<StatusCode>) -> Error {
-        Error::ProxyError(ProxyError {
-            message: Some("proxy".to_string()),
-            header: HashMap::new(),
-            status_code,
-        })
-    }
-
-    fn dfdaemon_error(status_code: Option<StatusCode>, message: &str) -> Error {
-        Error::DfdaemonError(DfdaemonError {
-            message: Some(message.to_string()),
-            header: HashMap::new(),
-            status_code,
-        })
-    }
-
-    fn ok_response(status_code: StatusCode) -> GetResponse {
-        GetResponse {
-            success: status_code.is_success(),
-            header: HeaderMap::new(),
-            status_code: Some(status_code),
-            body: None,
-        }
-    }
+    use std::collections::HashMap;
 
     #[tokio::test]
-    async fn into_response_rebuilds_answers_that_carry_a_status() {
+    async fn response_rebuilds_answers_that_carry_a_status() {
         let test_cases: Vec<(
             Result<GetResponse, Error>,
-            BytesMut,
+            &[u8],
             StatusCode,
             &str,
-            Option<(&str, &str)>,
+            Vec<(&str, &str)>,
         )> = vec![
             (
-                Ok(ok_response(StatusCode::PARTIAL_CONTENT)),
-                BytesMut::from(&b"payload"[..]),
+                Ok(GetResponse {
+                    success: true,
+                    header: HeaderMap::new(),
+                    status_code: Some(StatusCode::PARTIAL_CONTENT),
+                    body: None,
+                }),
+                b"payload",
                 StatusCode::PARTIAL_CONTENT,
                 "payload",
-                None,
+                vec![],
             ),
             (
-                Err(proxy_error(Some(StatusCode::TOO_MANY_REQUESTS))),
-                BytesMut::new(),
+                Err(Error::ProxyError(ProxyError {
+                    message: Some("proxy".to_string()),
+                    header: HashMap::new(),
+                    status_code: Some(StatusCode::TOO_MANY_REQUESTS),
+                })),
+                b"",
                 StatusCode::TOO_MANY_REQUESTS,
                 "proxy",
-                None,
+                vec![],
             ),
             (
-                Err(proxy_error(Some(StatusCode::BAD_GATEWAY))),
-                BytesMut::new(),
+                Err(Error::ProxyError(ProxyError {
+                    message: Some("proxy".to_string()),
+                    header: HashMap::new(),
+                    status_code: Some(StatusCode::BAD_GATEWAY),
+                })),
+                b"",
                 StatusCode::BAD_GATEWAY,
                 "proxy",
-                None,
+                vec![],
             ),
             (
                 Err(Error::BackendError(BackendError {
                     message: Some("origin said no".to_string()),
-                    header: HashMap::from([("x-served-by".to_string(), "origin".to_string())]),
+                    header: HashMap::from([
+                        ("x-served-by".to_string(), "origin".to_string()),
+                        ("bad header".to_string(), "x".to_string()),
+                        ("x-bad-value".to_string(), "bad\nvalue".to_string()),
+                    ]),
                     status_code: Some(StatusCode::FORBIDDEN),
                 })),
-                BytesMut::new(),
+                b"",
                 StatusCode::FORBIDDEN,
                 "origin said no",
-                Some(("x-served-by", "origin")),
+                vec![("x-served-by", "origin")],
             ),
             (
-                Err(dfdaemon_error(
-                    Some(StatusCode::INTERNAL_SERVER_ERROR),
-                    "no space",
-                )),
-                BytesMut::new(),
+                Err(Error::DfdaemonError(DfdaemonError {
+                    message: Some("no space".to_string()),
+                    header: HashMap::new(),
+                    status_code: Some(StatusCode::INTERNAL_SERVER_ERROR),
+                })),
+                b"",
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "no space",
-                None,
+                vec![],
             ),
             (
-                Err(dfdaemon_error(
-                    Some(StatusCode::INSUFFICIENT_STORAGE),
-                    "no space",
-                )),
-                BytesMut::new(),
+                Err(Error::DfdaemonError(DfdaemonError {
+                    message: Some("no space".to_string()),
+                    header: HashMap::new(),
+                    status_code: Some(StatusCode::INSUFFICIENT_STORAGE),
+                })),
+                b"",
                 StatusCode::INSUFFICIENT_STORAGE,
                 "no space",
-                None,
+                vec![],
             ),
             (
-                Err(dfdaemon_error(
-                    Some(StatusCode::UNPROCESSABLE_ENTITY),
-                    "no space",
-                )),
-                BytesMut::new(),
+                Err(Error::DfdaemonError(DfdaemonError {
+                    message: Some("no space".to_string()),
+                    header: HashMap::new(),
+                    status_code: Some(StatusCode::UNPROCESSABLE_ENTITY),
+                })),
+                b"",
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "no space",
-                None,
+                vec![],
             ),
         ];
 
-        for (result, body, status, text, header) in test_cases {
-            let response = into_response(result, body).unwrap();
+        for (result, body, status, text, headers) in test_cases {
+            let response = Dragonfly::response(result, BytesMut::from(body)).unwrap();
             assert_eq!(response.status, status);
             assert_eq!(response.protocol, Protocol::Dragonfly);
-            if let Some((name, value)) = header {
+            assert_eq!(response.headers.len(), headers.len(), "status={status}");
+            for (name, value) in headers {
                 assert_eq!(response.headers.get(name).unwrap(), value);
             }
             assert_eq!(response.text().await.unwrap(), text, "status={status}");
@@ -315,15 +284,26 @@ mod tests {
     }
 
     #[test]
-    fn into_response_turns_failures_without_a_status_into_transport_errors() {
+    fn response_turns_failures_without_a_status_into_transport_errors() {
         let test_cases = vec![
             (
                 Error::RequestTimeout("deadline exceeded".to_string()),
                 io::ErrorKind::TimedOut,
             ),
-            (proxy_error(None), io::ErrorKind::Other),
             (
-                dfdaemon_error(None, "connection refused"),
+                Error::ProxyError(ProxyError {
+                    message: Some("proxy".to_string()),
+                    header: HashMap::new(),
+                    status_code: None,
+                }),
+                io::ErrorKind::Other,
+            ),
+            (
+                Error::DfdaemonError(DfdaemonError {
+                    message: Some("connection refused".to_string()),
+                    header: HashMap::new(),
+                    status_code: None,
+                }),
                 io::ErrorKind::Other,
             ),
             (
@@ -334,20 +314,9 @@ mod tests {
 
         for (err, kind) in test_cases {
             assert!(matches!(
-                into_response(Err(err), BytesMut::new()),
+                Dragonfly::response(Err(err), BytesMut::new()),
                 Err(RegistryError::Io(io_err)) if io_err.kind() == kind
             ));
         }
-    }
-
-    #[test]
-    fn header_map_drops_invalid_entries() {
-        let headers = header_map(HashMap::from([
-            ("content-length".to_string(), "4".to_string()),
-            ("bad header".to_string(), "x".to_string()),
-            ("x-ok".to_string(), "bad\nvalue".to_string()),
-        ]));
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers.get("content-length").unwrap(), "4");
     }
 }
