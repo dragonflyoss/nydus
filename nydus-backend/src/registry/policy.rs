@@ -56,15 +56,6 @@ mod tests {
     use reqwest::StatusCode;
     use std::io;
 
-    fn response(status: StatusCode) -> Response {
-        Response {
-            status,
-            headers: HeaderMap::new(),
-            reader: Box::new(std::io::Cursor::new(Vec::new())),
-            protocol: Protocol::Dragonfly,
-        }
-    }
-
     #[tokio::test]
     async fn decide_serves_definitive_answers_for_both_read_kinds() {
         let test_cases = vec![
@@ -78,9 +69,15 @@ mod tests {
 
         for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
             for &status in &test_cases {
+                let response = Response {
+                    status,
+                    headers: HeaderMap::new(),
+                    reader: Box::new(io::Cursor::new(Vec::new())),
+                    protocol: Protocol::Dragonfly,
+                };
                 assert!(
                     matches!(
-                        Action::decide(kind, Ok(response(status))).await,
+                        Action::decide(kind, Ok(response)).await,
                         Action::Serve(served) if served.status == status
                     ),
                     "kind={kind:?} status={status}"
@@ -91,23 +88,36 @@ mod tests {
 
     #[tokio::test]
     async fn decide_defers_prefetch_and_falls_back_ondemand_on_failures() {
-        let test_cases: Vec<fn() -> RegistryResult<Response>> = vec![
-            || Ok(response(StatusCode::TOO_MANY_REQUESTS)),
-            || Ok(response(StatusCode::SERVICE_UNAVAILABLE)),
-            || Ok(response(StatusCode::INSUFFICIENT_STORAGE)),
-            || Ok(response(StatusCode::REQUEST_TIMEOUT)),
-            || Err(RegistryError::Io(io::Error::other("connection reset"))),
+        let test_cases = vec![
+            Some(StatusCode::TOO_MANY_REQUESTS),
+            Some(StatusCode::SERVICE_UNAVAILABLE),
+            Some(StatusCode::INSUFFICIENT_STORAGE),
+            Some(StatusCode::REQUEST_TIMEOUT),
+            None,
         ];
 
-        for failure in test_cases {
-            assert!(matches!(
-                Action::decide(ReadKind::Prefetch, failure()).await,
-                Action::Defer(RegistryError::PrefetchDeferred(_))
-            ));
-            assert!(matches!(
-                Action::decide(ReadKind::OnDemand, failure()).await,
-                Action::Fallback(_)
-            ));
+        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+            for &status in &test_cases {
+                let outcome = match status {
+                    Some(status) => Ok(Response {
+                        status,
+                        headers: HeaderMap::new(),
+                        reader: Box::new(io::Cursor::new(Vec::new())),
+                        protocol: Protocol::Dragonfly,
+                    }),
+                    None => Err(RegistryError::Io(io::Error::other("connection reset"))),
+                };
+                let action = Action::decide(kind, outcome).await;
+                match kind {
+                    ReadKind::OnDemand => {
+                        assert!(matches!(action, Action::Fallback(_)), "status={status:?}")
+                    }
+                    ReadKind::Prefetch => assert!(
+                        matches!(action, Action::Defer(RegistryError::PrefetchDeferred(_))),
+                        "status={status:?}"
+                    ),
+                }
+            }
         }
     }
 }
