@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tempfile::{tempdir, NamedTempFile, TempDir};
 
 use nydus::build::{build_image, BuildImageOptions, NativeLayout};
-use nydus_backend::{BlobBackend, Local, ReadContext};
+use nydus_backend::{BlobBackend, Local, ReadKind};
 use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
 use nydus_core::build::bootstrap::render_bootstrap;
 use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeData, InodeInfo};
@@ -595,8 +595,16 @@ fn zstd_config_windowlog_range() {
 }
 
 impl BlobBackend for CountingBackend {
-    fn blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
-        self.local.blob_metadata(blob_id)
+    fn backend(&self) -> nydus_backend::Backend {
+        self.local.backend()
+    }
+
+    fn protocol(&self) -> Option<nydus_backend::Protocol> {
+        self.local.protocol()
+    }
+
+    fn blob_metadata(&self, blob_id: &[u8; 32], kind: ReadKind) -> io::Result<BlobMetadata> {
+        self.local.blob_metadata(blob_id, kind)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; 32]) -> io::Result<bool> {
@@ -608,13 +616,13 @@ impl BlobBackend for CountingBackend {
         blob_id: &[u8; 32],
         offset: u64,
         dst: &mut [u8],
-        context: ReadContext,
+        kind: ReadKind,
     ) -> io::Result<()> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
         }
-        self.local.read_range_into(blob_id, offset, dst, context)
+        self.local.read_range_into(blob_id, offset, dst, kind)
     }
 }
 

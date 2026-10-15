@@ -14,10 +14,14 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
-use nydus_backend::BlobBackend;
+use nydus_backend::{BlobBackend, ReadKind};
 use nydus_format::blob::BlobMetadataChunkGroupExtent;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
-use nydus_telemetry::metrics::ImageMetrics;
+use nydus_telemetry::metrics::{
+    collect_fill_chunk_group_from_redirect_blob_failure_metrics,
+    FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT, FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT,
+    PREFETCH_REDIRECT_BLOB_TRAFFIC,
+};
 
 use super::{BlobCache, LocalBlobCache, RawDeviceBlobCache, RemoteBlobCache};
 
@@ -39,7 +43,9 @@ struct BlobSlot {
 }
 
 impl BlobSlot {
-    fn cache(&self, metrics: &Arc<ImageMetrics>) -> io::Result<Arc<dyn BlobCache>> {
+    /// The blob's cache, `kind` attributing the blob metadata fetch a cold
+    /// open may need.
+    fn cache(&self, kind: ReadKind) -> io::Result<Arc<dyn BlobCache>> {
         if let Some(cache) = self.cache.read().unwrap().as_ref() {
             return Ok(cache.clone());
         }
@@ -53,18 +59,18 @@ impl BlobSlot {
             Arc::new(RawDeviceBlobCache::new(self.blob_id, self.backend.clone()))
         } else {
             match &self.cache_dir {
-                Some(cache_dir) => Arc::new(LocalBlobCache::open_with_trace_and_metrics(
+                Some(cache_dir) => Arc::new(LocalBlobCache::open_with_trace(
                     self.blob_id,
                     self.blob_index as u32,
                     cache_dir,
                     self.backend.clone(),
                     self.trace_recorder.clone(),
-                    metrics.clone(),
+                    kind,
                 )?),
-                None => Arc::new(RemoteBlobCache::open_with_metrics(
+                None => Arc::new(RemoteBlobCache::open(
                     self.blob_id,
                     self.backend.clone(),
-                    metrics.clone(),
+                    kind,
                 )?),
             }
         };
@@ -76,7 +82,6 @@ impl BlobSlot {
 /// The set of per-blob lazy caches backing an opened image.
 pub struct BlobCaches {
     slots: HashMap<u16, BlobSlot>,
-    metrics: Arc<ImageMetrics>,
 }
 
 impl BlobCaches {
@@ -85,7 +90,6 @@ impl BlobCaches {
     pub fn empty() -> Self {
         Self {
             slots: HashMap::new(),
-            metrics: nydus_telemetry::metrics::process_metrics(),
         }
     }
 
@@ -97,22 +101,6 @@ impl BlobCaches {
         backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
-    ) -> io::Result<Self> {
-        Self::new_with_metrics(
-            entries,
-            backend,
-            cache_dir,
-            trace_recorder,
-            nydus_telemetry::metrics::process_metrics(),
-        )
-    }
-
-    pub fn new_with_metrics(
-        entries: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
-        backend: Arc<dyn BlobBackend>,
-        cache_dir: Option<&Path>,
-        trace_recorder: Option<Arc<TraceRecorder>>,
-        metrics: Arc<ImageMetrics>,
     ) -> io::Result<Self> {
         let slots = entries
             .into_iter()
@@ -130,11 +118,7 @@ impl BlobCaches {
                 )
             })
             .collect();
-        Ok(Self { slots, metrics })
-    }
-
-    pub(crate) fn metrics(&self) -> &Arc<ImageMetrics> {
-        &self.metrics
+        Ok(Self { slots })
     }
 
     /// Whether the set contains the blob identified by `blob_index`.
@@ -147,9 +131,10 @@ impl BlobCaches {
         self.slots.keys().copied()
     }
 
-    /// The (lazily opened) blob cache for the blob identified by `blob_index`.
-    pub fn cache(&self, blob_index: u16) -> io::Result<Arc<dyn BlobCache>> {
-        self.try_cache(blob_index).ok_or_else(|| {
+    /// The (lazily opened) blob cache for the blob identified by `blob_index`,
+    /// `kind` attributing the blob metadata fetch a cold open may need.
+    pub fn cache(&self, blob_index: u16, kind: ReadKind) -> io::Result<Arc<dyn BlobCache>> {
+        self.try_cache(blob_index, kind).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("blob {blob_index} not found"),
@@ -161,17 +146,19 @@ impl BlobCaches {
     /// cache open (`Some(Err)`), so callers can attach their own errors.
     ///
     /// [`cache`]: Self::cache
-    pub fn try_cache(&self, blob_index: u16) -> Option<io::Result<Arc<dyn BlobCache>>> {
-        self.slots
-            .get(&blob_index)
-            .map(|slot| slot.cache(&self.metrics))
+    pub fn try_cache(
+        &self,
+        blob_index: u16,
+        kind: ReadKind,
+    ) -> Option<io::Result<Arc<dyn BlobCache>>> {
+        self.slots.get(&blob_index).map(|slot| slot.cache(kind))
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
     /// blob (a REDIRECT blob produced by `nydus optimize`). Opens the blob
     /// cache, which reads the local blob meta but performs no data prefetch.
     pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
-        Ok(self.cache(blob_index)?.is_redirect())
+        Ok(self.cache(blob_index, ReadKind::Prefetch)?.is_redirect())
     }
 
     /// Prefetch every chunk group of the blob identified by `blob_index`.
@@ -187,7 +174,7 @@ impl BlobCaches {
         timeout: Duration,
     ) -> io::Result<()> {
         let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
-        let cache = self.cache(blob_index)?;
+        let cache = self.cache(blob_index, ReadKind::Prefetch)?;
         // Serialize prefetch of the same blob across processes sharing the
         // cache directory: with many identical instances cold-starting on one
         // node, only the lock owner streams from the backend while the others
@@ -202,17 +189,28 @@ impl BlobCaches {
         // Time the ondemand blob prefetch and report how many source groups
         // it warmed versus skipped, so operators can tell whether the warmup
         // outran the workload.
-        let fill_before = self.metrics.cache_redirect_fill_chunk_group_total();
-        let skip_before = self.metrics.cache_redirect_skip_chunk_group_total();
+        let fills = || {
+            FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT
+                .with_label_values(&[])
+                .get()
+        };
+        let skips = || {
+            FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
+                .with_label_values(&[])
+                .get()
+        };
+        let bytes = || PREFETCH_REDIRECT_BLOB_TRAFFIC.with_label_values(&[]).get();
+        let (fill_before, skip_before, bytes_before) = (fills(), skips(), bytes());
         let start = Instant::now();
         let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), workers, deadline);
         info!(
-            "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} chunk groups, skipped {}",
+            "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} chunk groups, skipped {}, read {} bytes",
             blob_index,
             start.elapsed(),
             workers.max(1),
-            self.metrics.cache_redirect_fill_chunk_group_total() - fill_before,
-            self.metrics.cache_redirect_skip_chunk_group_total() - skip_before,
+            fills() - fill_before,
+            skips() - skip_before,
+            bytes() - bytes_before,
         );
         result
     }
@@ -232,7 +230,7 @@ impl BlobCaches {
     ) -> io::Result<()> {
         let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
             let redirect = group.redirect()?;
-            match self.try_cache(redirect.source_blob_index()) {
+            match self.try_cache(redirect.source_blob_index(), ReadKind::Prefetch) {
                 Some(Ok(source)) => Some(source),
                 Some(Err(err)) => {
                     warn!(
@@ -260,12 +258,12 @@ impl BlobCaches {
         };
         cache.for_each_redirect_chunk_group(workers, deadline, &skip, &|group, payload| {
             let (Some(redirect), Some(source)) = (group.redirect(), source_of(group)) else {
-                self.metrics.inc_cache_redirect_skip_chunk_group();
+                collect_fill_chunk_group_from_redirect_blob_failure_metrics();
                 return Ok(());
             };
             let source_index = redirect.source_chunk_group_index() as usize;
             if let Err(err) = source.fill_chunk_group_from_redirect(source_index, payload) {
-                self.metrics.inc_cache_redirect_skip_chunk_group();
+                collect_fill_chunk_group_from_redirect_blob_failure_metrics();
                 warn!(
                     "failed to fill chunk group {source_index} of blob {} from ondemand blob {blob_index}: {err}",
                     redirect.source_blob_index()

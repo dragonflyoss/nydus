@@ -26,18 +26,18 @@ backend:
     # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
 
-    # HTTP client settings: timeouts, retries, and TLS trust. The whole block
-    # and every field are optional; the timeout and retry limits also apply to
-    # Dragonfly SDK requests.
+    # HTTP client settings of requests to the origin registry: timeouts,
+    # retries, and TLS trust. The whole block and every field are optional.
     http:
-      # Per-request timeout (connect + read), e.g. `5s` or `1m`; `0s` disables
-      # it. Default: 5s. Kept short because a read holds its chunk group's
-      # fetch claim for its whole duration, and the readers waiting behind
-      # that claim are FUSE worker threads.
-      timeout: 5s
+      # Timeout of a request to the origin registry (connect + read), e.g.
+      # `5s` or `1m`, greater than zero. Default: 5s. Kept short because a
+      # read holds its chunk group's fetch claim for its whole duration, and
+      # the readers waiting behind that claim are FUSE worker threads.
+      request_timeout: 5s
 
       # Maximum number of retry attempts per request, applied by the HTTP
-      # client's retry middleware and by the Dragonfly SDK. Default: 3.
+      # client's retry middleware on direct origin requests and on origin
+      # requests issued when Dragonfly cannot serve a read. Default: 3.
       max_retries: 3
 
       # Optional proxy block routing every registry request through an HTTP
@@ -61,26 +61,40 @@ backend:
         #
         # ca_cert: /etc/nydus/certs/registry-ca.pem
 
-      # Thread bounds of the process-wide async runtime behind the registry
-      # client. Workers only move bytes for the connection pool (readers
-      # block on their own threads); the blocking pool serves DNS lookups
-      # and shrinks again after 10 s idle. 0 selects the defaults (2 and 8).
-      # The runtime is shared by every registry backend in the process, so
-      # only the first backend constructed with non-zero values applies.
+      # Thread bounds of each async runtime behind the registry client, one
+      # for on-demand reads and one for prefetch. Workers only move bytes for
+      # the connection pool (readers block on their own threads); the
+      # blocking pool serves DNS lookups and shrinks again after 10 s idle.
+      # Defaults: 2 and 8 per runtime.
       #
       # worker_threads: 2
       # max_blocking_threads: 8
 
-    # Optional Dragonfly block (requires the `backend-dragonfly-proxy`
+    # Optional Dragonfly block (requires the `backend-dragonfly`
     # feature). When set, blob GETs are routed through the Dragonfly client
-    # SDK for P2P distribution, falling back to the origin registry when a
-    # Dragonfly request still fails after the SDK's retries; every other
-    # request goes directly to the origin registry. Omit to talk to the
-    # origin directly.
+    # SDK for P2P distribution. An on-demand read the seed peers cannot serve
+    # goes back to the origin registry through a rate limit, a prefetch read
+    # is rescheduled hours later instead. Every other request goes directly
+    # to the origin registry. Omit to talk to the origin directly.
     #
     # dragonfly:
-    #   # The Dragonfly scheduler endpoint (gRPC).
-    #   scheduler_endpoint: http://127.0.0.1:65000
+    #   # The Dragonfly scheduler service address with the scheme.
+    #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
+    #
+    #   # Timeout of each attempt of a request through the seed peers, e.g.
+    #   # `30s` or `1m`. Default: 30s.
+    #   request_timeout: 30s
+    #
+    #   # Retries of an on-demand read on a transient failure (timeout,
+    #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer.
+    #   # Default: 1, at most 3. Prefetch reads never retry.
+    #   max_retries: 1
+    #
+    #   # Origin reads issued when the seed peers cannot serve an on-demand
+    #   # read.
+    #   back_to_source:
+    #     # Rate limit in requests per second; 0 disables it. Default: 1.
+    #     request_rate_limit: 1
 
 storage:
   # Persistent chunk cache directory (equivalent to --cache-dir). Optional:
@@ -106,10 +120,10 @@ storage:
 prefetch:
   # Number of concurrently prefetched blobs.
   concurrent_blob_count: 10
-  # Per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching one
-  # whole blob may take, while `http.timeout` bounds each backend request
-  # within it. `0s` disables the bound. Default: 1h.
-  timeout: 1h
+  # Timeout of prefetching one whole blob, e.g. `1h`, while
+  # `http.request_timeout` bounds each backend request within it. `0s`
+  # disables the bound. Default: 1h.
+  blob_timeout: 1h
   # Which blobs to pull: `none` disables prefetch; `ondemand` (default)
   # prefetches only the "ondemand" blob produced by `nydus optimize`, which
   # holds the recorded hot set in access order, without pulling the whole

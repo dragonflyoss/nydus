@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::{BlobBackend, RawDeviceFile, ReadContext, ReadKind};
+use nydus_backend::{BlobBackend, RawDeviceFile, ReadKind};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use super::BlobCache;
@@ -49,12 +49,8 @@ impl BlobCache for RawDeviceBlobCache {
         if dst.is_empty() {
             return Ok(());
         }
-        self.backend.read_range_into(
-            &self.blob_id,
-            offset,
-            dst,
-            ReadContext::raw(ReadKind::OnDemand),
-        )
+        self.backend
+            .read_range_into(&self.blob_id, offset, dst, ReadKind::OnDemand)
     }
 
     /// A raw device holds no chunk groups to warm.
@@ -106,7 +102,7 @@ fn unsupported() -> io::Error {
 mod tests {
     use super::*;
     use crate::io::pread_exact;
-    use nydus_backend::{metered, Local};
+    use nydus_backend::Local;
     use nydus_format::blob::BlobMetadata;
     use nydus_test_utils::blob::FullBlob;
     use tempfile::tempdir;
@@ -121,9 +117,9 @@ mod tests {
     fn local_raw_device_maps_the_store_file_directly() {
         let dir = tempdir().unwrap();
         let (payload, blob_id) = write_raw_device_blob(dir.path());
-        let backend = metered(Arc::new(Local::new(dir.path().to_path_buf())));
+        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(dir.path().to_path_buf()));
         assert!(backend.is_raw_device(&blob_id).unwrap());
-        assert!(backend.blob_metadata(&blob_id).is_err());
+        assert!(backend.blob_metadata(&blob_id, ReadKind::OnDemand).is_err());
 
         let cache = RawDeviceBlobCache::new(blob_id, backend);
         let mut out = vec![0u8; 100];
@@ -157,8 +153,20 @@ mod tests {
     struct Streamed(Local);
 
     impl BlobBackend for Streamed {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.0.blob_metadata(blob_id)
+        fn backend(&self) -> nydus_backend::Backend {
+            self.0.backend()
+        }
+
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
+            self.0.protocol()
+        }
+
+        fn blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            kind: ReadKind,
+        ) -> io::Result<BlobMetadata> {
+            self.0.blob_metadata(blob_id, kind)
         }
 
         fn read_range_into(
@@ -166,9 +174,9 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            context: ReadContext,
+            kind: ReadKind,
         ) -> io::Result<()> {
-            self.0.read_range_into(blob_id, offset, dst, context)
+            self.0.read_range_into(blob_id, offset, dst, kind)
         }
     }
 

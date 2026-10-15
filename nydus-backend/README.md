@@ -5,17 +5,17 @@ Data-plane blob backends for
 registry, with optional Dragonfly SDK P2P reads.
 
 Every API here returns `io::Result` so the OS errno survives to the service
-edges; this crate does not depend on the control-plane error type.
-Backend-private errors (registry auth, Dragonfly classification) are matched
-for retry decisions internally and fold into `io::Error` at the trait
-boundary.
+edges; this crate does not depend on the control-plane error type. Registry
+auth and Dragonfly failures are `io::Error`s too; a prefetch read Dragonfly
+could not serve is an `io::ErrorKind::QuotaExceeded`, the one kind the storage
+layer acts on.
 
 ## Features
 
 | Feature | Description |
 | --- | --- |
 | `backend-registry` | Container image registry backend (OCI distribution). |
-| `backend-dragonfly-proxy` | Dragonfly P2P SDK proxy support for the registry backend. |
+| `backend-dragonfly` | Dragonfly P2P reads for the registry backend. |
 
 All features are disabled by default, keeping the dependency footprint
 minimal (local backend only).

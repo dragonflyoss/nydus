@@ -13,14 +13,20 @@ use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
 use crate::chunk_group_map::ChunkGroupMap;
-use nydus_backend::{BlobBackend, ReadContext, ReadKind};
+use nydus_backend::{BlobBackend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
-use nydus_telemetry::metrics::ImageMetrics;
+use nydus_telemetry::metrics::{
+    collect_fill_chunk_group_from_redirect_blob_failure_metrics,
+    collect_fill_chunk_group_from_redirect_blob_finished_metrics,
+    collect_prefetch_redirect_blob_metrics, collect_read_chunk_group_metrics, Storage,
+};
 
 use super::chunk_group_lock::ChunkGroupLocks;
-use super::{plan_prefetch_batches, validate_chunk_group_for_image, BlobCache, ChunkGroupBuffers};
+use super::{
+    plan_prefetch_batches, validate_chunk_group_with_metrics, BlobCache, ChunkGroupBuffers,
+};
 
 #[derive(Clone)]
 enum FlightResult {
@@ -84,9 +90,6 @@ impl Flight {
 /// directory.
 pub struct LocalBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
-    /// Digest naming this blob's cache files, shared by every image that
-    /// references the same blob.
-    cache_key: [u8; SHA256_DIGEST_SIZE],
     /// Device/blob index in the merged image, used to attribute on-demand
     /// chunk group accesses in the access trace.
     blob_index: u32,
@@ -103,7 +106,6 @@ pub struct LocalBlobCache {
     /// re-checks. A failed open leaves the slot empty and retryable.
     cache_file: RwLock<Option<Arc<File>>>,
     backend: Arc<dyn BlobBackend>,
-    metrics: Arc<ImageMetrics>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     /// In-process single flight keyed by group index; one flight covers
     /// every group of its fetch window.
@@ -125,33 +127,25 @@ impl LocalBlobCache {
         cache_dir: &Path,
         backend: Arc<dyn BlobBackend>,
     ) -> io::Result<Self> {
-        Self::open_with_trace(blob_id, blob_index, cache_dir, backend, None)
+        Self::open_with_trace(
+            blob_id,
+            blob_index,
+            cache_dir,
+            backend,
+            None,
+            ReadKind::OnDemand,
+        )
     }
 
+    /// Open the blob's cache, recording reads to `trace_recorder` when set
+    /// and attributing the blob metadata fetch a cold open may need to `kind`.
     pub fn open_with_trace(
         blob_id: [u8; SHA256_DIGEST_SIZE],
         blob_index: u32,
         cache_dir: &Path,
         backend: Arc<dyn BlobBackend>,
         trace_recorder: Option<Arc<TraceRecorder>>,
-    ) -> io::Result<Self> {
-        Self::open_with_trace_and_metrics(
-            blob_id,
-            blob_index,
-            cache_dir,
-            backend,
-            trace_recorder,
-            nydus_telemetry::metrics::process_metrics(),
-        )
-    }
-
-    pub(crate) fn open_with_trace_and_metrics(
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        blob_index: u32,
-        cache_dir: &Path,
-        backend: Arc<dyn BlobBackend>,
-        trace_recorder: Option<Arc<TraceRecorder>>,
-        metrics: Arc<ImageMetrics>,
+        kind: ReadKind,
     ) -> io::Result<Self> {
         fs::create_dir_all(cache_dir)?;
 
@@ -159,7 +153,7 @@ impl LocalBlobCache {
         let cache_key_hex = hex::encode(cache_key);
         let blob_metadata_path = cache_dir.join(format!("{cache_key_hex}{}", BlobMetadata::SUFFIX));
         let blob_metadata =
-            load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend)?;
+            load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend, kind)?;
         let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
         let group_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
@@ -204,11 +198,9 @@ impl LocalBlobCache {
         let traced_chunk_groups = (0..blob_metadata.chunk_group_count())
             .map(|_| AtomicBool::new(false))
             .collect();
-        metrics.track_blob_chunk_groups(cache_key, blob_metadata.chunk_group_count() as u64);
 
         Ok(Self {
             blob_id,
-            cache_key,
             blob_index,
             chunk_group_map,
             blob_metadata,
@@ -217,7 +209,6 @@ impl LocalBlobCache {
             prefetch_lock_path,
             cache_file: RwLock::new(None),
             backend,
-            metrics,
             trace_recorder,
             inflight: Mutex::new(HashMap::new()),
             cache_mmap: OnceLock::new(),
@@ -229,6 +220,16 @@ impl LocalBlobCache {
     /// compressor).
     pub fn blob_metadata(&self) -> &BlobMetadata {
         &self.blob_metadata
+    }
+
+    /// Count a chunk group read of `kind` served from `storage`.
+    fn count_chunk_group(&self, kind: ReadKind, storage: Storage) {
+        collect_read_chunk_group_metrics(
+            kind,
+            storage,
+            self.backend.backend(),
+            self.backend.protocol(),
+        );
     }
 
     /// Whether chunk group `index` is ready.
@@ -275,7 +276,6 @@ impl LocalBlobCache {
                 .open(&self.cache_data_path)?,
         );
         file.set_len(self.blob_metadata.logical_size())?;
-        self.metrics.inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
     }
@@ -324,7 +324,7 @@ impl LocalBlobCache {
                 "blob read beyond cache data file",
             ));
         }
-        self.metrics.inc_cache_hit_chunk_group();
+        self.count_chunk_group(ReadKind::OnDemand, Storage::Local);
         Ok(Some(&mmap[offset as usize..end as usize]))
     }
 
@@ -368,7 +368,7 @@ impl LocalBlobCache {
     fn ensure_chunk_groups(&self, offset: u64, end: u64, cache_file: &File) -> io::Result<()> {
         for index in self.chunk_group_span(offset, end)? {
             if self.chunk_group_ready(index)? {
-                self.metrics.inc_cache_hit_chunk_group();
+                self.count_chunk_group(ReadKind::OnDemand, Storage::Local);
             } else {
                 self.ensure_chunk_group_window(index, cache_file)?;
             }
@@ -444,7 +444,7 @@ impl LocalBlobCache {
 
         let result = (|| {
             if self.chunk_group_ready(first)? {
-                self.metrics.inc_cache_hit_chunk_group();
+                self.count_chunk_group(ReadKind::OnDemand, Storage::Local);
                 return Ok(());
             }
             // Claim the window across the processes sharing this cache. The
@@ -459,7 +459,7 @@ impl LocalBlobCache {
             let _claim = self.chunk_group_locks.acquire(window.clone());
             let window = self.trim_ready(window)?;
             if window.is_empty() {
-                self.metrics.inc_cache_hit_chunk_group();
+                self.count_chunk_group(ReadKind::OnDemand, Storage::Local);
                 return Ok(());
             }
             let mut buffers = ChunkGroupBuffers::default();
@@ -470,7 +470,7 @@ impl LocalBlobCache {
                 cache_file,
             )?;
             for _ in window {
-                self.metrics.inc_cache_ondemand_fill_chunk_group();
+                self.count_chunk_group(ReadKind::OnDemand, Storage::Backend);
             }
             Ok(())
         })();
@@ -509,7 +509,7 @@ impl LocalBlobCache {
         }
         self.fill_chunk_group_window(batch.clone(), ReadKind::Prefetch, buffers, cache_file)?;
         for _ in batch {
-            self.metrics.inc_cache_fill_chunk_group();
+            self.count_chunk_group(ReadKind::Prefetch, Storage::Backend);
         }
         Ok(())
     }
@@ -532,13 +532,8 @@ impl LocalBlobCache {
         })?;
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
-        let ctx = ReadContext::chunk_group(
-            kind,
-            head.logical_offset(),
-            tail.logical_range().end - head.logical_offset(),
-        );
         self.backend
-            .read_range_into(&self.blob_id, head.compressed_offset(), encoded, ctx)?;
+            .read_range_into(&self.blob_id, head.compressed_offset(), encoded, kind)?;
         Ok((encoded, decoded, head.compressed_offset()))
     }
 
@@ -565,13 +560,7 @@ impl LocalBlobCache {
             )?;
             out
         };
-        validate_chunk_group_for_image(
-            &self.backend,
-            &self.blob_metadata,
-            group,
-            payload,
-            &self.metrics,
-        )?;
+        validate_chunk_group_with_metrics(&self.backend, &self.blob_metadata, group, payload)?;
         Ok(payload)
     }
 
@@ -622,15 +611,19 @@ impl LocalBlobCache {
         }
         let (encoded, decoded, base) =
             self.fetch_window(&(start..end), ReadKind::Prefetch, buffers)?;
+        collect_prefetch_redirect_blob_metrics(encoded.len() as u64);
         for index in start..end {
             let group = self.chunk_group(index);
             if skip(&group) {
                 continue;
             }
             match self.decode_group(&group, base, encoded, decoded) {
-                Ok(payload) => cb(&group, payload)?,
+                Ok(payload) => {
+                    self.count_chunk_group(ReadKind::Prefetch, Storage::Backend);
+                    cb(&group, payload)?
+                }
                 Err(err) => {
-                    self.metrics.inc_cache_redirect_skip_chunk_group();
+                    collect_fill_chunk_group_from_redirect_blob_failure_metrics();
                     warn!(
                         "skipping redirect chunk group {index} of blob {}: {err}",
                         self.blob_index
@@ -725,29 +718,11 @@ impl LocalBlobCache {
         // Fast path: the sticky all-ready flag says every group is already
         // decoded into the cache file, so skip the per-group walk entirely.
         if self.chunk_group_map.is_all_ready() {
-            self.metrics.inc_cache_hit_chunk_group();
+            self.count_chunk_group(ReadKind::OnDemand, Storage::Local);
             return Ok(());
         }
 
         self.ensure_chunk_groups(offset, end, cache_file)
-    }
-}
-
-impl Drop for LocalBlobCache {
-    fn drop(&mut self) {
-        // Mirror the gauge updates from `open_with_trace` and `cache_file` so
-        // repeatedly opening and dropping caches does not inflate them.
-        // Recover from a poisoned lock: panicking in `Drop` during an unwind
-        // would abort the process.
-        let opened = self
-            .cache_file
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some();
-        if opened {
-            self.metrics.dec_cache_opened_files();
-        }
-        self.metrics.untrack_blob_chunk_groups(&self.cache_key);
     }
 }
 
@@ -925,23 +900,17 @@ impl BlobCache for LocalBlobCache {
                 )
             })?;
         if self.chunk_group_ready(chunk_group_index)? {
-            self.metrics.inc_cache_hit_chunk_group();
+            self.count_chunk_group(ReadKind::Prefetch, Storage::Local);
             return Ok(());
         }
         // Cross-check against this blob's own metadata: the redirect group's
         // crc32 and chunk lengths were copied from this group at optimize
         // time, so any divergence (stale optimize artifact, corrupted
         // transfer) is caught here before it can poison the cache.
-        validate_chunk_group_for_image(
-            &self.backend,
-            &self.blob_metadata,
-            &group,
-            payload,
-            &self.metrics,
-        )?;
+        validate_chunk_group_with_metrics(&self.backend, &self.blob_metadata, &group, payload)?;
         let cache_file = self.cache_file()?;
         self.write_chunk_group(&group, payload, cache_file.as_ref())?;
-        self.metrics.inc_cache_redirect_fill_chunk_group();
+        collect_fill_chunk_group_from_redirect_blob_finished_metrics();
         Ok(())
     }
 
@@ -1014,6 +983,7 @@ fn load_or_fetch_blob_metadata(
     cache_dir: &Path,
     blob_metadata_path: &Path,
     backend: &Arc<dyn BlobBackend>,
+    kind: ReadKind,
 ) -> io::Result<BlobMetadata> {
     if !blob_metadata_path.is_file() {
         // `O_EXCL` creation keeps the name unique against other processes
@@ -1022,7 +992,7 @@ fn load_or_fetch_blob_metadata(
             .prefix(".blob-meta-")
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
-        backend.save_blob_metadata(&blob_id, tmp.path())?;
+        backend.save_blob_metadata(&blob_id, kind, tmp.path())?;
         if let Err(err) = BlobMetadata::from_path(tmp.path()) {
             return Err(io::Error::other(err));
         }
@@ -1443,6 +1413,7 @@ mod tests {
             cache_dir.path(),
             backend as Arc<dyn BlobBackend>,
             Some(recorder.clone()),
+            ReadKind::OnDemand,
         )
         .unwrap();
         super::super::set_fetch_size(1 << 20);
@@ -1541,8 +1512,20 @@ mod tests {
     }
 
     impl BlobBackend for CountingBackend {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.inner.blob_metadata(blob_id)
+        fn backend(&self) -> nydus_backend::Backend {
+            self.inner.backend()
+        }
+
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
+            self.inner.protocol()
+        }
+
+        fn blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            kind: ReadKind,
+        ) -> io::Result<BlobMetadata> {
+            self.inner.blob_metadata(blob_id, kind)
         }
 
         fn read_range_into(
@@ -1550,10 +1533,10 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            ctx: ReadContext,
+            kind: ReadKind,
         ) -> io::Result<()> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst, ctx)
+            self.inner.read_range_into(blob_id, offset, dst, kind)
         }
     }
 

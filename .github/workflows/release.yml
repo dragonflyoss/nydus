@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  NYDUS_FEATURES: cli,uffd,fanotify,backend-dragonfly-proxy
+  NYDUS_FEATURES: cli,uffd,fanotify,backend-dragonfly
 
 permissions:
   contents: read

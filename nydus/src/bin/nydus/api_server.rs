@@ -1,7 +1,7 @@
 //! Lightweight HTTP server exposing Prometheus metrics over a Unix socket.
 //!
-//! The server is intentionally tiny: it serves `GET /metrics` (the Prometheus
-//! text exposition produced by [`nydus_telemetry::metrics`]) and returns `404` for
+//! The server is intentionally tiny: it serves `GET /metrics` (the text
+//! exposition of [`nydus_telemetry::metrics::REGISTRY`]) and returns `404` for
 //! everything else. It runs on its own current-thread Tokio runtime in a
 //! background thread so it stays independent of the backend's runtime and of
 //! any cargo feature, and is shut down cleanly when the mount exits.
@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use http_body_util::Full;
-use hyper::body::Bytes;
+use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use nydus_telemetry::metrics::ImageMetrics;
+use nydus_telemetry::metrics::REGISTRY;
+use prometheus::{Encoder, TextEncoder};
 use tokio::net::UnixListener;
 use tokio::runtime::Builder;
 use tokio::sync::Notify;
@@ -33,7 +34,7 @@ pub struct ApiServer {
 
 impl ApiServer {
     /// Start serving metrics at `address`, which must be `unix:///path/to.sock`.
-    pub fn start(address: &str, metrics: Arc<ImageMetrics>) -> Result<Self> {
+    pub fn start(address: &str) -> Result<Self> {
         let socket_path = parse_unix_address(address)?;
 
         if let Some(parent) = socket_path.parent() {
@@ -70,7 +71,7 @@ impl ApiServer {
         let handle = std::thread::Builder::new()
             .name("nydus_apiserver".to_string())
             .spawn(move || {
-                runtime.block_on(serve(listener, shutdown_for_thread, metrics));
+                runtime.block_on(serve(listener, shutdown_for_thread));
             })
             .context("failed to spawn apiserver thread")?;
 
@@ -95,22 +96,16 @@ impl ApiServer {
     }
 }
 
-async fn serve(listener: UnixListener, shutdown: Arc<Notify>, metrics: Arc<ImageMetrics>) {
+async fn serve(listener: UnixListener, shutdown: Arc<Notify>) {
     loop {
         tokio::select! {
             _ = shutdown.notified() => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _addr)) => {
                     let io = TokioIo::new(stream);
-                    let metrics = metrics.clone();
                     tokio::task::spawn(async move {
                         if let Err(err) = http1::Builder::new()
-                            .serve_connection(
-                                io,
-                                service_fn(move |request| {
-                                    handle_request(request, metrics.clone())
-                                }),
-                            )
+                            .serve_connection(io, service_fn(handle_request))
                             .await
                         {
                             warn!("apiserver connection error: {err}");
@@ -123,12 +118,14 @@ async fn serve(listener: UnixListener, shutdown: Arc<Notify>, metrics: Arc<Image
     }
 }
 
-async fn handle_request<B>(
-    req: Request<B>,
-    metrics: Arc<ImageMetrics>,
+async fn handle_request(
+    req: Request<Incoming>,
 ) -> std::result::Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
-        let body = metrics.encode_text();
+        let mut body = Vec::new();
+        if let Err(err) = TextEncoder::new().encode(&REGISTRY.gather(), &mut body) {
+            error!("failed to encode metrics: {err}");
+        }
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain; version=0.0.4")
@@ -148,41 +145,4 @@ async fn handle_request<B>(
             .expect("valid 404 response")
     };
     Ok(response)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use http_body_util::BodyExt;
-    use nydus_telemetry::metrics::{BackendTarget, ReadKind};
-    use std::time::Duration;
-
-    async fn metrics_body(metrics: Arc<ImageMetrics>) -> String {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("/metrics")
-            .body(())
-            .unwrap();
-        let response = handle_request(request, metrics).await.unwrap();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        String::from_utf8(bytes.to_vec()).unwrap()
-    }
-
-    #[tokio::test]
-    async fn metrics_endpoint_uses_the_selected_image_registry() {
-        let first = Arc::new(ImageMetrics::new());
-        let second = Arc::new(ImageMetrics::new());
-        first.record_backend_read(
-            BackendTarget::Origin,
-            ReadKind::OnDemand,
-            4096,
-            Duration::from_millis(1),
-            false,
-        );
-
-        let first_body = metrics_body(first).await;
-        let second_body = metrics_body(second).await;
-        assert!(first_body.contains("backend_origin_read_count 1\n"));
-        assert!(second_body.contains("backend_origin_read_count 0\n"));
-    }
 }
