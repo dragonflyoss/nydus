@@ -235,15 +235,15 @@ pub struct HttpConfig {
     pub tls: TlsConfig,
 
     /// The async worker threads of the runtime that drives the registry
-    /// client's sockets, `2` by default; `0` selects the default. Every
-    /// registry backend built from a configuration runs on a runtime of its
-    /// own with these bounds.
+    /// client's sockets, `2` by default and at least `1`. Every registry
+    /// backend built from a configuration runs on a runtime of its own with
+    /// these bounds.
     #[serde(default = "default_registry_http_worker_threads")]
     pub worker_threads: usize,
 
     /// The upper bound on the runtime's on-demand blocking threads, which
-    /// serve DNS lookups and are released after 10 s idle, `8` by default;
-    /// `0` selects the default.
+    /// serve DNS lookups and are released after 10 s idle, `8` by default and
+    /// at least `1`.
     #[serde(default = "default_registry_http_max_blocking_threads")]
     pub max_blocking_threads: usize,
 }
@@ -577,6 +577,16 @@ impl Config {
         }
 
         if let BackendConfig::Registry(registry) = &self.backend {
+            if registry.http.worker_threads == 0 {
+                return Err(Error::InvalidConfig(
+                    "http.worker_threads must be at least 1".to_string(),
+                ));
+            }
+            if registry.http.max_blocking_threads == 0 {
+                return Err(Error::InvalidConfig(
+                    "http.max_blocking_threads must be at least 1".to_string(),
+                ));
+            }
             if registry
                 .dragonfly
                 .as_ref()
@@ -914,6 +924,28 @@ scope: all
                 serde_yaml::from_str::<PrefetchConfig>(yaml).is_err(),
                 "{yaml}"
             );
+        }
+    }
+
+    #[test]
+    fn rejects_zero_registry_runtime_thread_bounds() {
+        let test_cases = vec![
+            (
+                "worker_threads: 0",
+                "http.worker_threads must be at least 1",
+            ),
+            (
+                "max_blocking_threads: 0",
+                "http.max_blocking_threads must be at least 1",
+            ),
+        ];
+
+        for (field, expected) in test_cases {
+            let yaml = format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    http:\n      {field}\n"
+            );
+            let err = Config::from_yaml(&yaml).unwrap_err();
+            assert_eq!(err.to_string(), expected);
         }
     }
 

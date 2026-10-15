@@ -29,10 +29,6 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tracing::{error, info};
 
-use nydus_config::{
-    default_registry_http_max_blocking_threads, default_registry_http_worker_threads,
-};
-
 use super::netns::Netns;
 
 /// Idle blocking threads are released after this long.
@@ -53,7 +49,7 @@ pub struct Runtime {
 impl Runtime {
     /// Build a runtime with `worker_threads` async workers, spawned now and
     /// kept for the runtime's life, and at most `max_blocking_threads` in the
-    /// blocking pool; `0` selects the configuration default of either. Every
+    /// blocking pool, both at least `1` as the configuration guarantees. Every
     /// runtime thread enters `netns` before it does any work, so sockets and
     /// DNS queries never depend on the caller's namespace; `None` keeps
     /// tokio's behaviour, threads inheriting the namespace of the thread
@@ -65,14 +61,6 @@ impl Runtime {
         max_blocking_threads: usize,
         netns: Option<Netns>,
     ) -> io::Result<Self> {
-        let worker_threads = match worker_threads {
-            0 => default_registry_http_worker_threads(),
-            n => n,
-        };
-        let max_blocking_threads = match max_blocking_threads {
-            0 => default_registry_http_max_blocking_threads(),
-            n => n,
-        };
         let mut builder = Builder::new_multi_thread();
         builder
             .thread_name(THREAD_NAME)
@@ -137,12 +125,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_spawns_the_configured_or_default_workers() {
-        let test_cases = vec![(3, 3), (0, default_registry_http_worker_threads())];
+    fn new_spawns_the_configured_workers() {
+        let test_cases = vec![1, 3];
 
-        for (worker_threads, expected) in test_cases {
-            let runtime = Runtime::new(worker_threads, 0, None).unwrap();
-            assert_eq!(runtime.tokio().metrics().num_workers(), expected);
+        for worker_threads in test_cases {
+            let runtime = Runtime::new(worker_threads, 1, None).unwrap();
+            assert_eq!(runtime.tokio().metrics().num_workers(), worker_threads);
         }
     }
 
@@ -150,7 +138,7 @@ mod tests {
     #[test]
     fn new_rejects_a_namespace_that_cannot_be_entered() {
         let netns = Netns::new(tempfile::tempfile().unwrap().into()).unwrap();
-        let err = Runtime::new(0, 0, Some(netns)).unwrap_err();
+        let err = Runtime::new(1, 1, Some(netns)).unwrap_err();
         assert!(err.to_string().contains("netns"), "{err}");
     }
 

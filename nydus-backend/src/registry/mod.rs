@@ -55,6 +55,8 @@ use reqwest::{Method, StatusCode};
 use tracing::warn;
 use url::Url;
 
+#[cfg(test)]
+use nydus_config::HttpConfig;
 use nydus_config::RegistryConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -616,7 +618,8 @@ mod tests {
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
     fn test_runtime() -> Arc<Runtime> {
-        Arc::new(Runtime::new(0, 0, None).unwrap())
+        let http = HttpConfig::default();
+        Arc::new(Runtime::new(http.worker_threads, http.max_blocking_threads, None).unwrap())
     }
 
     #[async_trait]
