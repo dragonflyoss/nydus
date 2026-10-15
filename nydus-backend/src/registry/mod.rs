@@ -94,17 +94,11 @@ pub(crate) enum RegistryError {
     #[error(transparent)]
     Format(#[from] nydus_format::Error),
 
-    /// The error when a URL cannot be parsed.
-    #[error("invalid url: {0}")]
-    InvalidUrl(String),
-
-    /// The error when the registry's challenge cannot be answered.
+    /// The error when the registry's challenge cannot be answered: the
+    /// challenge or the token server's answer is unusable, or the config
+    /// lacks the credentials it asks for.
     #[error("unauthorized: {0}")]
     Unauthorized(String),
-
-    /// The error when a response lacks what the request needed.
-    #[error("unexpected response: {0}")]
-    UnexpectedResponse(String),
 
     /// The error when the registry answers with a status the request did not
     /// expect, carrying the body.

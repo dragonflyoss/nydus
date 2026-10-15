@@ -52,7 +52,10 @@ impl Http {
         // Route through the configured proxy, or ignore any ambient one.
         builder = match &config.proxy {
             Some(proxy) => builder.proxy(reqwest::Proxy::all(&proxy.addr).map_err(|err| {
-                RegistryError::InvalidUrl(format!("proxy addr {}: {err}", proxy.addr))
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid proxy addr {}: {err}", proxy.addr),
+                )
             })?),
             None => builder.no_proxy(),
         };

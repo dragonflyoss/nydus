@@ -69,7 +69,10 @@ impl Response {
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
             .ok_or_else(|| {
-                RegistryError::UnexpectedResponse("missing redirect location".to_string())
+                RegistryError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "registry redirect missing a valid location",
+                ))
             })
     }
 

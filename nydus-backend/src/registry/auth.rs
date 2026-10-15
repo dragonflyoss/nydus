@@ -208,8 +208,8 @@ impl FetchTokenResponse {
         };
 
         if token.is_empty() {
-            return Err(RegistryError::UnexpectedResponse(
-                "empty token from registry".to_string(),
+            return Err(RegistryError::Unauthorized(
+                "empty token from token server".to_string(),
             ));
         }
 
@@ -297,7 +297,7 @@ impl Authorizer {
     ) -> RegistryResult<Authorization> {
         // Build the token URL from the realm and the challenge's parameters.
         let mut url = Url::parse(realm)
-            .map_err(|err| RegistryError::InvalidUrl(format!("{realm}: {err}")))?;
+            .map_err(|err| RegistryError::Unauthorized(format!("invalid realm {realm}: {err}")))?;
         url.query_pairs_mut().extend_pairs(
             [("service", service), ("scope", scope)]
                 .into_iter()
@@ -320,9 +320,8 @@ impl Authorizer {
 
         // Parse the token out of the body.
         let body = response.text().await?;
-        let token: FetchTokenResponse = serde_json::from_str(&body).map_err(|err| {
-            RegistryError::UnexpectedResponse(format!("invalid token response: {err}"))
-        })?;
+        let token: FetchTokenResponse = serde_json::from_str(&body)
+            .map_err(|err| RegistryError::Unauthorized(format!("invalid token response: {err}")))?;
 
         token.into_authorization()
     }
@@ -487,10 +486,7 @@ mod tests {
                 assert!(!authorization.unwrap().is_valid());
             }),
             (r#"{"token":"","access_token":""}"#, |authorization| {
-                assert!(matches!(
-                    authorization,
-                    Err(RegistryError::UnexpectedResponse(_))
-                ));
+                assert!(matches!(authorization, Err(RegistryError::Unauthorized(_))));
             }),
         ];
 
