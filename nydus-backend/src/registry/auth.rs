@@ -110,13 +110,17 @@ enum Authorization {
     /// The configured basic credentials, which never expire.
     Basic(HeaderValue),
 
-    /// A bearer token from the token server and when it expires.
+    /// A bearer token from the token server, when it was fetched and how long
+    /// it lives.
     Bearer {
         /// The `Bearer ...` header value.
         value: HeaderValue,
 
-        /// The instant the token server said the token expires.
-        expires_at: Instant,
+        /// The instant the token was fetched.
+        created_at: Instant,
+
+        /// The lifetime the token server gave the token.
+        expires_in: Duration,
     },
 }
 
@@ -135,7 +139,8 @@ impl Authorization {
     fn bearer(token: &str, expires_in: Duration) -> RegistryResult<Self> {
         Ok(Self::Bearer {
             value: Self::header_value(&format!("Bearer {token}"))?,
-            expires_at: Instant::now() + expires_in,
+            created_at: Instant::now(),
+            expires_in,
         })
     }
 
@@ -168,7 +173,11 @@ impl Authorization {
     fn is_valid(&self) -> bool {
         match self {
             Self::Basic(_) => true,
-            Self::Bearer { expires_at, .. } => Instant::now() + TOKEN_EXPIRY_LEEWAY < *expires_at,
+            Self::Bearer {
+                created_at,
+                expires_in,
+                ..
+            } => created_at.elapsed() + TOKEN_EXPIRY_LEEWAY < *expires_in,
         }
     }
 }

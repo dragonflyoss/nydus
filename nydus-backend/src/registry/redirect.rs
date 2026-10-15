@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 use lru::LruCache;
 use tracing::debug;
 
-/// A cached redirect and when it expires.
+/// A cached redirect and when it was learned.
 #[derive(Debug, Clone)]
 struct RedirectEntry {
     /// The signed URL the blob `GET` was redirected to.
     url: String,
 
-    /// The instant the redirect stops being trusted.
-    expires_at: Instant,
+    /// The instant the redirect was cached.
+    created_at: Instant,
 }
 
 /// The redirect URLs of recently read blobs, keyed by blob hex digest.
@@ -52,7 +52,7 @@ impl RedirectCache {
     pub(crate) fn get(&self, hex: &str) -> Option<String> {
         let mut redirects = self.redirects.lock().unwrap();
         let entry = redirects.get(hex)?;
-        if Instant::now() >= entry.expires_at {
+        if entry.created_at.elapsed() >= Self::DEFAULT_TTL {
             debug!("cached redirect for blob {hex} expired");
             redirects.pop(hex);
             return None;
@@ -70,7 +70,7 @@ impl RedirectCache {
             hex.to_string(),
             RedirectEntry {
                 url,
-                expires_at: Instant::now() + Self::DEFAULT_TTL,
+                created_at: Instant::now(),
             },
         );
     }
@@ -110,7 +110,7 @@ mod tests {
             .unwrap()
             .get_mut("a")
             .unwrap()
-            .expires_at = Instant::now();
+            .created_at -= RedirectCache::DEFAULT_TTL;
         assert_eq!(cache.get("a"), None);
         assert_eq!(cache.redirects.lock().unwrap().len(), 0);
     }
