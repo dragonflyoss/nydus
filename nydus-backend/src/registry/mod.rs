@@ -284,19 +284,21 @@ impl Registry {
     /// Creates a registry backend from its configuration, running on `runtime`.
     pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
-        let http = Http::builder(&config.http).build()?;
+        let http = Http::new(&config.http, None)?;
+
         // Throttle the origin fallback by the configured back-to-source rate,
         // zero leaving it unthrottled.
         let request_rate_limit = config
             .dragonfly
             .as_ref()
             .map_or(0, |dragonfly| dragonfly.back_to_source.request_rate_limit);
-        let mut back_to_source = Http::builder(&config.http);
-        if request_rate_limit > 0 {
-            back_to_source = back_to_source
-                .rate_limit(RateLimit::new(request_rate_limit, Duration::from_secs(1)));
-        }
-        let back_to_source = back_to_source.build()?;
+        let rate_limit = if request_rate_limit > 0 {
+            Some(RateLimit::new(request_rate_limit, Duration::from_secs(1)))
+        } else {
+            None
+        };
+        let back_to_source = Http::new(&config.http, rate_limit)?;
+
         // Reject a Dragonfly configuration this build cannot honour.
         #[cfg(not(feature = "backend-dragonfly"))]
         if let Some(dragonfly) = &config.dragonfly {
@@ -934,12 +936,13 @@ mod tests {
     ) -> Registry {
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
         let (scheme, host) = parse_registry_addr(&config.addr).unwrap();
-        let http = Http::builder(&config.http).build().unwrap();
-        let mut back_to_source = Http::builder(&config.http);
-        if !interval.is_zero() {
-            back_to_source = back_to_source.rate_limit(RateLimit::new(1, interval));
-        }
-        let back_to_source = back_to_source.build().unwrap();
+        let http = Http::new(&config.http, None).unwrap();
+        let rate_limit = if interval.is_zero() {
+            None
+        } else {
+            Some(RateLimit::new(1, interval))
+        };
+        let back_to_source = Http::new(&config.http, rate_limit).unwrap();
         Registry::from_parts(
             scheme,
             host,

@@ -449,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_answers_a_basic_challenge_from_the_config() {
-        let http = Http::builder(&HttpConfig::default()).build().unwrap();
+        let http = Http::new(&HttpConfig::default(), None).unwrap();
         let test_cases: Vec<(Option<&str>, fn(RegistryResult<()>, Option<HeaderValue>))> = vec![
             (Some("YWxpY2U6c2VjcmV0"), |result, header| {
                 assert!(result.is_ok());

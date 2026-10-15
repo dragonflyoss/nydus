@@ -37,92 +37,16 @@ pub(crate) struct Http {
 
 /// Implements the origin HTTP client.
 impl Http {
-    /// Creates a builder from the HTTP configuration.
-    pub(crate) fn builder(config: &HttpConfig) -> HttpBuilder {
-        HttpBuilder {
-            config: config.clone(),
-            rate_limit: None,
-        }
-    }
-
-    /// Sends `method` to `url` with `headers` and logs the outcome.
-    ///
-    /// Redirects are returned rather than followed so the caller can cache
-    /// the signed URL a blob `GET` is redirected to.
-    pub(crate) async fn request(
-        &self,
-        method: Method,
-        url: &str,
-        headers: HeaderMap,
-        kind: ReadKind,
-    ) -> RegistryResult<Response> {
-        let start = Instant::now();
-        let result = match self
-            .client
-            .request(method.clone(), url)
-            .headers(headers.clone())
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let status = response.status();
-                let response_headers = response.headers().clone();
-                Ok(Response {
-                    status,
-                    headers: response_headers,
-                    reader: Box::new(StreamReader::new(Box::pin(
-                        response.bytes_stream().map_err(io::Error::other),
-                    ))),
-                    protocol: Protocol::Http,
-                })
-            }
-            Err(err) => Err(RegistryError::Io(io::Error::other(err))),
-        };
-        self.log_request_done(&method, url, &headers, kind, &result, start.elapsed());
-        result
-    }
-}
-
-/// Implements the blob transport over the origin HTTP client.
-#[async_trait]
-impl Transport for Http {
-    /// Returns `none`, the label of a request that rode no P2P transport.
-    fn label(&self) -> &'static str {
-        "none"
-    }
-
-    /// Sends a `GET` to `url`.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
-        self.request(Method::GET, url, headers, kind).await
-    }
-}
-
-/// The builder of an [`Http`] client: the connection settings from the
-/// configuration, plus an optional rate limit on every attempt.
-pub(crate) struct HttpBuilder {
-    /// The connection settings.
-    config: HttpConfig,
-
-    /// The limit every attempt claims a slot from, when set.
-    rate_limit: Option<RateLimit>,
-}
-
-/// Implements the HTTP client builder.
-impl HttpBuilder {
-    /// Makes every attempt the client sends claim a slot from `limit` first.
-    pub(crate) fn rate_limit(mut self, limit: RateLimit) -> Self {
-        self.rate_limit = Some(limit);
-        self
-    }
-
-    /// Builds the client.
+    /// Creates a client from the HTTP configuration, every attempt claiming a
+    /// slot from `rate_limit` first when one is given.
     ///
     /// Requests go through the configured proxy or, without one, straight to
     /// the origin with any ambient proxy ignored. Names are resolved by
-    /// hickory, which caches lookups and honours record TTLs. Transient
-    /// failures are retried up to the configured `max_retries`.
-    pub(crate) fn build(self) -> io::Result<Http> {
-        let config = &self.config;
+    /// hickory, which caches lookups and honours record TTLs. Redirects are
+    /// returned rather than followed so the caller can cache the signed URL a
+    /// blob `GET` is redirected to. Transient failures are retried up to the
+    /// configured `max_retries`.
+    pub(crate) fn new(config: &HttpConfig, rate_limit: Option<RateLimit>) -> io::Result<Self> {
         let mut builder = Client::builder().redirect(Policy::none()).hickory_dns(true);
 
         // Route through the configured proxy, or ignore any ambient one.
@@ -172,12 +96,56 @@ impl HttpBuilder {
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(config.max_retries);
         let mut client = ClientBuilder::new(client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy));
-        if let Some(rate_limit) = self.rate_limit {
+        if let Some(rate_limit) = rate_limit {
             client = client.with(rate_limit);
         }
-        Ok(Http {
+
+        Ok(Self {
             client: client.build(),
         })
+    }
+
+    /// Sends `method` to `url` with `headers` and logs the outcome.
+    pub(crate) async fn request(
+        &self,
+        method: Method,
+        url: &str,
+        headers: HeaderMap,
+        kind: ReadKind,
+    ) -> RegistryResult<Response> {
+        let start = Instant::now();
+        let result = self
+            .client
+            .request(method.clone(), url)
+            .headers(headers.clone())
+            .send()
+            .await
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                reader: Box::new(StreamReader::new(
+                    response.bytes_stream().map_err(io::Error::other),
+                )),
+                protocol: Protocol::Http,
+            })
+            .map_err(|err| RegistryError::Io(io::Error::other(err)));
+
+        self.log_request_done(&method, url, &headers, kind, &result, start.elapsed());
+        result
+    }
+}
+
+/// Implements the blob transport over the origin HTTP client.
+#[async_trait]
+impl Transport for Http {
+    /// Returns `none`, the label of a request that rode no P2P transport.
+    fn label(&self) -> &'static str {
+        "none"
+    }
+
+    /// Sends a `GET` to `url`.
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> RegistryResult<Response> {
+        self.request(Method::GET, url, headers, kind).await
     }
 }
 
@@ -228,13 +196,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_accepts_an_optional_rate_limit() {
+    fn new_accepts_an_optional_rate_limit() {
         let config = HttpConfig::default();
-        assert!(Http::builder(&config).build().is_ok());
-        assert!(Http::builder(&config)
-            .rate_limit(RateLimit::new(10, Duration::from_secs(1)))
-            .build()
-            .is_ok());
+        assert!(Http::new(&config, None).is_ok());
+        assert!(Http::new(&config, Some(RateLimit::new(10, Duration::from_secs(1)))).is_ok());
     }
 
     #[test]
