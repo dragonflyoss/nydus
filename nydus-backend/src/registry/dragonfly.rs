@@ -151,8 +151,7 @@ impl Transport for Dragonfly {
         };
         let request = GetRequest {
             url: url.to_string(),
-            header: headers.clone(),
-            filtered_query_params: Vec::new(),
+            header: headers,
             priority: Some(priority),
             timeout: self.request_timeout,
             ..Default::default()
