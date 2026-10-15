@@ -44,7 +44,6 @@ pub(crate) enum Challenge {
 
 /// Implements parsing from a `WWW-Authenticate` value.
 impl FromStr for Challenge {
-    /// The error of a malformed or unsupported challenge.
     type Err = RegistryError;
 
     /// Parses the challenge list in `value` and picks the one to answer: a
@@ -158,9 +157,10 @@ impl Authorization {
     }
 }
 
-/// The body a token server answers with, either field naming the token.
+/// The body a token server answers [`Authorizer::fetch_token`] with, either
+/// field naming the token.
 #[derive(Deserialize)]
-struct TokenResponse {
+struct FetchTokenResponse {
     /// The token, as the distribution spec names it.
     #[serde(default)]
     token: String,
@@ -173,8 +173,8 @@ struct TokenResponse {
     expires_in: Option<u64>,
 }
 
-/// Implements the token response.
-impl TokenResponse {
+/// Implements the token fetch response.
+impl FetchTokenResponse {
     /// Converts the response into the bearer [Authorization] it carries.
     fn into_authorization(self) -> RegistryResult<Authorization> {
         let token = if self.token.is_empty() {
@@ -296,7 +296,7 @@ impl Authorizer {
 
         // Parse the token out of the body.
         let body = response.text().await.map_err(RegistryError::Io)?;
-        serde_json::from_str::<TokenResponse>(&body)
+        serde_json::from_str::<FetchTokenResponse>(&body)
             .map_err(|err| {
                 RegistryError::UnexpectedResponse(format!("invalid token response: {err}"))
             })?
@@ -472,7 +472,7 @@ mod tests {
         ];
 
         for (body, assert_fn) in test_cases {
-            let response: TokenResponse = serde_json::from_str(body).unwrap();
+            let response: FetchTokenResponse = serde_json::from_str(body).unwrap();
             assert_fn(response.into_authorization());
         }
     }
