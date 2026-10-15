@@ -58,16 +58,16 @@ fn default_registry_http_max_retries() -> u32 {
     3
 }
 
-/// Returns the default async worker thread count of the registry backend's
-/// shared runtime. The workers only drive socket I/O for the connection
+/// Returns the default async worker thread count of each of the registry
+/// backend's runtimes. The workers only drive socket I/O for the connection
 /// pool; the synchronous callers block on their own threads.
 #[inline]
 pub fn default_registry_http_worker_threads() -> usize {
     2
 }
 
-/// Returns the default upper bound on the shared runtime's on-demand
-/// blocking pool, where only DNS lookups (`getaddrinfo`) run.
+/// Returns the default upper bound on each runtime's on-demand blocking
+/// pool, where only DNS lookups (`getaddrinfo`) run.
 #[inline]
 pub fn default_registry_http_max_blocking_threads() -> usize {
     8
@@ -249,14 +249,14 @@ pub struct HttpConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// The async worker threads of the runtime that drives the registry
+    /// The async worker threads of each runtime that drives the registry
     /// client's sockets, `2` by default and at least `1`. Every registry
-    /// backend built from a configuration runs on a runtime of its own with
-    /// these bounds.
+    /// backend built from a configuration runs on two runtimes of its own
+    /// with these bounds, one for on-demand reads and one for prefetch.
     #[serde(default = "default_registry_http_worker_threads")]
     pub worker_threads: usize,
 
-    /// The upper bound on the runtime's on-demand blocking threads, which
+    /// The upper bound on each runtime's on-demand blocking threads, which
     /// serve DNS lookups and are released after 10 s idle, `8` by default and
     /// at least `1`.
     #[serde(default = "default_registry_http_max_blocking_threads")]

@@ -214,23 +214,26 @@ downloading it more than once.
 
 `BlobBackend` itself does not own a general-purpose thread pool. The local
 backend performs file I/O directly on the caller. Remote registry and
-Dragonfly HTTP backends bridge their synchronous methods into one lazy,
-process-wide Tokio multi-thread runtime:
+Dragonfly HTTP backends bridge their synchronous methods into two Tokio
+multi-thread runtimes, one for on-demand reads and one for prefetch, so a
+prefetch burst never queues ahead of a FUSE reader on the same workers:
 
 | Pool | Default | Lifetime and work |
 | ---- | ------- | ----------------- |
-| Async workers | 2 threads | Created with the registry backend and retained for its lifetime. Each request future is spawned onto them, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
-| Blocking workers | Up to 8 threads | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`). Idle threads are released after 10 seconds. Blob reads, decompression, verification, and cache writes do not run in this pool. |
+| Async workers | 2 threads per runtime | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime of its read kind, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Blocking workers | Up to 8 threads per runtime | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`). Idle threads are released after 10 seconds. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
 The registry `http.worker_threads` and `http.max_blocking_threads` settings
-set these bounds; every registry backend built from a configuration runs on a
-runtime of its own. Embedders may instead build one `nydus_backend::Runtime`
-with `Runtime::new(worker_threads, max_blocking_threads, netns)`, the optional
+set these bounds for each runtime; every registry backend built from a
+configuration runs on runtimes of its own. Embedders may instead build one
+`nydus_backend::Runtime` with
+`Runtime::new(worker_threads, max_blocking_threads, netns)`, the optional
 network namespace being one every runtime thread enters, and hand it to every
 backend they open through
 `nydus_backend::build_backend_with_runtime`; because requests run on those
 threads, registry sockets are created in that namespace regardless of the
-caller's. A process using only local blobs never creates a Tokio runtime.
+caller's. The HTTP connection pool is shared by both runtimes. A process using
+only local blobs never creates a Tokio runtime.
 
 ### `nydus-core` API
 
@@ -1222,16 +1225,17 @@ Fields under `backend.config`:
 		- `ca_cert` (optional): a CA certificate path with PEM format to trust
 			in addition to the system roots; the file may bundle multiple
 			certificates.
-	- `worker_threads` (default `2`): async worker threads of the runtime
-		that drives the registry client's sockets. They
+	- `worker_threads` (default `2`): async worker threads of each runtime
+		that drives the registry client's sockets, one runtime for on-demand
+		reads and one for prefetch. They
 		only move bytes for the connection pool (readers block on their own
 		threads), so two suffice for a node's worth of blob traffic; raise it
 		only if the backend metrics show the workers saturated.
-	- `max_blocking_threads` (default `8`): upper bound on the runtime's
+	- `max_blocking_threads` (default `8`): upper bound on each runtime's
 		on-demand blocking threads, which serve DNS lookups and are released
 		after 10 s idle.
 
-		Every registry backend built from a configuration runs on a runtime of
+		Every registry backend built from a configuration runs on runtimes of
 		its own with these bounds. Programs that embed the backend (a VMM) may
 		instead build one `nydus_backend::Runtime`, fixing its network
 		namespace as well, and share it across the backends they open through

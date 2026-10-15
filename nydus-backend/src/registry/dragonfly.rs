@@ -47,38 +47,43 @@ pub(crate) struct Dragonfly {
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Creates the transport, connecting to the configured scheduler on
-    /// `runtime`.
+    /// Creates the transport, each client connecting to the configured
+    /// scheduler on the runtime of its read kind.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
     pub(crate) fn new(config: DragonflyConfig, runtime: &Runtime) -> io::Result<Self> {
-        let request_timeout = config.request_timeout;
-
-        // Connect on a runtime thread so the scheduler is reached from the
-        // runtime's netns. Config::validate bounds max_retries to 3, so it
-        // fits the SDK's u8.
-        let (ondemand, prefetch) = runtime
-            .block_on_worker(async move {
-                let ondemand = Proxy::builder()
-                    .scheduler_endpoint(config.scheduler_endpoint.clone())
-                    .max_retries(config.max_retries as u8)
-                    .build()
-                    .await?;
-                let prefetch = Proxy::builder()
-                    .scheduler_endpoint(config.scheduler_endpoint)
-                    .max_retries(0)
-                    .build()
-                    .await?;
-                Ok::<_, Error>((ondemand, prefetch))
-            })?
-            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))?;
-
         Ok(Self {
-            ondemand,
-            prefetch,
-            request_timeout,
+            // Config::validate bounds max_retries to 3, so it fits the SDK's u8.
+            ondemand: Self::connect(
+                runtime,
+                ReadKind::OnDemand,
+                config.scheduler_endpoint.clone(),
+                config.max_retries as u8,
+            )?,
+            prefetch: Self::connect(runtime, ReadKind::Prefetch, config.scheduler_endpoint, 0)?,
+            request_timeout: config.request_timeout,
         })
+    }
+
+    /// Connects a client to the scheduler at `scheduler_endpoint` on the
+    /// runtime of `kind`, so the scheduler is reached from that runtime's
+    /// netns, retrying a request `max_retries` times across seed peers.
+    fn connect(
+        runtime: &Runtime,
+        kind: ReadKind,
+        scheduler_endpoint: String,
+        max_retries: u8,
+    ) -> io::Result<Proxy> {
+        runtime
+            .block_on_worker(kind, async move {
+                Proxy::builder()
+                    .scheduler_endpoint(scheduler_endpoint)
+                    .max_retries(max_retries)
+                    .build()
+                    .await
+            })?
+            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
     }
 
     /// Converts the SDK's answer into a transport response.

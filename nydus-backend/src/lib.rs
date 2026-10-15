@@ -28,10 +28,10 @@ pub use local::Local;
 #[cfg(feature = "backend-registry")]
 pub(crate) use registry::Registry;
 
-/// A registry backend runs on a [`Runtime`] built from its `http`
-/// configuration; an embedding process builds one itself, with the thread
-/// bounds and network namespace it needs, and shares it across its backends
-/// through [`build_backend_with_runtime`].
+/// A registry backend runs on a [`Runtime`], one tokio runtime per read kind,
+/// built from its `http` configuration; an embedding process builds one
+/// itself, with the thread bounds and network namespace it needs, and shares
+/// it across its backends through [`build_backend_with_runtime`].
 #[cfg(feature = "backend-registry")]
 pub use registry::{Netns, NetnsId, Runtime};
 
@@ -135,8 +135,8 @@ pub trait BlobBackend: Send + Sync {
 
 /// Creates a blob backend from its configuration.
 ///
-/// A registry backend runs on a runtime of its own, built from the `http`
-/// section.
+/// A registry backend runs on runtimes of its own, one per read kind, built
+/// from the `http` section.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
     match config {
         BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
@@ -158,10 +158,10 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>>
 }
 
 /// Creates a blob backend from its configuration, a registry backend on
-/// `runtime` rather than on one of its own.
+/// `runtime` rather than on runtimes of its own.
 ///
-/// An embedder builds the runtime with the namespace its registries must be
-/// reached from and hands it to every backend it opens.
+/// An embedder builds the runtimes with the namespace its registries must be
+/// reached from and hands them to every backend it opens.
 #[cfg(feature = "backend-registry")]
 pub fn build_backend_with_runtime(
     config: &BackendConfig,

@@ -61,11 +61,11 @@ backend:
         #
         # ca_cert: /etc/nydus/certs/registry-ca.pem
 
-      # Thread bounds of the process-wide async runtime behind the registry
-      # client. Workers only move bytes for the connection pool (readers
-      # block on their own threads); the blocking pool serves DNS lookups
-      # and shrinks again after 10 s idle. Defaults: 2 and 8. Every registry
-      # backend runs on a runtime of its own with these bounds.
+      # Thread bounds of each async runtime behind the registry client, one
+      # for on-demand reads and one for prefetch. Workers only move bytes for
+      # the connection pool (readers block on their own threads); the
+      # blocking pool serves DNS lookups and shrinks again after 10 s idle.
+      # Defaults: 2 and 8 per runtime.
       #
       # worker_threads: 2
       # max_blocking_threads: 8

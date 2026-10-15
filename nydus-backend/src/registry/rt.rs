@@ -1,17 +1,18 @@
-//! The tokio runtime behind a registry backend, and how an embedding process
-//! bounds and pins it.
+//! The tokio runtimes behind a registry backend, one per read kind, and how
+//! an embedding process bounds and pins them.
 //!
 //! The synchronous [`BlobBackend`](crate::BlobBackend) trait bridges into the
-//! async HTTP clients through a multi-thread runtime. Left to tokio's defaults
-//! that runtime spawns one worker per CPU and keeps them for the life of the
-//! process, and every runtime thread inherits the network namespace of the
-//! thread that built it. Neither suits a VMM that embeds this crate: the
-//! backend drives a handful of connections, so a couple of workers are
-//! plenty, and the registry must be reached from the host namespace no matter
-//! which thread builds the backend. [`Runtime::new`] takes both: a backend
-//! built from a config file gets its bounds from the `http` section, and an
-//! embedder builds one [`Runtime`] with its namespace and shares it across
-//! its backends through
+//! async HTTP clients through multi-thread runtimes, on-demand reads on one
+//! and background prefetch on another so a prefetch burst never queues ahead
+//! of a FUSE reader. Left to tokio's defaults a runtime spawns one worker per
+//! CPU and keeps them for the life of the process, and every runtime thread
+//! inherits the network namespace of the thread that built it. Neither suits
+//! a VMM that embeds this crate: the backend drives a handful of connections,
+//! so a couple of workers are plenty, and the registry must be reached from
+//! the host namespace no matter which thread builds the backend.
+//! [`Runtime::new`] takes both: a backend built from a config file gets its
+//! bounds from the `http` section, and an embedder builds one [`Runtime`]
+//! with its namespace and shares it across its backends through
 //! [`build_backend_with_runtime`](crate::build_backend_with_runtime).
 //!
 //! Pinning the runtime threads is only half of it: `Runtime::block_on` polls
@@ -30,28 +31,31 @@ use tokio::runtime::Builder;
 use tracing::{error, info};
 
 use super::netns::Netns;
+use crate::ReadKind;
 
 /// The time an idle blocking thread is kept before it is released.
 const BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
 
-/// The name of the runtime's threads.
-const THREAD_NAME: &str = "nydus-backend";
-
-/// The runtime a registry backend runs its requests on.
+/// The runtimes a registry backend runs its requests on, one per read kind,
+/// so background prefetch never queues ahead of a FUSE reader on the same
+/// workers.
 ///
-/// One is built per backend from its `http` configuration unless an embedder
-/// hands the same one to several backends.
+/// One pair is built per backend from its `http` configuration unless an
+/// embedder hands the same pair to several backends.
 #[derive(Debug)]
 pub struct Runtime {
-    /// The tokio runtime, its threads pinned to the configured namespace.
-    inner: tokio::runtime::Runtime,
+    /// The runtime of on-demand reads, which a FUSE reader waits on.
+    ondemand: tokio::runtime::Runtime,
+
+    /// The runtime of background prefetch reads.
+    prefetch: tokio::runtime::Runtime,
 }
 
-/// Implements the backend runtime.
+/// Implements the backend runtimes.
 impl Runtime {
-    /// Creates a runtime with `worker_threads` async workers and at most
-    /// `max_blocking_threads` in the blocking pool, every thread entering
-    /// `netns` before it does any work.
+    /// Creates a runtime per read kind, each with `worker_threads` async
+    /// workers and at most `max_blocking_threads` in its blocking pool, every
+    /// thread entering `netns` before it does any work.
     ///
     /// The workers are spawned now and kept for the runtime's life; both
     /// bounds are at least `1` as the configuration guarantees. With a
@@ -65,66 +69,100 @@ impl Runtime {
         max_blocking_threads: usize,
         netns: Option<Netns>,
     ) -> io::Result<Self> {
-        // Bound the runtime by the configured thread counts.
+        let netns = match netns {
+            Some(netns) => {
+                netns.probe()?;
+                Some(Arc::new(netns))
+            }
+            None => None,
+        };
+        let namespace = match &netns {
+            Some(netns) => format!("netns {}", netns.id()),
+            None => "inherited netns".to_string(),
+        };
+
+        let ondemand = Self::build(
+            ReadKind::OnDemand,
+            worker_threads,
+            max_blocking_threads,
+            netns.clone(),
+        )?;
+        let prefetch = Self::build(
+            ReadKind::Prefetch,
+            worker_threads,
+            max_blocking_threads,
+            netns,
+        )?;
+        info!("nydus-backend runtimes: {worker_threads} worker(s) and up to {max_blocking_threads} blocking per read kind, {namespace}");
+
+        Ok(Self { ondemand, prefetch })
+    }
+
+    /// Builds the runtime of reads of `kind`, its threads named after the
+    /// kind and pinned to `netns` when one is configured.
+    fn build(
+        kind: ReadKind,
+        worker_threads: usize,
+        max_blocking_threads: usize,
+        netns: Option<Arc<Netns>>,
+    ) -> io::Result<tokio::runtime::Runtime> {
         let mut builder = Builder::new_multi_thread();
         builder
-            .thread_name(THREAD_NAME)
+            .thread_name(format!("nydus-backend-{kind}"))
             .worker_threads(worker_threads)
             .max_blocking_threads(max_blocking_threads)
             .thread_keep_alive(BLOCKING_KEEP_ALIVE)
             .enable_all();
-        // Pin every runtime thread to the namespace, when one is configured.
-        let namespace = match netns {
-            Some(netns) => {
-                netns.probe()?;
-                let id = netns.id();
-                let netns = Arc::new(netns);
-                builder.on_thread_start(move || {
-                    if let Err(err) = netns.enter() {
-                        error!(
-                            "nydus-backend runtime thread cannot enter the configured netns: {err}"
-                        );
 
-                        // Abort the thread rather than leave it in the wrong
-                        // namespace, where it would silently route registry
-                        // traffic. The probe above entered this exact
-                        // descriptor, so this is unreachable in practice.
-                        panic!(
-                            "nydus-backend runtime thread cannot enter the configured netns: {err}"
-                        );
-                    }
-                });
-                format!("netns {id}")
-            }
-            None => "inherited netns".to_string(),
-        };
-        let inner = builder.build()?;
-        info!("nydus-backend runtime: {worker_threads} worker(s), {max_blocking_threads} blocking, {namespace}");
-        Ok(Self { inner })
+        // Pin every runtime thread to the namespace, when one is configured.
+        if let Some(netns) = netns {
+            builder.on_thread_start(move || {
+                if let Err(err) = netns.enter() {
+                    error!("nydus-backend runtime thread cannot enter the configured netns: {err}");
+
+                    // Abort the thread rather than leave it in the wrong
+                    // namespace, where it would silently route registry
+                    // traffic. The probe in new() entered this exact
+                    // descriptor, so this is unreachable in practice.
+                    panic!("nydus-backend runtime thread cannot enter the configured netns: {err}");
+                }
+            });
+        }
+
+        builder.build()
     }
 
-    /// Runs `future` on a runtime thread and waits for its result.
+    /// Runs `future` on a thread of the runtime of `kind` and waits for its
+    /// result.
     ///
     /// This is what puts DNS and TCP connect on a thread that entered the
     /// configured netns, where `Runtime::block_on` alone would poll on the
     /// caller.
     pub(crate) fn block_on_worker<T>(
         &self,
+        kind: ReadKind,
         future: impl Future<Output = T> + Send + 'static,
     ) -> io::Result<T>
     where
         T: Send + 'static,
     {
-        self.inner
-            .block_on(self.inner.spawn(future))
+        let runtime = match kind {
+            ReadKind::OnDemand => &self.ondemand,
+            ReadKind::Prefetch => &self.prefetch,
+        };
+        runtime
+            .block_on(runtime.spawn(future))
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))
     }
 
-    /// Returns the tokio runtime itself, for tests that poll a future on the
-    /// calling thread.
+    /// Returns the tokio runtime of `kind` itself, for tests that poll a
+    /// future on the calling thread.
     #[cfg(test)]
-    pub(crate) fn tokio(&self) -> &tokio::runtime::Runtime {
-        &self.inner
+    pub(crate) fn tokio(&self, kind: ReadKind) -> &tokio::runtime::Runtime {
+        match kind {
+            ReadKind::OnDemand => &self.ondemand,
+            ReadKind::Prefetch => &self.prefetch,
+        }
     }
 }
 
@@ -133,12 +171,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_spawns_the_configured_workers() {
+    fn new_spawns_the_configured_workers_per_read_kind() {
         let test_cases = vec![1, 3];
 
         for worker_threads in test_cases {
             let runtime = Runtime::new(worker_threads, 1, None).unwrap();
-            assert_eq!(runtime.tokio().metrics().num_workers(), worker_threads);
+            for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+                assert_eq!(
+                    runtime.tokio(kind).metrics().num_workers(),
+                    worker_threads,
+                    "{kind}"
+                );
+            }
         }
     }
 
@@ -190,19 +234,29 @@ mod tests {
 
         let runtime = Runtime::new(1, 1, Some(netns)).unwrap();
 
-        assert_eq!(runtime.tokio().block_on(async { current_netns() }), caller);
-        assert_eq!(
-            runtime.block_on_worker(async { current_netns() }).unwrap(),
-            configured
-        );
-        assert_eq!(
-            runtime
-                .block_on_worker(async {
-                    tokio::task::spawn_blocking(current_netns).await.unwrap()
-                })
-                .unwrap(),
-            configured
-        );
+        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+            assert_eq!(
+                runtime.tokio(kind).block_on(async { current_netns() }),
+                caller,
+                "{kind}"
+            );
+            assert_eq!(
+                runtime
+                    .block_on_worker(kind, async { current_netns() })
+                    .unwrap(),
+                configured,
+                "{kind}"
+            );
+            assert_eq!(
+                runtime
+                    .block_on_worker(kind, async {
+                        tokio::task::spawn_blocking(current_netns).await.unwrap()
+                    })
+                    .unwrap(),
+                configured,
+                "{kind}"
+            );
+        }
         assert_eq!(current_netns(), caller);
     }
 }

@@ -28,7 +28,7 @@
 //! an on-demand read back to the origin through the rate-limited client.
 //! `HEAD` requests and token fetches always go straight to the origin.
 //!
-//! Every read runs as a task on the backend's runtime ([`rt`]) and the
+//! Every read runs as a task on the runtime of its kind ([`rt`]) and the
 //! calling thread waits on its join handle, so the body flows from hyper or
 //! tonic to the read inside the worker pool, the connection is opened in the
 //! runtime's network namespace, and the caller is woken once, when the bytes
@@ -188,8 +188,8 @@ struct Inner {
     /// of a failed read: Dragonfly when configured, otherwise HTTP.
     protocol: Protocol,
 
-    /// The runtime every request runs on, last so the transports above drop
-    /// before it.
+    /// The runtimes every request runs on, one per read kind, last so the
+    /// transports above drop before them.
     runtime: Arc<Runtime>,
 }
 
@@ -558,9 +558,9 @@ impl BlobBackend for Registry {
     ) -> io::Result<BlobMetadata> {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
-        self.inner
-            .runtime
-            .block_on_worker(async move { inner.get_blob_metadata(&blob_id, kind).await })?
+        self.inner.runtime.block_on_worker(kind, async move {
+            inner.get_blob_metadata(&blob_id, kind).await
+        })?
     }
 
     /// Fills `dst` with the blob bytes from `offset` on the runtime, recording
@@ -582,7 +582,7 @@ impl BlobBackend for Registry {
         let _first = (!self.first_read_done.load(Ordering::Acquire))
             .then(|| self.first_read.lock().unwrap());
 
-        // Read into an owned buffer on a runtime thread.
+        // Read into an owned buffer on a thread of the kind's runtime.
         let start = Instant::now();
         let inner = self.inner.clone();
         let blob_id = *blob_id;
@@ -590,7 +590,7 @@ impl BlobBackend for Registry {
         let result = self
             .inner
             .runtime
-            .block_on_worker(async move {
+            .block_on_worker(kind, async move {
                 let mut buf = vec![0u8; len];
                 let protocol = inner.get_blob(&blob_id, offset, &mut buf, kind).await?;
                 Ok::<_, io::Error>((buf, protocol))
@@ -873,7 +873,7 @@ mod tests {
         registry
             .inner
             .runtime
-            .tokio()
+            .tokio(kind)
             .block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
     }
 
