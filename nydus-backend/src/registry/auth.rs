@@ -4,6 +4,7 @@ use std::str::FromStr;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use http_auth::ChallengeParser;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Method;
 use serde::Deserialize;
@@ -48,32 +49,42 @@ pub(crate) enum Challenge {
 impl FromStr for Challenge {
     type Err = RegistryError;
 
-    /// Parses the scheme and its `key="value"` parameters, rejecting a scheme
-    /// other than `Basic` or `Bearer` and a `Bearer` without a realm.
+    /// Parses the challenge list in `value` and picks the one to answer: a
+    /// `Bearer` when there is one, since a token server also serves anonymous
+    /// pulls, otherwise a `Basic`.
+    ///
+    /// Rejects a malformed list, one with neither scheme, and a `Bearer`
+    /// without a realm.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        // Split the scheme from its comma-separated parameters.
-        let (scheme, params) = value.split_once(' ').unwrap_or((value, ""));
-        let param = |name: &str| {
-            params
-                .split(',')
-                .filter_map(|pair| pair.trim().split_once('='))
-                .find(|(key, _)| key.trim() == name)
-                .map(|(_, value)| value.trim().trim_matches('"').to_string())
-        };
-
-        match scheme.trim() {
-            "Basic" => Ok(Self::Basic),
-            "Bearer" => Ok(Self::Bearer {
-                realm: param("realm").ok_or_else(|| {
-                    RegistryError::Unauthorized(format!("bearer challenge without realm: {value}"))
-                })?,
-                service: param("service").unwrap_or_default(),
-                scope: param("scope").unwrap_or_default(),
-            }),
-            _ => Err(RegistryError::Unauthorized(format!(
-                "unsupported auth challenge: {value}"
-            ))),
+        let mut basic = false;
+        for challenge in ChallengeParser::new(value) {
+            let challenge = challenge.map_err(|err| {
+                RegistryError::Unauthorized(format!("invalid auth challenge: {err}"))
+            })?;
+            if challenge.scheme.eq_ignore_ascii_case("Bearer") {
+                let param = |name: &str| {
+                    challenge
+                        .params
+                        .iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                        .map(|(_, value)| value.to_unescaped())
+                };
+                return Ok(Self::Bearer {
+                    realm: param("realm").ok_or_else(|| {
+                        RegistryError::Unauthorized(format!(
+                            "bearer challenge without realm: {value}"
+                        ))
+                    })?,
+                    service: param("service").unwrap_or_default(),
+                    scope: param("scope").unwrap_or_default(),
+                });
+            }
+            basic |= challenge.scheme.eq_ignore_ascii_case("Basic");
         }
+
+        basic.then_some(Self::Basic).ok_or_else(|| {
+            RegistryError::Unauthorized(format!("unsupported auth challenge: {value}"))
+        })
     }
 }
 
@@ -307,23 +318,23 @@ mod tests {
     }
 
     #[test]
-    fn from_str_parses_the_scheme_and_its_parameters() {
+    fn from_str_picks_the_challenge_to_answer() {
         let test_cases: Vec<(&str, fn(RegistryResult<Challenge>))> = vec![
             (
-                r#"Bearer realm="https://auth.example.com/token",service="example.com",scope="repository:library/ubuntu:pull""#,
+                r#"Bearer realm="https://auth.example.com/token",service="example.com",scope="repository:library/ubuntu:pull,push""#,
                 |challenge| {
                     assert_eq!(
                         challenge.unwrap(),
                         Challenge::Bearer {
                             realm: "https://auth.example.com/token".to_string(),
                             service: "example.com".to_string(),
-                            scope: "repository:library/ubuntu:pull".to_string(),
+                            scope: "repository:library/ubuntu:pull,push".to_string(),
                         }
                     );
                 },
             ),
             (
-                r#"Bearer realm="https://auth.example.com/token""#,
+                r#"bearer realm="https://auth.example.com/token""#,
                 |challenge| {
                     assert_eq!(
                         challenge.unwrap(),
@@ -335,13 +346,28 @@ mod tests {
                     );
                 },
             ),
+            (
+                r#"Basic realm="registry", Bearer realm="https://auth.example.com/token""#,
+                |challenge| {
+                    assert!(matches!(challenge.unwrap(), Challenge::Bearer { .. }));
+                },
+            ),
             (r#"Basic realm="registry""#, |challenge| {
                 assert_eq!(challenge.unwrap(), Challenge::Basic);
             }),
             ("Basic", |challenge| {
                 assert_eq!(challenge.unwrap(), Challenge::Basic);
             }),
+            (
+                r#"Digest realm="registry", Basic realm="registry""#,
+                |challenge| {
+                    assert_eq!(challenge.unwrap(), Challenge::Basic);
+                },
+            ),
             (r#"Bearer service="example.com""#, |challenge| {
+                assert!(matches!(challenge, Err(RegistryError::Unauthorized(_))));
+            }),
+            (r#"Bearer realm="unterminated"#, |challenge| {
                 assert!(matches!(challenge, Err(RegistryError::Unauthorized(_))));
             }),
             (r#"Digest realm="registry""#, |challenge| {
