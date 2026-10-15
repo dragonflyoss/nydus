@@ -289,15 +289,11 @@ impl Authorizer {
         // Build the token URL from the realm and the challenge's parameters.
         let mut url = Url::parse(realm)
             .map_err(|err| RegistryError::InvalidUrl(format!("{realm}: {err}")))?;
-        {
-            let mut query = url.query_pairs_mut();
-            if !service.is_empty() {
-                query.append_pair("service", service);
-            }
-            if !scope.is_empty() {
-                query.append_pair("scope", scope);
-            }
-        }
+        url.query_pairs_mut().extend_pairs(
+            [("service", service), ("scope", scope)]
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty()),
+        );
 
         // Present the configured credentials to the token server.
         let mut headers = HeaderMap::new();
@@ -315,11 +311,10 @@ impl Authorizer {
 
         // Parse the token out of the body.
         let body = response.text().await.map_err(RegistryError::Io)?;
-        serde_json::from_str::<FetchTokenResponse>(&body)
-            .map_err(|err| {
-                RegistryError::UnexpectedResponse(format!("invalid token response: {err}"))
-            })?
-            .into_authorization()
+        let token: FetchTokenResponse = serde_json::from_str(&body).map_err(|err| {
+            RegistryError::UnexpectedResponse(format!("invalid token response: {err}"))
+        })?;
+        token.into_authorization()
     }
 }
 
