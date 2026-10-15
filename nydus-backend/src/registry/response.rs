@@ -5,14 +5,9 @@ use std::io;
 use reqwest::header::{HeaderMap, CONTENT_LENGTH, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tracing::debug;
 
 use super::{RegistryError, RegistryResult};
 use crate::Protocol;
-
-/// The most of an error body kept as the error message, the cap containerd
-/// reads an unexpected status's body up to.
-const MAX_ERROR_BODY_SIZE: u64 = 64 * 1024;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
 /// and headers up front, plus the body as an async reader.
@@ -52,23 +47,14 @@ impl Response {
     }
 
     /// Consumes a response of a status the request did not expect into
-    /// [`RegistryError::UnexpectedStatus`], the first
-    /// [`MAX_ERROR_BODY_SIZE`] bytes of the body as the message.
+    /// [`RegistryError::UnexpectedStatus`], the body as the message.
     ///
-    /// The status is the error, so a body that cannot be read only shortens
+    /// The status is the error, so a body that cannot be read only blanks
     /// the message.
     pub(crate) async fn into_status_error(self) -> RegistryError {
-        let mut body = Vec::new();
-        if let Err(err) = self
-            .reader
-            .take(MAX_ERROR_BODY_SIZE)
-            .read_to_end(&mut body)
-            .await
-        {
-            debug!("reading the body of a {} answer failed: {err}", self.status);
-        }
-
-        RegistryError::UnexpectedStatus(self.status, String::from_utf8_lossy(&body).into_owned())
+        let status = self.status;
+        let body = self.text().await.unwrap_or_default();
+        RegistryError::UnexpectedStatus(status, body)
     }
 
     /// Returns whether another attempt might get a different answer: a `429`,
@@ -169,27 +155,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn into_status_error_keeps_the_status_and_a_bounded_lossy_body() {
-        let test_cases: Vec<(Vec<u8>, String)> = vec![
-            (b"no such blob".to_vec(), "no such blob".to_string()),
-            (b"caf\xe9".to_vec(), "caf\u{fffd}".to_string()),
-            (
-                vec![b'x'; MAX_ERROR_BODY_SIZE as usize + 1],
-                "x".repeat(MAX_ERROR_BODY_SIZE as usize),
-            ),
-        ];
-
-        for (body, expected) in test_cases {
-            let response = Response {
-                status: StatusCode::NOT_FOUND,
-                headers: HeaderMap::new(),
-                reader: Box::new(io::Cursor::new(body)),
-                protocol: Protocol::Http,
-            };
-            assert!(matches!(
-                response.into_status_error().await,
-                RegistryError::UnexpectedStatus(StatusCode::NOT_FOUND, body) if body == expected
-            ));
-        }
+    async fn into_status_error_keeps_the_status_and_body() {
+        let response = Response {
+            status: StatusCode::NOT_FOUND,
+            headers: HeaderMap::new(),
+            reader: Box::new(io::Cursor::new(b"no such blob".to_vec())),
+            protocol: Protocol::Http,
+        };
+        assert!(matches!(
+            response.into_status_error().await,
+            RegistryError::UnexpectedStatus(StatusCode::NOT_FOUND, body) if body == "no such blob"
+        ));
     }
 }
