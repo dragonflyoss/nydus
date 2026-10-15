@@ -22,9 +22,11 @@ const CLIENT_ID: &str = "nydus-registry-client";
 /// How long a bearer token lives when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
-/// How long before expiry a token is already treated as expired, so a
-/// request never leaves with a token about to lapse.
-const TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(20);
+/// How long before the token server's expiry a token is already treated as
+/// expired, covering the request's time in flight and the clocks' skew so a
+/// request never arrives with a token that has just lapsed; the `expiryDelta`
+/// of x/oauth2 and the `leeway` of client-go.
+const TOKEN_EXPIRY_LEEWAY: Duration = Duration::from_secs(20);
 
 /// The challenge a registry sends in `WWW-Authenticate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,12 +125,11 @@ impl Credential {
     }
 
     /// Whether the credential is still good to send: basic credentials
-    /// always, a bearer token until it is within the refresh margin of
-    /// expiring.
+    /// always, a bearer token until it is within the leeway of expiring.
     fn is_fresh(&self) -> bool {
         match self {
             Self::Basic(_) => true,
-            Self::Bearer { expires_at, .. } => Instant::now() + TOKEN_REFRESH_MARGIN < *expires_at,
+            Self::Bearer { expires_at, .. } => Instant::now() + TOKEN_EXPIRY_LEEWAY < *expires_at,
         }
     }
 }
@@ -348,7 +349,7 @@ mod tests {
                 Some("Bearer xyz"),
             ),
             (
-                Credential::bearer("xyz", TOKEN_REFRESH_MARGIN).unwrap(),
+                Credential::bearer("xyz", TOKEN_EXPIRY_LEEWAY).unwrap(),
                 None,
             ),
             (Credential::bearer("xyz", Duration::ZERO).unwrap(), None),
