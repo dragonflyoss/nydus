@@ -13,6 +13,7 @@ use std::os::unix::fs::MetadataExt;
 pub struct NetnsId {
     /// The device the namespace file lives on.
     dev: u64,
+
     /// The inode of the namespace file.
     ino: u64,
 }
@@ -30,6 +31,7 @@ impl fmt::Display for NetnsId {
 pub struct Netns {
     /// The open namespace file, kept for as long as threads may enter it.
     fd: OwnedFd,
+
     /// The identity read from `fd` when the value was created.
     id: NetnsId,
 }
@@ -113,6 +115,7 @@ impl Netns {
             scope
                 .spawn(|| {
                     // SAFETY: unshare only affects this scratch thread, which
+                    // exits right after; the descriptor keeps the namespace.
                     if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
                         return Err(io::Error::last_os_error());
                     }
