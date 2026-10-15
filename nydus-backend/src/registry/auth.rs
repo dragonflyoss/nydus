@@ -22,10 +22,8 @@ const CLIENT_ID: &str = "nydus-registry-client";
 /// How long a bearer token lives when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
-/// How long before the token server's expiry a token is already treated as
-/// expired, covering the request's time in flight and the clocks' skew so a
-/// request never arrives with a token that has just lapsed; the `expiryDelta`
-/// of x/oauth2 and the `leeway` of client-go.
+/// How long before its expiry a token is treated as expired, so a request in
+/// flight never arrives with a token that has just lapsed.
 const TOKEN_EXPIRY_LEEWAY: Duration = Duration::from_secs(20);
 
 /// The challenge a registry sends in `WWW-Authenticate`.
