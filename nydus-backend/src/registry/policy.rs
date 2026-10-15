@@ -3,8 +3,6 @@
 //! An on-demand read falls back to the origin on any failure, a prefetch read
 //! is deferred to the storage layer's delayed reschedule instead.
 
-use reqwest::StatusCode;
-
 use super::response::{status_error, Response};
 use super::{RegistryError, RegistryResult};
 use crate::ReadKind;
@@ -25,40 +23,28 @@ pub(super) enum Action {
     Defer(RegistryError),
 }
 
-/// Folds a transient answer into its error: `429`, `5xx` and `408` become
-/// [`RegistryError::UnexpectedStatus`], a dfdaemon `507` among them since
-/// another seed peer may have room. Every other status passes through,
-/// including a dfdaemon `422` that no retry or fallback would change.
-pub(super) async fn classify(response: Response) -> RegistryResult<Response> {
-    match response.status {
-        status
-            if status.is_server_error()
-                || status == StatusCode::REQUEST_TIMEOUT
-                || status == StatusCode::TOO_MANY_REQUESTS =>
-        {
-            Err(status_error(response).await)
-        }
-        _ => Ok(response),
-    }
-}
+/// Implements the action.
+impl Action {
+    /// Decides what a read of `kind` does with the outcome of its Dragonfly
+    /// request.
+    ///
+    /// A transient answer is folded into its error first, a dfdaemon `507`
+    /// among them since another seed peer may have room, while a dfdaemon
+    /// `422` is definitive and served as is. Prefetch reads never touch the
+    /// origin, so a Dragonfly outage degrades prefetch instead of flooding the
+    /// registry, while on-demand reads fall back on every failure the SDK's
+    /// retries did not cure.
+    pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) -> Self {
+        let err = match outcome {
+            Ok(response) if response.is_transient() => status_error(response).await,
+            Ok(response) => return Self::Serve(response),
+            Err(err) => err,
+        };
 
-/// Decides what a read of `kind` does with the outcome of its Dragonfly
-/// request.
-///
-/// Prefetch reads never touch the origin, so a Dragonfly outage degrades
-/// prefetch instead of flooding the registry, while on-demand reads fall back
-/// on every failure the SDK's retries did not cure.
-pub(super) async fn decide(kind: ReadKind, outcome: RegistryResult<Response>) -> Action {
-    let outcome = match outcome {
-        Ok(response) => classify(response).await,
-        Err(err) => Err(err),
-    };
-    match outcome {
-        Ok(response) => Action::Serve(response),
-        Err(err) => match kind {
-            ReadKind::Prefetch => Action::Defer(RegistryError::PrefetchDeferred(Box::new(err))),
-            ReadKind::OnDemand => Action::Fallback(err),
-        },
+        match kind {
+            ReadKind::Prefetch => Self::Defer(RegistryError::PrefetchDeferred(Box::new(err))),
+            ReadKind::OnDemand => Self::Fallback(err),
+        }
     }
 }
 
@@ -67,6 +53,7 @@ mod tests {
     use super::*;
     use crate::Protocol;
     use reqwest::header::HeaderMap;
+    use reqwest::StatusCode;
     use std::io;
 
     fn response(status: StatusCode) -> Response {
@@ -75,43 +62,6 @@ mod tests {
             headers: HeaderMap::new(),
             reader: Box::new(std::io::Cursor::new(Vec::new())),
             protocol: Protocol::Dragonfly,
-        }
-    }
-
-    fn transport_error() -> RegistryError {
-        RegistryError::Io(io::Error::other("connection reset"))
-    }
-
-    #[tokio::test]
-    async fn classify_folds_transient_answers_into_errors() {
-        let test_cases = vec![
-            (StatusCode::INTERNAL_SERVER_ERROR, true),
-            (StatusCode::BAD_GATEWAY, true),
-            (StatusCode::SERVICE_UNAVAILABLE, true),
-            (StatusCode::INSUFFICIENT_STORAGE, true),
-            (StatusCode::REQUEST_TIMEOUT, true),
-            (StatusCode::TOO_MANY_REQUESTS, true),
-            (StatusCode::OK, false),
-            (StatusCode::PARTIAL_CONTENT, false),
-            (StatusCode::TEMPORARY_REDIRECT, false),
-            (StatusCode::UNAUTHORIZED, false),
-            (StatusCode::FORBIDDEN, false),
-            (StatusCode::NOT_FOUND, false),
-            (StatusCode::UNPROCESSABLE_ENTITY, false),
-        ];
-
-        for (status, transient) in test_cases {
-            match classify(response(status)).await {
-                Ok(served) => {
-                    assert!(!transient, "status={status}");
-                    assert_eq!(served.status, status);
-                }
-                Err(RegistryError::UnexpectedStatus(got, _)) => {
-                    assert!(transient, "status={status}");
-                    assert_eq!(got, status);
-                }
-                Err(err) => panic!("status={status}: {err}"),
-            }
         }
     }
 
@@ -130,7 +80,7 @@ mod tests {
             for &status in &test_cases {
                 assert!(
                     matches!(
-                        decide(kind, Ok(response(status))).await,
+                        Action::decide(kind, Ok(response(status))).await,
                         Action::Serve(served) if served.status == status
                     ),
                     "kind={kind:?} status={status}"
@@ -146,16 +96,16 @@ mod tests {
             || Ok(response(StatusCode::SERVICE_UNAVAILABLE)),
             || Ok(response(StatusCode::INSUFFICIENT_STORAGE)),
             || Ok(response(StatusCode::REQUEST_TIMEOUT)),
-            || Err(transport_error()),
+            || Err(RegistryError::Io(io::Error::other("connection reset"))),
         ];
 
         for failure in test_cases {
             assert!(matches!(
-                decide(ReadKind::Prefetch, failure()).await,
+                Action::decide(ReadKind::Prefetch, failure()).await,
                 Action::Defer(RegistryError::PrefetchDeferred(_))
             ));
             assert!(matches!(
-                decide(ReadKind::OnDemand, failure()).await,
+                Action::decide(ReadKind::OnDemand, failure()).await,
                 Action::Fallback(_)
             ));
         }

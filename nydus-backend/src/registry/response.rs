@@ -51,6 +51,14 @@ impl Response {
         Ok(body)
     }
 
+    /// Returns whether the status is one another attempt might change: `429`,
+    /// `5xx` and `408`. Every other status is definitive.
+    pub(crate) fn is_transient(&self) -> bool {
+        self.status.is_server_error()
+            || self.status == StatusCode::REQUEST_TIMEOUT
+            || self.status == StatusCode::TOO_MANY_REQUESTS
+    }
+
     /// Returns the `Location` a redirect points at.
     pub(crate) fn location(&self) -> RegistryResult<String> {
         self.headers
@@ -154,6 +162,29 @@ mod tests {
             headers: HeaderMap::new(),
             reader: Box::new(std::io::Cursor::new(body.to_vec())),
             protocol: Protocol::Http,
+        }
+    }
+
+    #[test]
+    fn is_transient_marks_the_statuses_another_attempt_might_change() {
+        let test_cases = vec![
+            (StatusCode::INTERNAL_SERVER_ERROR, true),
+            (StatusCode::BAD_GATEWAY, true),
+            (StatusCode::SERVICE_UNAVAILABLE, true),
+            (StatusCode::INSUFFICIENT_STORAGE, true),
+            (StatusCode::REQUEST_TIMEOUT, true),
+            (StatusCode::TOO_MANY_REQUESTS, true),
+            (StatusCode::OK, false),
+            (StatusCode::PARTIAL_CONTENT, false),
+            (StatusCode::TEMPORARY_REDIRECT, false),
+            (StatusCode::UNAUTHORIZED, false),
+            (StatusCode::FORBIDDEN, false),
+            (StatusCode::NOT_FOUND, false),
+            (StatusCode::UNPROCESSABLE_ENTITY, false),
+        ];
+
+        for (status, expected) in test_cases {
+            assert_eq!(response(status, b"").is_transient(), expected, "{status}");
         }
     }
 

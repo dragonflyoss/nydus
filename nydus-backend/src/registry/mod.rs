@@ -23,7 +23,7 @@
 //!
 //! [`Registry`] owns the registry-specific logic, the transports spend their
 //! own retries and hand back a settled [`Response`]. A blob `GET` rides
-//! Dragonfly when it is configured and [`policy::decide`] settles the answer:
+//! Dragonfly when it is configured and [`Action::decide`] settles the answer:
 //! serve it, defer a prefetch read to the storage layer's reschedule, or fall
 //! an on-demand read back to the origin through the rate-limited client.
 //! `HEAD` requests and token fetches always go straight to the origin.
@@ -206,7 +206,7 @@ pub(crate) struct Registry {
 ///                                                                fill_exact
 ///
 /// send(method, url)
-///   ├─ GET, Dragonfly configured ──▶ dragonfly.get ──▶ policy::decide
+///   ├─ GET, Dragonfly configured ──▶ dragonfly.get ──▶ Action::decide
 ///   │                                   Serve ──▶ answer
 ///   │                                   Fallback ──▶ back_to_source.get (on-demand)
 ///   │                                   Defer ──▶ Err(PrefetchDeferred) (prefetch)
@@ -345,7 +345,7 @@ impl Inner {
 
     /// Sends a request.
     ///
-    /// A `GET` rides Dragonfly when it is configured and [`policy::decide`]
+    /// A `GET` rides Dragonfly when it is configured and [`Action::decide`]
     /// settles the answer, everything else goes straight to the origin.
     async fn send(
         &self,
@@ -360,7 +360,7 @@ impl Inner {
         };
 
         let outcome = dragonfly.get(url, headers.clone(), kind).await;
-        match policy::decide(kind, outcome).await {
+        match Action::decide(kind, outcome).await {
             Action::Serve(response) => Ok(response),
             Action::Fallback(err) => {
                 warn!("dragonfly request failed, falling back to the origin: {err}");
