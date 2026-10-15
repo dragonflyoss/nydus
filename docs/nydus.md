@@ -219,19 +219,17 @@ process-wide Tokio multi-thread runtime:
 
 | Pool | Default | Lifetime and work |
 | ---- | ------- | ----------------- |
-| Async workers | 2 threads | Created when the runtime is first needed (the first remote read, or the construction of a Dragonfly-backed registry) and retained for the process lifetime. Each request future is spawned onto them, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Async workers | 2 threads | Created with the registry backend and retained for its lifetime. Each request future is spawned onto them, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
 | Blocking workers | Up to 8 threads | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`). Idle threads are released after 10 seconds. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
 The registry `http.worker_threads` and `http.max_blocking_threads` settings
-override these defaults. The runtime is shared by every registry backend in a
-process, so configuration is first-writer-wins and must be applied before the
-first registry backend is constructed. Repeating the same configuration is
-harmless; a conflicting late configuration is rejected and logged. Embedders
-may instead call `nydus_backend::configure_runtime` before constructing any
-backend, including an optional network namespace that every runtime thread
-enters; because requests run on those threads, registry sockets are created in
-that namespace regardless of the caller's. A process using only local blobs
-never creates this Tokio runtime.
+set these bounds; every registry backend built from a configuration runs on a
+runtime of its own. Embedders may instead build one `nydus_backend::Runtime`
+from `RuntimeOptions`, including an optional network namespace that every
+runtime thread enters, and hand it to every backend they open through
+`nydus_backend::build_backend_with_runtime`; because requests run on those
+threads, registry sockets are created in that namespace regardless of the
+caller's. A process using only local blobs never creates a Tokio runtime.
 
 ### `nydus-core` API
 
@@ -1222,8 +1220,8 @@ Fields under `backend.config`:
 		- `ca_cert` (optional): a CA certificate path with PEM format to trust
 			in addition to the system roots; the file may bundle multiple
 			certificates.
-	- `worker_threads` (default `2`): async worker threads of the
-		process-wide runtime that drives the registry client's sockets. They
+	- `worker_threads` (default `2`): async worker threads of the runtime
+		that drives the registry client's sockets. They
 		only move bytes for the connection pool (readers block on their own
 		threads), so two suffice for a node's worth of blob traffic; raise it
 		only if the backend metrics show the workers saturated.
@@ -1231,12 +1229,12 @@ Fields under `backend.config`:
 		on-demand blocking threads, which serve DNS lookups and are released
 		after 10 s idle.
 
-		The runtime is shared by every registry backend in the process, so these
-		two keys take effect only from the first backend constructed; a later
-		backend asking for different values logs a warning and keeps the
-		running runtime. Programs that embed the backend
-		(a VMM) may also fix the runtime's network namespace through the
-		`nydus_backend::configure_runtime` API; the config file cannot.
+		Every registry backend built from a configuration runs on a runtime of
+		its own with these bounds. Programs that embed the backend (a VMM) may
+		instead build one `nydus_backend::Runtime`, fixing its network
+		namespace as well, and share it across the backends they open through
+		`nydus_backend::build_backend_with_runtime`; the config file cannot
+		name a namespace.
 - `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
 	(crate `dragonfly-client-request`) for P2P distribution, carrying a
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the

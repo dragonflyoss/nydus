@@ -234,18 +234,16 @@ pub struct HttpConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// The async worker threads of the process-wide runtime that drives the
-    /// registry client's sockets, `2` by default; `0` selects the default.
-    /// The runtime is shared by every registry backend in the process, so
-    /// only the first backend constructed can configure it; a later,
-    /// different value is logged and ignored.
+    /// The async worker threads of the runtime that drives the registry
+    /// client's sockets, `2` by default; `0` selects the default. Every
+    /// registry backend built from a configuration runs on a runtime of its
+    /// own with these bounds.
     #[serde(default = "default_registry_http_worker_threads")]
     pub worker_threads: usize,
 
     /// The upper bound on the runtime's on-demand blocking threads, which
     /// serve DNS lookups and are released after 10 s idle, `8` by default;
-    /// `0` selects the default. Shares the first-backend-wins rule of
-    /// [`worker_threads`](Self::worker_threads).
+    /// `0` selects the default.
     #[serde(default = "default_registry_http_max_blocking_threads")]
     pub max_blocking_threads: usize,
 }

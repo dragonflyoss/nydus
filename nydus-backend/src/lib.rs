@@ -28,11 +28,12 @@ pub use local::Local;
 #[cfg(feature = "backend-registry")]
 pub(crate) use registry::Registry;
 
-/// The registry backend's shared tokio runtime is process-wide; an embedding
-/// process bounds its threads and pins their network namespace with
-/// [`configure_runtime`] before constructing any registry backend.
+/// A registry backend runs on a [`Runtime`] built from its `http`
+/// configuration; an embedding process builds one itself, with the thread
+/// bounds and network namespace it needs, and shares it across its backends
+/// through [`build_backend_with_runtime`].
 #[cfg(feature = "backend-registry")]
-pub use registry::{configure_runtime, Netns, NetnsId, RuntimeOptions};
+pub use registry::{Netns, NetnsId, Runtime, RuntimeOptions};
 
 pub use nydus_config::{Backend, Protocol, ReadKind};
 
@@ -121,19 +122,36 @@ pub trait BlobBackend: Send + Sync {
     ) -> io::Result<()>;
 }
 
-/// Construct a blob backend from its configuration.
+/// Construct a blob backend from its configuration. A registry backend runs
+/// on a runtime of its own, built from the `http` section.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
+    match config {
+        BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
+        #[cfg(feature = "backend-registry")]
+        BackendConfig::Registry(registry) => {
+            let runtime = Runtime::new(RuntimeOptions::from(&registry.http))?;
+            build_backend_with_runtime(config, Arc::new(runtime))
+        }
+        #[cfg(not(feature = "backend-registry"))]
+        BackendConfig::Registry(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "registry backend requires the `backend-registry` feature",
+        )),
+    }
+}
+
+/// Construct a blob backend from its configuration, a registry backend on
+/// `runtime` rather than on one of its own: an embedder builds the runtime
+/// with the namespace its registries must be reached from and hands it to
+/// every backend it opens.
+#[cfg(feature = "backend-registry")]
+pub fn build_backend_with_runtime(
+    config: &BackendConfig,
+    runtime: Arc<Runtime>,
+) -> io::Result<Arc<dyn BlobBackend>> {
     let backend: Arc<dyn BlobBackend> = match config {
         BackendConfig::Local(local) => Arc::new(Local::new(local.dir.clone())),
-        #[cfg(feature = "backend-registry")]
-        BackendConfig::Registry(registry) => Arc::new(Registry::new(registry.clone())?),
-        #[cfg(not(feature = "backend-registry"))]
-        BackendConfig::Registry(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "registry backend requires the `backend-registry` feature",
-            ))
-        }
+        BackendConfig::Registry(registry) => Arc::new(Registry::new(registry.clone(), runtime)?),
     };
     Ok(backend)
 }

@@ -24,7 +24,7 @@ use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 use nydus_config::DragonflyConfig;
 
 use super::response::{log_request_done, Response};
-use super::rt::RUNTIME;
+use super::rt::Runtime;
 use super::{BlobTransport, RegistryError, RegistryResult};
 use crate::{Protocol, ReadKind};
 
@@ -59,9 +59,9 @@ pub(crate) struct Dragonfly {
 }
 
 impl Dragonfly {
-    /// Connect to the configured scheduler. Only the on-demand client
-    /// retries, `max_retries` times across seed peers.
-    pub(crate) fn new(config: &DragonflyConfig) -> io::Result<Dragonfly> {
+    /// Connect to the configured scheduler on `runtime`. Only the on-demand
+    /// client retries, `max_retries` times across seed peers.
+    pub(crate) fn new(config: &DragonflyConfig, runtime: &Runtime) -> io::Result<Dragonfly> {
         let max_retries = u8::try_from(config.max_retries).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -72,7 +72,7 @@ impl Dragonfly {
             )
         })?;
         let endpoint = config.scheduler_endpoint.clone();
-        let (ondemand, prefetch) = RUNTIME
+        let (ondemand, prefetch) = runtime
             .block_on_worker(async move {
                 let ondemand = Proxy::builder()
                     .scheduler_endpoint(endpoint.clone())

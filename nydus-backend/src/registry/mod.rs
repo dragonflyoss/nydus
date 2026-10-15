@@ -28,7 +28,7 @@
 //! an on-demand read back to the origin through the rate-limited client.
 //! `HEAD` requests and token fetches always go straight to the origin.
 //!
-//! Every read runs as a task on the shared backend runtime ([`rt`]) and the
+//! Every read runs as a task on the backend's runtime ([`rt`]) and the
 //! calling thread waits on its join handle, so the body flows from hyper or
 //! tonic to the read inside the worker pool, the connection is opened in the
 //! runtime's network namespace, and the caller is woken once, when the bytes
@@ -55,7 +55,7 @@ use reqwest::{Method, StatusCode};
 use tracing::warn;
 use url::Url;
 
-use nydus_config::{HttpConfig, RegistryConfig};
+use nydus_config::RegistryConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::{
@@ -72,22 +72,7 @@ pub use self::netns::{Netns, NetnsId};
 use self::policy::Action;
 use self::redirect::RedirectCache;
 use self::response::{fill_exact, status_error, Response};
-use self::rt::RUNTIME;
-pub use self::rt::{configure_runtime, RuntimeOptions};
-
-/// Apply the config file's thread bounds to the shared runtime. The config
-/// file cannot name a netns, so its request accepts whichever namespace an
-/// embedder installed through [`configure_runtime`] and only the thread
-/// bounds have to agree.
-///
-/// The options are process-wide, so this runs only once the rest of the
-/// backend configuration has been accepted: a backend that is rejected must
-/// not seal the runtime for the ones that follow.
-fn apply_runtime_config(http: &HttpConfig) {
-    if let Err(err) = configure_runtime(RuntimeOptions::from(http)) {
-        warn!("registry backend: http.worker_threads/max_blocking_threads ignored: {err}");
-    }
-}
+pub use self::rt::{Runtime, RuntimeOptions};
 
 /// An error of the registry backend. Private to the crate, it folds into an
 /// [`io::Error`] at the [`BlobBackend`] boundary.
@@ -227,11 +212,14 @@ struct Inner {
     /// How reads are fetched when nothing else is known, the `protocol` label
     /// of a failed read: Dragonfly when configured, otherwise HTTP.
     protocol: Protocol,
+    /// The runtime every request runs on, last so the transports above drop
+    /// before it.
+    runtime: Arc<Runtime>,
 }
 
 impl Registry {
-    /// Build a registry backend from its configuration.
-    pub(crate) fn new(config: RegistryConfig) -> io::Result<Self> {
+    /// Build a registry backend from its configuration, running on `runtime`.
+    pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
         let http = Http::builder(&config.http).build()?;
         let rate_limit = RateLimit::new(
@@ -254,13 +242,9 @@ impl Registry {
             ));
         }
 
-        // Everything that can reject the config has run; Dragonfly::new
-        // below builds the runtime, so the options must be in before it.
-        apply_runtime_config(&config.http);
-
         #[cfg(feature = "backend-dragonfly")]
         let dragonfly: Option<Box<dyn BlobTransport>> = match &config.dragonfly {
-            Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly)?)),
+            Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, &runtime)?)),
             None => None,
         };
         #[cfg(not(feature = "backend-dragonfly"))]
@@ -274,11 +258,13 @@ impl Registry {
             http,
             back_to_source,
             dragonfly,
+            runtime,
         ))
     }
 
     /// Assemble a registry backend from its parts. `basic_auth` is the
     /// `base64(user:pass)` of the config, sent verbatim after `Basic `.
+    #[allow(clippy::too_many_arguments)]
     fn from_parts(
         scheme: &'static str,
         host: String,
@@ -287,6 +273,7 @@ impl Registry {
         http: Http,
         back_to_source: Http,
         dragonfly: Option<Box<dyn BlobTransport>>,
+        runtime: Arc<Runtime>,
     ) -> Self {
         let protocol = if dragonfly.is_some() {
             Protocol::Dragonfly
@@ -304,6 +291,7 @@ impl Registry {
                 back_to_source,
                 dragonfly,
                 protocol,
+                runtime,
             }),
             first_read_done: AtomicBool::new(false),
             first_read: Mutex::new(()),
@@ -552,7 +540,9 @@ impl BlobBackend for Registry {
     ) -> io::Result<BlobMetadata> {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
-        Ok(RUNTIME
+        Ok(self
+            .inner
+            .runtime
             .block_on_worker(async move { inner.get_blob_metadata(&blob_id, kind).await })??)
     }
 
@@ -575,7 +565,9 @@ impl BlobBackend for Registry {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
         let len = dst.len();
-        let result = RUNTIME
+        let result = self
+            .inner
+            .runtime
             .block_on_worker(async move {
                 let mut buf = vec![0u8; len];
                 let protocol = inner.get_blob(&blob_id, offset, &mut buf, kind).await?;
@@ -622,6 +614,10 @@ mod tests {
     use nydus_telemetry::metrics;
 
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
+
+    fn test_runtime() -> Arc<Runtime> {
+        Arc::new(Runtime::new(RuntimeOptions::default()).unwrap())
+    }
 
     #[async_trait]
     impl<T: BlobTransport> BlobTransport for Arc<T> {
@@ -825,6 +821,7 @@ mod tests {
             http,
             back_to_source,
             Some(Box::new(transport)),
+            test_runtime(),
         )
     }
 
@@ -852,8 +849,10 @@ mod tests {
     }
 
     fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> RegistryResult<Protocol> {
-        RUNTIME
-            .runtime()
+        registry
+            .inner
+            .runtime
+            .tokio()
             .block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
     }
 
@@ -863,7 +862,7 @@ mod tests {
             "addr: https://registry.example.com\nrepository: library/ubuntu\n",
         )
         .unwrap();
-        let registry = Registry::new(config).unwrap();
+        let registry = Registry::new(config, test_runtime()).unwrap();
         assert_eq!(
             registry.inner.blob_url("abc123"),
             "https://registry.example.com/v2/library/ubuntu/blobs/sha256:abc123"
@@ -906,7 +905,7 @@ repository: library/ubuntu
 auth: YWxpY2U6c2VjcmV0
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let registry = Registry::new(config).unwrap();
+        let registry = Registry::new(config, test_runtime()).unwrap();
         assert_eq!(registry.inner.host, "registry.example.com");
         assert_eq!(registry.inner.scheme, "https");
         assert!(registry.inner.dragonfly.is_none());
@@ -923,7 +922,7 @@ dragonfly:
   scheduler_endpoint: http://127.0.0.1:65000
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = Registry::new(config).err().unwrap();
+        let err = Registry::new(config, test_runtime()).err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("backend-dragonfly"));
     }
