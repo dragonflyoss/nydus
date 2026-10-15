@@ -163,11 +163,12 @@ impl Transport for Dragonfly {
 
         match &result {
             Ok(response) => debug!(
-                "backend request done: read_kind={kind} transport=dragonfly_sdk method=GET url={url} headers={headers:?} status={} response_headers={:?} duration={:?}",
-                response.status, response.headers, start.elapsed()
+                "GET {url} ({kind}) answered {} through dragonfly in {:?}",
+                response.status,
+                start.elapsed()
             ),
             Err(err) => debug!(
-                "backend request failed: read_kind={kind} transport=dragonfly_sdk method=GET url={url} headers={headers:?} error={err} duration={:?}",
+                "GET {url} ({kind}) through dragonfly failed in {:?}: {err}",
                 start.elapsed()
             ),
         }

@@ -120,11 +120,12 @@ impl Http {
 
         match &result {
             Ok(response) => debug!(
-                "backend request done: read_kind={kind} transport=none method={method} url={url} headers={headers:?} status={} response_headers={:?} duration={:?}",
-                response.status, response.headers, start.elapsed()
+                "{method} {url} ({kind}) answered {} from the origin in {:?}",
+                response.status,
+                start.elapsed()
             ),
             Err(err) => debug!(
-                "backend request failed: read_kind={kind} transport=none method={method} url={url} headers={headers:?} error={err} duration={:?}",
+                "{method} {url} ({kind}) to the origin failed in {:?}: {err}",
                 start.elapsed()
             ),
         }
