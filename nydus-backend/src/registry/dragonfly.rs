@@ -218,17 +218,27 @@ impl Transport for Dragonfly {
         warn!("dragonfly request failed, falling back to the origin: {err}");
 
         let start = Instant::now();
-        self.fallback_http_client
-            .get(url, headers)
-            .await
-            .inspect_err(|_| {
+        let result = self.fallback_http_client.get(url, headers).await;
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (ondemand) back to the origin returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => {
                 collect_read_backend_failure_metrics(
                     ReadKind::OnDemand,
                     BackendKind::Registry,
                     Some(Protocol::Http),
                     start.elapsed(),
-                )
-            })
+                );
+                debug!(
+                    "GET {url} (ondemand) back to the origin failed in {:?}: {err}",
+                    start.elapsed()
+                );
+            }
+        }
+        result
     }
 
     /// Fetches `url` through the prefetch client at `Level3`, so a first
