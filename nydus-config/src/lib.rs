@@ -213,10 +213,9 @@ pub struct RegistryConfig {
 
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
-    /// hitting the origin registry directly. Only honored when built with the
-    /// `dragonfly` feature; parsed unconditionally so a build
-    /// without the feature can reject the block loudly instead of silently
-    /// ignoring it.
+    /// hitting the origin registry directly. Parsed unconditionally so a
+    /// build without the `dragonfly` feature rejects the block loudly when
+    /// the configuration is loaded instead of silently ignoring it.
     #[serde(default)]
     pub dragonfly: Option<DragonflyConfig>,
 }
@@ -618,6 +617,13 @@ impl Config {
                     "http.max_blocking_threads must be at least 1".to_string(),
                 ));
             }
+            #[cfg(not(feature = "dragonfly"))]
+            if let Some(dragonfly) = &registry.dragonfly {
+                return Err(Error::InvalidConfig(format!(
+                    "dragonfly.scheduler_endpoint is set ({}) but this build lacks the `dragonfly` feature",
+                    dragonfly.scheduler_endpoint
+                )));
+            }
             if let Some(dragonfly) = &registry.dragonfly {
                 if dragonfly.max_retries > 3 {
                     return Err(Error::InvalidConfig(
@@ -673,6 +679,18 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::Write;
 
+    #[cfg(not(feature = "dragonfly"))]
+    #[test]
+    fn load_config_file_rejects_the_dragonfly_block_without_the_feature() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/config.yaml"));
+        let err = Config::load(path).unwrap_err();
+        assert!(
+            err.to_string().contains("lacks the `dragonfly` feature"),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "dragonfly")]
     #[test]
     fn load_config_file_correctly() {
         let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/config.yaml"));
@@ -1029,6 +1047,7 @@ scope: all
         }
     }
 
+    #[cfg(feature = "dragonfly")]
     #[test]
     fn rejects_dragonfly_values_out_of_range() {
         let test_cases = vec![

@@ -1250,9 +1250,10 @@ Fields under `backend.config`:
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
 	configured `request_timeout` per attempt; every other request (`HEAD`, auth token
 	fetches) goes directly to the origin registry. Only available when the
-	binary is built with the `dragonfly` feature. Omit to talk
-	to the origin directly. Each read is counted under the backend that served
-	it (see [Metrics](#metrics)).
+	binary is built with the `dragonfly` feature; a build without it rejects
+	the block when the config is loaded. Omit to talk to the origin directly.
+	Each read is counted under the backend that served it (see
+	[Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
 	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times

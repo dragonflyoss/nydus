@@ -162,19 +162,6 @@ impl Registry {
     pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
         let http = Http::new(&config.http, None)?;
 
-        // Reject a Dragonfly configuration this build cannot honour.
-        #[cfg(not(feature = "dragonfly"))]
-        if let Some(dragonfly) = &config.dragonfly {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "dragonfly.scheduler_endpoint is set ({}) but this build lacks \
-                     the `dragonfly` feature",
-                    dragonfly.scheduler_endpoint
-                ),
-            ));
-        }
-
         // Connect the Dragonfly transport when configured.
         #[cfg(feature = "dragonfly")]
         let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
@@ -797,21 +784,6 @@ auth: YWxpY2U6c2VjcmV0
         );
         assert!(registry.client.dragonfly.is_none());
         assert_eq!(registry.client.protocol(), Protocol::Http);
-    }
-
-    #[cfg(not(feature = "dragonfly"))]
-    #[test]
-    fn new_rejects_dragonfly_endpoint_without_the_feature() {
-        let yaml = "
-addr: https://registry.example.com
-repository: library/ubuntu
-dragonfly:
-  scheduler_endpoint: http://127.0.0.1:65000
-";
-        let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = Registry::new(config, test_runtime()).err().unwrap();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("dragonfly"));
     }
 
     #[test]

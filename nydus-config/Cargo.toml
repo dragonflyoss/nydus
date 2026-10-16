@@ -8,6 +8,12 @@ description = "YAML storage configuration for nydus: the typed schema, loading a
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
+[features]
+# Accepts the `dragonfly` block of a registry backend; a build without it
+# rejects the block when the configuration is loaded. Enabled by
+# `nydus-backend/dragonfly`.
+dragonfly = []
+
 [dependencies]
 clap = { workspace = true }
 humantime-serde = "1"

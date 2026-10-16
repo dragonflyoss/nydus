@@ -33,6 +33,7 @@ registry = [
 # Dragonfly P2P reads for the registry backend.
 dragonfly = [
   "registry",
+  "nydus-config/dragonfly",
   "dep:dragonfly-api",
   "dep:dragonfly-client-request",
 ]
