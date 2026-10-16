@@ -20,6 +20,7 @@ backend-registry = [
   "dep:reqwest-retry",
   "dep:url",
   "dep:async-trait",
+  "dep:bytes",
   "dep:futures",
   "dep:http",
   "dep:http-auth",
@@ -33,7 +34,6 @@ backend-dragonfly = [
   "backend-registry",
   "dep:dragonfly-api",
   "dep:dragonfly-client-request",
-  "dep:bytes",
 ]
 
 [dependencies]

@@ -2,6 +2,7 @@
 
 use std::io;
 
+use bytes::{Bytes, BytesMut};
 use reqwest::header::{HeaderMap, CONTENT_LENGTH, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -9,9 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::Protocol;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
-/// and headers up front, plus the body as an async reader.
-///
-/// Origin bodies stream, Dragonfly bodies are already buffered by the SDK.
+/// and headers up front, plus the body.
 pub(crate) struct Response {
     /// The HTTP status.
     pub(crate) status: StatusCode,
@@ -19,33 +18,66 @@ pub(crate) struct Response {
     /// The response headers.
     pub(crate) headers: HeaderMap,
 
-    /// The body, streamed from the origin or buffered by the Dragonfly SDK.
-    pub(crate) reader: Box<dyn AsyncRead + Send + Unpin>,
+    /// The body.
+    pub(crate) body: Body,
 
     /// How the answer was fetched: the origin over HTTP, or Dragonfly.
     pub(crate) protocol: Protocol,
 }
 
+/// The body of a response.
+pub(crate) enum Body {
+    /// A body still streaming from the origin.
+    Stream(Box<dyn AsyncRead + Send + Unpin>),
+
+    /// A body the Dragonfly SDK already read whole, so a seed peer failing
+    /// mid-body was retried before the answer got here.
+    #[cfg_attr(not(feature = "backend-dragonfly"), allow(dead_code))]
+    Bytes(Bytes),
+}
+
 /// Implements the response.
 impl Response {
-    /// Reads the body so it exactly fills `buf`, a short body being an
-    /// [`io::ErrorKind::UnexpectedEof`].
-    pub(crate) async fn read_exact(mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.reader.read_exact(buf).await?;
-        Ok(())
+    /// Reads exactly `len` bytes of the body, a shorter body being an
+    /// [`io::ErrorKind::UnexpectedEof`]. A body already in memory is handed
+    /// over without a copy.
+    pub(crate) async fn bytes(self, len: usize) -> io::Result<Bytes> {
+        let bytes = match self.body {
+            Body::Bytes(bytes) => bytes,
+            Body::Stream(mut reader) => {
+                let mut buf = BytesMut::zeroed(len);
+                reader.read_exact(&mut buf).await?;
+                buf.freeze()
+            }
+        };
+        if bytes.len() < len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("registry returned {} bytes, expected {len}", bytes.len()),
+            ));
+        }
+
+        Ok(bytes.slice(..len))
     }
 
     /// Reads the body as a UTF-8 string.
-    pub(crate) async fn text(mut self) -> io::Result<String> {
-        let mut body = String::new();
-        self.reader.read_to_string(&mut body).await?;
-        Ok(body)
+    pub(crate) async fn text(self) -> io::Result<String> {
+        let bytes = match self.body {
+            Body::Bytes(bytes) => bytes,
+            Body::Stream(mut reader) => {
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf).await?;
+                buf.into()
+            }
+        };
+        String::from_utf8(bytes.into())
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
     /// Consumes a response of a status the request did not expect into an
     /// error naming the status, the body as the rest of the message.
     ///
-    /// The status is the error, so a body that cannot be read only shortens
+    /// The status is the error, so a body that cannot be read only blanks
     /// the message.
     pub(crate) async fn into_io_error(self) -> io::Error {
         let status = self.status;
@@ -118,7 +150,7 @@ mod tests {
             let response = Response {
                 status,
                 headers: HeaderMap::new(),
-                reader: Box::new(io::Cursor::new(Vec::new())),
+                body: Body::Bytes(Bytes::new()),
                 protocol: Protocol::Http,
             };
             assert_eq!(response.is_retryable(), expected, "{status}");
@@ -126,30 +158,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_exact_fills_the_buffer_or_rejects_a_short_body() {
-        let test_cases: Vec<(&[u8], fn(io::Result<()>, &[u8; 4]))> = vec![
-            (b"abcd", |result, buf| {
-                assert!(result.is_ok());
-                assert_eq!(buf, b"abcd");
+    async fn bytes_reads_exactly_len_from_either_body() {
+        let test_cases: Vec<(Body, fn(io::Result<Bytes>))> = vec![
+            (Body::Bytes(Bytes::from_static(b"abcd")), |result| {
+                assert_eq!(result.unwrap(), "abcd");
             }),
-            (b"ab", |result, _| {
-                assert!(matches!(
-                    result,
-                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof
-                ));
+            (Body::Bytes(Bytes::from_static(b"abcdef")), |result| {
+                assert_eq!(result.unwrap(), "abcd");
             }),
+            (Body::Bytes(Bytes::from_static(b"ab")), |result| {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+            }),
+            (
+                Body::Stream(Box::new(io::Cursor::new(b"abcd".to_vec()))),
+                |result| {
+                    assert_eq!(result.unwrap(), "abcd");
+                },
+            ),
+            (
+                Body::Stream(Box::new(io::Cursor::new(b"abcdef".to_vec()))),
+                |result| {
+                    assert_eq!(result.unwrap(), "abcd");
+                },
+            ),
+            (
+                Body::Stream(Box::new(io::Cursor::new(b"ab".to_vec()))),
+                |result| {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+                },
+            ),
         ];
 
         for (body, assert_fn) in test_cases {
             let response = Response {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
-                reader: Box::new(io::Cursor::new(body.to_vec())),
+                body,
                 protocol: Protocol::Http,
             };
-            let mut buf = [0u8; 4];
-            let result = response.read_exact(&mut buf).await;
-            assert_fn(result, &buf);
+            assert_fn(response.bytes(4).await);
         }
     }
 
@@ -158,7 +205,7 @@ mod tests {
         let response = Response {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
-            reader: Box::new(io::Cursor::new(b"no such blob".to_vec())),
+            body: Body::Stream(Box::new(io::Cursor::new(b"no such blob".to_vec()))),
             protocol: Protocol::Http,
         };
         assert_eq!(

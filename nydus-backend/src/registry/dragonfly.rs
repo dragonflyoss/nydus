@@ -24,7 +24,7 @@ use dragonfly_client_request::{GetRequest, GetResponse, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
 
-use super::response::Response;
+use super::response::{Body, Response};
 use super::rt::Runtime;
 use super::Transport;
 use crate::{Protocol, ReadKind};
@@ -99,7 +99,7 @@ impl Dragonfly {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
-                reader: Box::new(io::Cursor::new(body.freeze())),
+                body: Body::Bytes(body.freeze()),
                 protocol: Protocol::Dragonfly,
             }),
             Err(Error::ProxyError(ProxyError {
@@ -127,7 +127,7 @@ impl Dragonfly {
                         ))
                     })
                     .collect(),
-                reader: Box::new(io::Cursor::new(message.unwrap_or_default().into_bytes())),
+                body: Body::Bytes(message.unwrap_or_default().into()),
                 protocol: Protocol::Dragonfly,
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(

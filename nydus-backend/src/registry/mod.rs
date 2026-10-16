@@ -148,7 +148,7 @@ pub(crate) struct Registry {
 ///   └─ blob URL ──▶ authorized_request(GET) ─┬─ 3xx ──▶ send(GET location), cache it
 ///                                            └─ 2xx ──────────────────┐
 ///                                                                     ▼
-///                                                                read_exact
+///                                                                  bytes
 ///
 /// send(method, url)
 ///   ├─ GET, Dragonfly configured ──▶ dragonfly.get ──▶ Action::decide
@@ -384,8 +384,8 @@ impl Inner {
         self.send(method, url, headers, kind).await
     }
 
-    /// Fills `dst` with the blob bytes from `offset` and returns the protocol
-    /// that served them.
+    /// Sends the `GET` for `len` blob bytes from `offset` and returns the
+    /// successful response, its body still to be read.
     ///
     /// The read goes through the cached redirect when there is one and
     /// otherwise through the blob URL, caching the redirect it answers with.
@@ -393,23 +393,19 @@ impl Inner {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        dst: &mut [u8],
+        len: usize,
         kind: ReadKind,
-    ) -> io::Result<Protocol> {
+    ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
-        let end = offset + dst.len() as u64 - 1;
+        let end = offset + len as u64 - 1;
         let range: HeaderValue = format!("bytes={offset}-{end}").parse().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(RANGE, range);
 
-        let response = match self.get_through_redirect(&hex, &headers, kind).await? {
-            Some(response) => response,
-            None => self.get_through_blob_url(&hex, headers, kind).await?,
-        };
-
-        let protocol = response.protocol;
-        response.read_exact(dst).await?;
-        Ok(protocol)
+        match self.get_through_redirect(&hex, &headers, kind).await? {
+            Some(response) => Ok(response),
+            None => self.get_through_blob_url(&hex, headers, kind).await,
+        }
     }
 
     /// Sends the blob `GET` through the redirect cached for `hex`, `None`
@@ -507,10 +503,14 @@ impl Inner {
         let footer_offset =
             BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
 
-        let mut footer_bytes = [0u8; BlobFooter::SIZE];
-        self.get_blob(blob_id, footer_offset, &mut footer_bytes, kind)
+        let footer_bytes = self
+            .get_blob(blob_id, footer_offset, BlobFooter::SIZE, kind)
+            .await?
+            .bytes(BlobFooter::SIZE)
             .await?;
-        let footer = BlobFooter::from_bytes(&footer_bytes).map_err(io::Error::other)?;
+        let footer =
+            BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
         footer
             .validate_layout(footer_offset)
             .map_err(io::Error::other)?;
@@ -524,16 +524,18 @@ impl Inner {
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
-        let mut blob_metadata_bytes = vec![0u8; blob_metadata_size];
-        self.get_blob(
-            blob_id,
-            footer.blob_metadata_offset(),
-            &mut blob_metadata_bytes,
-            kind,
-        )
-        .await?;
+        let blob_metadata_bytes = self
+            .get_blob(
+                blob_id,
+                footer.blob_metadata_offset(),
+                blob_metadata_size,
+                kind,
+            )
+            .await?
+            .bytes(blob_metadata_size)
+            .await?;
 
-        BlobMetadata::from_bytes(blob_metadata_bytes).map_err(io::Error::other)
+        BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
     }
 }
 
@@ -582,7 +584,7 @@ impl BlobBackend for Registry {
         let _first = (!self.first_read_done.load(Ordering::Acquire))
             .then(|| self.first_read.lock().unwrap());
 
-        // Read into an owned buffer on a thread of the kind's runtime.
+        // Read the bytes on a thread of the kind's runtime.
         let start = Instant::now();
         let inner = self.inner.clone();
         let blob_id = *blob_id;
@@ -591,15 +593,15 @@ impl BlobBackend for Registry {
             .inner
             .runtime
             .block_on_worker(kind, async move {
-                let mut buf = vec![0u8; len];
-                let protocol = inner.get_blob(&blob_id, offset, &mut buf, kind).await?;
-                Ok::<_, io::Error>((buf, protocol))
+                let response = inner.get_blob(&blob_id, offset, len, kind).await?;
+                let protocol = response.protocol;
+                Ok::<_, io::Error>((response.bytes(len).await?, protocol))
             })
             .and_then(|result| result);
 
         // Record the metrics and copy the bytes out.
         match result {
-            Ok((buf, protocol)) => {
+            Ok((bytes, protocol)) => {
                 collect_read_backend_finished_metrics(
                     kind,
                     Backend::Registry,
@@ -607,7 +609,7 @@ impl BlobBackend for Registry {
                     len as u64,
                     start.elapsed(),
                 );
-                dst.copy_from_slice(&buf);
+                dst.copy_from_slice(&bytes);
                 self.first_read_done.store(true, Ordering::Release);
                 Ok(())
             }
@@ -634,7 +636,11 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use bytes::Bytes;
+
     use nydus_telemetry::metrics;
+
+    use super::response::Body;
 
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
@@ -697,13 +703,13 @@ mod tests {
                 Scripted::Body(body) => Ok(Response {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
-                    reader: Box::new(std::io::Cursor::new(body)),
+                    body: Body::Bytes(body.into()),
                     protocol: Protocol::Dragonfly,
                 }),
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
-                    reader: Box::new(std::io::Cursor::new(Vec::new())),
+                    body: Body::Bytes(Bytes::new()),
                     protocol: Protocol::Dragonfly,
                 }),
                 Scripted::Transport => Err(io::Error::other("scripted failure")),
@@ -746,7 +752,7 @@ mod tests {
                 return Ok(Response {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
-                    reader: Box::new(std::io::Cursor::new(b"ok".to_vec())),
+                    body: Body::Bytes(Bytes::from_static(b"ok")),
                     protocol: Protocol::Dragonfly,
                 });
             }
@@ -759,7 +765,7 @@ mod tests {
             Ok(Response {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
-                reader: Box::new(std::io::Cursor::new(Vec::new())),
+                body: Body::Bytes(Bytes::new()),
                 protocol: Protocol::Dragonfly,
             })
         }
@@ -870,11 +876,15 @@ mod tests {
     }
 
     fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> io::Result<Protocol> {
-        registry
-            .inner
-            .runtime
-            .tokio(kind)
-            .block_on(registry.inner.get_blob(&TEST_BLOB_ID, 0, dst, kind))
+        registry.inner.runtime.tokio(kind).block_on(async {
+            let response = registry
+                .inner
+                .get_blob(&TEST_BLOB_ID, 0, dst.len(), kind)
+                .await?;
+            let protocol = response.protocol;
+            dst.copy_from_slice(&response.bytes(dst.len()).await?);
+            Ok(protocol)
+        })
     }
 
     #[test]
