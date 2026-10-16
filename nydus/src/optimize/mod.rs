@@ -127,6 +127,14 @@ pub fn build_ondemand_blob(
             let info = infos_by_index.get(&blob_index).ok_or_else(|| {
                 Error::InvalidParameter(format!("pattern references unknown blob {blob_index}"))
             })?;
+            if backend
+                .is_raw_device(&info.blob_id)
+                .with_context(|| format!("failed to inspect source blob: {blob_index}"))?
+            {
+                return Err(Error::Unsupported(format!(
+                    "source blob {blob_index} is a native EROFS layer with no blob meta; refusing to optimize"
+                )));
+            }
             let cache =
                 LocalBlobCache::open(info.blob_id, blob_index as u32, cache_dir, backend.clone())
                     .with_context(|| format!("failed to open source blob: {blob_index}"))?;

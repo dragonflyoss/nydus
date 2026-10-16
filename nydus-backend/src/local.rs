@@ -20,13 +20,13 @@ use crate::{Backend, BackendKind, Protocol, RawDeviceFile, ReadKind};
 /// An open full blob file, its footer locating the data and blob metadata
 /// regions inside it.
 #[derive(Debug)]
-struct Blob {
-    /// The path of the full blob file.
+struct FullBlob {
+    /// The path of the file.
     path: PathBuf,
 
     /// The digest of the whole file, resolved once since it can mean hashing
     /// the file.
-    full_blob_id: [u8; SHA256_DIGEST_SIZE],
+    id: [u8; SHA256_DIGEST_SIZE],
 
     /// The validated footer, the layout of the file.
     footer: BlobFooter,
@@ -36,17 +36,17 @@ struct Blob {
 }
 
 /// Implements the full blob file.
-impl Blob {
-    /// Opens the full blob at `path`, the whole file digesting to
-    /// `full_blob_id`, its footer read and validated.
-    fn new(path: &Path, full_blob_id: [u8; SHA256_DIGEST_SIZE]) -> io::Result<Self> {
+impl FullBlob {
+    /// Opens the full blob at `path`, the whole file digesting to `id`, its
+    /// footer read and validated.
+    fn new(path: &Path, id: [u8; SHA256_DIGEST_SIZE]) -> io::Result<Self> {
         let footer = BlobFooter::from_blob_path(path).map_err(|err| {
             io::Error::other(format!("invalid nydus blob {}: {err}", path.display()))
         })?;
 
         Ok(Self {
             path: path.to_path_buf(),
-            full_blob_id,
+            id,
             footer,
             file: Arc::new(File::open(path)?),
         })
@@ -59,8 +59,8 @@ pub struct Local {
     /// The directory of full blobs named by their digest.
     dir: PathBuf,
 
-    /// The opened blobs by digest.
-    blobs: RwLock<HashMap<[u8; SHA256_DIGEST_SIZE], Arc<Blob>>>,
+    /// The opened full blobs by blob digest.
+    full_blobs: RwLock<HashMap<[u8; SHA256_DIGEST_SIZE], Arc<FullBlob>>>,
 }
 
 /// Implements the local directory backend.
@@ -69,7 +69,7 @@ impl Local {
     pub fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            blobs: RwLock::new(HashMap::new()),
+            full_blobs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -78,7 +78,7 @@ impl Local {
     ///
     /// The data region is verified against `blob_id` and the whole file hashed
     /// for its full blob digest.
-    pub fn with_blob(
+    pub fn with_full_blob(
         dir: PathBuf,
         blob_id: [u8; SHA256_DIGEST_SIZE],
         path: &Path,
@@ -90,12 +90,12 @@ impl Local {
                 format!("failed to open full blob {}: {err}", path.display()),
             )
         })?;
-        let full_blob_id = sha256_reader(&file).map_err(io::Error::other)?;
-        let blob = Blob::new(path, full_blob_id)?;
+        let id = sha256_reader(&file).map_err(io::Error::other)?;
+        let full_blob = FullBlob::new(path, id)?;
 
         // Verify the data region against the blob id.
-        file.seek(SeekFrom::Start(blob.footer.compressed_data_offset()))?;
-        let digest = sha256_reader((&file).take(blob.footer.compressed_data_size()))
+        file.seek(SeekFrom::Start(full_blob.footer.compressed_data_offset()))?;
+        let digest = sha256_reader((&file).take(full_blob.footer.compressed_data_size()))
             .map_err(io::Error::other)?;
         if digest != blob_id {
             return Err(io::Error::new(
@@ -105,29 +105,34 @@ impl Local {
         }
 
         let backend = Self::new(dir);
-        backend.insert_blob(blob_id, blob);
+        backend.insert_full_blob(blob_id, full_blob);
         Ok(backend)
     }
 
-    /// Remembers `blob` as `blob_id`, keeping an existing blob when a racing
-    /// open won.
-    fn insert_blob(&self, blob_id: [u8; SHA256_DIGEST_SIZE], blob: Blob) -> Arc<Blob> {
-        self.blobs
+    /// Remembers `full_blob` as `blob_id`, keeping an existing one when a
+    /// racing open won.
+    fn insert_full_blob(
+        &self,
+        blob_id: [u8; SHA256_DIGEST_SIZE],
+        full_blob: FullBlob,
+    ) -> Arc<FullBlob> {
+        self.full_blobs
             .write()
             .unwrap()
             .entry(blob_id)
-            .or_insert_with(|| Arc::new(blob))
+            .or_insert_with(|| Arc::new(full_blob))
             .clone()
     }
 
-    /// Returns the blob of `blob_id`, opened from `dir/<hex>` on first use.
+    /// Returns the full blob of `blob_id`, opened from `dir/<hex>` on first
+    /// use.
     ///
     /// The directory is content-addressed, so the file name is trusted as the
     /// full blob digest rather than hashing the file on every daemon start,
     /// corruption being caught by the CRC over every chunk group read.
-    fn blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<Blob>> {
-        if let Some(blob) = self.blobs.read().unwrap().get(blob_id).cloned() {
-            return Ok(blob);
+    fn full_blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<FullBlob>> {
+        if let Some(full_blob) = self.full_blobs.read().unwrap().get(blob_id).cloned() {
+            return Ok(full_blob);
         }
 
         let path = self.dir.join(hex::encode(blob_id));
@@ -142,15 +147,16 @@ impl Local {
             ));
         }
 
-        Ok(self.insert_blob(*blob_id, Blob::new(&path, *blob_id)?))
+        Ok(self.insert_full_blob(*blob_id, FullBlob::new(&path, *blob_id)?))
     }
 
-    /// Returns the sidecar blob metadata path of the blob at `path`, in `dir`.
+    /// Returns the sidecar blob metadata path of the full blob at `path`, in
+    /// `dir`.
     fn blob_metadata_path(&self, path: &Path) -> io::Result<PathBuf> {
         let file_name = path.file_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("blob path has no file name: {}", path.display()),
+                format!("full blob path has no file name: {}", path.display()),
             )
         })?;
 
@@ -169,19 +175,20 @@ impl Local {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
-        let blob = self.blob(blob_id)?;
+        let full_blob = self.full_blob(blob_id)?;
         let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
         })?;
-        if end > blob.footer.compressed_data_size() {
+        if end > full_blob.footer.compressed_data_size() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "backend range read exceeds data region",
             ));
         }
 
-        blob.file
-            .read_exact_at(buf, blob.footer.compressed_data_offset() + offset)
+        full_blob
+            .file
+            .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
     }
 
     /// Fills `buf` with the blob bytes from `offset` of the data region for
@@ -192,19 +199,20 @@ impl Local {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
-        let blob = self.blob(blob_id)?;
+        let full_blob = self.full_blob(blob_id)?;
         let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
         })?;
-        if end > blob.footer.compressed_data_size() {
+        if end > full_blob.footer.compressed_data_size() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "backend range read exceeds data region",
             ));
         }
 
-        blob.file
-            .read_exact_at(buf, blob.footer.compressed_data_offset() + offset)
+        full_blob
+            .file
+            .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
     }
 }
 
@@ -225,12 +233,12 @@ impl Backend for Local {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<[u8; SHA256_DIGEST_SIZE]> {
-        Ok(self.blob(blob_id)?.full_blob_id)
+        Ok(self.full_blob(blob_id)?.id)
     }
 
     /// Returns the footer's `RAW_DEVICE` flag.
     fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
-        Ok(self.blob(blob_id)?.footer.is_raw_device())
+        Ok(self.full_blob(blob_id)?.footer.is_raw_device())
     }
 
     /// Opens the full blob file and names its data region for a raw device
@@ -239,40 +247,31 @@ impl Backend for Local {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<Option<RawDeviceFile>> {
-        let blob = self.blob(blob_id)?;
-        if !blob.footer.is_raw_device() {
+        let full_blob = self.full_blob(blob_id)?;
+        if !full_blob.footer.is_raw_device() {
             return Ok(None);
         }
 
         Ok(Some(RawDeviceFile {
-            path: blob.path.clone(),
-            file: blob.file.clone(),
-            data_offset: blob.footer.compressed_data_offset(),
-            data_size: blob.footer.compressed_data_size(),
+            path: full_blob.path.clone(),
+            file: full_blob.file.clone(),
+            data_offset: full_blob.footer.compressed_data_offset(),
+            data_size: full_blob.footer.compressed_data_size(),
         }))
     }
 
     /// Reads the blob's metadata for an on-demand read from the sidecar file
     /// when present, otherwise from the region embedded in the full blob.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-        let blob = self.blob(blob_id)?;
-        if blob.footer.is_raw_device() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "native EROFS layer has no blob meta: {}",
-                    blob.path.display()
-                ),
-            ));
-        }
-
-        let blob_metadata_path = self.blob_metadata_path(&blob.path)?;
+        let full_blob = self.full_blob(blob_id)?;
+        let blob_metadata_path = self.blob_metadata_path(&full_blob.path)?;
         let buf = if blob_metadata_path.is_file() {
             fs::read(&blob_metadata_path)?
         } else {
-            let mut buf = vec![0u8; blob.footer.blob_metadata_size() as usize];
-            blob.file
-                .read_exact_at(&mut buf, blob.footer.blob_metadata_offset())?;
+            let mut buf = vec![0u8; full_blob.footer.blob_metadata_size() as usize];
+            full_blob
+                .file
+                .read_exact_at(&mut buf, full_blob.footer.blob_metadata_offset())?;
             buf
         };
 
@@ -285,24 +284,15 @@ impl Backend for Local {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
-        let blob = self.blob(blob_id)?;
-        if blob.footer.is_raw_device() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "native EROFS layer has no blob meta: {}",
-                    blob.path.display()
-                ),
-            ));
-        }
-
-        let blob_metadata_path = self.blob_metadata_path(&blob.path)?;
+        let full_blob = self.full_blob(blob_id)?;
+        let blob_metadata_path = self.blob_metadata_path(&full_blob.path)?;
         let buf = if blob_metadata_path.is_file() {
             fs::read(&blob_metadata_path)?
         } else {
-            let mut buf = vec![0u8; blob.footer.blob_metadata_size() as usize];
-            blob.file
-                .read_exact_at(&mut buf, blob.footer.blob_metadata_offset())?;
+            let mut buf = vec![0u8; full_blob.footer.blob_metadata_size() as usize];
+            full_blob
+                .file
+                .read_exact_at(&mut buf, full_blob.footer.blob_metadata_offset())?;
             buf
         };
 
@@ -404,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn with_blob_verifies_the_data_digest() {
+    fn with_full_blob_verifies_the_data_digest() {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let blob_metadata = single_chunk_group(&payload);
@@ -414,8 +404,8 @@ mod tests {
         let path = dir.path().join(hex::encode(full_blob_id));
         let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
 
-        let backend = Local::with_blob(dir.path().to_path_buf(), data_blob_id, &path).unwrap();
+        let backend = Local::with_full_blob(dir.path().to_path_buf(), data_blob_id, &path).unwrap();
         assert_eq!(backend.full_blob_id(&data_blob_id).unwrap(), full_blob_id);
-        assert!(Local::with_blob(dir.path().to_path_buf(), full_blob_id, &path).is_err());
+        assert!(Local::with_full_blob(dir.path().to_path_buf(), full_blob_id, &path).is_err());
     }
 }
