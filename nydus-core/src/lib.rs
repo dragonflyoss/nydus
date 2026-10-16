@@ -156,7 +156,7 @@ impl NydusCore {
         if cache_dir.is_none() {
             for info in &raw_blob_infos {
                 let mapped = backend
-                    .raw_device_file(&info.blob_id)
+                    .open_raw_device_file(&info.blob_id)
                     .with_context(|| format!("failed to resolve blob {}", info.blob_index))?
                     .is_some_and(|file| file.data_offset == 0);
                 if !mapped {

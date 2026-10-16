@@ -84,17 +84,6 @@ pub trait Backend: Send + Sync {
         Ok(*blob_id)
     }
 
-    /// Reads the blob's metadata for an on-demand read.
-    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
-
-    /// Reads the blob's metadata for a prefetch read.
-    fn prefetch_blob_metadata(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-    ) -> io::Result<BlobMetadata> {
-        self.read_blob_metadata(blob_id)
-    }
-
     /// Returns whether the blob is a raw EROFS device without blob meta, a
     /// native `erofs-*` layer whose bytes are read as-is and never cached or
     /// decoded by nydus.
@@ -105,15 +94,24 @@ pub trait Backend: Send + Sync {
         Ok(false)
     }
 
-    /// Returns the local file backing a raw device, `None` for a streamed or
+    /// Opens the local file backing a raw device, `None` for a streamed or
     /// chunked blob.
-    ///
-    /// File resolution and open errors are propagated.
-    fn raw_device_file(
+    fn open_raw_device_file(
         &self,
         _blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<Option<RawDeviceFile>> {
         Ok(None)
+    }
+
+    /// Reads the blob's metadata for an on-demand read.
+    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
+
+    /// Reads the blob's metadata for a prefetch read.
+    fn prefetch_blob_metadata(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<BlobMetadata> {
+        self.read_blob_metadata(blob_id)
     }
 
     /// Fills `buf` with the blob bytes from `offset` for an on-demand read.

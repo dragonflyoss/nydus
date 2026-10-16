@@ -28,7 +28,7 @@ impl RawDeviceBlobCache {
     /// Wrap `backend` for the raw device blob `blob_id`.
     pub fn new(blob_id: [u8; SHA256_DIGEST_SIZE], backend: Arc<dyn Backend>) -> Self {
         let file = backend
-            .raw_device_file(&blob_id)
+            .open_raw_device_file(&blob_id)
             .ok()
             .flatten()
             .filter(|file| file.data_offset == 0);

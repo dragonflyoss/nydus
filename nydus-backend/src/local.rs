@@ -238,6 +238,30 @@ impl Backend for Local {
         Ok(self.blob(blob_id)?.full_blob_id)
     }
 
+    /// Returns the footer's `RAW_DEVICE` flag.
+    fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
+        Ok(self.blob(blob_id)?.footer.is_raw_device())
+    }
+
+    /// Opens the full blob file and names its data region for a raw device
+    /// blob.
+    fn open_raw_device_file(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<Option<RawDeviceFile>> {
+        let blob = self.blob(blob_id)?;
+        if !blob.footer.is_raw_device() {
+            return Ok(None);
+        }
+
+        Ok(Some(RawDeviceFile {
+            path: blob.path.clone(),
+            file: blob.file()?,
+            data_offset: blob.footer.compressed_data_offset(),
+            data_size: blob.footer.compressed_data_size(),
+        }))
+    }
+
     /// Reads the blob's metadata for an on-demand read from the sidecar file
     /// when present, otherwise from the region embedded in the full blob.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
@@ -293,29 +317,6 @@ impl Backend for Local {
         };
 
         BlobMetadata::from_bytes(buf).map_err(io::Error::other)
-    }
-
-    /// Returns the footer's `RAW_DEVICE` flag.
-    fn is_raw_device(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
-        Ok(self.blob(blob_id)?.footer.is_raw_device())
-    }
-
-    /// Returns the full blob file and its data region for a raw device blob.
-    fn raw_device_file(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-    ) -> io::Result<Option<RawDeviceFile>> {
-        let blob = self.blob(blob_id)?;
-        if !blob.footer.is_raw_device() {
-            return Ok(None);
-        }
-
-        Ok(Some(RawDeviceFile {
-            path: blob.path.clone(),
-            file: blob.file()?,
-            data_offset: blob.footer.compressed_data_offset(),
-            data_size: blob.footer.compressed_data_size(),
-        }))
     }
 
     /// Fills `buf` from the data region for an on-demand read, recording the
