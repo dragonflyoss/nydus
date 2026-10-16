@@ -38,26 +38,26 @@ pub(crate) enum Body {
 
 /// Implements the response.
 impl Response {
-    /// Reads exactly `len` bytes of the body, a shorter body being an
+    /// Reads exactly `length` bytes of the body, a shorter body being an
     /// [`io::ErrorKind::UnexpectedEof`]. A body already in memory is handed
     /// over without a copy.
-    pub(crate) async fn bytes(self, len: usize) -> io::Result<Bytes> {
+    pub(crate) async fn bytes(self, length: usize) -> io::Result<Bytes> {
         let bytes = match self.body {
             Body::Bytes(bytes) => bytes,
             Body::Stream(mut reader) => {
-                let mut buf = BytesMut::zeroed(len);
+                let mut buf = BytesMut::zeroed(length);
                 reader.read_exact(&mut buf).await?;
                 buf.freeze()
             }
         };
-        if bytes.len() < len {
+        if bytes.len() < length {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("registry returned {} bytes, expected {len}", bytes.len()),
+                format!("registry returned {} bytes, expected {length}", bytes.len()),
             ));
         }
 
-        Ok(bytes.slice(..len))
+        Ok(bytes.slice(..length))
     }
 
     /// Reads the body as a UTF-8 string.

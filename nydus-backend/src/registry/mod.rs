@@ -120,18 +120,15 @@ pub(crate) struct Registry {
 /// can run on the runtime while its caller waits.
 ///
 /// ```text
-/// get_blob(range, kind)
-///   │
-///   ├─ cached redirect ──▶ get(redirect) ─────────────────────────────┐
-///   │                       401/403 evicts it and falls through       │
-///   └─ blob URL ──▶ execute(get) ─┬─ 3xx ──▶ get(location), cache it  │
+/// get_blob(range, kind)                 transport: Dragonfly when configured, else Http
+///   │                                   GET: transport.get for an on-demand read,
+///   │                                        transport.prefetch for a prefetch read
+///   ├─ cached redirect ──▶ GET redirect ───────────────────────────────┐
+///   │                       401/403 evicts it and falls through        │
+///   └─ blob URL ──▶ execute(GET) ─┬─ 3xx ──▶ GET location, cache it    │
 ///                                 └─ 2xx ─────────────────────────────┐
 ///                                                                     ▼
 ///                                                                  bytes
-///
-/// get(url, kind)                                transport: Dragonfly when
-///   ├─ on-demand ──▶ transport.get                configured, else Http
-///   └─ prefetch ──▶ transport.prefetch
 ///
 /// stat_blob ──▶ execute(transport.head), following one redirect
 /// ```
@@ -223,14 +220,6 @@ impl Client {
         }
     }
 
-    /// Sends the blob `GET` of a read of `kind` through the transport.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
-        match kind {
-            ReadKind::OnDemand => self.transport().get(url, headers).await,
-            ReadKind::Prefetch => self.transport().prefetch(url, headers).await,
-        }
-    }
-
     /// Executes `request` with `headers` carrying the cached Authorization,
     /// answering a `401` with the auth handshake and executing it again.
     ///
@@ -280,7 +269,7 @@ impl Client {
         request(headers).await
     }
 
-    /// Sends the `GET` for `len` blob bytes from `offset` and returns the
+    /// Sends the `GET` for `length` blob bytes from `offset` and returns the
     /// successful response, its body still to be read.
     ///
     /// The read goes through the cached redirect when there is one and
@@ -289,11 +278,11 @@ impl Client {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        len: usize,
+        length: usize,
         kind: ReadKind,
     ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
-        let end = offset + len as u64 - 1;
+        let end = offset + length as u64 - 1;
         let range: HeaderValue = format!("bytes={offset}-{end}").parse().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(RANGE, range);
@@ -317,7 +306,11 @@ impl Client {
             return Ok(None);
         };
 
-        let response = self.get(&redirect, headers.clone(), kind).await?;
+        let transport = self.transport();
+        let response = match kind {
+            ReadKind::OnDemand => transport.get(&redirect, headers.clone()).await?,
+            ReadKind::Prefetch => transport.prefetch(&redirect, headers.clone()).await?,
+        };
         match response.status {
             status if status.is_success() => Ok(Some(response)),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
@@ -337,8 +330,12 @@ impl Client {
         kind: ReadKind,
     ) -> io::Result<Response> {
         let url = self.blob_url(hex);
+        let transport = self.transport();
         let response = self
-            .execute(headers.clone(), |headers| self.get(&url, headers, kind))
+            .execute(headers.clone(), |headers| match kind {
+                ReadKind::OnDemand => transport.get(&url, headers),
+                ReadKind::Prefetch => transport.prefetch(&url, headers),
+            })
             .await?;
         if response.status.is_success() {
             return Ok(response);
@@ -348,7 +345,10 @@ impl Client {
         }
 
         let location = response.location()?;
-        let redirected = self.get(&location, headers, kind).await?;
+        let redirected = match kind {
+            ReadKind::OnDemand => transport.get(&location, headers).await?,
+            ReadKind::Prefetch => transport.prefetch(&location, headers).await?,
+        };
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
@@ -470,11 +470,11 @@ impl Backend for Registry {
         let start = Instant::now();
         let client = self.client.clone();
         let blob_id = *blob_id;
-        let len = buf.len();
+        let length = buf.len();
         let result = self.runtime.block_on_worker(kind, async move {
-            let response = client.get_blob(&blob_id, offset, len, kind).await?;
+            let response = client.get_blob(&blob_id, offset, length, kind).await?;
             let protocol = response.protocol;
-            Ok((response.bytes(len).await?, protocol))
+            Ok((response.bytes(length).await?, protocol))
         });
 
         // Record the metrics and copy the bytes out.
@@ -484,7 +484,7 @@ impl Backend for Registry {
                     kind,
                     BackendKind::Registry,
                     Some(protocol),
-                    len as u64,
+                    length as u64,
                     start.elapsed(),
                 );
                 buf.copy_from_slice(&bytes);
