@@ -95,23 +95,22 @@ impl Dragonfly {
             })?
             .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
     }
-}
 
-/// Implements the blob transport over the Dragonfly SDK.
-#[async_trait]
-impl Transport for Dragonfly {
-    /// Fetches `url` through the client of the read kind, on-demand at
-    /// `Level6` and prefetch at `Level3`, and logs the outcome.
+    /// Fetches `url` through `client` at `priority`, the SDK adding the P2P
+    /// and priority headers itself, and logs the outcome as a read of `kind`.
     ///
     /// The SDK reads the body whole, retrying a seed peer that fails mid-body,
     /// and the buffer is handed on as is. An SDK error carrying an HTTP status
     /// becomes a [`Response`] so the policy classifies it like an origin
     /// answer; anything else is a transport failure.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
-        let (client, priority) = match kind {
-            ReadKind::OnDemand => (&self.ondemand, Priority::Level6),
-            ReadKind::Prefetch => (&self.prefetch, Priority::Level3),
-        };
+    async fn download(
+        &self,
+        client: &Proxy,
+        priority: Priority,
+        kind: ReadKind,
+        url: &str,
+        headers: HeaderMap,
+    ) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
             header: headers,
@@ -177,10 +176,40 @@ impl Transport for Dragonfly {
         }
         result
     }
+}
+
+/// Implements the blob transport over the Dragonfly SDK.
+#[async_trait]
+impl Transport for Dragonfly {
+    /// Fetches `url` through the on-demand client at `Level6`, the SDK's
+    /// default priority.
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        self.download(
+            &self.ondemand,
+            Priority::Level6,
+            ReadKind::OnDemand,
+            url,
+            headers,
+        )
+        .await
+    }
+
+    /// Fetches `url` through the prefetch client at `Level3`, so a first
+    /// download lets a normal peer go back to source ahead of it.
+    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        self.download(
+            &self.prefetch,
+            Priority::Level3,
+            ReadKind::Prefetch,
+            url,
+            headers,
+        )
+        .await
+    }
 
     /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
     /// request that is not a `GET`.
-    async fn head(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
-        self.http.head(url, headers, kind).await
+    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        self.http.head(url, headers).await
     }
 }

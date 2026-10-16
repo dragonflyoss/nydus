@@ -84,11 +84,29 @@ pub use self::rt::Runtime;
 /// here rather than while the caller consumes it.
 #[async_trait]
 trait Transport: Send + Sync {
-    /// Sends a `GET` for `url` with `headers`, `kind` attributing the read.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response>;
+    /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
-    /// Sends a `HEAD` for `url` with `headers`, `kind` attributing the read.
-    async fn head(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response>;
+    /// Sends the `GET` of a background prefetch read.
+    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
+
+    /// Sends a `HEAD`.
+    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
+
+    /// Sends `method` for `url`, a `GET` as the read of `kind`.
+    async fn send(
+        &self,
+        method: Method,
+        url: &str,
+        headers: HeaderMap,
+        kind: ReadKind,
+    ) -> io::Result<Response> {
+        match (method, kind) {
+            (Method::HEAD, _) => self.head(url, headers).await,
+            (_, ReadKind::OnDemand) => self.get(url, headers).await,
+            (_, ReadKind::Prefetch) => self.prefetch(url, headers).await,
+        }
+    }
 }
 
 /// Splits a registry `addr` such as `http://127.0.0.1:5000` into its scheme
@@ -154,11 +172,11 @@ pub(crate) struct Registry {
 ///                                                                  bytes
 ///
 /// send(method, url)
-///   ├─ GET, Dragonfly configured ──▶ dragonfly.get ──▶ Action::decide
+///   ├─ GET, Dragonfly configured ──▶ dragonfly.get / prefetch ──▶ Action::decide
 ///   │                                   Serve ──▶ answer
 ///   │                                   Fallback ──▶ back_to_source.get (on-demand)
 ///   │                                   Defer ──▶ Err(QuotaExceeded) (prefetch)
-///   └─ otherwise ──▶ http.get / http.head
+///   └─ otherwise ──▶ http.get / prefetch / head
 /// ```
 struct Inner {
     /// The scheme of the configured `addr`, `http` or `https`.
@@ -308,23 +326,20 @@ impl Inner {
         kind: ReadKind,
     ) -> io::Result<Response> {
         let Some(dragonfly) = &self.dragonfly else {
-            return match method {
-                Method::HEAD => self.http.head(url, headers, kind).await,
-                _ => self.http.get(url, headers, kind).await,
-            };
+            return self.http.send(method, url, headers, kind).await;
         };
         if method == Method::HEAD {
-            return dragonfly.head(url, headers, kind).await;
+            return dragonfly.head(url, headers).await;
         }
 
-        let result = dragonfly.get(url, headers.clone(), kind).await;
+        let result = dragonfly.send(method, url, headers.clone(), kind).await;
         match Action::decide(kind, result).await {
             Action::Serve(response) => Ok(response),
             Action::Fallback(err) => {
                 warn!("dragonfly request failed, falling back to the origin: {err}");
                 let start = Instant::now();
                 self.back_to_source
-                    .get(url, headers, kind)
+                    .get(url, headers)
                     .await
                     .inspect_err(|_| {
                         collect_read_backend_failure_metrics(
@@ -659,17 +674,16 @@ mod tests {
 
     #[async_trait]
     impl<T: Transport> Transport for Arc<T> {
-        async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
-            (**self).get(url, headers, kind).await
+        async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            (**self).get(url, headers).await
         }
 
-        async fn head(
-            &self,
-            url: &str,
-            headers: HeaderMap,
-            kind: ReadKind,
-        ) -> io::Result<Response> {
-            (**self).head(url, headers, kind).await
+        async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            (**self).prefetch(url, headers).await
+        }
+
+        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            (**self).head(url, headers).await
         }
     }
 
@@ -701,16 +715,8 @@ mod tests {
         fn calls(&self) -> u32 {
             self.calls.load(Ordering::SeqCst)
         }
-    }
 
-    #[async_trait]
-    impl Transport for ScriptedTransport {
-        async fn get(
-            &self,
-            _url: &str,
-            _headers: HeaderMap,
-            _kind: ReadKind,
-        ) -> io::Result<Response> {
+        fn play(&self) -> io::Result<Response> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let scripted = self
                 .script
@@ -734,14 +740,20 @@ mod tests {
                 Scripted::Transport => Err(io::Error::other("scripted failure")),
             }
         }
+    }
 
-        async fn head(
-            &self,
-            url: &str,
-            headers: HeaderMap,
-            kind: ReadKind,
-        ) -> io::Result<Response> {
-            self.http.head(url, headers, kind).await
+    #[async_trait]
+    impl Transport for ScriptedTransport {
+        async fn get(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
+            self.play()
+        }
+
+        async fn prefetch(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
+            self.play()
+        }
+
+        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.http.head(url, headers).await
         }
     }
 
@@ -765,16 +777,8 @@ mod tests {
         fn challenges(&self) -> u32 {
             self.challenges.load(Ordering::SeqCst)
         }
-    }
 
-    #[async_trait]
-    impl Transport for AuthGate {
-        async fn get(
-            &self,
-            _url: &str,
-            headers: HeaderMap,
-            _kind: ReadKind,
-        ) -> io::Result<Response> {
+        async fn answer(&self, headers: HeaderMap) -> io::Result<Response> {
             if self.first.swap(false, Ordering::SeqCst) {
                 tokio::time::sleep(self.delay).await;
             }
@@ -799,14 +803,20 @@ mod tests {
                 protocol: Protocol::Dragonfly,
             })
         }
+    }
 
-        async fn head(
-            &self,
-            url: &str,
-            headers: HeaderMap,
-            kind: ReadKind,
-        ) -> io::Result<Response> {
-            self.http.head(url, headers, kind).await
+    #[async_trait]
+    impl Transport for AuthGate {
+        async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.answer(headers).await
+        }
+
+        async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.answer(headers).await
+        }
+
+        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.http.head(url, headers).await
         }
     }
 

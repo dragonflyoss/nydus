@@ -94,14 +94,15 @@ impl Http {
             client: client.build(),
         })
     }
-}
 
-/// Implements the blob transport over the origin HTTP client.
-#[async_trait]
-impl Transport for Http {
-    /// Sends a `GET` to `url` with `headers`, the body left streaming, and
-    /// logs the outcome.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
+    /// Sends the `GET` of a read of `kind` to `url` with `headers`, the body
+    /// left streaming, and logs the outcome.
+    async fn download(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+        kind: ReadKind,
+    ) -> io::Result<Response> {
         let start = Instant::now();
         let result = self
             .client
@@ -132,9 +133,23 @@ impl Transport for Http {
         }
         result
     }
+}
+
+/// Implements the blob transport over the origin HTTP client.
+#[async_trait]
+impl Transport for Http {
+    /// Sends the `GET` of an on-demand read to the origin.
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        self.download(url, headers, ReadKind::OnDemand).await
+    }
+
+    /// Sends the `GET` of a prefetch read to the origin.
+    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        self.download(url, headers, ReadKind::Prefetch).await
+    }
 
     /// Sends a `HEAD` to `url` with `headers` and logs the outcome.
-    async fn head(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
+    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let start = Instant::now();
         let result = self
             .client
@@ -152,12 +167,12 @@ impl Transport for Http {
 
         match &result {
             Ok(response) => debug!(
-                "HEAD {url} ({kind}) from the origin returned {} in {:?}",
+                "HEAD {url} from the origin returned {} in {:?}",
                 response.status,
                 start.elapsed()
             ),
             Err(err) => debug!(
-                "HEAD {url} ({kind}) from the origin failed in {:?}: {err}",
+                "HEAD {url} from the origin failed in {:?}: {err}",
                 start.elapsed()
             ),
         }

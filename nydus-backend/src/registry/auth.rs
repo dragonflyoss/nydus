@@ -12,7 +12,6 @@ use url::Url;
 
 use super::http::Http;
 use super::Transport;
-use crate::ReadKind;
 
 /// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
@@ -306,7 +305,7 @@ impl Authorizer {
         }
 
         // Request the token from the realm.
-        let response = http.get(url.as_str(), headers, ReadKind::OnDemand).await?;
+        let response = http.get(url.as_str(), headers).await?;
         if !response.status.is_success() {
             return Err(response.into_io_error().await);
         }
