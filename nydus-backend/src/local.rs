@@ -169,7 +169,7 @@ impl Local {
 
     /// Fills `buf` with the blob bytes from `offset` of the data region for
     /// an on-demand read.
-    fn read_blob_into(
+    fn read_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
@@ -193,7 +193,7 @@ impl Local {
 
     /// Fills `buf` with the blob bytes from `offset` of the data region for
     /// a prefetch read.
-    fn prefetch_blob_into(
+    fn prefetch_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
@@ -308,7 +308,7 @@ impl Backend for Local {
         buf: &mut [u8],
     ) -> io::Result<()> {
         let start = Instant::now();
-        let result = self.read_blob_into(blob_id, offset, buf);
+        let result = self.read_range(blob_id, offset, buf);
         match &result {
             Ok(()) => collect_read_backend_finished_metrics(
                 ReadKind::OnDemand,
@@ -336,7 +336,7 @@ impl Backend for Local {
         buf: &mut [u8],
     ) -> io::Result<()> {
         let start = Instant::now();
-        let result = self.prefetch_blob_into(blob_id, offset, buf);
+        let result = self.prefetch_range(blob_id, offset, buf);
         match &result {
             Ok(()) => collect_read_backend_finished_metrics(
                 ReadKind::Prefetch,
