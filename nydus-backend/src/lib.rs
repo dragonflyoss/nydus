@@ -28,9 +28,8 @@ pub use local::Local;
 pub(crate) use registry::Registry;
 
 /// A registry backend runs on a [`Runtime`], one tokio runtime per read kind,
-/// built from its `http` configuration; an embedding process builds one
-/// itself, with the thread bounds and network namespace it needs, and shares
-/// it across its backends through [`build_backend_with_runtime`].
+/// built from its `http` configuration, every thread of it entering the
+/// [`Netns`] it is given.
 #[cfg(feature = "registry")]
 pub use registry::{Netns, NetnsId, Runtime};
 
@@ -149,7 +148,10 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn Backend>> {
                 registry.http.max_blocking_threads,
                 None,
             )?;
-            build_backend_with_runtime(config, Arc::new(runtime))
+            Ok(Arc::new(Registry::new(
+                (**registry).clone(),
+                Arc::new(runtime),
+            )?))
         }
         #[cfg(not(feature = "registry"))]
         BackendConfig::Registry(_) => Err(io::Error::new(
@@ -157,25 +159,6 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn Backend>> {
             "registry backend requires the `registry` feature",
         )),
     }
-}
-
-/// Creates a blob backend from its configuration, a registry backend on
-/// `runtime` rather than on runtimes of its own.
-///
-/// An embedder builds the runtimes with the namespace its registries must be
-/// reached from and hands them to every backend it opens.
-#[cfg(feature = "registry")]
-pub fn build_backend_with_runtime(
-    config: &BackendConfig,
-    runtime: Arc<Runtime>,
-) -> io::Result<Arc<dyn Backend>> {
-    let backend: Arc<dyn Backend> = match config {
-        BackendConfig::Local(local) => Arc::new(Local::new(local.dir.clone())),
-        BackendConfig::Registry(registry) => {
-            Arc::new(Registry::new((**registry).clone(), runtime)?)
-        }
-    };
-    Ok(backend)
 }
 
 #[cfg(test)]

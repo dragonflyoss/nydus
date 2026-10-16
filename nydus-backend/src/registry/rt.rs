@@ -11,9 +11,7 @@
 //! so a couple of workers are plenty, and the registry must be reached from
 //! the host namespace no matter which thread builds the backend.
 //! [`Runtime::new`] takes both: a backend built from a config file gets its
-//! bounds from the `http` section, and an embedder builds one [`Runtime`]
-//! with its namespace and shares it across its backends through
-//! [`build_backend_with_runtime`](crate::build_backend_with_runtime).
+//! bounds from the `http` section and no namespace.
 //!
 //! Pinning the runtime threads is only half of it: `Runtime::block_on` polls
 //! its future on the *calling* thread, and hyper opens the TCP connection

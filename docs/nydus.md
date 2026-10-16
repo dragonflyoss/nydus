@@ -225,15 +225,12 @@ prefetch burst never queues ahead of a FUSE reader on the same workers:
 
 The registry `http.worker_threads` and `http.max_blocking_threads` settings
 set these bounds for each runtime; every registry backend built from a
-configuration runs on runtimes of its own. Embedders may instead build one
-`nydus_backend::Runtime` with
+configuration runs on runtimes of its own, built by
 `Runtime::new(worker_threads, max_blocking_threads, netns)`, the optional
-network namespace being one every runtime thread enters, and hand it to every
-backend they open through
-`nydus_backend::build_backend_with_runtime`; because requests run on those
-threads, registry sockets are created in that namespace regardless of the
-caller's. The HTTP connection pool is shared by both runtimes. A process using
-only local blobs never creates a Tokio runtime.
+network namespace being one every runtime thread enters so registry sockets
+are created in it regardless of the caller's. The HTTP connection pool is
+shared by both runtimes. A process using only local blobs never creates a
+Tokio runtime.
 
 ### `nydus-core` API
 
@@ -1241,11 +1238,7 @@ Fields under `backend.config`:
 		after 10 s idle.
 
 		Every registry backend built from a configuration runs on runtimes of
-		its own with these bounds. Programs that embed the backend (a VMM) may
-		instead build one `nydus_backend::Runtime`, fixing its network
-		namespace as well, and share it across the backends they open through
-		`nydus_backend::build_backend_with_runtime`; the config file cannot
-		name a namespace.
+		its own with these bounds.
 - `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
 	(crate `dragonfly-client-request`) for P2P distribution, carrying a
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
