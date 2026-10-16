@@ -30,9 +30,9 @@ pub(crate) enum Body {
     /// A body still streaming from the origin.
     Stream(Box<dyn AsyncRead + Send + Unpin>),
 
-    /// A body the Dragonfly SDK already read whole, so a seed peer failing
-    /// mid-body was retried before the answer got here.
-    #[cfg_attr(not(feature = "backend-dragonfly"), allow(dead_code))]
+    /// A body already in memory: the one the Dragonfly SDK read whole, so a
+    /// seed peer failing mid-body was retried before the answer got here, or
+    /// the empty body of a `HEAD`.
     Bytes(Bytes),
 }
 

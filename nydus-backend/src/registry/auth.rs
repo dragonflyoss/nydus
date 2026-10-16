@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use http_auth::ChallengeParser;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-use reqwest::Method;
 use serde::Deserialize;
 use url::Url;
 
 use super::http::Http;
+use super::Transport;
 use crate::ReadKind;
 
 /// The lifetime of a bearer token when the token server does not say.
@@ -306,9 +306,7 @@ impl Authorizer {
         }
 
         // Request the token from the realm.
-        let response = http
-            .request(Method::GET, url.as_str(), headers, ReadKind::OnDemand)
-            .await?;
+        let response = http.get(url.as_str(), headers, ReadKind::OnDemand).await?;
         if !response.status.is_success() {
             return Err(response.into_io_error().await);
         }

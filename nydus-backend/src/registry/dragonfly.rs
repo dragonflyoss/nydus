@@ -92,19 +92,13 @@ impl Dragonfly {
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl Transport for Dragonfly {
-    /// Fetches `url` through the client of the read kind at its scheduling
-    /// priority, the SDK adding the P2P and priority headers itself, and
-    /// logs the outcome.
+    /// Fetches `url` through the client of the read kind, on-demand at
+    /// `Level6` and prefetch at `Level3`, and logs the outcome.
     ///
-    /// An on-demand read a FUSE reader waits on goes at `Level6`, the SDK's
-    /// default, a background prefetch at `Level3` so a first download lets a
-    /// normal peer go back to source ahead of it. The SDK reads the body into
-    /// `body`, sized once from the answer's `Content-Length`, retrying a seed
-    /// peer that fails mid-body on the next one, and the buffer is handed on
-    /// as is. A proxy, backend or dfdaemon error carrying an HTTP status is an
-    /// answer, rebuilt as a [`Response`] with its status, headers and message,
-    /// so a `429`, `403` or a dfdaemon `422` reaches the policy the same way
-    /// an origin answer does; anything else is a transport failure.
+    /// The SDK reads the body whole, retrying a seed peer that fails mid-body,
+    /// and the buffer is handed on as is. An SDK error carrying an HTTP status
+    /// becomes a [`Response`] so the policy classifies it like an origin
+    /// answer; anything else is a transport failure.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
         let (client, priority) = match kind {
             ReadKind::OnDemand => (&self.ondemand, Priority::Level6),

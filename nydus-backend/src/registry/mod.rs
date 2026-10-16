@@ -155,7 +155,7 @@ pub(crate) struct Registry {
 ///   │                                   Serve ──▶ answer
 ///   │                                   Fallback ──▶ back_to_source.get (on-demand)
 ///   │                                   Defer ──▶ Err(QuotaExceeded) (prefetch)
-///   └─ otherwise ──▶ http.request
+///   └─ otherwise ──▶ http.get / http.head
 /// ```
 struct Inner {
     /// The scheme of the configured `addr`, `http` or `https`.
@@ -304,9 +304,11 @@ impl Inner {
         headers: HeaderMap,
         kind: ReadKind,
     ) -> io::Result<Response> {
-        let dragonfly = match (&self.dragonfly, &method) {
-            (Some(dragonfly), &Method::GET) => dragonfly,
-            _ => return self.http.request(method, url, headers, kind).await,
+        if method == Method::HEAD {
+            return self.http.head(url, headers, kind).await;
+        }
+        let Some(dragonfly) = &self.dragonfly else {
+            return self.http.get(url, headers, kind).await;
         };
 
         let result = dragonfly.get(url, headers.clone(), kind).await;

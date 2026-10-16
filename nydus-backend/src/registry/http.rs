@@ -4,12 +4,13 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::TryStreamExt;
 use http::Extensions;
 use leaky_bucket::RateLimiter;
 use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
-use reqwest::{Certificate, Client, Method, Request};
+use reqwest::{Certificate, Client, Request};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::io::StreamReader;
@@ -93,10 +94,9 @@ impl Http {
         })
     }
 
-    /// Sends `method` to `url` with `headers` and logs the outcome.
-    pub(crate) async fn request(
+    /// Sends a `HEAD` to `url` with `headers` and logs the outcome.
+    pub(crate) async fn head(
         &self,
-        method: Method,
         url: &str,
         headers: HeaderMap,
         kind: ReadKind,
@@ -104,8 +104,44 @@ impl Http {
         let start = Instant::now();
         let result = self
             .client
-            .request(method.clone(), url)
-            .headers(headers.clone())
+            .head(url)
+            .headers(headers)
+            .send()
+            .await
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: Body::Bytes(Bytes::new()),
+                protocol: Protocol::Http,
+            })
+            .map_err(io::Error::other);
+
+        match &result {
+            Ok(response) => debug!(
+                "HEAD {url} ({kind}) from the origin returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "HEAD {url} ({kind}) from the origin failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+        result
+    }
+}
+
+/// Implements the blob transport over the origin HTTP client.
+#[async_trait]
+impl Transport for Http {
+    /// Sends a `GET` to `url` with `headers`, the body left streaming, and
+    /// logs the outcome.
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
+        let start = Instant::now();
+        let result = self
+            .client
+            .get(url)
+            .headers(headers)
             .send()
             .await
             .map(|response| Response {
@@ -120,25 +156,16 @@ impl Http {
 
         match &result {
             Ok(response) => debug!(
-                "{method} {url} ({kind}) from the origin returned {} in {:?}",
+                "GET {url} ({kind}) from the origin returned {} in {:?}",
                 response.status,
                 start.elapsed()
             ),
             Err(err) => debug!(
-                "{method} {url} ({kind}) from the origin failed in {:?}: {err}",
+                "GET {url} ({kind}) from the origin failed in {:?}: {err}",
                 start.elapsed()
             ),
         }
         result
-    }
-}
-
-/// Implements the blob transport over the origin HTTP client.
-#[async_trait]
-impl Transport for Http {
-    /// Sends a `GET` to `url`.
-    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
-        self.request(Method::GET, url, headers, kind).await
     }
 }
 
