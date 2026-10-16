@@ -136,24 +136,11 @@ pub trait Backend: Send + Sync {
 }
 
 /// Creates a blob backend from its configuration.
-///
-/// A registry backend runs on runtimes of its own, one per read kind, built
-/// from the `http` section.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn Backend>> {
     match config {
         BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
         #[cfg(feature = "registry")]
-        BackendConfig::Registry(registry) => {
-            let runtime = Runtime::new(
-                registry.http.worker_threads,
-                registry.http.max_blocking_threads,
-                None,
-            )?;
-            Ok(Arc::new(Registry::new(
-                (**registry).clone(),
-                Arc::new(runtime),
-            )?))
-        }
+        BackendConfig::Registry(registry) => Ok(Arc::new(Registry::new((**registry).clone())?)),
         #[cfg(not(feature = "registry"))]
         BackendConfig::Registry(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,

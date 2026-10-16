@@ -149,8 +149,14 @@ struct Client {
 
 /// Implements the registry backend construction.
 impl Registry {
-    /// Creates a registry backend from its configuration, running on `runtime`.
-    pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
+    /// Creates a registry backend from its configuration, running on runtimes
+    /// of its own, one per read kind, bounded by the `http` section.
+    pub(crate) fn new(config: RegistryConfig) -> io::Result<Self> {
+        let runtime = Arc::new(Runtime::new(
+            config.http.worker_threads,
+            config.http.max_blocking_threads,
+            None,
+        )?);
         let http = Http::new(&config.http, None)?;
 
         // Connect the Dragonfly transport when configured.
@@ -844,7 +850,7 @@ mod tests {
             let config: RegistryConfig =
                 serde_yaml::from_str(&format!("addr: {addr}\nrepository: library/ubuntu\n"))
                     .unwrap();
-            let registry = Registry::new(config, test_runtime()).unwrap();
+            let registry = Registry::new(config).unwrap();
             assert_eq!(registry.client.blob_url("abc123"), expected, "addr={addr}");
         }
     }
@@ -857,7 +863,7 @@ repository: library/ubuntu
 auth: YWxpY2U6c2VjcmV0
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let registry = Registry::new(config, test_runtime()).unwrap();
+        let registry = Registry::new(config).unwrap();
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
@@ -899,7 +905,7 @@ auth: YWxpY2U6c2VjcmV0
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(config, test_runtime()).unwrap();
+        let registry = Registry::new(config).unwrap();
 
         let mut buf = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();
