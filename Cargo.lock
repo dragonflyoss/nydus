@@ -2241,6 +2241,7 @@ dependencies = [
  "nydus-format",
  "nydus-telemetry",
  "nydus-test-utils",
+ "rand 0.9.4",
  "reqwest",
  "reqwest-middleware",
  "reqwest-retry",

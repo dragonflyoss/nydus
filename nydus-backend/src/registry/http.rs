@@ -8,6 +8,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use http::Extensions;
 use leaky_bucket::RateLimiter;
+use rand::Rng;
 use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Request};
@@ -19,7 +20,7 @@ use tracing::{debug, warn};
 use nydus_config::HttpConfig;
 
 use super::response::{Body, Response};
-use super::Transport;
+use super::{Transport, PREFETCH_RETRY_DELAY};
 use crate::Protocol;
 
 /// An HTTP client talking straight to the origin registry.
@@ -166,50 +167,55 @@ impl Transport for Http {
 
     /// Sends the `GET` of a prefetch read to `url` with `headers`, the body
     /// left streaming, and logs the outcome; a `429`, `5xx`, `408` or
-    /// transport failure the retry middleware did not cure defers the read as
-    /// an [`io::ErrorKind::QuotaExceeded`] for the storage layer to reschedule
-    /// hours later.
+    /// transport failure the retry middleware did not cure is sent once more
+    /// after a random delay of hours.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        let start = Instant::now();
-        let result = self
-            .client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map(|response| Response {
-                status: response.status(),
-                headers: response.headers().clone(),
-                body: Body::Stream(Box::new(StreamReader::new(
-                    response.bytes_stream().map_err(io::Error::other),
-                ))),
-                protocol: Protocol::Http,
-            })
-            .map_err(io::Error::other);
+        let mut retried = false;
+        loop {
+            let start = Instant::now();
+            let result = self
+                .client
+                .get(url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map(|response| Response {
+                    status: response.status(),
+                    headers: response.headers().clone(),
+                    body: Body::Stream(Box::new(StreamReader::new(
+                        response.bytes_stream().map_err(io::Error::other),
+                    ))),
+                    protocol: Protocol::Http,
+                })
+                .map_err(io::Error::other);
 
-        match &result {
-            Ok(response) => debug!(
-                "GET {url} (prefetch) from the origin returned {} in {:?}",
-                response.status,
-                start.elapsed()
-            ),
-            Err(err) => debug!(
-                "GET {url} (prefetch) from the origin failed in {:?}: {err}",
-                start.elapsed()
-            ),
+            match &result {
+                Ok(response) => debug!(
+                    "GET {url} (prefetch) from the origin returned {} in {:?}",
+                    response.status,
+                    start.elapsed()
+                ),
+                Err(err) => debug!(
+                    "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                    start.elapsed()
+                ),
+            }
+
+            // Serve a definitive answer, or the second transient one.
+            let err = match result {
+                Ok(response) if response.needs_fallback() && !retried => {
+                    response.into_io_error().await
+                }
+                Err(err) if !retried => err,
+                result => return result,
+            };
+
+            // Retry once after a random delay of hours.
+            let delay = rand::rng().random_range(PREFETCH_RETRY_DELAY);
+            warn!("origin request failed, retrying in {delay:?}: {err}");
+            tokio::time::sleep(delay).await;
+            retried = true;
         }
-
-        // Serve a definitive answer; defer the read on anything else.
-        let err = match result {
-            Ok(response) if response.needs_fallback() => response.into_io_error().await,
-            Ok(response) => return Ok(response),
-            Err(err) => err,
-        };
-        warn!("origin request failed: {err}");
-        Err(io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            format!("prefetch deferred: {err}"),
-        ))
     }
 }
 
@@ -259,6 +265,86 @@ impl Middleware for RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    use reqwest::StatusCode;
+
+    fn origin(statuses: &'static [&'static str]) -> (String, Arc<AtomicU32>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicU32::new(0));
+        let served = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                while !buf.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => buf.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let hit = served.fetch_add(1, Ordering::SeqCst) as usize;
+                let status = statuses[hit.min(statuses.len() - 1)];
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (url, hits)
+    }
+
+    #[tokio::test]
+    async fn prefetch_retries_a_transient_failure_once_after_the_delay() {
+        let test_cases = vec![
+            (
+                &["503 Service Unavailable", "200 OK"][..],
+                StatusCode::OK,
+                2,
+            ),
+            (
+                &["429 Too Many Requests", "404 Not Found"][..],
+                StatusCode::NOT_FOUND,
+                2,
+            ),
+            (
+                &["503 Service Unavailable"][..],
+                StatusCode::SERVICE_UNAVAILABLE,
+                2,
+            ),
+            (&["404 Not Found"][..], StatusCode::NOT_FOUND, 1),
+        ];
+
+        for (statuses, expected, expected_hits) in test_cases {
+            let (url, hits) = origin(statuses);
+            let config = HttpConfig {
+                max_retries: 0,
+                ..Default::default()
+            };
+            let http = Http::new(&config, None).unwrap();
+
+            let start = Instant::now();
+            let response = http.prefetch(&url, HeaderMap::new()).await.unwrap();
+
+            assert_eq!(response.status, expected, "{statuses:?}");
+            assert_eq!(hits.load(Ordering::SeqCst), expected_hits, "{statuses:?}");
+            if expected_hits == 2 {
+                assert!(
+                    start.elapsed() >= *PREFETCH_RETRY_DELAY.start(),
+                    "{statuses:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn new_accepts_an_optional_rate_limit() {

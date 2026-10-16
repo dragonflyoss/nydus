@@ -174,7 +174,7 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus-core` | both | Image runtime facade: `NydusCore`, `ErofsReader`, path walk (`entry`), flattened device view (`extent`), blob table (`blob`) | `Error` for assembly/queries, `io::Result` on the read path |
 | `nydus-config` | control | Loads the YAML config file and converts it into the plain config structs owned by the crates below | `Error` |
 | `nydus-storage` | data | Local cache and reuse: `LocalBlobCache` (chunk group decode, CRC, on-demand fill), `BlobCaches`, chunk group ready-bitmaps, access tracing | `io::Result` only |
-| `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy; `BlobPrefetcher`, which drives the blob prefetch and reschedules the blobs a backend could not serve | `io::Result` only |
+| `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy; `BlobPrefetcher`, which drives the blob prefetch | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
 | `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, whose `BackendKind`/`Protocol`/`ReadKind` it maps to label values, so every layer can record without cycles | — |
@@ -1141,11 +1141,12 @@ Fields:
 	`all` prefetches every blob — the ondemand blob first, then the other
 	priority blobs, then the rest; `auto` behaves like `ondemand` when a
 	priority blob is an ondemand blob and like `all` otherwise, so an
-	unoptimized image is still streamed in the background. A blob prefetch the
-	backend deferred (a `429`, `5xx`, `408` or transport failure the
+	unoptimized image is still streamed in the background. A prefetch read the
+	backend could not serve (a `429`, `5xx`, `408` or transport failure the
 	transport's own retries did not cure, from the origin or Dragonfly) is
-	re-attempted after a random `6h`–`12h` delay so retry load spreads out
-	instead of stampeding; other prefetch failures are logged and skipped.
+	sent once more after a random `6h`–`12h` delay so retry load spreads out
+	instead of stampeding; a blob whose prefetch still fails is logged and
+	skipped.
 	See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
@@ -1216,8 +1217,8 @@ Fields under `backend.config`:
 		back-to-source rate limit slot, so this default bounds how often the
 		origin is retried before such a read errors out. A prefetch read still
 		failing with a `429`, `5xx`, `408` or transport error after them is
-		deferred and rescheduled after a random `6h`–`12h` delay, like one
-		Dragonfly cannot serve; an on-demand read errors out.
+		sent once more after a random `6h`–`12h` delay, like one Dragonfly
+		cannot serve; an on-demand read errors out.
 	- `proxy` (optional): routes every registry request through an HTTP
 		forward proxy. Requests keep their original upstream URL, so a proxy
 		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
@@ -1257,15 +1258,15 @@ Fields under `backend.config`:
 	For an on-demand read the SDK retries a transient failure (timeout,
 	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times
 	after a jittered exponential backoff, each attempt on the next seed peer
-	serving the blob. A prefetch read never retries. Any other answer returns at once. What happens next depends
-	on the read kind:
+	serving the blob. A prefetch read never retries at once. Any other answer
+	returns at once. What happens next depends on the read kind:
 
 	| Dragonfly outcome | Prefetch | On-demand |
 	|---|---|---|
 	| `2xx` / `3xx` / `401` / `403` / `404` / other definitive `4xx` | Served as is: `401` runs the auth handshake and resends, `403` and `404` fail the read without retry or fallback | Same |
-	| dfdaemon `400` (invalid request or URL) / `422` (the origin sent no `Content-Length`, or the piece length is invalid) | No retry, fail, no fallback, no reschedule | Same |
-	| dfdaemon `507` (the seed peer has no room for the blob) | No retry, no origin fallback; the blob's prefetch fails and is rescheduled after a random 6h–12h delay | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
-	| `429` / `5xx` / `408` / timeout / connection / dfdaemon `500` | No retry, no origin fallback; the blob's prefetch fails and is rescheduled after a random 6h–12h delay | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
+	| dfdaemon `400` (invalid request or URL) / `422` (the origin sent no `Content-Length`, or the piece length is invalid) | No retry, fail, no fallback | Same |
+	| dfdaemon `507` (the seed peer has no room for the blob) | Sent once more after a random 6h–12h delay, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
+	| `429` / `5xx` / `408` / timeout / connection / dfdaemon `500` | Sent once more after a random 6h–12h delay, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
 	| Origin fallback: `5xx` / `408` / `429` / transport error | n/a | Retried by the HTTP client's retry middleware up to `http.max_retries` times, every attempt waiting for its own back-to-source rate limit slot |
 
 	Prefetch reads never fall back to the origin, so a Dragonfly outage
@@ -1365,10 +1366,8 @@ Backend:
 	validations of fetched chunk groups and how many mismatched. `protocol` is
 	the backend's default, `dragonfly` when Dragonfly is configured even for a
 	read that went back to the origin.
-- `nydus_prefetch_task_total`, `nydus_prefetch_task_failure_total`,
-	`nydus_prefetch_task_reschedule_total` — blob prefetch attempts, the ones
-	that failed outright, and the ones the backend deferred and queued for a
-	delayed retry. A rescheduled blob counts a new task when it is retried.
+- `nydus_prefetch_task_total`, `nydus_prefetch_task_failure_total` — blob
+	prefetch attempts and the ones that failed.
 
 Filesystem:
 

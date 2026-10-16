@@ -86,8 +86,9 @@ impl Response {
     }
 
     /// Returns whether the transport failed to serve the read, a `429`, `5xx`
-    /// or `408`, so an on-demand read falls back and a prefetch is deferred.
-    /// Every other status is the registry's definitive answer.
+    /// or `408`, so an on-demand read falls back and a prefetch is sent once
+    /// more hours later. Every other status is the registry's definitive
+    /// answer.
     pub(crate) fn needs_fallback(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT

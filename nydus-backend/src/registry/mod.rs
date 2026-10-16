@@ -17,7 +17,8 @@
 //!            Http                Dragonfly
 //!       direct origin,       seed peers, own retries,
 //!       own retries,         on-demand back to source,
-//!       prefetch deferred    prefetch deferred
+//!       prefetch retried     prefetch retried once,
+//!       once, hours later    hours later
 //! ```
 //!
 //! [`Registry`] owns the registry-specific logic, the transports spend their
@@ -42,8 +43,9 @@ mod rt;
 
 use std::future::Future;
 use std::io;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
@@ -68,6 +70,20 @@ use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
 
+/// The window of the random delay before a prefetch read the transport's
+/// own retries did not cure is sent once more. Hours long so a registry or
+/// Dragonfly outage or rate limit has time to clear, random so a fleet of
+/// instances does not retry in lockstep.
+#[cfg(not(test))]
+const PREFETCH_RETRY_DELAY: RangeInclusive<Duration> =
+    Duration::from_secs(6 * 60 * 60)..=Duration::from_secs(12 * 60 * 60);
+
+/// The window of the random delay before a prefetch read is sent once more,
+/// shortened so a test watches the retry without waiting hours.
+#[cfg(test)]
+const PREFETCH_RETRY_DELAY: RangeInclusive<Duration> =
+    Duration::from_millis(30)..=Duration::from_millis(60);
+
 /// The transport a blob `GET` rides on: the origin registry over HTTP, or the
 /// Dragonfly seed peers.
 ///
@@ -82,9 +98,9 @@ trait Transport: Send + Sync {
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
-    /// Sends the `GET` of a background prefetch read, deferring a transient
-    /// failure the transport's retries did not cure as an
-    /// [`io::ErrorKind::QuotaExceeded`] for the storage layer to reschedule.
+    /// Sends the `GET` of a background prefetch read, sending it once more
+    /// after a random [`PREFETCH_RETRY_DELAY`] when the transport's own
+    /// retries did not cure a transient failure.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
@@ -877,28 +893,20 @@ dragonfly:
     }
 
     #[test]
-    fn origin_transient_failures_defer_prefetch_and_fail_ondemand() {
-        let test_cases = vec![
-            (ReadKind::Prefetch, io::ErrorKind::QuotaExceeded),
-            (ReadKind::OnDemand, io::ErrorKind::Other),
-        ];
+    fn origin_transient_failure_fails_an_ondemand_read_at_once() {
+        let origin = OriginStub::serve_with_status("503 Service Unavailable", b"busy".to_vec());
+        let config: RegistryConfig = serde_yaml::from_str(&format!(
+            "addr: http://{}\nrepository: library/ubuntu\nhttp:\n  max_retries: 0\n",
+            origin.addr
+        ))
+        .unwrap();
+        let registry = Registry::new(config, test_runtime()).unwrap();
 
-        for (kind, expected) in test_cases {
-            let origin = OriginStub::serve_with_status("503 Service Unavailable", b"busy".to_vec());
-            let config: RegistryConfig = serde_yaml::from_str(&format!(
-                "addr: http://{}\nrepository: library/ubuntu\nhttp:\n  max_retries: 0\n",
-                origin.addr
-            ))
-            .unwrap();
-            let registry = Registry::new(config, test_runtime()).unwrap();
+        let mut buf = vec![0u8; 4];
+        let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();
 
-            let mut buf = vec![0u8; 4];
-            let err = read(&registry, kind, &mut buf).unwrap_err();
-
-            assert_eq!(err.kind(), expected, "kind={kind:?}: {err}");
-            assert!(err.to_string().contains("503"), "kind={kind:?}: {err}");
-            assert_eq!(origin.hits(), 1, "kind={kind:?}");
-        }
+        assert!(err.to_string().contains("503"), "{err}");
+        assert_eq!(origin.hits(), 1);
     }
 
     #[test]

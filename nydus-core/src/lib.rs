@@ -78,8 +78,8 @@ pub struct NydusCore {
     address_layout: FlatLayout,
     trace_recorder: Arc<TraceRecorder>,
     /// Stop flag of the detached background prefetch worker, raised on drop
-    /// so the worker exits its retry/reschedule loop instead of holding the
-    /// cache and backend alive forever after the core is gone.
+    /// so the worker starts no new blob instead of holding the cache and
+    /// backend alive after the core is gone.
     prefetch_stop: Option<Arc<AtomicBool>>,
 }
 
@@ -180,8 +180,7 @@ impl NydusCore {
         // of the returned core. The handle is detached: prefetch is
         // best-effort warmup and must never block core construction or
         // teardown. The core retains only the worker's stop flag, raised on
-        // drop so the worker winds down instead of rescheduling throttled
-        // prefetches forever.
+        // drop so the worker winds down after its current blob.
         let mut prefetch_stop = None;
         if prefetch_scope != PrefetchScope::None {
             let prefetcher = BlobPrefetcher::new(
@@ -310,8 +309,7 @@ impl NydusCore {
 
 impl Drop for NydusCore {
     /// Raise the background prefetch worker's stop flag so it stops starting
-    /// new work and exits its reschedule loop, instead of retrying throttled
-    /// prefetches forever after the core is gone.
+    /// new work after the core is gone.
     fn drop(&mut self) {
         if let Some(stop) = &self.prefetch_stop {
             stop.store(true, Ordering::Relaxed);

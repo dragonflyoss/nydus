@@ -236,7 +236,7 @@ pub struct HttpConfig {
     /// client's retry middleware on direct origin requests and on origin
     /// requests issued when Dragonfly cannot serve a read, where every attempt
     /// also waits for a back-to-source rate limit slot. A prefetch read still
-    /// failing after them is left to the delayed reschedule.
+    /// failing after them is sent once more after a random delay of hours.
     #[serde(default = "default_registry_http_max_retries")]
     pub max_retries: u32,
 
@@ -367,15 +367,15 @@ impl TlsConfig {
 ///                        │
 ///                        └─ 429 / 5xx / 408 / timeout ─┬─ on-demand ─▶ retry, then origin
 ///                                                      │
-///                                                      └─ prefetch ──▶ reschedule
+///                                                      └─ prefetch ──▶ retried once, hours later
 /// ```
 ///
-/// | Answer                        | On-demand                                      | Prefetch                           |
-/// |-------------------------------|------------------------------------------------|------------------------------------|
-/// | `2xx` / `3xx`                 | served, a `3xx` followed through Dragonfly     | same                               |
-/// | `401`                         | registry auth handshake, then resent once      | same                               |
-/// | `400` / `403` / `404` / `422` | read fails, no retry, no origin                | same                               |
-/// | `429` / `5xx` / `408`         | retried on the next seed peer, then the origin | rescheduled hours later, no origin |
+/// | Answer                        | On-demand                                      | Prefetch                              |
+/// |-------------------------------|------------------------------------------------|---------------------------------------|
+/// | `2xx` / `3xx`                 | served, a `3xx` followed through Dragonfly     | same                                  |
+/// | `401`                         | registry auth handshake, then resent once      | same                                  |
+/// | `400` / `403` / `404` / `422` | read fails, no retry, no origin                | same                                  |
+/// | `429` / `5xx` / `408`         | retried on the next seed peer, then the origin | retried once hours later, no origin   |
 ///
 /// On-demand reads retry `max_retries` times and reach the origin under
 /// `back_to_source.request_rate_limit`. A timeout or connection failure counts
@@ -399,8 +399,8 @@ pub struct DragonflyConfig {
     /// The maximum number of retries of an on-demand blob `GET` through
     /// Dragonfly on a transient failure (timeout, connection, dfdaemon, `5xx`,
     /// `408` or `429`), each sent to the next seed peer after an exponential
-    /// backoff, at most 3. Any other answer returns at once. Prefetch reads
-    /// never retry, a failed prefetch is left to the delayed reschedule.
+    /// backoff, at most 3. Any other answer returns at once. A prefetch read
+    /// is instead sent once more after a random delay of hours.
     #[serde(default = "default_registry_dragonfly_max_retries")]
     pub max_retries: u32,
 

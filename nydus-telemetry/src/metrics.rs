@@ -144,19 +144,6 @@ pub static PREFETCH_TASK_FAILURE_COUNT: LazyLock<IntCounterVec> = LazyLock::new(
     .expect("metric can be created")
 });
 
-/// Used to count the number of rescheduled prefetch tasks.
-pub static PREFETCH_TASK_RESCHEDULE_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    IntCounterVec::new(
-        Opts::new(
-            "prefetch_task_reschedule_total",
-            "Counter of the number of the rescheduled prefetch task.",
-        )
-        .namespace(nydus_config::NAME),
-        &[],
-    )
-    .expect("metric can be created")
-});
-
 /// Used to count the number of filesystem operations.
 pub static FS_OP_COUNT: LazyLock<IntCounterVec> = LazyLock::new(|| {
     IntCounterVec::new(
@@ -296,10 +283,6 @@ fn register_custom_metrics(registry: &Registry) {
 
     registry
         .register(Box::new(PREFETCH_TASK_FAILURE_COUNT.clone()))
-        .expect("metric can be registered");
-
-    registry
-        .register(Box::new(PREFETCH_TASK_RESCHEDULE_COUNT.clone()))
         .expect("metric can be registered");
 
     registry
@@ -501,11 +484,6 @@ pub fn collect_prefetch_task_started_metrics() {
 /// Collects the prefetch task failure metrics.
 pub fn collect_prefetch_task_failure_metrics() {
     PREFETCH_TASK_FAILURE_COUNT.with_label_values(&[]).inc();
-}
-
-/// Collects the prefetch task reschedule metrics.
-pub fn collect_prefetch_task_reschedule_metrics() {
-    PREFETCH_TASK_RESCHEDULE_COUNT.with_label_values(&[]).inc();
 }
 
 /// Collects the filesystem operation finished metrics.
@@ -821,9 +799,6 @@ mod tests {
             }),
             (collect_prefetch_task_failure_metrics, || {
                 PREFETCH_TASK_FAILURE_COUNT.with_label_values(&[]).get()
-            }),
-            (collect_prefetch_task_reschedule_metrics, || {
-                PREFETCH_TASK_RESCHEDULE_COUNT.with_label_values(&[]).get()
             }),
         ];
 

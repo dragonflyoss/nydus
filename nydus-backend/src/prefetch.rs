@@ -1,39 +1,19 @@
 //! Post-mount blob prefetch: warms the local caches with the priority blobs
 //! declared in the image (and optionally every remaining blob) so on-demand
-//! reads hit the cache instead of the backend, and reschedules the blobs a
-//! backend could not serve.
+//! reads hit the cache instead of the backend.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracing::{info, warn};
 
 use nydus_config::PrefetchScope;
 use nydus_telemetry::metrics::{
-    collect_prefetch_task_failure_metrics, collect_prefetch_task_reschedule_metrics,
-    collect_prefetch_task_started_metrics,
+    collect_prefetch_task_failure_metrics, collect_prefetch_task_started_metrics,
 };
-
-/// How often the reschedule wait re-checks the stop flag while sleeping
-/// towards the next deadline.
-const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
-
-/// The window of the random delay before a deferred blob prefetch is
-/// re-attempted. Hours long so a registry or Dragonfly outage or rate limit
-/// has time to clear, random so a fleet of instances does not retry in
-/// lockstep.
-const RESCHEDULE_DELAY_MIN: Duration = Duration::from_secs(6 * 60 * 60);
-const RESCHEDULE_DELAY_MAX: Duration = Duration::from_secs(12 * 60 * 60);
-
-/// Whether the backend deferred this prefetch (a read its transport could
-/// not serve now, folded into [`io::ErrorKind::QuotaExceeded`] at the
-/// backend's trait boundary).
-fn is_deferred(err: &io::Error) -> bool {
-    err.kind() == io::ErrorKind::QuotaExceeded
-}
 
 /// The blob store a prefetch fills: one cache per blob of the image, kept by
 /// the storage layer, which streams a blob's chunk groups from the backend.
@@ -48,8 +28,7 @@ pub trait Store: Send + Sync {
 
     /// Prefetches every chunk group of blob `blob_index` with up to `workers`
     /// concurrent batch fetches, a non-zero `timeout` bounding the whole
-    /// blob, a read the backend could not serve surfacing as
-    /// [`io::ErrorKind::QuotaExceeded`].
+    /// blob.
     fn prefetch_blob(&self, blob_index: u16, workers: usize, timeout: Duration) -> io::Result<()>;
 }
 
@@ -69,12 +48,9 @@ pub trait Store: Send + Sync {
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" blob) while no later read pays the
 ///    metadata round trips.
-/// 4. Blobs whose prefetch the backend deferred (a Dragonfly read it could
-///    not serve, surfaced as [`io::ErrorKind::QuotaExceeded`]) are rescheduled
-///    after a random delay of `RESCHEDULE_DELAY_MIN` to
-///    `RESCHEDULE_DELAY_MAX` and re-attempted until they succeed or the
-///    [stop flag](Self::stop_flag) is raised. Other failures are logged and
-///    skipped.
+///
+/// A blob whose prefetch fails is logged and skipped; the backend itself
+/// retries a read it could not serve once, hours later.
 pub struct BlobPrefetcher {
     store: Arc<dyn Store>,
     priority: Vec<u16>,
@@ -83,11 +59,7 @@ pub struct BlobPrefetcher {
     scope: PrefetchScope,
     /// Per-blob prefetch timeout; `0s` disables the bound.
     timeout: Duration,
-    /// The `[min, max]` window for the random delay before a deferred blob
-    /// prefetch is re-attempted, the constants unless a test shortens it.
-    reschedule_delay: (Duration, Duration),
-    /// Cooperative stop flag: once raised, no new prefetch work is started
-    /// and the reschedule loop exits.
+    /// Cooperative stop flag: once raised, no new prefetch work is started.
     stop: Arc<AtomicBool>,
 }
 
@@ -118,22 +90,13 @@ impl BlobPrefetcher {
             threads: threads.max(1),
             scope,
             timeout,
-            reschedule_delay: (RESCHEDULE_DELAY_MIN, RESCHEDULE_DELAY_MAX),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Shorten the reschedule window so a test can watch a deferred prefetch
-    /// come back without waiting hours.
-    #[cfg(test)]
-    fn with_reschedule_delay(mut self, min: Duration, max: Duration) -> Self {
-        self.reschedule_delay = (min, max.max(min));
-        self
-    }
-
     /// A handle to this prefetcher's stop flag. Storing `true` makes the
-    /// prefetcher stop starting new work and exit its reschedule loop, so a
-    /// detached prefetch thread can be wound down on unmount.
+    /// prefetcher stop starting new work, so a detached prefetch thread can
+    /// be wound down on unmount.
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         self.stop.clone()
     }
@@ -193,16 +156,12 @@ impl BlobPrefetcher {
     /// Drive the whole prefetch workflow synchronously on the calling thread:
     /// ondemand priority blobs first, then (only when the scope resolves to
     /// [`PrefetchScope::All`]) the other priority blobs in declared order and
-    /// the remaining blobs through a worker pool, then delayed retries of
-    /// deferred blobs. Per-blob failures the backend did not defer are logged
-    /// and skipped.
+    /// the remaining blobs through a worker pool. Per-blob failures are
+    /// logged and skipped.
     pub fn run(mut self) {
         if self.scope == PrefetchScope::None {
             return;
         }
-
-        // Blobs the backend deferred, awaiting a delayed retry.
-        let mut deferred: Vec<u16> = Vec::new();
 
         // Under the "ondemand" scope the non-ondemand blobs are not pulled, but
         // every cache is opened in the background (blob meta fetched and
@@ -276,14 +235,6 @@ impl BlobPrefetcher {
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
-                Err(err) if is_deferred(&err) => {
-                    collect_prefetch_task_reschedule_metrics();
-                    warn!(
-                        "backend deferred prefetch of priority blob {}, rescheduling: {}",
-                        blob_index, err
-                    );
-                    deferred.push(blob_index);
-                }
                 Err(err) => {
                     collect_prefetch_task_failure_metrics();
                     warn!("failed to prefetch priority blob {}: {}", blob_index, err)
@@ -300,13 +251,11 @@ impl BlobPrefetcher {
         if scope == PrefetchScope::All && !self.rest.is_empty() {
             let worker_count = self.threads.min(self.rest.len());
             let queue = Arc::new(Mutex::new(std::mem::take(&mut self.rest)));
-            let deferred_shared = Arc::new(Mutex::new(Vec::new()));
             let timeout = self.timeout;
             let mut handles = Vec::with_capacity(worker_count);
             for _ in 0..worker_count {
                 let store = self.store.clone();
                 let queue = queue.clone();
-                let deferred_shared = deferred_shared.clone();
                 let stop = self.stop.clone();
                 let handle = thread::Builder::new()
                     .name("nydus_prefetch_worker".to_string())
@@ -324,14 +273,6 @@ impl BlobPrefetcher {
                         collect_prefetch_task_started_metrics();
                         match store.prefetch_blob(blob_index, 1, timeout) {
                             Ok(()) => info!("prefetched blob {}", blob_index),
-                            Err(err) if is_deferred(&err) => {
-                                collect_prefetch_task_reschedule_metrics();
-                                warn!(
-                                    "backend deferred prefetch of blob {}, rescheduling: {}",
-                                    blob_index, err
-                                );
-                                deferred_shared.lock().unwrap().push(blob_index);
-                            }
                             Err(err) => {
                                 collect_prefetch_task_failure_metrics();
                                 warn!("failed to prefetch blob {}: {}", blob_index, err)
@@ -346,71 +287,7 @@ impl BlobPrefetcher {
             for handle in handles {
                 let _ = handle.join();
             }
-            deferred.append(&mut deferred_shared.lock().unwrap());
         }
-
-        // Phase 3: delayed retries of deferred blobs. Each blob gets a fresh
-        // random deadline inside the retry window; retries that get deferred
-        // again are rescheduled, other failures are dropped. The cross-process
-        // prefetch flock and group-map skip logic inside `prefetch_blob` make
-        // a rescheduled prefetch behind another node's progress nearly free.
-        let mut queue: Vec<(Instant, u16)> = deferred
-            .into_iter()
-            .map(|blob_index| (Instant::now() + self.retry_delay(), blob_index))
-            .collect();
-        while !queue.is_empty() {
-            queue.sort_by_key(|(deadline, _)| *deadline);
-            let (deadline, blob_index) = queue.remove(0);
-            while Instant::now() < deadline {
-                if self.stopped() {
-                    return;
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                thread::sleep(remaining.min(RESCHEDULE_POLL_INTERVAL));
-            }
-            if self.stopped() {
-                return;
-            }
-            collect_prefetch_task_started_metrics();
-            match self
-                .store
-                .prefetch_blob(blob_index, self.threads, self.timeout)
-            {
-                Ok(()) => info!("prefetched rescheduled blob {}", blob_index),
-                Err(err) if is_deferred(&err) => {
-                    collect_prefetch_task_reschedule_metrics();
-                    warn!(
-                        "backend deferred rescheduled prefetch of blob {}, rescheduling again: {}",
-                        blob_index, err
-                    );
-                    queue.push((Instant::now() + self.retry_delay(), blob_index));
-                }
-                Err(err) => {
-                    collect_prefetch_task_failure_metrics();
-                    warn!(
-                        "failed to prefetch rescheduled blob {}, giving up: {}",
-                        blob_index, err
-                    )
-                }
-            }
-        }
-    }
-
-    /// A random delay inside the reschedule window, seeded from OS entropy via
-    /// `RandomState` so no `rand` dependency is needed.
-    fn retry_delay(&self) -> Duration {
-        let (min, max) = self.reschedule_delay;
-        let span = max.saturating_sub(min);
-        if span.is_zero() {
-            return min;
-        }
-        use std::hash::{BuildHasher, Hasher};
-        let seed = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        // The 6h span is far below `u64::MAX` nanoseconds (~584 years).
-        let span_nanos = u64::try_from(span.as_nanos()).unwrap_or(u64::MAX);
-        min + Duration::from_nanos(seed % span_nanos.saturating_add(1))
     }
 }
 
@@ -420,28 +297,18 @@ mod tests {
 
     use std::sync::atomic::AtomicUsize;
 
-    fn deferred() -> io::Error {
-        io::Error::new(io::ErrorKind::QuotaExceeded, "prefetch deferred")
-    }
-
-    fn ordinary() -> io::Error {
-        io::Error::other("ordinary failure")
-    }
-
     struct ScriptedStore {
         redirects: Vec<u16>,
-        failures: usize,
-        error: fn() -> io::Error,
+        fail: bool,
         attempts: AtomicUsize,
         prefetched: Mutex<Vec<u16>>,
     }
 
     impl ScriptedStore {
-        fn new(redirects: &[u16], failures: usize, error: fn() -> io::Error) -> Arc<Self> {
+        fn new(redirects: &[u16], fail: bool) -> Arc<Self> {
             Arc::new(Self {
                 redirects: redirects.to_vec(),
-                failures,
-                error,
+                fail,
                 attempts: AtomicUsize::new(0),
                 prefetched: Mutex::new(Vec::new()),
             })
@@ -471,9 +338,9 @@ mod tests {
             _workers: usize,
             _timeout: Duration,
         ) -> io::Result<()> {
-            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
-            if attempt < self.failures {
-                return Err((self.error)());
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(io::Error::other("failure"));
             }
             self.prefetched.lock().unwrap().push(blob_index);
             Ok(())
@@ -486,7 +353,6 @@ mod tests {
         plan: PrefetchPlan,
     ) -> BlobPrefetcher {
         BlobPrefetcher::new(store, plan, 1, scope, Duration::ZERO)
-            .with_reschedule_delay(Duration::from_millis(30), Duration::from_millis(60))
     }
 
     fn single_blob_plan() -> PrefetchPlan {
@@ -497,52 +363,31 @@ mod tests {
     }
 
     #[test]
-    fn deferred_prefetch_is_rescheduled_and_retried() {
-        let store = ScriptedStore::new(&[], 1, deferred);
-        let tasks = || {
-            nydus_telemetry::metrics::PREFETCH_TASK_COUNT
+    fn failed_prefetch_is_skipped_after_one_attempt() {
+        let store = ScriptedStore::new(&[], true);
+        let failures = || {
+            nydus_telemetry::metrics::PREFETCH_TASK_FAILURE_COUNT
                 .with_label_values(&[])
                 .get()
         };
-        let reschedules = || {
-            nydus_telemetry::metrics::PREFETCH_TASK_RESCHEDULE_COUNT
-                .with_label_values(&[])
-                .get()
-        };
-        let (tasks_before, reschedules_before) = (tasks(), reschedules());
+        let failures_before = failures();
 
-        let start = Instant::now();
-        prefetcher(store.clone(), PrefetchScope::All, single_blob_plan()).run();
-
-        assert_eq!(store.attempts(), 2);
-        assert_eq!(store.prefetched(), vec![0]);
-        assert!(start.elapsed() >= Duration::from_millis(30));
-        assert!(tasks() >= tasks_before + 2);
-        assert!(reschedules() > reschedules_before);
-    }
-
-    #[test]
-    fn undeferred_failure_is_not_rescheduled() {
-        let store = ScriptedStore::new(&[], usize::MAX, ordinary);
-
-        let start = Instant::now();
         prefetcher(store.clone(), PrefetchScope::All, single_blob_plan()).run();
 
         assert_eq!(store.attempts(), 1);
-        assert!(start.elapsed() < Duration::from_millis(30));
+        assert!(store.prefetched().is_empty());
+        assert!(failures() > failures_before);
     }
 
     #[test]
-    fn raised_stop_flag_prevents_rescheduled_retries() {
-        let store = ScriptedStore::new(&[], usize::MAX, deferred);
+    fn raised_stop_flag_skips_the_prefetch() {
+        let store = ScriptedStore::new(&[], false);
         let prefetcher = prefetcher(store.clone(), PrefetchScope::All, single_blob_plan());
         prefetcher.stop_flag().store(true, Ordering::SeqCst);
 
-        let start = Instant::now();
         prefetcher.run();
 
         assert_eq!(store.attempts(), 0);
-        assert!(start.elapsed() < Duration::from_millis(30));
     }
 
     #[test]
@@ -558,7 +403,7 @@ mod tests {
         ];
 
         for (scope, priority, rest, expected) in test_cases {
-            let store = ScriptedStore::new(&[2], 0, ordinary);
+            let store = ScriptedStore::new(&[2], false);
             let plan = PrefetchPlan {
                 priority: priority.clone(),
                 rest: rest.clone(),

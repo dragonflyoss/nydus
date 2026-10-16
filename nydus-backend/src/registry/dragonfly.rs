@@ -4,16 +4,15 @@
 //! scheduler, every other request going straight to the origin. The SDK owns
 //! the retries: an on-demand read retries a transient failure, a `429`
 //! included, on the next seed peer up to the configured budget, while a
-//! prefetch read never retries, the storage layer rescheduling a failed
-//! prefetch hours later instead. The SDK reads the body whole, so a seed peer
-//! failing mid-body is retried like any other transient failure, and the
-//! buffer it filled is handed on without a copy.
+//! prefetch read never retries at once. The SDK reads the body whole, so a
+//! seed peer failing mid-body is retried like any other transient failure,
+//! and the buffer it filled is handed on without a copy.
 //!
 //! What a read does once the SDK's own retries are spent is decided here: a
 //! `429`, `5xx`, `408` or transport failure sends an on-demand read back to
 //! the origin through the rate-limited client, as dfdaemon itself goes back
-//! to source, and defers a prefetch read to the storage layer's reschedule
-//! instead, so a Dragonfly outage degrades prefetch rather than flooding the
+//! to source, and sends a prefetch read once more after a random delay of
+//! hours, so a Dragonfly outage degrades prefetch rather than flooding the
 //! registry. Any other answer is served as is, a dfdaemon `422` included.
 
 use std::io;
@@ -21,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
+use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
 use tracing::{debug, warn};
@@ -35,7 +35,7 @@ use nydus_telemetry::metrics::collect_read_backend_failure_metrics;
 use super::http::{Http, RateLimit};
 use super::response::{Body, Response};
 use super::rt::Runtime;
-use super::Transport;
+use super::{Transport, PREFETCH_RETRY_DELAY};
 use crate::{BackendKind, Protocol, ReadKind};
 
 /// The Dragonfly SDK transport, one client per read kind so each kind keeps
@@ -46,8 +46,8 @@ pub(crate) struct Dragonfly {
     /// peer may not be rate limited.
     ondemand_client: Proxy,
 
-    /// The seed peer client of prefetch reads, never retrying: a failed
-    /// prefetch is rescheduled hours later instead.
+    /// The seed peer client of prefetch reads, never retrying at once: a
+    /// failed prefetch is sent once more hours later instead.
     prefetch_client: Proxy,
 
     /// The HTTP client of the requests P2P does not carry, a `HEAD` for a
@@ -232,10 +232,9 @@ impl Transport for Dragonfly {
 
     /// Fetches `url` through the prefetch client at `Level3`, so a first
     /// download lets a normal peer go back to source ahead of it, and logs
-    /// the outcome; a `429`, `5xx`, `408` or transport failure defers the
-    /// read as an [`io::ErrorKind::QuotaExceeded`] for the storage layer to
-    /// reschedule hours later, never touching the origin. The body and
-    /// errors are otherwise handled as in [`get`](Self::get).
+    /// the outcome; a `429`, `5xx`, `408` or transport failure is sent once
+    /// more after a random delay of hours, never touching the origin. The
+    /// body and errors are otherwise handled as in [`get`](Self::get).
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
@@ -245,73 +244,79 @@ impl Transport for Dragonfly {
             ..Default::default()
         };
 
-        let start = Instant::now();
-        let mut body = BytesMut::new();
-        let result = match self.prefetch_client.get_into(&request, &mut body).await {
-            Ok(response) => Ok(Response {
-                status: response.status_code.unwrap_or(StatusCode::OK),
-                headers: response.header,
-                body: Body::Bytes(body.freeze()),
-                protocol: Protocol::Dragonfly,
-            }),
-            Err(Error::ProxyError(ProxyError {
-                status_code: Some(status),
-                header,
-                message,
-            }))
-            | Err(Error::BackendError(BackendError {
-                status_code: Some(status),
-                header,
-                message,
-            }))
-            | Err(Error::DfdaemonError(DfdaemonError {
-                status_code: Some(status),
-                header,
-                message,
-            })) => Ok(Response {
-                status,
-                headers: header
-                    .into_iter()
-                    .filter_map(|(name, value)| {
-                        Some((
-                            HeaderName::from_bytes(name.as_bytes()).ok()?,
-                            HeaderValue::from_str(&value).ok()?,
-                        ))
-                    })
-                    .collect(),
-                body: Body::Bytes(message.unwrap_or_default().into()),
-                protocol: Protocol::Dragonfly,
-            }),
-            Err(Error::RequestTimeout(message)) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("dragonfly request timed out: {message}"),
-            )),
-            Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
-        };
+        let mut retried = false;
+        loop {
+            let start = Instant::now();
+            let mut body = BytesMut::new();
+            let result = match self.prefetch_client.get_into(&request, &mut body).await {
+                Ok(response) => Ok(Response {
+                    status: response.status_code.unwrap_or(StatusCode::OK),
+                    headers: response.header,
+                    body: Body::Bytes(body.freeze()),
+                    protocol: Protocol::Dragonfly,
+                }),
+                Err(Error::ProxyError(ProxyError {
+                    status_code: Some(status),
+                    header,
+                    message,
+                }))
+                | Err(Error::BackendError(BackendError {
+                    status_code: Some(status),
+                    header,
+                    message,
+                }))
+                | Err(Error::DfdaemonError(DfdaemonError {
+                    status_code: Some(status),
+                    header,
+                    message,
+                })) => Ok(Response {
+                    status,
+                    headers: header
+                        .into_iter()
+                        .filter_map(|(name, value)| {
+                            Some((
+                                HeaderName::from_bytes(name.as_bytes()).ok()?,
+                                HeaderValue::from_str(&value).ok()?,
+                            ))
+                        })
+                        .collect(),
+                    body: Body::Bytes(message.unwrap_or_default().into()),
+                    protocol: Protocol::Dragonfly,
+                }),
+                Err(Error::RequestTimeout(message)) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("dragonfly request timed out: {message}"),
+                )),
+                Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
+            };
 
-        match &result {
-            Ok(response) => debug!(
-                "GET {url} (prefetch) through dragonfly returned {} in {:?}",
-                response.status,
-                start.elapsed()
-            ),
-            Err(err) => debug!(
-                "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
-                start.elapsed()
-            ),
+            match &result {
+                Ok(response) => debug!(
+                    "GET {url} (prefetch) through dragonfly returned {} in {:?}",
+                    response.status,
+                    start.elapsed()
+                ),
+                Err(err) => debug!(
+                    "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
+                    start.elapsed()
+                ),
+            }
+
+            // Serve a definitive answer, or the second transient one, as a
+            // prefetch never falls back to the origin.
+            let err = match result {
+                Ok(response) if response.needs_fallback() && !retried => {
+                    response.into_io_error().await
+                }
+                Err(err) if !retried => err,
+                result => return result,
+            };
+
+            // Retry once after a random delay of hours.
+            let delay = rand::rng().random_range(PREFETCH_RETRY_DELAY);
+            warn!("dragonfly request failed, retrying in {delay:?}: {err}");
+            tokio::time::sleep(delay).await;
+            retried = true;
         }
-
-        // Serve a definitive answer; defer the read on anything else, as a
-        // prefetch never falls back to the origin.
-        let err = match result {
-            Ok(response) if response.needs_fallback() => response.into_io_error().await,
-            Ok(response) => return Ok(response),
-            Err(err) => err,
-        };
-        warn!("dragonfly request failed: {err}");
-        Err(io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            format!("prefetch deferred: {err}"),
-        ))
     }
 }

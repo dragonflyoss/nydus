@@ -4,10 +4,9 @@
 //! Every API here returns `io::Result` so the OS errno survives to the
 //! service edges, and this crate never depends on the control-plane error
 //! type. Registry auth and Dragonfly failures are `io::Error`s too, carrying
-//! their message; the one kind acted on is [`io::ErrorKind::QuotaExceeded`],
-//! a prefetch read the origin or Dragonfly could not serve, a `429`, `5xx`,
-//! `408` or a transport failure, which the [`prefetch`] module reschedules
-//! hours later instead of retrying now.
+//! their message. A prefetch read the origin or Dragonfly could not serve, a
+//! `429`, `5xx`, `408` or a transport failure, is sent once more after a
+//! random delay of hours before it fails.
 
 mod local;
 pub mod prefetch;

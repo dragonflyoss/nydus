@@ -38,7 +38,7 @@ backend:
       # Maximum number of retry attempts per request, applied by the HTTP
       # client's retry middleware on direct origin requests and on origin
       # requests issued when Dragonfly cannot serve a read. A prefetch read
-      # still failing after them is rescheduled hours later. Default: 3.
+      # still failing after them is retried once hours later. Default: 3.
       max_retries: 3
 
       # Optional proxy block routing every registry request through an HTTP
@@ -75,7 +75,7 @@ backend:
     # feature). When set, blob GETs are routed through the Dragonfly client
     # SDK for P2P distribution. An on-demand read the seed peers cannot serve
     # goes back to the origin registry through a rate limit, a prefetch read
-    # is rescheduled hours later instead. Every other request goes directly
+    # is retried once hours later instead. Every other request goes directly
     # to the origin registry. Omit to talk to the origin directly.
     #
     # dragonfly:
@@ -88,8 +88,8 @@ backend:
     #
     #   # Retries of an on-demand read on a transient failure (timeout,
     #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer
-    #   # after an exponential backoff. Default: 1, at most 3. Prefetch reads
-    #   # never retry.
+    #   # after an exponential backoff. Default: 1, at most 3. A prefetch read
+    #   # is instead retried once after a random 6h-12h delay.
     #   max_retries: 1
     #
     #   # Origin reads issued when the seed peers cannot serve an on-demand

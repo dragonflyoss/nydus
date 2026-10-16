@@ -327,8 +327,7 @@ impl FuseCommand {
 
         let join_result = session.serve()?;
 
-        // The filesystem is unmounted: wind down the detached prefetch thread
-        // (it may be sleeping towards a rescheduled throttled-blob retry).
+        // The filesystem is unmounted: wind down the detached prefetch thread.
         if let Some(stop) = prefetch_stop {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
