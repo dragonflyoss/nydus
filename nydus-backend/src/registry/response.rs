@@ -86,10 +86,10 @@ impl Response {
     }
 
     /// Returns whether the seed peers failed to serve the read, a `429`, `5xx`
-    /// or `408`, so it goes back to the source. Every other status is the
+    /// or `408`, so it falls back to the origin. Every other status is the
     /// registry's definitive answer.
     #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
-    pub(crate) fn needs_back_to_source(&self) -> bool {
+    pub(crate) fn needs_fallback(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT
             || self.status == StatusCode::TOO_MANY_REQUESTS
@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn needs_back_to_source_marks_the_statuses_the_seed_peers_failed_with() {
+    fn needs_fallback_marks_the_statuses_the_seed_peers_failed_with() {
         let test_cases = vec![
             (StatusCode::INTERNAL_SERVER_ERROR, true),
             (StatusCode::BAD_GATEWAY, true),
@@ -155,7 +155,7 @@ mod tests {
                 body: Body::Bytes(Bytes::new()),
                 protocol: Protocol::Http,
             };
-            assert_eq!(response.needs_back_to_source(), expected, "{status}");
+            assert_eq!(response.needs_fallback(), expected, "{status}");
         }
     }
 
