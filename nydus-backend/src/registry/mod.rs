@@ -392,28 +392,22 @@ impl Client {
         redirected.content_length()
     }
 
-    /// Recovers a blob's metadata from its trailing footer: `HEAD` for the
-    /// size, read the footer, then read the blob metadata region it points at.
+    /// Recovers a blob's metadata from its trailing footer for an on-demand
+    /// read: `HEAD` for the size, read the footer, then read the blob
+    /// metadata region it points at.
     async fn get_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
-        kind: ReadKind,
     ) -> io::Result<BlobMetadata> {
         let size = self.stat_blob(blob_id).await?;
         let footer_offset =
             BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
 
-        let footer = match kind {
-            ReadKind::OnDemand => {
-                self.get_blob(blob_id, footer_offset, BlobFooter::SIZE)
-                    .await?
-            }
-            ReadKind::Prefetch => {
-                self.prefetch_blob(blob_id, footer_offset, BlobFooter::SIZE)
-                    .await?
-            }
-        };
-        let footer_bytes = footer.bytes(BlobFooter::SIZE).await?;
+        let footer_bytes = self
+            .get_blob(blob_id, footer_offset, BlobFooter::SIZE)
+            .await?
+            .bytes(BlobFooter::SIZE)
+            .await?;
         let footer_bytes = footer_bytes.as_ref().try_into().map_err(io::Error::other)?;
         let footer = BlobFooter::from_bytes(footer_bytes).map_err(io::Error::other)?;
         footer
@@ -429,17 +423,51 @@ impl Client {
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
-        let blob_metadata = match kind {
-            ReadKind::OnDemand => {
-                self.get_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
-                    .await?
-            }
-            ReadKind::Prefetch => {
-                self.prefetch_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
-                    .await?
-            }
-        };
-        let blob_metadata_bytes = blob_metadata.bytes(blob_metadata_size).await?;
+        let blob_metadata_bytes = self
+            .get_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
+            .await?
+            .bytes(blob_metadata_size)
+            .await?;
+
+        BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
+    }
+
+    /// Recovers a blob's metadata from its trailing footer for a prefetch
+    /// read: `HEAD` for the size, read the footer, then read the blob
+    /// metadata region it points at.
+    async fn prefetch_blob_metadata(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<BlobMetadata> {
+        let size = self.stat_blob(blob_id).await?;
+        let footer_offset =
+            BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
+
+        let footer_bytes = self
+            .prefetch_blob(blob_id, footer_offset, BlobFooter::SIZE)
+            .await?
+            .bytes(BlobFooter::SIZE)
+            .await?;
+        let footer_bytes = footer_bytes.as_ref().try_into().map_err(io::Error::other)?;
+        let footer = BlobFooter::from_bytes(footer_bytes).map_err(io::Error::other)?;
+        footer
+            .validate_layout(footer_offset)
+            .map_err(io::Error::other)?;
+        if footer.is_raw_device() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "native EROFS layers are not served from a registry; mount them through the kernel",
+            ));
+        }
+
+        let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
+        })?;
+        let blob_metadata_bytes = self
+            .prefetch_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
+            .await?
+            .bytes(blob_metadata_size)
+            .await?;
 
         BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
     }
@@ -467,7 +495,10 @@ impl Backend for Registry {
         let client = self.client.clone();
         let blob_id = *blob_id;
         self.runtime.block_on_worker(kind, async move {
-            client.get_blob_metadata(&blob_id, kind).await
+            match kind {
+                ReadKind::OnDemand => client.get_blob_metadata(&blob_id).await,
+                ReadKind::Prefetch => client.prefetch_blob_metadata(&blob_id).await,
+            }
         })
     }
 
