@@ -2,13 +2,14 @@
 
 Data-plane blob backends for
 [Nydus](https://github.com/dragonflyoss/nydus): local directory and OCI
-registry, with optional Dragonfly SDK P2P reads.
+registry, with optional Dragonfly SDK P2P reads, plus the blob prefetch that
+drives them and reschedules the blobs a backend could not serve.
 
 Every API here returns `io::Result` so the OS errno survives to the service
 edges; this crate does not depend on the control-plane error type. Registry
-auth and Dragonfly failures are `io::Error`s too; a prefetch read Dragonfly
-could not serve is an `io::ErrorKind::QuotaExceeded`, the one kind the storage
-layer acts on.
+auth and Dragonfly failures are `io::Error`s too; a prefetch read the origin
+or Dragonfly could not serve is an `io::ErrorKind::QuotaExceeded`, the one
+kind the prefetcher acts on.
 
 ## Features
 

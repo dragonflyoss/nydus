@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
+use nydus_backend::prefetch::Store;
 use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::BlobMetadataChunkGroupExtent;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -271,5 +272,23 @@ impl BlobCaches {
             }
             Ok(())
         })
+    }
+}
+
+/// Implements the blob store the prefetcher fills.
+impl Store for BlobCaches {
+    /// Opens the blob's cache as a prefetch read.
+    fn open(&self, blob_index: u16) -> io::Result<()> {
+        self.cache(blob_index, ReadKind::Prefetch).map(|_| ())
+    }
+
+    /// Returns whether the blob is an "ondemand" (REDIRECT) blob.
+    fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
+        BlobCaches::is_redirect(self, blob_index)
+    }
+
+    /// Prefetches every chunk group of the blob.
+    fn prefetch_blob(&self, blob_index: u16, workers: usize, timeout: Duration) -> io::Result<()> {
+        BlobCaches::prefetch_blob(self, blob_index, workers, timeout)
     }
 }

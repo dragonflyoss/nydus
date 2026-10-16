@@ -1,6 +1,7 @@
 //! Post-mount blob prefetch: warms the local caches with the priority blobs
 //! declared in the image (and optionally every remaining blob) so on-demand
-//! reads hit the cache instead of the backend.
+//! reads hit the cache instead of the backend, and reschedules the blobs a
+//! backend could not serve.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,14 +11,11 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
-use nydus_backend::ReadKind;
 use nydus_config::PrefetchScope;
 use nydus_telemetry::metrics::{
     collect_prefetch_task_failure_metrics, collect_prefetch_task_reschedule_metrics,
     collect_prefetch_task_started_metrics,
 };
-
-use crate::cache::BlobCaches;
 
 /// How often the reschedule wait re-checks the stop flag while sleeping
 /// towards the next deadline.
@@ -35,6 +33,24 @@ const RESCHEDULE_DELAY_MAX: Duration = Duration::from_secs(12 * 60 * 60);
 /// backend's trait boundary).
 fn is_deferred(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::QuotaExceeded
+}
+
+/// The blob store a prefetch fills: one cache per blob of the image, kept by
+/// the storage layer, which streams a blob's chunk groups from the backend.
+pub trait Store: Send + Sync {
+    /// Opens the cache of blob `blob_index`: its blob metadata fetched and
+    /// validated, its sparse file created, no data prefetched.
+    fn open(&self, blob_index: u16) -> io::Result<()>;
+
+    /// Returns whether blob `blob_index` is an "ondemand" (REDIRECT) blob,
+    /// opening its cache.
+    fn is_redirect(&self, blob_index: u16) -> io::Result<bool>;
+
+    /// Prefetches every chunk group of blob `blob_index` with up to `workers`
+    /// concurrent batch fetches, a non-zero `timeout` bounding the whole
+    /// blob, a read the backend could not serve surfacing as
+    /// [`io::ErrorKind::QuotaExceeded`].
+    fn prefetch_blob(&self, blob_index: u16, workers: usize, timeout: Duration) -> io::Result<()>;
 }
 
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
@@ -60,7 +76,7 @@ fn is_deferred(err: &io::Error) -> bool {
 ///    [stop flag](Self::stop_flag) is raised. Other failures are logged and
 ///    skipped.
 pub struct BlobPrefetcher {
-    caches: Arc<BlobCaches>,
+    store: Arc<dyn Store>,
     priority: Vec<u16>,
     rest: Vec<u16>,
     threads: usize,
@@ -87,16 +103,16 @@ pub struct PrefetchPlan {
 
 impl BlobPrefetcher {
     /// `plan` is typically the result of `ErofsReader::prefetch_plan`, and
-    /// `blobs` the matching cache set (`ErofsReader::blob_caches`).
+    /// `store` the matching cache set (`ErofsReader::blob_caches`).
     pub fn new(
-        caches: Arc<BlobCaches>,
+        store: Arc<dyn Store>,
         plan: PrefetchPlan,
         threads: usize,
         scope: PrefetchScope,
         timeout: Duration,
     ) -> Self {
         Self {
-            caches,
+            store,
             priority: plan.priority,
             rest: plan.rest,
             threads: threads.max(1),
@@ -139,7 +155,7 @@ impl BlobPrefetcher {
         let queue = Arc::new(Mutex::new(queue));
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let blobs = self.caches.clone();
+            let store = self.store.clone();
             let queue = queue.clone();
             let stop = self.stop.clone();
             let handle = thread::Builder::new()
@@ -151,7 +167,7 @@ impl BlobPrefetcher {
                     let blob_index = queue.lock().unwrap().pop();
                     match blob_index {
                         Some(blob_index) => {
-                            if let Err(err) = blobs.cache(blob_index, ReadKind::Prefetch) {
+                            if let Err(err) = store.open(blob_index) {
                                 warn!("failed to open blob {} cache: {}", blob_index, err);
                             }
                         }
@@ -209,7 +225,7 @@ impl BlobPrefetcher {
         let ondemand: Vec<bool> = self
             .priority
             .iter()
-            .map(|&blob_index| match self.caches.is_redirect(blob_index) {
+            .map(|&blob_index| match self.store.is_redirect(blob_index) {
                 Ok(redirect) => redirect,
                 Err(err) => {
                     warn!("failed to inspect priority blob {}: {}", blob_index, err);
@@ -256,7 +272,7 @@ impl BlobPrefetcher {
             }
             collect_prefetch_task_started_metrics();
             match self
-                .caches
+                .store
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
@@ -288,7 +304,7 @@ impl BlobPrefetcher {
             let timeout = self.timeout;
             let mut handles = Vec::with_capacity(worker_count);
             for _ in 0..worker_count {
-                let blobs = self.caches.clone();
+                let store = self.store.clone();
                 let queue = queue.clone();
                 let deferred_shared = deferred_shared.clone();
                 let stop = self.stop.clone();
@@ -306,7 +322,7 @@ impl BlobPrefetcher {
                             break;
                         };
                         collect_prefetch_task_started_metrics();
-                        match blobs.prefetch_blob(blob_index, 1, timeout) {
+                        match store.prefetch_blob(blob_index, 1, timeout) {
                             Ok(()) => info!("prefetched blob {}", blob_index),
                             Err(err) if is_deferred(&err) => {
                                 collect_prefetch_task_reschedule_metrics();
@@ -357,7 +373,7 @@ impl BlobPrefetcher {
             }
             collect_prefetch_task_started_metrics();
             match self
-                .caches
+                .store
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched rescheduled blob {}", blob_index),
@@ -401,126 +417,88 @@ impl BlobPrefetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+
     use std::sync::atomic::AtomicUsize;
 
-    use nydus_backend::{Backend, Local};
-    use nydus_format::blob::BlobMetadata;
-    use nydus_format::utils::SHA256_DIGEST_SIZE;
-    use nydus_test_utils::blob::FullBlob;
-    use nydus_test_utils::metadata::{single_chunk_group, single_chunk_group_redirect};
-    use tempfile::tempdir;
-
-    fn deferred_error() -> io::Error {
+    fn deferred() -> io::Error {
         io::Error::new(io::ErrorKind::QuotaExceeded, "prefetch deferred")
     }
 
-    /// Wraps a local backend and fails the first `failures` data reads with
-    /// the given error builder, then delegates, counting every read attempt.
-    struct FlakyBackend {
-        inner: Local,
+    fn ordinary() -> io::Error {
+        io::Error::other("ordinary failure")
+    }
+
+    struct ScriptedStore {
+        redirects: Vec<u16>,
         failures: usize,
         error: fn() -> io::Error,
         attempts: AtomicUsize,
+        prefetched: Mutex<Vec<u16>>,
     }
 
-    impl FlakyBackend {
-        fn new(dir: &Path, failures: usize, error: fn() -> io::Error) -> Arc<Self> {
+    impl ScriptedStore {
+        fn new(redirects: &[u16], failures: usize, error: fn() -> io::Error) -> Arc<Self> {
             Arc::new(Self {
-                inner: Local::new(dir.to_path_buf()),
+                redirects: redirects.to_vec(),
                 failures,
                 error,
                 attempts: AtomicUsize::new(0),
+                prefetched: Mutex::new(Vec::new()),
             })
         }
 
         fn attempts(&self) -> usize {
             self.attempts.load(Ordering::SeqCst)
         }
+
+        fn prefetched(&self) -> Vec<u16> {
+            self.prefetched.lock().unwrap().clone()
+        }
     }
 
-    impl Backend for FlakyBackend {
-        fn kind(&self) -> nydus_backend::BackendKind {
-            self.inner.kind()
+    impl Store for ScriptedStore {
+        fn open(&self, _blob_index: u16) -> io::Result<()> {
+            Ok(())
         }
 
-        fn protocol(&self) -> Option<nydus_backend::Protocol> {
-            self.inner.protocol()
+        fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
+            Ok(self.redirects.contains(&blob_index))
         }
 
-        fn read_blob_metadata(
+        fn prefetch_blob(
             &self,
-            blob_id: &[u8; SHA256_DIGEST_SIZE],
-            kind: ReadKind,
-        ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id, kind)
-        }
-
-        fn read_range_into(
-            &self,
-            blob_id: &[u8; SHA256_DIGEST_SIZE],
-            offset: u64,
-            dst: &mut [u8],
-            kind: ReadKind,
+            blob_index: u16,
+            _workers: usize,
+            _timeout: Duration,
         ) -> io::Result<()> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
             }
-            self.inner.read_range_into(blob_id, offset, dst, kind)
+            self.prefetched.lock().unwrap().push(blob_index);
+            Ok(())
         }
     }
 
-    /// A single-blob prefetcher over a `FlakyBackend`, with a tight retry
-    /// window so tests run in milliseconds.
-    fn prefetcher_over(
-        backend: Arc<FlakyBackend>,
-        backend_dir: &Path,
-        cache_dir: &Path,
-        payload: &[u8],
-        meta: &BlobMetadata,
+    fn prefetcher(
+        store: Arc<ScriptedStore>,
+        scope: PrefetchScope,
+        plan: PrefetchPlan,
     ) -> BlobPrefetcher {
-        let full_blob_id = FullBlob::new(payload)
-            .with_blob_metadata(meta)
-            .with_blob_metadata_file()
-            .save_in(backend_dir);
-        let caches = Arc::new(
-            BlobCaches::new([(0u16, full_blob_id)], backend, Some(cache_dir), None).unwrap(),
-        );
-        BlobPrefetcher::new(
-            caches,
-            PrefetchPlan {
-                priority: vec![0],
-                rest: Vec::new(),
-            },
-            1,
-            PrefetchScope::All,
-            Duration::ZERO,
-        )
-        .with_reschedule_delay(Duration::from_millis(30), Duration::from_millis(60))
+        BlobPrefetcher::new(store, plan, 1, scope, Duration::ZERO)
+            .with_reschedule_delay(Duration::from_millis(30), Duration::from_millis(60))
     }
 
-    fn test_payload() -> (Vec<u8>, BlobMetadata) {
-        let payload = vec![0xabu8; 4096];
-        let meta = single_chunk_group(&payload);
-        (payload, meta)
+    fn single_blob_plan() -> PrefetchPlan {
+        PrefetchPlan {
+            priority: vec![0],
+            rest: Vec::new(),
+        }
     }
 
     #[test]
     fn deferred_prefetch_is_rescheduled_and_retried() {
-        let backend_dir = tempdir().unwrap();
-        let cache_dir = tempdir().unwrap();
-        let (payload, meta) = test_payload();
-        // The first data read is deferred; the delayed retry succeeds.
-        let backend = FlakyBackend::new(backend_dir.path(), 1, deferred_error);
-        let prefetcher = prefetcher_over(
-            backend.clone(),
-            backend_dir.path(),
-            cache_dir.path(),
-            &payload,
-            &meta,
-        );
-
+        let store = ScriptedStore::new(&[], 1, deferred);
         let tasks = || {
             nydus_telemetry::metrics::PREFETCH_TASK_COUNT
                 .with_label_values(&[])
@@ -532,12 +510,12 @@ mod tests {
                 .get()
         };
         let (tasks_before, reschedules_before) = (tasks(), reschedules());
-        let start = Instant::now();
-        prefetcher.run();
 
-        // One deferred attempt plus the successful delayed retry.
-        assert!(backend.attempts() >= 2, "attempts={}", backend.attempts());
-        // The retry waited out (at least) the minimum delay.
+        let start = Instant::now();
+        prefetcher(store.clone(), PrefetchScope::All, single_blob_plan()).run();
+
+        assert_eq!(store.attempts(), 2);
+        assert_eq!(store.prefetched(), vec![0]);
         assert!(start.elapsed() >= Duration::from_millis(30));
         assert!(tasks() >= tasks_before + 2);
         assert!(reschedules() > reschedules_before);
@@ -545,195 +523,53 @@ mod tests {
 
     #[test]
     fn undeferred_failure_is_not_rescheduled() {
-        let backend_dir = tempdir().unwrap();
-        let cache_dir = tempdir().unwrap();
-        let (payload, meta) = test_payload();
-        // Always fail with an ordinary error: log-and-skip, no reschedule.
-        let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, || {
-            io::Error::other("ordinary failure")
-        });
-        let prefetcher = prefetcher_over(
-            backend.clone(),
-            backend_dir.path(),
-            cache_dir.path(),
-            &payload,
-            &meta,
-        );
+        let store = ScriptedStore::new(&[], usize::MAX, ordinary);
 
         let start = Instant::now();
-        prefetcher.run();
+        prefetcher(store.clone(), PrefetchScope::All, single_blob_plan()).run();
 
-        // No delayed retry: exactly the initial attempt, and no retry-window
-        // sleep.
-        assert_eq!(backend.attempts(), 1);
+        assert_eq!(store.attempts(), 1);
         assert!(start.elapsed() < Duration::from_millis(30));
     }
 
     #[test]
     fn raised_stop_flag_prevents_rescheduled_retries() {
-        let backend_dir = tempdir().unwrap();
-        let cache_dir = tempdir().unwrap();
-        let (payload, meta) = test_payload();
-        let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, deferred_error);
-        let prefetcher = prefetcher_over(
-            backend.clone(),
-            backend_dir.path(),
-            cache_dir.path(),
-            &payload,
-            &meta,
-        );
-
-        // Raise the stop flag before running: the initial pass is skipped
-        // entirely and run() returns without sleeping towards a retry.
+        let store = ScriptedStore::new(&[], usize::MAX, deferred);
+        let prefetcher = prefetcher(store.clone(), PrefetchScope::All, single_blob_plan());
         prefetcher.stop_flag().store(true, Ordering::SeqCst);
+
         let start = Instant::now();
         prefetcher.run();
 
-        assert_eq!(backend.attempts(), 0);
+        assert_eq!(store.attempts(), 0);
         assert!(start.elapsed() < Duration::from_millis(30));
     }
 
-    /// Records which blob every data read targets, in call order.
-    struct RecordingBackend {
-        inner: Local,
-        reads: Mutex<Vec<[u8; SHA256_DIGEST_SIZE]>>,
-    }
-
-    impl Backend for RecordingBackend {
-        fn kind(&self) -> nydus_backend::BackendKind {
-            self.inner.kind()
-        }
-
-        fn protocol(&self) -> Option<nydus_backend::Protocol> {
-            self.inner.protocol()
-        }
-
-        fn read_blob_metadata(
-            &self,
-            blob_id: &[u8; SHA256_DIGEST_SIZE],
-            kind: ReadKind,
-        ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id, kind)
-        }
-
-        fn read_range_into(
-            &self,
-            blob_id: &[u8; SHA256_DIGEST_SIZE],
-            offset: u64,
-            dst: &mut [u8],
-            kind: ReadKind,
-        ) -> io::Result<()> {
-            self.reads.lock().unwrap().push(*blob_id);
-            self.inner.read_range_into(blob_id, offset, dst, kind)
-        }
-    }
-
-    /// Two blobs in the backend dir: plain blob 1 and blob 2, an "ondemand"
-    /// (REDIRECT) blob whose single group redirects to blob 1's group 0.
-    /// Returns the backend, the cache set and the blob ids of (1, 2).
-    fn plain_and_redirect_blobs(
-        backend_dir: &Path,
-        cache_dir: &Path,
-    ) -> (
-        Arc<RecordingBackend>,
-        Arc<BlobCaches>,
-        [[u8; SHA256_DIGEST_SIZE]; 2],
-    ) {
-        let (payload, plain_meta) = test_payload();
-        let plain_id = FullBlob::new(&payload)
-            .with_blob_metadata(&plain_meta)
-            .with_blob_metadata_file()
-            .save_in(backend_dir);
-        let redirect_meta = single_chunk_group_redirect(&payload, 1);
-        assert!(redirect_meta.is_redirect());
-        let redirect_id = FullBlob::new(&payload)
-            .with_blob_metadata(&redirect_meta)
-            .with_blob_metadata_file()
-            .save_in(backend_dir);
-        let backend = Arc::new(RecordingBackend {
-            inner: Local::new(backend_dir.to_path_buf()),
-            reads: Mutex::new(Vec::new()),
-        });
-        let caches = Arc::new(
-            BlobCaches::new(
-                [(1u16, plain_id), (2u16, redirect_id)],
-                backend.clone(),
-                Some(cache_dir),
-                None,
-            )
-            .unwrap(),
-        );
-        (backend, caches, [plain_id, redirect_id])
-    }
-
-    /// Run a prefetcher with `scope` over `plan` and return the distinct blobs
-    /// read from the backend, in first-read order, as blob indexes.
-    fn blobs_read(scope: PrefetchScope, plan: PrefetchPlan) -> Vec<u16> {
-        let backend_dir = tempdir().unwrap();
-        let cache_dir = tempdir().unwrap();
-        let (backend, caches, ids) = plain_and_redirect_blobs(backend_dir.path(), cache_dir.path());
-        BlobPrefetcher::new(caches, plan, 2, scope, Duration::ZERO)
-            .with_reschedule_delay(Duration::from_millis(1), Duration::from_millis(1))
-            .run();
-        let mut order = Vec::new();
-        for read in backend.reads.lock().unwrap().iter() {
-            let index = if *read == ids[0] { 1 } else { 2 };
-            if !order.contains(&index) {
-                order.push(index);
-            }
-        }
-        order
-    }
-
     #[test]
-    fn scope_none_pulls_nothing_even_with_an_ondemand_blob() {
-        let plan = PrefetchPlan {
-            priority: vec![2, 1],
-            rest: Vec::new(),
-        };
-        assert!(blobs_read(PrefetchScope::None, plan).is_empty());
-    }
+    fn scope_selects_the_blobs_to_pull_and_their_order() {
+        let test_cases = vec![
+            (PrefetchScope::None, vec![2, 1], vec![], vec![]),
+            (PrefetchScope::Ondemand, vec![2, 1], vec![], vec![2]),
+            (PrefetchScope::Ondemand, vec![1], vec![2], vec![]),
+            (PrefetchScope::All, vec![1, 2], vec![], vec![2, 1]),
+            (PrefetchScope::All, vec![1], vec![2, 3], vec![1, 3, 2]),
+            (PrefetchScope::Auto, vec![2, 1], vec![], vec![2]),
+            (PrefetchScope::Auto, vec![1], vec![], vec![1]),
+        ];
 
-    #[test]
-    fn scope_ondemand_streams_only_the_ondemand_blob() {
-        let plan = PrefetchPlan {
-            priority: vec![2, 1],
-            rest: Vec::new(),
-        };
-        // The redirect stream fills blob 1's cache from blob 2's data; blob 1
-        // itself is never read from the backend.
-        assert_eq!(blobs_read(PrefetchScope::Ondemand, plan), vec![2]);
-        let plan = PrefetchPlan {
-            priority: vec![1],
-            rest: vec![2],
-        };
-        // No ondemand blob among the priority blobs: nothing is pulled.
-        assert!(blobs_read(PrefetchScope::Ondemand, plan).is_empty());
-    }
+        for (scope, priority, rest, expected) in test_cases {
+            let store = ScriptedStore::new(&[2], 0, ordinary);
+            let plan = PrefetchPlan {
+                priority: priority.clone(),
+                rest: rest.clone(),
+            };
+            prefetcher(store.clone(), scope, plan).run();
 
-    #[test]
-    fn scope_all_streams_the_ondemand_blob_before_the_others() {
-        // Declared order puts the plain blob first; the ondemand blob is
-        // still streamed first, then the plain blob's remaining groups.
-        let plan = PrefetchPlan {
-            priority: vec![1, 2],
-            rest: Vec::new(),
-        };
-        let read = blobs_read(PrefetchScope::All, plan);
-        assert_eq!(read.first(), Some(&2), "reads: {read:?}");
-    }
-
-    #[test]
-    fn scope_auto_picks_ondemand_with_an_ondemand_blob_and_all_without() {
-        let plan = PrefetchPlan {
-            priority: vec![2, 1],
-            rest: Vec::new(),
-        };
-        assert_eq!(blobs_read(PrefetchScope::Auto, plan), vec![2]);
-        let plan = PrefetchPlan {
-            priority: vec![1],
-            rest: Vec::new(),
-        };
-        assert_eq!(blobs_read(PrefetchScope::Auto, plan), vec![1]);
+            assert_eq!(
+                store.prefetched(),
+                expected,
+                "scope={scope:?} priority={priority:?} rest={rest:?}"
+            );
+        }
     }
 }

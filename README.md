@@ -273,8 +273,8 @@ Output image size across payload shapes (manifest layer totals):
 | `nydus`           | `nydus/`           | Mount services (`fuse`, `fanotify`, `nbd`, `ublk`, `uffd`), the build/merge/check/optimize pipelines, and the CLI binary |
 | `nydus-core`      | `nydus-core/`      | Image runtime library (`NydusCore`, `ErofsReader`) for embedding the read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
 | `nydus-config`    | `nydus-config/`    | YAML config loading                                                                                        |
-| `nydus-storage`   | `nydus-storage/`   | Local blob cache, prefetch, and access tracing (data plane, `io::Result` only)                             |
-| `nydus-backend`   | `nydus-backend/`   | Blob sources: OCI registry, local directory, Dragonfly P2P (data plane, `io::Result` only)                 |
+| `nydus-storage`   | `nydus-storage/`   | Local blob cache and access tracing (data plane, `io::Result` only)                                        |
+| `nydus-backend`   | `nydus-backend/`   | Blob sources: OCI registry, local directory, Dragonfly P2P, and the blob prefetch (data plane, `io::Result` only) |
 | `nydus-format`    | `nydus-format/`    | On-disk format definitions: EROFS structures and the nydus blob format                                     |
 | `nydus-error`     | `nydus-error/`     | Control-plane error contract (`Error`, `report()`, `Context`)                                              |
 | `nydus-telemetry` | `nydus-telemetry/` | Metrics and logging setup                                                                                  |

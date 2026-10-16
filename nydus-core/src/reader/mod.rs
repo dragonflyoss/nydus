@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
 
+use nydus_backend::prefetch::PrefetchPlan;
 use nydus_backend::{Backend, Local, ReadKind};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::erofs::{
@@ -18,7 +19,6 @@ use nydus_format::erofs::{
 };
 use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
-use nydus_storage::prefetch::PrefetchPlan;
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct RawDirEntry {
@@ -379,7 +379,7 @@ impl ErofsReader {
     }
 
     /// The storage-side cache set shared with the read and prefetch paths,
-    /// e.g. to construct a [`nydus_storage::prefetch::BlobPrefetcher`].
+    /// e.g. to construct a [`nydus_backend::prefetch::BlobPrefetcher`].
     pub fn blob_caches(&self) -> Arc<BlobCaches> {
         self.blobs.clone()
     }
