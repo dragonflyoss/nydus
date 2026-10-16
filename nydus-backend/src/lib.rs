@@ -74,9 +74,10 @@ pub trait Backend: Send + Sync {
     /// backend without a protocol.
     fn protocol(&self) -> Option<Protocol>;
 
-    /// Returns the digest naming the blob's cache files, the blob digest itself
-    /// unless the backend stores the blob under another name.
-    fn cache_key(
+    /// Returns the full blob digest of `blob_id`, the digest of the whole blob
+    /// file that names its cache files: `blob_id` itself, unless the backend
+    /// serves the blob under the digest of its data region.
+    fn full_blob_id(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<[u8; SHA256_DIGEST_SIZE]> {

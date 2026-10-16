@@ -24,9 +24,9 @@ struct Blob {
     /// The path of the full blob file.
     path: PathBuf,
 
-    /// The digest naming the blob's cache files, resolved once since it can
-    /// mean hashing the whole file.
-    cache_key: [u8; SHA256_DIGEST_SIZE],
+    /// The digest of the whole file, resolved once since it can mean hashing
+    /// the file.
+    full_blob_id: [u8; SHA256_DIGEST_SIZE],
 
     /// The validated footer, the layout of the file.
     footer: BlobFooter,
@@ -37,16 +37,16 @@ struct Blob {
 
 /// Implements the full blob file.
 impl Blob {
-    /// Opens the full blob at `path`, its cache files named by `cache_key`,
-    /// its footer read and validated.
-    fn new(path: &Path, cache_key: [u8; SHA256_DIGEST_SIZE]) -> io::Result<Self> {
+    /// Opens the full blob at `path`, the whole file digesting to
+    /// `full_blob_id`, its footer read and validated.
+    fn new(path: &Path, full_blob_id: [u8; SHA256_DIGEST_SIZE]) -> io::Result<Self> {
         let footer = BlobFooter::from_blob_path(path).map_err(|err| {
             io::Error::other(format!("invalid nydus blob {}: {err}", path.display()))
         })?;
 
         Ok(Self {
             path: path.to_path_buf(),
-            cache_key,
+            full_blob_id,
             footer,
             file: OnceLock::new(),
         })
@@ -87,21 +87,21 @@ impl Local {
     /// a full blob's data region, from the full blob at `path`.
     ///
     /// The data region is verified against `blob_id` and the whole file hashed
-    /// for the cache key.
+    /// for its full blob digest.
     pub fn with_blob(
         dir: PathBuf,
         blob_id: [u8; SHA256_DIGEST_SIZE],
         path: &Path,
     ) -> io::Result<Self> {
-        // Hash the whole file for the cache key and read its footer.
+        // Hash the whole file for its full blob digest and read its footer.
         let mut file = File::open(path).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!("failed to open full blob {}: {err}", path.display()),
             )
         })?;
-        let cache_key = sha256_reader(&file).map_err(io::Error::other)?;
-        let blob = Blob::new(path, cache_key)?;
+        let full_blob_id = sha256_reader(&file).map_err(io::Error::other)?;
+        let blob = Blob::new(path, full_blob_id)?;
 
         // Verify the data region against the blob id.
         file.seek(SeekFrom::Start(blob.footer.compressed_data_offset()))?;
@@ -133,7 +133,7 @@ impl Local {
     /// Returns the blob of `blob_id`, opened from `dir/<hex>` on first use.
     ///
     /// The directory is content-addressed, so the file name is trusted as the
-    /// cache key rather than hashing the file on every daemon start,
+    /// full blob digest rather than hashing the file on every daemon start,
     /// corruption being caught by the CRC over every chunk group read.
     fn blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<Blob>> {
         if let Some(blob) = self.blobs.read().unwrap().get(blob_id).cloned() {
@@ -230,12 +230,12 @@ impl Backend for Local {
         None
     }
 
-    /// Returns the digest naming the blob's cache files.
-    fn cache_key(
+    /// Returns the digest of the whole blob file.
+    fn full_blob_id(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<[u8; SHA256_DIGEST_SIZE]> {
-        Ok(self.blob(blob_id)?.cache_key)
+        Ok(self.blob(blob_id)?.full_blob_id)
     }
 
     /// Reads the blob's metadata for an on-demand read from the sidecar file
@@ -424,7 +424,7 @@ mod tests {
         let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
 
         let backend = Local::with_blob(dir.path().to_path_buf(), data_blob_id, &path).unwrap();
-        assert_eq!(backend.cache_key(&data_blob_id).unwrap(), full_blob_id);
+        assert_eq!(backend.full_blob_id(&data_blob_id).unwrap(), full_blob_id);
         assert!(Local::with_blob(dir.path().to_path_buf(), full_blob_id, &path).is_err());
     }
 }

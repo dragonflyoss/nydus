@@ -149,14 +149,13 @@ impl LocalBlobCache {
     ) -> io::Result<Self> {
         fs::create_dir_all(cache_dir)?;
 
-        let cache_key = backend.cache_key(&blob_id)?;
-        let cache_key_hex = hex::encode(cache_key);
-        let blob_metadata_path = cache_dir.join(format!("{cache_key_hex}{}", BlobMetadata::SUFFIX));
+        let hex = hex::encode(backend.full_blob_id(&blob_id)?);
+        let blob_metadata_path = cache_dir.join(format!("{hex}{}", BlobMetadata::SUFFIX));
         let blob_metadata =
             load_or_fetch_blob_metadata(blob_id, cache_dir, &blob_metadata_path, &backend, kind)?;
-        let cache_data_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
+        let cache_data_path = cache_dir.join(format!("{hex}.blob.data"));
 
-        let group_map_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
+        let group_map_path = cache_dir.join(format!("{hex}.group.map"));
         // The group map is only meaningful together with the cache data file
         // it describes: a leftover map whose data file has been removed would
         // claim groups are ready while reads hit sparse zeros. Note this
@@ -190,7 +189,7 @@ impl LocalBlobCache {
             );
         }
 
-        let prefetch_lock_path = cache_dir.join(format!("{cache_key_hex}.prefetch.lock"));
+        let prefetch_lock_path = cache_dir.join(format!("{hex}.prefetch.lock"));
         // Byte `i` of the group map file stands for group `i` in the
         // cross-process fetch locks; the bytes locked and the bytes the map
         // stores are unrelated, so no second sidecar is needed.
@@ -1599,8 +1598,7 @@ mod tests {
         // Model the operational accident: the data file is removed while the
         // group map survives. Reopening must reset the group map instead of
         // trusting ready bits that now point at sparse holes.
-        let cache_key = backend.cache_key(&full_blob_id).unwrap();
-        let prefix = hex::encode(cache_key);
+        let prefix = hex::encode(backend.full_blob_id(&full_blob_id).unwrap());
         fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
 
         let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
@@ -1635,8 +1633,7 @@ mod tests {
         live.read_at(0, &mut buf).unwrap();
         assert!(live.is_chunk_group_ready(0));
 
-        let cache_key = backend.cache_key(&full_blob_id).unwrap();
-        let prefix = hex::encode(cache_key);
+        let prefix = hex::encode(backend.full_blob_id(&full_blob_id).unwrap());
         let group_map_path = cache_dir.path().join(format!("{prefix}.group.map"));
         let before = fs::metadata(&group_map_path).unwrap().ino();
         fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
