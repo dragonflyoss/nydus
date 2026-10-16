@@ -41,42 +41,42 @@ use crate::{BackendKind, Protocol, ReadKind};
 /// The Dragonfly SDK transport, one client per read kind so each kind keeps
 /// its own retry budget.
 pub(crate) struct Dragonfly {
-    /// The client serving on-demand reads, retrying at once because a FUSE
-    /// reader is waiting, a `429` included since another seed peer may not be
-    /// rate limited.
-    ondemand: Proxy,
+    /// The seed peer client of on-demand reads, retrying at once because a
+    /// FUSE reader is waiting, a `429` included since another seed peer may
+    /// not be rate limited.
+    ondemand_client: Proxy,
 
-    /// The client serving prefetch reads, never retrying: a failed prefetch
-    /// is rescheduled hours later instead.
-    prefetch: Proxy,
-
-    /// The timeout of each attempt of a request.
-    request_timeout: Duration,
+    /// The seed peer client of prefetch reads, never retrying: a failed
+    /// prefetch is rescheduled hours later instead.
+    prefetch_client: Proxy,
 
     /// The origin client of the requests P2P does not carry, a `HEAD` for a
     /// blob's size, as dfdaemon's own proxy forwards non-`GET` requests
     /// straight to the origin.
-    http: Http,
+    origin_client: Http,
 
     /// The origin client an on-demand read goes back to when the seed peers
     /// cannot serve it, every attempt claiming a rate limit slot first.
     back_to_source_client: Http,
+
+    /// The timeout of each attempt of a request.
+    request_timeout: Duration,
 }
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Creates the transport, each client connecting to the configured
-    /// scheduler on the runtime of its read kind, with `http` for the
-    /// requests that go to the origin and a back-to-source client built from
-    /// `http_config` under the configured rate limit, zero leaving it
-    /// unthrottled.
+    /// Creates the transport, each seed peer client connecting to the
+    /// configured scheduler on the runtime of its read kind, with
+    /// `origin_client` for the requests that go to the origin and a
+    /// back-to-source client built from `http_config` under the configured
+    /// rate limit, zero leaving it unthrottled.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
     pub(crate) fn new(
         config: DragonflyConfig,
         http_config: &HttpConfig,
-        http: Http,
+        origin_client: Http,
         runtime: &Runtime,
     ) -> io::Result<Self> {
         let request_rate_limit = config.back_to_source.request_rate_limit;
@@ -84,16 +84,21 @@ impl Dragonfly {
             .then(|| RateLimit::new(request_rate_limit, Duration::from_secs(1)));
 
         Ok(Self {
-            ondemand: Self::client(
+            ondemand_client: Self::client(
                 runtime,
                 ReadKind::OnDemand,
                 config.scheduler_endpoint.clone(),
                 config.max_retries as u8,
             )?,
-            prefetch: Self::client(runtime, ReadKind::Prefetch, config.scheduler_endpoint, 0)?,
-            request_timeout: config.request_timeout,
-            http,
+            prefetch_client: Self::client(
+                runtime,
+                ReadKind::Prefetch,
+                config.scheduler_endpoint,
+                0,
+            )?,
+            origin_client,
             back_to_source_client: Http::new(http_config, rate_limit)?,
+            request_timeout: config.request_timeout,
         })
     }
 
@@ -124,7 +129,7 @@ impl Transport for Dragonfly {
     /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
     /// request that is not a `GET`.
     async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.http.head(url, headers).await
+        self.origin_client.head(url, headers).await
     }
 
     /// Fetches `url` through the on-demand client at `Level6`, the SDK's
@@ -147,7 +152,7 @@ impl Transport for Dragonfly {
 
         let start = Instant::now();
         let mut body = BytesMut::new();
-        let result = match self.ondemand.get_into(&request, &mut body).await {
+        let result = match self.ondemand_client.get_into(&request, &mut body).await {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
@@ -240,7 +245,7 @@ impl Transport for Dragonfly {
 
         let start = Instant::now();
         let mut body = BytesMut::new();
-        let result = match self.prefetch.get_into(&request, &mut body).await {
+        let result = match self.prefetch_client.get_into(&request, &mut body).await {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
