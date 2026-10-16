@@ -56,9 +56,7 @@ impl Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::response::Body;
     use crate::Protocol;
-    use bytes::Bytes;
     use reqwest::header::HeaderMap;
     use reqwest::StatusCode;
 
@@ -78,7 +76,7 @@ mod tests {
                 let response = Response {
                     status,
                     headers: HeaderMap::new(),
-                    body: Body::Bytes(Bytes::new()),
+                    body: Box::new(io::Cursor::new(Vec::new())),
                     protocol: Protocol::Dragonfly,
                 };
                 assert!(
@@ -108,7 +106,7 @@ mod tests {
                     Some(status) => Ok(Response {
                         status,
                         headers: HeaderMap::new(),
-                        body: Body::Bytes(Bytes::new()),
+                        body: Box::new(io::Cursor::new(Vec::new())),
                         protocol: Protocol::Dragonfly,
                     }),
                     None => Err(io::Error::other("connection reset")),
