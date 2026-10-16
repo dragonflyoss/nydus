@@ -55,9 +55,9 @@ pub(crate) struct Dragonfly {
     /// straight to the origin.
     origin_client: Http,
 
-    /// The origin client an on-demand read goes back to when the seed peers
-    /// cannot serve it, every attempt claiming a rate limit slot first.
-    back_to_source_client: Http,
+    /// The rate-limited origin client an on-demand read falls back to when
+    /// the seed peers cannot serve it, every attempt claiming a slot first.
+    fallback_client: Http,
 
     /// The timeout of each attempt of a request.
     request_timeout: Duration,
@@ -67,9 +67,9 @@ pub(crate) struct Dragonfly {
 impl Dragonfly {
     /// Creates the transport, each seed peer client connecting to the
     /// configured scheduler on the runtime of its read kind, with
-    /// `origin_client` for the requests that go to the origin and a
-    /// back-to-source client built from `http_config` under the configured
-    /// rate limit, zero leaving it unthrottled.
+    /// `origin_client` for the requests that go to the origin and a fallback
+    /// client built from `http_config` under the configured rate limit, zero
+    /// leaving it unthrottled.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
@@ -97,7 +97,7 @@ impl Dragonfly {
                 0,
             )?,
             origin_client,
-            back_to_source_client: Http::new(http_config, rate_limit)?,
+            fallback_client: Http::new(http_config, rate_limit)?,
             request_timeout: config.request_timeout,
         })
     }
@@ -214,8 +214,9 @@ impl Transport for Dragonfly {
             Err(err) => err,
         };
         warn!("dragonfly request failed, falling back to the origin: {err}");
+
         let start = Instant::now();
-        self.back_to_source_client
+        self.fallback_client
             .get(url, headers)
             .await
             .inspect_err(|_| {
