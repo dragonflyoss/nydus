@@ -2,8 +2,7 @@
 
 Data-plane blob backends for
 [Nydus](https://github.com/dragonflyoss/nydus): local directory and OCI
-registry, with optional Dragonfly SDK P2P reads, plus the blob prefetch that
-drives them.
+registry, with optional Dragonfly SDK P2P reads.
 
 Every API here returns `io::Result` so the OS errno survives to the service
 edges; this crate does not depend on the control-plane error type. Registry

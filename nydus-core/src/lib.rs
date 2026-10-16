@@ -57,9 +57,9 @@ use entry::ImageFs;
 use extent::{BlobRangeSpec, ExtentResolver};
 use layout::{FlatLayout, Segment};
 use nydus_backend::build_backend;
-use nydus_backend::prefetch::BlobPrefetcher;
 use nydus_config::PrefetchScope;
 use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
+use nydus_storage::prefetch::BlobPrefetcher;
 
 /// Read-side handle over a nydus image, split into blob data access and
 /// static filesystem metadata/data access.

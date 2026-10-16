@@ -173,8 +173,8 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus` | boundary | The five mount services (`fuse/`, `fanotify/`, `nbd/`, `ublk/`, `uffd/`), the build/optimize/check/export pipelines, and the CLI binary | each service's `core.rs` converts `Error` ↔ `errno` explicitly |
 | `nydus-core` | both | Image runtime facade: `NydusCore`, `ErofsReader`, path walk (`entry`), flattened device view (`extent`), blob table (`blob`) | `Error` for assembly/queries, `io::Result` on the read path |
 | `nydus-config` | control | Loads the YAML config file and converts it into the plain config structs owned by the crates below | `Error` |
-| `nydus-storage` | data | Local cache and reuse: `LocalBlobCache` (chunk group decode, CRC, on-demand fill), `BlobCaches`, chunk group ready-bitmaps, access tracing | `io::Result` only |
-| `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy; `BlobPrefetcher`, which drives the blob prefetch | `io::Result` only |
+| `nydus-storage` | data | Local cache and reuse: `LocalBlobCache` (chunk group decode, CRC, on-demand fill), `BlobCaches`, chunk group ready-bitmaps, prefetch, access tracing | `io::Result` only |
+| `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
 | `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, whose `BackendKind`/`Protocol`/`ReadKind` it maps to label values, so every layer can record without cycles | — |

@@ -9,7 +9,6 @@
 //! random delay of hours before it fails.
 
 mod local;
-pub mod prefetch;
 
 #[cfg(feature = "registry")]
 mod registry;
