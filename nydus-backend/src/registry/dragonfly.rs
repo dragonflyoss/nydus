@@ -100,6 +100,12 @@ impl Dragonfly {
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl Transport for Dragonfly {
+    /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
+    /// request that is not a `GET`.
+    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        self.http.head(url, headers).await
+    }
+
     /// Fetches `url` through the on-demand client at `Level6`, the SDK's
     /// default priority, the SDK adding the P2P and priority headers itself,
     /// and logs the outcome.
@@ -243,11 +249,5 @@ impl Transport for Dragonfly {
             ),
         }
         result
-    }
-
-    /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
-    /// request that is not a `GET`.
-    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.http.head(url, headers).await
     }
 }

@@ -99,6 +99,37 @@ impl Http {
 /// Implements the blob transport over the origin HTTP client.
 #[async_trait]
 impl Transport for Http {
+    /// Sends a `HEAD` to `url` with `headers` and logs the outcome.
+    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let start = Instant::now();
+        let result = self
+            .client
+            .head(url)
+            .headers(headers)
+            .send()
+            .await
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: Body::Bytes(Bytes::new()),
+                protocol: Protocol::Http,
+            })
+            .map_err(io::Error::other);
+
+        match &result {
+            Ok(response) => debug!(
+                "HEAD {url} from the origin returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "HEAD {url} from the origin failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+        result
+    }
+
     /// Sends the `GET` of an on-demand read to `url` with `headers`, the body
     /// left streaming, and logs the outcome.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
@@ -161,37 +192,6 @@ impl Transport for Http {
             ),
             Err(err) => debug!(
                 "GET {url} (prefetch) from the origin failed in {:?}: {err}",
-                start.elapsed()
-            ),
-        }
-        result
-    }
-
-    /// Sends a `HEAD` to `url` with `headers` and logs the outcome.
-    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        let start = Instant::now();
-        let result = self
-            .client
-            .head(url)
-            .headers(headers)
-            .send()
-            .await
-            .map(|response| Response {
-                status: response.status(),
-                headers: response.headers().clone(),
-                body: Body::Bytes(Bytes::new()),
-                protocol: Protocol::Http,
-            })
-            .map_err(io::Error::other);
-
-        match &result {
-            Ok(response) => debug!(
-                "HEAD {url} from the origin returned {} in {:?}",
-                response.status,
-                start.elapsed()
-            ),
-            Err(err) => debug!(
-                "HEAD {url} from the origin failed in {:?}: {err}",
                 start.elapsed()
             ),
         }

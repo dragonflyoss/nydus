@@ -84,14 +84,14 @@ pub use self::rt::Runtime;
 /// here rather than while the caller consumes it.
 #[async_trait]
 trait Transport: Send + Sync {
+    /// Sends a `HEAD`.
+    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
+
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
     /// Sends the `GET` of a background prefetch read.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
-
-    /// Sends a `HEAD`.
-    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
 /// Splits a registry `addr` such as `http://127.0.0.1:5000` into its scheme
@@ -664,16 +664,16 @@ mod tests {
 
     #[async_trait]
     impl<T: Transport> Transport for Arc<T> {
+        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            (**self).head(url, headers).await
+        }
+
         async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
             (**self).get(url, headers).await
         }
 
         async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
             (**self).prefetch(url, headers).await
-        }
-
-        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-            (**self).head(url, headers).await
         }
     }
 
@@ -734,16 +734,16 @@ mod tests {
 
     #[async_trait]
     impl Transport for ScriptedTransport {
+        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.http.head(url, headers).await
+        }
+
         async fn get(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
             self.play()
         }
 
         async fn prefetch(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
             self.play()
-        }
-
-        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-            self.http.head(url, headers).await
         }
     }
 
@@ -797,16 +797,16 @@ mod tests {
 
     #[async_trait]
     impl Transport for AuthGate {
+        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.http.head(url, headers).await
+        }
+
         async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
         }
 
         async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
-        }
-
-        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-            self.http.head(url, headers).await
         }
     }
 
