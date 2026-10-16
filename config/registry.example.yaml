@@ -94,7 +94,7 @@ backend:
     #   # Origin reads issued when the seed peers cannot serve an on-demand
     #   # read.
     #   back_to_source:
-    #     # Rate limit in requests per second; 0 disables it. Default: 1.
+    #     # Rate limit in requests per second, at least 1. Default: 1.
     #     request_rate_limit: 1
 
 storage:

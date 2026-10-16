@@ -1277,8 +1277,8 @@ Fields under `backend.config`:
 		an exponential backoff. Prefetch reads never retry.
 	- `back_to_source.request_rate_limit` (default `1`, i.e. 1 QPS per
 		process): the rate limit of origin requests issued when the seed peers
-		cannot serve an on-demand read, in requests per second; `0` disables
-		it. Every attempt — including each retry of a transient origin failure —
+		cannot serve an on-demand read, in requests per second, at least `1`.
+		Every attempt — including each retry of a transient origin failure —
 		waits for its own slot, so actual origin requests never exceed the
 		limit. Only these reads are shaped — the normal direct path and auth
 		fetches are never. On-demand group singleflight already dedupes

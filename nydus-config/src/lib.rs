@@ -415,8 +415,8 @@ pub struct DragonflyConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct BackToSourceConfig {
     /// The rate limit of origin requests in requests per second, `1` by
-    /// default. `0` disables the limit. Only these reads are shaped, direct
-    /// reads and auth token fetches never are.
+    /// default and at least `1`. Only these reads are shaped, direct reads
+    /// and auth token fetches never are.
     #[serde(default = "default_registry_dragonfly_back_to_source_request_rate_limit")]
     pub request_rate_limit: u64,
 }
@@ -607,14 +607,18 @@ impl Config {
                     "http.max_blocking_threads must be at least 1".to_string(),
                 ));
             }
-            if registry
-                .dragonfly
-                .as_ref()
-                .is_some_and(|dragonfly| dragonfly.max_retries > 3)
-            {
-                return Err(Error::InvalidConfig(
-                    "dragonfly.max_retries must not exceed 3".to_string(),
-                ));
+            if let Some(dragonfly) = &registry.dragonfly {
+                if dragonfly.max_retries > 3 {
+                    return Err(Error::InvalidConfig(
+                        "dragonfly.max_retries must not exceed 3".to_string(),
+                    ));
+                }
+                if dragonfly.back_to_source.request_rate_limit == 0 {
+                    return Err(Error::InvalidConfig(
+                        "dragonfly.back_to_source.request_rate_limit must be at least 1"
+                            .to_string(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -775,12 +779,12 @@ scheduler_endpoint: http://127.0.0.1:8002
 request_timeout: 5s
 max_retries: 0
 back_to_source:
-  request_rate_limit: 0
+  request_rate_limit: 3
 "#;
         let dragonfly: DragonflyConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(dragonfly.request_timeout, Duration::from_secs(5));
         assert_eq!(dragonfly.max_retries, 0);
-        assert_eq!(dragonfly.back_to_source.request_rate_limit, 0);
+        assert_eq!(dragonfly.back_to_source.request_rate_limit, 3);
     }
 
     #[test]
@@ -983,22 +987,22 @@ scope: all
     }
 
     #[test]
-    fn rejects_dragonfly_max_retries_above_the_limit() {
-        let yaml = r#"
-backend:
-  type: registry
-  config:
-    addr: http://127.0.0.1:5000
-    repository: library/ubuntu
-    dragonfly:
-      scheduler_endpoint: http://127.0.0.1:8002
-      max_retries: 4
-"#;
+    fn rejects_dragonfly_values_out_of_range() {
+        let test_cases = vec![
+            ("max_retries: 4", "dragonfly.max_retries must not exceed 3"),
+            (
+                "back_to_source:\n        request_rate_limit: 0",
+                "dragonfly.back_to_source.request_rate_limit must be at least 1",
+            ),
+        ];
 
-        let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("dragonfly.max_retries must not exceed 3"));
+        for (field, expected) in test_cases {
+            let yaml = format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:8002\n      {field}\n"
+            );
+            let err = Config::from_yaml(&yaml).unwrap_err();
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]

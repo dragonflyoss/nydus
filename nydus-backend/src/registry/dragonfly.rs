@@ -68,8 +68,7 @@ impl Dragonfly {
     /// Creates the transport, each seed peer client connecting to the
     /// configured scheduler on the runtime of its read kind, with
     /// `origin_client` for the requests that go to the origin and a fallback
-    /// client built from `http_config` under the configured rate limit, zero
-    /// leaving it unthrottled.
+    /// client built from `http_config` under the configured rate limit.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
@@ -79,10 +78,6 @@ impl Dragonfly {
         origin_client: Http,
         runtime: &Runtime,
     ) -> io::Result<Self> {
-        let request_rate_limit = config.back_to_source.request_rate_limit;
-        let rate_limit = (request_rate_limit > 0)
-            .then(|| RateLimit::new(request_rate_limit, Duration::from_secs(1)));
-
         Ok(Self {
             ondemand_client: Self::client(
                 runtime,
@@ -97,7 +92,13 @@ impl Dragonfly {
                 0,
             )?,
             origin_client,
-            fallback_client: Http::new(http_config, rate_limit)?,
+            fallback_client: Http::new(
+                http_config,
+                Some(RateLimit::new(
+                    config.back_to_source.request_rate_limit,
+                    Duration::from_secs(1),
+                )),
+            )?,
             request_timeout: config.request_timeout,
         })
     }

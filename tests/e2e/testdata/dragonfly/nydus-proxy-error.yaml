@@ -11,7 +11,7 @@ backend:
       request_timeout: 5s
       max_retries: 3
       back_to_source:
-        request_rate_limit: 0
+        request_rate_limit: 1000
 storage:
   dir: /tmp/nydus-dragonfly/cache
 prefetch:
