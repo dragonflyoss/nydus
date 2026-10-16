@@ -24,14 +24,15 @@ use crate::cache::BlobCaches;
 const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The window of the random delay before a deferred blob prefetch is
-/// re-attempted. Hours long so a Dragonfly outage or rate limit has time to
-/// clear, random so a fleet of instances does not retry in lockstep.
+/// re-attempted. Hours long so a registry or Dragonfly outage or rate limit
+/// has time to clear, random so a fleet of instances does not retry in
+/// lockstep.
 const RESCHEDULE_DELAY_MIN: Duration = Duration::from_secs(6 * 60 * 60);
 const RESCHEDULE_DELAY_MAX: Duration = Duration::from_secs(12 * 60 * 60);
 
-/// Whether the backend deferred this prefetch (a Dragonfly read it could not
-/// serve now, folded into [`io::ErrorKind::QuotaExceeded`] at the backend's
-/// trait boundary).
+/// Whether the backend deferred this prefetch (a read its transport could
+/// not serve now, folded into [`io::ErrorKind::QuotaExceeded`] at the
+/// backend's trait boundary).
 fn is_deferred(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::QuotaExceeded
 }

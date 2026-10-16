@@ -37,7 +37,8 @@ backend:
 
       # Maximum number of retry attempts per request, applied by the HTTP
       # client's retry middleware on direct origin requests and on origin
-      # requests issued when Dragonfly cannot serve a read. Default: 3.
+      # requests issued when Dragonfly cannot serve a read. A prefetch read
+      # still failing after them is rescheduled hours later. Default: 3.
       max_retries: 3
 
       # Optional proxy block routing every registry request through an HTTP

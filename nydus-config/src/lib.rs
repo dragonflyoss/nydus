@@ -235,7 +235,8 @@ pub struct HttpConfig {
     /// The maximum number of retry attempts per request, applied by the HTTP
     /// client's retry middleware on direct origin requests and on origin
     /// requests issued when Dragonfly cannot serve a read, where every attempt
-    /// also waits for a back-to-source rate limit slot.
+    /// also waits for a back-to-source rate limit slot. A prefetch read still
+    /// failing after them is left to the delayed reschedule.
     #[serde(default = "default_registry_http_max_retries")]
     pub max_retries: u32,
 

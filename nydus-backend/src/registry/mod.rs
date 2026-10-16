@@ -15,9 +15,9 @@
 //!                         │
 //!              ┌──────────┴──────────┐
 //!            Http                Dragonfly
-//!       direct origin        seed peers, own retries,
-//!                            on-demand back to source,
-//!                            prefetch deferred
+//!       direct origin,       seed peers, own retries,
+//!       own retries,         on-demand back to source,
+//!       prefetch deferred    prefetch deferred
 //! ```
 //!
 //! [`Registry`] owns the registry-specific logic, the transports spend their
@@ -81,7 +81,9 @@ trait Transport: Send + Sync {
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
-    /// Sends the `GET` of a background prefetch read.
+    /// Sends the `GET` of a background prefetch read, deferring a transient
+    /// failure the transport's retries did not cure as an
+    /// [`io::ErrorKind::QuotaExceeded`] for the storage layer to reschedule.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
@@ -886,6 +888,31 @@ dragonfly:
                 assert_eq!(transport.calls(), 1, "kind={kind:?} status={terminal}");
                 assert_eq!(origin.hits(), 0, "kind={kind:?} status={terminal}");
             }
+        }
+    }
+
+    #[test]
+    fn origin_transient_failures_defer_prefetch_and_fail_ondemand() {
+        let test_cases = vec![
+            (ReadKind::Prefetch, io::ErrorKind::QuotaExceeded),
+            (ReadKind::OnDemand, io::ErrorKind::Other),
+        ];
+
+        for (kind, expected) in test_cases {
+            let origin = OriginStub::serve_with_status("503 Service Unavailable", b"busy".to_vec());
+            let config: RegistryConfig = serde_yaml::from_str(&format!(
+                "addr: http://{}\nrepository: library/ubuntu\nhttp:\n  max_retries: 0\n",
+                origin.addr
+            ))
+            .unwrap();
+            let registry = Registry::new(config, test_runtime()).unwrap();
+
+            let mut buf = vec![0u8; 4];
+            let err = read(&registry, kind, &mut buf).unwrap_err();
+
+            assert_eq!(err.kind(), expected, "kind={kind:?}: {err}");
+            assert!(err.to_string().contains("503"), "kind={kind:?}: {err}");
+            assert_eq!(origin.hits(), 1, "kind={kind:?}");
         }
     }
 

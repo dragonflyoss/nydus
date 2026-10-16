@@ -14,7 +14,7 @@ use reqwest::{Certificate, Client, Request};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::io::StreamReader;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use nydus_config::HttpConfig;
 
@@ -165,7 +165,10 @@ impl Transport for Http {
     }
 
     /// Sends the `GET` of a prefetch read to `url` with `headers`, the body
-    /// left streaming, and logs the outcome.
+    /// left streaming, and logs the outcome; a `429`, `5xx`, `408` or
+    /// transport failure the retry middleware did not cure defers the read as
+    /// an [`io::ErrorKind::QuotaExceeded`] for the storage layer to reschedule
+    /// hours later.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let start = Instant::now();
         let result = self
@@ -195,7 +198,18 @@ impl Transport for Http {
                 start.elapsed()
             ),
         }
-        result
+
+        // Serve a definitive answer; defer the read on anything else.
+        let err = match result {
+            Ok(response) if response.needs_fallback() => response.into_io_error().await,
+            Ok(response) => return Ok(response),
+            Err(err) => err,
+        };
+        warn!("origin request failed: {err}");
+        Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("prefetch deferred: {err}"),
+        ))
     }
 }
 

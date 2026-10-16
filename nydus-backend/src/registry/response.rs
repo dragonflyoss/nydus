@@ -85,10 +85,9 @@ impl Response {
         io::Error::other(format!("unexpected status {status}: {body}"))
     }
 
-    /// Returns whether the seed peers failed to serve the read, a `429`, `5xx`
-    /// or `408`, so it falls back to the origin. Every other status is the
-    /// registry's definitive answer.
-    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
+    /// Returns whether the transport failed to serve the read, a `429`, `5xx`
+    /// or `408`, so an on-demand read falls back and a prefetch is deferred.
+    /// Every other status is the registry's definitive answer.
     pub(crate) fn needs_fallback(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT
@@ -131,7 +130,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn needs_fallback_marks_the_statuses_the_seed_peers_failed_with() {
+    fn needs_fallback_marks_the_statuses_the_transport_failed_with() {
         let test_cases = vec![
             (StatusCode::INTERNAL_SERVER_ERROR, true),
             (StatusCode::BAD_GATEWAY, true),

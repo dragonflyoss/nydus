@@ -1142,9 +1142,10 @@ Fields:
 	priority blobs, then the rest; `auto` behaves like `ondemand` when a
 	priority blob is an ondemand blob and like `all` otherwise, so an
 	unoptimized image is still streamed in the background. A blob prefetch the
-	backend deferred (a Dragonfly read it could not serve) is re-attempted
-	after a random `6h`–`12h` delay so retry load spreads out instead of
-	stampeding; other prefetch failures are logged and skipped.
+	backend deferred (a `429`, `5xx`, `408` or transport failure the
+	transport's own retries did not cure, from the origin or Dragonfly) is
+	re-attempted after a random `6h`–`12h` delay so retry load spreads out
+	instead of stampeding; other prefetch failures are logged and skipped.
 	See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
@@ -1213,7 +1214,10 @@ Fields under `backend.config`:
 		middleware on direct origin requests and on origin requests issued when
 		Dragonfly cannot serve a read, where every attempt also waits for a
 		back-to-source rate limit slot, so this default bounds how often the
-		origin is retried before such a read errors out.
+		origin is retried before such a read errors out. A prefetch read still
+		failing with a `429`, `5xx`, `408` or transport error after them is
+		deferred and rescheduled after a random `6h`–`12h` delay, like one
+		Dragonfly cannot serve; an on-demand read errors out.
 	- `proxy` (optional): routes every registry request through an HTTP
 		forward proxy. Requests keep their original upstream URL, so a proxy
 		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
