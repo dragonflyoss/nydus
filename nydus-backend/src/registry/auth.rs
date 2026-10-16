@@ -227,6 +227,10 @@ pub(crate) struct Authorizer {
 
     /// The answer to the last challenge, kept until it expires.
     authorization: RwLock<Option<Authorization>>,
+
+    /// The lock one handshake holds while it answers a challenge, so a burst
+    /// of challenged requests fetches one token and the rest reuse it.
+    handshake: tokio::sync::Mutex<()>,
 }
 
 /// Implements the registry authorizer.
@@ -240,6 +244,7 @@ impl Authorizer {
         Ok(Self {
             basic: basic.map(Authorization::basic).transpose()?,
             authorization: RwLock::new(None),
+            handshake: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -258,10 +263,37 @@ impl Authorizer {
         }
     }
 
+    /// Forgets the kept answer when it is `stale`, the one a request was just
+    /// refused with, so the next handshake fetches a new one. An answer another
+    /// handshake has replaced it with since is kept.
+    pub(crate) fn invalidate(&self, stale: &HeaderValue) {
+        let mut authorization = self.authorization.write().unwrap();
+        if authorization
+            .as_ref()
+            .is_some_and(|current| current.value() == stale)
+        {
+            *authorization = None;
+        }
+    }
+
     /// Answers `challenge` and keeps the answer for the requests that follow:
     /// the configured basic credentials, or a bearer token fetched from the
     /// realm through `http`.
+    ///
+    /// One handshake runs at a time; one that finds a valid answer already
+    /// kept, left by the handshake it waited for, reuses it.
     pub(crate) async fn authenticate(&self, http: &Http, challenge: Challenge) -> io::Result<()> {
+        let _handshake = self.handshake.lock().await;
+        if self
+            .authorization
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(Authorization::is_valid)
+        {
+            return Ok(());
+        }
+
         let authorization = match challenge {
             Challenge::Basic => self.basic.clone().ok_or_else(|| {
                 io::Error::other("registry requires basic-auth credentials".to_string())
@@ -463,6 +495,75 @@ mod tests {
             authorizer.authorize(&mut headers);
             assert_fn(result, headers.get(AUTHORIZATION).cloned());
         }
+    }
+
+    #[tokio::test]
+    async fn authenticate_fetches_one_token_for_a_burst_of_challenges() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let realm = format!("http://{}/token", listener.local_addr().unwrap());
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let served = fetches.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let served = served.clone();
+                std::thread::spawn(move || {
+                    use std::io::{Read, Write};
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        match stream.read(&mut byte) {
+                            Ok(1) => request.push(byte[0]),
+                            _ => return,
+                        }
+                    }
+                    served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(50));
+                    let body = r#"{"token":"abc","expires_in":300}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let http = Http::new(&HttpConfig::default(), None).unwrap();
+        let authorizer = Authorizer::new(None).unwrap();
+        let challenge = || Challenge::Bearer {
+            realm: realm.clone(),
+            service: String::new(),
+            scope: String::new(),
+        };
+
+        let (first, second) = tokio::join!(
+            authorizer.authenticate(&http, challenge()),
+            authorizer.authenticate(&http, challenge())
+        );
+
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let mut headers = HeaderMap::new();
+        authorizer.authorize(&mut headers);
+        assert_eq!(headers[AUTHORIZATION], "Bearer abc");
+    }
+
+    #[test]
+    fn invalidate_forgets_only_the_answer_a_request_was_refused_with() {
+        let authorizer = Authorizer::new(None).unwrap();
+        *authorizer.authorization.write().unwrap() =
+            Some(Authorization::bearer("fresh", Duration::from_secs(3600)).unwrap());
+
+        authorizer.invalidate(&HeaderValue::from_static("Bearer stale"));
+        let mut headers = HeaderMap::new();
+        authorizer.authorize(&mut headers);
+        assert_eq!(headers[AUTHORIZATION], "Bearer fresh");
+
+        authorizer.invalidate(&HeaderValue::from_static("Bearer fresh"));
+        let mut headers = HeaderMap::new();
+        authorizer.authorize(&mut headers);
+        assert_eq!(headers.get(AUTHORIZATION), None);
     }
 
     #[test]

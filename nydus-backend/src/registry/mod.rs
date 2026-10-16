@@ -45,8 +45,7 @@ mod response;
 mod rt;
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -108,14 +107,6 @@ pub(crate) struct Registry {
 
     /// The runtimes every read runs on, one per read kind.
     runtime: Arc<Runtime>,
-
-    /// Whether a read has succeeded, so later reads skip [`Self::first_read`].
-    first_read_done: AtomicBool,
-
-    /// The lock serializing reads until the first one succeeds, so a
-    /// cold-start burst performs one auth handshake and reuses its token
-    /// instead of one per read.
-    first_read: Mutex<()>,
 }
 
 /// The client of one repository on one registry, behind an [`Arc`] so a read
@@ -213,8 +204,6 @@ impl Registry {
                 dragonfly,
             }),
             runtime,
-            first_read_done: AtomicBool::new(false),
-            first_read: Mutex::new(()),
         })
     }
 
@@ -336,12 +325,15 @@ impl Client {
             return Ok(response);
         }
 
-        // Resend without the stale Authorization to get a fresh challenge.
-        let challenge_response = if headers.remove(AUTHORIZATION).is_some() {
-            self.send(method.clone(), url, headers.clone(), kind)
-                .await?
-        } else {
-            response
+        // Forget the refused Authorization and resend without it to get a
+        // fresh challenge.
+        let challenge_response = match headers.remove(AUTHORIZATION) {
+            Some(stale) => {
+                self.authorizer.invalidate(&stale);
+                self.send(method.clone(), url, headers.clone(), kind)
+                    .await?
+            }
+            None => response,
         };
 
         // Answer the challenge and resend authorized.
@@ -539,9 +531,6 @@ impl BlobBackend for Registry {
 
     /// Fills `buf` with the blob bytes from `offset` on the runtime, recording
     /// the read's metrics.
-    ///
-    /// Reads are serialized until the first one succeeds, so a cold-start
-    /// burst waits for one auth handshake and reuses its token.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -552,9 +541,6 @@ impl BlobBackend for Registry {
         if buf.is_empty() {
             return Ok(());
         }
-        // Hold the first-read lock until a read has succeeded.
-        let _first = (!self.first_read_done.load(Ordering::Acquire))
-            .then(|| self.first_read.lock().unwrap());
 
         // Read the bytes on a thread of the kind's runtime.
         let start = Instant::now();
@@ -578,7 +564,6 @@ impl BlobBackend for Registry {
                     start.elapsed(),
                 );
                 buf.copy_from_slice(&bytes);
-                self.first_read_done.store(true, Ordering::Release);
                 Ok(())
             }
             Err(err) => {
@@ -600,7 +585,8 @@ mod tests {
 
     use std::collections::VecDeque;
     use std::net::{SocketAddr, TcpListener};
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -843,8 +829,6 @@ mod tests {
                 dragonfly: Some(Box::new(transport)),
             }),
             runtime: test_runtime(),
-            first_read_done: AtomicBool::new(false),
-            first_read: Mutex::new(()),
         }
     }
 
@@ -1135,7 +1119,7 @@ dragonfly:
     }
 
     #[test]
-    fn concurrent_first_reads_share_one_auth_handshake() {
+    fn concurrent_reads_each_complete_the_auth_handshake() {
         let gate = AuthGate::new(Duration::from_millis(100));
         let registry = Arc::new(scripted_registry_from(
             &format!(
@@ -1162,8 +1146,7 @@ dragonfly:
             assert_eq!(&reader.join().unwrap(), b"ok");
         }
 
-        assert_eq!(gate.challenges(), 1);
-        assert!(registry.first_read_done.load(Ordering::Acquire));
+        assert_eq!(gate.challenges(), 2);
     }
 
     #[test]
