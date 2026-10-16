@@ -32,6 +32,7 @@ use crate::{Protocol, ReadKind};
 ///                 │                          │
 ///                 └── retry ─────────────────┘  every attempt claims its own slot
 /// ```
+#[derive(Clone)]
 pub(crate) struct Http {
     /// The reqwest client behind the retry and rate limit middleware.
     client: ClientWithMiddleware,
@@ -93,42 +94,6 @@ impl Http {
             client: client.build(),
         })
     }
-
-    /// Sends a `HEAD` to `url` with `headers` and logs the outcome.
-    pub(crate) async fn head(
-        &self,
-        url: &str,
-        headers: HeaderMap,
-        kind: ReadKind,
-    ) -> io::Result<Response> {
-        let start = Instant::now();
-        let result = self
-            .client
-            .head(url)
-            .headers(headers)
-            .send()
-            .await
-            .map(|response| Response {
-                status: response.status(),
-                headers: response.headers().clone(),
-                body: Body::Bytes(Bytes::new()),
-                protocol: Protocol::Http,
-            })
-            .map_err(io::Error::other);
-
-        match &result {
-            Ok(response) => debug!(
-                "HEAD {url} ({kind}) from the origin returned {} in {:?}",
-                response.status,
-                start.elapsed()
-            ),
-            Err(err) => debug!(
-                "HEAD {url} ({kind}) from the origin failed in {:?}: {err}",
-                start.elapsed()
-            ),
-        }
-        result
-    }
 }
 
 /// Implements the blob transport over the origin HTTP client.
@@ -162,6 +127,37 @@ impl Transport for Http {
             ),
             Err(err) => debug!(
                 "GET {url} ({kind}) from the origin failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+        result
+    }
+
+    /// Sends a `HEAD` to `url` with `headers` and logs the outcome.
+    async fn head(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
+        let start = Instant::now();
+        let result = self
+            .client
+            .head(url)
+            .headers(headers)
+            .send()
+            .await
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: Body::Bytes(Bytes::new()),
+                protocol: Protocol::Http,
+            })
+            .map_err(io::Error::other);
+
+        match &result {
+            Ok(response) => debug!(
+                "HEAD {url} ({kind}) from the origin returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "HEAD {url} ({kind}) from the origin failed in {:?}: {err}",
                 start.elapsed()
             ),
         }

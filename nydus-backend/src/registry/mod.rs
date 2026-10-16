@@ -86,6 +86,9 @@ pub use self::rt::Runtime;
 trait Transport: Send + Sync {
     /// Sends a `GET` for `url` with `headers`, `kind` attributing the read.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response>;
+
+    /// Sends a `HEAD` for `url` with `headers`, `kind` attributing the read.
+    async fn head(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response>;
 }
 
 /// Splits a registry `addr` such as `http://127.0.0.1:5000` into its scheme
@@ -229,7 +232,7 @@ impl Registry {
         // Connect the Dragonfly transport when configured.
         #[cfg(feature = "backend-dragonfly")]
         let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
-            Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, &runtime)?)),
+            Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, http.clone(), &runtime)?)),
             None => None,
         };
         #[cfg(not(feature = "backend-dragonfly"))]
@@ -304,12 +307,15 @@ impl Inner {
         headers: HeaderMap,
         kind: ReadKind,
     ) -> io::Result<Response> {
-        if method == Method::HEAD {
-            return self.http.head(url, headers, kind).await;
-        }
         let Some(dragonfly) = &self.dragonfly else {
-            return self.http.get(url, headers, kind).await;
+            return match method {
+                Method::HEAD => self.http.head(url, headers, kind).await,
+                _ => self.http.get(url, headers, kind).await,
+            };
         };
+        if method == Method::HEAD {
+            return dragonfly.head(url, headers, kind).await;
+        }
 
         let result = dragonfly.get(url, headers.clone(), kind).await;
         match Action::decide(kind, result).await {
@@ -656,6 +662,15 @@ mod tests {
         async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
             (**self).get(url, headers, kind).await
         }
+
+        async fn head(
+            &self,
+            url: &str,
+            headers: HeaderMap,
+            kind: ReadKind,
+        ) -> io::Result<Response> {
+            (**self).head(url, headers, kind).await
+        }
     }
 
     enum Scripted {
@@ -671,6 +686,7 @@ mod tests {
     struct ScriptedTransport {
         script: Mutex<VecDeque<Scripted>>,
         calls: AtomicU32,
+        http: Http,
     }
 
     impl ScriptedTransport {
@@ -678,6 +694,7 @@ mod tests {
             Arc::new(ScriptedTransport {
                 script: Mutex::new(script.into_iter().collect()),
                 calls: AtomicU32::new(0),
+                http: Http::new(&HttpConfig::default(), None).unwrap(),
             })
         }
 
@@ -717,12 +734,22 @@ mod tests {
                 Scripted::Transport => Err(io::Error::other("scripted failure")),
             }
         }
+
+        async fn head(
+            &self,
+            url: &str,
+            headers: HeaderMap,
+            kind: ReadKind,
+        ) -> io::Result<Response> {
+            self.http.head(url, headers, kind).await
+        }
     }
 
     struct AuthGate {
         delay: Duration,
         first: AtomicBool,
         challenges: AtomicU32,
+        http: Http,
     }
 
     impl AuthGate {
@@ -731,6 +758,7 @@ mod tests {
                 delay,
                 first: AtomicBool::new(true),
                 challenges: AtomicU32::new(0),
+                http: Http::new(&HttpConfig::default(), None).unwrap(),
             })
         }
 
@@ -770,6 +798,15 @@ mod tests {
                 body: Body::Bytes(Bytes::new()),
                 protocol: Protocol::Dragonfly,
             })
+        }
+
+        async fn head(
+            &self,
+            url: &str,
+            headers: HeaderMap,
+            kind: ReadKind,
+        ) -> io::Result<Response> {
+            self.http.head(url, headers, kind).await
         }
     }
 

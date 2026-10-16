@@ -26,6 +26,7 @@ use dragonfly_client_request::{GetRequest, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
 
+use super::http::Http;
 use super::response::{Body, Response};
 use super::rt::Runtime;
 use super::Transport;
@@ -45,16 +46,22 @@ pub(crate) struct Dragonfly {
 
     /// The timeout of each attempt of a request.
     request_timeout: Duration,
+
+    /// The origin client of the requests P2P does not carry, a `HEAD` for a
+    /// blob's size, as dfdaemon's own proxy forwards non-`GET` requests
+    /// straight to the origin.
+    http: Http,
 }
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
     /// Creates the transport, each client connecting to the configured
-    /// scheduler on the runtime of its read kind.
+    /// scheduler on the runtime of its read kind, with `http` for the
+    /// requests that go to the origin.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
-    pub(crate) fn new(config: DragonflyConfig, runtime: &Runtime) -> io::Result<Self> {
+    pub(crate) fn new(config: DragonflyConfig, http: Http, runtime: &Runtime) -> io::Result<Self> {
         Ok(Self {
             ondemand: Self::client(
                 runtime,
@@ -64,6 +71,7 @@ impl Dragonfly {
             )?,
             prefetch: Self::client(runtime, ReadKind::Prefetch, config.scheduler_endpoint, 0)?,
             request_timeout: config.request_timeout,
+            http,
         })
     }
 
@@ -168,5 +176,11 @@ impl Transport for Dragonfly {
             ),
         }
         result
+    }
+
+    /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
+    /// request that is not a `GET`.
+    async fn head(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
+        self.http.head(url, headers, kind).await
     }
 }
