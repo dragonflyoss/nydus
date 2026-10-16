@@ -96,11 +96,11 @@ trait Transport: Send + Sync {
 /// of a [`Client`], which does the asynchronous work on the runtime.
 ///
 /// ```text
-/// read_range_into(dst)                      runtime worker
+/// read_range_into(buf)                      runtime worker
 ///   │ spawn(get_blob, read its bytes) ──▶ get_blob ◀── body chunks ── hyper / tonic
 ///   │ block_on(join handle)                     │
 ///   ◀──────────── one wake ────────────────────┘
-///   └─ copy into dst, note who served it
+///   └─ copy into buf, note who served it
 /// ```
 pub(crate) struct Registry {
     /// The registry client, shared with the task of each read.
@@ -537,7 +537,7 @@ impl BlobBackend for Registry {
         })
     }
 
-    /// Fills `dst` with the blob bytes from `offset` on the runtime, recording
+    /// Fills `buf` with the blob bytes from `offset` on the runtime, recording
     /// the read's metrics.
     ///
     /// Reads are serialized until the first one succeeds, so a cold-start
@@ -546,10 +546,10 @@ impl BlobBackend for Registry {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        dst: &mut [u8],
+        buf: &mut [u8],
         kind: ReadKind,
     ) -> io::Result<()> {
-        if dst.is_empty() {
+        if buf.is_empty() {
             return Ok(());
         }
         // Hold the first-read lock until a read has succeeded.
@@ -560,7 +560,7 @@ impl BlobBackend for Registry {
         let start = Instant::now();
         let client = self.client.clone();
         let blob_id = *blob_id;
-        let len = dst.len();
+        let len = buf.len();
         let result = self.runtime.block_on_worker(kind, async move {
             let response = client.get_blob(&blob_id, offset, len, kind).await?;
             let protocol = response.protocol;
@@ -577,7 +577,7 @@ impl BlobBackend for Registry {
                     len as u64,
                     start.elapsed(),
                 );
-                dst.copy_from_slice(&bytes);
+                buf.copy_from_slice(&bytes);
                 self.first_read_done.store(true, Ordering::Release);
                 Ok(())
             }
@@ -871,14 +871,14 @@ mod tests {
         scripted_registry_at(origin.addr, transport, interval, 3)
     }
 
-    fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> io::Result<Protocol> {
+    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Protocol> {
         registry.runtime.tokio(kind).block_on(async {
             let response = registry
                 .client
-                .get_blob(&TEST_BLOB_ID, 0, dst.len(), kind)
+                .get_blob(&TEST_BLOB_ID, 0, buf.len(), kind)
                 .await?;
             let protocol = response.protocol;
-            dst.copy_from_slice(&response.bytes(dst.len()).await?);
+            buf.copy_from_slice(&response.bytes(buf.len()).await?);
             Ok(protocol)
         })
     }
@@ -962,11 +962,11 @@ dragonfly:
         let transport = ScriptedTransport::new(vec![Scripted::Transport]);
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
-        let mut dst = vec![0u8; body.len()];
-        let protocol = read(&registry, ReadKind::OnDemand, &mut dst).unwrap();
+        let mut buf = vec![0u8; body.len()];
+        let protocol = read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
 
         assert_eq!(protocol, Protocol::Http);
-        assert_eq!(dst, body);
+        assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 1);
     }
@@ -981,12 +981,12 @@ dragonfly:
         let back_to_source_before = metrics::READ_BACKEND_COUNT
             .with_label_values(&["ondemand", "registry", "http"])
             .get();
-        let mut dst = vec![0u8; body.len()];
+        let mut buf = vec![0u8; body.len()];
         registry
-            .read_range_into(&TEST_BLOB_ID, 0, &mut dst, ReadKind::OnDemand)
+            .read_range_into(&TEST_BLOB_ID, 0, &mut buf, ReadKind::OnDemand)
             .unwrap();
 
-        assert_eq!(dst, body);
+        assert_eq!(buf, body);
         assert_eq!(origin.hits(), 1);
         assert!(
             metrics::READ_BACKEND_COUNT
@@ -1011,8 +1011,8 @@ dragonfly:
             let transport = ScriptedTransport::new(vec![scripted]);
             let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
-            let mut dst = vec![0u8; 4];
-            let err = read(&registry, ReadKind::Prefetch, &mut dst).unwrap_err();
+            let mut buf = vec![0u8; 4];
+            let err = read(&registry, ReadKind::Prefetch, &mut buf).unwrap_err();
 
             assert_eq!(
                 err.kind(),
@@ -1041,10 +1041,10 @@ dragonfly:
             let transport = ScriptedTransport::new(vec![scripted]);
             let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
-            let mut dst = vec![0u8; body.len()];
-            read(&registry, ReadKind::OnDemand, &mut dst).unwrap();
+            let mut buf = vec![0u8; body.len()];
+            read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
 
-            assert_eq!(dst, body);
+            assert_eq!(buf, body);
             assert_eq!(transport.calls(), 1);
             assert_eq!(origin.hits(), 1);
         }
@@ -1062,8 +1062,8 @@ dragonfly:
                 let transport = ScriptedTransport::new(vec![status(terminal)]);
                 let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
 
-                let mut dst = vec![0u8; 4];
-                let err = read(&registry, kind, &mut dst).unwrap_err();
+                let mut buf = vec![0u8; 4];
+                let err = read(&registry, kind, &mut buf).unwrap_err();
 
                 assert!(
                     err.to_string().contains(terminal.as_str()),
@@ -1098,10 +1098,10 @@ dragonfly:
                 Duration::ZERO,
             );
 
-            let mut dst = vec![0u8; body.len()];
-            read(&registry, kind, &mut dst).unwrap();
+            let mut buf = vec![0u8; body.len()];
+            read(&registry, kind, &mut buf).unwrap();
 
-            assert_eq!(dst, body, "kind={kind:?}");
+            assert_eq!(buf, body, "kind={kind:?}");
             assert_eq!(transport.calls(), 2, "kind={kind:?}");
             assert_eq!(origin.hits(), 0, "kind={kind:?}");
             let mut authorized = HeaderMap::new();
@@ -1150,11 +1150,11 @@ dragonfly:
             .map(|_| {
                 let registry = registry.clone();
                 thread::spawn(move || {
-                    let mut dst = [0u8; 2];
+                    let mut buf = [0u8; 2];
                     registry
-                        .read_range_into(&TEST_BLOB_ID, 0, &mut dst, ReadKind::OnDemand)
+                        .read_range_into(&TEST_BLOB_ID, 0, &mut buf, ReadKind::OnDemand)
                         .unwrap();
-                    dst
+                    buf
                 })
             })
             .collect();
@@ -1174,8 +1174,8 @@ dragonfly:
         let errors_before = metrics::READ_BACKEND_FAILURE_COUNT
             .with_label_values(&["ondemand", "registry", "http"])
             .get();
-        let mut dst = vec![0u8; 4];
-        let err = read(&registry, ReadKind::OnDemand, &mut dst).unwrap_err();
+        let mut buf = vec![0u8; 4];
+        let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();
 
         assert_ne!(
             err.kind(),
@@ -1197,8 +1197,8 @@ dragonfly:
         let transport = ScriptedTransport::new(vec![status(StatusCode::TOO_MANY_REQUESTS)]);
         let registry = scripted_registry_at(origin.addr, transport.clone(), Duration::ZERO, 1);
 
-        let mut dst = vec![0u8; 4];
-        let err = read(&registry, ReadKind::OnDemand, &mut dst).unwrap_err();
+        let mut buf = vec![0u8; 4];
+        let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();
 
         assert!(err.to_string().contains("500"), "unexpected: {err}");
         assert_eq!(transport.calls(), 1);
@@ -1213,8 +1213,8 @@ dragonfly:
         let start = Instant::now();
         let registry = scripted_registry_at(origin.addr, transport.clone(), interval, 1);
 
-        let mut dst = vec![0u8; 4];
-        let err = read(&registry, ReadKind::OnDemand, &mut dst).unwrap_err();
+        let mut buf = vec![0u8; 4];
+        let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();
 
         assert!(err.to_string().contains("500"), "unexpected: {err}");
         assert_eq!(origin.hits(), 2);
@@ -1233,10 +1233,10 @@ dragonfly:
         let start = Instant::now();
         let registry = scripted_registry(&origin, transport.clone(), interval);
 
-        let mut dst = vec![0u8; body.len()];
+        let mut buf = vec![0u8; body.len()];
         for _ in 0..2 {
-            read(&registry, ReadKind::OnDemand, &mut dst).unwrap();
-            assert_eq!(dst, body);
+            read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
+            assert_eq!(buf, body);
         }
 
         assert_eq!(origin.hits(), 2);
@@ -1255,11 +1255,11 @@ dragonfly:
             .redirects
             .insert(&hex, "http://cdn.example.com/signed".to_string());
 
-        let mut dst = vec![0u8; body.len()];
-        let protocol = read(&registry, ReadKind::OnDemand, &mut dst).unwrap();
+        let mut buf = vec![0u8; body.len()];
+        let protocol = read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
 
         assert_eq!(protocol, Protocol::Dragonfly);
-        assert_eq!(dst, body);
+        assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);
     }
@@ -1279,10 +1279,10 @@ dragonfly:
             .redirects
             .insert(&hex, "http://cdn.example.com/expired".to_string());
 
-        let mut dst = vec![0u8; body.len()];
-        read(&registry, ReadKind::OnDemand, &mut dst).unwrap();
+        let mut buf = vec![0u8; body.len()];
+        read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
 
-        assert_eq!(dst, body);
+        assert_eq!(buf, body);
         assert_eq!(transport.calls(), 2);
         assert!(registry.client.redirects.get(&hex).is_none());
     }

@@ -122,13 +122,13 @@ pub trait BlobBackend: Send + Sync {
         blob_metadata.save(dst).map_err(io::Error::other)
     }
 
-    /// Fills `dst` with the blob bytes from `offset`, `kind` attributing the
+    /// Fills `buf` with the blob bytes from `offset`, `kind` attributing the
     /// read.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        dst: &mut [u8],
+        buf: &mut [u8],
         kind: ReadKind,
     ) -> io::Result<()>;
 }

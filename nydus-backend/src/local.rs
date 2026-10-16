@@ -195,15 +195,15 @@ impl Local {
         ))
     }
 
-    /// Fills `dst` with the blob bytes from `offset` of the data region.
+    /// Fills `buf` with the blob bytes from `offset` of the data region.
     fn read_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        dst: &mut [u8],
+        buf: &mut [u8],
     ) -> io::Result<()> {
         let slot = self.source(blob_id)?;
-        let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
+        let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
         })?;
         if end > slot.source.data_size {
@@ -213,7 +213,7 @@ impl Local {
             ));
         }
         slot.open_file()?
-            .read_exact_at(dst, slot.source.data_offset + offset)
+            .read_exact_at(buf, slot.source.data_offset + offset)
     }
 
     /// Reads the raw blob metadata of `source`: the sidecar file when present,
@@ -314,25 +314,25 @@ impl BlobBackend for Local {
         file.flush()
     }
 
-    /// Fills `dst` from the data region, recording the read's metrics.
+    /// Fills `buf` from the data region, recording the read's metrics.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        dst: &mut [u8],
+        buf: &mut [u8],
         kind: ReadKind,
     ) -> io::Result<()> {
-        if dst.is_empty() {
+        if buf.is_empty() {
             return Ok(());
         }
         let start = Instant::now();
-        let result = self.read_range(blob_id, offset, dst);
+        let result = self.read_range(blob_id, offset, buf);
         match &result {
             Ok(()) => collect_read_backend_finished_metrics(
                 kind,
                 Backend::Local,
                 None,
-                dst.len() as u64,
+                buf.len() as u64,
                 start.elapsed(),
             ),
             Err(_) => {
