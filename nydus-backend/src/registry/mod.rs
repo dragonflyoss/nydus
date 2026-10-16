@@ -203,9 +203,24 @@ impl Client {
         }
     }
 
-    /// Returns the URL of the blob with hex digest `hex`.
-    fn blob_url(&self, hex: &str) -> String {
-        format!("{}v2/{}/blobs/sha256:{hex}", self.addr, self.repository)
+    /// Returns the URL of the blob with hex digest `hex`, the distribution
+    /// API path appended to the registry address, a path of its own kept as
+    /// the prefix.
+    fn blob_url(&self, hex: &str) -> io::Result<String> {
+        let mut url = self.addr.clone();
+        url.path_segments_mut()
+            .map_err(|()| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("registry addr {} cannot carry a path", self.addr),
+                )
+            })?
+            .pop_if_empty()
+            .push("v2")
+            .extend(self.repository.split('/'))
+            .push("blobs")
+            .push(&format!("sha256:{hex}"));
+        Ok(url.into())
     }
 
     /// Returns the transport a blob `GET` rides: Dragonfly when it is
@@ -330,7 +345,7 @@ impl Client {
         headers: HeaderMap,
         kind: ReadKind,
     ) -> io::Result<Response> {
-        let url = self.blob_url(hex);
+        let url = self.blob_url(hex)?;
         let response = self
             .execute(headers.clone(), |headers| self.get(&url, headers, kind))
             .await?;
@@ -353,7 +368,7 @@ impl Client {
 
     /// Returns the size of a blob, from a `HEAD` request following one redirect.
     async fn stat_blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<u64> {
-        let url = self.blob_url(&hex::encode(blob_id));
+        let url = self.blob_url(&hex::encode(blob_id))?;
         let transport = self.transport();
         let response = self
             .execute(HeaderMap::new(), |headers| transport.head(&url, headers))
@@ -757,16 +772,37 @@ mod tests {
     }
 
     #[test]
-    fn blob_url_names_the_blob_under_the_repository() {
-        let config: RegistryConfig = serde_yaml::from_str(
-            "addr: https://registry.example.com\nrepository: library/ubuntu\n",
-        )
-        .unwrap();
-        let registry = Registry::new(config, test_runtime()).unwrap();
-        assert_eq!(
-            registry.client.blob_url("abc123"),
-            "https://registry.example.com/v2/library/ubuntu/blobs/sha256:abc123"
-        );
+    fn blob_url_appends_the_api_path_to_the_registry_addr() {
+        let test_cases = vec![
+            (
+                "https://registry.example.com",
+                "https://registry.example.com/v2/library/ubuntu/blobs/sha256:abc123",
+            ),
+            (
+                "http://127.0.0.1:5000/",
+                "http://127.0.0.1:5000/v2/library/ubuntu/blobs/sha256:abc123",
+            ),
+            (
+                "https://registry.example.com/mirror",
+                "https://registry.example.com/mirror/v2/library/ubuntu/blobs/sha256:abc123",
+            ),
+            (
+                "https://registry.example.com/mirror/",
+                "https://registry.example.com/mirror/v2/library/ubuntu/blobs/sha256:abc123",
+            ),
+        ];
+
+        for (addr, expected) in test_cases {
+            let config: RegistryConfig =
+                serde_yaml::from_str(&format!("addr: {addr}\nrepository: library/ubuntu\n"))
+                    .unwrap();
+            let registry = Registry::new(config, test_runtime()).unwrap();
+            assert_eq!(
+                registry.client.blob_url("abc123").unwrap(),
+                expected,
+                "addr={addr}"
+            );
+        }
     }
 
     #[test]

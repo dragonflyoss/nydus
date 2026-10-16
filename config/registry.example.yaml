@@ -15,7 +15,9 @@ backend:
     # Registry address including the scheme; the scheme selects between TLS
     # and plain HTTP. For the official Docker registry use
     # "https://registry-1.docker.io"; for a local distribution registry
-    # started with --plain-http use "http://127.0.0.1:5000".
+    # started with --plain-http use "http://127.0.0.1:5000". A path becomes
+    # the prefix of the distribution API path, for a registry behind a
+    # reverse proxy.
     addr: http://127.0.0.1:5000
 
     # Image repository (no tag/digest), e.g. "library/ubuntu".

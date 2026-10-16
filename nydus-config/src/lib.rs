@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use url::{Position, Url};
+use url::Url;
 
 /// The name of the package.
 pub const NAME: &str = "nydus";
@@ -594,29 +594,24 @@ impl Config {
         }
 
         if let BackendConfig::Registry(registry) = &self.backend {
-            if !matches!(registry.addr.scheme(), "http" | "https")
-                || &registry.addr[Position::BeforePath..] != "/"
-            {
-                return Err(Error::InvalidConfig(format!(
-                    "addr {} must be http(s)://host[:port]",
-                    registry.addr
-                )));
-            }
             if registry.http.request_timeout.is_zero() {
                 return Err(Error::InvalidConfig(
                     "http.request_timeout must be greater than 0s".to_string(),
                 ));
             }
+
             if registry.http.worker_threads == 0 {
                 return Err(Error::InvalidConfig(
                     "http.worker_threads must be at least 1".to_string(),
                 ));
             }
+
             if registry.http.max_blocking_threads == 0 {
                 return Err(Error::InvalidConfig(
                     "http.max_blocking_threads must be at least 1".to_string(),
                 ));
             }
+
             #[cfg(not(feature = "dragonfly"))]
             if let Some(dragonfly) = &registry.dragonfly {
                 return Err(Error::InvalidConfig(format!(
@@ -624,12 +619,14 @@ impl Config {
                     dragonfly.scheduler_endpoint
                 )));
             }
+
             if let Some(dragonfly) = &registry.dragonfly {
                 if dragonfly.max_retries > 3 {
                     return Err(Error::InvalidConfig(
                         "dragonfly.max_retries must not exceed 3".to_string(),
                     ));
                 }
+
                 if dragonfly.back_to_source.request_rate_limit == 0 {
                     return Err(Error::InvalidConfig(
                         "dragonfly.back_to_source.request_rate_limit must be at least 1"
@@ -990,7 +987,7 @@ scope: all
     }
 
     #[test]
-    fn registry_addr_must_be_a_bare_http_origin() {
+    fn registry_addr_is_parsed_as_a_url() {
         let test_cases = vec![
             ("http://127.0.0.1:5000", Some("http://127.0.0.1:5000/")),
             (
@@ -998,13 +995,10 @@ scope: all
                 Some("https://registry-1.docker.io/"),
             ),
             (
-                "https://registry.example.com/",
-                Some("https://registry.example.com/"),
+                "https://registry.example.com/mirror",
+                Some("https://registry.example.com/mirror"),
             ),
             ("registry.example.com", None),
-            ("ftp://registry.example.com", None),
-            ("https://registry.example.com/v2", None),
-            ("https://registry.example.com/?x=1", None),
         ];
 
         for (addr, expected) in test_cases {

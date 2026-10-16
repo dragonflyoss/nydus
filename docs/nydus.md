@@ -1196,7 +1196,8 @@ Fields under `backend.config`:
 
 - `addr` (required): registry address including the scheme, e.g.
 	`https://registry-1.docker.io` or `http://127.0.0.1:5000`. The scheme
-	selects between TLS and plain HTTP.
+	selects between TLS and plain HTTP; a path becomes the prefix of the
+	distribution API path, for a registry behind a reverse proxy.
 - `repository` (required): image repository without tag/digest, e.g.
 	`library/ubuntu`.
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
