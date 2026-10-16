@@ -48,7 +48,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
-use url::Url;
+use url::{Position, Url};
 
 use nydus_config::RegistryConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata};
@@ -193,25 +193,20 @@ impl Registry {
         })
     }
 
-    /// Parses a registry `addr` such as `http://127.0.0.1:5000` into its
-    /// origin, rejecting a scheme other than `http` or `https` and any path,
-    /// query or fragment.
+    /// Parses a registry `addr` such as `http://127.0.0.1:5000`, an `http` or
+    /// `https` origin carrying no path, query or fragment.
     fn parse_addr(addr: &str) -> io::Result<Url> {
-        let invalid = |reason: &str| {
+        let url = Url::parse(addr).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid registry addr {addr}: {reason}"),
+                format!("invalid registry addr {addr}: {err}"),
             )
-        };
-        let url = Url::parse(addr).map_err(|err| invalid(&err.to_string()))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(invalid(&format!("unsupported scheme `{}`", url.scheme())));
-        }
-        if url.host_str().is_none() {
-            return Err(invalid("missing host"));
-        }
-        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-            return Err(invalid("must not carry a path, query, or fragment"));
+        })?;
+        if !matches!(url.scheme(), "http" | "https") || &url[Position::BeforePath..] != "/" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid registry addr {addr}: expected http(s)://host[:port]"),
+            ));
         }
 
         Ok(url)
