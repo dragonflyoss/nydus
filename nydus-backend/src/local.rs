@@ -73,16 +73,14 @@ impl Local {
         }
     }
 
-    /// Creates a backend over `dir` that also serves `blob_id`, the digest of
-    /// a full blob's data region, from the full blob at `path`.
+    /// Opens the self-contained full blob at `path` as a backend: `blob_id`,
+    /// the digest of its data region by which its embedded bootstrap names
+    /// it, is served from the file itself, any other blob from the file's
+    /// directory.
     ///
     /// The data region is verified against `blob_id` and the whole file hashed
     /// for its full blob digest.
-    pub fn with_full_blob(
-        dir: PathBuf,
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        path: &Path,
-    ) -> io::Result<Self> {
+    pub fn open(blob_id: [u8; SHA256_DIGEST_SIZE], path: &Path) -> io::Result<Self> {
         // Hash the whole file for its full blob digest and read its footer.
         let mut file = File::open(path).map_err(|err| {
             io::Error::new(
@@ -93,7 +91,6 @@ impl Local {
         let id = sha256_reader(&file).map_err(io::Error::other)?;
         let full_blob = FullBlob::new(path, id)?;
 
-        // Verify the data region against the blob id.
         file.seek(SeekFrom::Start(full_blob.footer.compressed_data_offset()))?;
         let digest = sha256_reader((&file).take(full_blob.footer.compressed_data_size()))
             .map_err(io::Error::other)?;
@@ -104,24 +101,13 @@ impl Local {
             ));
         }
 
-        let backend = Self::new(dir);
-        backend.insert_full_blob(blob_id, full_blob);
-        Ok(backend)
-    }
-
-    /// Remembers `full_blob` as `blob_id`, keeping an existing one when a
-    /// racing open won.
-    fn insert_full_blob(
-        &self,
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        full_blob: FullBlob,
-    ) -> Arc<FullBlob> {
-        self.full_blobs
+        let backend = Self::new(path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        backend
+            .full_blobs
             .write()
             .unwrap()
-            .entry(blob_id)
-            .or_insert_with(|| Arc::new(full_blob))
-            .clone()
+            .insert(blob_id, Arc::new(full_blob));
+        Ok(backend)
     }
 
     /// Returns the full blob of `blob_id`, opened from `dir/<hex>` on first
@@ -147,7 +133,15 @@ impl Local {
             ));
         }
 
-        Ok(self.insert_full_blob(*blob_id, FullBlob::new(&path, *blob_id)?))
+        // Keep the full blob a racing open inserted first.
+        let full_blob = FullBlob::new(&path, *blob_id)?;
+        Ok(self
+            .full_blobs
+            .write()
+            .unwrap()
+            .entry(*blob_id)
+            .or_insert_with(|| Arc::new(full_blob))
+            .clone())
     }
 
     /// Returns the sidecar blob metadata path of the full blob at `path`, in
@@ -394,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn with_full_blob_verifies_the_data_digest() {
+    fn open_verifies_the_data_digest() {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let blob_metadata = single_chunk_group(&payload);
@@ -404,8 +398,8 @@ mod tests {
         let path = dir.path().join(hex::encode(full_blob_id));
         let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
 
-        let backend = Local::with_full_blob(dir.path().to_path_buf(), data_blob_id, &path).unwrap();
+        let backend = Local::open(data_blob_id, &path).unwrap();
         assert_eq!(backend.full_blob_id(&data_blob_id).unwrap(), full_blob_id);
-        assert!(Local::with_full_blob(dir.path().to_path_buf(), full_blob_id, &path).is_err());
+        assert!(Local::open(full_blob_id, &path).is_err());
     }
 }
