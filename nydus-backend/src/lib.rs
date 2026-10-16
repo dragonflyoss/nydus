@@ -9,6 +9,7 @@
 //! before it fails.
 
 mod local;
+mod netns;
 
 #[cfg(feature = "registry")]
 mod registry;
@@ -23,15 +24,10 @@ use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 pub use local::Local;
+pub use netns::{Netns, NetnsId};
 
 #[cfg(feature = "registry")]
 pub(crate) use registry::Registry;
-
-/// A registry backend runs on a [`Runtime`], one tokio runtime per read kind,
-/// built from its `http` configuration, every thread of it entering the
-/// [`Netns`] it is given.
-#[cfg(feature = "registry")]
-pub use registry::{Netns, NetnsId, Runtime};
 
 pub use nydus_config::{BackendKind, Protocol, ReadKind};
 
@@ -133,17 +129,25 @@ pub trait Backend: Send + Sync {
     }
 }
 
-/// Creates a blob backend from its configuration.
-pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn Backend>> {
-    match config {
-        BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
-        #[cfg(feature = "registry")]
-        BackendConfig::Registry(registry) => Ok(Arc::new(Registry::new((**registry).clone())?)),
-        #[cfg(not(feature = "registry"))]
-        BackendConfig::Registry(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "registry backend requires the `registry` feature",
-        )),
+/// Implements the blob backend construction.
+impl dyn Backend {
+    /// Creates the blob backend `config` describes, a registry backend
+    /// reaching the registry from `netns` when one is given, the caller's
+    /// network namespace otherwise.
+    #[cfg_attr(not(feature = "registry"), allow(unused_variables))]
+    pub fn new(config: &BackendConfig, netns: Option<Netns>) -> io::Result<Arc<dyn Backend>> {
+        match config {
+            BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
+            #[cfg(feature = "registry")]
+            BackendConfig::Registry(registry) => {
+                Ok(Arc::new(Registry::new((**registry).clone(), netns)?))
+            }
+            #[cfg(not(feature = "registry"))]
+            BackendConfig::Registry(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "registry backend requires the `registry` feature",
+            )),
+        }
     }
 }
 
@@ -152,30 +156,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_backend_builds_a_local_backend() {
+    fn new_builds_a_local_backend() {
         let config: BackendConfig =
             serde_yaml::from_str("type: local\nconfig:\n  dir: /blobs\n").unwrap();
-        assert!(build_backend(&config).is_ok());
+        assert!(<dyn Backend>::new(&config, None).is_ok());
     }
 
     #[cfg(feature = "registry")]
     #[test]
-    fn build_backend_builds_a_registry_backend() {
+    fn new_builds_a_registry_backend() {
         let config: BackendConfig = serde_yaml::from_str(
             "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
         )
         .unwrap();
-        assert!(build_backend(&config).is_ok());
+        assert!(<dyn Backend>::new(&config, None).is_ok());
     }
 
     #[cfg(not(feature = "registry"))]
     #[test]
-    fn build_backend_rejects_registry_without_the_feature() {
+    fn new_rejects_a_registry_backend_without_the_feature() {
         let config: BackendConfig = serde_yaml::from_str(
             "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
         )
         .unwrap();
-        let err = build_backend(&config).err().unwrap();
+        let err = <dyn Backend>::new(&config, None).err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("registry"));
     }

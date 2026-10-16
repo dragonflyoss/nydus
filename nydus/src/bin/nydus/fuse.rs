@@ -2,7 +2,7 @@ use clap::Parser;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
-use nydus_backend::{build_backend, Backend, Local};
+use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_blob_timeout, default_prefetch_concurrent_blob_count, Config, PrefetchScope,
 };
@@ -236,7 +236,10 @@ impl FuseCommand {
             }
             Some(Arc::new(Local::new(dir.clone())))
         } else if let Some(config) = storage_config.as_ref() {
-            Some(build_backend(&config.backend).context("failed to build blob backend")?)
+            Some(
+                <dyn Backend>::new(&config.backend, None)
+                    .context("failed to build blob backend")?,
+            )
         } else {
             None
         };

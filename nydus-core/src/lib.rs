@@ -56,7 +56,7 @@ use nydus_error::{Context, Error, Result};
 use entry::ImageFs;
 use extent::{BlobRangeSpec, ExtentResolver};
 use layout::{FlatLayout, Segment};
-use nydus_backend::build_backend;
+use nydus_backend::Backend;
 use nydus_config::PrefetchScope;
 use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -128,7 +128,8 @@ impl NydusCore {
         let prefetch_timeout = config.prefetch.blob_timeout;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
-        let backend = build_backend(&config.backend).context("failed to build blob backend")?;
+        let backend =
+            <dyn Backend>::new(&config.backend, None).context("failed to build blob backend")?;
         let cache_dir = config.storage.dir.clone();
         if let Some(cache_dir) = &cache_dir {
             std::fs::create_dir_all(cache_dir).with_context(|| {

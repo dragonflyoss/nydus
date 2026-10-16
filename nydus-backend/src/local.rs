@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use nydus_format::blob::{BlobFooter, BlobMetadata};
@@ -17,8 +17,8 @@ use nydus_telemetry::metrics::{
 
 use crate::{Backend, BackendKind, Protocol, RawDeviceFile, ReadKind};
 
-/// A full blob file, its footer locating the data and blob metadata regions
-/// inside it.
+/// An open full blob file, its footer locating the data and blob metadata
+/// regions inside it.
 #[derive(Debug)]
 struct Blob {
     /// The path of the full blob file.
@@ -31,8 +31,8 @@ struct Blob {
     /// The validated footer, the layout of the file.
     footer: BlobFooter,
 
-    /// The file, opened on the first read, a failed open being retried.
-    file: OnceLock<Arc<File>>,
+    /// The open file, shared with the raw device it may back.
+    file: Arc<File>,
 }
 
 /// Implements the full blob file.
@@ -48,18 +48,8 @@ impl Blob {
             path: path.to_path_buf(),
             full_blob_id,
             footer,
-            file: OnceLock::new(),
+            file: Arc::new(File::open(path)?),
         })
-    }
-
-    /// Returns the open file, opening it on first use.
-    fn file(&self) -> io::Result<Arc<File>> {
-        if let Some(file) = self.file.get() {
-            return Ok(file.clone());
-        }
-
-        let file = Arc::new(File::open(&self.path)?);
-        Ok(self.file.get_or_init(|| file).clone())
     }
 }
 
@@ -119,8 +109,8 @@ impl Local {
         Ok(backend)
     }
 
-    /// Remembers `blob` as `blob_id`, keeping an existing blob and its open
-    /// file when a racing open won.
+    /// Remembers `blob` as `blob_id`, keeping an existing blob when a racing
+    /// open won.
     fn insert_blob(&self, blob_id: [u8; SHA256_DIGEST_SIZE], blob: Blob) -> Arc<Blob> {
         self.blobs
             .write()
@@ -190,7 +180,7 @@ impl Local {
             ));
         }
 
-        blob.file()?
+        blob.file
             .read_exact_at(buf, blob.footer.compressed_data_offset() + offset)
     }
 
@@ -213,7 +203,7 @@ impl Local {
             ));
         }
 
-        blob.file()?
+        blob.file
             .read_exact_at(buf, blob.footer.compressed_data_offset() + offset)
     }
 }
@@ -256,7 +246,7 @@ impl Backend for Local {
 
         Ok(Some(RawDeviceFile {
             path: blob.path.clone(),
-            file: blob.file()?,
+            file: blob.file.clone(),
             data_offset: blob.footer.compressed_data_offset(),
             data_size: blob.footer.compressed_data_size(),
         }))
@@ -281,7 +271,7 @@ impl Backend for Local {
             fs::read(&blob_metadata_path)?
         } else {
             let mut buf = vec![0u8; blob.footer.blob_metadata_size() as usize];
-            blob.file()?
+            blob.file
                 .read_exact_at(&mut buf, blob.footer.blob_metadata_offset())?;
             buf
         };
@@ -311,7 +301,7 @@ impl Backend for Local {
             fs::read(&blob_metadata_path)?
         } else {
             let mut buf = vec![0u8; blob.footer.blob_metadata_size() as usize];
-            blob.file()?
+            blob.file
                 .read_exact_at(&mut buf, blob.footer.blob_metadata_offset())?;
             buf
         };

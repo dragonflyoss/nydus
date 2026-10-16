@@ -4,7 +4,7 @@ use nydus::error::{Context, Error, Result};
 use nydus::optimize::{
     build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, ChunkGroupRef,
 };
-use nydus_backend::{build_backend, Backend};
+use nydus_backend::Backend;
 use nydus_config::Config;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
@@ -129,8 +129,8 @@ impl OptimizeCommand {
 
         // Load the storage config.
         let storage_config = Config::load(&self.config)?;
-        let backend =
-            build_backend(&storage_config.backend).context("failed to build blob backend")?;
+        let backend = <dyn Backend>::new(&storage_config.backend, None)
+            .context("failed to build blob backend")?;
         // Source chunks are read through the local blob cache's backend, so
         // diskless mode cannot apply.
         let Some(cache_dir) = storage_config.storage.dir else {

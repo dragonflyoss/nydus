@@ -10,8 +10,8 @@
 //! a VMM that embeds this crate: the backend drives a handful of connections,
 //! so a couple of workers are plenty, and the registry must be reached from
 //! the host namespace no matter which thread builds the backend.
-//! [`Runtime::new`] takes both: a backend built from a config file gets its
-//! bounds from the `http` section and no namespace.
+//! [`Runtime::new`] takes both: the bounds from the `http` section and the
+//! namespace an embedder hands to `<dyn Backend>::new`.
 //!
 //! Pinning the runtime threads is only half of it: `Runtime::block_on` polls
 //! its future on the *calling* thread, and hyper opens the TCP connection
@@ -28,7 +28,7 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 use tracing::{error, info};
 
-use super::netns::Netns;
+use crate::Netns;
 use crate::ReadKind;
 
 /// The time an idle blocking thread is kept before it is released.
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn current_netns() -> super::super::netns::NetnsId {
+    fn current_netns() -> crate::NetnsId {
         let file = std::fs::File::open("/proc/thread-self/ns/net").unwrap();
         Netns::new(file.into()).unwrap().id()
     }

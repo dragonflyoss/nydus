@@ -36,7 +36,6 @@ mod auth;
 #[cfg(feature = "dragonfly")]
 mod dragonfly;
 mod http;
-mod netns;
 mod redirect;
 mod response;
 mod rt;
@@ -59,13 +58,12 @@ use nydus_telemetry::metrics::{
     collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
 };
 
-use crate::{Backend, BackendKind, Protocol, ReadKind};
+use crate::{Backend, BackendKind, Netns, Protocol, ReadKind};
 
 use self::auth::{Authorizer, Challenge};
 #[cfg(feature = "dragonfly")]
 use self::dragonfly::Dragonfly;
 use self::http::Http;
-pub use self::netns::{Netns, NetnsId};
 use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
@@ -150,12 +148,13 @@ struct Client {
 /// Implements the registry backend construction.
 impl Registry {
     /// Creates a registry backend from its configuration, running on runtimes
-    /// of its own, one per read kind, bounded by the `http` section.
-    pub(crate) fn new(config: RegistryConfig) -> io::Result<Self> {
+    /// of its own, one per read kind, bounded by the `http` section, every
+    /// thread of them entering `netns` when one is given.
+    pub(crate) fn new(config: RegistryConfig, netns: Option<Netns>) -> io::Result<Self> {
         let runtime = Arc::new(Runtime::new(
             config.http.worker_threads,
             config.http.max_blocking_threads,
-            None,
+            netns,
         )?);
         let http = Http::new(&config.http, None)?;
 
@@ -850,7 +849,7 @@ mod tests {
             let config: RegistryConfig =
                 serde_yaml::from_str(&format!("addr: {addr}\nrepository: library/ubuntu\n"))
                     .unwrap();
-            let registry = Registry::new(config).unwrap();
+            let registry = Registry::new(config, None).unwrap();
             assert_eq!(registry.client.blob_url("abc123"), expected, "addr={addr}");
         }
     }
@@ -863,7 +862,7 @@ repository: library/ubuntu
 auth: YWxpY2U6c2VjcmV0
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let registry = Registry::new(config).unwrap();
+        let registry = Registry::new(config, None).unwrap();
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
@@ -905,7 +904,7 @@ auth: YWxpY2U6c2VjcmV0
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(config).unwrap();
+        let registry = Registry::new(config, None).unwrap();
 
         let mut buf = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();

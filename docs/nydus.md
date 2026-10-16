@@ -224,13 +224,12 @@ prefetch burst never queues ahead of a FUSE reader on the same workers:
 | Blocking workers | Up to 8 threads per runtime | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`). Idle threads are released after 10 seconds. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
 The registry `http.worker_threads` and `http.max_blocking_threads` settings
-set these bounds for each runtime; every registry backend built from a
-configuration runs on runtimes of its own, built by
-`Runtime::new(worker_threads, max_blocking_threads, netns)`, the optional
-network namespace being one every runtime thread enters so registry sockets
-are created in it regardless of the caller's. The HTTP connection pool is
-shared by both runtimes. A process using only local blobs never creates a
-Tokio runtime.
+set these bounds for each runtime; every registry backend runs on runtimes of
+its own. `nydus_backend::Backend::new(config, netns)` takes an optional
+network namespace every runtime thread enters, so an embedder's registry
+sockets are created in it regardless of the caller's. The HTTP connection
+pool is shared by both runtimes. A process using only local blobs never
+creates a Tokio runtime.
 
 ### `nydus-core` API
 
