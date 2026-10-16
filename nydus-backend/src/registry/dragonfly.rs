@@ -50,10 +50,10 @@ pub(crate) struct Dragonfly {
     /// prefetch is rescheduled hours later instead.
     prefetch_client: Proxy,
 
-    /// The origin client of the requests P2P does not carry, a `HEAD` for a
+    /// The HTTP client of the requests P2P does not carry, a `HEAD` for a
     /// blob's size, as dfdaemon's own proxy forwards non-`GET` requests
     /// straight to the origin.
-    origin_client: Http,
+    http_client: Http,
 
     /// The rate-limited origin client an on-demand read falls back to when
     /// the seed peers cannot serve it, every attempt claiming a slot first.
@@ -67,7 +67,7 @@ pub(crate) struct Dragonfly {
 impl Dragonfly {
     /// Creates the transport, each seed peer client connecting to the
     /// configured scheduler on the runtime of its read kind, with
-    /// `origin_client` for the requests that go to the origin and a fallback
+    /// `http_client` for the requests that go to the origin and a fallback
     /// client built from `http_config` under the configured rate limit.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
@@ -75,7 +75,7 @@ impl Dragonfly {
     pub(crate) fn new(
         config: DragonflyConfig,
         http_config: &HttpConfig,
-        origin_client: Http,
+        http_client: Http,
         runtime: &Runtime,
     ) -> io::Result<Self> {
         Ok(Self {
@@ -91,7 +91,7 @@ impl Dragonfly {
                 config.scheduler_endpoint,
                 0,
             )?,
-            origin_client,
+            http_client,
             fallback_client: Http::new(
                 http_config,
                 Some(RateLimit::new(
@@ -131,7 +131,7 @@ impl Transport for Dragonfly {
     /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
     /// request that is not a `GET`.
     async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.origin_client.head(url, headers).await
+        self.http_client.head(url, headers).await
     }
 
     /// Fetches `url` through the on-demand client at `Level6`, the SDK's
