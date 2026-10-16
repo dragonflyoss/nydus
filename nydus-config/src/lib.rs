@@ -18,6 +18,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use url::{Position, Url};
 
 /// The name of the package.
 pub const NAME: &str = "nydus";
@@ -139,8 +140,9 @@ pub enum BackendConfig {
 
     /// Serve blobs from an OCI image registry. Parsed unconditionally so a
     /// build without the `registry` feature rejects the configuration
-    /// loudly at backend construction instead of silently ignoring it.
-    Registry(RegistryConfig),
+    /// loudly at backend construction instead of silently ignoring it. Boxed
+    /// as it dwarfs the local variant.
+    Registry(Box<RegistryConfig>),
 }
 
 /// The blob backend, the `type` tag of [`BackendConfig`].
@@ -191,10 +193,10 @@ impl fmt::Display for ReadKind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
-    /// The registry address including the scheme, e.g.
-    /// `https://registry-1.docker.io` or `http://127.0.0.1:5000`. The scheme
-    /// selects between TLS and plain HTTP.
-    pub addr: String,
+    /// The registry address, an `http` or `https` origin carrying no path,
+    /// query or fragment, e.g. `https://registry-1.docker.io` or
+    /// `http://127.0.0.1:5000`. The scheme selects between TLS and plain HTTP.
+    pub addr: Url,
 
     /// The image repository (no tag or digest), e.g. `library/ubuntu`.
     pub repository: String,
@@ -593,6 +595,14 @@ impl Config {
         }
 
         if let BackendConfig::Registry(registry) = &self.backend {
+            if !matches!(registry.addr.scheme(), "http" | "https")
+                || &registry.addr[Position::BeforePath..] != "/"
+            {
+                return Err(Error::InvalidConfig(format!(
+                    "addr {} must be http(s)://host[:port]",
+                    registry.addr
+                )));
+            }
             if registry.http.request_timeout.is_zero() {
                 return Err(Error::InvalidConfig(
                     "http.request_timeout must be greater than 0s".to_string(),
@@ -671,7 +681,7 @@ mod tests {
         let BackendConfig::Registry(registry) = &config.backend else {
             panic!("expected a registry backend, got {:?}", config.backend);
         };
-        assert_eq!(registry.addr, "http://127.0.0.1:5000");
+        assert_eq!(registry.addr.as_str(), "http://127.0.0.1:5000/");
         assert_eq!(registry.repository, "library/nydus-demo");
         assert_eq!(
             registry.auth.as_deref(),
@@ -742,7 +752,7 @@ config:
         let BackendConfig::Registry(registry) = &backend else {
             panic!("expected a registry backend, got {backend:?}");
         };
-        assert_eq!(registry.addr, "http://127.0.0.1:5000");
+        assert_eq!(registry.addr.as_str(), "http://127.0.0.1:5000/");
         assert_eq!(registry.repository, "library/ubuntu");
         assert_eq!(registry.auth.as_deref(), Some("YWxpY2U6c2VjcmV0"));
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
@@ -958,6 +968,38 @@ scope: all
                 serde_yaml::from_str::<PrefetchConfig>(yaml).is_err(),
                 "{yaml}"
             );
+        }
+    }
+
+    #[test]
+    fn registry_addr_must_be_a_bare_http_origin() {
+        let test_cases = vec![
+            ("http://127.0.0.1:5000", Some("http://127.0.0.1:5000/")),
+            (
+                "https://registry-1.docker.io",
+                Some("https://registry-1.docker.io/"),
+            ),
+            (
+                "https://registry.example.com/",
+                Some("https://registry.example.com/"),
+            ),
+            ("registry.example.com", None),
+            ("ftp://registry.example.com", None),
+            ("https://registry.example.com/v2", None),
+            ("https://registry.example.com/?x=1", None),
+        ];
+
+        for (addr, expected) in test_cases {
+            let yaml = format!(
+                "backend:\n  type: registry\n  config:\n    addr: {addr}\n    repository: library/ubuntu\n"
+            );
+            let parsed = Config::from_yaml(&yaml)
+                .ok()
+                .map(|config| match config.backend {
+                    BackendConfig::Registry(registry) => registry.addr.to_string(),
+                    backend => panic!("expected a registry backend, got {backend:?}"),
+                });
+            assert_eq!(parsed.as_deref(), expected, "addr={addr}");
         }
     }
 

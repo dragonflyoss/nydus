@@ -168,7 +168,9 @@ pub fn build_backend_with_runtime(
 ) -> io::Result<Arc<dyn Backend>> {
     let backend: Arc<dyn Backend> = match config {
         BackendConfig::Local(local) => Arc::new(Local::new(local.dir.clone())),
-        BackendConfig::Registry(registry) => Arc::new(Registry::new(registry.clone(), runtime)?),
+        BackendConfig::Registry(registry) => {
+            Arc::new(Registry::new((**registry).clone(), runtime)?)
+        }
     };
     Ok(backend)
 }

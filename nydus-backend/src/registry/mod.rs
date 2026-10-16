@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
-use url::{Position, Url};
+use url::Url;
 
 use nydus_config::RegistryConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata};
@@ -160,7 +160,6 @@ struct Client {
 impl Registry {
     /// Creates a registry backend from its configuration, running on `runtime`.
     pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
-        let addr = Self::parse_addr(&config.addr)?;
         let http = Http::new(&config.http, None)?;
 
         // Reject a Dragonfly configuration this build cannot honour.
@@ -192,7 +191,7 @@ impl Registry {
 
         Ok(Self {
             client: Arc::new(Client {
-                addr,
+                addr: config.addr,
                 repository: config.repository,
                 authorizer: Authorizer::new(config.auth.as_deref())?,
                 redirects: RedirectCache::new(),
@@ -201,25 +200,6 @@ impl Registry {
             }),
             runtime,
         })
-    }
-
-    /// Parses a registry `addr` such as `http://127.0.0.1:5000`, an `http` or
-    /// `https` origin carrying no path, query or fragment.
-    fn parse_addr(addr: &str) -> io::Result<Url> {
-        let url = Url::parse(addr).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid registry addr {addr}: {err}"),
-            )
-        })?;
-        if !matches!(url.scheme(), "http" | "https") || &url[Position::BeforePath..] != "/" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid registry addr {addr}: expected http(s)://host[:port]"),
-            ));
-        }
-
-        Ok(url)
     }
 }
 
@@ -759,7 +739,7 @@ mod tests {
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
         Registry {
             client: Arc::new(Client {
-                addr: Registry::parse_addr(&config.addr).unwrap(),
+                addr: config.addr,
                 repository: config.repository,
                 authorizer: Authorizer::new(config.auth.as_deref()).unwrap(),
                 redirects: RedirectCache::new(),
@@ -800,33 +780,6 @@ mod tests {
             registry.client.blob_url("abc123"),
             "https://registry.example.com/v2/library/ubuntu/blobs/sha256:abc123"
         );
-    }
-
-    #[test]
-    fn parse_addr_accepts_a_bare_http_origin() {
-        let test_cases = vec![
-            ("http://127.0.0.1:5000", Some("http://127.0.0.1:5000/")),
-            (
-                "https://registry-1.docker.io",
-                Some("https://registry-1.docker.io/"),
-            ),
-            (
-                "https://registry.example.com/",
-                Some("https://registry.example.com/"),
-            ),
-            ("registry.example.com", None),
-            ("ftp://registry.example.com", None),
-            ("https://registry.example.com/v2", None),
-            ("https://registry.example.com/?x=1", None),
-        ];
-
-        for (addr, expected) in test_cases {
-            assert_eq!(
-                Registry::parse_addr(addr).ok().as_ref().map(Url::as_str),
-                expected,
-                "addr={addr}"
-            );
-        }
     }
 
     #[test]

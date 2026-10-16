@@ -2267,6 +2267,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -4052,6 +4053,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
