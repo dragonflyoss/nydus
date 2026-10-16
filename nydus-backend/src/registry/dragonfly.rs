@@ -85,15 +85,14 @@ impl Dragonfly {
         scheduler_endpoint: String,
         max_retries: u8,
     ) -> io::Result<Proxy> {
-        runtime
-            .block_on_worker(kind, async move {
-                Proxy::builder()
-                    .scheduler_endpoint(scheduler_endpoint)
-                    .max_retries(max_retries)
-                    .build()
-                    .await
-            })?
-            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
+        runtime.block_on_worker(kind, async move {
+            Proxy::builder()
+                .scheduler_endpoint(scheduler_endpoint)
+                .max_retries(max_retries)
+                .build()
+                .await
+                .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
+        })
     }
 }
 

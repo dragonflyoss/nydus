@@ -133,7 +133,7 @@ impl Runtime {
     }
 
     /// Runs `future` on a thread of the runtime of `kind` and waits for its
-    /// result.
+    /// result, a task that panics or is cancelled failing like the I/O it ran.
     ///
     /// This is what puts DNS and TCP connect on a thread that entered the
     /// configured netns, where `Runtime::block_on` alone would poll on the
@@ -141,7 +141,7 @@ impl Runtime {
     pub(crate) fn block_on_worker<T>(
         &self,
         kind: ReadKind,
-        future: impl Future<Output = T> + Send + 'static,
+        future: impl Future<Output = io::Result<T>> + Send + 'static,
     ) -> io::Result<T>
     where
         T: Send + 'static,
@@ -152,7 +152,7 @@ impl Runtime {
         };
         runtime
             .block_on(runtime.spawn(future))
-            .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))
+            .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))?
     }
 
     /// Returns the tokio runtime of `kind` itself, for tests that poll a
@@ -242,7 +242,7 @@ mod tests {
             );
             assert_eq!(
                 runtime
-                    .block_on_worker(kind, async { current_netns() })
+                    .block_on_worker(kind, async { Ok(current_netns()) })
                     .unwrap(),
                 configured,
                 "{kind}"
@@ -250,7 +250,7 @@ mod tests {
             assert_eq!(
                 runtime
                     .block_on_worker(kind, async {
-                        tokio::task::spawn_blocking(current_netns).await.unwrap()
+                        Ok(tokio::task::spawn_blocking(current_netns).await.unwrap())
                     })
                     .unwrap(),
                 configured,

@@ -55,8 +55,6 @@ use reqwest::{Method, StatusCode};
 use tracing::warn;
 use url::Url;
 
-#[cfg(test)]
-use nydus_config::HttpConfig;
 use nydus_config::RegistryConfig;
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -94,40 +92,14 @@ trait Transport: Send + Sync {
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
-/// Splits a registry `addr` such as `http://127.0.0.1:5000` into its scheme
-/// and `host[:port]` authority.
-fn parse_registry_addr(addr: &str) -> io::Result<(&'static str, String)> {
-    let invalid = |reason: &str| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid registry addr {addr}: {reason}"),
-        )
-    };
-    let url = Url::parse(addr).map_err(|err| invalid(&err.to_string()))?;
-    let scheme = match url.scheme() {
-        "http" => "http",
-        "https" => "https",
-        other => return Err(invalid(&format!("unsupported scheme `{other}`"))),
-    };
-    let host = url.host_str().ok_or_else(|| invalid("missing host"))?;
-    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
-        return Err(invalid("must not carry a path, query, or fragment"));
-    }
-    let host = match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    };
-    Ok((scheme, host))
-}
-
 /// A blob backend over an OCI registry: the synchronous [`BlobBackend`] face
 /// of [`Inner`], which does the asynchronous work on the runtime.
 ///
 /// ```text
-/// read_range_into(dst)                         runtime worker
-///   │ spawn(get_blob into an owned buffer) ──▶ get_blob ◀── body chunks ── hyper / tonic
-///   │ block_on(join handle)                        │
-///   ◀──────────── one wake ───────────────────────┘
+/// read_range_into(dst)                      runtime worker
+///   │ spawn(get_blob, read its bytes) ──▶ get_blob ◀── body chunks ── hyper / tonic
+///   │ block_on(join handle)                     │
+///   ◀──────────── one wake ────────────────────┘
 ///   └─ copy into dst, note who served it
 /// ```
 pub(crate) struct Registry {
@@ -164,11 +136,8 @@ pub(crate) struct Registry {
 ///   └─ otherwise ──▶ http.get / prefetch / head
 /// ```
 struct Inner {
-    /// The scheme of the configured `addr`, `http` or `https`.
-    scheme: &'static str,
-
-    /// The registry `host[:port]` authority.
-    host: String,
+    /// The registry origin, `scheme://host[:port]/`.
+    addr: Url,
 
     /// The image repository, such as `library/ubuntu`.
     repository: String,
@@ -190,10 +159,6 @@ struct Inner {
     /// `backend-dragonfly` feature since the config is rejected.
     dragonfly: Option<Box<dyn Transport>>,
 
-    /// How reads are fetched when nothing else is known, the `protocol` label
-    /// of a failed read: Dragonfly when configured, otherwise HTTP.
-    protocol: Protocol,
-
     /// The runtimes every request runs on, one per read kind, last so the
     /// transports above drop before them.
     runtime: Arc<Runtime>,
@@ -203,20 +168,17 @@ struct Inner {
 impl Registry {
     /// Creates a registry backend from its configuration, running on `runtime`.
     pub(crate) fn new(config: RegistryConfig, runtime: Arc<Runtime>) -> io::Result<Self> {
-        let (scheme, host) = parse_registry_addr(&config.addr)?;
+        let addr = Self::parse_addr(&config.addr)?;
         let http = Http::new(&config.http, None)?;
 
         // Throttle the origin fallback by the configured back-to-source rate,
         // zero leaving it unthrottled.
-        let request_rate_limit = config
+        let rate_limit = config
             .dragonfly
             .as_ref()
-            .map_or(0, |dragonfly| dragonfly.back_to_source.request_rate_limit);
-        let rate_limit = if request_rate_limit > 0 {
-            Some(RateLimit::new(request_rate_limit, Duration::from_secs(1)))
-        } else {
-            None
-        };
+            .map(|dragonfly| dragonfly.back_to_source.request_rate_limit)
+            .filter(|&limit| limit > 0)
+            .map(|limit| RateLimit::new(limit, Duration::from_secs(1)));
         let back_to_source = Http::new(&config.http, rate_limit)?;
 
         // Reject a Dragonfly configuration this build cannot honour.
@@ -241,62 +203,63 @@ impl Registry {
         #[cfg(not(feature = "backend-dragonfly"))]
         let dragonfly: Option<Box<dyn Transport>> = None;
 
-        Ok(Self::from_parts(
-            scheme,
-            host,
-            config.repository,
-            Authorizer::new(config.auth.as_deref())?,
-            http,
-            back_to_source,
-            dragonfly,
-            runtime,
-        ))
-    }
-
-    /// Assembles a registry backend from its parts.
-    #[allow(clippy::too_many_arguments)]
-    fn from_parts(
-        scheme: &'static str,
-        host: String,
-        repository: String,
-        authorizer: Authorizer,
-        http: Http,
-        back_to_source: Http,
-        dragonfly: Option<Box<dyn Transport>>,
-        runtime: Arc<Runtime>,
-    ) -> Self {
-        let protocol = if dragonfly.is_some() {
-            Protocol::Dragonfly
-        } else {
-            Protocol::Http
-        };
-        Registry {
+        Ok(Self {
             inner: Arc::new(Inner {
-                scheme,
-                host,
-                repository,
-                authorizer,
+                addr,
+                repository: config.repository,
+                authorizer: Authorizer::new(config.auth.as_deref())?,
                 redirects: RedirectCache::new(),
                 http,
                 back_to_source,
                 dragonfly,
-                protocol,
                 runtime,
             }),
             first_read_done: AtomicBool::new(false),
             first_read: Mutex::new(()),
+        })
+    }
+
+    /// Parses a registry `addr` such as `http://127.0.0.1:5000` into its
+    /// origin, rejecting a scheme other than `http` or `https` and any path,
+    /// query or fragment.
+    fn parse_addr(addr: &str) -> io::Result<Url> {
+        let invalid = |reason: &str| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid registry addr {addr}: {reason}"),
+            )
+        };
+        let url = Url::parse(addr).map_err(|err| invalid(&err.to_string()))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(invalid(&format!("unsupported scheme `{}`", url.scheme())));
         }
+        if url.host_str().is_none() {
+            return Err(invalid("missing host"));
+        }
+        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err(invalid("must not carry a path, query, or fragment"));
+        }
+
+        Ok(url)
     }
 }
 
 /// Implements the registry requests.
 impl Inner {
+    /// Returns how reads are fetched when nothing else is known, the
+    /// `protocol` label of a failed read: Dragonfly when configured,
+    /// otherwise HTTP.
+    fn protocol(&self) -> Protocol {
+        if self.dragonfly.is_some() {
+            Protocol::Dragonfly
+        } else {
+            Protocol::Http
+        }
+    }
+
     /// Returns the URL of the blob with hex digest `hex`.
     fn blob_url(&self, hex: &str) -> String {
-        format!(
-            "{}://{}/v2/{}/blobs/sha256:{}",
-            self.scheme, self.host, self.repository, hex
-        )
+        format!("{}v2/{}/blobs/sha256:{hex}", self.addr, self.repository)
     }
 
     /// Sends a request.
@@ -486,23 +449,21 @@ impl Inner {
         let response = self
             .authorized_request(Method::HEAD, &url, HeaderMap::new(), kind)
             .await?;
-
-        let response = if response.status.is_redirection() {
-            let location = response.location()?;
-            let redirected = self
-                .send(Method::HEAD, &location, HeaderMap::new(), kind)
-                .await?;
-            if !redirected.status.is_success() {
-                return Err(redirected.into_io_error().await);
-            }
-            redirected
-        } else if response.status.is_success() {
-            response
-        } else {
+        if response.status.is_success() {
+            return response.content_length();
+        }
+        if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
-        };
+        }
 
-        response.content_length()
+        let redirected = self
+            .send(Method::HEAD, &response.location()?, HeaderMap::new(), kind)
+            .await?;
+        if !redirected.status.is_success() {
+            return Err(redirected.into_io_error().await);
+        }
+
+        redirected.content_length()
     }
 
     /// Recovers a blob's metadata from its trailing footer: `HEAD` for the
@@ -521,9 +482,8 @@ impl Inner {
             .await?
             .bytes(BlobFooter::SIZE)
             .await?;
-        let footer =
-            BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
-                .map_err(io::Error::other)?;
+        let footer_bytes = footer_bytes.as_ref().try_into().map_err(io::Error::other)?;
+        let footer = BlobFooter::from_bytes(footer_bytes).map_err(io::Error::other)?;
         footer
             .validate_layout(footer_offset)
             .map_err(io::Error::other)?;
@@ -562,7 +522,7 @@ impl BlobBackend for Registry {
     /// Returns the configured transport: Dragonfly when configured, otherwise
     /// HTTP.
     fn protocol(&self) -> Option<Protocol> {
-        Some(self.inner.protocol)
+        Some(self.inner.protocol())
     }
 
     /// Recovers the blob's metadata from the registry on the runtime.
@@ -575,7 +535,7 @@ impl BlobBackend for Registry {
         let blob_id = *blob_id;
         self.inner.runtime.block_on_worker(kind, async move {
             inner.get_blob_metadata(&blob_id, kind).await
-        })?
+        })
     }
 
     /// Fills `dst` with the blob bytes from `offset` on the runtime, recording
@@ -602,15 +562,11 @@ impl BlobBackend for Registry {
         let inner = self.inner.clone();
         let blob_id = *blob_id;
         let len = dst.len();
-        let result = self
-            .inner
-            .runtime
-            .block_on_worker(kind, async move {
-                let response = inner.get_blob(&blob_id, offset, len, kind).await?;
-                let protocol = response.protocol;
-                Ok::<_, io::Error>((response.bytes(len).await?, protocol))
-            })
-            .and_then(|result| result);
+        let result = self.inner.runtime.block_on_worker(kind, async move {
+            let response = inner.get_blob(&blob_id, offset, len, kind).await?;
+            let protocol = response.protocol;
+            Ok((response.bytes(len).await?, protocol))
+        });
 
         // Record the metrics and copy the bytes out.
         match result {
@@ -630,7 +586,7 @@ impl BlobBackend for Registry {
                 collect_read_backend_failure_metrics(
                     kind,
                     Backend::Registry,
-                    Some(self.inner.protocol),
+                    Some(self.inner.protocol()),
                     start.elapsed(),
                 );
                 Err(err)
@@ -651,6 +607,7 @@ mod tests {
 
     use bytes::Bytes;
 
+    use nydus_config::HttpConfig;
     use nydus_telemetry::metrics;
 
     use super::response::Body;
@@ -871,24 +828,25 @@ mod tests {
         interval: Duration,
     ) -> Registry {
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let (scheme, host) = parse_registry_addr(&config.addr).unwrap();
-        let http = Http::new(&config.http, None).unwrap();
         let rate_limit = if interval.is_zero() {
             None
         } else {
             Some(RateLimit::new(1, interval))
         };
-        let back_to_source = Http::new(&config.http, rate_limit).unwrap();
-        Registry::from_parts(
-            scheme,
-            host,
-            config.repository,
-            Authorizer::new(config.auth.as_deref()).unwrap(),
-            http,
-            back_to_source,
-            Some(Box::new(transport)),
-            test_runtime(),
-        )
+        Registry {
+            inner: Arc::new(Inner {
+                addr: Registry::parse_addr(&config.addr).unwrap(),
+                repository: config.repository,
+                authorizer: Authorizer::new(config.auth.as_deref()).unwrap(),
+                redirects: RedirectCache::new(),
+                http: Http::new(&config.http, None).unwrap(),
+                back_to_source: Http::new(&config.http, rate_limit).unwrap(),
+                dragonfly: Some(Box::new(transport)),
+                runtime: test_runtime(),
+            }),
+            first_read_done: AtomicBool::new(false),
+            first_read: Mutex::new(()),
+        }
     }
 
     fn scripted_registry_at(
@@ -940,27 +898,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_registry_addr_splits_the_scheme_and_authority() {
+    fn parse_addr_accepts_a_bare_http_origin() {
         let test_cases = vec![
-            ("http://127.0.0.1:5000", Some(("http", "127.0.0.1:5000"))),
+            ("http://127.0.0.1:5000", Some("http://127.0.0.1:5000/")),
             (
                 "https://registry-1.docker.io",
-                Some(("https", "registry-1.docker.io")),
+                Some("https://registry-1.docker.io/"),
             ),
             (
                 "https://registry.example.com/",
-                Some(("https", "registry.example.com")),
+                Some("https://registry.example.com/"),
             ),
             ("registry.example.com", None),
             ("ftp://registry.example.com", None),
             ("https://registry.example.com/v2", None),
+            ("https://registry.example.com/?x=1", None),
         ];
+
         for (addr, expected) in test_cases {
-            let parsed = parse_registry_addr(addr).ok();
             assert_eq!(
-                parsed
-                    .as_ref()
-                    .map(|(scheme, host)| (*scheme, host.as_str())),
+                Registry::parse_addr(addr).ok().as_ref().map(Url::as_str),
                 expected,
                 "addr={addr}"
             );
@@ -976,10 +933,12 @@ auth: YWxpY2U6c2VjcmV0
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = Registry::new(config, test_runtime()).unwrap();
-        assert_eq!(registry.inner.host, "registry.example.com");
-        assert_eq!(registry.inner.scheme, "https");
+        assert_eq!(
+            registry.inner.addr.as_str(),
+            "https://registry.example.com/"
+        );
         assert!(registry.inner.dragonfly.is_none());
-        assert_eq!(registry.inner.protocol, Protocol::Http);
+        assert_eq!(registry.inner.protocol(), Protocol::Http);
     }
 
     #[cfg(not(feature = "backend-dragonfly"))]
