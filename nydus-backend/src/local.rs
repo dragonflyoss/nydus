@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -268,11 +268,7 @@ impl Backend for Local {
     }
 
     /// Reads the blob's metadata from the sidecar file or the full blob.
-    fn read_blob_metadata(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        _kind: ReadKind,
-    ) -> io::Result<BlobMetadata> {
+    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let slot = self.source(blob_id)?;
         let data = self.read_blob_metadata_bytes(&slot.source)?;
         BlobMetadata::from_bytes(data).map_err(io::Error::other)
@@ -300,27 +296,13 @@ impl Backend for Local {
         }))
     }
 
-    /// Copies the raw blob metadata to `dst`.
-    fn save_blob_metadata(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        _kind: ReadKind,
-        dst: &Path,
-    ) -> io::Result<()> {
-        let slot = self.source(blob_id)?;
-        let data = self.read_blob_metadata_bytes(&slot.source)?;
-        let mut file = File::create(dst)?;
-        file.write_all(&data)?;
-        file.flush()
-    }
-
-    /// Fills `buf` from the data region, recording the read's metrics.
+    /// Fills `buf` from the data region for an on-demand read, recording the
+    /// read's metrics.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         buf: &mut [u8],
-        kind: ReadKind,
     ) -> io::Result<()> {
         if buf.is_empty() {
             return Ok(());
@@ -329,14 +311,45 @@ impl Backend for Local {
         let result = self.read_range(blob_id, offset, buf);
         match &result {
             Ok(()) => collect_read_backend_finished_metrics(
-                kind,
+                ReadKind::OnDemand,
                 BackendKind::Local,
                 None,
                 buf.len() as u64,
                 start.elapsed(),
             ),
             Err(_) => collect_read_backend_failure_metrics(
-                kind,
+                ReadKind::OnDemand,
+                BackendKind::Local,
+                None,
+                start.elapsed(),
+            ),
+        }
+        result
+    }
+
+    /// Fills `buf` from the data region for a prefetch read, recording the
+    /// read's metrics.
+    fn prefetch_range_into(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        let result = self.read_range(blob_id, offset, buf);
+        match &result {
+            Ok(()) => collect_read_backend_finished_metrics(
+                ReadKind::Prefetch,
+                BackendKind::Local,
+                None,
+                buf.len() as u64,
+                start.elapsed(),
+            ),
+            Err(_) => collect_read_backend_failure_metrics(
+                ReadKind::Prefetch,
                 BackendKind::Local,
                 None,
                 start.elapsed(),
@@ -391,19 +404,15 @@ mod tests {
             let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
             let backend = Local::new(dir.path().to_path_buf());
 
-            let blob_metadata = backend
-                .read_blob_metadata(&full_blob_id, ReadKind::OnDemand)
-                .unwrap();
+            let blob_metadata = backend.read_blob_metadata(&full_blob_id).unwrap();
             let mut data = vec![0u8; 4096];
             backend
-                .read_range_into(&full_blob_id, 0, &mut data, ReadKind::OnDemand)
+                .read_range_into(&full_blob_id, 0, &mut data)
                 .unwrap();
 
             assert_eq!(blob_metadata.chunk_count(), 1, "sidecar={sidecar}");
             assert_eq!(data, payload, "sidecar={sidecar}");
-            assert!(backend
-                .read_blob_metadata(&data_blob_id, ReadKind::OnDemand)
-                .is_err());
+            assert!(backend.read_blob_metadata(&data_blob_id).is_err());
         }
     }
 }

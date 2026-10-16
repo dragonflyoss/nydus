@@ -324,9 +324,8 @@ mod tests {
         fn read_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
-            kind: ReadKind,
         ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id, kind)
+            self.inner.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -334,13 +333,12 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            kind: ReadKind,
         ) -> io::Result<()> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
             }
-            self.inner.read_range_into(blob_id, offset, dst, kind)
+            self.inner.read_range_into(blob_id, offset, dst)
         }
     }
 
@@ -443,9 +441,8 @@ mod tests {
         fn read_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
-            kind: ReadKind,
         ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id, kind)
+            self.inner.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -453,10 +450,9 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            kind: ReadKind,
         ) -> io::Result<()> {
             self.reads.lock().unwrap().push(*blob_id);
-            self.inner.read_range_into(blob_id, offset, dst, kind)
+            self.inner.read_range_into(blob_id, offset, dst)
         }
     }
 

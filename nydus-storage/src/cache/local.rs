@@ -532,8 +532,17 @@ impl LocalBlobCache {
         })?;
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
-        self.backend
-            .read_range_into(&self.blob_id, head.compressed_offset(), encoded, kind)?;
+        match kind {
+            ReadKind::OnDemand => {
+                self.backend
+                    .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?
+            }
+            ReadKind::Prefetch => self.backend.prefetch_range_into(
+                &self.blob_id,
+                head.compressed_offset(),
+                encoded,
+            )?,
+        }
         Ok((encoded, decoded, head.compressed_offset()))
     }
 
@@ -992,7 +1001,11 @@ fn load_or_fetch_blob_metadata(
             .prefix(".blob-meta-")
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
-        backend.save_blob_metadata(&blob_id, kind, tmp.path())?;
+        let blob_metadata = match kind {
+            ReadKind::OnDemand => backend.read_blob_metadata(&blob_id)?,
+            ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
+        };
+        blob_metadata.save(tmp.path()).map_err(io::Error::other)?;
         if let Err(err) = BlobMetadata::from_path(tmp.path()) {
             return Err(io::Error::other(err));
         }
@@ -1523,9 +1536,8 @@ mod tests {
         fn read_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
-            kind: ReadKind,
         ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id, kind)
+            self.inner.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -1533,10 +1545,9 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            kind: ReadKind,
         ) -> io::Result<()> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst, kind)
+            self.inner.read_range_into(blob_id, offset, dst)
         }
     }
 

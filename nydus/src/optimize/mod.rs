@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::build::merge::rewrite_bootstrap_with_ondemand_blob;
 use crate::parse_unix_address;
-use nydus_backend::{Backend, ReadKind};
+use nydus_backend::Backend;
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
@@ -201,12 +201,7 @@ pub fn build_ondemand_blob(
                 .map_err(|err| Error::Overflow(format!("copy read exceeds usize: {err}")))?;
             let mut window = vec![0u8; len];
             backend
-                .read_range_into(
-                    &blob_id,
-                    first.compressed_offset(),
-                    &mut window,
-                    ReadKind::Prefetch,
-                )
+                .prefetch_range_into(&blob_id, first.compressed_offset(), &mut window)
                 .with_context(|| {
                     format!(
                         "failed to read chunk groups {}..={} of blob {blob_index}",

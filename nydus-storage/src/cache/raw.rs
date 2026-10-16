@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::{Backend, RawDeviceFile, ReadKind};
+use nydus_backend::{Backend, RawDeviceFile};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use super::BlobCache;
@@ -49,8 +49,7 @@ impl BlobCache for RawDeviceBlobCache {
         if dst.is_empty() {
             return Ok(());
         }
-        self.backend
-            .read_range_into(&self.blob_id, offset, dst, ReadKind::OnDemand)
+        self.backend.read_range_into(&self.blob_id, offset, dst)
     }
 
     /// A raw device holds no chunk groups to warm.
@@ -119,9 +118,7 @@ mod tests {
         let (payload, blob_id) = write_raw_device_blob(dir.path());
         let backend: Arc<dyn Backend> = Arc::new(Local::new(dir.path().to_path_buf()));
         assert!(backend.is_raw_device(&blob_id).unwrap());
-        assert!(backend
-            .read_blob_metadata(&blob_id, ReadKind::OnDemand)
-            .is_err());
+        assert!(backend.read_blob_metadata(&blob_id).is_err());
 
         let cache = RawDeviceBlobCache::new(blob_id, backend);
         let mut out = vec![0u8; 100];
@@ -166,9 +163,8 @@ mod tests {
         fn read_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
-            kind: ReadKind,
         ) -> io::Result<BlobMetadata> {
-            self.0.read_blob_metadata(blob_id, kind)
+            self.0.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -176,9 +172,8 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            kind: ReadKind,
         ) -> io::Result<()> {
-            self.0.read_range_into(blob_id, offset, dst, kind)
+            self.0.read_range_into(blob_id, offset, dst)
         }
     }
 

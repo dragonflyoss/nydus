@@ -34,7 +34,10 @@ impl RemoteBlobCache {
         backend: Arc<dyn Backend>,
         kind: ReadKind,
     ) -> io::Result<Self> {
-        let blob_metadata = backend.read_blob_metadata(&blob_id, kind)?;
+        let blob_metadata = match kind {
+            ReadKind::OnDemand => backend.read_blob_metadata(&blob_id)?,
+            ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
+        };
         Ok(Self {
             blob_id,
             blob_metadata,
@@ -73,12 +76,8 @@ impl BlobCache for RemoteBlobCache {
         let decoded_len = meta.max_bytes_per_chunk_group() as usize;
         let mut buffers = ChunkGroupBuffers::default();
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
-        self.backend.read_range_into(
-            &self.blob_id,
-            head.compressed_offset(),
-            encoded,
-            ReadKind::OnDemand,
-        )?;
+        self.backend
+            .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?;
 
         dst.fill(0);
         for index in first..=last {

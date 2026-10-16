@@ -486,54 +486,61 @@ impl Backend for Registry {
         Some(self.client.protocol())
     }
 
-    /// Recovers the blob's metadata from the registry on the runtime.
-    fn read_blob_metadata(
+    /// Recovers the blob's metadata from the registry on the on-demand
+    /// runtime.
+    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
+        let client = self.client.clone();
+        let blob_id = *blob_id;
+        self.runtime
+            .block_on_worker(ReadKind::OnDemand, async move {
+                client.get_blob_metadata(&blob_id).await
+            })
+    }
+
+    /// Recovers the blob's metadata from the registry on the prefetch
+    /// runtime.
+    fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
-        kind: ReadKind,
     ) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
-        self.runtime.block_on_worker(kind, async move {
-            match kind {
-                ReadKind::OnDemand => client.get_blob_metadata(&blob_id).await,
-                ReadKind::Prefetch => client.prefetch_blob_metadata(&blob_id).await,
-            }
-        })
+        self.runtime
+            .block_on_worker(ReadKind::Prefetch, async move {
+                client.prefetch_blob_metadata(&blob_id).await
+            })
     }
 
-    /// Fills `buf` with the blob bytes from `offset` on the runtime, recording
-    /// the read's metrics.
+    /// Fills `buf` with the blob bytes from `offset` on the on-demand
+    /// runtime, recording the read's metrics.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         buf: &mut [u8],
-        kind: ReadKind,
     ) -> io::Result<()> {
         if buf.is_empty() {
             return Ok(());
         }
 
-        // Read the bytes on a thread of the kind's runtime.
+        // Read the bytes on a thread of the on-demand runtime.
         let start = Instant::now();
         let client = self.client.clone();
         let blob_id = *blob_id;
         let length = buf.len();
-        let result = self.runtime.block_on_worker(kind, async move {
-            let response = match kind {
-                ReadKind::OnDemand => client.get_blob(&blob_id, offset, length).await?,
-                ReadKind::Prefetch => client.prefetch_blob(&blob_id, offset, length).await?,
-            };
-            let protocol = response.protocol;
-            Ok((response.bytes(length).await?, protocol))
-        });
+        let result = self
+            .runtime
+            .block_on_worker(ReadKind::OnDemand, async move {
+                let response = client.get_blob(&blob_id, offset, length).await?;
+                let protocol = response.protocol;
+                Ok((response.bytes(length).await?, protocol))
+            });
 
         // Record the metrics and copy the bytes out.
         match result {
             Ok((bytes, protocol)) => {
                 collect_read_backend_finished_metrics(
-                    kind,
+                    ReadKind::OnDemand,
                     BackendKind::Registry,
                     Some(protocol),
                     length as u64,
@@ -544,7 +551,57 @@ impl Backend for Registry {
             }
             Err(err) => {
                 collect_read_backend_failure_metrics(
-                    kind,
+                    ReadKind::OnDemand,
+                    BackendKind::Registry,
+                    Some(self.client.protocol()),
+                    start.elapsed(),
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Fills `buf` with the blob bytes from `offset` on the prefetch runtime,
+    /// recording the read's metrics.
+    fn prefetch_range_into(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        // Read the bytes on a thread of the prefetch runtime.
+        let start = Instant::now();
+        let client = self.client.clone();
+        let blob_id = *blob_id;
+        let length = buf.len();
+        let result = self
+            .runtime
+            .block_on_worker(ReadKind::Prefetch, async move {
+                let response = client.prefetch_blob(&blob_id, offset, length).await?;
+                let protocol = response.protocol;
+                Ok((response.bytes(length).await?, protocol))
+            });
+
+        // Record the metrics and copy the bytes out.
+        match result {
+            Ok((bytes, protocol)) => {
+                collect_read_backend_finished_metrics(
+                    ReadKind::Prefetch,
+                    BackendKind::Registry,
+                    Some(protocol),
+                    length as u64,
+                    start.elapsed(),
+                );
+                buf.copy_from_slice(&bytes);
+                Ok(())
+            }
+            Err(err) => {
+                collect_read_backend_failure_metrics(
+                    ReadKind::Prefetch,
                     BackendKind::Registry,
                     Some(self.client.protocol()),
                     start.elapsed(),
@@ -945,9 +1002,11 @@ auth: YWxpY2U6c2VjcmV0
             let transport = ScriptedTransport::new(vec![status(StatusCode::NOT_FOUND)]);
             let registry = scripted_registry(&origin, transport.clone());
 
-            let err = registry
-                .read_blob_metadata(&TEST_BLOB_ID, kind)
-                .unwrap_err();
+            let err = match kind {
+                ReadKind::OnDemand => registry.read_blob_metadata(&TEST_BLOB_ID),
+                ReadKind::Prefetch => registry.prefetch_blob_metadata(&TEST_BLOB_ID),
+            }
+            .unwrap_err();
 
             assert!(err.to_string().contains("404"), "kind={kind:?}: {err}");
             assert_eq!(origin.hits(), 1, "kind={kind:?}");
@@ -972,7 +1031,7 @@ auth: YWxpY2U6c2VjcmV0
                 thread::spawn(move || {
                     let mut buf = [0u8; 2];
                     registry
-                        .read_range_into(&TEST_BLOB_ID, 0, &mut buf, ReadKind::OnDemand)
+                        .read_range_into(&TEST_BLOB_ID, 0, &mut buf)
                         .unwrap();
                     buf
                 })

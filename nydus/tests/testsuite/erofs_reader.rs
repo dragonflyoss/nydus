@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tempfile::{tempdir, NamedTempFile, TempDir};
 
 use nydus::build::{build_image, BuildImageOptions, NativeLayout};
-use nydus_backend::{Backend, Local, ReadKind};
+use nydus_backend::{Backend, Local};
 use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
 use nydus_core::build::bootstrap::render_bootstrap;
 use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeData, InodeInfo};
@@ -603,26 +603,20 @@ impl Backend for CountingBackend {
         self.local.protocol()
     }
 
-    fn read_blob_metadata(&self, blob_id: &[u8; 32], kind: ReadKind) -> io::Result<BlobMetadata> {
-        self.local.read_blob_metadata(blob_id, kind)
+    fn read_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
+        self.local.read_blob_metadata(blob_id)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; 32]) -> io::Result<bool> {
         self.local.is_raw_device(blob_id)
     }
 
-    fn read_range_into(
-        &self,
-        blob_id: &[u8; 32],
-        offset: u64,
-        dst: &mut [u8],
-        kind: ReadKind,
-    ) -> io::Result<()> {
+    fn read_range_into(&self, blob_id: &[u8; 32], offset: u64, dst: &mut [u8]) -> io::Result<()> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
         }
-        self.local.read_range_into(blob_id, offset, dst, kind)
+        self.local.read_range_into(blob_id, offset, dst)
     }
 }
 

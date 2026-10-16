@@ -15,7 +15,7 @@ mod registry;
 
 use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nydus_config::BackendConfig;
@@ -62,7 +62,9 @@ pub struct RawDeviceFile {
 /// ```
 ///
 /// Every implementation reports its reads to [`nydus_telemetry::metrics`]
-/// itself, once per [`read_range_into`](Self::read_range_into) call.
+/// itself, once per range read. A backend that serves an on-demand and a
+/// prefetch read alike keeps the `prefetch_*` defaults, which forward to the
+/// on-demand methods.
 pub trait Backend: Send + Sync {
     /// Returns which backend this is, the `backend` label of its metrics.
     fn kind(&self) -> BackendKind;
@@ -81,12 +83,16 @@ pub trait Backend: Send + Sync {
         Ok(*blob_id)
     }
 
-    /// Reads the blob's metadata, `kind` attributing the reads that recover it.
-    fn read_blob_metadata(
+    /// Reads the blob's metadata for an on-demand read.
+    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
+
+    /// Reads the blob's metadata for a prefetch read.
+    fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
-        kind: ReadKind,
-    ) -> io::Result<BlobMetadata>;
+    ) -> io::Result<BlobMetadata> {
+        self.read_blob_metadata(blob_id)
+    }
 
     /// Returns whether the blob is a raw EROFS device without blob meta, a
     /// native `erofs-*` layer whose bytes are read as-is and never cached or
@@ -109,27 +115,23 @@ pub trait Backend: Send + Sync {
         Ok(None)
     }
 
-    /// Writes the blob's metadata to `dst`, `kind` attributing the reads that
-    /// recover it.
-    fn save_blob_metadata(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        kind: ReadKind,
-        dst: &Path,
-    ) -> io::Result<()> {
-        let blob_metadata = self.read_blob_metadata(blob_id, kind)?;
-        blob_metadata.save(dst).map_err(io::Error::other)
-    }
-
-    /// Fills `buf` with the blob bytes from `offset`, `kind` attributing the
-    /// read.
+    /// Fills `buf` with the blob bytes from `offset` for an on-demand read.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         buf: &mut [u8],
-        kind: ReadKind,
     ) -> io::Result<()>;
+
+    /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
+    fn prefetch_range_into(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
+        self.read_range_into(blob_id, offset, buf)
+    }
 }
 
 /// Creates a blob backend from its configuration.

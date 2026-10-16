@@ -531,7 +531,6 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_backend::ReadKind;
     use nydus_format::blob::{BlobMetadataDigester, BlobMetadataTableType};
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -823,7 +822,6 @@ mod tests {
         fn read_blob_metadata(
             &self,
             _blob_id: &[u8; SHA256_DIGEST_SIZE],
-            _kind: ReadKind,
         ) -> io::Result<nydus_format::blob::BlobMetadata> {
             Err(io::Error::other("unused"))
         }
@@ -833,7 +831,6 @@ mod tests {
             _blob_id: &[u8; SHA256_DIGEST_SIZE],
             _offset: u64,
             _dst: &mut [u8],
-            _kind: ReadKind,
         ) -> io::Result<()> {
             Err(io::Error::other("unused"))
         }
