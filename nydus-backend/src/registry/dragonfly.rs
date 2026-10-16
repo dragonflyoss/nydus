@@ -60,7 +60,7 @@ pub(crate) struct Dragonfly {
 
     /// The origin client an on-demand read goes back to when the seed peers
     /// cannot serve it, every attempt claiming a rate limit slot first.
-    back_to_source: Http,
+    back_to_source_client: Http,
 }
 
 /// Implements the Dragonfly transport.
@@ -93,7 +93,7 @@ impl Dragonfly {
             prefetch: Self::client(runtime, ReadKind::Prefetch, config.scheduler_endpoint, 0)?,
             request_timeout: config.request_timeout,
             http,
-            back_to_source: Http::new(http_config, rate_limit)?,
+            back_to_source_client: Http::new(http_config, rate_limit)?,
         })
     }
 
@@ -210,7 +210,7 @@ impl Transport for Dragonfly {
         };
         warn!("dragonfly request failed, falling back to the origin: {err}");
         let start = Instant::now();
-        self.back_to_source
+        self.back_to_source_client
             .get(url, headers)
             .await
             .inspect_err(|_| {
