@@ -40,13 +40,14 @@ mod redirect;
 mod response;
 mod rt;
 
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
-use reqwest::{Method, StatusCode};
+use reqwest::StatusCode;
 use url::Url;
 
 use nydus_config::RegistryConfig;
@@ -111,17 +112,18 @@ pub(crate) struct Registry {
 /// ```text
 /// get_blob(range, kind)
 ///   │
-///   ├─ cached redirect ──▶ send(GET redirect) ──────────────────────┐
-///   │                       401/403 evicts it and falls through      │
-///   └─ blob URL ──▶ authorized_request(GET) ─┬─ 3xx ──▶ send(GET location), cache it
-///                                            └─ 2xx ──────────────────┐
+///   ├─ cached redirect ──▶ get(redirect) ─────────────────────────────┐
+///   │                       401/403 evicts it and falls through       │
+///   └─ blob URL ──▶ execute(get) ─┬─ 3xx ──▶ get(location), cache it  │
+///                                 └─ 2xx ─────────────────────────────┐
 ///                                                                     ▼
 ///                                                                  bytes
 ///
-/// send(method, url)
-///   ├─ HEAD ──▶ transport.head
-///   ├─ on-demand GET ──▶ transport.get
-///   └─ prefetch GET ──▶ transport.prefetch     transport: Dragonfly when configured, else Http
+/// get(url, kind)                                transport: Dragonfly when
+///   ├─ on-demand ──▶ transport.get                configured, else Http
+///   └─ prefetch ──▶ transport.prefetch
+///
+/// stat_blob ──▶ execute(transport.head), following one redirect
 /// ```
 struct Client {
     /// The registry origin, `scheme://host[:port]/`.
@@ -234,65 +236,58 @@ impl Client {
         format!("{}v2/{}/blobs/sha256:{hex}", self.addr, self.repository)
     }
 
-    /// Sends `method` for `url` through Dragonfly when it is configured,
-    /// otherwise straight to the origin, a `GET` as the read of `kind`.
-    async fn send(
-        &self,
-        method: Method,
-        url: &str,
-        headers: HeaderMap,
-        kind: ReadKind,
-    ) -> io::Result<Response> {
-        let transport: &dyn Transport = match &self.dragonfly {
+    /// Returns the transport a blob `GET` rides: Dragonfly when it is
+    /// configured, otherwise the origin.
+    fn transport(&self) -> &dyn Transport {
+        match &self.dragonfly {
             Some(dragonfly) => dragonfly.as_ref(),
             None => &self.http,
-        };
-        match (method, kind) {
-            (Method::HEAD, _) => transport.head(url, headers).await,
-            (_, ReadKind::OnDemand) => transport.get(url, headers).await,
-            (_, ReadKind::Prefetch) => transport.prefetch(url, headers).await,
         }
     }
 
-    /// Sends a request, answering a `401` with the auth handshake.
+    /// Sends the blob `GET` of a read of `kind` through the transport.
+    async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
+        match kind {
+            ReadKind::OnDemand => self.transport().get(url, headers).await,
+            ReadKind::Prefetch => self.transport().prefetch(url, headers).await,
+        }
+    }
+
+    /// Executes `request` with `headers` carrying the cached Authorization,
+    /// answering a `401` with the auth handshake and executing it again.
     ///
     /// ```text
-    /// send with cached Authorization ──▶ not 401 ──▶ answer
+    /// request with cached Authorization ──▶ not 401 ──▶ answer
     ///   │ 401
     ///   ▼
-    /// resend without Authorization when one was sent, to get a fresh challenge
+    /// request again without Authorization when one was sent, for a fresh challenge
     ///   │
     ///   ▼
-    /// WWW-Authenticate ──▶ Authorizer::authenticate ──▶ resend authorized
+    /// WWW-Authenticate ──▶ Authorizer::authenticate ──▶ request again authorized
     /// ```
-    async fn authorized_request(
-        &self,
-        method: Method,
-        url: &str,
-        mut headers: HeaderMap,
-        kind: ReadKind,
-    ) -> io::Result<Response> {
-        // Send with the cached Authorization, when one is still valid.
+    async fn execute<F, Fut>(&self, mut headers: HeaderMap, request: F) -> io::Result<Response>
+    where
+        F: Fn(HeaderMap) -> Fut,
+        Fut: Future<Output = io::Result<Response>>,
+    {
+        // Request with the cached Authorization, when one is still valid.
         self.authorizer.authorize(&mut headers);
-        let response = self
-            .send(method.clone(), url, headers.clone(), kind)
-            .await?;
+        let response = request(headers.clone()).await?;
         if response.status != StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
 
-        // Forget the refused Authorization and resend without it to get a
-        // fresh challenge.
+        // Forget the refused Authorization and request again without it to
+        // get a fresh challenge.
         let challenge_response = match headers.remove(AUTHORIZATION) {
             Some(stale) => {
                 self.authorizer.invalidate(&stale);
-                self.send(method.clone(), url, headers.clone(), kind)
-                    .await?
+                request(headers.clone()).await?
             }
             None => response,
         };
 
-        // Answer the challenge and resend authorized.
+        // Answer the challenge and request again authorized.
         let challenge = challenge_response
             .headers
             .get(WWW_AUTHENTICATE)
@@ -304,7 +299,7 @@ impl Client {
 
         self.authorizer.authenticate(&self.http, challenge).await?;
         self.authorizer.authorize(&mut headers);
-        self.send(method, url, headers, kind).await
+        request(headers).await
     }
 
     /// Sends the `GET` for `len` blob bytes from `offset` and returns the
@@ -344,9 +339,7 @@ impl Client {
             return Ok(None);
         };
 
-        let response = self
-            .send(Method::GET, &redirect, headers.clone(), kind)
-            .await?;
+        let response = self.get(&redirect, headers.clone(), kind).await?;
         match response.status {
             status if status.is_success() => Ok(Some(response)),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
@@ -367,7 +360,7 @@ impl Client {
     ) -> io::Result<Response> {
         let url = self.blob_url(hex);
         let response = self
-            .authorized_request(Method::GET, &url, headers.clone(), kind)
+            .execute(headers.clone(), |headers| self.get(&url, headers, kind))
             .await?;
         if response.status.is_success() {
             return Ok(response);
@@ -377,7 +370,7 @@ impl Client {
         }
 
         let location = response.location()?;
-        let redirected = self.send(Method::GET, &location, headers, kind).await?;
+        let redirected = self.get(&location, headers, kind).await?;
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
@@ -387,14 +380,11 @@ impl Client {
     }
 
     /// Returns the size of a blob, from a `HEAD` request following one redirect.
-    async fn stat_blob(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        kind: ReadKind,
-    ) -> io::Result<u64> {
+    async fn stat_blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<u64> {
         let url = self.blob_url(&hex::encode(blob_id));
+        let transport = self.transport();
         let response = self
-            .authorized_request(Method::HEAD, &url, HeaderMap::new(), kind)
+            .execute(HeaderMap::new(), |headers| transport.head(&url, headers))
             .await?;
         if response.status.is_success() {
             return response.content_length();
@@ -403,8 +393,8 @@ impl Client {
             return Err(response.into_io_error().await);
         }
 
-        let redirected = self
-            .send(Method::HEAD, &response.location()?, HeaderMap::new(), kind)
+        let redirected = transport
+            .head(&response.location()?, HeaderMap::new())
             .await?;
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
@@ -420,7 +410,7 @@ impl Client {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
     ) -> io::Result<BlobMetadata> {
-        let size = self.stat_blob(blob_id, kind).await?;
+        let size = self.stat_blob(blob_id).await?;
         let footer_offset =
             BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
 
