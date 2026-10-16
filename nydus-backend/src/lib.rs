@@ -38,6 +38,7 @@ pub use nydus_config::{BackendKind, Protocol, ReadKind};
 
 /// A raw EROFS device backed by the range
 /// `[data_offset, data_offset + data_size)` of a local file.
+#[derive(Debug, Clone)]
 pub struct RawDeviceFile {
     /// The path of the local file.
     pub path: PathBuf,
