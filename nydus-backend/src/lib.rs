@@ -4,9 +4,9 @@
 //! Every API here returns `io::Result` so the OS errno survives to the
 //! service edges, and this crate never depends on the control-plane error
 //! type. Registry auth and Dragonfly failures are `io::Error`s too, carrying
-//! their message. A prefetch read the origin or Dragonfly could not serve, a
-//! `429`, `5xx`, `408` or a transport failure, is sent once more after a
-//! random delay of hours before it fails.
+//! their message. A prefetch read the origin or Dragonfly answered with a
+//! `429`, `5xx` or `408` is sent once more after a random delay of hours
+//! before it fails.
 
 mod local;
 

@@ -100,7 +100,8 @@ trait Transport: Send + Sync {
 
     /// Sends the `GET` of a background prefetch read, sending it once more
     /// after a random [`PREFETCH_RETRY_DELAY`] when the transport's own
-    /// retries did not cure a transient failure.
+    /// retries did not cure a `429`, `5xx` or `408`; a transport failure
+    /// fails the read at once.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 

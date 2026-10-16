@@ -7,8 +7,8 @@ registry, with optional Dragonfly SDK P2P reads.
 Every API here returns `io::Result` so the OS errno survives to the service
 edges; this crate does not depend on the control-plane error type. Registry
 auth and Dragonfly failures are `io::Error`s too; a prefetch read the origin
-or Dragonfly could not serve is sent once more after a random delay of hours
-before it fails.
+or Dragonfly answered with a `429`, `5xx` or `408` is sent once more after a
+random delay of hours before it fails.
 
 ## Features
 

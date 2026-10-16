@@ -11,9 +11,10 @@
 //! What a read does once the SDK's own retries are spent is decided here: a
 //! `429`, `5xx`, `408` or transport failure sends an on-demand read back to
 //! the origin through the rate-limited client, as dfdaemon itself goes back
-//! to source, and sends a prefetch read once more after a random delay of
-//! hours, so a Dragonfly outage degrades prefetch rather than flooding the
-//! registry. Any other answer is served as is, a dfdaemon `422` included.
+//! to source; a `429`, `5xx` or `408` sends a prefetch read once more after
+//! a random delay of hours and a transport failure fails it at once, so a
+//! Dragonfly outage degrades prefetch rather than flooding the registry. Any
+//! other answer is served as is, a dfdaemon `422` included.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -232,9 +233,10 @@ impl Transport for Dragonfly {
 
     /// Fetches `url` through the prefetch client at `Level3`, so a first
     /// download lets a normal peer go back to source ahead of it, and logs
-    /// the outcome; a `429`, `5xx`, `408` or transport failure is sent once
-    /// more after a random delay of hours, never touching the origin. The
-    /// body and errors are otherwise handled as in [`get`](Self::get).
+    /// the outcome; a `429`, `5xx` or `408` is sent once more after a random
+    /// delay of hours, a transport failure fails the read at once, and the
+    /// origin is never touched. The body and errors are otherwise handled as
+    /// in [`get`](Self::get).
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
@@ -304,15 +306,13 @@ impl Transport for Dragonfly {
 
             // Serve a definitive answer, or the second transient one, as a
             // prefetch never falls back to the origin.
-            let err = match result {
-                Ok(response) if response.needs_fallback() && !retried => {
-                    response.into_io_error().await
-                }
-                Err(err) if !retried => err,
-                result => return result,
-            };
+            let response = result?;
+            if !response.needs_fallback() || retried {
+                return Ok(response);
+            }
 
             // Retry once after a random delay of hours.
+            let err = response.into_io_error().await;
             let delay = rand::rng().random_range(PREFETCH_RETRY_DELAY);
             warn!("dragonfly request failed, retrying in {delay:?}: {err}");
             tokio::time::sleep(delay).await;

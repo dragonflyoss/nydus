@@ -166,9 +166,9 @@ impl Transport for Http {
     }
 
     /// Sends the `GET` of a prefetch read to `url` with `headers`, the body
-    /// left streaming, and logs the outcome; a `429`, `5xx`, `408` or
-    /// transport failure the retry middleware did not cure is sent once more
-    /// after a random delay of hours.
+    /// left streaming, and logs the outcome; a `429`, `5xx` or `408` the
+    /// retry middleware did not cure is sent once more after a random delay
+    /// of hours, a transport failure fails the read at once.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let mut retried = false;
         loop {
@@ -202,15 +202,13 @@ impl Transport for Http {
             }
 
             // Serve a definitive answer, or the second transient one.
-            let err = match result {
-                Ok(response) if response.needs_fallback() && !retried => {
-                    response.into_io_error().await
-                }
-                Err(err) if !retried => err,
-                result => return result,
-            };
+            let response = result?;
+            if !response.needs_fallback() || retried {
+                return Ok(response);
+            }
 
             // Retry once after a random delay of hours.
+            let err = response.into_io_error().await;
             let delay = rand::rng().random_range(PREFETCH_RETRY_DELAY);
             warn!("origin request failed, retrying in {delay:?}: {err}");
             tokio::time::sleep(delay).await;
@@ -344,6 +342,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn prefetch_fails_at_once_on_a_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        drop(listener);
+        let config = HttpConfig {
+            max_retries: 0,
+            ..Default::default()
+        };
+        let http = Http::new(&config, None).unwrap();
+
+        let start = Instant::now();
+        assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
+        assert!(start.elapsed() < *PREFETCH_RETRY_DELAY.start());
     }
 
     #[test]

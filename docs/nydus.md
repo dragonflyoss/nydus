@@ -1142,11 +1142,10 @@ Fields:
 	priority blobs, then the rest; `auto` behaves like `ondemand` when a
 	priority blob is an ondemand blob and like `all` otherwise, so an
 	unoptimized image is still streamed in the background. A prefetch read the
-	backend could not serve (a `429`, `5xx`, `408` or transport failure the
-	transport's own retries did not cure, from the origin or Dragonfly) is
-	sent once more after a random `6h`–`12h` delay so retry load spreads out
-	instead of stampeding; a blob whose prefetch still fails is logged and
-	skipped.
+	origin or Dragonfly answered with a `429`, `5xx` or `408` the transport's
+	own retries did not cure is sent once more after a random `6h`–`12h` delay
+	so retry load spreads out instead of stampeding; a transport failure, and
+	a blob whose prefetch still fails, is logged and skipped.
 	See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
@@ -1216,9 +1215,9 @@ Fields under `backend.config`:
 		Dragonfly cannot serve a read, where every attempt also waits for a
 		back-to-source rate limit slot, so this default bounds how often the
 		origin is retried before such a read errors out. A prefetch read still
-		failing with a `429`, `5xx`, `408` or transport error after them is
-		sent once more after a random `6h`–`12h` delay, like one Dragonfly
-		cannot serve; an on-demand read errors out.
+		answered with a `429`, `5xx` or `408` after them is sent once more
+		after a random `6h`–`12h` delay, like one Dragonfly answers so; an
+		on-demand read, and a prefetch read failing in transport, errors out.
 	- `proxy` (optional): routes every registry request through an HTTP
 		forward proxy. Requests keep their original upstream URL, so a proxy
 		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
@@ -1266,7 +1265,8 @@ Fields under `backend.config`:
 	| `2xx` / `3xx` / `401` / `403` / `404` / other definitive `4xx` | Served as is: `401` runs the auth handshake and resends, `403` and `404` fail the read without retry or fallback | Same |
 	| dfdaemon `400` (invalid request or URL) / `422` (the origin sent no `Content-Length`, or the piece length is invalid) | No retry, fail, no fallback | Same |
 	| dfdaemon `507` (the seed peer has no room for the blob) | Sent once more after a random 6h–12h delay, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
-	| `429` / `5xx` / `408` / timeout / connection / dfdaemon `500` | Sent once more after a random 6h–12h delay, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
+	| `429` / `5xx` / `408` / dfdaemon `500` | Sent once more after a random 6h–12h delay, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
+	| timeout / connection | Fails the read at once, no retry, no origin fallback | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
 	| Origin fallback: `5xx` / `408` / `429` / transport error | n/a | Retried by the HTTP client's retry middleware up to `http.max_retries` times, every attempt waiting for its own back-to-source rate limit slot |
 
 	Prefetch reads never fall back to the origin, so a Dragonfly outage
