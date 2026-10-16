@@ -35,7 +35,7 @@
 //! are ready to copy out.
 
 mod auth;
-#[cfg(feature = "backend-dragonfly")]
+#[cfg(feature = "dragonfly")]
 mod dragonfly;
 mod http;
 mod netns;
@@ -65,7 +65,7 @@ use nydus_telemetry::metrics::{
 use crate::{Backend, BlobBackend, Protocol, ReadKind};
 
 use self::auth::{Authorizer, Challenge};
-#[cfg(feature = "backend-dragonfly")]
+#[cfg(feature = "dragonfly")]
 use self::dragonfly::Dragonfly;
 use self::http::{Http, RateLimit};
 pub use self::netns::{Netns, NetnsId};
@@ -159,7 +159,7 @@ struct Client {
     back_to_source: Http,
 
     /// The Dragonfly transport when configured, always `None` without the
-    /// `backend-dragonfly` feature since the config is rejected.
+    /// `dragonfly` feature since the config is rejected.
     dragonfly: Option<Box<dyn Transport>>,
 }
 
@@ -181,25 +181,25 @@ impl Registry {
         let back_to_source = Http::new(&config.http, rate_limit)?;
 
         // Reject a Dragonfly configuration this build cannot honour.
-        #[cfg(not(feature = "backend-dragonfly"))]
+        #[cfg(not(feature = "dragonfly"))]
         if let Some(dragonfly) = &config.dragonfly {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "dragonfly.scheduler_endpoint is set ({}) but this build lacks \
-                     the `backend-dragonfly` feature",
+                     the `dragonfly` feature",
                     dragonfly.scheduler_endpoint
                 ),
             ));
         }
 
         // Connect the Dragonfly transport when configured.
-        #[cfg(feature = "backend-dragonfly")]
+        #[cfg(feature = "dragonfly")]
         let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
             Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, http.clone(), &runtime)?)),
             None => None,
         };
-        #[cfg(not(feature = "backend-dragonfly"))]
+        #[cfg(not(feature = "dragonfly"))]
         let dragonfly: Option<Box<dyn Transport>> = None;
 
         Ok(Self {
@@ -940,7 +940,7 @@ auth: YWxpY2U6c2VjcmV0
         assert_eq!(registry.client.protocol(), Protocol::Http);
     }
 
-    #[cfg(not(feature = "backend-dragonfly"))]
+    #[cfg(not(feature = "dragonfly"))]
     #[test]
     fn new_rejects_dragonfly_endpoint_without_the_feature() {
         let yaml = "
@@ -952,7 +952,7 @@ dragonfly:
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
         let err = Registry::new(config, test_runtime()).err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("backend-dragonfly"));
+        assert!(err.to_string().contains("dragonfly"));
     }
 
     #[test]

@@ -1246,7 +1246,7 @@ Fields under `backend.config`:
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
 	configured `request_timeout` per attempt; every other request (`HEAD`, auth token
 	fetches) goes directly to the origin registry. Only available when the
-	binary is built with the `backend-dragonfly` feature. Omit to talk
+	binary is built with the `dragonfly` feature. Omit to talk
 	to the origin directly. Each read is counted under the backend that served
 	it (see [Metrics](#metrics)).
 
@@ -2708,7 +2708,7 @@ The core needs neither FUSE nor the CLI stack: it lives in the
 standalone `nydus-core` crate (`nydus-core/`). Depending on `nydus-core`
 produces a minimal library surface (no fuser/hyper/tokio-server/clap)
 suitable for embedding; enable the registry backend with
-`--features nydus-backend/backend-registry` when blobs are served from an
+`--features nydus-backend/registry` when blobs are served from an
 OCI registry. See [Crate Architecture](#crate-architecture) for how the
 library crates layer.
 

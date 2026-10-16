@@ -1,4 +1,4 @@
-//! The Dragonfly SDK transport, feature `backend-dragonfly`.
+//! The Dragonfly SDK transport, feature `dragonfly`.
 //!
 //! A blob `GET` rides the Dragonfly client SDK to the seed peers named by the
 //! scheduler, every other request going straight to the origin. The SDK owns

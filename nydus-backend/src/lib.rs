@@ -11,7 +11,7 @@
 
 mod local;
 
-#[cfg(feature = "backend-registry")]
+#[cfg(feature = "registry")]
 mod registry;
 
 use std::fs::File;
@@ -25,14 +25,14 @@ use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 pub use local::Local;
 
-#[cfg(feature = "backend-registry")]
+#[cfg(feature = "registry")]
 pub(crate) use registry::Registry;
 
 /// A registry backend runs on a [`Runtime`], one tokio runtime per read kind,
 /// built from its `http` configuration; an embedding process builds one
 /// itself, with the thread bounds and network namespace it needs, and shares
 /// it across its backends through [`build_backend_with_runtime`].
-#[cfg(feature = "backend-registry")]
+#[cfg(feature = "registry")]
 pub use registry::{Netns, NetnsId, Runtime};
 
 pub use nydus_config::{Backend, Protocol, ReadKind};
@@ -140,7 +140,7 @@ pub trait BlobBackend: Send + Sync {
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
     match config {
         BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
-        #[cfg(feature = "backend-registry")]
+        #[cfg(feature = "registry")]
         BackendConfig::Registry(registry) => {
             let runtime = Runtime::new(
                 registry.http.worker_threads,
@@ -149,10 +149,10 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>>
             )?;
             build_backend_with_runtime(config, Arc::new(runtime))
         }
-        #[cfg(not(feature = "backend-registry"))]
+        #[cfg(not(feature = "registry"))]
         BackendConfig::Registry(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "registry backend requires the `backend-registry` feature",
+            "registry backend requires the `registry` feature",
         )),
     }
 }
@@ -162,7 +162,7 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>>
 ///
 /// An embedder builds the runtimes with the namespace its registries must be
 /// reached from and hands them to every backend it opens.
-#[cfg(feature = "backend-registry")]
+#[cfg(feature = "registry")]
 pub fn build_backend_with_runtime(
     config: &BackendConfig,
     runtime: Arc<Runtime>,
@@ -185,7 +185,7 @@ mod tests {
         assert!(build_backend(&config).is_ok());
     }
 
-    #[cfg(feature = "backend-registry")]
+    #[cfg(feature = "registry")]
     #[test]
     fn build_backend_builds_a_registry_backend() {
         let config: BackendConfig = serde_yaml::from_str(
@@ -195,7 +195,7 @@ mod tests {
         assert!(build_backend(&config).is_ok());
     }
 
-    #[cfg(not(feature = "backend-registry"))]
+    #[cfg(not(feature = "registry"))]
     #[test]
     fn build_backend_rejects_registry_without_the_feature() {
         let config: BackendConfig = serde_yaml::from_str(
@@ -204,6 +204,6 @@ mod tests {
         .unwrap();
         let err = build_backend(&config).err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("backend-registry"));
+        assert!(err.to_string().contains("registry"));
     }
 }

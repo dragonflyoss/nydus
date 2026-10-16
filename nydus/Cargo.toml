@@ -13,7 +13,7 @@ path = "src/bin/nydus/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["backend-registry"]
+default = ["registry"]
 # FUSE mount support (ErofsFs over fuser).
 fuse = ["dep:fuser", "dep:signal-hook"]
 # The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
@@ -45,11 +45,11 @@ nbd = ["dep:signal-hook"]
 # (CONFIG_EROFS_FS_BACKED_BY_FILE).
 fileio = ["fuse", "dep:signal-hook"]
 # Container image registry backend (OCI distribution).
-backend-registry = ["nydus-backend/backend-registry"]
+registry = ["nydus-backend/registry"]
 # Dragonfly P2P reads for the registry backend.
-backend-dragonfly = [
-  "backend-registry",
-  "nydus-backend/backend-dragonfly",
+dragonfly = [
+  "registry",
+  "nydus-backend/dragonfly",
 ]
 # ublk block device target: expose the flattened image as /dev/ublkbN so the
 # kernel EROFS driver can mount it directly. Requires Linux >= 6.0 (ublk_drv).

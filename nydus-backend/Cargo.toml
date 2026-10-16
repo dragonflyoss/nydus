@@ -11,7 +11,7 @@ readme = "README.md"
 [features]
 default = []
 # Container image registry backend (OCI distribution).
-backend-registry = [
+registry = [
   "dep:serde",
   "dep:serde_json",
   "dep:tracing",
@@ -30,8 +30,8 @@ backend-registry = [
   "dep:tokio-util",
 ]
 # Dragonfly P2P reads for the registry backend.
-backend-dragonfly = [
-  "backend-registry",
+dragonfly = [
+  "registry",
   "dep:dragonfly-api",
   "dep:dragonfly-client-request",
 ]

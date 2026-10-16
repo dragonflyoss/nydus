@@ -70,7 +70,7 @@ backend:
       # worker_threads: 2
       # max_blocking_threads: 8
 
-    # Optional Dragonfly block (requires the `backend-dragonfly`
+    # Optional Dragonfly block (requires the `dragonfly`
     # feature). When set, blob GETs are routed through the Dragonfly client
     # SDK for P2P distribution. An on-demand read the seed peers cannot serve
     # goes back to the origin registry through a rate limit, a prefetch read

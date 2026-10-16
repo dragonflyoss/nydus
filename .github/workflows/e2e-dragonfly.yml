@@ -50,7 +50,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build nydus
-        run: cargo build -p nydus --release --features "cli,backend-dragonfly"
+        run: cargo build -p nydus --release --features "cli,dragonfly"
 
       - name: Set up Go
         uses: actions/setup-go@v5

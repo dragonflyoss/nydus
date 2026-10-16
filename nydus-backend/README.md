@@ -14,8 +14,8 @@ layer acts on.
 
 | Feature | Description |
 | --- | --- |
-| `backend-registry` | Container image registry backend (OCI distribution). |
-| `backend-dragonfly` | Dragonfly P2P reads for the registry backend. |
+| `registry` | Container image registry backend (OCI distribution). |
+| `dragonfly` | Dragonfly P2P reads for the registry backend. |
 
 All features are disabled by default, keeping the dependency footprint
 minimal (local backend only).

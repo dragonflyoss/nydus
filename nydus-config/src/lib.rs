@@ -138,7 +138,7 @@ pub enum BackendConfig {
     Local(LocalConfig),
 
     /// Serve blobs from an OCI image registry. Parsed unconditionally so a
-    /// build without the `backend-registry` feature rejects the configuration
+    /// build without the `registry` feature rejects the configuration
     /// loudly at backend construction instead of silently ignoring it.
     Registry(RegistryConfig),
 }
@@ -212,7 +212,7 @@ pub struct RegistryConfig {
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
     /// hitting the origin registry directly. Only honored when built with the
-    /// `backend-dragonfly` feature; parsed unconditionally so a build
+    /// `dragonfly` feature; parsed unconditionally so a build
     /// without the feature can reject the block loudly instead of silently
     /// ignoring it.
     #[serde(default)]
