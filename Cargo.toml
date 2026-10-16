@@ -144,7 +144,7 @@ members = [
 
 [workspace.dependencies]
 # rust-vmm crates
-vhost = "0.15.0"
+vhost = "0.17.0"
 virtio-bindings = "0.2.7"
 virtio-queue = "0.17.0"
 vm-memory = "=0.17.1"
