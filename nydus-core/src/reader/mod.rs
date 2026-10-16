@@ -122,7 +122,7 @@ impl ErofsReader {
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
         let backend: Arc<dyn Backend> = match blob_infos.as_slice() {
-            [info] => Arc::new(Local::open(info.blob_id, blob_path)?),
+            [info] => Arc::new(Local::from_full_blob(info.blob_id, blob_path)?),
             _ => Arc::new(Local::new(blob_dir.to_path_buf())),
         };
         let blobs = BlobCaches::new(

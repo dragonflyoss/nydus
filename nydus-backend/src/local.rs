@@ -73,14 +73,14 @@ impl Local {
         }
     }
 
-    /// Opens the self-contained full blob at `path` as a backend: `blob_id`,
-    /// the digest of its data region by which its embedded bootstrap names
-    /// it, is served from the file itself, any other blob from the file's
-    /// directory.
+    /// Creates a backend from the self-contained full blob at `path`:
+    /// `blob_id`, the digest of its data region by which its embedded
+    /// bootstrap names it, is served from the file itself, any other blob
+    /// from the file's directory.
     ///
     /// The data region is verified against `blob_id` and the whole file hashed
     /// for its full blob digest.
-    pub fn open(blob_id: [u8; SHA256_DIGEST_SIZE], path: &Path) -> io::Result<Self> {
+    pub fn from_full_blob(blob_id: [u8; SHA256_DIGEST_SIZE], path: &Path) -> io::Result<Self> {
         // Hash the whole file for its full blob digest and read its footer.
         let mut file = File::open(path).map_err(|err| {
             io::Error::new(
@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn open_verifies_the_data_digest() {
+    fn from_full_blob_verifies_the_data_digest() {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let blob_metadata = single_chunk_group(&payload);
@@ -398,8 +398,8 @@ mod tests {
         let path = dir.path().join(hex::encode(full_blob_id));
         let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
 
-        let backend = Local::open(data_blob_id, &path).unwrap();
+        let backend = Local::from_full_blob(data_blob_id, &path).unwrap();
         assert_eq!(backend.full_blob_id(&data_blob_id).unwrap(), full_blob_id);
-        assert!(Local::open(full_blob_id, &path).is_err());
+        assert!(Local::from_full_blob(full_blob_id, &path).is_err());
     }
 }
