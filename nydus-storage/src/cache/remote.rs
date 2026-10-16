@@ -34,7 +34,7 @@ impl RemoteBlobCache {
         backend: Arc<dyn Backend>,
         kind: ReadKind,
     ) -> io::Result<Self> {
-        let blob_metadata = backend.blob_metadata(&blob_id, kind)?;
+        let blob_metadata = backend.read_blob_metadata(&blob_id, kind)?;
         Ok(Self {
             blob_id,
             blob_metadata,

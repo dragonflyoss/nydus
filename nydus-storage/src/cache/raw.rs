@@ -119,7 +119,9 @@ mod tests {
         let (payload, blob_id) = write_raw_device_blob(dir.path());
         let backend: Arc<dyn Backend> = Arc::new(Local::new(dir.path().to_path_buf()));
         assert!(backend.is_raw_device(&blob_id).unwrap());
-        assert!(backend.blob_metadata(&blob_id, ReadKind::OnDemand).is_err());
+        assert!(backend
+            .read_blob_metadata(&blob_id, ReadKind::OnDemand)
+            .is_err());
 
         let cache = RawDeviceBlobCache::new(blob_id, backend);
         let mut out = vec![0u8; 100];
@@ -161,12 +163,12 @@ mod tests {
             self.0.protocol()
         }
 
-        fn blob_metadata(
+        fn read_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             kind: ReadKind,
         ) -> io::Result<BlobMetadata> {
-            self.0.blob_metadata(blob_id, kind)
+            self.0.read_blob_metadata(blob_id, kind)
         }
 
         fn read_range_into(

@@ -82,8 +82,8 @@ pub trait Backend: Send + Sync {
         Ok(*blob_id)
     }
 
-    /// Returns the blob's metadata, `kind` attributing the reads that recover it.
-    fn blob_metadata(
+    /// Reads the blob's metadata, `kind` attributing the reads that recover it.
+    fn read_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
@@ -118,7 +118,7 @@ pub trait Backend: Send + Sync {
         kind: ReadKind,
         dst: &Path,
     ) -> io::Result<()> {
-        let blob_metadata = self.blob_metadata(blob_id, kind)?;
+        let blob_metadata = self.read_blob_metadata(blob_id, kind)?;
         blob_metadata.save(dst).map_err(io::Error::other)
     }
 

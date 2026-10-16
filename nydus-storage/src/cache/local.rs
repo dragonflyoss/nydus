@@ -1520,12 +1520,12 @@ mod tests {
             self.inner.protocol()
         }
 
-        fn blob_metadata(
+        fn read_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             kind: ReadKind,
         ) -> io::Result<BlobMetadata> {
-            self.inner.blob_metadata(blob_id, kind)
+            self.inner.read_blob_metadata(blob_id, kind)
         }
 
         fn read_range_into(

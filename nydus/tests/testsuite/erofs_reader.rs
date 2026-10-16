@@ -603,8 +603,8 @@ impl Backend for CountingBackend {
         self.local.protocol()
     }
 
-    fn blob_metadata(&self, blob_id: &[u8; 32], kind: ReadKind) -> io::Result<BlobMetadata> {
-        self.local.blob_metadata(blob_id, kind)
+    fn read_blob_metadata(&self, blob_id: &[u8; 32], kind: ReadKind) -> io::Result<BlobMetadata> {
+        self.local.read_blob_metadata(blob_id, kind)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; 32]) -> io::Result<bool> {

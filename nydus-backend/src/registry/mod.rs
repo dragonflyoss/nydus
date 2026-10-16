@@ -463,7 +463,7 @@ impl Backend for Registry {
     }
 
     /// Recovers the blob's metadata from the registry on the runtime.
-    fn blob_metadata(
+    fn read_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
@@ -941,13 +941,15 @@ dragonfly:
     }
 
     #[test]
-    fn blob_metadata_stats_at_the_origin_and_reads_through_the_transport() {
+    fn read_blob_metadata_stats_at_the_origin_and_reads_through_the_transport() {
         for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
             let origin = OriginStub::serve(vec![0u8; 2 * BlobFooter::SIZE]);
             let transport = ScriptedTransport::new(vec![status(StatusCode::NOT_FOUND)]);
             let registry = scripted_registry(&origin, transport.clone());
 
-            let err = registry.blob_metadata(&TEST_BLOB_ID, kind).unwrap_err();
+            let err = registry
+                .read_blob_metadata(&TEST_BLOB_ID, kind)
+                .unwrap_err();
 
             assert!(err.to_string().contains("404"), "kind={kind:?}: {err}");
             assert_eq!(origin.hits(), 1, "kind={kind:?}");

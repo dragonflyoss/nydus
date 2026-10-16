@@ -268,7 +268,7 @@ impl Backend for Local {
     }
 
     /// Reads the blob's metadata from the sidecar file or the full blob.
-    fn blob_metadata(
+    fn read_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         _kind: ReadKind,
@@ -376,7 +376,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn blob_metadata_reads_the_sidecar_file_or_the_embedded_region() {
+    fn read_blob_metadata_uses_the_sidecar_file_or_the_embedded_region() {
         let test_cases = vec![true, false];
 
         for sidecar in test_cases {
@@ -392,7 +392,7 @@ mod tests {
             let backend = Local::new(dir.path().to_path_buf());
 
             let blob_metadata = backend
-                .blob_metadata(&full_blob_id, ReadKind::OnDemand)
+                .read_blob_metadata(&full_blob_id, ReadKind::OnDemand)
                 .unwrap();
             let mut data = vec![0u8; 4096];
             backend
@@ -402,7 +402,7 @@ mod tests {
             assert_eq!(blob_metadata.chunk_count(), 1, "sidecar={sidecar}");
             assert_eq!(data, payload, "sidecar={sidecar}");
             assert!(backend
-                .blob_metadata(&data_blob_id, ReadKind::OnDemand)
+                .read_blob_metadata(&data_blob_id, ReadKind::OnDemand)
                 .is_err());
         }
     }

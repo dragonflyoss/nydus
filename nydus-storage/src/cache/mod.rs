@@ -820,7 +820,7 @@ mod tests {
             Some(nydus_backend::Protocol::Dragonfly)
         }
 
-        fn blob_metadata(
+        fn read_blob_metadata(
             &self,
             _blob_id: &[u8; SHA256_DIGEST_SIZE],
             _kind: ReadKind,
