@@ -50,6 +50,7 @@ impl Response {
                 buf.freeze()
             }
         };
+
         if bytes.len() < length {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,

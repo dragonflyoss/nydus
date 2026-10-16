@@ -408,8 +408,9 @@ impl Client {
             .await?
             .bytes(BlobFooter::SIZE)
             .await?;
-        let footer_bytes = footer_bytes.as_ref().try_into().map_err(io::Error::other)?;
-        let footer = BlobFooter::from_bytes(footer_bytes).map_err(io::Error::other)?;
+        let footer =
+            BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
         footer
             .validate_layout(footer_offset)
             .map_err(io::Error::other)?;
@@ -448,8 +449,9 @@ impl Client {
             .await?
             .bytes(BlobFooter::SIZE)
             .await?;
-        let footer_bytes = footer_bytes.as_ref().try_into().map_err(io::Error::other)?;
-        let footer = BlobFooter::from_bytes(footer_bytes).map_err(io::Error::other)?;
+        let footer =
+            BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
         footer
             .validate_layout(footer_offset)
             .map_err(io::Error::other)?;
