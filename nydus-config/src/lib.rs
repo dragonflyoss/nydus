@@ -397,9 +397,9 @@ pub struct DragonflyConfig {
 
     /// The maximum number of retries of an on-demand blob `GET` through
     /// Dragonfly on a transient failure (timeout, connection, dfdaemon, `5xx`,
-    /// `408` or `429`), each sent to the next seed peer at once, at most 3.
-    /// Any other answer returns at once. Prefetch reads never retry, a failed
-    /// prefetch is left to the delayed reschedule.
+    /// `408` or `429`), each sent to the next seed peer after an exponential
+    /// backoff, at most 3. Any other answer returns at once. Prefetch reads
+    /// never retry, a failed prefetch is left to the delayed reschedule.
     #[serde(default = "default_registry_dragonfly_max_retries")]
     pub max_retries: u32,
 

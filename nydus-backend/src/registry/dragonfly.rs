@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 
 use dragonfly_api::common::v2::Priority;
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
-use dragonfly_client_request::{GetRequest, Proxy, Request as _};
+use dragonfly_client_request::{ExponentialBuilder, GetRequest, Proxy, Request as _};
 
 use nydus_config::{DragonflyConfig, HttpConfig};
 use nydus_telemetry::metrics::collect_read_backend_failure_metrics;
@@ -41,9 +41,9 @@ use crate::{BackendKind, Protocol, ReadKind};
 /// The Dragonfly SDK transport, one client per read kind so each kind keeps
 /// its own retry budget.
 pub(crate) struct Dragonfly {
-    /// The seed peer client of on-demand reads, retrying at once because a
-    /// FUSE reader is waiting, a `429` included since another seed peer may
-    /// not be rate limited.
+    /// The seed peer client of on-demand reads, retrying on the next seed
+    /// peer after an exponential backoff, a `429` included since another seed
+    /// peer may not be rate limited.
     ondemand_client: Proxy,
 
     /// The seed peer client of prefetch reads, never retrying: a failed
@@ -105,7 +105,7 @@ impl Dragonfly {
     /// Creates the client of reads of `kind`, connected to the scheduler at
     /// `scheduler_endpoint` on that kind's runtime so it is reached from the
     /// runtime's netns, retrying a request `max_retries` times across seed
-    /// peers.
+    /// peers with a jittered exponential backoff.
     fn client(
         runtime: &Runtime,
         kind: ReadKind,
@@ -116,6 +116,7 @@ impl Dragonfly {
             Proxy::builder()
                 .scheduler_endpoint(scheduler_endpoint)
                 .max_retries(max_retries)
+                .backoff(ExponentialBuilder::default().with_jitter())
                 .build()
                 .await
                 .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))

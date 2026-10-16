@@ -1251,9 +1251,9 @@ Fields under `backend.config`:
 	it (see [Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
-	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times at
-	once, each attempt on the next seed peer serving the blob. A prefetch read
-	never retries. Any other answer returns at once. What happens next depends
+	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times
+	after a jittered exponential backoff, each attempt on the next seed peer
+	serving the blob. A prefetch read never retries. Any other answer returns at once. What happens next depends
 	on the read kind:
 
 	| Dragonfly outcome | Prefetch | On-demand |
@@ -1273,8 +1273,8 @@ Fields under `backend.config`:
 	- `request_timeout` (default `30s`): the timeout of each attempt of a
 		request through the seed peers, one chunk group per request.
 	- `max_retries` (default `1`, at most `3`): Dragonfly retries of an
-		on-demand read on a transient failure, each on the next seed peer.
-		Prefetch reads never retry.
+		on-demand read on a transient failure, each on the next seed peer after
+		an exponential backoff. Prefetch reads never retry.
 	- `back_to_source.request_rate_limit` (default `1`, i.e. 1 QPS per
 		process): the rate limit of origin requests issued when the seed peers
 		cannot serve an on-demand read, in requests per second; `0` disables

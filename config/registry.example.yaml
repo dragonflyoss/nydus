@@ -86,8 +86,9 @@ backend:
     #   request_timeout: 30s
     #
     #   # Retries of an on-demand read on a transient failure (timeout,
-    #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer.
-    #   # Default: 1, at most 3. Prefetch reads never retry.
+    #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer
+    #   # after an exponential backoff. Default: 1, at most 3. Prefetch reads
+    #   # never retry.
     #   max_retries: 1
     #
     #   # Origin reads issued when the seed peers cannot serve an on-demand
