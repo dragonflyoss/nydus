@@ -54,22 +54,22 @@ impl Dragonfly {
     /// peers.
     pub(crate) fn new(config: DragonflyConfig, runtime: &Runtime) -> io::Result<Self> {
         Ok(Self {
-            // Config::validate bounds max_retries to 3, so it fits the SDK's u8.
-            ondemand: Self::connect(
+            ondemand: Self::client(
                 runtime,
                 ReadKind::OnDemand,
                 config.scheduler_endpoint.clone(),
                 config.max_retries as u8,
             )?,
-            prefetch: Self::connect(runtime, ReadKind::Prefetch, config.scheduler_endpoint, 0)?,
+            prefetch: Self::client(runtime, ReadKind::Prefetch, config.scheduler_endpoint, 0)?,
             request_timeout: config.request_timeout,
         })
     }
 
-    /// Connects a client to the scheduler at `scheduler_endpoint` on the
-    /// runtime of `kind`, so the scheduler is reached from that runtime's
-    /// netns, retrying a request `max_retries` times across seed peers.
-    fn connect(
+    /// Creates the client of reads of `kind`, connected to the scheduler at
+    /// `scheduler_endpoint` on that kind's runtime so it is reached from the
+    /// runtime's netns, retrying a request `max_retries` times across seed
+    /// peers.
+    fn client(
         runtime: &Runtime,
         kind: ReadKind,
         scheduler_endpoint: String,
