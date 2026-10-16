@@ -74,15 +74,8 @@ pub use self::rt::Runtime;
 /// own retries did not cure is sent once more. Hours long so a registry or
 /// Dragonfly outage or rate limit has time to clear, random so a fleet of
 /// instances does not retry in lockstep.
-#[cfg(not(test))]
 const PREFETCH_RETRY_DELAY: RangeInclusive<Duration> =
     Duration::from_secs(6 * 60 * 60)..=Duration::from_secs(12 * 60 * 60);
-
-/// The window of the random delay before a prefetch read is sent once more,
-/// shortened so a test watches the retry without waiting hours.
-#[cfg(test)]
-const PREFETCH_RETRY_DELAY: RangeInclusive<Duration> =
-    Duration::from_millis(30)..=Duration::from_millis(60);
 
 /// The transport a blob `GET` rides on: the origin registry over HTTP, or the
 /// Dragonfly seed peers.
