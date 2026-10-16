@@ -203,7 +203,7 @@ impl Transport for Http {
 
             // Serve a definitive answer, or the second transient one.
             let response = result?;
-            if !response.needs_fallback() || retried {
+            if !response.needs_retry() || retried {
                 return Ok(response);
             }
 

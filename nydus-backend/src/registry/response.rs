@@ -85,11 +85,20 @@ impl Response {
         io::Error::other(format!("unexpected status {status}: {body}"))
     }
 
-    /// Returns whether the transport failed to serve the read, a `429`, `5xx`
-    /// or `408`, so an on-demand read falls back and a prefetch is sent once
-    /// more hours later. Every other status is the registry's definitive
-    /// answer.
+    /// Returns whether an on-demand read falls back to the origin: the seed
+    /// peers failed to serve it with a `429`, `5xx` or `408`. Every other
+    /// status is the registry's definitive answer.
+    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
     pub(crate) fn needs_fallback(&self) -> bool {
+        self.status.is_server_error()
+            || self.status == StatusCode::REQUEST_TIMEOUT
+            || self.status == StatusCode::TOO_MANY_REQUESTS
+    }
+
+    /// Returns whether a prefetch read is sent once more hours later: the
+    /// transport failed to serve it with a `429`, `5xx` or `408`. Every other
+    /// status is the registry's definitive answer.
+    pub(crate) fn needs_retry(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT
             || self.status == StatusCode::TOO_MANY_REQUESTS
@@ -131,7 +140,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn needs_fallback_marks_the_statuses_the_transport_failed_with() {
+    fn needs_fallback_and_needs_retry_mark_the_statuses_the_transport_failed_with() {
         let test_cases = vec![
             (StatusCode::INTERNAL_SERVER_ERROR, true),
             (StatusCode::BAD_GATEWAY, true),
@@ -156,6 +165,7 @@ mod tests {
                 protocol: Protocol::Http,
             };
             assert_eq!(response.needs_fallback(), expected, "{status}");
+            assert_eq!(response.needs_retry(), expected, "{status}");
         }
     }
 
