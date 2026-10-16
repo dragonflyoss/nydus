@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "nydus"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -2979,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-backend"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "arc-swap",
  "dragonfly-client-request",
@@ -3007,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-config"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "clap",
  "humantime-serde",
@@ -3020,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-core"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "blake3",
  "crc32c",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-error"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "libc",
  "nydus-format",
@@ -3055,7 +3055,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-format"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "blake3",
  "crc32c",
@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "crc32c",
  "hex",
@@ -3093,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-telemetry"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "prometheus",
  "rolling-file",
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-test-utils"
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3"
 dependencies = [
  "crc32c",
  "hex",
