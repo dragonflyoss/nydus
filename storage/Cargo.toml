@@ -26,7 +26,7 @@ leaky-bucket = { version = "0.12.1" }
 libc = "0.2"
 log = "0.4.8"
 nix = "0.24"
-reqwest = { version = "0.12.28", features = [
+reqwest = { version = "0.13.5", features = [
     "blocking",
     "json",
 ], optional = true }
