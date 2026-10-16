@@ -100,7 +100,7 @@ trait Transport: Send + Sync {
 ///
 /// ```text
 /// read_range_into(buf)                      runtime worker
-///   │ spawn(get_blob, read its bytes) ──▶ get_blob ◀── body chunks ── hyper / tonic
+///   │ spawn(read_blob, read its bytes) ──▶ read_blob ◀── body chunks ── hyper / tonic
 ///   │ block_on(join handle)                     │
 ///   ◀──────────── one wake ────────────────────┘
 ///   └─ copy into buf, note who served it
@@ -117,7 +117,7 @@ pub(crate) struct Registry {
 /// can run on the runtime while its caller waits.
 ///
 /// ```text
-/// get_blob(range) / prefetch_blob(range)         transport: Dragonfly when
+/// read_blob(range) / prefetch_blob(range)         transport: Dragonfly when
 ///   │                                            configured, else Http
 ///   ├─ cached redirect ──▶ GET redirect ───────────────────────────────┐
 ///   │                       401/403 evicts it and falls through        │
@@ -264,7 +264,7 @@ impl Client {
     /// The read goes through the cached redirect when there is one, a `401`
     /// or `403` evicting it, and otherwise through the blob URL, caching the
     /// redirect it answers with.
-    async fn get_blob(
+    async fn read_blob(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         range: &str,
@@ -358,12 +358,12 @@ impl Client {
     /// read: a suffix range fetches the footer, the blob's fixed-size tail,
     /// without knowing the blob's size, which its `Content-Range` tells; the
     /// footer then points at the blob metadata region.
-    async fn get_blob_metadata(
+    async fn read_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
         let response = self
-            .get_blob(blob_id, &format!("bytes=-{}", BlobFooter::SIZE))
+            .read_blob(blob_id, &format!("bytes=-{}", BlobFooter::SIZE))
             .await?;
         let footer_offset = BlobFooter::calculate_offset_by_blob_size(response.complete_length()?)
             .map_err(io::Error::other)?;
@@ -380,7 +380,7 @@ impl Client {
         })?;
         let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
         let blob_metadata_bytes = self
-            .get_blob(
+            .read_blob(
                 blob_id,
                 &format!(
                     "bytes={}-{blob_metadata_end}",
@@ -455,7 +455,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         self.runtime
             .block_on_worker(ReadKind::OnDemand, async move {
-                client.get_blob_metadata(&blob_id).await
+                client.read_blob_metadata(&blob_id).await
             })
     }
 
@@ -494,7 +494,7 @@ impl Backend for Registry {
             .runtime
             .block_on_worker(ReadKind::OnDemand, async move {
                 let range = format!("bytes={offset}-{}", offset + length as u64 - 1);
-                let response = client.get_blob(&blob_id, &range).await?;
+                let response = client.read_blob(&blob_id, &range).await?;
                 let protocol = response.protocol;
                 Ok((response.bytes(length).await?, protocol))
             });
@@ -812,7 +812,7 @@ mod tests {
             let client = &registry.client;
             let range = format!("bytes=0-{}", buf.len() - 1);
             let response = match kind {
-                ReadKind::OnDemand => client.get_blob(&TEST_BLOB_ID, &range).await?,
+                ReadKind::OnDemand => client.read_blob(&TEST_BLOB_ID, &range).await?,
                 ReadKind::Prefetch => client.prefetch_blob(&TEST_BLOB_ID, &range).await?,
             };
             let protocol = response.protocol;
