@@ -20,7 +20,7 @@ use nydus_config::HttpConfig;
 
 use super::response::{Body, Response};
 use super::Transport;
-use crate::{Protocol, ReadKind};
+use crate::Protocol;
 
 /// An HTTP client talking straight to the origin registry.
 ///
@@ -94,15 +94,14 @@ impl Http {
             client: client.build(),
         })
     }
+}
 
-    /// Sends the `GET` of a read of `kind` to `url` with `headers`, the body
+/// Implements the blob transport over the origin HTTP client.
+#[async_trait]
+impl Transport for Http {
+    /// Sends the `GET` of an on-demand read to `url` with `headers`, the body
     /// left streaming, and logs the outcome.
-    async fn download(
-        &self,
-        url: &str,
-        headers: HeaderMap,
-        kind: ReadKind,
-    ) -> io::Result<Response> {
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let start = Instant::now();
         let result = self
             .client
@@ -122,30 +121,50 @@ impl Http {
 
         match &result {
             Ok(response) => debug!(
-                "GET {url} ({kind}) from the origin returned {} in {:?}",
+                "GET {url} (ondemand) from the origin returned {} in {:?}",
                 response.status,
                 start.elapsed()
             ),
             Err(err) => debug!(
-                "GET {url} ({kind}) from the origin failed in {:?}: {err}",
+                "GET {url} (ondemand) from the origin failed in {:?}: {err}",
                 start.elapsed()
             ),
         }
         result
     }
-}
 
-/// Implements the blob transport over the origin HTTP client.
-#[async_trait]
-impl Transport for Http {
-    /// Sends the `GET` of an on-demand read to the origin.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.download(url, headers, ReadKind::OnDemand).await
-    }
-
-    /// Sends the `GET` of a prefetch read to the origin.
+    /// Sends the `GET` of a prefetch read to `url` with `headers`, the body
+    /// left streaming, and logs the outcome.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.download(url, headers, ReadKind::Prefetch).await
+        let start = Instant::now();
+        let result = self
+            .client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: Body::Stream(Box::new(StreamReader::new(
+                    response.bytes_stream().map_err(io::Error::other),
+                ))),
+                protocol: Protocol::Http,
+            })
+            .map_err(io::Error::other);
+
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (prefetch) from the origin returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+        result
     }
 
     /// Sends a `HEAD` to `url` with `headers` and logs the outcome.

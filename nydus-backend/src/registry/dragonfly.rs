@@ -95,33 +95,31 @@ impl Dragonfly {
             })?
             .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
     }
+}
 
-    /// Fetches `url` through `client` at `priority`, the SDK adding the P2P
-    /// and priority headers itself, and logs the outcome as a read of `kind`.
+/// Implements the blob transport over the Dragonfly SDK.
+#[async_trait]
+impl Transport for Dragonfly {
+    /// Fetches `url` through the on-demand client at `Level6`, the SDK's
+    /// default priority, the SDK adding the P2P and priority headers itself,
+    /// and logs the outcome.
     ///
     /// The SDK reads the body whole, retrying a seed peer that fails mid-body,
     /// and the buffer is handed on as is. An SDK error carrying an HTTP status
     /// becomes a [`Response`] so the policy classifies it like an origin
     /// answer; anything else is a transport failure.
-    async fn download(
-        &self,
-        client: &Proxy,
-        priority: Priority,
-        kind: ReadKind,
-        url: &str,
-        headers: HeaderMap,
-    ) -> io::Result<Response> {
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
             header: headers,
-            priority: Some(priority as i32),
+            priority: Some(Priority::Level6 as i32),
             timeout: self.request_timeout,
             ..Default::default()
         };
 
         let start = Instant::now();
         let mut body = BytesMut::new();
-        let result = match client.get_into(&request, &mut body).await {
+        let result = match self.ondemand.get_into(&request, &mut body).await {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
@@ -165,46 +163,86 @@ impl Dragonfly {
 
         match &result {
             Ok(response) => debug!(
-                "GET {url} ({kind}) through dragonfly returned {} in {:?}",
+                "GET {url} (ondemand) through dragonfly returned {} in {:?}",
                 response.status,
                 start.elapsed()
             ),
             Err(err) => debug!(
-                "GET {url} ({kind}) through dragonfly failed in {:?}: {err}",
+                "GET {url} (ondemand) through dragonfly failed in {:?}: {err}",
                 start.elapsed()
             ),
         }
         result
     }
-}
-
-/// Implements the blob transport over the Dragonfly SDK.
-#[async_trait]
-impl Transport for Dragonfly {
-    /// Fetches `url` through the on-demand client at `Level6`, the SDK's
-    /// default priority.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.download(
-            &self.ondemand,
-            Priority::Level6,
-            ReadKind::OnDemand,
-            url,
-            headers,
-        )
-        .await
-    }
 
     /// Fetches `url` through the prefetch client at `Level3`, so a first
-    /// download lets a normal peer go back to source ahead of it.
+    /// download lets a normal peer go back to source ahead of it, and logs
+    /// the outcome; the body and errors are handled as in [`get`](Self::get).
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.download(
-            &self.prefetch,
-            Priority::Level3,
-            ReadKind::Prefetch,
-            url,
-            headers,
-        )
-        .await
+        let request = GetRequest {
+            url: url.to_string(),
+            header: headers,
+            priority: Some(Priority::Level3 as i32),
+            timeout: self.request_timeout,
+            ..Default::default()
+        };
+
+        let start = Instant::now();
+        let mut body = BytesMut::new();
+        let result = match self.prefetch.get_into(&request, &mut body).await {
+            Ok(response) => Ok(Response {
+                status: response.status_code.unwrap_or(StatusCode::OK),
+                headers: response.header,
+                body: Body::Bytes(body.freeze()),
+                protocol: Protocol::Dragonfly,
+            }),
+            Err(Error::ProxyError(ProxyError {
+                status_code: Some(status),
+                header,
+                message,
+            }))
+            | Err(Error::BackendError(BackendError {
+                status_code: Some(status),
+                header,
+                message,
+            }))
+            | Err(Error::DfdaemonError(DfdaemonError {
+                status_code: Some(status),
+                header,
+                message,
+            })) => Ok(Response {
+                status,
+                headers: header
+                    .into_iter()
+                    .filter_map(|(name, value)| {
+                        Some((
+                            HeaderName::from_bytes(name.as_bytes()).ok()?,
+                            HeaderValue::from_str(&value).ok()?,
+                        ))
+                    })
+                    .collect(),
+                body: Body::Bytes(message.unwrap_or_default().into()),
+                protocol: Protocol::Dragonfly,
+            }),
+            Err(Error::RequestTimeout(message)) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("dragonfly request timed out: {message}"),
+            )),
+            Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
+        };
+
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (prefetch) through dragonfly returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+        result
     }
 
     /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
