@@ -93,7 +93,7 @@ trait Transport: Send + Sync {
 }
 
 /// A blob backend over an OCI registry: the synchronous [`BlobBackend`] face
-/// of [`Inner`], which does the asynchronous work on the runtime.
+/// of a [`Client`], which does the asynchronous work on the runtime.
 ///
 /// ```text
 /// read_range_into(dst)                      runtime worker
@@ -103,8 +103,11 @@ trait Transport: Send + Sync {
 ///   └─ copy into dst, note who served it
 /// ```
 pub(crate) struct Registry {
-    /// The client every read shares.
-    inner: Arc<Inner>,
+    /// The registry client, shared with the task of each read.
+    client: Arc<Client>,
+
+    /// The runtimes every read runs on, one per read kind.
+    runtime: Arc<Runtime>,
 
     /// Whether a read has succeeded, so later reads skip [`Self::first_read`].
     first_read_done: AtomicBool,
@@ -115,8 +118,8 @@ pub(crate) struct Registry {
     first_read: Mutex<()>,
 }
 
-/// The registry client every read shares, behind an [`Arc`] so a read can run
-/// on the runtime while its caller waits.
+/// The client of one repository on one registry, behind an [`Arc`] so a read
+/// can run on the runtime while its caller waits.
 ///
 /// ```text
 /// get_blob(range, kind)
@@ -135,7 +138,7 @@ pub(crate) struct Registry {
 ///   │                                   Defer ──▶ Err(QuotaExceeded) (prefetch)
 ///   └─ otherwise ──▶ http.get / prefetch / head
 /// ```
-struct Inner {
+struct Client {
     /// The registry origin, `scheme://host[:port]/`.
     addr: Url,
 
@@ -158,10 +161,6 @@ struct Inner {
     /// The Dragonfly transport when configured, always `None` without the
     /// `backend-dragonfly` feature since the config is rejected.
     dragonfly: Option<Box<dyn Transport>>,
-
-    /// The runtimes every request runs on, one per read kind, last so the
-    /// transports above drop before them.
-    runtime: Arc<Runtime>,
 }
 
 /// Implements the registry backend construction.
@@ -204,7 +203,7 @@ impl Registry {
         let dragonfly: Option<Box<dyn Transport>> = None;
 
         Ok(Self {
-            inner: Arc::new(Inner {
+            client: Arc::new(Client {
                 addr,
                 repository: config.repository,
                 authorizer: Authorizer::new(config.auth.as_deref())?,
@@ -212,8 +211,8 @@ impl Registry {
                 http,
                 back_to_source,
                 dragonfly,
-                runtime,
             }),
+            runtime,
             first_read_done: AtomicBool::new(false),
             first_read: Mutex::new(()),
         })
@@ -245,7 +244,7 @@ impl Registry {
 }
 
 /// Implements the registry requests.
-impl Inner {
+impl Client {
     /// Returns how reads are fetched when nothing else is known, the
     /// `protocol` label of a failed read: Dragonfly when configured,
     /// otherwise HTTP.
@@ -522,7 +521,7 @@ impl BlobBackend for Registry {
     /// Returns the configured transport: Dragonfly when configured, otherwise
     /// HTTP.
     fn protocol(&self) -> Option<Protocol> {
-        Some(self.inner.protocol())
+        Some(self.client.protocol())
     }
 
     /// Recovers the blob's metadata from the registry on the runtime.
@@ -531,10 +530,10 @@ impl BlobBackend for Registry {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         kind: ReadKind,
     ) -> io::Result<BlobMetadata> {
-        let inner = self.inner.clone();
+        let client = self.client.clone();
         let blob_id = *blob_id;
-        self.inner.runtime.block_on_worker(kind, async move {
-            inner.get_blob_metadata(&blob_id, kind).await
+        self.runtime.block_on_worker(kind, async move {
+            client.get_blob_metadata(&blob_id, kind).await
         })
     }
 
@@ -559,11 +558,11 @@ impl BlobBackend for Registry {
 
         // Read the bytes on a thread of the kind's runtime.
         let start = Instant::now();
-        let inner = self.inner.clone();
+        let client = self.client.clone();
         let blob_id = *blob_id;
         let len = dst.len();
-        let result = self.inner.runtime.block_on_worker(kind, async move {
-            let response = inner.get_blob(&blob_id, offset, len, kind).await?;
+        let result = self.runtime.block_on_worker(kind, async move {
+            let response = client.get_blob(&blob_id, offset, len, kind).await?;
             let protocol = response.protocol;
             Ok((response.bytes(len).await?, protocol))
         });
@@ -586,7 +585,7 @@ impl BlobBackend for Registry {
                 collect_read_backend_failure_metrics(
                     kind,
                     Backend::Registry,
-                    Some(self.inner.protocol()),
+                    Some(self.client.protocol()),
                     start.elapsed(),
                 );
                 Err(err)
@@ -834,7 +833,7 @@ mod tests {
             Some(RateLimit::new(1, interval))
         };
         Registry {
-            inner: Arc::new(Inner {
+            client: Arc::new(Client {
                 addr: Registry::parse_addr(&config.addr).unwrap(),
                 repository: config.repository,
                 authorizer: Authorizer::new(config.auth.as_deref()).unwrap(),
@@ -842,8 +841,8 @@ mod tests {
                 http: Http::new(&config.http, None).unwrap(),
                 back_to_source: Http::new(&config.http, rate_limit).unwrap(),
                 dragonfly: Some(Box::new(transport)),
-                runtime: test_runtime(),
             }),
+            runtime: test_runtime(),
             first_read_done: AtomicBool::new(false),
             first_read: Mutex::new(()),
         }
@@ -873,9 +872,9 @@ mod tests {
     }
 
     fn read(registry: &Registry, kind: ReadKind, dst: &mut [u8]) -> io::Result<Protocol> {
-        registry.inner.runtime.tokio(kind).block_on(async {
+        registry.runtime.tokio(kind).block_on(async {
             let response = registry
-                .inner
+                .client
                 .get_blob(&TEST_BLOB_ID, 0, dst.len(), kind)
                 .await?;
             let protocol = response.protocol;
@@ -892,7 +891,7 @@ mod tests {
         .unwrap();
         let registry = Registry::new(config, test_runtime()).unwrap();
         assert_eq!(
-            registry.inner.blob_url("abc123"),
+            registry.client.blob_url("abc123"),
             "https://registry.example.com/v2/library/ubuntu/blobs/sha256:abc123"
         );
     }
@@ -934,11 +933,11 @@ auth: YWxpY2U6c2VjcmV0
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = Registry::new(config, test_runtime()).unwrap();
         assert_eq!(
-            registry.inner.addr.as_str(),
+            registry.client.addr.as_str(),
             "https://registry.example.com/"
         );
-        assert!(registry.inner.dragonfly.is_none());
-        assert_eq!(registry.inner.protocol(), Protocol::Http);
+        assert!(registry.client.dragonfly.is_none());
+        assert_eq!(registry.client.protocol(), Protocol::Http);
     }
 
     #[cfg(not(feature = "backend-dragonfly"))]
@@ -1106,7 +1105,7 @@ dragonfly:
             assert_eq!(transport.calls(), 2, "kind={kind:?}");
             assert_eq!(origin.hits(), 0, "kind={kind:?}");
             let mut authorized = HeaderMap::new();
-            registry.inner.authorizer.authorize(&mut authorized);
+            registry.client.authorizer.authorize(&mut authorized);
             assert_eq!(authorized[AUTHORIZATION], "Basic YWxpY2U6c2VjcmV0");
         }
     }
@@ -1252,7 +1251,7 @@ dragonfly:
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
         let hex = hex::encode(TEST_BLOB_ID);
         registry
-            .inner
+            .client
             .redirects
             .insert(&hex, "http://cdn.example.com/signed".to_string());
 
@@ -1276,7 +1275,7 @@ dragonfly:
         let registry = scripted_registry(&origin, transport.clone(), Duration::ZERO);
         let hex = hex::encode(TEST_BLOB_ID);
         registry
-            .inner
+            .client
             .redirects
             .insert(&hex, "http://cdn.example.com/expired".to_string());
 
@@ -1285,6 +1284,6 @@ dragonfly:
 
         assert_eq!(dst, body);
         assert_eq!(transport.calls(), 2);
-        assert!(registry.inner.redirects.get(&hex).is_none());
+        assert!(registry.client.redirects.get(&hex).is_none());
     }
 }
