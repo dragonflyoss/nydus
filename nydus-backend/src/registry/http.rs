@@ -17,7 +17,7 @@ use tracing::debug;
 
 use nydus_config::HttpConfig;
 
-use super::response::Response;
+use super::response::{Body, Response};
 use super::Transport;
 use crate::{Protocol, ReadKind};
 
@@ -111,9 +111,9 @@ impl Http {
             .map(|response| Response {
                 status: response.status(),
                 headers: response.headers().clone(),
-                body: Box::new(StreamReader::new(
+                body: Body::Stream(Box::new(StreamReader::new(
                     response.bytes_stream().map_err(io::Error::other),
-                )),
+                ))),
                 protocol: Protocol::Http,
             })
             .map_err(io::Error::other);

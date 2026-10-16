@@ -5,20 +5,19 @@
 //! the retries: an on-demand read retries a transient failure, a `429`
 //! included, on the next seed peer up to the configured budget, while a
 //! prefetch read never retries, the storage layer rescheduling a failed
-//! prefetch hours later instead. The body streams from the seed peer, so a
-//! read holds no more than the bytes it asked for. An answer the SDK reports
-//! as an error but that carries an HTTP status is handed back as a
-//! [`Response`], so [`policy`](super::policy) classifies it by status like an
-//! origin answer.
+//! prefetch hours later instead. The SDK reads the body whole, so a seed peer
+//! failing mid-body is retried like any other transient failure, and the
+//! buffer it filled is handed on without a copy. An answer the SDK reports as
+//! an error but that carries an HTTP status is handed back as a [`Response`],
+//! so [`policy`](super::policy) classifies it by status like an origin answer.
 
 use std::io;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use bytes::BytesMut;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
-use tokio_util::io::StreamReader;
 use tracing::debug;
 
 use dragonfly_api::common::v2::Priority;
@@ -27,7 +26,7 @@ use dragonfly_client_request::{GetRequest, Proxy, Request as _};
 
 use nydus_config::DragonflyConfig;
 
-use super::response::Response;
+use super::response::{Body, Response};
 use super::rt::Runtime;
 use super::Transport;
 use crate::{Protocol, ReadKind};
@@ -99,13 +98,13 @@ impl Transport for Dragonfly {
     ///
     /// An on-demand read a FUSE reader waits on goes at `Level6`, the SDK's
     /// default, a background prefetch at `Level3` so a first download lets a
-    /// normal peer go back to source ahead of it. The body streams from the
-    /// seed peer; the SDK retries a transient failure before it starts, a
-    /// peer failing mid-body fails the read. A proxy, backend or dfdaemon
-    /// error carrying an HTTP status is an answer, rebuilt as a [`Response`]
-    /// with its status, headers and message, so a `429`, `403` or a dfdaemon
-    /// `422` reaches the policy the same way an origin answer does; anything
-    /// else is a transport failure.
+    /// normal peer go back to source ahead of it. The SDK reads the body into
+    /// `body`, sized once from the answer's `Content-Length`, retrying a seed
+    /// peer that fails mid-body on the next one, and the buffer is handed on
+    /// as is. A proxy, backend or dfdaemon error carrying an HTTP status is an
+    /// answer, rebuilt as a [`Response`] with its status, headers and message,
+    /// so a `429`, `403` or a dfdaemon `422` reaches the policy the same way
+    /// an origin answer does; anything else is a transport failure.
     async fn get(&self, url: &str, headers: HeaderMap, kind: ReadKind) -> io::Result<Response> {
         let (client, priority) = match kind {
             ReadKind::OnDemand => (&self.ondemand, Priority::Level6),
@@ -120,16 +119,12 @@ impl Transport for Dragonfly {
         };
 
         let start = Instant::now();
-        let result = match client.get(&request).await {
+        let mut body = BytesMut::new();
+        let result = match client.get_into(&request, &mut body).await {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
-                body: Box::new(StreamReader::new(
-                    response
-                        .body
-                        .unwrap_or_else(|| Box::new(futures::stream::empty()))
-                        .map_err(io::Error::other),
-                )),
+                body: Body::Bytes(body.freeze()),
                 protocol: Protocol::Dragonfly,
             }),
             Err(Error::ProxyError(ProxyError {
@@ -157,7 +152,7 @@ impl Transport for Dragonfly {
                         ))
                     })
                     .collect(),
-                body: Box::new(io::Cursor::new(message.unwrap_or_default())),
+                body: Body::Bytes(message.unwrap_or_default().into()),
                 protocol: Protocol::Dragonfly,
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(

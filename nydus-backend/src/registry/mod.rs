@@ -80,8 +80,8 @@ pub use self::rt::Runtime;
 /// Dragonfly seed peers.
 ///
 /// One call spends the transport's own retries and hands back a settled
-/// answer whose body still streams; a connection failing mid-body fails the
-/// read.
+/// answer, a Dragonfly body already buffered so a mid-stream failure surfaces
+/// here rather than while the caller consumes it.
 #[async_trait]
 trait Transport: Send + Sync {
     /// Sends a `GET` for `url` with `headers`, `kind` attributing the read.
@@ -636,7 +636,11 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use bytes::Bytes;
+
     use nydus_telemetry::metrics;
+
+    use super::response::Body;
 
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
@@ -699,13 +703,13 @@ mod tests {
                 Scripted::Body(body) => Ok(Response {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
-                    body: Box::new(std::io::Cursor::new(body)),
+                    body: Body::Bytes(body.into()),
                     protocol: Protocol::Dragonfly,
                 }),
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
-                    body: Box::new(std::io::Cursor::new(Vec::new())),
+                    body: Body::Bytes(Bytes::new()),
                     protocol: Protocol::Dragonfly,
                 }),
                 Scripted::Transport => Err(io::Error::other("scripted failure")),
@@ -748,7 +752,7 @@ mod tests {
                 return Ok(Response {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
-                    body: Box::new(std::io::Cursor::new(b"ok".to_vec())),
+                    body: Body::Bytes(Bytes::from_static(b"ok")),
                     protocol: Protocol::Dragonfly,
                 });
             }
@@ -761,7 +765,7 @@ mod tests {
             Ok(Response {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
-                body: Box::new(std::io::Cursor::new(Vec::new())),
+                body: Body::Bytes(Bytes::new()),
                 protocol: Protocol::Dragonfly,
             })
         }

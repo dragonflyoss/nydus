@@ -1250,12 +1250,11 @@ Fields under `backend.config`:
 	to the origin directly. Each read is counted under the backend that served
 	it (see [Metrics](#metrics)).
 
-	For an on-demand read the SDK retries a transient failure before the body
-	starts (timeout, connection, dfdaemon, `5xx`, `408`, `429`) up to
-	`max_retries` times at once, each attempt on the next seed peer serving the
-	blob; the body then streams, and a seed peer failing mid-body fails the
-	read. A prefetch read never retries. Any other answer returns at once. What
-	happens next depends on the read kind:
+	For an on-demand read the SDK retries a transient failure (timeout,
+	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times at
+	once, each attempt on the next seed peer serving the blob. A prefetch read
+	never retries. Any other answer returns at once. What happens next depends
+	on the read kind:
 
 	| Dragonfly outcome | Prefetch | On-demand |
 	|---|---|---|
