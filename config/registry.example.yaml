@@ -77,8 +77,8 @@ backend:
     # feature). When set, blob GETs are routed through the Dragonfly client
     # SDK for P2P distribution. An on-demand read the seed peers cannot serve
     # goes back to the origin registry through a rate limit, a prefetch read
-    # is retried once hours later instead. Every other request goes directly
-    # to the origin registry. Omit to talk to the origin directly.
+    # is retried once hours later instead. Auth token fetches go directly to
+    # the origin registry. Omit to talk to the origin directly.
     #
     # dragonfly:
     #   # The Dragonfly scheduler service address with the scheme.

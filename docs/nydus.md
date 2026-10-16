@@ -1249,8 +1249,8 @@ Fields under `backend.config`:
 - `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
 	(crate `dragonfly-client-request`) for P2P distribution, carrying a
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
-	configured `request_timeout` per attempt; every other request (`HEAD`, auth token
-	fetches) goes directly to the origin registry. Only available when the
+	configured `request_timeout` per attempt; auth token fetches go directly
+	to the origin registry. Only available when the
 	binary is built with the `dragonfly` feature; a build without it rejects
 	the block when the config is loaded. Omit to talk to the origin directly.
 	Each read is counted under the backend that served it (see

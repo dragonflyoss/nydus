@@ -1,7 +1,7 @@
 //! The Dragonfly SDK transport, feature `dragonfly`.
 //!
 //! A blob `GET` rides the Dragonfly client SDK to the seed peers named by the
-//! scheduler, every other request going straight to the origin. The SDK owns
+//! scheduler, token fetches going straight to the origin. The SDK owns
 //! the retries: an on-demand read retries a transient failure, a `429`
 //! included, on the next seed peer up to the configured budget, while a
 //! prefetch read never retries at once. The SDK reads the body whole, so a
@@ -51,11 +51,6 @@ pub(crate) struct Dragonfly {
     /// failed prefetch is sent once more hours later instead.
     prefetch_client: Proxy,
 
-    /// The HTTP client of the requests P2P does not carry, a `HEAD` for a
-    /// blob's size, as dfdaemon's own proxy forwards non-`GET` requests
-    /// straight to the origin.
-    http_client: Http,
-
     /// The rate-limited HTTP client an on-demand read falls back to when the
     /// seed peers cannot serve it, every attempt claiming a slot first.
     fallback_http_client: Http,
@@ -67,8 +62,7 @@ pub(crate) struct Dragonfly {
 /// Implements the Dragonfly transport.
 impl Dragonfly {
     /// Creates the transport, each seed peer client connecting to the
-    /// configured scheduler on the runtime of its read kind, with
-    /// `http_client` for the requests that go to the origin and a fallback
+    /// configured scheduler on the runtime of its read kind, with a fallback
     /// client built from `http_config` under the configured rate limit.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
@@ -76,7 +70,6 @@ impl Dragonfly {
     pub(crate) fn new(
         config: DragonflyConfig,
         http_config: &HttpConfig,
-        http_client: Http,
         runtime: &Runtime,
     ) -> io::Result<Self> {
         Ok(Self {
@@ -92,7 +85,6 @@ impl Dragonfly {
                 config.scheduler_endpoint,
                 0,
             )?,
-            http_client,
             fallback_http_client: Http::new(
                 http_config,
                 Some(RateLimit::new(
@@ -129,12 +121,6 @@ impl Dragonfly {
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl Transport for Dragonfly {
-    /// Sends the `HEAD` to the origin, as dfdaemon's own proxy does for every
-    /// request that is not a `GET`.
-    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        self.http_client.head(url, headers).await
-    }
-
     /// Fetches `url` through the on-demand client at `Level6`, the SDK's
     /// default priority, the SDK adding the P2P and priority headers itself,
     /// and logs the outcome; a `429`, `5xx`, `408` or transport failure the

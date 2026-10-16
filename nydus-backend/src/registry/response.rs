@@ -3,7 +3,7 @@
 use std::io;
 
 use bytes::{Bytes, BytesMut};
-use reqwest::header::{HeaderMap, CONTENT_LENGTH, LOCATION};
+use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -31,8 +31,8 @@ pub(crate) enum Body {
     Stream(Box<dyn AsyncRead + Send + Unpin>),
 
     /// A body already in memory: the one the Dragonfly SDK read whole, so a
-    /// seed peer failing mid-body was retried before the answer got here, or
-    /// the empty body of a `HEAD`.
+    /// seed peer failing mid-body was retried before the answer got here.
+    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
     Bytes(Bytes),
 }
 
@@ -119,16 +119,18 @@ impl Response {
             })
     }
 
-    /// Returns the `Content-Length` a `HEAD` answered with.
-    pub(crate) fn content_length(&self) -> io::Result<u64> {
+    /// Returns the complete length of the blob a `206` carries in its
+    /// `Content-Range`, the `complete-length` of `bytes first-last/complete-length`.
+    pub(crate) fn complete_length(&self) -> io::Result<u64> {
         self.headers
-            .get(CONTENT_LENGTH)
+            .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok())
+            .and_then(|value| value.rsplit_once('/'))
+            .and_then(|(_, complete_length)| complete_length.parse().ok())
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "registry HEAD response missing a valid content-length",
+                    "registry range response missing a valid content-range",
                 )
             })
     }

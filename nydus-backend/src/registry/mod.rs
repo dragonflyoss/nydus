@@ -23,8 +23,8 @@
 //!
 //! [`Registry`] owns the registry-specific logic, the transports spend their
 //! own retries and fallbacks and hand back a settled [`Response`]. A blob
-//! `GET` rides Dragonfly when it is configured; `HEAD` requests and token
-//! fetches always go straight to the origin.
+//! `GET` rides Dragonfly when it is configured; token fetches always go
+//! straight to the origin.
 //!
 //! Every read runs as a task on the runtime of its kind ([`rt`]) and the
 //! calling thread waits on its join handle, so the body flows from hyper or
@@ -85,9 +85,6 @@ const PREFETCH_RETRY_DELAY: RangeInclusive<Duration> =
 /// here rather than while the caller consumes it.
 #[async_trait]
 trait Transport: Send + Sync {
-    /// Sends a `HEAD`.
-    async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
-
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
@@ -128,8 +125,6 @@ pub(crate) struct Registry {
 ///                                 └─ 2xx ─────────────────────────────┐
 ///                                                                     ▼
 ///                                                                  bytes
-///
-/// stat_blob ──▶ execute(transport.head), following one redirect
 /// ```
 struct Client {
     /// The registry origin, `scheme://host[:port]/`.
@@ -161,12 +156,7 @@ impl Registry {
         // Connect the Dragonfly transport when configured.
         #[cfg(feature = "dragonfly")]
         let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
-            Some(dragonfly) => Some(Box::new(Dragonfly::new(
-                dragonfly,
-                &config.http,
-                http.clone(),
-                &runtime,
-            )?)),
+            Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, &config.http, &runtime)?)),
             None => None,
         };
         #[cfg(not(feature = "dragonfly"))]
@@ -268,8 +258,8 @@ impl Client {
         request(headers).await
     }
 
-    /// Fetches `length` blob bytes from `offset` for an on-demand read and
-    /// returns the successful response, its body still to be read.
+    /// Fetches the `range` of a blob, a `Range` header value, for an on-demand
+    /// read and returns the successful response, its body still to be read.
     ///
     /// The read goes through the cached redirect when there is one, a `401`
     /// or `403` evicting it, and otherwise through the blob URL, caching the
@@ -277,13 +267,11 @@ impl Client {
     async fn get_blob(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
-        offset: u64,
-        length: usize,
+        range: &str,
     ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
-        let end = offset + length as u64 - 1;
         let mut headers = HeaderMap::new();
-        headers.insert(RANGE, format!("bytes={offset}-{end}").parse().unwrap());
+        headers.insert(RANGE, range.parse().map_err(io::Error::other)?);
         let transport = self.transport();
 
         // Read through the cached redirect, a refusal evicting it.
@@ -318,8 +306,8 @@ impl Client {
         Ok(redirected)
     }
 
-    /// Fetches `length` blob bytes from `offset` for a prefetch read and
-    /// returns the successful response, its body still to be read.
+    /// Fetches the `range` of a blob, a `Range` header value, for a prefetch
+    /// read and returns the successful response, its body still to be read.
     ///
     /// The read goes through the cached redirect when there is one, a `401`
     /// or `403` evicting it, and otherwise through the blob URL, caching the
@@ -327,13 +315,11 @@ impl Client {
     async fn prefetch_blob(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
-        offset: u64,
-        length: usize,
+        range: &str,
     ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
-        let end = offset + length as u64 - 1;
         let mut headers = HeaderMap::new();
-        headers.insert(RANGE, format!("bytes={offset}-{end}").parse().unwrap());
+        headers.insert(RANGE, range.parse().map_err(io::Error::other)?);
         let transport = self.transport();
 
         // Read through the cached redirect, a refusal evicting it.
@@ -368,64 +354,39 @@ impl Client {
         Ok(redirected)
     }
 
-    /// Returns the size of a blob, from a `HEAD` request following one redirect.
-    async fn stat_blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<u64> {
-        let url = self.blob_url(&hex::encode(blob_id));
-        let transport = self.transport();
-        let response = self
-            .execute(HeaderMap::new(), |headers| transport.head(&url, headers))
-            .await?;
-        if response.status.is_success() {
-            return response.content_length();
-        }
-        if !response.status.is_redirection() {
-            return Err(response.into_io_error().await);
-        }
-
-        let redirected = transport
-            .head(&response.location()?, HeaderMap::new())
-            .await?;
-        if !redirected.status.is_success() {
-            return Err(redirected.into_io_error().await);
-        }
-
-        redirected.content_length()
-    }
-
     /// Recovers a blob's metadata from its trailing footer for an on-demand
-    /// read: `HEAD` for the size, read the footer, then read the blob
-    /// metadata region it points at.
+    /// read: a suffix range fetches the footer, the blob's fixed-size tail,
+    /// without knowing the blob's size, which its `Content-Range` tells; the
+    /// footer then points at the blob metadata region.
     async fn get_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
-        let size = self.stat_blob(blob_id).await?;
-        let footer_offset =
-            BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
-
-        let footer_bytes = self
-            .get_blob(blob_id, footer_offset, BlobFooter::SIZE)
-            .await?
-            .bytes(BlobFooter::SIZE)
+        let response = self
+            .get_blob(blob_id, &format!("bytes=-{}", BlobFooter::SIZE))
             .await?;
+        let footer_offset = BlobFooter::calculate_offset_by_blob_size(response.complete_length()?)
+            .map_err(io::Error::other)?;
+        let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
         let footer =
             BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
                 .map_err(io::Error::other)?;
         footer
             .validate_layout(footer_offset)
             .map_err(io::Error::other)?;
-        if footer.is_raw_device() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "native EROFS layers are not served from a registry; mount them through the kernel",
-            ));
-        }
 
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
+        let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
         let blob_metadata_bytes = self
-            .get_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
+            .get_blob(
+                blob_id,
+                &format!(
+                    "bytes={}-{blob_metadata_end}",
+                    footer.blob_metadata_offset()
+                ),
+            )
             .await?
             .bytes(blob_metadata_size)
             .await?;
@@ -434,39 +395,38 @@ impl Client {
     }
 
     /// Recovers a blob's metadata from its trailing footer for a prefetch
-    /// read: `HEAD` for the size, read the footer, then read the blob
-    /// metadata region it points at.
+    /// read: a suffix range fetches the footer, the blob's fixed-size tail,
+    /// without knowing the blob's size, which its `Content-Range` tells; the
+    /// footer then points at the blob metadata region.
     async fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
-        let size = self.stat_blob(blob_id).await?;
-        let footer_offset =
-            BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
-
-        let footer_bytes = self
-            .prefetch_blob(blob_id, footer_offset, BlobFooter::SIZE)
-            .await?
-            .bytes(BlobFooter::SIZE)
+        let response = self
+            .prefetch_blob(blob_id, &format!("bytes=-{}", BlobFooter::SIZE))
             .await?;
+        let footer_offset = BlobFooter::calculate_offset_by_blob_size(response.complete_length()?)
+            .map_err(io::Error::other)?;
+        let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
         let footer =
             BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
                 .map_err(io::Error::other)?;
         footer
             .validate_layout(footer_offset)
             .map_err(io::Error::other)?;
-        if footer.is_raw_device() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "native EROFS layers are not served from a registry; mount them through the kernel",
-            ));
-        }
 
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
+        let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
         let blob_metadata_bytes = self
-            .prefetch_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
+            .prefetch_blob(
+                blob_id,
+                &format!(
+                    "bytes={}-{blob_metadata_end}",
+                    footer.blob_metadata_offset()
+                ),
+            )
             .await?
             .bytes(blob_metadata_size)
             .await?;
@@ -533,7 +493,8 @@ impl Backend for Registry {
         let result = self
             .runtime
             .block_on_worker(ReadKind::OnDemand, async move {
-                let response = client.get_blob(&blob_id, offset, length).await?;
+                let range = format!("bytes={offset}-{}", offset + length as u64 - 1);
+                let response = client.get_blob(&blob_id, &range).await?;
                 let protocol = response.protocol;
                 Ok((response.bytes(length).await?, protocol))
             });
@@ -583,7 +544,8 @@ impl Backend for Registry {
         let result = self
             .runtime
             .block_on_worker(ReadKind::Prefetch, async move {
-                let response = client.prefetch_blob(&blob_id, offset, length).await?;
+                let range = format!("bytes={offset}-{}", offset + length as u64 - 1);
+                let response = client.prefetch_blob(&blob_id, &range).await?;
                 let protocol = response.protocol;
                 Ok((response.bytes(length).await?, protocol))
             });
@@ -640,10 +602,6 @@ mod tests {
 
     #[async_trait]
     impl<T: Transport> Transport for Arc<T> {
-        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-            (**self).head(url, headers).await
-        }
-
         async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
             (**self).get(url, headers).await
         }
@@ -665,7 +623,6 @@ mod tests {
     struct ScriptedTransport {
         script: Mutex<VecDeque<Scripted>>,
         calls: AtomicU32,
-        http: Http,
     }
 
     impl ScriptedTransport {
@@ -673,7 +630,6 @@ mod tests {
             Arc::new(ScriptedTransport {
                 script: Mutex::new(script.into_iter().collect()),
                 calls: AtomicU32::new(0),
-                http: Http::new(&HttpConfig::default(), None).unwrap(),
             })
         }
 
@@ -708,10 +664,6 @@ mod tests {
 
     #[async_trait]
     impl Transport for ScriptedTransport {
-        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-            self.http.head(url, headers).await
-        }
-
         async fn get(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
             self.play()
         }
@@ -725,7 +677,6 @@ mod tests {
         delay: Duration,
         first: AtomicBool,
         challenges: AtomicU32,
-        http: Http,
     }
 
     impl AuthGate {
@@ -734,7 +685,6 @@ mod tests {
                 delay,
                 first: AtomicBool::new(true),
                 challenges: AtomicU32::new(0),
-                http: Http::new(&HttpConfig::default(), None).unwrap(),
             })
         }
 
@@ -771,10 +721,6 @@ mod tests {
 
     #[async_trait]
     impl Transport for AuthGate {
-        async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-            self.http.head(url, headers).await
-        }
-
         async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
         }
@@ -864,9 +810,10 @@ mod tests {
     fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Protocol> {
         registry.runtime.tokio(kind).block_on(async {
             let client = &registry.client;
+            let range = format!("bytes=0-{}", buf.len() - 1);
             let response = match kind {
-                ReadKind::OnDemand => client.get_blob(&TEST_BLOB_ID, 0, buf.len()).await?,
-                ReadKind::Prefetch => client.prefetch_blob(&TEST_BLOB_ID, 0, buf.len()).await?,
+                ReadKind::OnDemand => client.get_blob(&TEST_BLOB_ID, &range).await?,
+                ReadKind::Prefetch => client.prefetch_blob(&TEST_BLOB_ID, &range).await?,
             };
             let protocol = response.protocol;
             buf.copy_from_slice(&response.bytes(buf.len()).await?);
@@ -998,9 +945,9 @@ auth: YWxpY2U6c2VjcmV0
     }
 
     #[test]
-    fn read_blob_metadata_stats_at_the_origin_and_reads_through_the_transport() {
+    fn read_blob_metadata_fetches_the_footer_through_the_transport() {
         for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
-            let origin = OriginStub::serve(vec![0u8; 2 * BlobFooter::SIZE]);
+            let origin = OriginStub::serve(b"unused".to_vec());
             let transport = ScriptedTransport::new(vec![status(StatusCode::NOT_FOUND)]);
             let registry = scripted_registry(&origin, transport.clone());
 
@@ -1011,7 +958,7 @@ auth: YWxpY2U6c2VjcmV0
             .unwrap_err();
 
             assert!(err.to_string().contains("404"), "kind={kind:?}: {err}");
-            assert_eq!(origin.hits(), 1, "kind={kind:?}");
+            assert_eq!(origin.hits(), 0, "kind={kind:?}");
             assert_eq!(transport.calls(), 1, "kind={kind:?}");
         }
     }
