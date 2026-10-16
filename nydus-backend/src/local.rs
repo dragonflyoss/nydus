@@ -16,7 +16,7 @@ use nydus_telemetry::metrics::{
     collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
 };
 
-use crate::{Backend, BlobBackend, Protocol, RawDeviceFile, ReadKind};
+use crate::{Backend, BackendKind, Protocol, RawDeviceFile, ReadKind};
 
 /// A byte region embedded in a larger file.
 #[derive(Clone, Copy)]
@@ -248,10 +248,10 @@ impl Local {
 }
 
 /// Implements the blob backend over the local directory.
-impl BlobBackend for Local {
-    /// Returns [`Backend::Local`].
-    fn backend(&self) -> Backend {
-        Backend::Local
+impl Backend for Local {
+    /// Returns [`BackendKind::Local`].
+    fn kind(&self) -> BackendKind {
+        BackendKind::Local
     }
 
     /// Returns `None`, a local read having no protocol.
@@ -330,14 +330,17 @@ impl BlobBackend for Local {
         match &result {
             Ok(()) => collect_read_backend_finished_metrics(
                 kind,
-                Backend::Local,
+                BackendKind::Local,
                 None,
                 buf.len() as u64,
                 start.elapsed(),
             ),
-            Err(_) => {
-                collect_read_backend_failure_metrics(kind, Backend::Local, None, start.elapsed())
-            }
+            Err(_) => collect_read_backend_failure_metrics(
+                kind,
+                BackendKind::Local,
+                None,
+                start.elapsed(),
+            ),
         }
         result
     }

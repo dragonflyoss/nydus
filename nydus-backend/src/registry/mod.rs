@@ -61,7 +61,7 @@ use nydus_telemetry::metrics::{
     collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
 };
 
-use crate::{Backend, BlobBackend, Protocol, ReadKind};
+use crate::{Backend, BackendKind, Protocol, ReadKind};
 
 use self::auth::{Authorizer, Challenge};
 #[cfg(feature = "dragonfly")]
@@ -91,7 +91,7 @@ trait Transport: Send + Sync {
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
-/// A blob backend over an OCI registry: the synchronous [`BlobBackend`] face
+/// A blob backend over an OCI registry: the synchronous [`Backend`] face
 /// of a [`Client`], which does the asynchronous work on the runtime.
 ///
 /// ```text
@@ -285,7 +285,7 @@ impl Client {
                     .inspect_err(|_| {
                         collect_read_backend_failure_metrics(
                             kind,
-                            Backend::Registry,
+                            BackendKind::Registry,
                             Some(Protocol::Http),
                             start.elapsed(),
                         )
@@ -504,10 +504,10 @@ impl Client {
 }
 
 /// Implements the blob backend over the registry.
-impl BlobBackend for Registry {
-    /// Returns [`Backend::Registry`].
-    fn backend(&self) -> Backend {
-        Backend::Registry
+impl Backend for Registry {
+    /// Returns [`BackendKind::Registry`].
+    fn kind(&self) -> BackendKind {
+        BackendKind::Registry
     }
 
     /// Returns the configured transport: Dragonfly when configured, otherwise
@@ -558,7 +558,7 @@ impl BlobBackend for Registry {
             Ok((bytes, protocol)) => {
                 collect_read_backend_finished_metrics(
                     kind,
-                    Backend::Registry,
+                    BackendKind::Registry,
                     Some(protocol),
                     len as u64,
                     start.elapsed(),
@@ -569,7 +569,7 @@ impl BlobBackend for Registry {
             Err(err) => {
                 collect_read_backend_failure_metrics(
                     kind,
-                    Backend::Registry,
+                    BackendKind::Registry,
                     Some(self.client.protocol()),
                     start.elapsed(),
                 );

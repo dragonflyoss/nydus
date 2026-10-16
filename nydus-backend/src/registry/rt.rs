@@ -1,7 +1,7 @@
 //! The tokio runtimes behind a registry backend, one per read kind, and how
 //! an embedding process bounds and pins them.
 //!
-//! The synchronous [`BlobBackend`](crate::BlobBackend) trait bridges into the
+//! The synchronous [`Backend`](crate::Backend) trait bridges into the
 //! async HTTP clients through multi-thread runtimes, on-demand reads on one
 //! and background prefetch on another so a prefetch burst never queues ahead
 //! of a FUSE reader. Left to tokio's defaults a runtime spawns one worker per

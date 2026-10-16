@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use prometheus::{exponential_buckets, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
 
-pub use nydus_config::{Backend, Protocol, ReadKind};
+pub use nydus_config::{BackendKind, Protocol, ReadKind};
 
 /// Used to register all metrics.
 pub static REGISTRY: LazyLock<Registry> = LazyLock::new(|| {
@@ -367,10 +367,10 @@ fn read_kind_label(kind: ReadKind) -> &'static str {
 }
 
 /// The `backend` label value of a backend.
-fn backend_label(backend: Backend) -> &'static str {
+fn backend_label(backend: BackendKind) -> &'static str {
     match backend {
-        Backend::Local => "local",
-        Backend::Registry => "registry",
+        BackendKind::Local => "local",
+        BackendKind::Registry => "registry",
     }
 }
 
@@ -429,7 +429,7 @@ impl fmt::Display for FsOp {
 /// Collects the read backend finished metrics.
 pub fn collect_read_backend_finished_metrics(
     kind: ReadKind,
-    backend: Backend,
+    backend: BackendKind,
     protocol: Option<Protocol>,
     length: u64,
     cost: Duration,
@@ -454,7 +454,7 @@ pub fn collect_read_backend_finished_metrics(
 /// Collects the read backend failure metrics.
 pub fn collect_read_backend_failure_metrics(
     kind: ReadKind,
-    backend: Backend,
+    backend: BackendKind,
     protocol: Option<Protocol>,
     cost: Duration,
 ) {
@@ -474,14 +474,20 @@ pub fn collect_read_backend_failure_metrics(
 }
 
 /// Collects the validate chunk group started metrics.
-pub fn collect_validate_chunk_group_started_metrics(backend: Backend, protocol: Option<Protocol>) {
+pub fn collect_validate_chunk_group_started_metrics(
+    backend: BackendKind,
+    protocol: Option<Protocol>,
+) {
     VALIDATE_CHUNK_GROUP_COUNT
         .with_label_values(&[backend_label(backend), protocol_label(protocol)])
         .inc();
 }
 
 /// Collects the validate chunk group failure metrics.
-pub fn collect_validate_chunk_group_failure_metrics(backend: Backend, protocol: Option<Protocol>) {
+pub fn collect_validate_chunk_group_failure_metrics(
+    backend: BackendKind,
+    protocol: Option<Protocol>,
+) {
     VALIDATE_CHUNK_GROUP_FAILURE_COUNT
         .with_label_values(&[backend_label(backend), protocol_label(protocol)])
         .inc();
@@ -532,7 +538,7 @@ pub fn collect_fs_op_failure_metrics(op: FsOp, cost: Duration) {
 pub fn collect_read_chunk_group_metrics(
     kind: ReadKind,
     storage: Storage,
-    backend: Backend,
+    backend: BackendKind,
     protocol: Option<Protocol>,
 ) {
     READ_CHUNK_GROUP_COUNT
@@ -583,7 +589,7 @@ mod tests {
         duration_sum: f64,
     }
 
-    fn read_sample(kind: ReadKind, backend: Backend, protocol: Option<Protocol>) -> ReadSample {
+    fn read_sample(kind: ReadKind, backend: BackendKind, protocol: Option<Protocol>) -> ReadSample {
         let labels = [
             read_kind_label(kind),
             backend_label(backend),
@@ -605,12 +611,16 @@ mod tests {
     #[test]
     fn read_backends_are_counted_by_type_backend_and_protocol() {
         let test_cases = vec![
-            (ReadKind::OnDemand, Backend::Local, None),
-            (ReadKind::Prefetch, Backend::Local, None),
-            (ReadKind::OnDemand, Backend::Registry, Some(Protocol::Http)),
+            (ReadKind::OnDemand, BackendKind::Local, None),
+            (ReadKind::Prefetch, BackendKind::Local, None),
+            (
+                ReadKind::OnDemand,
+                BackendKind::Registry,
+                Some(Protocol::Http),
+            ),
             (
                 ReadKind::Prefetch,
-                Backend::Registry,
+                BackendKind::Registry,
                 Some(Protocol::Dragonfly),
             ),
         ];
@@ -654,9 +664,9 @@ mod tests {
     #[test]
     fn validate_chunk_groups_are_counted_by_backend_and_protocol() {
         let test_cases = vec![
-            (Backend::Local, None),
-            (Backend::Registry, Some(Protocol::Http)),
-            (Backend::Registry, Some(Protocol::Dragonfly)),
+            (BackendKind::Local, None),
+            (BackendKind::Registry, Some(Protocol::Http)),
+            (BackendKind::Registry, Some(Protocol::Dragonfly)),
         ];
 
         for (backend, protocol) in test_cases {
@@ -724,18 +734,23 @@ mod tests {
     #[test]
     fn read_chunk_groups_are_counted_by_type_storage_backend_and_protocol() {
         let test_cases = vec![
-            (ReadKind::OnDemand, Storage::Local, Backend::Local, None),
-            (ReadKind::OnDemand, Storage::Backend, Backend::Local, None),
+            (ReadKind::OnDemand, Storage::Local, BackendKind::Local, None),
+            (
+                ReadKind::OnDemand,
+                Storage::Backend,
+                BackendKind::Local,
+                None,
+            ),
             (
                 ReadKind::Prefetch,
                 Storage::Backend,
-                Backend::Registry,
+                BackendKind::Registry,
                 Some(Protocol::Http),
             ),
             (
                 ReadKind::Prefetch,
                 Storage::Local,
-                Backend::Registry,
+                BackendKind::Registry,
                 Some(Protocol::Dragonfly),
             ),
         ];
@@ -823,12 +838,12 @@ mod tests {
     fn registry_encodes_registered_metrics() {
         collect_read_backend_finished_metrics(
             ReadKind::Prefetch,
-            Backend::Local,
+            BackendKind::Local,
             None,
             3,
             Duration::from_millis(500),
         );
-        collect_validate_chunk_group_started_metrics(Backend::Local, None);
+        collect_validate_chunk_group_started_metrics(BackendKind::Local, None);
         collect_fs_op_finished_metrics(FsOp::Statfs, Duration::from_millis(1));
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&REGISTRY.gather())

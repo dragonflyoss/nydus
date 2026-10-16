@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::build::merge::rewrite_bootstrap_with_ondemand_blob;
 use crate::parse_unix_address;
-use nydus_backend::{BlobBackend, ReadKind};
+use nydus_backend::{Backend, ReadKind};
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
@@ -101,7 +101,7 @@ pub struct ChunkGroupRef {
 pub fn build_ondemand_blob(
     parent_bootstrap: &Path,
     patterns: &[ChunkGroupRef],
-    backend: Arc<dyn BlobBackend>,
+    backend: Arc<dyn Backend>,
     cache_dir: &Path,
 ) -> Result<OndemandBlob> {
     let reader = ErofsReader::open_metadata_only(parent_bootstrap).with_context(|| {

@@ -403,7 +403,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
-    use nydus_backend::{BlobBackend, Local};
+    use nydus_backend::{Backend, Local};
     use nydus_format::blob::BlobMetadata;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
     use nydus_test_utils::blob::FullBlob;
@@ -438,9 +438,9 @@ mod tests {
         }
     }
 
-    impl BlobBackend for FlakyBackend {
-        fn backend(&self) -> nydus_backend::Backend {
-            self.inner.backend()
+    impl Backend for FlakyBackend {
+        fn kind(&self) -> nydus_backend::BackendKind {
+            self.inner.kind()
         }
 
         fn protocol(&self) -> Option<nydus_backend::Protocol> {
@@ -598,9 +598,9 @@ mod tests {
         reads: Mutex<Vec<[u8; SHA256_DIGEST_SIZE]>>,
     }
 
-    impl BlobBackend for RecordingBackend {
-        fn backend(&self) -> nydus_backend::Backend {
-            self.inner.backend()
+    impl Backend for RecordingBackend {
+        fn kind(&self) -> nydus_backend::BackendKind {
+            self.inner.kind()
         }
 
         fn protocol(&self) -> Option<nydus_backend::Protocol> {

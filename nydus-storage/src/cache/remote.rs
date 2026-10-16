@@ -10,7 +10,7 @@
 use std::io;
 use std::sync::Arc;
 
-use nydus_backend::{BlobBackend, ReadKind};
+use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -23,7 +23,7 @@ use super::{
 pub struct RemoteBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
     blob_metadata: BlobMetadata,
-    backend: Arc<dyn BlobBackend>,
+    backend: Arc<dyn Backend>,
 }
 
 impl RemoteBlobCache {
@@ -31,7 +31,7 @@ impl RemoteBlobCache {
     /// fetch; no local file is created.
     pub fn open(
         blob_id: [u8; SHA256_DIGEST_SIZE],
-        backend: Arc<dyn BlobBackend>,
+        backend: Arc<dyn Backend>,
         kind: ReadKind,
     ) -> io::Result<Self> {
         let blob_metadata = backend.blob_metadata(&blob_id, kind)?;
@@ -151,7 +151,7 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
-        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn Backend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend, ReadKind::OnDemand).unwrap();
 
         let mut buf = vec![0u8; 1024];
@@ -214,7 +214,7 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
-        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
+        let backend: Arc<dyn Backend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
         let remote = RemoteBlobCache::open(full_blob_id, backend, ReadKind::OnDemand).unwrap();
 
         assert_eq!(

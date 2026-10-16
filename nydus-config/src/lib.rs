@@ -145,7 +145,7 @@ pub enum BackendConfig {
 
 /// The blob backend, the `type` tag of [`BackendConfig`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Backend {
+pub enum BackendKind {
     /// The local directory backend.
     Local,
 

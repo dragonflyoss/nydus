@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tempfile::{tempdir, NamedTempFile, TempDir};
 
 use nydus::build::{build_image, BuildImageOptions, NativeLayout};
-use nydus_backend::{BlobBackend, Local, ReadKind};
+use nydus_backend::{Backend, Local, ReadKind};
 use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
 use nydus_core::build::bootstrap::render_bootstrap;
 use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeData, InodeInfo};
@@ -594,9 +594,9 @@ fn zstd_config_windowlog_range() {
     }
 }
 
-impl BlobBackend for CountingBackend {
-    fn backend(&self) -> nydus_backend::Backend {
-        self.local.backend()
+impl Backend for CountingBackend {
+    fn kind(&self) -> nydus_backend::BackendKind {
+        self.local.kind()
     }
 
     fn protocol(&self) -> Option<nydus_backend::Protocol> {
@@ -1201,7 +1201,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let bootstrap_path = dir.path().join("bootstrap");
     fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");
 
-    let backend: std::sync::Arc<dyn nydus_backend::BlobBackend> =
+    let backend: std::sync::Arc<dyn nydus_backend::Backend> =
         std::sync::Arc::new(nydus_backend::Local::new(dir.path().to_path_buf()));
     let reader =
         ErofsReader::open_bootstrap(&bootstrap_path, backend, None, None).expect("open reader");

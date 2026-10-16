@@ -177,7 +177,7 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
-| `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, whose `Backend`/`Protocol`/`ReadKind` it maps to label values, so every layer can record without cycles | — |
+| `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, whose `BackendKind`/`Protocol`/`ReadKind` it maps to label values, so every layer can record without cycles | — |
 
 `nydus-format` stays neutral by mirroring the error shape: its `FormatError`
 carries the same context-chain design, the data plane wraps it into
@@ -201,7 +201,7 @@ them.
 ## Runtime Thread Model
 
 The data-plane APIs are synchronous. A thread that calls `ErofsReader`,
-`NydusCore`, `Blobs`, or `BlobBackend` remains responsible for that operation
+`NydusCore`, `Blobs`, or `Backend` remains responsible for that operation
 until it completes. The layers below may use helper threads for remote I/O or
 explicit prefetch, but they do not turn an ordinary read into a detached task.
 This means frontend concurrency is also read concurrency: for example, a FUSE
@@ -212,7 +212,7 @@ downloading it more than once.
 
 ### Backend thread pools
 
-`BlobBackend` itself does not own a general-purpose thread pool. The local
+`Backend` itself does not own a general-purpose thread pool. The local
 backend performs file I/O directly on the caller. Remote registry and
 Dragonfly HTTP backends bridge their synchronous methods into two Tokio
 multi-thread runtimes, one for on-demand reads and one for prefetch, so a

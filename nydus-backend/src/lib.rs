@@ -35,7 +35,7 @@ pub(crate) use registry::Registry;
 #[cfg(feature = "registry")]
 pub use registry::{Netns, NetnsId, Runtime};
 
-pub use nydus_config::{Backend, Protocol, ReadKind};
+pub use nydus_config::{BackendKind, Protocol, ReadKind};
 
 /// A raw EROFS device backed by the range
 /// `[data_offset, data_offset + data_size)` of a local file.
@@ -56,7 +56,7 @@ pub struct RawDeviceFile {
 /// A blob backend resolves blob data and metadata by content digest.
 ///
 /// ```text
-///           BlobBackend
+///           Backend
 ///        ┌───────┴───────┐
 ///      Local         Registry
 ///    directory     origin, P2P
@@ -64,9 +64,9 @@ pub struct RawDeviceFile {
 ///
 /// Every implementation reports its reads to [`nydus_telemetry::metrics`]
 /// itself, once per [`read_range_into`](Self::read_range_into) call.
-pub trait BlobBackend: Send + Sync {
+pub trait Backend: Send + Sync {
     /// Returns which backend this is, the `backend` label of its metrics.
-    fn backend(&self) -> Backend;
+    fn kind(&self) -> BackendKind;
 
     /// Returns how this backend fetches bytes when nothing else is known, the
     /// `protocol` label of the metrics recorded outside a read, `None` for a
@@ -137,7 +137,7 @@ pub trait BlobBackend: Send + Sync {
 ///
 /// A registry backend runs on runtimes of its own, one per read kind, built
 /// from the `http` section.
-pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
+pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn Backend>> {
     match config {
         BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
         #[cfg(feature = "registry")]
@@ -166,8 +166,8 @@ pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>>
 pub fn build_backend_with_runtime(
     config: &BackendConfig,
     runtime: Arc<Runtime>,
-) -> io::Result<Arc<dyn BlobBackend>> {
-    let backend: Arc<dyn BlobBackend> = match config {
+) -> io::Result<Arc<dyn Backend>> {
+    let backend: Arc<dyn Backend> = match config {
         BackendConfig::Local(local) => Arc::new(Local::new(local.dir.clone())),
         BackendConfig::Registry(registry) => Arc::new(Registry::new(registry.clone(), runtime)?),
     };

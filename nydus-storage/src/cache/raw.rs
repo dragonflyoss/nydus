@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::{BlobBackend, RawDeviceFile, ReadKind};
+use nydus_backend::{Backend, RawDeviceFile, ReadKind};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use super::BlobCache;
@@ -20,13 +20,13 @@ use super::BlobCache;
 /// A blob cache that passes reads through to the backend unchanged.
 pub struct RawDeviceBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
-    backend: Arc<dyn BlobBackend>,
+    backend: Arc<dyn Backend>,
     file: Option<RawDeviceFile>,
 }
 
 impl RawDeviceBlobCache {
     /// Wrap `backend` for the raw device blob `blob_id`.
-    pub fn new(blob_id: [u8; SHA256_DIGEST_SIZE], backend: Arc<dyn BlobBackend>) -> Self {
+    pub fn new(blob_id: [u8; SHA256_DIGEST_SIZE], backend: Arc<dyn Backend>) -> Self {
         let file = backend
             .raw_device_file(&blob_id)
             .ok()
@@ -117,7 +117,7 @@ mod tests {
     fn local_raw_device_maps_the_store_file_directly() {
         let dir = tempdir().unwrap();
         let (payload, blob_id) = write_raw_device_blob(dir.path());
-        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(dir.path().to_path_buf()));
+        let backend: Arc<dyn Backend> = Arc::new(Local::new(dir.path().to_path_buf()));
         assert!(backend.is_raw_device(&blob_id).unwrap());
         assert!(backend.blob_metadata(&blob_id, ReadKind::OnDemand).is_err());
 
@@ -152,9 +152,9 @@ mod tests {
 
     struct Streamed(Local);
 
-    impl BlobBackend for Streamed {
-        fn backend(&self) -> nydus_backend::Backend {
-            self.0.backend()
+    impl Backend for Streamed {
+        fn kind(&self) -> nydus_backend::BackendKind {
+            self.0.kind()
         }
 
         fn protocol(&self) -> Option<nydus_backend::Protocol> {

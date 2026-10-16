@@ -9,7 +9,7 @@
 //!
 //! This crate depends on no nydus crate but [`nydus_config`], so every layer
 //! (data plane and control plane alike) can record metrics. The enums that
-//! describe the configuration ([`nydus_config::Backend`],
+//! describe the configuration ([`nydus_config::BackendKind`],
 //! [`nydus_config::Protocol`], [`nydus_config::ReadKind`]) are defined there
 //! and re-exported from [`metrics`], which maps them to label values; the
 //! enums that only exist for metrics ([`metrics::Storage`], [`metrics::FsOp`])

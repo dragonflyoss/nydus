@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::BlobBackend;
+use nydus_backend::Backend;
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataChunkGroupDigest, BlobMetadataChunkGroupExtent,
     BlobMetadataCompressor,
@@ -213,7 +213,7 @@ pub fn plan_prefetch_batches(
 /// served the window.
 pub fn decode_chunk_group_from_window<'a>(
     blob_metadata: &BlobMetadata,
-    backend: &Arc<dyn BlobBackend>,
+    backend: &Arc<dyn Backend>,
     group: &BlobMetadataChunkGroupExtent,
     window_base_offset: u64,
     window_bytes: &'a [u8],
@@ -378,19 +378,19 @@ pub(crate) fn decode_chunk_group_into(
 /// Validate a decoded chunk group, counting the CRC check and, on a CRC
 /// mismatch, the failure against the backend.
 pub fn validate_chunk_group_with_metrics(
-    backend: &Arc<dyn BlobBackend>,
+    backend: &Arc<dyn Backend>,
     blob_metadata: &BlobMetadata,
     group: &BlobMetadataChunkGroupExtent,
     decoded: &[u8],
 ) -> io::Result<()> {
     nydus_telemetry::metrics::collect_validate_chunk_group_started_metrics(
-        backend.backend(),
+        backend.kind(),
         backend.protocol(),
     );
     if let Err(err) = validate_decoded_chunk_group(blob_metadata, group, decoded) {
         if is_chunk_group_crc_mismatch(&err) {
             nydus_telemetry::metrics::collect_validate_chunk_group_failure_metrics(
-                backend.backend(),
+                backend.kind(),
                 backend.protocol(),
             );
         }
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn window_decode_borrows_plain_payload_and_preserves_validation() {
-        let backend: Arc<dyn BlobBackend> = Arc::new(DragonflyBackend);
+        let backend: Arc<dyn Backend> = Arc::new(DragonflyBackend);
         let payload = vec![0x5a; 4096];
         for compressor in [
             BlobMetadataCompressor::None,
@@ -811,9 +811,9 @@ mod tests {
     /// A backend whose reads are never exercised; only its labels matter.
     struct DragonflyBackend;
 
-    impl BlobBackend for DragonflyBackend {
-        fn backend(&self) -> nydus_backend::Backend {
-            nydus_backend::Backend::Registry
+    impl Backend for DragonflyBackend {
+        fn kind(&self) -> nydus_backend::BackendKind {
+            nydus_backend::BackendKind::Registry
         }
 
         fn protocol(&self) -> Option<nydus_backend::Protocol> {
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn crc_failure_is_counted_against_the_backend() {
-        let backend: Arc<dyn BlobBackend> = Arc::new(DragonflyBackend);
+        let backend: Arc<dyn Backend> = Arc::new(DragonflyBackend);
         let payload = vec![0u8; EROFS_BLOCK_SIZE as usize];
         // A zeroed block has crc32c != 0, so a group declaring crc 0 mismatches.
         let metadata = BlobMetadata::new(

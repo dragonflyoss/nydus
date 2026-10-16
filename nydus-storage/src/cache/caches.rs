@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::access_trace::TraceRecorder;
-use nydus_backend::{BlobBackend, ReadKind};
+use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::BlobMetadataChunkGroupExtent;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::{
@@ -34,7 +34,7 @@ struct BlobSlot {
     /// The local cache directory; `None` selects the diskless
     /// [`RemoteBlobCache`], which serves every read from the backend.
     cache_dir: Option<PathBuf>,
-    backend: Arc<dyn BlobBackend>,
+    backend: Arc<dyn Backend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     /// Double-checked lazy init: reads take the read lock (hot path), a cold
     /// slot takes the write lock and re-checks before opening. A failed open
@@ -98,7 +98,7 @@ impl BlobCaches {
     /// directly and nothing is written to disk.
     pub fn new(
         entries: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
-        backend: Arc<dyn BlobBackend>,
+        backend: Arc<dyn Backend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<Self> {

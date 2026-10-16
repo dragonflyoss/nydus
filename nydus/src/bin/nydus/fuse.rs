@@ -2,7 +2,7 @@ use clap::Parser;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
-use nydus_backend::{build_backend, BlobBackend, Local};
+use nydus_backend::{build_backend, Backend, Local};
 use nydus_config::{
     default_prefetch_blob_timeout, default_prefetch_concurrent_blob_count, Config, PrefetchScope,
 };
@@ -225,7 +225,7 @@ impl FuseCommand {
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
         // explicit `--blob-dir` (local backend) or the backend from `--config`.
-        let backend: Option<Arc<dyn BlobBackend>> = if self.blob.is_some() {
+        let backend: Option<Arc<dyn Backend>> = if self.blob.is_some() {
             None
         } else if let Some(dir) = self.blob_dir.as_ref() {
             if !dir.is_dir() {

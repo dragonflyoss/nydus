@@ -4,7 +4,7 @@ use nydus::error::{Context, Error, Result};
 use nydus::optimize::{
     build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, ChunkGroupRef,
 };
-use nydus_backend::{build_backend, BlobBackend};
+use nydus_backend::{build_backend, Backend};
 use nydus_config::Config;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
@@ -114,7 +114,7 @@ impl OptimizeCommand {
     /// Lowers the raw CLI flags into the optimize inputs: the access patterns
     /// from the trace source, the blob backend, and the local cache directory
     /// the source blobs' metadata is loaded through.
-    fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn BlobBackend>, PathBuf)> {
+    fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, PathBuf)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
             (Some(path), _) => load_patterns_from_file(path)?,
             (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
@@ -148,7 +148,7 @@ impl OptimizeCommand {
     fn run(
         &self,
         patterns: &[ChunkGroupRef],
-        backend: Arc<dyn BlobBackend>,
+        backend: Arc<dyn Backend>,
         cache_dir: &Path,
     ) -> Result<()> {
         fs::create_dir_all(cache_dir).with_context(|| {
