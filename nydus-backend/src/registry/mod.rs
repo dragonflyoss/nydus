@@ -481,10 +481,6 @@ impl Backend for Registry {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-
         // Read the bytes on a thread of the on-demand runtime.
         let start = Instant::now();
         let client = self.client.clone();
@@ -493,7 +489,10 @@ impl Backend for Registry {
         let result = self
             .runtime
             .block_on_worker(ReadKind::OnDemand, async move {
-                let range = format!("bytes={offset}-{}", offset + length as u64 - 1);
+                let range = format!(
+                    "bytes={offset}-{}",
+                    (offset + length as u64).saturating_sub(1)
+                );
                 let response = client.read_blob(&blob_id, &range).await?;
                 let protocol = response.protocol;
                 Ok((response.bytes(length).await?, protocol))
@@ -532,10 +531,6 @@ impl Backend for Registry {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-
         // Read the bytes on a thread of the prefetch runtime.
         let start = Instant::now();
         let client = self.client.clone();
@@ -544,7 +539,10 @@ impl Backend for Registry {
         let result = self
             .runtime
             .block_on_worker(ReadKind::Prefetch, async move {
-                let range = format!("bytes={offset}-{}", offset + length as u64 - 1);
+                let range = format!(
+                    "bytes={offset}-{}",
+                    (offset + length as u64).saturating_sub(1)
+                );
                 let response = client.prefetch_blob(&blob_id, &range).await?;
                 let protocol = response.protocol;
                 Ok((response.bytes(length).await?, protocol))

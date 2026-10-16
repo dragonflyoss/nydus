@@ -171,32 +171,8 @@ impl Local {
         )))
     }
 
-    /// Reads the raw blob metadata of `blob`: the sidecar file when present,
-    /// otherwise the region embedded in the full blob.
-    fn read_blob_metadata_bytes(&self, blob: &Blob) -> io::Result<Vec<u8>> {
-        if blob.footer.is_raw_device() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "native EROFS layer has no blob meta: {}",
-                    blob.path.display()
-                ),
-            ));
-        }
-
-        let blob_metadata_path = self.blob_metadata_path(&blob.path)?;
-        if blob_metadata_path.is_file() {
-            return fs::read(&blob_metadata_path);
-        }
-
-        let mut buf = vec![0u8; blob.footer.blob_metadata_size() as usize];
-        blob.file()?
-            .read_exact_at(&mut buf, blob.footer.blob_metadata_offset())?;
-        Ok(buf)
-    }
-
     /// Fills `buf` with the blob bytes from `offset` of the data region.
-    fn read_range(
+    fn read_blob(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
@@ -238,10 +214,30 @@ impl Backend for Local {
         Ok(self.blob(blob_id)?.cache_key)
     }
 
-    /// Reads the blob's metadata from the sidecar file or the full blob.
+    /// Reads the blob's metadata from the sidecar file when present, otherwise
+    /// from the region embedded in the full blob.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let blob = self.blob(blob_id)?;
-        let buf = self.read_blob_metadata_bytes(&blob)?;
+        if blob.footer.is_raw_device() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "native EROFS layer has no blob meta: {}",
+                    blob.path.display()
+                ),
+            ));
+        }
+
+        let blob_metadata_path = self.blob_metadata_path(&blob.path)?;
+        let buf = if blob_metadata_path.is_file() {
+            fs::read(&blob_metadata_path)?
+        } else {
+            let mut buf = vec![0u8; blob.footer.blob_metadata_size() as usize];
+            blob.file()?
+                .read_exact_at(&mut buf, blob.footer.blob_metadata_offset())?;
+            buf
+        };
+
         BlobMetadata::from_bytes(buf).map_err(io::Error::other)
     }
 
@@ -276,12 +272,8 @@ impl Backend for Local {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-
         let start = Instant::now();
-        let result = self.read_range(blob_id, offset, buf);
+        let result = self.read_blob(blob_id, offset, buf);
         match &result {
             Ok(()) => collect_read_backend_finished_metrics(
                 ReadKind::OnDemand,
@@ -308,12 +300,8 @@ impl Backend for Local {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-
         let start = Instant::now();
-        let result = self.read_range(blob_id, offset, buf);
+        let result = self.read_blob(blob_id, offset, buf);
         match &result {
             Ok(()) => collect_read_backend_finished_metrics(
                 ReadKind::Prefetch,
