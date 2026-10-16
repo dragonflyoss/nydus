@@ -208,10 +208,9 @@ impl Transport for Dragonfly {
             ),
         }
 
-        // Serve a definitive answer; go back to the origin on anything another
-        // attempt might change.
+        // Serve a definitive answer; go back to the origin on anything else.
         let err = match result {
-            Ok(response) if response.is_retryable() => response.into_io_error().await,
+            Ok(response) if response.needs_back_to_source() => response.into_io_error().await,
             Ok(response) => return Ok(response),
             Err(err) => err,
         };
@@ -302,10 +301,10 @@ impl Transport for Dragonfly {
             ),
         }
 
-        // Serve a definitive answer; defer the read on anything another
-        // attempt might change.
+        // Serve a definitive answer; defer the read on anything else, as a
+        // prefetch never goes back to the origin.
         let err = match result {
-            Ok(response) if response.is_retryable() => response.into_io_error().await,
+            Ok(response) if response.needs_back_to_source() => response.into_io_error().await,
             Ok(response) => return Ok(response),
             Err(err) => err,
         };

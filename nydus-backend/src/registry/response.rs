@@ -85,10 +85,11 @@ impl Response {
         io::Error::other(format!("unexpected status {status}: {body}"))
     }
 
-    /// Returns whether another attempt might get a different answer: a `429`,
-    /// `5xx` or `408`. Every other status is definitive.
+    /// Returns whether the seed peers failed to serve the read, a `429`, `5xx`
+    /// or `408`, so it goes back to the source. Every other status is the
+    /// registry's definitive answer.
     #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
-    pub(crate) fn is_retryable(&self) -> bool {
+    pub(crate) fn needs_back_to_source(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT
             || self.status == StatusCode::TOO_MANY_REQUESTS
@@ -130,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_retryable_marks_the_statuses_another_attempt_might_change() {
+    fn needs_back_to_source_marks_the_statuses_the_seed_peers_failed_with() {
         let test_cases = vec![
             (StatusCode::INTERNAL_SERVER_ERROR, true),
             (StatusCode::BAD_GATEWAY, true),
@@ -154,7 +155,7 @@ mod tests {
                 body: Body::Bytes(Bytes::new()),
                 protocol: Protocol::Http,
             };
-            assert_eq!(response.is_retryable(), expected, "{status}");
+            assert_eq!(response.needs_back_to_source(), expected, "{status}");
         }
     }
 
