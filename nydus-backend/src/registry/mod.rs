@@ -92,21 +92,6 @@ trait Transport: Send + Sync {
 
     /// Sends a `HEAD`.
     async fn head(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
-
-    /// Sends `method` for `url`, a `GET` as the read of `kind`.
-    async fn send(
-        &self,
-        method: Method,
-        url: &str,
-        headers: HeaderMap,
-        kind: ReadKind,
-    ) -> io::Result<Response> {
-        match (method, kind) {
-            (Method::HEAD, _) => self.head(url, headers).await,
-            (_, ReadKind::OnDemand) => self.get(url, headers).await,
-            (_, ReadKind::Prefetch) => self.prefetch(url, headers).await,
-        }
-    }
 }
 
 /// Splits a registry `addr` such as `http://127.0.0.1:5000` into its scheme
@@ -325,14 +310,19 @@ impl Inner {
         headers: HeaderMap,
         kind: ReadKind,
     ) -> io::Result<Response> {
-        let Some(dragonfly) = &self.dragonfly else {
-            return self.http.send(method, url, headers, kind).await;
+        let transport: &dyn Transport = match &self.dragonfly {
+            Some(dragonfly) => dragonfly.as_ref(),
+            None => &self.http,
         };
-        if method == Method::HEAD {
-            return dragonfly.head(url, headers).await;
+        let result = match (method, kind) {
+            (Method::HEAD, _) => return transport.head(url, headers).await,
+            (_, ReadKind::OnDemand) => transport.get(url, headers.clone()).await,
+            (_, ReadKind::Prefetch) => transport.prefetch(url, headers.clone()).await,
+        };
+        if self.dragonfly.is_none() {
+            return result;
         }
 
-        let result = dragonfly.send(method, url, headers.clone(), kind).await;
         match Action::decide(kind, result).await {
             Action::Serve(response) => Ok(response),
             Action::Fallback(err) => {
