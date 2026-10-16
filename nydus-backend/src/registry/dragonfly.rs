@@ -7,9 +7,14 @@
 //! prefetch read never retries, the storage layer rescheduling a failed
 //! prefetch hours later instead. The SDK reads the body whole, so a seed peer
 //! failing mid-body is retried like any other transient failure, and the
-//! buffer it filled is handed on without a copy. An answer the SDK reports as
-//! an error but that carries an HTTP status is handed back as a [`Response`],
-//! so [`policy`](super::policy) classifies it by status like an origin answer.
+//! buffer it filled is handed on without a copy.
+//!
+//! What a read does once the SDK's own retries are spent is decided here: a
+//! `429`, `5xx`, `408` or transport failure sends an on-demand read back to
+//! the origin through the rate-limited client, as dfdaemon itself goes back
+//! to source, and defers a prefetch read to the storage layer's reschedule
+//! instead, so a Dragonfly outage degrades prefetch rather than flooding the
+//! registry. Any other answer is served as is, a dfdaemon `422` included.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -18,19 +23,20 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use dragonfly_api::common::v2::Priority;
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
 use dragonfly_client_request::{GetRequest, Proxy, Request as _};
 
-use nydus_config::DragonflyConfig;
+use nydus_config::{DragonflyConfig, HttpConfig};
+use nydus_telemetry::metrics::collect_read_backend_failure_metrics;
 
-use super::http::Http;
+use super::http::{Http, RateLimit};
 use super::response::{Body, Response};
 use super::rt::Runtime;
 use super::Transport;
-use crate::{Protocol, ReadKind};
+use crate::{BackendKind, Protocol, ReadKind};
 
 /// The Dragonfly SDK transport, one client per read kind so each kind keeps
 /// its own retry budget.
@@ -51,17 +57,32 @@ pub(crate) struct Dragonfly {
     /// blob's size, as dfdaemon's own proxy forwards non-`GET` requests
     /// straight to the origin.
     http: Http,
+
+    /// The origin client an on-demand read goes back to when the seed peers
+    /// cannot serve it, every attempt claiming a rate limit slot first.
+    back_to_source: Http,
 }
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
     /// Creates the transport, each client connecting to the configured
     /// scheduler on the runtime of its read kind, with `http` for the
-    /// requests that go to the origin.
+    /// requests that go to the origin and a back-to-source client built from
+    /// `http_config` under the configured rate limit, zero leaving it
+    /// unthrottled.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers.
-    pub(crate) fn new(config: DragonflyConfig, http: Http, runtime: &Runtime) -> io::Result<Self> {
+    pub(crate) fn new(
+        config: DragonflyConfig,
+        http_config: &HttpConfig,
+        http: Http,
+        runtime: &Runtime,
+    ) -> io::Result<Self> {
+        let request_rate_limit = config.back_to_source.request_rate_limit;
+        let rate_limit = (request_rate_limit > 0)
+            .then(|| RateLimit::new(request_rate_limit, Duration::from_secs(1)));
+
         Ok(Self {
             ondemand: Self::client(
                 runtime,
@@ -72,6 +93,7 @@ impl Dragonfly {
             prefetch: Self::client(runtime, ReadKind::Prefetch, config.scheduler_endpoint, 0)?,
             request_timeout: config.request_timeout,
             http,
+            back_to_source: Http::new(http_config, rate_limit)?,
         })
     }
 
@@ -107,16 +129,17 @@ impl Transport for Dragonfly {
 
     /// Fetches `url` through the on-demand client at `Level6`, the SDK's
     /// default priority, the SDK adding the P2P and priority headers itself,
-    /// and logs the outcome.
+    /// and logs the outcome; a `429`, `5xx`, `408` or transport failure the
+    /// SDK's retries did not cure goes back to the origin.
     ///
     /// The SDK reads the body whole, retrying a seed peer that fails mid-body,
     /// and the buffer is handed on as is. An SDK error carrying an HTTP status
-    /// becomes a [`Response`] so the policy classifies it like an origin
+    /// becomes a [`Response`] so it is settled by status like an origin
     /// answer; anything else is a transport failure.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
-            header: headers,
+            header: headers.clone(),
             priority: Some(Priority::Level6 as i32),
             timeout: self.request_timeout,
             ..Default::default()
@@ -177,12 +200,35 @@ impl Transport for Dragonfly {
                 start.elapsed()
             ),
         }
-        result
+
+        // Serve a definitive answer; go back to the origin on anything another
+        // attempt might change.
+        let err = match result {
+            Ok(response) if response.is_retryable() => response.into_io_error().await,
+            Ok(response) => return Ok(response),
+            Err(err) => err,
+        };
+        warn!("dragonfly request failed, falling back to the origin: {err}");
+        let start = Instant::now();
+        self.back_to_source
+            .get(url, headers)
+            .await
+            .inspect_err(|_| {
+                collect_read_backend_failure_metrics(
+                    ReadKind::OnDemand,
+                    BackendKind::Registry,
+                    Some(Protocol::Http),
+                    start.elapsed(),
+                )
+            })
     }
 
     /// Fetches `url` through the prefetch client at `Level3`, so a first
     /// download lets a normal peer go back to source ahead of it, and logs
-    /// the outcome; the body and errors are handled as in [`get`](Self::get).
+    /// the outcome; a `429`, `5xx`, `408` or transport failure defers the
+    /// read as an [`io::ErrorKind::QuotaExceeded`] for the storage layer to
+    /// reschedule hours later, never touching the origin. The body and
+    /// errors are otherwise handled as in [`get`](Self::get).
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
@@ -247,6 +293,18 @@ impl Transport for Dragonfly {
                 start.elapsed()
             ),
         }
-        result
+
+        // Serve a definitive answer; defer the read on anything another
+        // attempt might change.
+        let err = match result {
+            Ok(response) if response.is_retryable() => response.into_io_error().await,
+            Ok(response) => return Ok(response),
+            Err(err) => err,
+        };
+        warn!("dragonfly request failed: {err}");
+        Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("prefetch deferred: {err}"),
+        ))
     }
 }

@@ -87,6 +87,7 @@ impl Response {
 
     /// Returns whether another attempt might get a different answer: a `429`,
     /// `5xx` or `408`. Every other status is definitive.
+    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
     pub(crate) fn is_retryable(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT

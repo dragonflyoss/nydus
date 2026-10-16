@@ -213,6 +213,7 @@ pub(crate) struct RateLimit {
 impl RateLimit {
     /// Creates a limit of `request_rate_limit` requests per `interval`, both
     /// at least one.
+    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
     pub(crate) fn new(request_rate_limit: u64, interval: Duration) -> Self {
         Self {
             limiter: RateLimiter::builder()
