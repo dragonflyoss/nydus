@@ -48,7 +48,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
+use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
 use url::Url;
 
@@ -120,9 +120,8 @@ pub(crate) struct Registry {
 /// can run on the runtime while its caller waits.
 ///
 /// ```text
-/// get_blob(range, kind)                 transport: Dragonfly when configured, else Http
-///   │                                   GET: transport.get for an on-demand read,
-///   │                                        transport.prefetch for a prefetch read
+/// get_blob(range) / prefetch_blob(range)         transport: Dragonfly when
+///   │                                            configured, else Http
 ///   ├─ cached redirect ──▶ GET redirect ───────────────────────────────┐
 ///   │                       401/403 evicts it and falls through        │
 ///   └─ blob URL ──▶ execute(GET) ─┬─ 3xx ──▶ GET location, cache it    │
@@ -269,73 +268,38 @@ impl Client {
         request(headers).await
     }
 
-    /// Sends the `GET` for `length` blob bytes from `offset` and returns the
-    /// successful response, its body still to be read.
+    /// Fetches `length` blob bytes from `offset` for an on-demand read and
+    /// returns the successful response, its body still to be read.
     ///
-    /// The read goes through the cached redirect when there is one and
-    /// otherwise through the blob URL, caching the redirect it answers with.
+    /// The read goes through the cached redirect when there is one, a `401`
+    /// or `403` evicting it, and otherwise through the blob URL, caching the
+    /// redirect it answers with.
     async fn get_blob(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: usize,
-        kind: ReadKind,
     ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
         let end = offset + length as u64 - 1;
-        let range: HeaderValue = format!("bytes={offset}-{end}").parse().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert(RANGE, range);
-
-        match self.get_through_redirect(&hex, &headers, kind).await? {
-            Some(response) => Ok(response),
-            None => self.get_through_blob_url(&hex, headers, kind).await,
-        }
-    }
-
-    /// Sends the blob `GET` through the redirect cached for `hex`, `None`
-    /// when none is cached or the link answered `401` or `403`, which evicts
-    /// it so the read falls through to the blob URL.
-    async fn get_through_redirect(
-        &self,
-        hex: &str,
-        headers: &HeaderMap,
-        kind: ReadKind,
-    ) -> io::Result<Option<Response>> {
-        let Some(redirect) = self.redirects.get(hex) else {
-            return Ok(None);
-        };
-
+        headers.insert(RANGE, format!("bytes={offset}-{end}").parse().unwrap());
         let transport = self.transport();
-        let response = match kind {
-            ReadKind::OnDemand => transport.get(&redirect, headers.clone()).await?,
-            ReadKind::Prefetch => transport.prefetch(&redirect, headers.clone()).await?,
-        };
-        match response.status {
-            status if status.is_success() => Ok(Some(response)),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                self.redirects.remove(hex);
-                Ok(None)
+
+        // Read through the cached redirect, a refusal evicting it.
+        if let Some(redirect) = self.redirects.get(&hex) {
+            let response = transport.get(&redirect, headers.clone()).await?;
+            match response.status {
+                status if status.is_success() => return Ok(response),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
+                _ => return Err(response.into_io_error().await),
             }
-            _ => Err(response.into_io_error().await),
         }
-    }
 
-    /// Sends the blob `GET` through the blob URL of `hex`, following the
-    /// redirect it answers with and caching it for the reads that follow.
-    async fn get_through_blob_url(
-        &self,
-        hex: &str,
-        headers: HeaderMap,
-        kind: ReadKind,
-    ) -> io::Result<Response> {
-        let url = self.blob_url(hex);
-        let transport = self.transport();
+        // Read through the blob URL, following and caching its redirect.
+        let url = self.blob_url(&hex);
         let response = self
-            .execute(headers.clone(), |headers| match kind {
-                ReadKind::OnDemand => transport.get(&url, headers),
-                ReadKind::Prefetch => transport.prefetch(&url, headers),
-            })
+            .execute(headers.clone(), |headers| transport.get(&url, headers))
             .await?;
         if response.status.is_success() {
             return Ok(response);
@@ -345,15 +309,62 @@ impl Client {
         }
 
         let location = response.location()?;
-        let redirected = match kind {
-            ReadKind::OnDemand => transport.get(&location, headers).await?,
-            ReadKind::Prefetch => transport.prefetch(&location, headers).await?,
-        };
+        let redirected = transport.get(&location, headers).await?;
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
 
-        self.redirects.insert(hex, location);
+        self.redirects.insert(&hex, location);
+        Ok(redirected)
+    }
+
+    /// Fetches `length` blob bytes from `offset` for a prefetch read and
+    /// returns the successful response, its body still to be read.
+    ///
+    /// The read goes through the cached redirect when there is one, a `401`
+    /// or `403` evicting it, and otherwise through the blob URL, caching the
+    /// redirect it answers with.
+    async fn prefetch_blob(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: usize,
+    ) -> io::Result<Response> {
+        let hex = hex::encode(blob_id);
+        let end = offset + length as u64 - 1;
+        let mut headers = HeaderMap::new();
+        headers.insert(RANGE, format!("bytes={offset}-{end}").parse().unwrap());
+        let transport = self.transport();
+
+        // Read through the cached redirect, a refusal evicting it.
+        if let Some(redirect) = self.redirects.get(&hex) {
+            let response = transport.prefetch(&redirect, headers.clone()).await?;
+            match response.status {
+                status if status.is_success() => return Ok(response),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
+                _ => return Err(response.into_io_error().await),
+            }
+        }
+
+        // Read through the blob URL, following and caching its redirect.
+        let url = self.blob_url(&hex);
+        let response = self
+            .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
+            .await?;
+        if response.status.is_success() {
+            return Ok(response);
+        }
+        if !response.status.is_redirection() {
+            return Err(response.into_io_error().await);
+        }
+
+        let location = response.location()?;
+        let redirected = transport.prefetch(&location, headers).await?;
+        if !redirected.status.is_success() {
+            return Err(redirected.into_io_error().await);
+        }
+
+        self.redirects.insert(&hex, location);
         Ok(redirected)
     }
 
@@ -392,11 +403,17 @@ impl Client {
         let footer_offset =
             BlobFooter::calculate_offset_by_blob_size(size).map_err(io::Error::other)?;
 
-        let footer_bytes = self
-            .get_blob(blob_id, footer_offset, BlobFooter::SIZE, kind)
-            .await?
-            .bytes(BlobFooter::SIZE)
-            .await?;
+        let footer = match kind {
+            ReadKind::OnDemand => {
+                self.get_blob(blob_id, footer_offset, BlobFooter::SIZE)
+                    .await?
+            }
+            ReadKind::Prefetch => {
+                self.prefetch_blob(blob_id, footer_offset, BlobFooter::SIZE)
+                    .await?
+            }
+        };
+        let footer_bytes = footer.bytes(BlobFooter::SIZE).await?;
         let footer_bytes = footer_bytes.as_ref().try_into().map_err(io::Error::other)?;
         let footer = BlobFooter::from_bytes(footer_bytes).map_err(io::Error::other)?;
         footer
@@ -412,16 +429,17 @@ impl Client {
         let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
-        let blob_metadata_bytes = self
-            .get_blob(
-                blob_id,
-                footer.blob_metadata_offset(),
-                blob_metadata_size,
-                kind,
-            )
-            .await?
-            .bytes(blob_metadata_size)
-            .await?;
+        let blob_metadata = match kind {
+            ReadKind::OnDemand => {
+                self.get_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
+                    .await?
+            }
+            ReadKind::Prefetch => {
+                self.prefetch_blob(blob_id, footer.blob_metadata_offset(), blob_metadata_size)
+                    .await?
+            }
+        };
+        let blob_metadata_bytes = blob_metadata.bytes(blob_metadata_size).await?;
 
         BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
     }
@@ -472,7 +490,10 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let length = buf.len();
         let result = self.runtime.block_on_worker(kind, async move {
-            let response = client.get_blob(&blob_id, offset, length, kind).await?;
+            let response = match kind {
+                ReadKind::OnDemand => client.get_blob(&blob_id, offset, length).await?,
+                ReadKind::Prefetch => client.prefetch_blob(&blob_id, offset, length).await?,
+            };
             let protocol = response.protocol;
             Ok((response.bytes(length).await?, protocol))
         });
@@ -752,10 +773,11 @@ mod tests {
 
     fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Protocol> {
         registry.runtime.tokio(kind).block_on(async {
-            let response = registry
-                .client
-                .get_blob(&TEST_BLOB_ID, 0, buf.len(), kind)
-                .await?;
+            let client = &registry.client;
+            let response = match kind {
+                ReadKind::OnDemand => client.get_blob(&TEST_BLOB_ID, 0, buf.len()).await?,
+                ReadKind::Prefetch => client.prefetch_blob(&TEST_BLOB_ID, 0, buf.len()).await?,
+            };
             let protocol = response.protocol;
             buf.copy_from_slice(&response.bytes(buf.len()).await?);
             Ok(protocol)
