@@ -20,6 +20,7 @@ use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
 use nydus_storage::prefetch::PrefetchPlan;
 use nydus_telemetry::metrics::ImageMetrics;
+use sha2::{Digest, Sha256};
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct RawDirEntry {
@@ -404,6 +405,13 @@ impl ErofsReader {
         let (cfgs, _) = ZErofsComprCfgs::from_bytes(bytes, algs)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         Ok(Some(cfgs))
+    }
+
+    /// Hashes mapped image metadata, excluding the blob payload.
+    /// Raw full blobs include the metadata tail and footer; compressed
+    /// bootstraps use the decoded mapping.
+    pub fn image_digest(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+        Sha256::digest(&self.mmap[self.image_offset..]).into()
     }
 
     pub fn blob_infos(&self) -> io::Result<&[RawBlobInfo]> {

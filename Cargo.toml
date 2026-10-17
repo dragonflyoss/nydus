@@ -2,6 +2,10 @@
 resolver = "2"
 members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry", "nydus-test-utils"]
 
+# Use fuser's handoff APIs until they land upstream.
+[patch.crates-io]
+fuser = { git = "https://github.com/Zephyrcf/fuser.git", tag = "0.18.0-upgrade-rc2" }
+
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env", "string"] }
 hex = "0.4"
