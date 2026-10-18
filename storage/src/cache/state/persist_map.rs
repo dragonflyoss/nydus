@@ -65,6 +65,14 @@ impl PersistMap {
                     filename, err
                 ))
             })?;
+        // Other processes sharing the cache directory may open the same file, so initialize and
+        // check it under a file lock. Outside the lock only the bitmap changes, through atomic
+        // operations.
+        if create {
+            file.lock()?;
+        } else {
+            file.lock_shared()?;
+        }
 
         let file_size = file.metadata()?.len();
         let bitmap_size = div_round_up(chunk_count as u64, 8u64);
@@ -93,9 +101,8 @@ impl PersistMap {
                 return Err(enoent!());
             }
 
-            // There's race window between "file.set_len()" and "file.write(&header)". If that
-            // happens, all file content should be zero. Detect the race window and write out
-            // header again to fix it.
+            // A process that stopped between "file.set_len()" and "file.write(&header)" leaves a
+            // file whose content is all zero. Detect that and write out the header again.
             let content = unsafe { filemap.get_slice::<u8>(0, expected_size as usize) }?;
             for c in content {
                 if *c != 0 {
@@ -141,6 +148,9 @@ impl PersistMap {
                 }
             }
         }
+
+        // The mapping holds a duplicate of `file`, which shares the lock, so release it explicitly.
+        file.unlock()?;
 
         readahead(file.as_raw_fd(), 0, expected_size);
         if !persist {
