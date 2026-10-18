@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use nydus_utils::filemap::FromMapped;
 use std::io::Result;
 use std::mem::size_of;
 use std::slice;
@@ -23,6 +24,8 @@ pub struct BatchInflateContext {
     __reserved3: u64,
     __reserved4: u64,
 }
+
+unsafe impl FromMapped for BatchInflateContext {}
 
 impl BatchInflateContext {
     /// Get compressed size of the whole batch chunk data.

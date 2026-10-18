@@ -9,7 +9,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use nydus_utils::div_round_up;
-use nydus_utils::filemap::{clone_file, FileMapState};
+use nydus_utils::filemap::{clone_file, FileMapState, FromMapped};
 
 use crate::utils::readahead;
 
@@ -30,6 +30,8 @@ pub(crate) struct Header {
     pub reserved: [u8; HEADER_RESERVED_SIZE],
 }
 
+unsafe impl FromMapped for Header {}
+
 impl Header {
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
@@ -39,6 +41,14 @@ impl Header {
             )
         }
     }
+}
+
+/// Get the byte at `offset` in a chunk map mapping as an atomic.
+fn atomic_byte(filemap: &FileMapState, offset: usize) -> Result<&AtomicU8> {
+    let ptr = filemap.validate_range(offset, 1)?;
+    // Safe because the byte is in the writable mapping, which outlives the reference. The bitmap
+    // is only ever accessed atomically, and the header is only read this way before it's written.
+    Ok(unsafe { AtomicU8::from_ptr(ptr.cast_mut()) })
 }
 
 pub(crate) struct PersistMap {
@@ -94,7 +104,10 @@ impl PersistMap {
         }
 
         let file2 = clone_file(file.as_raw_fd())?;
-        let mut filemap = FileMapState::new(file2, 0, expected_size as usize, true)?;
+        // Safe because the header is written through `file` only under the exclusive file lock,
+        // while no reference into the mapping is alive, and the bitmap is accessed only through
+        // atomic operations.
+        let mut filemap = unsafe { FileMapState::new(file2, 0, expected_size as usize, true) }?;
         let header = unsafe { filemap.get_mut::<Header>(0) }?;
         if header.magic != MAGIC1 {
             if !create {
@@ -103,9 +116,8 @@ impl PersistMap {
 
             // A process that stopped between "file.set_len()" and "file.write(&header)" leaves a
             // file whose content is all zero. Detect that and write out the header again.
-            let content = unsafe { filemap.get_slice::<u8>(0, expected_size as usize) }?;
-            for c in content {
-                if *c != 0 {
+            for idx in 0..expected_size as usize {
+                if atomic_byte(&filemap, idx)?.load(Ordering::Acquire) != 0 {
                     return Err(einval!(format!(
                         "invalid blob chunk_map file header: {:?}",
                         filename
@@ -133,7 +145,7 @@ impl PersistMap {
             } else {
                 let mut ready_count = 0;
                 for idx in HEADER_SIZE..expected_size as usize {
-                    let current = unsafe { filemap.get_ref::<AtomicU8>(idx) }?;
+                    let current = atomic_byte(&filemap, idx)?;
                     let val = current.load(Ordering::Acquire);
                     ready_count += val.count_ones() as u32;
                 }
@@ -203,7 +215,7 @@ impl PersistMap {
     #[inline]
     fn read_u8(&self, idx: u32) -> u8 {
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let current = unsafe { self.filemap.get_ref::<AtomicU8>(start) }.unwrap();
+        let current = atomic_byte(&self.filemap, start).unwrap();
 
         current.load(Ordering::Acquire)
     }
@@ -213,7 +225,7 @@ impl PersistMap {
         let mask = Self::index_to_mask(idx);
         let expected = current | mask;
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let atomic_value = unsafe { self.filemap.get_ref::<AtomicU8>(start) }.unwrap();
+        let atomic_value = atomic_byte(&self.filemap, start).unwrap();
 
         atomic_value
             .compare_exchange(current, expected, Ordering::Acquire, Ordering::Relaxed)
