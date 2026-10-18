@@ -153,7 +153,9 @@ impl VerityGenerator {
             if md.len() < total_size as u64 + offset {
                 file.set_len(total_size as u64 + offset)?;
             }
-            FileMapState::new(file, offset as libc::off_t, total_size, true)?
+            // Safe because only this mapping writes the verity data from `offset` on, and the block
+            // device that uses it writes only the data below `offset`.
+            unsafe { FileMapState::new(file, offset as libc::off_t, total_size, true) }?
         } else {
             FileMapState::default()
         };
@@ -232,7 +234,7 @@ impl VerityGenerator {
         let mut guard = self.file_map.lock().unwrap();
 
         for _ in 0..count {
-            let data = unsafe { guard.get_slice::<u8>(data_base, page_size) }?;
+            let data = guard.get_slice::<u8>(data_base, page_size)?;
             let digest = RafsDigest::from_buf(data, self.mkl_tree.digest_algo);
             let buf = unsafe { guard.get_mut::<DigestData>(digest_base) }?;
             buf.copy_from_slice(digest.as_ref());
@@ -254,7 +256,7 @@ impl VerityGenerator {
             Ok(self.root_digest)
         } else {
             let guard = self.file_map.lock().unwrap();
-            let data = unsafe { guard.get_slice::<u8>(0, self.mkl_tree.page_size as usize) }?;
+            let data = guard.get_slice::<u8>(0, self.mkl_tree.page_size as usize)?;
             Ok(RafsDigest::from_buf(data, self.mkl_tree.digest_algo))
         }
     }
