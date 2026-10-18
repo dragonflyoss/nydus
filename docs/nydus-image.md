@@ -233,23 +233,18 @@ cat /path/to/backend-config.json
 # layers_to_compact:
 #   if number of blobs >= layers_to_compact, try compact nydus image
 #   0 means always try compact
-cat /path/to/compact.json
-{
-  "min_used_ratio": 10,
-  "compact_blob_size": 10485760,
-  "max_compact_size": 104857600,
-  "layers_to_compact": 32,
-  "blobs_dir": "/path/to/blobs"
-}
 
 # Compact Nydus image with chunk-dict
-nydus-image create \
+nydus-image compact \
   --bootstrap /path/to/bootstrap \
   --chunk-dict bootstrap=/path/to/dict \
-  --config /path/to/compact.json \
+  --min-used-ratio 10 \
+  --compact-blob-size 10485760 \
+  --max-compact-size 104857600 \
+  --layers-to-compact 32 \
+  --blob-dir /path/to/blobs \
   --backend-config-file /path/to/backend-config.json \
-  --backend-type oss \
-  /path/to/lower/dir
+  --backend-type oss
 ```
 
 ## Export RAFS Filesystem into Other Formats
