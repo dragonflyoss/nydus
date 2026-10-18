@@ -10,10 +10,23 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+/// Types that can be read straight out of mapped file bytes.
+///
+/// # Safety
+/// Every bit pattern of `size_of::<Self>()` bytes must be a valid `Self`, and `Self` must have no
+/// padding and no interior mutability. That holds for integers, arrays of them, and `#[repr(C)]`
+/// structs without gaps whose fields are plain integers, arrays, or structs of them.
+pub unsafe trait FromMapped {}
+
+unsafe impl FromMapped for u8 {}
+unsafe impl FromMapped for u16 {}
+unsafe impl FromMapped for u32 {}
+unsafe impl FromMapped for u64 {}
+unsafe impl<T: FromMapped, const N: usize> FromMapped for [T; N] {}
+
 /// Struct to manage memory range mapped from file objects.
 ///
 /// It maps a region from a file into current process by using libc::mmap().
-/// Typed access requires the caller to uphold the mapped type and aliasing contracts.
 pub struct FileMapState {
     base: *const u8,
     size: usize,
@@ -21,7 +34,8 @@ pub struct FileMapState {
     writable: bool,
 }
 
-// Typed access is unsafe and requires callers to synchronize writes to shared mappings.
+// Safe because `new` requires that nothing writes the mapped file under live references, and
+// mutable access is unsafe.
 unsafe impl Send for FileMapState {}
 unsafe impl Sync for FileMapState {}
 
@@ -54,7 +68,17 @@ impl FileMapState {
     /// Memory map a region of the file object into current process.
     ///
     /// It takes ownership of the file object and will close it when the returned object is dropped.
-    pub fn new(file: File, offset: libc::off_t, size: usize, writable: bool) -> Result<Self> {
+    ///
+    /// # Safety
+    /// While any reference taken from the mapping is alive, nothing may write the mapped range of
+    /// the file, in this process or another, except bytes that are only ever accessed through
+    /// atomic operations. The file must not be truncated while it's mapped.
+    pub unsafe fn new(
+        file: File,
+        offset: libc::off_t,
+        size: usize,
+        writable: bool,
+    ) -> Result<Self> {
         if size == 0 || size > isize::MAX as usize {
             return Err(einval!("invalid mmap size"));
         }
@@ -96,21 +120,18 @@ impl FileMapState {
     }
 
     /// Cast a subregion of the mapped area to an object reference.
-    ///
-    /// # Safety
-    /// The mapped bytes must represent a valid T and remain unchanged while borrowed, except
-    /// through T's interior mutability. The backing file must not be truncated while mapped.
-    pub unsafe fn get_ref<T>(&self, offset: usize) -> Result<&T> {
+    pub fn get_ref<T: FromMapped>(&self, offset: usize) -> Result<&T> {
         let start = self.typed_range::<T>(offset, 1)?;
+        // Safe because any bytes are a valid `T`, and `new` requires them not to change while
+        // borrowed.
         Ok(unsafe { &*start })
     }
 
     /// Cast a subregion of the mapped area to a mutable object reference.
     ///
     /// # Safety
-    /// The mapped bytes must represent a valid T, with exclusive access to the borrowed range.
-    /// The backing file must not be truncated while mapped.
-    pub unsafe fn get_mut<T>(&mut self, offset: usize) -> Result<&mut T> {
+    /// Nothing else, in this process or another, may access the borrowed range while borrowed.
+    pub unsafe fn get_mut<T: FromMapped>(&mut self, offset: usize) -> Result<&mut T> {
         if !self.writable {
             return Err(einval!("mapping is read-only"));
         }
@@ -119,21 +140,21 @@ impl FileMapState {
     }
 
     /// Get an immutable slice of T at offset with count entries.
-    ///
-    /// # Safety
-    /// Each element must be a valid T and remain unchanged while borrowed, except through T's
-    /// interior mutability. The backing file must not be truncated while mapped.
-    pub unsafe fn get_slice<T>(&self, offset: usize, count: usize) -> Result<&[T]> {
+    pub fn get_slice<T: FromMapped>(&self, offset: usize, count: usize) -> Result<&[T]> {
         let start = self.typed_range::<T>(offset, count)?;
+        // Safe for the same reasons as `get_ref`.
         Ok(unsafe { std::slice::from_raw_parts(start, count) })
     }
 
     /// Get a mutable slice of T at offset with count entries.
     ///
     /// # Safety
-    /// Each element must be a valid T, with exclusive access to the borrowed range.
-    /// The backing file must not be truncated while mapped.
-    pub unsafe fn get_slice_mut<T>(&mut self, offset: usize, count: usize) -> Result<&mut [T]> {
+    /// Nothing else, in this process or another, may access the borrowed range while borrowed.
+    pub unsafe fn get_slice_mut<T: FromMapped>(
+        &mut self,
+        offset: usize,
+        count: usize,
+    ) -> Result<&mut [T]> {
         if !self.writable {
             return Err(einval!("mapping is read-only"));
         }
@@ -210,13 +231,9 @@ pub struct MappedSlice<T> {
     _map: Arc<FileMapState>,
 }
 
-impl<T> MappedSlice<T> {
+impl<T: FromMapped> MappedSlice<T> {
     /// Create a view of `len` entries of `T` at `offset` in `map`.
-    ///
-    /// # Safety
-    /// Every bit pattern of the mapped bytes must be a valid `T`. Nothing may write to the mapped
-    /// range or truncate the backing file while the view exists.
-    pub unsafe fn new(map: Arc<FileMapState>, offset: usize, len: usize) -> Result<Self> {
+    pub fn new(map: Arc<FileMapState>, offset: usize, len: usize) -> Result<Self> {
         let size = len
             .checked_mul(size_of::<T>())
             .ok_or_else(|| einval!("mapped slice size overflow"))?;
@@ -317,21 +334,20 @@ mod tests {
         temp.as_file()
             .write_all(&[1u8, 0, 0, 0, 2, 0, 0, 0])
             .unwrap();
-        let map =
-            Arc::new(FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 8, false).unwrap());
-        unsafe {
-            let view = MappedSlice::<u32>::new(map.clone(), 0, 2).unwrap();
-            assert_eq!(u32::from_le(view[1]), 2);
-            assert!(MappedSlice::<u32>::new(map.clone(), 1, 1).is_err());
-            assert!(MappedSlice::<u32>::new(map.clone(), 4, 2).is_err());
-            assert!(MappedSlice::<u32>::new(map.clone(), 0, usize::MAX).is_err());
-            assert!(MappedSlice::<u32>::new(map.clone(), 8, 0)
-                .unwrap()
-                .is_empty());
-            assert!(MappedSlice::<u32>::new(map.clone(), 9, 0).is_err());
-            drop(map);
-            assert_eq!(u32::from_le(view[0]), 1);
-        }
+        let map = Arc::new(
+            unsafe { FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 8, false) }.unwrap(),
+        );
+        let view = MappedSlice::<u32>::new(map.clone(), 0, 2).unwrap();
+        assert_eq!(u32::from_le(view[1]), 2);
+        assert!(MappedSlice::<u32>::new(map.clone(), 1, 1).is_err());
+        assert!(MappedSlice::<u32>::new(map.clone(), 4, 2).is_err());
+        assert!(MappedSlice::<u32>::new(map.clone(), 0, usize::MAX).is_err());
+        assert!(MappedSlice::<u32>::new(map.clone(), 8, 0)
+            .unwrap()
+            .is_empty());
+        assert!(MappedSlice::<u32>::new(map.clone(), 9, 0).is_err());
+        drop(map);
+        assert_eq!(u32::from_le(view[0]), 1);
     }
 
     #[test]
@@ -343,14 +359,14 @@ mod tests {
             .write(false)
             .open(path)
             .unwrap();
-        let map = FileMapState::new(file, 0, 4096, false).unwrap();
+        let map = unsafe { FileMapState::new(file, 0, 4096, false) }.unwrap();
 
-        let magic = unsafe { map.get_ref::<u32>(0) }.unwrap();
+        let magic = map.get_ref::<u32>(0).unwrap();
         assert_eq!(u32::from_le(*magic), 0x52414653);
 
-        unsafe { map.get_ref::<u32>(4096) }.unwrap_err();
-        let _ = unsafe { map.get_ref::<u32>(4092) }.unwrap();
-        let _ = unsafe { map.get_ref::<u32>(0) }.unwrap();
+        map.get_ref::<u32>(4096).unwrap_err();
+        let _ = map.get_ref::<u32>(4092).unwrap();
+        let _ = map.get_ref::<u32>(0).unwrap();
         map.validate_range(4096, 1).unwrap_err();
         let _ = map.validate_range(4095, 1).unwrap();
         let _ = map.validate_range(0, 1).unwrap();
@@ -372,7 +388,7 @@ mod tests {
             .write(false)
             .open(temp.as_path())
             .unwrap();
-        assert!(FileMapState::new(file, 0, 4096, true).is_err());
+        assert!(unsafe { FileMapState::new(file, 0, 4096, true) }.is_err());
 
         let temp = TempFile::new().unwrap();
         temp.as_file().set_len(4096).unwrap();
@@ -381,17 +397,17 @@ mod tests {
             .write(false)
             .open(temp.as_path())
             .unwrap();
-        let mut map = FileMapState::new(file, 0, 4096, false).unwrap();
-        assert!(unsafe { map.get_slice::<usize>(0, usize::MAX) }.is_err());
-        assert!(unsafe { map.get_slice::<usize>(usize::MAX, 1) }.is_err());
-        assert!(unsafe { map.get_slice::<usize>(4096, 4096) }.is_err());
-        assert!(unsafe { map.get_slice::<usize>(0, 128) }.is_ok());
-        assert!(unsafe { map.get_slice::<usize>(0, 0) }.is_ok());
+        let mut map = unsafe { FileMapState::new(file, 0, 4096, false) }.unwrap();
+        assert!(map.get_slice::<u64>(0, usize::MAX).is_err());
+        assert!(map.get_slice::<u64>(usize::MAX, 1).is_err());
+        assert!(map.get_slice::<u64>(4096, 4096).is_err());
+        assert!(map.get_slice::<u64>(0, 128).is_ok());
+        assert!(map.get_slice::<u64>(0, 0).is_ok());
 
-        assert!(unsafe { map.get_slice_mut::<usize>(0, usize::MAX) }.is_err());
-        assert!(unsafe { map.get_slice_mut::<usize>(usize::MAX, 1) }.is_err());
-        assert!(unsafe { map.get_slice_mut::<usize>(4096, 4096) }.is_err());
-        assert!(unsafe { map.get_slice_mut::<usize>(0, 128) }.is_err());
+        assert!(unsafe { map.get_slice_mut::<u64>(0, usize::MAX) }.is_err());
+        assert!(unsafe { map.get_slice_mut::<u64>(usize::MAX, 1) }.is_err());
+        assert!(unsafe { map.get_slice_mut::<u64>(4096, 4096) }.is_err());
+        assert!(unsafe { map.get_slice_mut::<u64>(0, 128) }.is_err());
     }
 
     #[test]
@@ -399,7 +415,8 @@ mod tests {
         let temp = TempFile::new().unwrap();
         temp.as_file().set_len(4096).unwrap();
         let mut map =
-            FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 4096, true).unwrap();
+            unsafe { FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 4096, true) }
+                .unwrap();
         unsafe {
             assert!(map.get_ref::<u32>(1).is_err());
             assert!(map.get_mut::<u32>(1).is_err());
@@ -412,7 +429,8 @@ mod tests {
         map.sync_data().unwrap();
         drop(map);
         let mut map =
-            FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 4096, false).unwrap();
+            unsafe { FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 4096, false) }
+                .unwrap();
         unsafe {
             assert_eq!(*map.get_ref::<u32>(4).unwrap(), 42);
             assert!(map.get_mut::<u32>(4).is_err());
@@ -420,14 +438,16 @@ mod tests {
         }
         let mut empty = FileMapState::default();
         unsafe {
-            assert!(empty.get_ref::<()>(0).is_ok());
+            assert!(empty.get_ref::<[u8; 0]>(0).is_ok());
             assert!(empty.get_slice::<u8>(0, 0).is_ok());
             assert!(empty.get_slice::<u8>(1, 0).is_err());
             assert!(empty.get_ref::<u8>(0).is_err());
-            assert!(empty.get_mut::<()>(0).is_err());
+            assert!(empty.get_mut::<[u8; 0]>(0).is_err());
         }
         assert!(empty.sync_data().is_err());
         assert!(empty.validate_range(0, 0).is_err());
-        assert!(FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 0, false).is_err());
+        assert!(
+            unsafe { FileMapState::new(temp.as_file().try_clone().unwrap(), 0, 0, false) }.is_err()
+        );
     }
 }

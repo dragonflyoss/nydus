@@ -7,6 +7,7 @@ use std::mem::size_of;
 use std::slice;
 
 use nydus_utils::compress::zlib_random::{ZranContext, ZranGenerator, ZranReader};
+use nydus_utils::filemap::FromMapped;
 
 use crate::meta::chunk_info_v2::BlobChunkInfoV2Ondisk;
 use crate::meta::{round_up_4k, BlobMetaChunkInfo};
@@ -34,6 +35,8 @@ pub struct ZranInflateContext {
     __reserved1: u8,
     __reserved2: u8,
 }
+
+unsafe impl FromMapped for ZranInflateContext {}
 
 impl ZranInflateContext {
     /// Get offset into the compressed stream.
