@@ -167,6 +167,7 @@ test-compat-build: $(if $(COMPAT_BUILDER),,release) nydusify
 	@test -n "$(COMPAT_IMAGES)" || { echo "set COMPAT_IMAGES=/abs/path/to/images"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
+		NYDUS_BIN="$(COMPAT_BUILDER)" \
 		NYDUS_E2E_COMPAT_BUILDER="$(COMPAT_BUILDER)" \
 		NYDUS_E2E_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
 		$(GO_BIN) test -v -run '^TestCompatBuildImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) .
@@ -176,6 +177,7 @@ test-compat-read: $(if $(COMPAT_READER),,release) nydusify
 	@test -n "$(COMPAT_IMAGES)" || { echo "set COMPAT_IMAGES=/abs/path/to/images"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
+		NYDUS_BIN="$(COMPAT_READER)" \
 		NYDUS_E2E_COMPAT_READER="$(COMPAT_READER)" \
 		NYDUS_E2E_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
 		$(GO_BIN) test -v -run '^TestCompatReadImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) .

@@ -2,8 +2,8 @@ package e2e
 
 import (
 	"fmt"
-	"net"
 	"net/http"
+	"net/netip"
 	"os/exec"
 	"testing"
 	"time"
@@ -26,7 +26,7 @@ const (
 
 	// dragonflyGateway is the gateway of the kind docker network, the address
 	// under which the seed peers inside the cluster reach services on the
-	// host, and the source address of the host's own requests to it.
+	// host.
 	dragonflyGateway = "172.30.0.1"
 
 	// dragonflyRegistryAddr is the local registry as both the host and the
@@ -40,6 +40,11 @@ const (
 	// dragonflyRepository is the repository the test image is pushed to.
 	dragonflyRepository = "nydus-e2e/dragonfly"
 )
+
+// dragonflyNetwork is the kind docker network. The seed peers run on its
+// nodes with hostNetwork, so their requests reach the host from a node
+// address in it.
+var dragonflyNetwork = netip.MustParsePrefix("172.30.0.0/16")
 
 // newDragonflySuite pushes an image to the registry the seed peers reach and
 // fronts that registry with a proxy on the address the seed peers reach too,
@@ -72,10 +77,12 @@ func dragonflyConfig(image *registryImage, origin string) util.Config {
 	return config
 }
 
-// fromSeedPeer reports whether a proxy request came from inside the kind
-// cluster rather than from the daemon on the host.
+// fromSeedPeer reports whether a proxy request came from a node of the kind
+// cluster rather than from the daemon on the host, whose requests come from
+// the host's own addresses, the network's gateway among them.
 func fromSeedPeer(host string) bool {
-	return host != dragonflyGateway && !net.ParseIP(host).IsLoopback()
+	addr, err := netip.ParseAddr(host)
+	return err == nil && host != dragonflyGateway && dragonflyNetwork.Contains(addr)
 }
 
 // scaleSeedClient scales the seed client statefulset to replicas and waits
@@ -150,10 +157,10 @@ func TestDragonfly_PrefetchRetry(t *testing.T) {
 	assert := assert.New(t)
 	image, proxy := newDragonflySuite(t)
 
-	// The seed peers cannot reach the origin until the prefetch has been
-	// answered once; with the retry interval cut to a second, the prefetch is
-	// sent once more through the seed peers and completes without the
-	// daemon ever reading the origin itself.
+	// The seed peers cannot reach the origin until the daemon has put a
+	// failed prefetch read off to its retry; with the retry interval cut to
+	// a second, that read is sent once more through the seed peers and the
+	// prefetch completes without the daemon ever reading the origin itself.
 	proxy.Inject(http.StatusServiceUnavailable, -1, fromSeedPeer)
 	config := dragonflyConfig(image, dragonflyProxyAddr)
 	config.Backend.Config.HTTP.MaxRetries = 0
@@ -161,11 +168,10 @@ func TestDragonfly_PrefetchRetry(t *testing.T) {
 	config.Prefetch.RetryInterval = "1s"
 	config.Prefetch.Scope = "all"
 	m := image.mount(t, config)
-	assert.Eventually(func() bool { return proxy.Injected() > 0 }, 30*time.Second, 100*time.Millisecond, "the prefetch never reached the origin")
+	m.waitLogs(t, "retrying in")
 	proxy.Inject(0, 0, nil)
 
 	util.WaitMetricSettled(t, m.apiserver, "nydus_read_backend_total", `type="prefetch"`)
-	assert.Contains(m.logs(), "retrying in")
 	assert.Positive(m.backendReads(t, "prefetch", "dragonfly"))
 	assert.Zero(m.backendReads(t, "prefetch", "http"))
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
