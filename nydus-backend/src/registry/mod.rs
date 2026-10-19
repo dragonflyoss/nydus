@@ -11,16 +11,15 @@ mod rt;
 
 use std::future::Future;
 use std::io;
-use std::ops::RangeInclusive;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
 use url::Url;
 
-use nydus_config::RegistryConfig;
+use nydus_config::{PrefetchConfig, RegistryConfig};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::{
@@ -37,12 +36,6 @@ use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
 
-/// The window of the random delay before a prefetch read is sent once more:
-/// hours, so an outage or rate limit has time to clear, random, so a fleet
-/// of instances does not retry in lockstep.
-const PREFETCH_RETRY_DELAY: RangeInclusive<Duration> =
-    Duration::from_secs(6 * 60 * 60)..=Duration::from_secs(12 * 60 * 60);
-
 /// The transport a blob `GET` rides on: the origin registry over HTTP, or the
 /// Dragonfly seed peers.
 ///
@@ -54,9 +47,9 @@ trait Transport: Send + Sync {
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
-    /// Sends the `GET` of a background prefetch read, once more after a
-    /// random [`PREFETCH_RETRY_DELAY`] when it answered `429`, `5xx` or `408`;
-    /// a transport failure fails the read at once.
+    /// Sends the `GET` of a background prefetch read, once more after the
+    /// configured prefetch retry interval when it answered `429`, `5xx` or
+    /// `408`; a transport failure fails the read at once.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
@@ -137,17 +130,27 @@ struct Client {
 impl Registry {
     /// Creates a registry backend from its configuration, running on runtimes
     /// of its own, one per read kind, bounded by the `http` section, every
-    /// thread of them entering `netns` when one is given.
-    pub(crate) fn new(config: RegistryConfig, netns: Option<Netns>) -> io::Result<Self> {
+    /// thread of them entering `netns` when one is given, its prefetch reads
+    /// retried after the interval the `prefetch` section sets.
+    pub(crate) fn new(
+        config: RegistryConfig,
+        prefetch: &PrefetchConfig,
+        netns: Option<Netns>,
+    ) -> io::Result<Self> {
         let runtime = Arc::new(Runtime::new(
             config.http.worker_threads,
             config.http.max_blocking_threads,
             netns,
         )?);
-        let http = Http::new(&config.http, None)?;
+        let http = Http::new(&config.http, prefetch.retry_interval, None)?;
         #[cfg(feature = "dragonfly")]
         let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
-            Some(dragonfly) => Some(Box::new(Dragonfly::new(dragonfly, &config.http, &runtime)?)),
+            Some(dragonfly) => Some(Box::new(Dragonfly::new(
+                dragonfly,
+                &config.http,
+                prefetch.retry_interval,
+                &runtime,
+            )?)),
             None => None,
         };
         #[cfg(not(feature = "dragonfly"))]
@@ -744,7 +747,7 @@ mod tests {
                 repository: "library/ubuntu".to_string(),
                 authorizer: Authorizer::new(auth).unwrap(),
                 redirects: RedirectCache::new(),
-                http: Http::new(&http, None).unwrap(),
+                http: Http::new(&http, PrefetchConfig::default().retry_interval, None).unwrap(),
                 dragonfly: Some(Box::new(transport)),
             }),
             runtime: Arc::new(
@@ -792,7 +795,7 @@ mod tests {
             let config: RegistryConfig =
                 serde_yaml::from_str(&format!("addr: {addr}\nrepository: library/ubuntu\n"))
                     .unwrap();
-            let registry = Registry::new(config, None).unwrap();
+            let registry = Registry::new(config, &PrefetchConfig::default(), None).unwrap();
             assert_eq!(registry.client.blob_url("abc123"), expected, "addr={addr}");
         }
     }
@@ -805,7 +808,7 @@ repository: library/ubuntu
 auth: YWxpY2U6c2VjcmV0
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let registry = Registry::new(config, None).unwrap();
+        let registry = Registry::new(config, &PrefetchConfig::default(), None).unwrap();
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
@@ -848,7 +851,7 @@ auth: YWxpY2U6c2VjcmV0
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(config, None).unwrap();
+        let registry = Registry::new(config, &PrefetchConfig::default(), None).unwrap();
 
         let mut buf = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();

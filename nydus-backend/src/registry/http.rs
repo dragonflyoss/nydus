@@ -1,6 +1,7 @@
 //! The direct HTTP transport to the origin registry.
 
 use std::io;
+use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -19,7 +20,7 @@ use tracing::{debug, warn};
 use nydus_config::HttpConfig;
 
 use super::response::{Body, Response};
-use super::{Transport, PREFETCH_RETRY_DELAY};
+use super::Transport;
 use crate::Protocol;
 
 /// An HTTP client talking straight to the origin registry, every attempt
@@ -30,24 +31,33 @@ use crate::Protocol;
 ///           │ 429 / 5xx / 408 / transport failure
 ///           ├─ again, max_retries times, exponential backoff
 ///           ├─ on-demand ─▶ error
-///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more 6h to 12h later ─▶ error
+///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more after the retry interval ─▶ error
 ///                         └─ transport failure ───────────────────────────▶ error
 /// ```
 #[derive(Clone)]
 pub(crate) struct Http {
     /// The reqwest client behind the retry and rate limit middleware.
     client: ClientWithMiddleware,
+
+    /// The window of the random interval before a prefetch read is sent once
+    /// more, the configured interval up to twice that.
+    prefetch_retry_interval: RangeInclusive<Duration>,
 }
 
 /// Implements the origin HTTP client.
 impl Http {
-    /// Creates a client from the HTTP configuration, every attempt claiming a
-    /// slot from `rate_limit` first when one is given.
+    /// Creates a client from the HTTP configuration, sending a failed prefetch
+    /// read once more after `prefetch_retry_interval` and every attempt
+    /// claiming a slot from `rate_limit` first when one is given.
     ///
     /// Redirects are returned rather than followed so the caller can cache
     /// the signed URL a blob `GET` is redirected to; names are resolved by
     /// hickory, which honours record TTLs.
-    pub(crate) fn new(config: &HttpConfig, rate_limit: Option<RateLimit>) -> io::Result<Self> {
+    pub(crate) fn new(
+        config: &HttpConfig,
+        prefetch_retry_interval: Duration,
+        rate_limit: Option<RateLimit>,
+    ) -> io::Result<Self> {
         let mut builder = Client::builder().redirect(Policy::none()).hickory_dns(true);
 
         builder = match &config.proxy {
@@ -86,6 +96,8 @@ impl Http {
 
         Ok(Self {
             client: client.build(),
+            prefetch_retry_interval: prefetch_retry_interval
+                ..=prefetch_retry_interval.saturating_mul(2),
         })
     }
 }
@@ -128,8 +140,8 @@ impl Transport for Http {
     }
 
     /// Sends the `GET` of a prefetch read, the body left streaming, sending
-    /// a `429`, `5xx` or `408` once more hours later and failing a transport
-    /// failure at once.
+    /// a `429`, `5xx` or `408` once more after the retry interval and failing
+    /// a transport failure at once.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let mut retried = false;
         loop {
@@ -168,9 +180,9 @@ impl Transport for Http {
                 return Ok(response);
             }
 
-            // Retry once after a random delay of hours.
+            // Retry once after a random interval in the configured window.
             let err = response.into_io_error().await;
-            let delay = rand::rng().random_range(PREFETCH_RETRY_DELAY);
+            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
             warn!("origin request failed, retrying in {delay:?}: {err}");
             tokio::time::sleep(delay).await;
             retried = true;
@@ -235,18 +247,24 @@ mod tests {
             max_retries: 0,
             ..Default::default()
         };
-        let http = Http::new(&config, None).unwrap();
+        let retry_interval = Duration::from_secs(60 * 60);
+        let http = Http::new(&config, retry_interval, None).unwrap();
 
         let start = Instant::now();
         assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
-        assert!(start.elapsed() < *PREFETCH_RETRY_DELAY.start());
+        assert!(start.elapsed() < retry_interval);
     }
 
     #[test]
     fn new_accepts_an_optional_rate_limit() {
         let config = HttpConfig::default();
-        assert!(Http::new(&config, None).is_ok());
-        assert!(Http::new(&config, Some(RateLimit::new(10, Duration::from_secs(1)))).is_ok());
+        assert!(Http::new(&config, Duration::from_secs(1), None).is_ok());
+        assert!(Http::new(
+            &config,
+            Duration::from_secs(1),
+            Some(RateLimit::new(10, Duration::from_secs(1)))
+        )
+        .is_ok());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The Dragonfly SDK transport, feature `dragonfly`.
 
 use std::io;
+use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use nydus_telemetry::metrics::collect_read_backend_failure_metrics;
 use super::http::{Http, RateLimit};
 use super::response::{Body, Response};
 use super::rt::Runtime;
-use super::{Transport, PREFETCH_RETRY_DELAY};
+use super::Transport;
 use crate::{BackendKind, Protocol, ReadKind};
 
 /// The Dragonfly SDK transport: a blob `GET` rides the SDK to the seed peers
@@ -30,7 +31,7 @@ use crate::{BackendKind, Protocol, ReadKind};
 /// GET ──▶ seed peer ──▶ 2xx / 3xx / 4xx ────────────────────────────▶ handed back as is
 ///           │ 429 / 5xx / 408 / transport failure
 ///           ├─ on-demand ─▶ next seed peer, max_retries times ─▶ origin, rate limited
-///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more 6h to 12h later ─▶ error
+///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more after the retry interval ─▶ error
 ///                         └─ transport failure ───────────────────────────▶ error
 /// ```
 pub(crate) struct Dragonfly {
@@ -40,8 +41,12 @@ pub(crate) struct Dragonfly {
     ondemand_client: Proxy,
 
     /// The seed peer client of prefetch reads, never retrying at once: a
-    /// failed prefetch is sent once more hours later instead.
+    /// failed prefetch is sent once more after the retry interval instead.
     prefetch_client: Proxy,
+
+    /// The window of the random interval before a prefetch read is sent once
+    /// more, the configured interval up to twice that.
+    prefetch_retry_interval: RangeInclusive<Duration>,
 
     /// The rate-limited HTTP client an on-demand read falls back to when the
     /// seed peers cannot serve it, every attempt claiming a slot first.
@@ -58,10 +63,12 @@ impl Dragonfly {
     /// client built from `http_config` under the configured rate limit.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
-    /// peers.
+    /// peers; a failed prefetch read is sent once more after
+    /// `prefetch_retry_interval`.
     pub(crate) fn new(
         config: DragonflyConfig,
         http_config: &HttpConfig,
+        prefetch_retry_interval: Duration,
         runtime: &Runtime,
     ) -> io::Result<Self> {
         Ok(Self {
@@ -79,12 +86,15 @@ impl Dragonfly {
             )?,
             fallback_http_client: Http::new(
                 http_config,
+                prefetch_retry_interval,
                 Some(RateLimit::new(
                     config.back_to_source.request_rate_limit,
                     Duration::from_secs(1),
                 )),
             )?,
             request_timeout: config.request_timeout,
+            prefetch_retry_interval: prefetch_retry_interval
+                ..=prefetch_retry_interval.saturating_mul(2),
         })
     }
 
@@ -207,7 +217,7 @@ impl Transport for Dragonfly {
 
     /// Fetches `url` through the prefetch client at `Level3`, so a normal
     /// peer goes back to source ahead of it, sending a `429`, `5xx` or `408`
-    /// once more hours later and failing a transport failure at once, never
+    /// once more after the retry interval and failing a transport failure at once, never
     /// touching the origin.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
@@ -283,9 +293,9 @@ impl Transport for Dragonfly {
                 return Ok(response);
             }
 
-            // Retry once after a random delay of hours.
+            // Retry once after a random interval in the configured window.
             let err = response.into_io_error().await;
-            let delay = rand::rng().random_range(PREFETCH_RETRY_DELAY);
+            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
             warn!("dragonfly request failed, retrying in {delay:?}: {err}");
             tokio::time::sleep(delay).await;
             retried = true;

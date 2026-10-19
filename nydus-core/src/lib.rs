@@ -128,8 +128,8 @@ impl NydusCore {
         let prefetch_timeout = config.prefetch.blob_timeout;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
-        let backend =
-            <dyn Backend>::new(&config.backend, None).context("failed to build blob backend")?;
+        let backend = <dyn Backend>::new(&config.backend, &config.prefetch, None)
+            .context("failed to build blob backend")?;
         let cache_dir = config.storage.dir.clone();
         if let Some(cache_dir) = &cache_dir {
             std::fs::create_dir_all(cache_dir).with_context(|| {

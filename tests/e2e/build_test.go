@@ -136,3 +136,35 @@ func TestReproducibleBuild(t *testing.T) {
 		assert.Equal(t, util.Sha256File(t, mergedA), util.Sha256File(t, mergedB), "merged bootstrap differs")
 	})
 }
+
+// TestBuildExclude builds an image with `--exclude` and checks the excluded
+// entries are in neither the tree nor the blob while their siblings are.
+func TestBuildExclude(t *testing.T) {
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	workDir := t.TempDir()
+	source := filepath.Join(workDir, "source")
+	blobDir := filepath.Join(workDir, "blobs")
+	bootstrap := filepath.Join(workDir, "image.boot")
+	for _, dir := range []string{"keep", "drop", "drop/nested"} {
+		assert.NoError(os.MkdirAll(filepath.Join(source, dir), 0o755))
+	}
+	util.WriteRandomFile(t, filepath.Join(source, "keep", "a.bin"), 256<<10)
+	util.WriteRandomFile(t, filepath.Join(source, "drop", "b.bin"), 256<<10)
+	util.WriteRandomFile(t, filepath.Join(source, "drop", "nested", "c.bin"), 256<<10)
+	util.WriteRandomFile(t, filepath.Join(source, "cache.tmp"), 256<<10)
+
+	blob := util.BuildImage(t, nydusBin, bootstrap, blobDir, source, 1<<20,
+		"--exclude", filepath.Join(source, "drop"),
+		"--exclude", filepath.Join(source, "cache.tmp"))
+	info, err := os.Stat(blob)
+	assert.NoError(err)
+	assert.Less(info.Size(), int64(600<<10), "the excluded data is still in the blob")
+
+	mountpoint := filepath.Join(workDir, "mnt")
+	t.Cleanup(util.MountNydusBootstrap(t, nydusBin, bootstrap, blobDir, "", mountpoint))
+	assert.FileExists(filepath.Join(mountpoint, "keep", "a.bin"))
+	assert.NoFileExists(filepath.Join(mountpoint, "drop"))
+	assert.NoFileExists(filepath.Join(mountpoint, "cache.tmp"))
+	assert.Equal(util.Sha256File(t, filepath.Join(source, "keep", "a.bin")), util.Sha256File(t, filepath.Join(mountpoint, "keep", "a.bin")))
+}

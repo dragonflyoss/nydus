@@ -3,13 +3,16 @@ package e2e
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
 	"github.com/dragonflyoss/nydus/tests/e2e/util"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sys/unix"
 )
 
 // TestBlobMount builds the standard corpus at two chunk sizes and diffs the
@@ -90,5 +93,64 @@ func verifyChunkCacheFiles(t *testing.T, cacheDir string, blobs ...string) {
 		assert.FileExists(t, filepath.Join(cacheDir, digest+".blob.data"))
 		assert.FileExists(t, filepath.Join(cacheDir, digest+".blob.meta"))
 		assert.FileExists(t, filepath.Join(cacheDir, digest+".group.map"))
+	}
+}
+
+// TestBlobIntegrity corrupts one byte of a blob's data region and reads the
+// file stored there: the blob meta carries a CRC per chunk group that every
+// decode checks, so the read fails instead of serving the corruption whether
+// or not the decoded groups are also verified against their digests. The
+// image is built without compression, so the corruption survives decoding.
+func TestBlobIntegrity(t *testing.T) {
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	workDir := t.TempDir()
+	source := filepath.Join(workDir, "source")
+	blobDir := filepath.Join(workDir, "blobs")
+	bootstrap := filepath.Join(workDir, "image.boot")
+	assert.NoError(t, os.MkdirAll(source, 0o755))
+	util.WriteRandomFile(t, filepath.Join(source, "data.bin"), 1<<20)
+	blob := util.BuildImage(t, nydusBin, bootstrap, blobDir, source, 1<<20, "--compressor", "none")
+
+	// Flip a byte well inside the data region, which starts the full blob.
+	f, err := os.OpenFile(blob, os.O_RDWR, 0)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	var b [1]byte
+	_, err = f.ReadAt(b[:], 4096)
+	assert.NoError(t, err)
+	b[0] ^= 0xff
+	_, err = f.WriteAt(b[:], 4096)
+	assert.NoError(t, err)
+	assert.NoError(t, f.Close())
+
+	verify := false
+	tests := []struct {
+		name   string
+		verify *bool
+	}{
+		{name: "checksums unverified, the default"},
+		{name: "checksums verified", verify: &verify},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			dir := t.TempDir()
+			config := util.NewLocalBackendConfig(blobDir, filepath.Join(dir, "cache"), "none")
+			config.Storage.SkipVerifyChecksums = tc.verify
+			config.Write(t, filepath.Join(dir, "nydus.yaml"))
+			mountpoint := filepath.Join(dir, "mnt")
+			logDir := filepath.Join(dir, "logs")
+			assert.NoError(os.MkdirAll(mountpoint, 0o755))
+			cmd := exec.Command(nydusBin, "fuse", "--bootstrap", bootstrap, "--config", filepath.Join(dir, "nydus.yaml"), "--mountpoint", mountpoint, "--log-dir", logDir)
+			t.Cleanup(util.MountFuse(t, cmd, mountpoint, "nydus fuse"))
+
+			_, err := os.ReadFile(filepath.Join(mountpoint, "data.bin"))
+			assert.ErrorIs(err, unix.EIO)
+			assert.Eventually(func() bool {
+				return strings.Contains(util.ReadLogs(logDir), "crc32 mismatch")
+			}, 10*time.Second, 200*time.Millisecond, "the corruption was not caught by the chunk group crc")
+		})
 	}
 }

@@ -78,7 +78,7 @@ TOP_IMAGES_PLATFORM ?= linux/amd64
 TOP_IMAGES_WORKDIR ?=
 TOP_IMAGES_GO_TEST_ARGS ?=
 
-E2E_DEFAULT_TESTS = ^Test(ErofsKernelCompatibility|BlobMount|MergedMount|NydusifyOptimize|ReproducibleBuild|AutomaticNoXattr)
+E2E_DEFAULT_TESTS = ^Test(ErofsKernelCompatibility|BlobMount|BlobIntegrity|BuildExclude|MergedMount|NydusifyOptimize|PrefetchScope|Registry_|ReproducibleBuild|AutomaticNoXattr)
 
 GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH)" "HOME=$(HOME)" \
 	"GOCACHE=$$($(GO_BIN) env GOCACHE)" \

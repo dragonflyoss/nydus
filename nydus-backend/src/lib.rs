@@ -15,7 +15,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nydus_config::BackendConfig;
+use nydus_config::{BackendConfig, PrefetchConfig};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
@@ -138,17 +138,23 @@ pub trait Backend: Send + Sync {
 
 /// Implements the blob backend construction.
 impl dyn Backend {
-    /// Creates the blob backend `config` describes, a registry backend
-    /// reaching the registry from `netns` when one is given, the caller's
-    /// network namespace otherwise.
+    /// Creates the blob backend `config` describes, its prefetch reads
+    /// following `prefetch`, a registry backend reaching the registry from
+    /// `netns` when one is given, the caller's network namespace otherwise.
     #[cfg_attr(not(feature = "registry"), allow(unused_variables))]
-    pub fn new(config: &BackendConfig, netns: Option<Netns>) -> io::Result<Arc<dyn Backend>> {
+    pub fn new(
+        config: &BackendConfig,
+        prefetch: &PrefetchConfig,
+        netns: Option<Netns>,
+    ) -> io::Result<Arc<dyn Backend>> {
         match config {
             BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
             #[cfg(feature = "registry")]
-            BackendConfig::Registry(registry) => {
-                Ok(Arc::new(Registry::new((**registry).clone(), netns)?))
-            }
+            BackendConfig::Registry(registry) => Ok(Arc::new(Registry::new(
+                (**registry).clone(),
+                prefetch,
+                netns,
+            )?)),
             #[cfg(not(feature = "registry"))]
             BackendConfig::Registry(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -166,7 +172,7 @@ mod tests {
     fn new_builds_a_local_backend() {
         let config: BackendConfig =
             serde_yaml::from_str("type: local\nconfig:\n  dir: /blobs\n").unwrap();
-        assert!(<dyn Backend>::new(&config, None).is_ok());
+        assert!(<dyn Backend>::new(&config, &PrefetchConfig::default(), None).is_ok());
     }
 
     #[cfg(feature = "registry")]
@@ -176,7 +182,7 @@ mod tests {
             "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
         )
         .unwrap();
-        assert!(<dyn Backend>::new(&config, None).is_ok());
+        assert!(<dyn Backend>::new(&config, &PrefetchConfig::default(), None).is_ok());
     }
 
     #[cfg(not(feature = "registry"))]
@@ -186,7 +192,9 @@ mod tests {
             "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
         )
         .unwrap();
-        let err = <dyn Backend>::new(&config, None).err().unwrap();
+        let err = <dyn Backend>::new(&config, &PrefetchConfig::default(), None)
+            .err()
+            .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("registry"));
     }

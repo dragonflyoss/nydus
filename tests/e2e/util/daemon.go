@@ -1,7 +1,6 @@
 package util
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,25 +12,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
-
-// WriteLocalBackendConfig writes the nydus config of a local backend over
-// blobDir with the chunk cache under cacheDir and the given prefetch scope,
-// `none`, `ondemand`, `all` or `auto`.
-func WriteLocalBackendConfig(t *testing.T, path, blobDir, cacheDir, prefetchScope string) {
-	t.Helper()
-	assert.NoError(t, os.MkdirAll(cacheDir, 0o755))
-
-	config := fmt.Sprintf(`backend:
-  type: local
-  config:
-    dir: %s
-storage:
-  dir: %s
-prefetch:
-  scope: %s
-`, blobDir, cacheDir, prefetchScope)
-	assert.NoError(t, os.WriteFile(path, []byte(config), 0o644))
-}
 
 // Daemon is a spawned nydus service daemon, such as nbd or fanotify, with
 // its console log and log directory. Embed it in a test environment to
@@ -133,14 +113,18 @@ func (d *Daemon) WaitReady(t *testing.T, ready func() bool) {
 
 // Logs returns the console log followed by every log file of the daemon.
 func (d *Daemon) Logs() string {
-	var b strings.Builder
 	console, _ := os.ReadFile(d.ConsoleLog)
-	b.Write(console)
+	return string(console) + ReadLogs(d.LogDir)
+}
 
-	entries, _ := os.ReadDir(d.LogDir)
+// ReadLogs returns the content of every log file under logDir, empty when
+// the directory does not exist yet.
+func ReadLogs(logDir string) string {
+	var b strings.Builder
+	entries, _ := os.ReadDir(logDir)
 	for _, entry := range entries {
 		if entry.Type().IsRegular() {
-			data, _ := os.ReadFile(filepath.Join(d.LogDir, entry.Name()))
+			data, _ := os.ReadFile(filepath.Join(logDir, entry.Name()))
 			b.Write(data)
 		}
 	}

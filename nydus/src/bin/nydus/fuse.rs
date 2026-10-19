@@ -237,7 +237,7 @@ impl FuseCommand {
             Some(Arc::new(Local::new(dir.clone())))
         } else if let Some(config) = storage_config.as_ref() {
             Some(
-                <dyn Backend>::new(&config.backend, None)
+                <dyn Backend>::new(&config.backend, &config.prefetch, None)
                     .context("failed to build blob backend")?,
             )
         } else {

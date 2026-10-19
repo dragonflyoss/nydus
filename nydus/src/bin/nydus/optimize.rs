@@ -129,7 +129,7 @@ impl OptimizeCommand {
 
         // Load the storage config.
         let storage_config = Config::load(&self.config)?;
-        let backend = <dyn Backend>::new(&storage_config.backend, None)
+        let backend = <dyn Backend>::new(&storage_config.backend, &storage_config.prefetch, None)
             .context("failed to build blob backend")?;
         // Source chunks are read through the local blob cache's backend, so
         // diskless mode cannot apply.

@@ -88,6 +88,13 @@ pub fn default_prefetch_blob_timeout() -> Duration {
     Duration::from_secs(60 * 60)
 }
 
+/// Returns the default interval before a failed prefetch read is sent once
+/// more.
+#[inline]
+pub fn default_prefetch_retry_interval() -> Duration {
+    Duration::from_secs(6 * 60 * 60)
+}
+
 /// Returns the default timeout of each attempt of a request through the
 /// Dragonfly seed peers.
 #[inline]
@@ -237,7 +244,7 @@ pub struct HttpConfig {
     /// client's retry middleware on direct origin requests and on origin
     /// requests issued when Dragonfly cannot serve a read, where every attempt
     /// also waits for a back-to-source rate limit slot. A prefetch read still
-    /// failing after them is sent once more after a random delay of hours.
+    /// failing after them is sent once more after `prefetch.retry_interval`.
     #[serde(default = "default_registry_http_max_retries")]
     pub max_retries: u32,
 
@@ -490,6 +497,14 @@ pub struct PrefetchConfig {
     #[serde(default = "default_prefetch_blob_timeout", with = "humantime_serde")]
     pub blob_timeout: Duration,
 
+    /// The interval before a prefetch read that the origin or the seed peers
+    /// answered with `429`, `5xx` or `408` is sent once more, e.g. `6h`, the
+    /// default: hours, so an outage or rate limit has time to clear. The
+    /// actual interval is random between this and twice this, so a fleet of
+    /// instances does not retry in lockstep.
+    #[serde(default = "default_prefetch_retry_interval", with = "humantime_serde")]
+    pub retry_interval: Duration,
+
     /// The scope of blob prefetch: nothing, only the "ondemand" blob, all
     /// blobs, or `auto` (the default): the "ondemand" blob when the image has
     /// one, otherwise all blobs.
@@ -533,6 +548,7 @@ impl Default for PrefetchConfig {
         Self {
             concurrent_blob_count: default_prefetch_concurrent_blob_count(),
             blob_timeout: default_prefetch_blob_timeout(),
+            retry_interval: default_prefetch_retry_interval(),
             scope: PrefetchScope::default(),
         }
     }
