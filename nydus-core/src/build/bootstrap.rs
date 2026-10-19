@@ -1274,6 +1274,15 @@ mod tests {
             let nid = lookup(big_nid, name);
             assert_eq!(reader.inode(nid).unwrap().size(), 1);
         }
+        for missing in ["!", "0000", "0060-", "0119-o", "zzz"] {
+            assert_eq!(
+                reader
+                    .lookup_dir_entry(big_nid, &big, missing.as_bytes())
+                    .unwrap(),
+                None,
+                "{missing} should be absent"
+            );
+        }
         assert_eq!(root.data_layout(), EROFS_INODE_FLAT_INLINE);
     }
 }

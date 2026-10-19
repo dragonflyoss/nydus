@@ -639,6 +639,14 @@ fn core_static_filesystem_api_reads_metadata_and_data() {
     assert!(small[corpus["dir/small.txt"].len()..]
         .iter()
         .all(|byte| *byte == 0));
+    assert!(matches!(
+        core.fs.open("dir/missing.txt"),
+        Err(nydus_error::Error::NotFound(_))
+    ));
+    assert!(matches!(
+        core.fs.open("file1/child"),
+        Err(nydus_error::Error::InvalidParameter(_))
+    ));
 
     let link_entry = core.fs.open("link_to_file1").unwrap();
     let link = link_entry.read_link().unwrap();
