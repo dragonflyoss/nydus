@@ -57,7 +57,7 @@ impl NbdCore {
         self.image.block_count()
     }
 
-    /// Borrow the underlying core, e.g. to snapshot metrics.
+    /// Borrow the underlying core.
     pub fn core(&self) -> &Arc<NydusCore> {
         self.image.core()
     }

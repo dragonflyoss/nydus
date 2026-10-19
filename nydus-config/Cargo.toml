@@ -2,11 +2,17 @@
 name = "nydus-config"
 version = "3.0.0-beta.3"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "YAML storage configuration for nydus: the typed schema, loading and validation."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
+
+[features]
+# Accepts the `dragonfly` block of a registry backend; a build without it
+# rejects the block when the configuration is loaded. Enabled by
+# `nydus-backend/dragonfly`.
+dragonfly = []
 
 [dependencies]
 clap = { workspace = true }
@@ -15,6 +21,7 @@ nydus-error = { version = "3.0.0-beta.3", path = "../nydus-error" }
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { workspace = true }
 serde_yaml = "0.9"
+url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

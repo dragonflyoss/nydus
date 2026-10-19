@@ -11,12 +11,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::BlobBackend;
+use nydus_backend::Backend;
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataChunkGroupDigest, BlobMetadataChunkGroupExtent,
     BlobMetadataCompressor,
 };
-use nydus_telemetry::metrics::ImageMetrics;
 
 /// Default on-demand fetch size: the compressed bytes one backend read
 /// covers around a missed chunk group (see [`set_fetch_size`]). 2 MiB.
@@ -214,7 +213,7 @@ pub fn plan_prefetch_batches(
 /// served the window.
 pub fn decode_chunk_group_from_window<'a>(
     blob_metadata: &BlobMetadata,
-    backend: &Arc<dyn BlobBackend>,
+    backend: &Arc<dyn Backend>,
     group: &BlobMetadataChunkGroupExtent,
     window_base_offset: u64,
     window_bytes: &'a [u8],
@@ -376,46 +375,24 @@ pub(crate) fn decode_chunk_group_into(
     Ok(())
 }
 
-/// Validate a decoded chunk group and, on a checksum failure, attribute a
-/// CRC error metric to the backend that served the bytes. A read diverted
-/// from the backend's static target (e.g. a Dragonfly fallback to the
-/// origin) is attributed to the side that actually served it, via
-/// [`nydus_backend::last_read_served_by`].
+/// Validate a decoded chunk group, counting the CRC check and, on a CRC
+/// mismatch, the failure against the backend.
 pub fn validate_chunk_group_with_metrics(
-    backend: &Arc<dyn BlobBackend>,
+    backend: &Arc<dyn Backend>,
     blob_metadata: &BlobMetadata,
     group: &BlobMetadataChunkGroupExtent,
     decoded: &[u8],
 ) -> io::Result<()> {
-    validate_chunk_group(backend, blob_metadata, group, decoded, |target| {
-        nydus_telemetry::metrics::record_backend_crc_error(target)
-    })
-}
-
-pub(crate) fn validate_chunk_group_for_image(
-    backend: &Arc<dyn BlobBackend>,
-    blob_metadata: &BlobMetadata,
-    group: &BlobMetadataChunkGroupExtent,
-    decoded: &[u8],
-    metrics: &ImageMetrics,
-) -> io::Result<()> {
-    validate_chunk_group(backend, blob_metadata, group, decoded, |target| {
-        metrics.record_backend_crc_error(target)
-    })
-}
-
-fn validate_chunk_group(
-    backend: &Arc<dyn BlobBackend>,
-    blob_metadata: &BlobMetadata,
-    group: &BlobMetadataChunkGroupExtent,
-    decoded: &[u8],
-    record_crc_error: impl FnOnce(nydus_telemetry::metrics::BackendTarget),
-) -> io::Result<()> {
+    nydus_telemetry::metrics::collect_validate_chunk_group_started_metrics(
+        backend.kind(),
+        backend.protocol(),
+    );
     if let Err(err) = validate_decoded_chunk_group(blob_metadata, group, decoded) {
         if is_chunk_group_crc_mismatch(&err) {
-            let target =
-                nydus_backend::last_read_served_by().unwrap_or_else(|| backend.backend_target());
-            record_crc_error(target);
+            nydus_telemetry::metrics::collect_validate_chunk_group_failure_metrics(
+                backend.kind(),
+                backend.protocol(),
+            );
         }
         return Err(err);
     }
@@ -554,7 +531,6 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_backend::ReadContext;
     use nydus_format::blob::{BlobMetadataDigester, BlobMetadataTableType};
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -637,7 +613,7 @@ mod tests {
 
     #[test]
     fn window_decode_borrows_plain_payload_and_preserves_validation() {
-        let backend: Arc<dyn BlobBackend> = Arc::new(StaticTargetBackend);
+        let backend: Arc<dyn Backend> = Arc::new(DragonflyBackend);
         let payload = vec![0x5a; 4096];
         for compressor in [
             BlobMetadataCompressor::None,
@@ -831,15 +807,19 @@ mod tests {
         assert!(plan_prefetch_batches(&empty, 4096, 4).is_empty());
     }
 
-    /// A backend whose reads are never exercised; only its static target matters.
-    struct StaticTargetBackend;
+    /// A backend whose reads are never exercised; only its labels matter.
+    struct DragonflyBackend;
 
-    impl BlobBackend for StaticTargetBackend {
-        fn backend_target(&self) -> nydus_telemetry::metrics::BackendTarget {
-            nydus_telemetry::metrics::BackendTarget::Proxy
+    impl Backend for DragonflyBackend {
+        fn kind(&self) -> nydus_backend::BackendKind {
+            nydus_backend::BackendKind::Registry
         }
 
-        fn blob_metadata(
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
+            Some(nydus_backend::Protocol::Dragonfly)
+        }
+
+        fn read_blob_metadata(
             &self,
             _blob_id: &[u8; SHA256_DIGEST_SIZE],
         ) -> io::Result<nydus_format::blob::BlobMetadata> {
@@ -851,17 +831,20 @@ mod tests {
             _blob_id: &[u8; SHA256_DIGEST_SIZE],
             _offset: u64,
             _dst: &mut [u8],
-            _context: ReadContext,
         ) -> io::Result<()> {
             Err(io::Error::other("unused"))
         }
     }
 
-    #[test]
-    fn crc_failure_is_attributed_to_the_static_target_without_an_override() {
-        use nydus_telemetry::metrics::BackendTarget;
+    fn validate_failures() -> u64 {
+        nydus_telemetry::metrics::VALIDATE_CHUNK_GROUP_FAILURE_COUNT
+            .with_label_values(&["registry", "dragonfly"])
+            .get()
+    }
 
-        let backend: Arc<dyn BlobBackend> = Arc::new(StaticTargetBackend);
+    #[test]
+    fn crc_failure_is_counted_against_the_backend() {
+        let backend: Arc<dyn Backend> = Arc::new(DragonflyBackend);
         let payload = vec![0u8; EROFS_BLOCK_SIZE as usize];
         // A zeroed block has crc32c != 0, so a group declaring crc 0 mismatches.
         let metadata = BlobMetadata::new(
@@ -887,25 +870,18 @@ mod tests {
         )
         .unwrap();
         let group = metadata.chunk_group(0).unwrap();
-        assert!(nydus_backend::last_read_served_by().is_none());
 
-        let proxy_before = nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy);
+        let failures_before = validate_failures();
         let err = validate_chunk_group_with_metrics(&backend, &metadata, &group, &payload)
             .expect_err("crc must mismatch");
         assert!(is_chunk_group_crc_mismatch(&err));
-        assert_eq!(
-            nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy),
-            proxy_before + 1
-        );
+        assert_eq!(validate_failures(), failures_before + 1);
         let mut scratch = Vec::new();
         let err =
             decode_chunk_group_from_window(&metadata, &backend, &group, 0, &payload, &mut scratch)
                 .expect_err("borrowed payload must still be validated");
         assert!(is_chunk_group_crc_mismatch(&err));
         assert_eq!(scratch.capacity(), 0);
-        assert_eq!(
-            nydus_telemetry::metrics::backend_crc_error_total(BackendTarget::Proxy),
-            proxy_before + 2
-        );
+        assert_eq!(validate_failures(), failures_before + 2);
     }
 }

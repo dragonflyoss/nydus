@@ -177,7 +177,7 @@ inter-crate dependency set, enforced by each `Cargo.toml`.
 | `nydus-backend` | data | Where bytes come from: `Registry` (OCI distribution), `Local` (directory), Dragonfly P2P via SDK or HTTP proxy | `io::Result` only |
 | `nydus-format` | neutral | Single source of truth for on-disk layouts: `erofs/` structures, the nydus blob format (`blob/`), byte-level utils | own `FormatError`, wrapped by each plane |
 | `nydus-error` | control | The error contract: `Error`, chain-printing `report()`, `Context` | — |
-| `nydus-telemetry` | leaf | Metrics (including `ReadKind`) and feature-gated logging setup; a leaf so every layer can record without cycles | — |
+| `nydus-telemetry` | leaf | Metrics and feature-gated logging setup; depends only on `nydus-config`, whose `BackendKind`/`Protocol`/`ReadKind` it maps to label values, so every layer can record without cycles | — |
 
 `nydus-format` stays neutral by mirroring the error shape: its `FormatError`
 carries the same context-chain design, the data plane wraps it into
@@ -201,7 +201,7 @@ them.
 ## Runtime Thread Model
 
 The data-plane APIs are synchronous. A thread that calls `ErofsReader`,
-`NydusCore`, `Blobs`, or `BlobBackend` remains responsible for that operation
+`NydusCore`, `Blobs`, or `Backend` remains responsible for that operation
 until it completes. The layers below may use helper threads for remote I/O or
 explicit prefetch, but they do not turn an ordinary read into a detached task.
 This means frontend concurrency is also read concurrency: for example, a FUSE
@@ -212,26 +212,24 @@ downloading it more than once.
 
 ### Backend thread pools
 
-`BlobBackend` itself does not own a general-purpose thread pool. The local
+`Backend` itself does not own a general-purpose thread pool. The local
 backend performs file I/O directly on the caller. Remote registry and
-Dragonfly HTTP backends bridge their synchronous methods into one lazy,
-process-wide Tokio multi-thread runtime:
+Dragonfly HTTP backends bridge their synchronous methods into two Tokio
+multi-thread runtimes, one for on-demand reads and one for prefetch, so a
+prefetch burst never queues ahead of a FUSE reader on the same workers:
 
 | Pool | Default | Lifetime and work |
 | ---- | ------- | ----------------- |
-| Async workers | 2 threads | Created when the runtime is first needed (the first remote read, or the construction of a Dragonfly-backed registry) and retained for the process lifetime. Each request future is spawned onto them, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
-| Blocking workers | Up to 8 threads | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`). Idle threads are released after 10 seconds. Blob reads, decompression, verification, and cache writes do not run in this pool. |
+| Async workers | 2 threads per runtime | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime of its read kind, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Blocking workers | Up to 8 threads per runtime | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`). Idle threads are released after 10 seconds. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
 The registry `http.worker_threads` and `http.max_blocking_threads` settings
-override these defaults. The runtime is shared by every registry backend in a
-process, so configuration is first-writer-wins and must be applied before the
-first registry backend is constructed. Repeating the same configuration is
-harmless; a conflicting late configuration is rejected and logged. Embedders
-may instead call `nydus_backend::configure_runtime` before constructing any
-backend, including an optional network namespace that every runtime thread
-enters; because requests run on those threads, registry sockets are created in
-that namespace regardless of the caller's. A process using only local blobs
-never creates this Tokio runtime.
+set these bounds for each runtime; every registry backend runs on runtimes of
+its own. `nydus_backend::Backend::new(config, netns)` takes an optional
+network namespace every runtime thread enters, so an embedder's registry
+sockets are created in it regardless of the caller's. The HTTP connection
+pool is shared by both runtimes. A process using only local blobs never
+creates a Tokio runtime.
 
 ### `nydus-core` API
 
@@ -1007,7 +1005,7 @@ Options:
   (default `max(ncpu, 64)`). A busy pool queues tasks — backpressure —
   rather than denying reads. Admission is unbounded; there is no per-event
   byte cap or timeout (bounded fetch time comes from the backend's HTTP
-  timeout + retries; a registry `timeout: 0s` is rejected for this mode).
+  timeout + retries).
 - `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
 
 The service marks every blob device and runs an event coordinator whose fetch
@@ -1128,26 +1126,23 @@ Fields:
 	for the trade-off.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
-- `prefetch.timeout` (default `1h`) bounds how long prefetching one whole
-	blob may take, while `http.timeout` bounds each backend request within it;
-	`0s` disables the bound. A blob that exceeds it is aborted with a warning
-	and prefetch moves on.
-- `prefetch.retry_delay_min` / `prefetch.retry_delay_max` (defaults `6h` /
-	`12h`) bound the random delay before a blob prefetch that the backend
-	throttled (a Dragonfly proxy `429`) is re-attempted; each throttled blob is
-	rescheduled with a fresh random deadline inside the window so retry load
-	spreads out instead of stampeding. `retry_delay_min` must not exceed
-	`retry_delay_max`. Only throttled failures are rescheduled; other prefetch
-	failures are logged and skipped.
+- `prefetch.blob_timeout` (default `1h`) bounds how long prefetching one
+	whole blob may take, while `http.request_timeout` bounds each backend
+	request within it; `0s` disables the bound. A blob that exceeds it is
+	aborted with a warning and prefetch moves on.
 - `prefetch.scope` (default `auto`) selects which blobs to pull. `none`
-        disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
-        `nydus optimize` emits (if any), landing the access-ordered hot set in the
-        source blobs' caches while leaving backend bandwidth to on-demand reads;
-        `all` prefetches every blob — the ondemand blob first, then the other
-        priority blobs, then the rest; `auto` behaves like `ondemand` when a
-        priority blob is an ondemand blob and like `all` otherwise, so an
-        unoptimized image is still streamed in the background.
-        See [Blob prefetch](#blob-prefetch).
+	disables prefetch; `ondemand` prefetches only the "ondemand" redirect blob
+	`nydus optimize` emits (if any), landing the access-ordered hot set in the
+	source blobs' caches while leaving backend bandwidth to on-demand reads;
+	`all` prefetches every blob — the ondemand blob first, then the other
+	priority blobs, then the rest; `auto` behaves like `ondemand` when a
+	priority blob is an ondemand blob and like `all` otherwise, so an
+	unoptimized image is still streamed in the background. A prefetch read the
+	origin or Dragonfly answered with a `429`, `5xx` or `408` the transport's
+	own retries did not cure is sent once more after a random `6h`–`12h` delay
+	so retry load spreads out instead of stampeding; a transport failure, and
+	a blob whose prefetch still fails, is logged and skipped.
+	See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
@@ -1180,39 +1175,46 @@ backend:
     # base64-encoded `username:password`
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     http:
-      timeout: 5s
+      request_timeout: 5s
       max_retries: 3
       tls:
         skip_verify: false
         ca_cert: /etc/nydus/certs/registry-ca.pem
     # dragonfly:
-    #   scheduler_endpoint: http://127.0.0.1:65000
+    #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
+    #   request_timeout: 30s
+    #   max_retries: 1
+    #   back_to_source:
+    #     request_rate_limit: 1
 ```
 
 Fields under `backend.config`:
 
 - `addr` (required): registry address including the scheme, e.g.
 	`https://registry-1.docker.io` or `http://127.0.0.1:5000`. The scheme
-	selects between TLS and plain HTTP.
+	selects between TLS and plain HTTP; a path becomes the prefix of the
+	distribution API path, for a registry behind a reverse proxy.
 - `repository` (required): image repository without tag/digest, e.g.
 	`library/ubuntu`.
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
 	Omit for anonymous / token-only registries.
-- `http` (optional): the HTTP client settings — timeouts, retries, and TLS
-	trust. The timeout also applies to Dragonfly SDK requests; retry counts
-	for Dragonfly reads are governed by the `dragonfly` policy knobs below.
-	- `timeout` (default `5s`): per-request timeout in humantime format (e.g.
-		`5s`, `1m`); `0s` disables it. Kept short because a read holds the
+- `http` (optional): the HTTP client settings of requests to the origin
+	registry — timeouts, retries, and TLS trust.
+	- `request_timeout` (default `5s`): the timeout of a request to the origin
+		registry in humantime format (e.g. `5s`, `1m`), greater than zero. Kept
+		short because a read holds the
 		chunk group's cross-process fetch claim for its whole duration, and what
 		queues up behind that claim are reader threads in the other instances
 		sharing the cache directory.
 	- `max_retries` (default `3`): maximum number of retry attempts per
 		request, applied with exponential backoff by the HTTP client's retry
-		middleware on direct origin requests. Origin requests issued as
-		Dragonfly fallbacks share the same budget but pace each retry through
-		the fallback throttle instead of the middleware's backoff, so this
-		default is what bounds "origin failing 3 retries" before a fallback
-		read errors out.
+		middleware on direct origin requests and on origin requests issued when
+		Dragonfly cannot serve a read, where every attempt also waits for a
+		back-to-source rate limit slot, so this default bounds how often the
+		origin is retried before such a read errors out. A prefetch read still
+		answered with a `429`, `5xx` or `408` after them is sent once more
+		after a random `6h`–`12h` delay, like one Dragonfly answers so; an
+		on-demand read, and a prefetch read failing in transport, errors out.
 	- `proxy` (optional): routes every registry request through an HTTP
 		forward proxy. Requests keep their original upstream URL, so a proxy
 		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
@@ -1224,65 +1226,63 @@ Fields under `backend.config`:
 		- `ca_cert` (optional): a CA certificate path with PEM format to trust
 			in addition to the system roots; the file may bundle multiple
 			certificates.
-	- `worker_threads` (default `0` = 2): async worker threads of the
-		process-wide runtime that drives the registry client's sockets. They
+	- `worker_threads` (default `2`): async worker threads of each runtime
+		that drives the registry client's sockets, one runtime for on-demand
+		reads and one for prefetch. They
 		only move bytes for the connection pool (readers block on their own
 		threads), so two suffice for a node's worth of blob traffic; raise it
 		only if the backend metrics show the workers saturated.
-	- `max_blocking_threads` (default `0` = 8): upper bound on the runtime's
+	- `max_blocking_threads` (default `8`): upper bound on each runtime's
 		on-demand blocking threads, which serve DNS lookups and are released
 		after 10 s idle.
 
-		The runtime is shared by every registry backend in the process, so these
-		two keys take effect only from the first backend constructed with a
-		non-zero value; a later backend asking for different values logs a
-		warning and keeps the running runtime. Programs that embed the backend
-		(a VMM) may also fix the runtime's network namespace through the
-		`nydus_backend::configure_runtime` API; the config file cannot.
+		Every registry backend built from a configuration runs on runtimes of
+		its own with these bounds.
 - `dragonfly` (optional): routes blob `GET`s through the Dragonfly client SDK
 	(crate `dragonfly-client-request`) for P2P distribution, carrying a
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
-	configured `timeout`; every other request (`HEAD`, auth token fetches)
-	goes directly to the origin registry. Only available when the binary is
-	built with the `backend-dragonfly-proxy` feature. Omit to talk to the
-	origin directly. Metrics attribute each read to the origin or proxy side
-	(see [Metrics](#metrics)).
+	configured `request_timeout` per attempt; auth token fetches go directly
+	to the origin registry. Only available when the
+	binary is built with the `dragonfly` feature; a build without it rejects
+	the block when the config is loaded. Omit to talk to the origin directly.
+	Each read is counted under the backend that served it (see
+	[Metrics](#metrics)).
 
-	Failed Dragonfly reads are handled by a load-shedding policy keyed on the
-	failure class and the read kind. The SDK's internal retries are disabled;
-	the retry counts below are exact and observable:
+	For an on-demand read the SDK retries a transient failure (timeout,
+	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times
+	after a jittered exponential backoff, each attempt on the next seed peer
+	serving the blob. A prefetch read never retries at once. Any other answer
+	returns at once. What happens next depends on the read kind:
 
-	| Failure class | Prefetch | On-demand |
+	| Dragonfly outcome | Prefetch | On-demand |
 	|---|---|---|
-	| Proxy `429` | No retry, no origin fallback; the blob's prefetch fails and is rescheduled after a random `prefetch.retry_delay_min`–`prefetch.retry_delay_max` delay | No Dragonfly retry; fall back to the origin through the fallback throttle; the origin failing `http.max_retries` attempts → IO error |
-	| Proxy `403` | Fail immediately, no retry, no fallback | Fail immediately, no retry, no fallback |
-	| Timeout | `prefetch_max_retries` Dragonfly retries (each after a random 100ms–1s delay), then fail (no fallback) | `ondemand_max_retries` Dragonfly retries, then throttled origin fallback |
-	| Connect / `5xx` / other | `prefetch_max_retries` Dragonfly retries (each after a random 100ms–1s delay), then fail (no fallback) | `ondemand_max_retries` Dragonfly retries, then throttled origin fallback |
+	| `2xx` / `3xx` / `401` / `403` / `404` / other definitive `4xx` | Served as is: `401` runs the auth handshake and resends, `403` and `404` fail the read without retry or fallback | Same |
+	| dfdaemon `400` (invalid request or URL) / `422` (the origin sent no `Content-Length`, or the piece length is invalid) | No retry, fail, no fallback | Same |
+	| dfdaemon `507` (the seed peer has no room for the blob) | Sent once more after a random 6h–12h delay, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
+	| `429` / `5xx` / `408` / dfdaemon `500` | Sent once more after a random 6h–12h delay, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
+	| timeout / connection | Fails the read at once, no retry, no origin fallback | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the back-to-source rate limit |
+	| Origin fallback: `5xx` / `408` / `429` / transport error | n/a | Retried by the HTTP client's retry middleware up to `http.max_retries` times, every attempt waiting for its own back-to-source rate limit slot |
 
 	Prefetch reads never fall back to the origin, so a Dragonfly outage
 	degrades prefetch instead of flooding the registry, while on-demand reads
-	stay served through the shaped fallback path.
+	stay served through the rate limited back-to-source path.
 
-	- `scheduler_endpoint` (required): the Dragonfly scheduler endpoint (gRPC),
-		e.g. `http://127.0.0.1:65000`.
-	- `ondemand_max_retries` (default `3`): Dragonfly retries for a retryable
-		(timeout / connect / `5xx`) on-demand read failure before falling back
-		to the origin.
-	- `prefetch_max_retries` (default `10`): Dragonfly retries for a retryable
-		prefetch read failure before the read fails. Each prefetch retry waits
-		a random 100ms–1s delay first so failing prefetch reads do not hammer
-		a struggling Dragonfly proxy in lockstep; on-demand retries are never
-		delayed.
-	- `fallback_interval` (default `1s`, i.e. 1 QPS per process): the minimum
-		interval between origin requests issued as Dragonfly fallbacks; `0s`
-		disables the throttle. Every fallback attempt — including each retry
-		of a transient origin failure — waits for its own throttle slot, so
-		actual origin requests never exceed one per interval. Only fallback
-		reads are shaped — the normal direct path and auth fetches are never
-		throttled. On-demand group singleflight already dedupes concurrent
-		readers per group, so the throttle queues at most one leader per cold
-		group.
-
+	- `scheduler_endpoint` (required): the Dragonfly scheduler service address
+		with the scheme, e.g. `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
+	- `request_timeout` (default `30s`): the timeout of each attempt of a
+		request through the seed peers, one chunk group per request.
+	- `max_retries` (default `1`, at most `3`): Dragonfly retries of an
+		on-demand read on a transient failure, each on the next seed peer after
+		an exponential backoff. Prefetch reads never retry.
+	- `back_to_source.request_rate_limit` (default `1`, i.e. 1 QPS per
+		process): the rate limit of origin requests issued when the seed peers
+		cannot serve an on-demand read, in requests per second, at least `1`.
+		Every attempt — including each retry of a transient origin failure —
+		waits for its own slot, so actual origin requests never exceed the
+		limit. Only these reads are shaped — the normal direct path and auth
+		fetches are never. On-demand group singleflight already dedupes
+		concurrent readers per group, so the limiter queues at most one leader
+		per cold group.
 
 ## Metrics
 
@@ -1311,91 +1311,90 @@ Each completed backend request is also logged at `debug` level after it returns,
 carrying the request source, transport, method, URL, request headers, response
 status and headers (or an error), and the wall-clock duration.
 
-For library embedders (no apiserver socket), each `NydusCore` owns an
-independent `ImageMetrics`. Use `core.metrics().snapshot()` for a serializable
-snapshot or `core.metrics().encode_text()` for the Prometheus exposition of
-that image. `Snapshot` serializes to a flat JSON map: counters as unsigned
-integers, gauges as signed integers, histograms expanded to `<name>_sum` /
-`<name>_count`, and labeled series keyed as
-`<name>{label="value",...}`. Embedders (e.g. a hypervisor's stats endpoint)
-include it to reason about runtime behavior — in particular
-`backend_ondemand_read_count > 0` means the prefetch did not cover the access
-pattern and the workload fell back to the network.
-
-The free `nydus_telemetry::metrics::snapshot()` and `encode_text()` functions
-read a separate process-wide compatibility registry used by legacy
-constructors that do not receive an `ImageMetrics`. They do **not** aggregate
-the registries owned by `NydusCore` instances, so the process-wide value is
-not the sum of all image values. Aggregation must be explicit: counters can be
-summed; histograms must merge buckets, count, and sum; and gauges need a
-defined policy. In particular, summing per-image `cache_total_chunk_group`
-counts a blob once per image, whereas the compatibility registry deduplicates
-the same cache key across its users.
+For library embedders (no apiserver socket), `nydus_telemetry::metrics::REGISTRY`
+is the `prometheus::Registry` behind the endpoint: encode `REGISTRY.gather()`
+with a `prometheus::TextEncoder` to get the same text exposition, which a
+hypervisor's stats endpoint can serve as is or parse with the Prometheus client
+libraries (`expfmt` in Go, `prometheus-parse` in Rust). A non-zero
+`nydus_read_backend_total{type="ondemand"}` means the prefetch did not
+cover the access pattern and the workload fell back to the network.
 
 Exported metrics:
 
+Every name carries the `nydus_` namespace and is a verb followed by what it
+acts on. Counters end in `_total`, failure counters in `_failure_total`, byte
+counters in `_traffic`, and duration histograms in `_duration_milliseconds`
+(exponential buckets from 1ms to 2^23ms). Dimensions are labels, each with a
+fixed vocabulary:
+
+| Label | Meaning | Values |
+| --- | --- | --- |
+| `type` | what triggered the operation | `ondemand`, `prefetch` |
+| `backend` | the blob backend | `local`, `registry` |
+| `protocol` | how the registry backend fetched the bytes | `http`, `dragonfly` |
+| `storage` | where a chunk group was read from | `local`, `backend` |
+| `op` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
+
+`protocol` is `http` for the registry backend reading the origin and
+`dragonfly` for it reading the Dragonfly seed peers; a read Dragonfly could not
+serve that went back to the origin is `http`. The local backend has no protocol
+and leaves the label empty. `storage` is `local` for a
+chunk group already in the local cache and `backend` for one fetched from the
+backend into the cache.
+
 Backend:
 
-- `backend_origin_read_count`, `backend_origin_read_errors`,
-	`backend_proxy_read_count`, `backend_proxy_read_errors` — read and error counts
-	split by whether the origin registry or a proxy served the read.
-- `backend_origin_read_latency`, `backend_proxy_read_latency` — read latency
-	histograms (seconds, exponential buckets from 1ms to ~8s).
-- `backend_origin_read_bytes`, `backend_proxy_read_bytes` — bytes read per side.
-- `backend_ondemand_read_count`, `backend_ondemand_read_bytes`,
-	`backend_ondemand_read_errors`, `backend_ondemand_read_high_latency_count` and
-	the `backend_prefetch_*` equivalents — reads split by on-demand vs prefetch
-	source. A read is "high latency" when it takes 250ms or more.
-- `backend_origin_crc_check_errors`, `backend_proxy_crc_check_errors` — CRC
-	validation failures on fetched data, attributed to the serving side.
-- `backend_dragonfly_read_errors{class,kind}` — Dragonfly read failures by
-	failure class (`rate_limited`, `forbidden`, `timeout`, `connect`,
-	`server_error`, `other`) and read kind (`ondemand`, `prefetch`).
-- `backend_fallback_read_count`, `backend_fallback_read_errors` — origin
-	requests issued as Dragonfly fallbacks and how many of them failed; these
-	reads also count into the `backend_origin_*` split above. Each logical
-	fallback read counts once, however many throttled retry attempts it made.
-	The error counter covers only HTTP transport errors (connect failures,
-	timeouts) surfaced once the retry budget is spent — an HTTP error status
-	from the origin or a failure while streaming the response body is not
-	counted here. Watch this rate to confirm origin load stays shaped by
-	`fallback_interval`.
-- `backend_fallback_throttle_wait` — histogram of how long fallback reads
-	waited in the throttle queue (seconds).
-- `prefetch_reschedule_count`, `prefetch_reschedule_run_count` — throttled
-	blob prefetches queued for a delayed retry, and delayed retries executed.
+- `nydus_read_backend_total{type,backend,protocol}`,
+	`nydus_read_backend_failure_total{type,backend,protocol}`,
+	`nydus_read_backend_duration_milliseconds{type,backend,protocol}`,
+	`nydus_read_backend_traffic{type,backend,protocol}` — backend reads, how
+	many failed, their duration and their bytes. A `dragonfly` failure is one
+	the SDK's retries did not cure; the cause is in the logs. On a daemon with
+	Dragonfly configured an `http` read is an on-demand read that went back to
+	the origin; it counts once, however many rate-limited retry attempts it
+	made, and its failure counter covers only HTTP transport errors surfaced
+	once the retry budget is spent. Watch that `http` rate to confirm origin
+	load stays shaped by `dragonfly.back_to_source.request_rate_limit`.
+- `nydus_validate_chunk_group_total{backend,protocol}`,
+	`nydus_validate_chunk_group_failure_total{backend,protocol}` — CRC
+	validations of fetched chunk groups and how many mismatched. `protocol` is
+	the backend's default, `dragonfly` when Dragonfly is configured even for a
+	read that went back to the origin.
+- `nydus_prefetch_task_total`, `nydus_prefetch_task_failure_total` — blob
+	prefetch attempts and the ones that failed.
 
 Filesystem:
 
-- `fs_op_count{op}`, `fs_op_errors{op}` — successful and failed FUSE operations
-	by op (`read`, `lookup`, `getattr`, ...).
-- `fs_read_latency` — FUSE read latency histogram (seconds).
+- `nydus_fs_op_total{op}`, `nydus_fs_op_failure_total{op}` — successful and
+	failed FUSE operations by op (`read`, `lookup`, `getattr`, ...).
+- `nydus_fs_read_duration_milliseconds` — FUSE read duration histogram.
 
 Cache:
 
-- `cache_opened_files` — open blob data cache files (excludes the `.blob.meta`,
-	`.group.map` and `.prefetch.lock` sidecars).
-- `cache_hit_chunk_group` — chunk groups served from cache without a backend
-	read.
-- `cache_total_chunk_group` — total chunk groups across loaded blob metas,
-	counted once per blob however many caches are open on it.
-- `cache_fill_chunk_group` — chunk groups written into a blob's own cache by
-	regular blob prefetch (`prefetch.scope: all`).
-- `cache_ondemand_fill_chunk_group` — chunk groups written into a blob's own
-	cache to satisfy an on-demand read. Summing it across the instances
-	sharing a cache directory shows how much duplicate fetching they do.
-- `cache_redirect_fill_chunk_group` — chunk groups written into a **source**
-	blob's cache from a redirect (ondemand) blob during phase-0 prefetch.
-- `cache_redirect_skip_chunk_group` — redirect chunk groups skipped during
-	ondemand prefetch (decode/CRC failures, unknown source blob, or failed
-	fills); normally zero. Groups whose source was already cached are not
-	fetched at all and count in neither.
+- `nydus_read_chunk_group_total{type,storage,backend,protocol}` — chunk groups
+	read through a blob's cache. `storage="local"` was already in the cache and
+	needed no backend read, `storage="backend"` was fetched and written into
+	the cache. `protocol` is the backend's default. Summing
+	`{type="ondemand",storage="backend"}` across the instances sharing a cache
+	directory shows how much duplicate fetching they do.
 
-After an optimized mount's prefetch quiesces, `backend_prefetch_read_count > 0`
-with `cache_redirect_fill_chunk_group` equal to the number of traced groups
-shows the ondemand blob was pulled into the source caches, and a
-`backend_ondemand_read_count` that stays at zero through the workload shows
-the trace covered it.
+Redirect blob (ondemand blob) prefetch:
+
+- `nydus_fill_chunk_group_from_redirect_blob_total`,
+	`nydus_fill_chunk_group_from_redirect_blob_failure_total` — chunk groups decoded
+	from a redirect (ondemand) blob during phase-0 prefetch and filled into the
+	local storage of the blob they belong to, and the ones that could not be
+	(decode/CRC failures, unknown source device, or failed fills); the failure
+	counter is normally zero. Every decoded chunk group also counts in
+	`nydus_read_chunk_group_total{type="prefetch",storage="backend"}`.
+- `nydus_prefetch_redirect_blob_total`, `nydus_prefetch_redirect_blob_traffic`
+	— backend reads that fetched ondemand (redirect) blob data and their bytes,
+	a subset of the `type="prefetch"` backend reads. Together with
+	`nydus_fill_chunk_group_from_redirect_blob_total` these attribute cache warmup to the
+	optimize pipeline: after an optimized mount's prefetch quiesces, a non-zero
+	`nydus_prefetch_redirect_blob_total` proves the ondemand blob was fetched
+	and `nydus_fill_chunk_group_from_redirect_blob_total` equals the number of traced
+	chunk groups filled into local storage.
 
 
 ## Artifact Model
@@ -2298,7 +2297,7 @@ group a fetch pulls in is decoded onto the cache whether or not the workload
 reads it. Larger fetches cut the request count and help on high-latency
 links; smaller fetches transfer fewer unused bytes and help on
 bandwidth-bound links and small disks. The 2 MiB default takes about a third
-of the requests off the previous block-group format for a moderate byte and
+of the requests off the previous chunk-group format for a moderate byte and
 cache cost, where 4 MiB roughly doubles the cache. Deployments that are short
 on bandwidth or disk should lower `fetch_size`; latency-bound ones can
 raise it. Optimized images (see [Optimize](#optimize)) sidestep the trade-off:
@@ -2463,7 +2462,8 @@ parallel before the bulk follows. The ondemand blob never builds a cache
 file of its own. Groups whose source is already cached — by another process
 sharing the directory, or by a previous run — are trimmed off the batches
 and not fetched. Per-group failures (decode or CRC errors, an unknown source
-blob, a failed fill) are logged, counted in `cache_redirect_skip_chunk_group`
+blob, a failed fill) are logged, counted in
+`nydus_fill_chunk_group_from_redirect_blob_failure_total`
 and skipped, so a bad copy can only lose warmup, never poison a source cache
 or abort the prefetch. The prefetch logs how long the ondemand blob took and
 how many groups it filled and skipped, so operators can tell whether the
@@ -2559,8 +2559,8 @@ than one per instance.
 	mid-flight hands the group to a waiter instead of wedging it.
 - Waiting blocks in the kernel rather than polling, so the handover follows the
 	release immediately. What bounds the wait is the fetcher, not the waiter:
-	every backend read carries a timeout (hence the short registry `timeout`
-	default), so a claim is always released. **A claim must never be held across
+	every backend read carries a timeout (hence the short registry
+	`request_timeout` default), so a claim is always released. **A claim must never be held across
 	an operation that cannot time out** — what queues up behind it are reader
 	threads. The wait is interruptible, so shutdown still works.
 - The in-process fetch flight elects a single fetcher per group before any of
@@ -2582,7 +2582,8 @@ ready is not fetched at all.
 node is independent of how many instances share the cache: the end-to-end
 suite in `tests/e2e/cache_sharing_test.go` reads the same cold file from
 four processes at once and requires the summed
-`cache_ondemand_fill_chunk_group` to stay within one group of a single
+`nydus_read_chunk_group_total{type="ondemand",storage="backend"}` to stay
+within one group of a single
 process doing the same read, requires
 four concurrent full prefetches to fill at most 1.5× the groups a single
 prefetch fills (the per-blob prefetch lock keeps all but one process from
@@ -2620,9 +2621,9 @@ through `ublk_drv` over `io_uring`; see
 	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.
 - Access traces record every chunk the guest reads, hit or miss, and
-	`core.metrics().snapshot()` exposes this image's runtime counters for
-	embedding into hypervisor stats endpoints; a saved trace JSON can be replayed
-	offline via `nydus optimize --trace-file`. See [Metrics](#metrics).
+	`nydus_telemetry::metrics::REGISTRY` exposes runtime counters for embedding
+	into hypervisor stats endpoints; a saved trace JSON can be replayed offline
+	via `nydus optimize --trace-file`. See [Metrics](#metrics).
 - `BlobId` is the public blob digest type. It converts to/from 64-character
 	SHA256 hex strings and `[u8; 32]` bytes.
 - `blobs.prepare_all()` lists the device table in order as `BlobInfo` entries:
@@ -2704,7 +2705,7 @@ The core needs neither FUSE nor the CLI stack: it lives in the
 standalone `nydus-core` crate (`nydus-core/`). Depending on `nydus-core`
 produces a minimal library surface (no fuser/hyper/tokio-server/clap)
 suitable for embedding; enable the registry backend with
-`--features nydus-backend/backend-registry` when blobs are served from an
+`--features nydus-backend/registry` when blobs are served from an
 OCI registry. See [Crate Architecture](#crate-architecture) for how the
 library crates layer.
 

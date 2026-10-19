@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tempfile::{tempdir, NamedTempFile, TempDir};
 
 use nydus::build::{build_image, BuildImageOptions, NativeLayout};
-use nydus_backend::{BlobBackend, Local, ReadContext};
+use nydus_backend::{Backend, Local};
 use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
 use nydus_core::build::bootstrap::render_bootstrap;
 use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeData, InodeInfo};
@@ -594,27 +594,29 @@ fn zstd_config_windowlog_range() {
     }
 }
 
-impl BlobBackend for CountingBackend {
-    fn blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
-        self.local.blob_metadata(blob_id)
+impl Backend for CountingBackend {
+    fn kind(&self) -> nydus_backend::BackendKind {
+        self.local.kind()
+    }
+
+    fn protocol(&self) -> Option<nydus_backend::Protocol> {
+        self.local.protocol()
+    }
+
+    fn read_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
+        self.local.read_blob_metadata(blob_id)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; 32]) -> io::Result<bool> {
         self.local.is_raw_device(blob_id)
     }
 
-    fn read_range_into(
-        &self,
-        blob_id: &[u8; 32],
-        offset: u64,
-        dst: &mut [u8],
-        context: ReadContext,
-    ) -> io::Result<()> {
+    fn read_range_into(&self, blob_id: &[u8; 32], offset: u64, dst: &mut [u8]) -> io::Result<()> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
         }
-        self.local.read_range_into(blob_id, offset, dst, context)
+        self.local.read_range_into(blob_id, offset, dst)
     }
 }
 
@@ -1193,7 +1195,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let bootstrap_path = dir.path().join("bootstrap");
     fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");
 
-    let backend: std::sync::Arc<dyn nydus_backend::BlobBackend> =
+    let backend: std::sync::Arc<dyn nydus_backend::Backend> =
         std::sync::Arc::new(nydus_backend::Local::new(dir.path().to_path_buf()));
     let reader =
         ErofsReader::open_bootstrap(&bootstrap_path, backend, None, None).expect("open reader");

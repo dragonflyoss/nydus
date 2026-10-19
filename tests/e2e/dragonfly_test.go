@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +21,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// dragonflyEnv is the Dragonfly e2e environment the workflow describes through
+// NYDUS_CONFIG, BOOTSTRAP_PATH, WORK_DIR, NYDUS_CACHE_DIR and DRAGONFLY_MODE.
 type dragonflyEnv struct {
 	nydusBin      string
 	configPath    string
@@ -30,6 +33,8 @@ type dragonflyEnv struct {
 	dragonflyMode string
 }
 
+// loadDragonflyEnv reads the environment, failing the test on a missing
+// config or bootstrap.
 func loadDragonflyEnv(t *testing.T) dragonflyEnv {
 	t.Helper()
 	workDir := envOr("WORK_DIR", "/tmp/nydus-dragonfly")
@@ -38,27 +43,24 @@ func loadDragonflyEnv(t *testing.T) dragonflyEnv {
 	require.NotEmpty(t, configPath, "NYDUS_CONFIG must be set")
 	require.NotEmpty(t, bootstrap, "BOOTSTRAP_PATH must be set")
 
-	cacheDir := os.Getenv("NYDUS_CACHE_DIR")
-	if cacheDir == "" {
-		cacheDir = filepath.Join(workDir, "cache")
+	nydusBin := os.Getenv("NYDUS_BIN")
+	if nydusBin == "" {
+		nydusBin = mustLookupExecutable(t, "nydus")
 	}
 
 	return dragonflyEnv{
-		nydusBin: func() string {
-			if bin := os.Getenv("NYDUS_BIN"); bin != "" {
-				return bin
-			}
-			return mustLookupExecutable(t, "nydus")
-		}(),
+		nydusBin:      nydusBin,
 		configPath:    configPath,
 		bootstrap:     bootstrap,
 		mountpoint:    filepath.Join(workDir, "mnt"),
 		workDir:       workDir,
-		cacheDir:      cacheDir,
-		dragonflyMode: envOr("DRAGONFLY_MODE", "sdk-proxy-fallback"),
+		cacheDir:      envOr("NYDUS_CACHE_DIR", filepath.Join(workDir, "cache")),
+		dragonflyMode: envOr("DRAGONFLY_MODE", "fallback"),
 	}
 }
 
+// startFuse mounts the bootstrap with the nydus config and returns the cleanup
+// that unmounts it.
 func (e dragonflyEnv) startFuse(t *testing.T) func() {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(e.mountpoint, 0o755))
@@ -77,6 +79,8 @@ func (e dragonflyEnv) startFuse(t *testing.T) func() {
 	return startFuseMount(t, cmd, e.mountpoint, "nydus fuse with dragonfly")
 }
 
+// readMountedFile reads one regular file from the mounted image, preferring a
+// small set of known paths and falling back to the first file found.
 func readMountedFile(t *testing.T, mountpoint string) (string, []byte, error) {
 	t.Helper()
 	candidates := []string{"etc/os-release", "etc/passwd", "etc/group", "usr/bin/env"}
@@ -103,7 +107,7 @@ func readMountedFile(t *testing.T, mountpoint string) (string, []byte, error) {
 		chosen = rel
 		return io.EOF
 	})
-	if err == io.EOF && chosen != "" {
+	if errors.Is(err, io.EOF) && chosen != "" {
 		path := filepath.Join(mountpoint, chosen)
 		data, readErr := os.ReadFile(path)
 		return chosen, data, readErr
@@ -112,55 +116,56 @@ func readMountedFile(t *testing.T, mountpoint string) (string, []byte, error) {
 	return "", nil, os.ErrNotExist
 }
 
-func killDfdaemon(t *testing.T) {
+// stopDragonfly takes the Dragonfly deployment down through the shell command
+// in DRAGONFLY_STOP_CMD (CI scales the scheduler and seed client statefulsets
+// to zero and waits for the pods to terminate).
+func stopDragonfly(t *testing.T) {
 	t.Helper()
-	_ = exec.Command("pkill", "-f", "dfdaemon").Run()
-	// give process supervisor-free background processes a moment to exit.
-	time.Sleep(2 * time.Second)
+	command := os.Getenv("DRAGONFLY_STOP_CMD")
+	require.NotEmpty(t, command, "DRAGONFLY_STOP_CMD must be set")
+	out, err := exec.Command("bash", "-c", command).CombinedOutput()
+	require.NoError(t, err, "stop dragonfly: %s", out)
 }
 
+// TestDragonflyE2E reads a file through Dragonfly, takes Dragonfly down and
+// reads it again from a cold cache. In fallback mode the read is served by the
+// origin registry. In strict mode the configured origin is the injectable
+// proxy, which forwards to the registry for the first read and then injects a
+// 503 on every blob GET, so the second read fails.
 func TestDragonflyE2E(t *testing.T) {
 	env := loadDragonflyEnv(t)
-
-	// In strict mode the origin configured in the nydus config is the
-	// injectable proxy: it forwards to the local registry so the initial
-	// read (and Dragonfly back-to-source) succeeds, and later injects hard
-	// failures so origin fallback cannot succeed either.
-	strict := strings.Contains(env.dragonflyMode, "strict")
+	strict := env.dragonflyMode == "strict"
 	if strict {
-		_, stopProxy := newInjectableProxy(t, strings.TrimPrefix(proxyControlURL, "http://"))
+		_, stopProxy := newInjectableProxy(t)
 		defer stopProxy()
 	}
 
 	cleanup := env.startFuse(t)
+	relPath, data, err := readMountedFile(t, env.mountpoint)
+	require.NoError(t, err)
+	require.NotEmpty(t, data)
 
-	relPath, firstData, err := readMountedFile(t, env.mountpoint)
-	require.NoError(t, err, "initial FUSE read must succeed")
-	require.NotEmpty(t, firstData, "initial read should return data")
-
-	killDfdaemon(t)
+	stopDragonfly(t)
 	wipeCacheDir(env.cacheDir)
 	if strict {
-		// Fail every origin blob fetch from now on: with Dragonfly down and
-		// the origin hard-failing, strict mode must surface a read error.
 		postInject(t, http.StatusServiceUnavailable, -1)
 	}
-
 	cleanup()
 	cleanup = env.startFuse(t)
 	defer cleanup()
 
-	dataAfterFailure, err := os.ReadFile(filepath.Join(env.mountpoint, relPath))
+	data, err = os.ReadFile(filepath.Join(env.mountpoint, relPath))
 	if strict {
-		require.Error(t, err, "strict mode should fail once Dragonfly is down")
+		require.Error(t, err)
 		return
 	}
-
-	require.NoError(t, err, "fallback mode should keep reads alive through origin fallback")
-	require.NotEmpty(t, dataAfterFailure)
-	require.NotEmpty(t, firstData)
+	require.NoError(t, err)
+	require.NotEmpty(t, data)
 }
 
+// injectableProxy fronts the local registry and injects error responses on
+// blob GETs on demand, so tests can fail the origin for both Dragonfly
+// back-to-source and direct fallback reads.
 type injectableProxy struct {
 	targetURL *url.URL
 	proxy     *httputil.ReverseProxy
@@ -170,9 +175,17 @@ type injectableProxy struct {
 	remaining int
 }
 
+// proxyListenAddr binds all interfaces: the Dragonfly seed client reaches the
+// proxy from inside the kind cluster through the docker network gateway.
+const proxyListenAddr = ":18080"
+
+// proxyControlURL is where the tests reach the proxy's inject and clear
+// endpoints.
 const proxyControlURL = "http://127.0.0.1:18080"
 
-func newInjectableProxy(t *testing.T, addr string) (*injectableProxy, func()) {
+// newInjectableProxy serves the proxy in front of PROXY_TARGET_URL and returns
+// it with the shutdown that stops it.
+func newInjectableProxy(t *testing.T) (*injectableProxy, func()) {
 	t.Helper()
 	targetURL, err := url.Parse(envOr("PROXY_TARGET_URL", "http://127.0.0.1:5000"))
 	require.NoError(t, err)
@@ -191,7 +204,7 @@ func newInjectableProxy(t *testing.T, addr string) (*injectableProxy, func()) {
 	mux.HandleFunc("/_test/clear", p.clear)
 	mux.HandleFunc("/", p.serve)
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", proxyListenAddr)
 	require.NoError(t, err)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
@@ -203,6 +216,8 @@ func newInjectableProxy(t *testing.T, addr string) (*injectableProxy, func()) {
 	}
 }
 
+// inject arms the proxy with a status and a budget of blob GETs to inject it
+// into, a negative budget meaning every one.
 func (p *injectableProxy) inject(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -223,6 +238,7 @@ func (p *injectableProxy) inject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// clear disarms the proxy.
 func (p *injectableProxy) clear(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -235,10 +251,11 @@ func (p *injectableProxy) clear(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// serve injects the configured status into blob GETs, the footer and blob
+// metadata reads of a cold cache included, until the budget runs out; a
+// negative budget never does. Manifest and token requests pass through.
 func (p *injectableProxy) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
-	// Only blob GETs are injected: HEAD blob-size probes stay healthy so the
-	// tests exercise the data-read policy, not metadata recovery.
 	inject := p.status > 0 && p.remaining != 0 && r.Method == http.MethodGet &&
 		strings.Contains(r.URL.Path, "/blobs/")
 	if inject {
@@ -255,6 +272,7 @@ func (p *injectableProxy) serve(w http.ResponseWriter, r *http.Request) {
 	p.proxy.ServeHTTP(w, r)
 }
 
+// postInject arms the proxy through its inject endpoint.
 func postInject(t *testing.T, status, count int) {
 	t.Helper()
 	payload, err := json.Marshal(map[string]int{"status": status, "count": count})
@@ -265,6 +283,7 @@ func postInject(t *testing.T, status, count int) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+// clearInject disarms the proxy through its clear endpoint.
 func clearInject(t *testing.T) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, proxyControlURL+"/_test/clear", nil)
@@ -275,49 +294,59 @@ func clearInject(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+// TestProxyErrorSimulation fronts the origin with the injectable proxy and
+// reads from a cold cache under each injected status. The 403 case runs first,
+// while the seed peers' piece caches are still cold, so every path to the
+// origin sees it.
 func TestProxyErrorSimulation(t *testing.T) {
 	env := loadDragonflyEnv(t)
-	configPath := os.Getenv("NYDUS_PROXY_ERROR_CONFIG")
-	require.NotEmpty(t, configPath, "NYDUS_PROXY_ERROR_CONFIG must be set")
-	env.configPath = configPath
-
-	_, stopProxy := newInjectableProxy(t, strings.TrimPrefix(proxyControlURL, "http://"))
+	_, stopProxy := newInjectableProxy(t)
 	defer stopProxy()
 
-	// The 403 case runs first while dfdaemon's chunk cache is still cold, so
-	// its back-to-source fetches are guaranteed to see the injected failure.
-	// It injects with no budget: every origin blob GET (Dragonfly
-	// back-to-source and the direct fallback path alike) is denied, so the
-	// read must surface an error no matter which path serves it.
-	t.Run("status_403_terminal", func(t *testing.T) {
-		postInject(t, http.StatusForbidden, -1)
-		defer clearInject(t)
-		wipeCacheDir(env.cacheDir)
-		cleanup := env.startFuse(t)
-		defer cleanup()
-		_, _, err := readMountedFile(t, env.mountpoint)
-		require.Error(t, err)
-	})
+	tests := []struct {
+		name   string
+		status int
+		count  int
+		expect func(t *testing.T, data []byte, err error)
+	}{
+		{
+			name:   "403 on every origin GET fails the read",
+			status: http.StatusForbidden,
+			count:  -1,
+			expect: func(t *testing.T, data []byte, err error) {
+				require.Error(t, err)
+			},
+		},
+		{
+			name:   "429 on one origin GET is retried on the next seed peer or the origin",
+			status: http.StatusTooManyRequests,
+			count:  1,
+			expect: func(t *testing.T, data []byte, err error) {
+				require.NoError(t, err)
+				require.NotEmpty(t, data)
+			},
+		},
+		{
+			name:   "503 on three origin GETs is outlasted by the retries and the fallback",
+			status: http.StatusServiceUnavailable,
+			count:  3,
+			expect: func(t *testing.T, data []byte, err error) {
+				require.NoError(t, err)
+				require.NotEmpty(t, data)
+			},
+		},
+	}
 
-	t.Run("status_429_ondemand_fallback", func(t *testing.T) {
-		postInject(t, http.StatusTooManyRequests, 1)
-		defer clearInject(t)
-		wipeCacheDir(env.cacheDir)
-		cleanup := env.startFuse(t)
-		defer cleanup()
-		_, data, err := readMountedFile(t, env.mountpoint)
-		require.NoError(t, err)
-		require.NotEmpty(t, data)
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			postInject(t, tc.status, tc.count)
+			defer clearInject(t)
+			wipeCacheDir(env.cacheDir)
+			cleanup := env.startFuse(t)
+			defer cleanup()
 
-	t.Run("status_503_retry_or_fallback", func(t *testing.T) {
-		postInject(t, http.StatusServiceUnavailable, 3)
-		defer clearInject(t)
-		wipeCacheDir(env.cacheDir)
-		cleanup := env.startFuse(t)
-		defer cleanup()
-		_, data, err := readMountedFile(t, env.mountpoint)
-		require.NoError(t, err)
-		require.NotEmpty(t, data)
-	})
+			_, data, err := readMountedFile(t, env.mountpoint)
+			tc.expect(t, data, err)
+		})
+	}
 }

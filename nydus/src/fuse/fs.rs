@@ -34,7 +34,6 @@ const EROFS_NAME_MAX: usize = 255;
 
 pub struct ErofsFs {
     reader: Arc<ErofsReader>,
-    metrics: Arc<metrics::ImageMetrics>,
     dir_handles: Mutex<HashMap<u64, Arc<DirHandle>>>,
     next_dir_handle: AtomicU64,
     /// Kernel accepts ENOSYS from open/opendir as "stop sending them": file
@@ -69,7 +68,6 @@ impl DirHandle {
 
 impl ErofsFs {
     pub fn new(reader: Arc<ErofsReader>) -> io::Result<Self> {
-        let metrics = reader.metrics();
         let root_nid = reader.superblock().root_nid();
         let root = reader.inode(root_nid)?;
         let no_xattr = reader
@@ -78,7 +76,6 @@ impl ErofsFs {
             .any(|entry| entry.is_nydus_no_xattr() && entry.value == b"1");
         Ok(Self {
             reader,
-            metrics,
             dir_handles: Mutex::new(HashMap::new()),
             next_dir_handle: AtomicU64::new(1),
             no_open: AtomicBool::new(false),
@@ -245,17 +242,15 @@ fn negative_attr() -> FileAttr {
 /// RAII guard that records a FUSE operation's outcome and latency on drop.
 /// It assumes success unless [`fail`](FsOpMetric::fail) is called before the
 /// op replies with an error.
-struct FsOpMetric<'a> {
-    metrics: &'a metrics::ImageMetrics,
+struct FsOpMetric {
     op: metrics::FsOp,
     start: Instant,
     errored: bool,
 }
 
-impl<'a> FsOpMetric<'a> {
-    fn new(metrics: &'a metrics::ImageMetrics, op: metrics::FsOp) -> Self {
+impl FsOpMetric {
+    fn new(op: metrics::FsOp) -> Self {
         Self {
-            metrics,
             op,
             start: Instant::now(),
             errored: false,
@@ -267,10 +262,13 @@ impl<'a> FsOpMetric<'a> {
     }
 }
 
-impl Drop for FsOpMetric<'_> {
+impl Drop for FsOpMetric {
     fn drop(&mut self) {
-        self.metrics
-            .record_fs_op(self.op, self.start.elapsed(), self.errored);
+        if self.errored {
+            metrics::collect_fs_op_failure_metrics(self.op, self.start.elapsed());
+        } else {
+            metrics::collect_fs_op_finished_metrics(self.op, self.start.elapsed());
+        }
     }
 }
 
@@ -334,7 +332,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Lookup);
+        let mut m = FsOpMetric::new(metrics::FsOp::Lookup);
         let target = name.as_bytes();
         if target.len() > EROFS_NAME_MAX {
             m.fail();
@@ -379,11 +377,11 @@ impl Filesystem for ErofsFs {
     }
 
     fn forget(&self, _req: &Request, _ino: INodeNo, _nlookup: u64) {
-        let _m = FsOpMetric::new(&self.metrics, metrics::FsOp::Forget);
+        let _m = FsOpMetric::new(metrics::FsOp::Forget);
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Getattr);
+        let mut m = FsOpMetric::new(metrics::FsOp::Getattr);
         let nid = self.ino_to_nid(ino.0);
         match self.reader.inode(nid) {
             Ok(vi) => {
@@ -398,7 +396,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Open);
+        let mut m = FsOpMetric::new(metrics::FsOp::Open);
         // ENOSYS makes the kernel treat this and every later open as success
         // without a handle, with KEEP_CACHE semantics; the read-only mount
         // already rejects write opens before they reach us.
@@ -440,7 +438,7 @@ impl Filesystem for ErofsFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        let _m = FsOpMetric::new(&self.metrics, metrics::FsOp::Release);
+        let _m = FsOpMetric::new(metrics::FsOp::Release);
         reply.ok();
     }
 
@@ -469,7 +467,7 @@ impl Filesystem for ErofsFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Read);
+        let mut m = FsOpMetric::new(metrics::FsOp::Read);
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
@@ -504,7 +502,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Readlink);
+        let mut m = FsOpMetric::new(metrics::FsOp::Readlink);
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
@@ -524,7 +522,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Opendir);
+        let mut m = FsOpMetric::new(metrics::FsOp::Opendir);
         // See open(): dropping opendir/releasedir round-trips also gives the
         // kernel-side dummy handle FOPEN_CACHE_DIR, so repeat listings are
         // served from the page cache without any FUSE traffic.
@@ -567,7 +565,7 @@ impl Filesystem for ErofsFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Readdir);
+        let mut m = FsOpMetric::new(metrics::FsOp::Readdir);
         let result = self.for_each_dir_entry(
             ino,
             fh,
@@ -594,7 +592,7 @@ impl Filesystem for ErofsFs {
         offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Readdirplus);
+        let mut m = FsOpMetric::new(metrics::FsOp::Readdirplus);
         let result = self.for_each_dir_entry(
             ino,
             fh,
@@ -634,7 +632,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let _m = FsOpMetric::new(&self.metrics, metrics::FsOp::Statfs);
+        let _m = FsOpMetric::new(metrics::FsOp::Statfs);
         let sb = self.reader.superblock();
         let block_size = 1u64 << sb.blkszbits;
         reply.statfs(
@@ -650,7 +648,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
-        let _m = FsOpMetric::new(&self.metrics, metrics::FsOp::Access);
+        let _m = FsOpMetric::new(metrics::FsOp::Access);
         reply.ok();
     }
 
@@ -671,7 +669,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Getxattr);
+        let mut m = FsOpMetric::new(metrics::FsOp::Getxattr);
         if self.no_xattr {
             reply.error(Errno::ENOSYS);
             return;
@@ -715,7 +713,7 @@ impl Filesystem for ErofsFs {
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        let mut m = FsOpMetric::new(&self.metrics, metrics::FsOp::Listxattr);
+        let mut m = FsOpMetric::new(metrics::FsOp::Listxattr);
         if self.no_xattr {
             reply.error(Errno::ENOSYS);
             return;

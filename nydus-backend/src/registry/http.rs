@@ -1,62 +1,68 @@
-//! Direct HTTP transport to the origin registry.
+//! The direct HTTP transport to the origin registry.
 
 use std::io;
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
+use futures::TryStreamExt;
+use http::Extensions;
+use leaky_bucket::RateLimiter;
+use rand::Rng;
+use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
-use reqwest::{Certificate, Client};
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest::{Certificate, Client, Request};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tokio_util::io::StreamReader;
+use tracing::{debug, warn};
 
 use nydus_config::HttpConfig;
 
-use super::dns::SystemResolver;
+use super::response::{Body, Response};
+use super::{Transport, PREFETCH_RETRY_DELAY};
+use crate::Protocol;
 
-/// The direct HTTP transport to the origin registry.
-// Named after the protocol like dragonfly-client-backend's `HTTP` backend.
-#[allow(clippy::upper_case_acronyms)]
-pub(crate) struct HTTP {
-    /// The configured async HTTP client, wrapped with the retry middleware.
+/// An HTTP client talking straight to the origin registry, every attempt
+/// claiming a [`RateLimit`] slot first when built with one.
+///
+/// ```text
+/// GET ──▶ origin ──▶ 2xx / 3xx / 4xx ────────────────────────────────▶ handed back as is
+///           │ 429 / 5xx / 408 / transport failure
+///           ├─ again, max_retries times, exponential backoff
+///           ├─ on-demand ─▶ error
+///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more 6h to 12h later ─▶ error
+///                         └─ transport failure ───────────────────────────▶ error
+/// ```
+#[derive(Clone)]
+pub(crate) struct Http {
+    /// The reqwest client behind the retry and rate limit middleware.
     client: ClientWithMiddleware,
-    /// The same client without the retry middleware, for callers that pace
-    /// their own retries (the Dragonfly fallback path).
-    raw_client: Client,
-    /// The configured retry budget ([`max_retries`](HttpConfig::max_retries)).
-    max_retries: u32,
 }
 
-impl HTTP {
-    /// Create a new HTTP transport from the HTTP client configuration.
-    /// Requests are routed through [`proxy`](HttpConfig::proxy) when it is
-    /// set; otherwise any ambient proxy from the environment is explicitly
-    /// disabled so the connection truly goes direct. Transient failures are
-    /// retried by the client middleware with exponential backoff, up to
-    /// [`max_retries`](HttpConfig::max_retries) attempts.
-    pub(crate) fn new(config: &HttpConfig) -> io::Result<HTTP> {
-        let mut builder = Client::builder()
-            // The registry handles 3xx redirects manually so it can cache the
-            // redirected blob-storage URL.
-            .redirect(Policy::none())
-            .dns_resolver(Arc::new(SystemResolver::default()));
+/// Implements the origin HTTP client.
+impl Http {
+    /// Creates a client from the HTTP configuration, every attempt claiming a
+    /// slot from `rate_limit` first when one is given.
+    ///
+    /// Redirects are returned rather than followed so the caller can cache
+    /// the signed URL a blob `GET` is redirected to; names are resolved by
+    /// hickory, which honours record TTLs.
+    pub(crate) fn new(config: &HttpConfig, rate_limit: Option<RateLimit>) -> io::Result<Self> {
+        let mut builder = Client::builder().redirect(Policy::none()).hickory_dns(true);
 
         builder = match &config.proxy {
-            Some(proxy) => {
-                let proxy = reqwest::Proxy::all(&proxy.addr).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("invalid proxy addr {}: {err}", proxy.addr),
-                    )
-                })?;
-                builder.proxy(proxy)
-            }
+            Some(proxy) => builder.proxy(reqwest::Proxy::all(&proxy.addr).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid proxy addr {}: {err}", proxy.addr),
+                )
+            })?),
             None => builder.no_proxy(),
         };
 
-        if !config.timeout.is_zero() {
-            builder = builder
-                .timeout(config.timeout)
-                .connect_timeout(config.timeout);
-        }
+        builder = builder
+            .timeout(config.request_timeout)
+            .connect_timeout(config.request_timeout);
 
         if config.tls.skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
@@ -64,45 +70,192 @@ impl HTTP {
 
         if let Some(certs) = config.tls.load_ca_cert_der().map_err(io::Error::other)? {
             for cert in certs {
-                builder =
-                    builder.add_root_certificate(Certificate::from_der(&cert).map_err(|err| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("invalid CA cert: {err}"),
-                        )
-                    })?);
+                builder = builder
+                    .add_root_certificate(Certificate::from_der(&cert).map_err(io::Error::other)?);
             }
         }
-
-        let client = builder
-            .build()
-            .map_err(|err| io::Error::other(format!("failed to build http client: {err}")))?;
+        let client = builder.build().map_err(io::Error::other)?;
 
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(config.max_retries);
-        let raw_client = client.clone();
-        let client = ClientBuilder::new(client)
-            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
-            .build();
-        Ok(HTTP {
-            client,
-            raw_client,
-            max_retries: config.max_retries,
+        let mut client = ClientBuilder::new(client)
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy));
+
+        if let Some(rate_limit) = rate_limit {
+            client = client.with(rate_limit);
+        }
+
+        Ok(Self {
+            client: client.build(),
         })
     }
+}
 
-    /// The underlying async HTTP client.
-    pub(crate) fn client(&self) -> &ClientWithMiddleware {
-        &self.client
+/// Implements the blob transport over the origin HTTP client.
+#[async_trait]
+impl Transport for Http {
+    /// Sends the `GET` of an on-demand read to `url` with `headers`, the body
+    /// left streaming, and logs the outcome.
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let start = Instant::now();
+        let result = self
+            .client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: Body::Stream(Box::new(StreamReader::new(
+                    response.bytes_stream().map_err(io::Error::other),
+                ))),
+                protocol: Protocol::Http,
+            })
+            .map_err(io::Error::other);
+
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (ondemand) from the origin returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (ondemand) from the origin failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+        result
     }
 
-    /// The async HTTP client without the retry middleware: one call issues
-    /// exactly one request attempt.
-    pub(crate) fn raw_client(&self) -> &Client {
-        &self.raw_client
+    /// Sends the `GET` of a prefetch read, the body left streaming, sending
+    /// a `429`, `5xx` or `408` once more hours later and failing a transport
+    /// failure at once.
+    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let mut retried = false;
+        loop {
+            let start = Instant::now();
+            let result = self
+                .client
+                .get(url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map(|response| Response {
+                    status: response.status(),
+                    headers: response.headers().clone(),
+                    body: Body::Stream(Box::new(StreamReader::new(
+                        response.bytes_stream().map_err(io::Error::other),
+                    ))),
+                    protocol: Protocol::Http,
+                })
+                .map_err(io::Error::other);
+
+            match &result {
+                Ok(response) => debug!(
+                    "GET {url} (prefetch) from the origin returned {} in {:?}",
+                    response.status,
+                    start.elapsed()
+                ),
+                Err(err) => debug!(
+                    "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                    start.elapsed()
+                ),
+            }
+
+            // Serve a definitive answer, or the second transient one.
+            let response = result?;
+            if !response.needs_retry() || retried {
+                return Ok(response);
+            }
+
+            // Retry once after a random delay of hours.
+            let err = response.into_io_error().await;
+            let delay = rand::rng().random_range(PREFETCH_RETRY_DELAY);
+            warn!("origin request failed, retrying in {delay:?}: {err}");
+            tokio::time::sleep(delay).await;
+            retried = true;
+        }
+    }
+}
+
+/// A fair leaky bucket handing out one slot per request, the limiter dfdaemon
+/// puts in front of its own proxy.
+///
+/// As a middleware it sits inside the retry middleware so every retry attempt
+/// waits for its own slot.
+pub(crate) struct RateLimit {
+    /// The request rate limiter.
+    limiter: RateLimiter,
+}
+
+/// Implements the rate limit.
+impl RateLimit {
+    /// Creates a limit of `request_rate_limit` requests per `interval`, both
+    /// at least one.
+    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
+    pub(crate) fn new(request_rate_limit: u64, interval: Duration) -> Self {
+        Self {
+            limiter: RateLimiter::builder()
+                .initial(request_rate_limit as usize)
+                .refill(request_rate_limit as usize)
+                .max(request_rate_limit as usize)
+                .interval(interval)
+                .fair(true)
+                .build(),
+        }
+    }
+}
+
+/// Implements the rate limit as a reqwest middleware.
+#[async_trait]
+impl Middleware for RateLimit {
+    /// Claims a slot, then runs the request.
+    async fn handle(
+        &self,
+        req: Request,
+        extensions: &mut Extensions,
+        next: Next<'_>,
+    ) -> reqwest_middleware::Result<reqwest::Response> {
+        self.limiter.acquire_one().await;
+        next.run(req, extensions).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[tokio::test]
+    async fn prefetch_fails_at_once_on_a_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        drop(listener);
+        let config = HttpConfig {
+            max_retries: 0,
+            ..Default::default()
+        };
+        let http = Http::new(&config, None).unwrap();
+
+        let start = Instant::now();
+        assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
+        assert!(start.elapsed() < *PREFETCH_RETRY_DELAY.start());
     }
 
-    /// The configured retry budget ([`max_retries`](HttpConfig::max_retries)).
-    pub(crate) fn max_retries(&self) -> u32 {
-        self.max_retries
+    #[test]
+    fn new_accepts_an_optional_rate_limit() {
+        let config = HttpConfig::default();
+        assert!(Http::new(&config, None).is_ok());
+        assert!(Http::new(&config, Some(RateLimit::new(10, Duration::from_secs(1)))).is_ok());
+    }
+
+    #[test]
+    fn new_fills_a_fair_bucket_to_the_limit() {
+        let limit = RateLimit::new(10, Duration::from_millis(100));
+        assert_eq!(limit.limiter.max(), 10);
+        assert_eq!(limit.limiter.refill(), 10);
+        assert_eq!(limit.limiter.balance(), 10);
+        assert_eq!(limit.limiter.interval(), Duration::from_millis(100));
+        assert!(limit.limiter.is_fair());
     }
 }

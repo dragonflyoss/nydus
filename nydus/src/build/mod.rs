@@ -715,7 +715,7 @@ mod tests {
         std::fs::write(&blob_path, &data).unwrap();
         let bootstrap = dir.path().join("bootstrap");
         std::fs::write(&bootstrap, layer.standalone_bootstrap.unwrap()).unwrap();
-        let backend: std::sync::Arc<dyn nydus_backend::BlobBackend> =
+        let backend: std::sync::Arc<dyn nydus_backend::Backend> =
             std::sync::Arc::new(nydus_backend::Local::new(store));
         assert!(backend.is_raw_device(&layer.full_blob_digest).unwrap());
         let cache_dir = dir.path().join("cache");

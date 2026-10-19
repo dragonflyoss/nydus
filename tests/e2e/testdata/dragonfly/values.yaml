@@ -1,0 +1,29 @@
+manager:
+  enable: false
+
+client:
+  enable: false
+
+scheduler:
+  replicas: 1
+  hostNetwork: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: '2'
+      memory: 2Gi
+
+seedClient:
+  replicas: 1
+  hostNetwork: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: '2'
+      memory: 2Gi
+  persistence:
+    size: 10Gi

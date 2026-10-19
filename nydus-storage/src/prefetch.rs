@@ -6,18 +6,17 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracing::{info, warn};
 
-use nydus_backend::is_backend_throttled;
+use nydus_backend::ReadKind;
 use nydus_config::PrefetchScope;
+use nydus_telemetry::metrics::{
+    collect_prefetch_task_failure_metrics, collect_prefetch_task_started_metrics,
+};
 
 use crate::cache::BlobCaches;
-
-/// How often the reschedule wait re-checks the stop flag while sleeping
-/// towards the next deadline.
-const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///
@@ -35,11 +34,9 @@ const RESCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" blob) while no later read pays the
 ///    metadata round trips.
-/// 4. Blobs whose prefetch the backend throttled (Dragonfly `429`, detected
-///    via [`is_backend_throttled`]) are rescheduled after a random delay in
-///    the configured window and re-attempted until they stop being throttled
-///    or the [stop flag](Self::stop_flag) is raised. Other failures are
-///    logged and skipped.
+///
+/// A blob whose prefetch fails is logged and skipped; the backend itself
+/// retries a read it could not serve once, hours later.
 pub struct BlobPrefetcher {
     caches: Arc<BlobCaches>,
     priority: Vec<u16>,
@@ -48,12 +45,7 @@ pub struct BlobPrefetcher {
     scope: PrefetchScope,
     /// Per-blob prefetch timeout; `0s` disables the bound.
     timeout: Duration,
-    /// The `[min, max]` window for the random delay before a throttled blob
-    /// prefetch is re-attempted.
-    retry_delay_min: Duration,
-    retry_delay_max: Duration,
-    /// Cooperative stop flag: once raised, no new prefetch work is started
-    /// and the reschedule loop exits.
+    /// Cooperative stop flag: once raised, no new prefetch work is started.
     stop: Arc<AtomicBool>,
 }
 
@@ -70,16 +62,12 @@ pub struct PrefetchPlan {
 impl BlobPrefetcher {
     /// `plan` is typically the result of `ErofsReader::prefetch_plan`, and
     /// `blobs` the matching cache set (`ErofsReader::blob_caches`).
-    /// `retry_delay_min ..= retry_delay_max` is the window for the random
-    /// delay before a throttled blob prefetch is re-attempted.
     pub fn new(
         caches: Arc<BlobCaches>,
         plan: PrefetchPlan,
         threads: usize,
         scope: PrefetchScope,
         timeout: Duration,
-        retry_delay_min: Duration,
-        retry_delay_max: Duration,
     ) -> Self {
         Self {
             caches,
@@ -88,15 +76,13 @@ impl BlobPrefetcher {
             threads: threads.max(1),
             scope,
             timeout,
-            retry_delay_min,
-            retry_delay_max: retry_delay_max.max(retry_delay_min),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// A handle to this prefetcher's stop flag. Storing `true` makes the
-    /// prefetcher stop starting new work and exit its reschedule loop, so a
-    /// detached prefetch thread can be wound down on unmount.
+    /// prefetcher stop starting new work, so a detached prefetch thread can
+    /// be wound down on unmount.
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         self.stop.clone()
     }
@@ -130,7 +116,7 @@ impl BlobPrefetcher {
                     let blob_index = queue.lock().unwrap().pop();
                     match blob_index {
                         Some(blob_index) => {
-                            if let Err(err) = blobs.cache(blob_index) {
+                            if let Err(err) = blobs.cache(blob_index, ReadKind::Prefetch) {
                                 warn!("failed to open blob {} cache: {}", blob_index, err);
                             }
                         }
@@ -156,16 +142,12 @@ impl BlobPrefetcher {
     /// Drive the whole prefetch workflow synchronously on the calling thread:
     /// ondemand priority blobs first, then (only when the scope resolves to
     /// [`PrefetchScope::All`]) the other priority blobs in declared order and
-    /// the remaining blobs through a worker pool, then delayed retries of
-    /// throttled blobs. Per-blob failures other than backend throttling are
+    /// the remaining blobs through a worker pool. Per-blob failures are
     /// logged and skipped.
     pub fn run(mut self) {
         if self.scope == PrefetchScope::None {
             return;
         }
-
-        // Blobs the backend throttled, awaiting a delayed retry.
-        let mut throttled: Vec<u16> = Vec::new();
 
         // Under the "ondemand" scope the non-ondemand blobs are not pulled, but
         // every cache is opened in the background (blob meta fetched and
@@ -233,20 +215,16 @@ impl BlobPrefetcher {
             if self.stopped() {
                 return;
             }
+            collect_prefetch_task_started_metrics();
             match self
                 .caches
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
-                Err(err) if is_backend_throttled(&err) => {
-                    self.caches.metrics().inc_prefetch_reschedule();
-                    warn!(
-                        "backend throttled prefetch of priority blob {}, rescheduling: {}",
-                        blob_index, err
-                    );
-                    throttled.push(blob_index);
+                Err(err) => {
+                    collect_prefetch_task_failure_metrics();
+                    warn!("failed to prefetch priority blob {}: {}", blob_index, err)
                 }
-                Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
         }
 
@@ -259,13 +237,11 @@ impl BlobPrefetcher {
         if scope == PrefetchScope::All && !self.rest.is_empty() {
             let worker_count = self.threads.min(self.rest.len());
             let queue = Arc::new(Mutex::new(std::mem::take(&mut self.rest)));
-            let throttled_shared = Arc::new(Mutex::new(Vec::new()));
             let timeout = self.timeout;
             let mut handles = Vec::with_capacity(worker_count);
             for _ in 0..worker_count {
                 let blobs = self.caches.clone();
                 let queue = queue.clone();
-                let throttled_shared = throttled_shared.clone();
                 let stop = self.stop.clone();
                 let handle = thread::Builder::new()
                     .name("nydus_prefetch_worker".to_string())
@@ -277,22 +253,16 @@ impl BlobPrefetcher {
                             let mut guard = queue.lock().unwrap();
                             guard.pop()
                         };
-                        match blob_index {
-                            Some(blob_index) => match blobs.prefetch_blob(blob_index, 1, timeout) {
-                                Ok(()) => info!("prefetched blob {}", blob_index),
-                                Err(err) if is_backend_throttled(&err) => {
-                                    blobs.metrics().inc_prefetch_reschedule();
-                                    warn!(
-                                        "backend throttled prefetch of blob {}, rescheduling: {}",
-                                        blob_index, err
-                                    );
-                                    throttled_shared.lock().unwrap().push(blob_index);
-                                }
-                                Err(err) => {
-                                    warn!("failed to prefetch blob {}: {}", blob_index, err)
-                                }
-                            },
-                            None => break,
+                        let Some(blob_index) = blob_index else {
+                            break;
+                        };
+                        collect_prefetch_task_started_metrics();
+                        match blobs.prefetch_blob(blob_index, 1, timeout) {
+                            Ok(()) => info!("prefetched blob {}", blob_index),
+                            Err(err) => {
+                                collect_prefetch_task_failure_metrics();
+                                warn!("failed to prefetch blob {}: {}", blob_index, err)
+                            }
                         }
                     });
                 match handle {
@@ -303,68 +273,7 @@ impl BlobPrefetcher {
             for handle in handles {
                 let _ = handle.join();
             }
-            throttled.append(&mut throttled_shared.lock().unwrap());
         }
-
-        // Phase 3: delayed retries of throttled blobs. Each blob gets a fresh
-        // random deadline inside the retry window; retries that get throttled
-        // again are rescheduled, other failures are dropped. The cross-process
-        // prefetch flock and group-map skip logic inside `prefetch_blob` make
-        // a rescheduled prefetch behind another node's progress nearly free.
-        let mut queue: Vec<(Instant, u16)> = throttled
-            .into_iter()
-            .map(|blob_index| (Instant::now() + self.retry_delay(), blob_index))
-            .collect();
-        while !queue.is_empty() {
-            queue.sort_by_key(|(deadline, _)| *deadline);
-            let (deadline, blob_index) = queue.remove(0);
-            while Instant::now() < deadline {
-                if self.stopped() {
-                    return;
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                thread::sleep(remaining.min(RESCHEDULE_POLL_INTERVAL));
-            }
-            if self.stopped() {
-                return;
-            }
-            self.caches.metrics().inc_prefetch_reschedule_run();
-            match self
-                .caches
-                .prefetch_blob(blob_index, self.threads, self.timeout)
-            {
-                Ok(()) => info!("prefetched rescheduled blob {}", blob_index),
-                Err(err) if is_backend_throttled(&err) => {
-                    self.caches.metrics().inc_prefetch_reschedule();
-                    warn!(
-                        "backend throttled rescheduled prefetch of blob {}, rescheduling again: {}",
-                        blob_index, err
-                    );
-                    queue.push((Instant::now() + self.retry_delay(), blob_index));
-                }
-                Err(err) => warn!(
-                    "failed to prefetch rescheduled blob {}, giving up: {}",
-                    blob_index, err
-                ),
-            }
-        }
-    }
-
-    /// A random delay inside the configured retry window, seeded from OS
-    /// entropy via `RandomState` so no `rand` dependency is needed.
-    fn retry_delay(&self) -> Duration {
-        let span = self.retry_delay_max.saturating_sub(self.retry_delay_min);
-        if span.is_zero() {
-            return self.retry_delay_min;
-        }
-        use std::hash::{BuildHasher, Hasher};
-        let seed = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        // The default window (6h span) is far below `u64::MAX` nanoseconds
-        // (~584 years); clamp anyway so pathological configs cannot overflow.
-        let span_nanos = u64::try_from(span.as_nanos()).unwrap_or(u64::MAX);
-        self.retry_delay_min + Duration::from_nanos(seed % span_nanos.saturating_add(1))
     }
 }
 
@@ -374,15 +283,13 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
-    use nydus_backend::{throttled_error, BlobBackend, Local, ReadContext};
+    use nydus_backend::{Backend, Local};
     use nydus_format::blob::BlobMetadata;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::{single_chunk_group, single_chunk_group_redirect};
     use tempfile::tempdir;
 
-    /// Wraps a local backend and fails the first `failures` data reads with
-    /// the given error builder, then delegates, counting every read attempt.
     struct FlakyBackend {
         inner: Local,
         failures: usize,
@@ -405,9 +312,20 @@ mod tests {
         }
     }
 
-    impl BlobBackend for FlakyBackend {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.inner.blob_metadata(blob_id)
+    impl Backend for FlakyBackend {
+        fn kind(&self) -> nydus_backend::BackendKind {
+            self.inner.kind()
+        }
+
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
+            self.inner.protocol()
+        }
+
+        fn read_blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+        ) -> io::Result<BlobMetadata> {
+            self.inner.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -415,18 +333,15 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            ctx: ReadContext,
         ) -> io::Result<()> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
             }
-            self.inner.read_range_into(blob_id, offset, dst, ctx)
+            self.inner.read_range_into(blob_id, offset, dst)
         }
     }
 
-    /// A single-blob prefetcher over a `FlakyBackend`, with a tight retry
-    /// window so tests run in milliseconds.
     fn prefetcher_over(
         backend: Arc<FlakyBackend>,
         backend_dir: &Path,
@@ -450,8 +365,6 @@ mod tests {
             1,
             PrefetchScope::All,
             Duration::ZERO,
-            Duration::from_millis(30),
-            Duration::from_millis(60),
         )
     }
 
@@ -462,42 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn throttled_prefetch_is_rescheduled_and_retried() {
+    fn failed_prefetch_is_skipped_after_one_attempt() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (payload, meta) = test_payload();
-        // The first data read is throttled; the delayed retry succeeds.
-        let backend = FlakyBackend::new(backend_dir.path(), 1, || {
-            throttled_error("proxy answered 429")
-        });
-        let prefetcher = prefetcher_over(
-            backend.clone(),
-            backend_dir.path(),
-            cache_dir.path(),
-            &payload,
-            &meta,
-        );
-
-        let metrics = prefetcher.caches.metrics().clone();
-        let reschedules_before = metrics.prefetch_reschedule_total();
-        let runs_before = metrics.prefetch_reschedule_run_total();
-        let start = Instant::now();
-        prefetcher.run();
-
-        // One throttled attempt plus the successful delayed retry.
-        assert!(backend.attempts() >= 2, "attempts={}", backend.attempts());
-        // The retry waited out (at least) the minimum delay.
-        assert!(start.elapsed() >= Duration::from_millis(30));
-        assert!(metrics.prefetch_reschedule_total() > reschedules_before);
-        assert!(metrics.prefetch_reschedule_run_total() > runs_before);
-    }
-
-    #[test]
-    fn non_throttled_failure_is_not_rescheduled() {
-        let backend_dir = tempdir().unwrap();
-        let cache_dir = tempdir().unwrap();
-        let (payload, meta) = test_payload();
-        // Always fail with an ordinary error: log-and-skip, no reschedule.
         let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, || {
             io::Error::other("ordinary failure")
         });
@@ -508,23 +389,26 @@ mod tests {
             &payload,
             &meta,
         );
+        let failures = || {
+            nydus_telemetry::metrics::PREFETCH_TASK_FAILURE_COUNT
+                .with_label_values(&[])
+                .get()
+        };
+        let failures_before = failures();
 
-        let start = Instant::now();
         prefetcher.run();
 
-        // No delayed retry: exactly the initial attempt, and no retry-window
-        // sleep.
         assert_eq!(backend.attempts(), 1);
-        assert!(start.elapsed() < Duration::from_millis(30));
+        assert!(failures() > failures_before);
     }
 
     #[test]
-    fn raised_stop_flag_prevents_rescheduled_retries() {
+    fn raised_stop_flag_skips_the_prefetch() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (payload, meta) = test_payload();
         let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, || {
-            throttled_error("proxy answered 429")
+            io::Error::other("ordinary failure")
         });
         let prefetcher = prefetcher_over(
             backend.clone(),
@@ -533,26 +417,32 @@ mod tests {
             &payload,
             &meta,
         );
-
-        // Raise the stop flag before running: the initial pass is skipped
-        // entirely and run() returns without sleeping towards a retry.
         prefetcher.stop_flag().store(true, Ordering::SeqCst);
-        let start = Instant::now();
+
         prefetcher.run();
 
         assert_eq!(backend.attempts(), 0);
-        assert!(start.elapsed() < Duration::from_millis(30));
     }
 
-    /// Records which blob every data read targets, in call order.
     struct RecordingBackend {
         inner: Local,
         reads: Mutex<Vec<[u8; SHA256_DIGEST_SIZE]>>,
     }
 
-    impl BlobBackend for RecordingBackend {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.inner.blob_metadata(blob_id)
+    impl Backend for RecordingBackend {
+        fn kind(&self) -> nydus_backend::BackendKind {
+            self.inner.kind()
+        }
+
+        fn protocol(&self) -> Option<nydus_backend::Protocol> {
+            self.inner.protocol()
+        }
+
+        fn read_blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+        ) -> io::Result<BlobMetadata> {
+            self.inner.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -560,16 +450,12 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            ctx: ReadContext,
         ) -> io::Result<()> {
             self.reads.lock().unwrap().push(*blob_id);
-            self.inner.read_range_into(blob_id, offset, dst, ctx)
+            self.inner.read_range_into(blob_id, offset, dst)
         }
     }
 
-    /// Two blobs in the backend dir: plain blob 1 and blob 2, an "ondemand"
-    /// (REDIRECT) blob whose single group redirects to blob 1's group 0.
-    /// Returns the backend, the cache set and the blob ids of (1, 2).
     fn plain_and_redirect_blobs(
         backend_dir: &Path,
         cache_dir: &Path,
@@ -605,22 +491,11 @@ mod tests {
         (backend, caches, [plain_id, redirect_id])
     }
 
-    /// Run a prefetcher with `scope` over `plan` and return the distinct blobs
-    /// read from the backend, in first-read order, as blob indexes.
     fn blobs_read(scope: PrefetchScope, plan: PrefetchPlan) -> Vec<u16> {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (backend, caches, ids) = plain_and_redirect_blobs(backend_dir.path(), cache_dir.path());
-        BlobPrefetcher::new(
-            caches,
-            plan,
-            2,
-            scope,
-            Duration::ZERO,
-            Duration::from_millis(1),
-            Duration::from_millis(1),
-        )
-        .run();
+        BlobPrefetcher::new(caches, plan, 2, scope, Duration::ZERO).run();
         let mut order = Vec::new();
         for read in backend.reads.lock().unwrap().iter() {
             let index = if *read == ids[0] { 1 } else { 2 };
@@ -646,21 +521,16 @@ mod tests {
             priority: vec![2, 1],
             rest: Vec::new(),
         };
-        // The redirect stream fills blob 1's cache from blob 2's data; blob 1
-        // itself is never read from the backend.
         assert_eq!(blobs_read(PrefetchScope::Ondemand, plan), vec![2]);
         let plan = PrefetchPlan {
             priority: vec![1],
             rest: vec![2],
         };
-        // No ondemand blob among the priority blobs: nothing is pulled.
         assert!(blobs_read(PrefetchScope::Ondemand, plan).is_empty());
     }
 
     #[test]
     fn scope_all_streams_the_ondemand_blob_before_the_others() {
-        // Declared order puts the plain blob first; the ondemand blob is
-        // still streamed first, then the plain blob's remaining groups.
         let plan = PrefetchPlan {
             priority: vec![1, 2],
             rest: Vec::new(),
