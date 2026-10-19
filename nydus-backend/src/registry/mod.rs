@@ -19,6 +19,7 @@ mod dns;
 #[cfg(feature = "backend-dragonfly-proxy")]
 mod dragonfly;
 mod http;
+mod mirror;
 mod rt;
 
 use std::collections::HashMap;
@@ -45,6 +46,7 @@ use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use self::http::HTTP;
+use self::mirror::Mirror;
 use self::rt::{block_on_worker, runtime};
 pub use self::rt::{
     configure_runtime, RuntimeOptions, DEFAULT_MAX_BLOCKING_THREADS, DEFAULT_WORKER_THREADS,
@@ -523,6 +525,8 @@ pub(crate) struct Registry {
     redirect_urls: RwLock<HashMap<String, String>>,
     /// Direct HTTP transport to the origin registry.
     http: HTTP,
+    /// Ordered mirrors for registry blob requests, never token or redirect URLs.
+    mirrors: Vec<Mirror>,
     /// Routes blob `GET`s through the Dragonfly SDK when configured. Always
     /// `None` when the `backend-dragonfly-proxy` feature is off (the config
     /// is rejected); kept unconditional so the policy loop and its tests
@@ -532,7 +536,7 @@ pub(crate) struct Registry {
     dragonfly_policy: DragonflyPolicy,
     /// Shapes origin requests issued as Dragonfly fallbacks.
     fallback_limiter: FallbackLimiter,
-    /// Whether reads are served through the Dragonfly SDK, used to attribute
+    /// Whether reads are served through mirrors or the Dragonfly SDK, used to attribute
     /// backend read and CRC metrics.
     target: nydus_telemetry::metrics::BackendTarget,
     metrics: Arc<nydus_telemetry::metrics::ImageMetrics>,
@@ -554,6 +558,18 @@ impl Registry {
         metrics: Arc<nydus_telemetry::metrics::ImageMetrics>,
     ) -> io::Result<Self> {
         let (scheme, host) = parse_registry_addr(&config.addr)?;
+        if !config.mirrors.is_empty() && (config.http.proxy.is_some() || config.dragonfly.is_some())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "registry mirrors cannot be combined with http.proxy or dragonfly",
+            ));
+        }
+        let mirrors = config
+            .mirrors
+            .iter()
+            .map(Mirror::new)
+            .collect::<io::Result<Vec<_>>>()?;
         let http = HTTP::new(&config.http)?;
         #[cfg(not(feature = "backend-dragonfly-proxy"))]
         if let Some(dragonfly_config) = &config.dragonfly {
@@ -591,7 +607,7 @@ impl Registry {
                 .unwrap_or(Duration::ZERO),
         );
 
-        let target = if dragonfly.is_some() {
+        let target = if dragonfly.is_some() || !mirrors.is_empty() {
             nydus_telemetry::metrics::BackendTarget::Proxy
         } else {
             nydus_telemetry::metrics::BackendTarget::Origin
@@ -609,6 +625,7 @@ impl Registry {
             token_expires_at: ArcSwapOption::from(None),
             redirect_urls: RwLock::new(HashMap::new()),
             http,
+            mirrors,
             dragonfly,
             dragonfly_policy,
             fallback_limiter,
@@ -705,6 +722,9 @@ impl Registry {
             }
         }
 
+        if !self.mirrors.is_empty() {
+            crate::note_read_served_by(nydus_telemetry::metrics::BackendTarget::Origin);
+        }
         self.request_http(method, url, headers, context)
     }
 
@@ -1127,6 +1147,43 @@ impl Registry {
             .map_err(|err| RegistryError::Io(io::Error::other(err)))
     }
 
+    /// Try mirrors only for original registry blob requests. Auth endpoints and
+    /// resolved redirect URLs use `request` directly, keeping mirror headers and
+    /// cached registry credentials away from unrelated hosts.
+    fn request_blob(
+        &self,
+        method: Method,
+        url: &str,
+        headers: HeaderMap,
+        context: ReadContext,
+    ) -> RegistryResult<Response> {
+        for mirror in &self.mirrors {
+            if !mirror.auth_through && !headers.contains_key(AUTHORIZATION) {
+                continue;
+            }
+            let mirror_url = mirror.url(url).map_err(RegistryError::Io)?;
+            let mut mirror_headers = headers.clone();
+            mirror_headers.extend(mirror.headers.clone());
+            match self.request_http(method.clone(), mirror_url.as_str(), mirror_headers, context) {
+                Ok(response)
+                    if response.status.is_success()
+                        || response.status.is_redirection()
+                        || (mirror.auth_through && response.status == StatusCode::UNAUTHORIZED) =>
+                {
+                    crate::note_read_served_by(nydus_telemetry::metrics::BackendTarget::Proxy);
+                    return Ok(response);
+                }
+                Ok(response) => {
+                    tracing::debug!(status = %response.status, "registry mirror failed; trying next source")
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "registry mirror failed; trying next source")
+                }
+            }
+        }
+        self.request(method, url, headers, context, true)
+    }
+
     /// Issue a request, transparently performing the auth handshake on `401`.
     fn authorized_request(
         &self,
@@ -1140,14 +1197,14 @@ impl Registry {
             headers.insert(AUTHORIZATION, auth_header_value(&cached_auth)?);
         }
 
-        let response = self.request(method.clone(), url, headers.clone(), context, true)?;
+        let response = self.request_blob(method.clone(), url, headers.clone(), context)?;
         if response.status != StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
 
         // Drop any stale token so the server returns the expected challenge.
         let challenge_response = if headers.remove(AUTHORIZATION).is_some() {
-            self.request(method.clone(), url, headers.clone(), context, true)?
+            self.request_blob(method.clone(), url, headers.clone(), context)?
         } else {
             response
         };
@@ -1164,7 +1221,7 @@ impl Registry {
 
         let auth_header = self.obtain_auth(challenge)?;
         headers.insert(AUTHORIZATION, auth_header_value(&auth_header)?);
-        let response = self.request(method, url, headers, context, true)?;
+        let response = self.request_blob(method, url, headers, context)?;
         if response.status.is_success() || response.status.is_redirection() {
             self.set_auth(auth_header);
         }

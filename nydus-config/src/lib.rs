@@ -132,6 +132,8 @@ pub struct LocalConfig {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+// Parsed once per backend; keep the configuration variants directly accessible.
+#[allow(clippy::large_enum_variant)]
 pub enum BackendConfig {
     /// Serve blobs from a local directory.
     Local(LocalConfig),
@@ -177,6 +179,12 @@ pub struct RegistryConfig {
     #[serde(default)]
     pub http: HttpConfig,
 
+    /// Registry mirrors tried in order before the origin. Mutually exclusive
+    /// with `http.proxy` and `dragonfly`; mirror requests use the HTTP client's
+    /// timeout, retries and TLS settings.
+    #[serde(default)]
+    pub mirrors: Vec<MirrorConfig>,
+
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
     /// hitting the origin registry directly. Only honored when built with the
@@ -185,6 +193,25 @@ pub struct RegistryConfig {
     /// ignoring it.
     #[serde(default)]
     pub dragonfly: Option<DragonflyConfig>,
+}
+
+/// A registry mirror, including HTTP mirrors served by Dragonfly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MirrorConfig {
+    /// Mirror origin, e.g. `http://127.0.0.1:65001`, without a path or credentials.
+    pub host: String,
+
+    /// Headers sent only to this mirror, e.g. `X-Dragonfly-Registry`.
+    /// Routing, authentication, range and framing headers cannot be overridden.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+
+    /// Allow unauthenticated blob requests and registry auth challenges through
+    /// this mirror. By default, acquire credentials from the origin first.
+    /// Token endpoint requests always bypass mirrors.
+    #[serde(default)]
+    pub auth_through: bool,
 }
 
 /// The HTTP client configuration for the registry backend.
@@ -690,6 +717,7 @@ config:
         let BackendConfig::Registry(registry) = &backend else {
             panic!("expected a registry backend, got {backend:?}");
         };
+        assert!(registry.mirrors.is_empty());
         assert_eq!(registry.http.timeout, default_registry_http_timeout());
         assert_eq!(
             registry.http.max_retries,
