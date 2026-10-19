@@ -135,14 +135,12 @@ impl ImageFs {
                             "path component is not a directory: {wanted}"
                         )));
                     }
-                    let entries = self.reader.read_dir(ino, &inode)?;
-                    let entry = entries
-                        .into_iter()
-                        .find(|entry| entry.name == wanted.as_bytes())
+                    ino = self
+                        .reader
+                        .lookup_dir_entry(ino, &inode, wanted.as_bytes())?
                         .ok_or_else(|| {
                             Error::NotFound(format!("path not found: {}", path.display()))
                         })?;
-                    ino = entry.nid;
                 }
                 Component::ParentDir | Component::Prefix(_) => {
                     return Err(Error::Unsupported(format!(
