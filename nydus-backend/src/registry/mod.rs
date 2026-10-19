@@ -1017,33 +1017,33 @@ impl Registry {
         let url = self.blob_url(&hex)?;
         let mut headers = HeaderMap::new();
         headers.insert(RANGE, range.parse().unwrap());
-        let response = self.authorized_request(Method::GET, &url, headers, context)?;
-        let status = response.status;
+        self.request_blob(Method::GET, &url, headers, context, |response| {
+            if response.status.is_redirection() {
+                let location = response
+                    .headers
+                    .get(LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        RegistryError::UnexpectedResponse("missing redirect location".to_string())
+                    })?
+                    .to_string();
 
-        if status.is_redirection() {
-            let location = response
-                .headers
-                .get(LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    RegistryError::UnexpectedResponse("missing redirect location".to_string())
-                })?
-                .to_string();
-
-            let mut redirect_headers = HeaderMap::new();
-            redirect_headers.insert(RANGE, range.parse().unwrap());
-            let redirected =
-                self.request(Method::GET, &location, redirect_headers, context, true)?;
-            if !redirected.status.is_success() {
-                return Err(status_error(redirected));
+                let mut redirect_headers = HeaderMap::new();
+                redirect_headers.insert(RANGE, range.parse().unwrap());
+                let redirected =
+                    self.request(Method::GET, &location, redirect_headers, context, true)?;
+                if !redirected.status.is_success() {
+                    return Err(status_error(redirected));
+                }
+                fill_exact(redirected, dst)?;
+                self.set_redirect_url(&hex, location);
+                Ok(())
+            } else if response.status.is_success() {
+                fill_exact(response, dst)
+            } else {
+                Err(status_error(response))
             }
-            self.set_redirect_url(&hex, location);
-            fill_exact(redirected, dst)
-        } else if status.is_success() {
-            fill_exact(response, dst)
-        } else {
-            Err(status_error(response))
-        }
+        })
     }
 
     /// Resolve the total size of a blob via a `HEAD` request, following a single
@@ -1051,51 +1051,35 @@ impl Registry {
     fn fetch_blob_size(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> RegistryResult<u64> {
         let hex = hex::encode(blob_id);
         let url = self.blob_url(&hex)?;
-        let response = self.authorized_request(
-            Method::HEAD,
-            &url,
-            HeaderMap::new(),
-            ReadContext::raw(ReadKind::OnDemand),
-        )?;
-        let status = response.status;
-
-        let response = if status.is_redirection() {
-            let location = response
-                .headers
-                .get(LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    RegistryError::UnexpectedResponse("missing redirect location".to_string())
-                })?
-                .to_string();
-            let redirected = self.request(
-                Method::HEAD,
-                &location,
-                HeaderMap::new(),
-                ReadContext::raw(ReadKind::OnDemand),
-                true,
-            )?;
-            if !redirected.status.is_success() {
-                return Err(status_error(redirected));
+        let context = ReadContext::raw(ReadKind::OnDemand);
+        self.request_blob(Method::HEAD, &url, HeaderMap::new(), context, |response| {
+            let response = if response.status.is_redirection() {
+                let location = response
+                    .headers
+                    .get(LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        RegistryError::UnexpectedResponse("missing redirect location".to_string())
+                    })?;
+                self.request(Method::HEAD, location, HeaderMap::new(), context, true)?
+            } else {
+                response
+            };
+            if !response.status.is_success() {
+                return Err(status_error(response));
             }
-            redirected
-        } else if status.is_success() {
             response
-        } else {
-            return Err(status_error(response));
-        };
-
-        response
-            .headers
-            .get(CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| {
-                RegistryError::Io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "registry HEAD response missing a valid content-length",
-                ))
-            })
+                .headers
+                .get(CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    RegistryError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "registry HEAD response missing a valid content-length",
+                    ))
+                })
+        })
     }
 
     /// Recover a blob's metadata from its trailing footer using range reads:
@@ -1147,64 +1131,72 @@ impl Registry {
             .map_err(|err| RegistryError::Io(io::Error::other(err)))
     }
 
-    /// Try mirrors only for original registry blob requests. Auth endpoints and
-    /// resolved redirect URLs use `request` directly, keeping mirror headers and
-    /// cached registry credentials away from unrelated hosts.
-    fn request_blob(
+    /// A source succeeds only after authentication and `finish` complete.
+    /// GET finishes by filling the caller's range buffer; HEAD validates the
+    /// blob size. A failed GET is retried from the original offset, overwriting
+    /// any partial bytes without allocating another buffer.
+    fn request_blob<T>(
         &self,
         method: Method,
         url: &str,
         headers: HeaderMap,
         context: ReadContext,
-    ) -> RegistryResult<Response> {
+        mut finish: impl FnMut(Response) -> RegistryResult<T>,
+    ) -> RegistryResult<T> {
         for mirror in &self.mirrors {
-            if !mirror.auth_through && !headers.contains_key(AUTHORIZATION) {
-                continue;
-            }
             let mirror_url = mirror.url(url).map_err(RegistryError::Io)?;
-            let mut mirror_headers = headers.clone();
-            mirror_headers.extend(mirror.headers.clone());
-            match self.request_http(method.clone(), mirror_url.as_str(), mirror_headers, context) {
-                Ok(response)
-                    if response.status.is_success()
-                        || response.status.is_redirection()
-                        || (mirror.auth_through && response.status == StatusCode::UNAUTHORIZED) =>
-                {
+            let result = self.authorized_request(
+                headers.clone(),
+                |mut headers| {
+                    if !mirror.auth_through && !headers.contains_key(AUTHORIZATION) {
+                        return self.request(method.clone(), url, headers, context, true);
+                    }
+                    headers.extend(mirror.headers.clone());
+                    let response =
+                        self.request_http(method.clone(), mirror_url.as_str(), headers, context)?;
+                    if !mirror.auth_through && response.status == StatusCode::UNAUTHORIZED {
+                        return Err(status_error(response));
+                    }
                     crate::note_read_served_by(nydus_telemetry::metrics::BackendTarget::Proxy);
-                    return Ok(response);
-                }
-                Ok(response) => {
-                    tracing::debug!(status = %response.status, "registry mirror failed; trying next source")
-                }
+                    Ok(response)
+                },
+                &mut finish,
+            );
+            match result {
+                Ok(value) => return Ok(value),
                 Err(err) => {
-                    tracing::debug!(error = %err, "registry mirror failed; trying next source")
+                    tracing::debug!(error = %err, "registry mirror failed; trying next source");
                 }
             }
         }
-        self.request(method, url, headers, context, true)
+        self.authorized_request(
+            headers,
+            |headers| self.request(method.clone(), url, headers, context, true),
+            finish,
+        )
     }
 
-    /// Issue a request, transparently performing the auth handshake on `401`.
-    fn authorized_request(
+    /// Perform at most one auth handshake for this source. Publish new
+    /// credentials only after the response has been consumed successfully.
+    fn authorized_request<T>(
         &self,
-        method: Method,
-        url: &str,
         mut headers: HeaderMap,
-        context: ReadContext,
-    ) -> RegistryResult<Response> {
+        mut send: impl FnMut(HeaderMap) -> RegistryResult<Response>,
+        mut finish: impl FnMut(Response) -> RegistryResult<T>,
+    ) -> RegistryResult<T> {
         let cached_auth = self.current_auth();
         if !cached_auth.is_empty() {
             headers.insert(AUTHORIZATION, auth_header_value(&cached_auth)?);
         }
 
-        let response = self.request_blob(method.clone(), url, headers.clone(), context)?;
+        let response = send(headers.clone())?;
         if response.status != StatusCode::UNAUTHORIZED {
-            return Ok(response);
+            return finish(response);
         }
 
         // Drop any stale token so the server returns the expected challenge.
         let challenge_response = if headers.remove(AUTHORIZATION).is_some() {
-            self.request_blob(method.clone(), url, headers.clone(), context)?
+            send(headers.clone())?
         } else {
             response
         };
@@ -1216,19 +1208,19 @@ impl Registry {
             .and_then(Registry::parse_challenge);
 
         let Some(challenge) = challenge else {
-            return Ok(challenge_response);
+            return finish(challenge_response);
         };
 
-        let auth_header = self.obtain_auth(challenge)?;
+        let (auth_header, expires_at) = self.obtain_auth(challenge)?;
         headers.insert(AUTHORIZATION, auth_header_value(&auth_header)?);
-        let response = self.request_blob(method, url, headers, context)?;
-        if response.status.is_success() || response.status.is_redirection() {
-            self.set_auth(auth_header);
-        }
-        Ok(response)
+        let response = send(headers)?;
+        let value = finish(response)?;
+        self.token_expires_at.store(expires_at.map(Arc::new));
+        self.set_auth(auth_header);
+        Ok(value)
     }
 
-    fn obtain_auth(&self, challenge: AuthChallenge) -> RegistryResult<String> {
+    fn obtain_auth(&self, challenge: AuthChallenge) -> RegistryResult<(String, Option<u64>)> {
         match challenge {
             AuthChallenge::Basic => {
                 let basic = self.basic_auth.as_ref().ok_or_else(|| {
@@ -1236,20 +1228,25 @@ impl Registry {
                         "registry requires basic-auth credentials".to_string(),
                     )
                 })?;
-                Ok(format!("Basic {basic}"))
+                Ok((format!("Basic {basic}"), None))
             }
             AuthChallenge::Bearer {
                 realm,
                 service,
                 scope,
             } => {
-                let token = self.fetch_token(&realm, &service, &scope)?;
-                Ok(format!("Bearer {token}"))
+                let (token, expires_at) = self.fetch_token(&realm, &service, &scope)?;
+                Ok((format!("Bearer {token}"), Some(expires_at)))
             }
         }
     }
 
-    fn fetch_token(&self, realm: &str, service: &str, scope: &str) -> RegistryResult<String> {
+    fn fetch_token(
+        &self,
+        realm: &str,
+        service: &str,
+        scope: &str,
+    ) -> RegistryResult<(String, u64)> {
         let mut url = Url::parse(realm)
             .map_err(|err| RegistryError::InvalidUrl(format!("{realm}: {err}")))?;
         {
@@ -1293,9 +1290,7 @@ impl Registry {
             ));
         }
 
-        self.token_expires_at
-            .store(Some(Arc::new(now_secs() + token.expires_in)));
-        Ok(token.token)
+        Ok((token.token, now_secs() + token.expires_in))
     }
 }
 

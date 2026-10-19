@@ -205,6 +205,8 @@ mod tests {
                 if request.starts_with("GET /token?") {
                     assert!(request.contains("authorization: Basic dXNlcjpwYXNz\r\n"));
                     response("200 OK", "", r#"{"token":"fresh-token","expires_in":3600}"#)
+                } else if request.contains("authorization: Bearer fresh-token\r\n") {
+                    response("206 Partial Content", "", "data")
                 } else {
                     response(
                         "401 Unauthorized",
@@ -234,13 +236,19 @@ mod tests {
                 origin_requests.len(),
                 if auth_through {
                     1
+                } else if stale_token {
+                    4
                 } else {
-                    2 + usize::from(stale_token)
+                    2
                 }
             );
             assert_eq!(
                 mirror.requests().len(),
-                if auth_through { 3 } else { 2 } + usize::from(stale_token)
+                if auth_through {
+                    3 + usize::from(stale_token)
+                } else {
+                    2
+                }
             );
             assert!(origin_requests
                 .iter()
@@ -291,6 +299,165 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_body_restarts_the_full_range_at_the_next_source() {
+        for declared_length in [2, 4] {
+            for next_is_mirror in [false, true] {
+                let broken = Server::new(move |_, _| {
+                    format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\nxx"
+                )
+                });
+                let healthy = Server::new(|_, _| response("206 Partial Content", "", "data"));
+                let mirrors = if next_is_mirror {
+                    vec![(broken.url.as_str(), true), (healthy.url.as_str(), true)]
+                } else {
+                    vec![(broken.url.as_str(), true)]
+                };
+                let registry = registry(&healthy.url, &mirrors);
+                registry.set_auth("Bearer cached-token".into());
+                read(&registry);
+                assert_eq!(broken.requests().len(), 1);
+                let requests = healthy.requests();
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].contains("range: bytes=7-10\r\n"));
+                assert!(requests[0].contains("authorization: Bearer cached-token\r\n"));
+                assert_eq!(
+                    requests[0].contains("x-dragonfly-registry:"),
+                    next_is_mirror
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authentication_failure_is_bounded_and_tries_the_next_source() {
+        for failure in [
+            "persistent-401",
+            "no-challenge",
+            "no-credentials",
+            "token-error",
+            "invalid-token",
+        ] {
+            for next_is_mirror in [false, true] {
+                let token = Server::new(move |_, _| {
+                    if failure == "token-error" {
+                        response("503 Service Unavailable", "", "")
+                    } else {
+                        response("200 OK", "", "not-json")
+                    }
+                });
+                let token_url = token.url.clone();
+                let denied = Server::new(move |_, _| {
+                    let challenge = match failure {
+                        "no-challenge" => String::new(),
+                        "token-error" | "invalid-token" => {
+                            format!("WWW-Authenticate: Bearer realm=\"{token_url}/token\"\r\n")
+                        }
+                        _ => "WWW-Authenticate: Basic realm=\"registry\"\r\n".into(),
+                    };
+                    response("401 Unauthorized", &challenge, "")
+                });
+                let healthy = Server::new(|_, _| response("206 Partial Content", "", "data"));
+                let mirrors = if next_is_mirror {
+                    vec![(denied.url.as_str(), true), (healthy.url.as_str(), true)]
+                } else {
+                    vec![(denied.url.as_str(), true)]
+                };
+                let mut registry = registry(&healthy.url, &mirrors);
+                if failure == "no-credentials" {
+                    registry.basic_auth = None;
+                }
+                read(&registry);
+                assert_eq!(
+                    denied.requests().len(),
+                    if failure == "persistent-401" { 2 } else { 1 }
+                );
+                assert_eq!(healthy.requests().len(), 1);
+                assert_eq!(
+                    token.requests().len(),
+                    usize::from(matches!(failure, "token-error" | "invalid-token"))
+                );
+                assert!(registry.current_auth().is_empty());
+                assert!(registry.token_expires_at.load().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn failed_authenticated_body_does_not_publish_token_or_expiry() {
+        let token = Server::new(|_, _| {
+            response("200 OK", "", r#"{"token":"mirror-token","expires_in":600}"#)
+        });
+        let token_url = token.url.clone();
+        let broken = Server::new(move |request, _| {
+            if request.contains("authorization: Bearer mirror-token\r\n") {
+                response("206 Partial Content", "", "xx")
+            } else {
+                response(
+                    "401 Unauthorized",
+                    &format!("WWW-Authenticate: Bearer realm=\"{token_url}/token\"\r\n"),
+                    "",
+                )
+            }
+        });
+        let origin = Server::new(|_, _| response("206 Partial Content", "", "data"));
+        let registry = registry(&origin.url, &[(&broken.url, true)]);
+        registry.set_auth("Bearer origin-token".into());
+        let expiry = crate::registry::now_secs() + 3600;
+        registry.token_expires_at.store(Some(Arc::new(expiry)));
+        read(&registry);
+        assert_eq!(registry.current_auth(), "Bearer origin-token");
+        assert_eq!(**registry.token_expires_at.load().as_ref().unwrap(), expiry);
+        assert_eq!(broken.requests().len(), 3);
+        assert_eq!(token.requests().len(), 1);
+        let requests = origin.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("authorization: Bearer origin-token\r\n"));
+        assert!(!requests[0].contains("x-dragonfly-registry:"));
+    }
+
+    #[test]
+    fn all_sources_failing_returns_an_error_without_restarting_the_list() {
+        let denied = Server::new(|_, _| {
+            response(
+                "401 Unauthorized",
+                "WWW-Authenticate: Basic realm=\"registry\"\r\n",
+                "",
+            )
+        });
+        let broken = Server::new(|_, _| response("206 Partial Content", "", "xx"));
+        let origin = Server::new(|_, _| response("404 Not Found", "", "missing"));
+        let registry = registry(&origin.url, &[(&denied.url, true), (&broken.url, true)]);
+        let err = registry
+            .read_range_into(
+                &[0; 32],
+                7,
+                &mut [0; 4],
+                ReadContext::raw(ReadKind::OnDemand),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("404"));
+        assert_eq!(denied.requests().len(), 2);
+        assert_eq!(broken.requests().len(), 1);
+        assert_eq!(origin.requests().len(), 1);
+    }
+
+    #[test]
+    fn failed_redirect_body_is_not_cached_and_falls_back() {
+        let destination = Server::new(|_, _| response("206 Partial Content", "", "xx"));
+        let location = format!("Location: {}/signed-blob\r\n", destination.url);
+        let mirror = Server::new(move |_, _| response("307 Temporary Redirect", &location, ""));
+        let origin = Server::new(|_, _| response("206 Partial Content", "", "data"));
+        let registry = registry(&origin.url, &[(&mirror.url, true)]);
+        read(&registry);
+        read(&registry);
+        assert_eq!(mirror.requests().len(), 2);
+        assert_eq!(destination.requests().len(), 2);
+        assert_eq!(origin.requests().len(), 2);
+        assert!(registry.redirect_url(&"00".repeat(32)).is_none());
+    }
+
+    #[test]
     fn redirect_and_cached_redirect_do_not_receive_mirror_headers_or_auth() {
         let destination = Server::new(|_, _| response("206 Partial Content", "", "data"));
         let location = format!(
@@ -320,6 +487,16 @@ mod tests {
         let registry = registry("https://registry.invalid", &[(&mirror.url, true)]);
         assert_eq!(registry.fetch_blob_size(&[0; 32]).unwrap(), 4);
         assert!(mirror.requests()[0].starts_with("HEAD /v2/"));
+    }
+
+    #[test]
+    fn head_without_a_valid_size_falls_back() {
+        let mirror = Server::new(|_, _| "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".into());
+        let origin = Server::new(|_, _| response("200 OK", "", "data"));
+        let registry = registry(&origin.url, &[(&mirror.url, true)]);
+        assert_eq!(registry.fetch_blob_size(&[0; 32]).unwrap(), 4);
+        assert_eq!(mirror.requests().len(), 1);
+        assert_eq!(origin.requests().len(), 1);
     }
 
     #[test]

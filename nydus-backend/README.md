@@ -42,8 +42,10 @@ and HEAD requests directly to its configured address, preserving the path,
 query, Range and registry Authorization headers. An HTTP mirror for an HTTPS
 registry does not use CONNECT or require TLS interception.
 
-Mirrors are tried in order, then the original registry on transport errors
-or unsuccessful HTTP responses. They share `http.timeout`,
+Mirrors are tried in order, then the original registry on transport errors,
+authentication failures, unsuccessful HTTP responses or incomplete range
+reads. Each attempt must finish the requested read before it succeeds;
+partial reads restart the full range at the next source. They share `http.timeout`,
 `http.max_retries` and `http.tls`. Do not combine `mirrors` with `http.proxy`
 or `dragonfly`; these select different routing mechanisms.
 
