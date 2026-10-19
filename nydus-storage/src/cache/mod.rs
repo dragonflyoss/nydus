@@ -292,7 +292,7 @@ impl ChunkGroupBuffer {
             if self
                 .mapping
                 .as_ref()
-                .map_or(true, |mapping| mapping.len() < len)
+                .is_none_or(|mapping| mapping.len() < len)
             {
                 let mapping = memmap2::MmapMut::map_anon(len)?;
                 #[cfg(target_os = "linux")]
