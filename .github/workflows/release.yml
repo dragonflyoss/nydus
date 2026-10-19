@@ -7,16 +7,11 @@ on:
   workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   NYDUS_FEATURES: cli,uffd,fanotify,dragonfly
 
 permissions:
   contents: read
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -53,8 +48,6 @@ jobs:
       - name: Install musl toolchain
         run: |
           sudo apt-get update
-          # perl/make are needed by openssl-src, which builds OpenSSL from
-          # source for the musl target (dragonfly-client-util vendors it).
           sudo apt-get install -y --no-install-recommends \
             musl-tools musl-dev pkg-config perl make file
 
@@ -71,10 +64,10 @@ jobs:
             --target ${{ matrix.target }} \
             --features "${NYDUS_FEATURES}"
 
-      - name: Set up Go
+      - name: Install Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.5"
+          go-version-file: nydusify/go.mod
           cache-dependency-path: nydusify/go.sum
 
       - name: Build nydusify
@@ -99,8 +92,6 @@ jobs:
           for bin in nydus-static/nydus nydus-static/nydusify; do
             echo "== ${bin}"
             file "${bin}"
-            # musl release builds come out as `static-pie linked`, while the
-            # CGO-free Go binary is plain `statically linked`.
             file "${bin}" | grep -Eq 'statically linked|static-pie linked'
           done
           ./nydus-static/nydus --help > /dev/null

@@ -3,29 +3,23 @@ name: E2E Test With Dragonfly
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
-  workflow_dispatch:
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  schedule:
+    - cron: '0 4 * * *'
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
+  KIND_VERSION: v0.32.0
+  KIND_CONFIG_PATH: tests/testdata/kind/config.yaml
   DRAGONFLY_CHART_VERSION: "1.8.2"
+  DRAGONFLY_CHARTS_CONFIG_PATH: tests/testdata/charts/config.yaml
+  DRAGONFLY_SCHEDULER_NODEPORT_SERVICE_PATH: tests/testdata/k8s/scheduler-nodeport-svc.yaml
 
 jobs:
   build:
@@ -52,10 +46,10 @@ jobs:
       - name: Build nydus
         run: cargo build -p nydus --release --features "cli,dragonfly"
 
-      - name: Set up Go
+      - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.5'
+          go-version-file: nydusify/go.mod
 
       - name: Build nydusify
         run: |
@@ -70,7 +64,7 @@ jobs:
             target/release/nydus
             target/release/nydusify
 
-  e2e:
+  e2e_tests:
     name: E2E (${{ matrix.mode }})
     runs-on: ubuntu-latest
     needs: build
@@ -78,16 +72,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        mode: ['seed-peer', 'origin']
         include:
-          - mode: fallback
-            config: nydus-fallback.yaml
-            test: TestDragonflyE2E
-          - mode: strict
-            config: nydus-strict.yaml
-            test: TestDragonflyE2E
-          - mode: proxy-error
-            config: nydus-proxy-error.yaml
-            test: TestProxyErrorSimulation
+          - mode: seed-peer
+            run: '^TestDragonfly_(ReadThroughSeedPeer|ServedFromSeedPeerCache|Prefetch|ProxyError)$'
+          - mode: origin
+            run: '^TestDragonfly_(FallbackToOrigin|OriginErrorWithoutSeedPeers)$'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -102,88 +93,60 @@ jobs:
         run: |
           sudo install -m 0755 /tmp/nydus-bin/nydus /usr/local/bin/nydus
           sudo install -m 0755 /tmp/nydus-bin/nydusify /usr/local/bin/nydusify
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.5'
-
-      - name: Install runtime dependencies
-        run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq fuse3
+          mkdir -p /tmp/artifact
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/e2e/go.mod
 
       - name: Create kind network
         run: docker network create kind --subnet 172.30.0.0/16 --gateway 172.30.0.1
 
-      - name: Create kind cluster
+      - name: Setup Kind
         uses: helm/kind-action@v1
         with:
-          config: tests/e2e/testdata/dragonfly/kind.yaml
+          version: ${{ env.KIND_VERSION }}
+          config: ${{ env.KIND_CONFIG_PATH }}
+          cluster_name: kind
 
-      - name: Install Dragonfly
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Setup dragonfly
         run: |
           helm repo add dragonfly https://dragonflyoss.github.io/helm-charts/
-          helm install dragonfly dragonfly/dragonfly \
-            --version "${DRAGONFLY_CHART_VERSION}" \
-            --namespace dragonfly-system --create-namespace \
-            --values tests/e2e/testdata/dragonfly/values.yaml \
-            --wait --timeout 10m
+          helm install --wait --timeout 10m --create-namespace --namespace dragonfly-system \
+            --version ${{ env.DRAGONFLY_CHART_VERSION }} -f ${{ env.DRAGONFLY_CHARTS_CONFIG_PATH }} \
+            dragonfly dragonfly/dragonfly
+          kubectl apply -f ${{ env.DRAGONFLY_SCHEDULER_NODEPORT_SERVICE_PATH }}
           timeout 120 bash -c 'until (echo > /dev/tcp/127.0.0.1/8002) 2>/dev/null; do sleep 1; done'
 
-      - name: Push nydus test image
+      - name: Setup registry
         run: |
           docker run -d --name registry -p 5000:5000 registry:2
           timeout 30 bash -c 'until curl -sf http://127.0.0.1:5000/v2/ >/dev/null; do sleep 1; done'
 
-          WORK_DIR="/tmp/nydus-dragonfly"
-          mkdir -p "${WORK_DIR}/source/etc" "${WORK_DIR}/source/data" "${WORK_DIR}/mnt" "${WORK_DIR}/cache"
-          printf 'NAME="Nydus Dragonfly E2E"\nID=nydus-e2e\nVERSION_ID=1\n' > "${WORK_DIR}/source/etc/os-release"
-          echo "root:x:0:0:root:/root:/bin/sh" > "${WORK_DIR}/source/etc/passwd"
-          echo "root:x:0:" > "${WORK_DIR}/source/etc/group"
-          head -c 4194304 /dev/urandom > "${WORK_DIR}/source/data/blob1.bin"
-          head -c 8388608 /dev/urandom > "${WORK_DIR}/source/data/blob2.bin"
-
-          nydusify convert --source "${WORK_DIR}/source" \
-            --target 172.30.0.1:5000/nydus-e2e/dragonfly:v1 \
-            --builder /usr/local/bin/nydus \
-            --target-insecure --target-plain-http
-          nydusify check --target 172.30.0.1:5000/nydus-e2e/dragonfly:v1 \
-            --work-dir "${WORK_DIR}/check" \
-            --builder /usr/local/bin/nydus \
-            --target-insecure --target-plain-http
-
-          BOOTSTRAP_FILE=$(find "${WORK_DIR}/check" -name image.boot | head -1)
-          [ -n "${BOOTSTRAP_FILE}" ] || { echo "exported image.boot not found under ${WORK_DIR}/check"; exit 1; }
-          cp "${BOOTSTRAP_FILE}" "${WORK_DIR}/bootstrap"
-
-      - name: Run e2e test (${{ matrix.mode }})
+      - name: Run E2E test
         run: |
           cd tests/e2e
-          sudo -E env "PATH=$PATH" \
-            KUBECONFIG="$HOME/.kube/config" \
-            NYDUS_BIN=/usr/local/bin/nydus \
-            NYDUS_CONFIG=${{ github.workspace }}/tests/e2e/testdata/dragonfly/${{ matrix.config }} \
-            DRAGONFLY_MODE=${{ matrix.mode }} \
-            DRAGONFLY_STOP_CMD="kubectl --namespace dragonfly-system scale statefulset --all --replicas=0 && kubectl --namespace dragonfly-system wait --for=delete pod --all --timeout=180s" \
-            BOOTSTRAP_PATH=/tmp/nydus-dragonfly/bootstrap \
-            WORK_DIR=/tmp/nydus-dragonfly \
-            go test -v -run '^${{ matrix.test }}$' -timeout 15m -count=1 dragonfly_test.go harness.go
+          sudo -E env "PATH=$PATH" KUBECONFIG="$HOME/.kube/config" NYDUS_E2E_ARTIFACT_DIR=/tmp/artifact \
+            go test -v -count=1 -timeout 30m -run '${{ matrix.run }}' .
 
-      - name: Dump logs
+      - name: Export logs
         if: always()
-        continue-on-error: true
         run: |
-          LOG_DIR="/tmp/dragonfly-e2e-logs"
-          mkdir -p "${LOG_DIR}"
-          kubectl --namespace dragonfly-system get pods -o wide > "${LOG_DIR}/pods.log" 2>&1 || true
-          kubectl --namespace dragonfly-system logs statefulset/dragonfly-scheduler --tail=-1 > "${LOG_DIR}/scheduler.log" 2>&1 || true
-          kubectl --namespace dragonfly-system logs statefulset/dragonfly-seed-client --tail=-1 > "${LOG_DIR}/seed-client.log" 2>&1 || true
-          cp -r /tmp/nydus-dragonfly/logs "${LOG_DIR}/nydus" 2>/dev/null || true
+          kubectl --namespace dragonfly-system get pods -o wide > /tmp/artifact/pods.log 2>&1 || true
+          kubectl --namespace dragonfly-system get services > /tmp/artifact/services.log 2>&1 || true
+          kubectl --namespace dragonfly-system logs statefulset/dragonfly-scheduler --tail=-1 > /tmp/artifact/scheduler.log 2>&1 || true
+          kubectl --namespace dragonfly-system logs statefulset/dragonfly-seed-client --tail=-1 > /tmp/artifact/seed-client.log 2>&1 || true
+          sudo chown -R $USER:$USER /tmp/artifact
 
-      - name: Upload logs
+      - name: Upload Logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dragonfly-e2e-logs-${{ matrix.mode }}
-          path: /tmp/dragonfly-e2e-logs/
+          name: dragonfly-${{ matrix.mode }}-e2e-tests-logs
+          path: /tmp/artifact/**

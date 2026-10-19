@@ -8,7 +8,6 @@ E2E_TEST ?=
 E2E_TIMEOUT ?= 600s
 E2E_COUNT ?= 1
 E2E_GO_TEST_ARGS ?=
-NYDUSFS_MERGE_PAUSE_SECS ?= 0
 EROFS_C_FUSE ?=
 EROFS_MKFS ?=
 
@@ -39,10 +38,10 @@ FANOTIFY_COUNT ?= 1
 FANOTIFY_GO_TEST_ARGS ?=
 # Set to 1 to also run the optional C11 fail-closed case (needs the local
 # registry container started by the test).
-FANOTIFY_RUN_FAIL_CLOSED ?=
+NYDUS_E2E_FANOTIFY_RUN_FAIL_CLOSED ?=
 # Set to 0 to skip C12 strace ground-truth case (runs by default if strace
 # is installed).
-FANOTIFY_RUN_STRACE ?=
+NYDUS_E2E_FANOTIFY_RUN_STRACE ?=
 
 NBD_TIMEOUT ?= 600s
 NBD_COUNT ?= 1
@@ -79,27 +78,13 @@ TOP_IMAGES_PLATFORM ?= linux/amd64
 TOP_IMAGES_WORKDIR ?=
 TOP_IMAGES_GO_TEST_ARGS ?=
 
+E2E_DEFAULT_TESTS = ^Test(ErofsKernelCompatibility|BlobMount|MergedMount|NydusifyOptimize|ReproducibleBuild|AutomaticNoXattr)
+
 GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH)" "HOME=$(HOME)" \
 	"GOCACHE=$$($(GO_BIN) env GOCACHE)" \
 	"GOMODCACHE=$$($(GO_BIN) env GOMODCACHE)" \
 	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
-TEST_SUPPORT_FILES = harness.go optimize.go diff.go
-E2E_TEST_FILES = roundtrip_test.go no_xattr_test.go $(TEST_SUPPORT_FILES)
-TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
-UFFD_TEST_FILES = uffd_test.go uffd_fault_test.go $(TEST_SUPPORT_FILES)
-UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
-CACHE_SHARING_TEST_FILES = cache_sharing_test.go $(TEST_SUPPORT_FILES)
-FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
-COMPAT_TEST_FILES = compat_test.go compat_images_test.go $(TEST_SUPPORT_FILES)
-TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
-FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
-# NBD and bench use whole-package compilation: nbd_test.go and bench_test.go
-# reuse helpers (shaFile, usedBytes, kernelVersion, erofsSupported, etc.)
-# defined in fanotify_test.go and nbd_test.go, so the entire package must be
-# compiled together.
-NBD_TEST_PKG = .
-BENCH_TEST_PKG = .
 
 .PHONY: build release nydusify test test-nydusify test-e2e test-tooci test-tar-corpus test-compat test-compat-build test-compat-read test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
@@ -131,9 +116,8 @@ test-e2e: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		NYDUSFS_MERGE_PAUSE_SECS="$(NYDUSFS_MERGE_PAUSE_SECS)" \
-		NYDUSFS_RUN_EROFS_COMPAT="$(NYDUSFS_RUN_EROFS_COMPAT)" \
-		$(GO_BIN) test -v $(if $(strip $(E2E_TEST)),-run '^$(E2E_TEST)$$',) -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(E2E_TEST_FILES)
+		NYDUS_E2E_RUN_EROFS_COMPAT="$(NYDUS_E2E_RUN_EROFS_COMPAT)" \
+		$(GO_BIN) test -v -run '$(if $(strip $(E2E_TEST)),^$(E2E_TEST)$$,$(E2E_DEFAULT_TESTS))' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) .
 
 # Run the nydus-to-OCI round trip. Requires a local registry and root, since
 # the round trip has to reproduce ownership and device nodes.
@@ -141,22 +125,22 @@ test-tooci: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestNydusifyToOCI$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestNydusifyToOCI$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) .
 
 # Convert Go's archive/tar test corpus and vectors, containerd's archive
 # tests, generated and mutated layers, and 8 GiB files through nydus.Pack,
 # and diff each FUSE mount against the containerd archive.Apply tree.
 # Requires root and FUSE. NYDUS_E2E_TAR_SEEDS sets how many random layers
 # to generate; NYDUS_E2E_HUGE_TAR=1 also streams the 60 GB sparse corpus.
-# GO_TAR_TESTDATA points at a Go archive/tar testdata directory other than
+# NYDUS_E2E_GO_TAR_TESTDATA points at a Go archive/tar testdata directory other than
 # the one in GOROOT. TMPDIR is set to the repo's .test-tmp/.
-test-tar-corpus: release
+test-tar-corpus: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
 	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
 		"NYDUS_E2E_TAR_SEEDS=$(NYDUS_E2E_TAR_SEEDS)" "NYDUS_E2E_HUGE_TAR=$(NYDUS_E2E_HUGE_TAR)" \
-		"GO_TAR_TESTDATA=$(GO_TAR_TESTDATA)" \
+		"NYDUS_E2E_GO_TAR_TESTDATA=$(NYDUS_E2E_GO_TAR_TESTDATA)" \
 		$(GO_BIN) test -v -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) ./tar
 
 # Cross-version on-disk compatibility check (requires root): builds images of
@@ -166,35 +150,35 @@ test-tar-corpus: release
 # the last released version, e.g.
 #   make test-compat COMPAT_BUILDER=/abs/old/nydus
 #   make test-compat COMPAT_READER=/abs/old/nydus
-test-compat: release
+test-compat: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		NYDUS_COMPAT_BUILDER="$(COMPAT_BUILDER)" \
-		NYDUS_COMPAT_READER="$(COMPAT_READER)" \
-		$(GO_BIN) test -v -run '^TestCrossVersionCompatibility$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) $(COMPAT_TEST_FILES)
+		NYDUS_E2E_COMPAT_BUILDER="$(COMPAT_BUILDER)" \
+		NYDUS_E2E_COMPAT_READER="$(COMPAT_READER)" \
+		$(GO_BIN) test -v -run '^TestCrossVersionCompatibility$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) .
 
 # The two halves of test-compat, run separately so the images of a released
 # version can be built once and kept, e.g.
 #   make test-compat-build COMPAT_BUILDER=/abs/old/nydus COMPAT_IMAGES=/abs/images
 #   make test-compat-read COMPAT_IMAGES=/abs/images
-test-compat-build: $(if $(COMPAT_BUILDER),,release)
+test-compat-build: $(if $(COMPAT_BUILDER),,release) nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	@test -n "$(COMPAT_IMAGES)" || { echo "set COMPAT_IMAGES=/abs/path/to/images"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		NYDUS_COMPAT_BUILDER="$(COMPAT_BUILDER)" \
-		NYDUS_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
-		$(GO_BIN) test -v -run '^TestCompatBuildImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) $(COMPAT_TEST_FILES)
+		NYDUS_E2E_COMPAT_BUILDER="$(COMPAT_BUILDER)" \
+		NYDUS_E2E_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
+		$(GO_BIN) test -v -run '^TestCompatBuildImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) .
 
-test-compat-read: $(if $(COMPAT_READER),,release)
+test-compat-read: $(if $(COMPAT_READER),,release) nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	@test -n "$(COMPAT_IMAGES)" || { echo "set COMPAT_IMAGES=/abs/path/to/images"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		NYDUS_COMPAT_READER="$(COMPAT_READER)" \
-		NYDUS_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
-		$(GO_BIN) test -v -run '^TestCompatReadImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) $(COMPAT_TEST_FILES)
+		NYDUS_E2E_COMPAT_READER="$(COMPAT_READER)" \
+		NYDUS_E2E_COMPAT_IMAGES="$(COMPAT_IMAGES)" \
+		$(GO_BIN) test -v -run '^TestCompatReadImages$$' -count $(COMPAT_COUNT) -timeout $(COMPAT_TIMEOUT) $(COMPAT_GO_TEST_ARGS) .
 
 # Run the UFFD test suite: capability preflight, the stateless socket smoke,
 # real userfaultfd fault-completion integration (managed copy/zeropage and
@@ -203,13 +187,13 @@ test-compat-read: $(if $(COMPAT_READER),,release)
 # vm.unprivileged_userfaultfd=1); set UFFD_REQUIRE=1 to fail instead of skip
 # on runners without userfaultfd support.
 test-uffd: FEATURES=cli,uffd
-test-uffd: release
+test-uffd: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		NYDUSFS_UFFD_REQUIRE="$(UFFD_REQUIRE)" \
-		NYDUSFS_UFFD_EVIDENCE_DIR="$(UFFD_EVIDENCE_DIR)" \
-		$(GO_BIN) test -v -run '^TestUffd' -count $(UFFD_COUNT) -timeout $(UFFD_TIMEOUT) $(UFFD_GO_TEST_ARGS) $(UFFD_TEST_FILES)
+		NYDUS_E2E_UFFD_REQUIRE="$(UFFD_REQUIRE)" \
+		NYDUS_E2E_UFFD_EVIDENCE_DIR="$(UFFD_EVIDENCE_DIR)" \
+		$(GO_BIN) test -v -run '^TestUffd' -count $(UFFD_COUNT) -timeout $(UFFD_TIMEOUT) $(UFFD_GO_TEST_ARGS) .
 
 # Scheduled UFFD stability run: repeats the three real-fault integration
 # cases (managed copy, managed zeropage, zerocopy) UFFD_STABILITY_COUNT times
@@ -217,60 +201,59 @@ test-uffd: release
 # failure fails the target; there is no retry, so the first attempt is the
 # recorded result.
 test-uffd-stability: FEATURES=cli,uffd
-test-uffd-stability: release
+test-uffd-stability: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		NYDUSFS_UFFD_REQUIRE="$(UFFD_REQUIRE)" \
-		NYDUSFS_UFFD_EVIDENCE_DIR="$(UFFD_EVIDENCE_DIR)" \
-		$(GO_BIN) test -v -run '^TestUffdRealFault' -count $(UFFD_STABILITY_COUNT) -timeout $(UFFD_STABILITY_TIMEOUT) $(UFFD_GO_TEST_ARGS) $(UFFD_TEST_FILES)
+		NYDUS_E2E_UFFD_REQUIRE="$(UFFD_REQUIRE)" \
+		NYDUS_E2E_UFFD_EVIDENCE_DIR="$(UFFD_EVIDENCE_DIR)" \
+		$(GO_BIN) test -v -run '^TestUffdRealFault' -count $(UFFD_STABILITY_COUNT) -timeout $(UFFD_STABILITY_TIMEOUT) $(UFFD_GO_TEST_ARGS) .
 
 # Run the ublk block device test. Requires root and Linux 6.0+ with ublk_drv;
 # the test skips itself when either is missing.
 test-ublk: FEATURES=cli,ublk
-test-ublk: release
+test-ublk: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestUblkService$$' -count $(UBLK_COUNT) -timeout $(UBLK_TIMEOUT) $(UBLK_GO_TEST_ARGS) $(UBLK_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestUblkService$$' -count $(UBLK_COUNT) -timeout $(UBLK_TIMEOUT) $(UBLK_GO_TEST_ARGS) .
 
 # Run the cross-process blob cache tests. Requires root because they mount
 # several nydus FUSE instances against one shared --cache-dir and assert on the
 # cache directory plus each instance's /metrics endpoint.
-test-cache-sharing: release
+test-cache-sharing: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestCacheSharing' -count $(CACHE_SHARING_COUNT) -timeout $(CACHE_SHARING_TIMEOUT) $(CACHE_SHARING_GO_TEST_ARGS) $(CACHE_SHARING_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestCacheSharing' -count $(CACHE_SHARING_COUNT) -timeout $(CACHE_SHARING_TIMEOUT) $(CACHE_SHARING_GO_TEST_ARGS) .
 
 # Run the fanotify pre-content E2E test (requires root, Linux >= 6.15, docker
 # for the throwaway local registry). Builds nydus with the fanotify feature.
 # It boots the real daemon against a real OCI registry backend and asserts
 # byte-exact on-demand reads through the FAN_PRE_ACCESS path. Set
-# FANOTIFY_RUN_FAIL_CLOSED=1 to also run the optional C11 fail-closed case.
+# NYDUS_E2E_FANOTIFY_RUN_FAIL_CLOSED=1 to also run the optional C11 fail-closed case.
 test-fanotify: FEATURES=cli,fanotify
 test-fanotify: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
 	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
-		FANOTIFY_RUN_FAIL_CLOSED="$(FANOTIFY_RUN_FAIL_CLOSED)" \
-		FANOTIFY_RUN_STRACE="$(FANOTIFY_RUN_STRACE)" \
-		$(GO_BIN) test -v -run '^TestFanotify$$' -count $(FANOTIFY_COUNT) -timeout $(FANOTIFY_TIMEOUT) $(FANOTIFY_GO_TEST_ARGS) $(FANOTIFY_TEST_FILES)
+		NYDUS_E2E_FANOTIFY_RUN_FAIL_CLOSED="$(NYDUS_E2E_FANOTIFY_RUN_FAIL_CLOSED)" \
+		NYDUS_E2E_FANOTIFY_RUN_STRACE="$(NYDUS_E2E_FANOTIFY_RUN_STRACE)" \
+		$(GO_BIN) test -v -run '^TestFanotify$$' -count $(FANOTIFY_COUNT) -timeout $(FANOTIFY_TIMEOUT) $(FANOTIFY_GO_TEST_ARGS) .
 
 # Run the NBD E2E test (requires root, the nbd kernel module, EROFS support).
 # Builds nydus with the nbd feature. Uses a LOCAL backend (nydus build
 # --blob-dir, no docker/registry) so the test is hermetic. The daemon attaches
 # a free /dev/nbdX, mounts it as EROFS on demand, and serves cold reads
-# through the NBD socket protocol. Whole-package compilation (NBD_TEST_PKG=.)
-# because nbd_test.go reuses helpers defined in fanotify_test.go.
+# through the NBD socket protocol.
 test-nbd: FEATURES=cli,nbd
-test-nbd: release
+test-nbd: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
 	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
-		$(GO_BIN) test -v -run '^TestNbd$$' -count $(NBD_COUNT) -timeout $(NBD_TIMEOUT) $(NBD_GO_TEST_ARGS) $(NBD_TEST_PKG)
+		$(GO_BIN) test -v -run '^TestNbd$$' -count $(NBD_COUNT) -timeout $(NBD_TIMEOUT) $(NBD_GO_TEST_ARGS) .
 
 # Unified cold-start performance benchmark: FUSE vs NBD vs ublk vs fanotify
 # (plus an optional C erofsfuse column when the binary is available), all
@@ -282,39 +265,39 @@ test-nbd: release
 # individually. Requires root and fio; fanotify needs an ext4 cache dir —
 # TMPDIR is set to the repo's .test-tmp/ on the working tree filesystem.
 test-bench: FEATURES=cli,fuse,nbd,ublk,fanotify,fileio
-test-bench: release
+test-bench: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
 	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
-		NYDUSFS_RUN_BENCH=1 \
-		$(GO_BIN) test -v -run '^TestBench$$' -count $(BENCH_COUNT) -timeout $(BENCH_TIMEOUT) $(BENCH_GO_TEST_ARGS) $(BENCH_TEST_PKG)
+		NYDUS_E2E_RUN_BENCH=1 \
+		$(GO_BIN) test -v -run '^TestBench$$' -count $(BENCH_COUNT) -timeout $(BENCH_TIMEOUT) $(BENCH_GO_TEST_ARGS) .
 
 # Filesystem conformance suite. Pure Go, one mount per build config and corpus,
 # all cases in parallel; covers write rejection, dirent encoding, inode
 # identity, mmap, splice and xattr behaviour against the mounted image.
-test-fs: release
+test-fs: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestFilesystem' -parallel 32 -count $(FS_COUNT) -timeout $(FS_TIMEOUT) $(FS_GO_TEST_ARGS) $(FS_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestFilesystem' -parallel 32 -count $(FS_COUNT) -timeout $(FS_TIMEOUT) $(FS_GO_TEST_ARGS) .
 
 # Convert and validate the top Docker Hub images, pushing the converted nydus
 # images to $(TOP_IMAGES_REGISTRY) (e.g. a GHCR namespace or a local registry).
 # Requires root and credentials for the target registry. Builds nydusify on demand.
-test-top-images: release
+test-top-images: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		NYDUSFS_RUN_TOP_IMAGES=1 \
-		NYDUSFS_TOP_IMAGES_REGISTRY=$(TOP_IMAGES_REGISTRY) \
-		NYDUSFS_TOP_IMAGES_PLAIN_HTTP=$(TOP_IMAGES_PLAIN_HTTP) \
-		NYDUSFS_TOP_IMAGES_PLATFORM=$(TOP_IMAGES_PLATFORM) \
-		NYDUSFS_TOP_IMAGES_CONCURRENCY=$(TOP_IMAGES_CONCURRENCY) \
-		NYDUSFS_TOP_IMAGES_RETRIES=$(TOP_IMAGES_RETRIES) \
-		NYDUSFS_TOP_IMAGES_RETRY_INTERVAL=$(TOP_IMAGES_RETRY_INTERVAL) \
-		NYDUSFS_TOP_IMAGES_WORKDIR=$(TOP_IMAGES_WORKDIR) \
-		$(GO_BIN) test -v -run '^TestTopImages$$' -count $(TOP_IMAGES_COUNT) -timeout $(TOP_IMAGES_TIMEOUT) $(TOP_IMAGES_GO_TEST_ARGS) $(TOP_IMAGES_TEST_FILES)
+		NYDUS_E2E_RUN_TOP_IMAGES=1 \
+		NYDUS_E2E_TOP_IMAGES_REGISTRY=$(TOP_IMAGES_REGISTRY) \
+		NYDUS_E2E_TOP_IMAGES_PLAIN_HTTP=$(TOP_IMAGES_PLAIN_HTTP) \
+		NYDUS_E2E_TOP_IMAGES_PLATFORM=$(TOP_IMAGES_PLATFORM) \
+		NYDUS_E2E_TOP_IMAGES_CONCURRENCY=$(TOP_IMAGES_CONCURRENCY) \
+		NYDUS_E2E_TOP_IMAGES_RETRIES=$(TOP_IMAGES_RETRIES) \
+		NYDUS_E2E_TOP_IMAGES_RETRY_INTERVAL=$(TOP_IMAGES_RETRY_INTERVAL) \
+		NYDUS_E2E_TOP_IMAGES_WORKDIR=$(TOP_IMAGES_WORKDIR) \
+		$(GO_BIN) test -v -run '^TestTopImages$$' -count $(TOP_IMAGES_COUNT) -timeout $(TOP_IMAGES_TIMEOUT) $(TOP_IMAGES_GO_TEST_ARGS) .
 
 clean:
 	$(CARGO) clean

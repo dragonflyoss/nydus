@@ -3,26 +3,13 @@ name: Lint
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   rustfmt:

@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dragonflyoss/nydus/tests/e2e/util"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // The cross-version compatibility check builds images with one nydus binary
@@ -30,206 +30,242 @@ import (
 // built and read in separate runs through an images directory, so CI builds
 // the released version's images once and caches them.
 const (
-	compatBuilderEnv = "NYDUS_COMPAT_BUILDER"
-	compatReaderEnv  = "NYDUS_COMPAT_READER"
-	compatImagesEnv  = "NYDUS_COMPAT_IMAGES"
+	// builderEnv names the nydus binary that builds the images.
+	builderEnv = "NYDUS_E2E_COMPAT_BUILDER"
+
+	// readerEnv names the nydus binary that checks and reads them.
+	readerEnv = "NYDUS_E2E_COMPAT_READER"
+
+	// imagesDirEnv names the images directory of a separate build or read
+	// run.
+	imagesDirEnv = "NYDUS_E2E_COMPAT_IMAGES"
 )
 
 // TestCompatBuildImages builds the compatibility images into
-// $NYDUS_COMPAT_IMAGES with $NYDUS_COMPAT_BUILDER.
+// $NYDUS_E2E_COMPAT_IMAGES with $NYDUS_E2E_COMPAT_BUILDER.
 func TestCompatBuildImages(t *testing.T) {
-	dir := compatImagesDir(t)
-	builder := lookupBinFromEnv(t, compatBuilderEnv, "nydus")
-	t.Logf("builder: %s (%s)", builder, compatVersion(t, builder))
-	compatBuildImages(t, builder, dir)
+	imagesDir := skipUnlessImagesDir(t)
+	builder, err := util.LookupExecutableFromEnv(builderEnv, "nydus")
+	assert.NoError(t, err)
+
+	t.Logf("builder: %s (%s)", builder, nydusVersion(t, builder))
+	buildImages(t, builder, imagesDir)
 }
 
 // TestCompatReadImages checks and reads the compatibility images in
-// $NYDUS_COMPAT_IMAGES with $NYDUS_COMPAT_READER.
+// $NYDUS_E2E_COMPAT_IMAGES with $NYDUS_E2E_COMPAT_READER.
 func TestCompatReadImages(t *testing.T) {
-	dir := compatImagesDir(t)
-	reader := lookupBinFromEnv(t, compatReaderEnv, "nydus")
-	compatReadImages(t, reader, dir, compatLoadManifest(t, dir))
+	imagesDir := skipUnlessImagesDir(t)
+	reader, err := util.LookupExecutableFromEnv(readerEnv, "nydus")
+	assert.NoError(t, err)
+
+	readImages(t, reader, imagesDir, loadImagesManifest(t, imagesDir))
 }
 
 // TestCrossVersionCompatibility builds the compatibility images with
-// $NYDUS_COMPAT_BUILDER and checks and reads them with $NYDUS_COMPAT_READER.
+// $NYDUS_E2E_COMPAT_BUILDER and checks and reads them with $NYDUS_E2E_COMPAT_READER.
 func TestCrossVersionCompatibility(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("requires root")
-	}
-	builder := lookupBinFromEnv(t, compatBuilderEnv, "nydus")
-	reader := lookupBinFromEnv(t, compatReaderEnv, "nydus")
-	t.Logf("builder: %s (%s)", builder, compatVersion(t, builder))
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	builder, err := util.LookupExecutableFromEnv(builderEnv, "nydus")
+	assert.NoError(err)
+	reader, err := util.LookupExecutableFromEnv(readerEnv, "nydus")
+	assert.NoError(err)
+	t.Logf("builder: %s (%s)", builder, nydusVersion(t, builder))
 
-	dir := filepath.Join(t.TempDir(), "images")
-	var manifest *compatManifest
-	t.Run("Build", func(t *testing.T) {
-		manifest = compatBuildImages(t, builder, dir)
+	// Read only images of a build that went through.
+	imagesDir := filepath.Join(t.TempDir(), "images")
+	var manifest *imagesManifest
+	t.Run("build", func(t *testing.T) {
+		manifest = buildImages(t, builder, imagesDir)
 	})
 	if manifest == nil {
 		t.FailNow()
 	}
-	t.Run("Read", func(t *testing.T) {
-		compatReadImages(t, reader, dir, manifest)
+
+	t.Run("read", func(t *testing.T) {
+		readImages(t, reader, imagesDir, manifest)
 	})
 }
 
-func compatImagesDir(t *testing.T) string {
+// skipUnlessImagesDir returns the absolute images directory of a separate build
+// or read run, skipping the test without root or $NYDUS_E2E_COMPAT_IMAGES.
+func skipUnlessImagesDir(t *testing.T) string {
 	t.Helper()
-	if os.Getuid() != 0 {
-		t.Skip("requires root")
+	util.SkipUnlessRoot(t, "mounting FUSE")
+
+	imagesDir := os.Getenv(imagesDirEnv)
+	if imagesDir == "" {
+		t.Skipf("%s is not set", imagesDirEnv)
 	}
-	dir := os.Getenv(compatImagesEnv)
-	if dir == "" {
-		t.Skipf("%s is not set", compatImagesEnv)
-	}
-	dir, err := filepath.Abs(dir)
-	require.NoError(t, err)
-	return dir
+
+	imagesDir, err := filepath.Abs(imagesDir)
+	assert.NoError(t, err)
+	return imagesDir
 }
 
-// compatReadImages runs every read path of reader over the images in dir:
+// readImages runs every read path of reader over the images in imagesDir:
 // `check` of each blob and of the bootstrap, FUSE mounts through the full blob,
 // the bootstrap and the bootstrap with a chunk cache, and `export`. Each must
 // reproduce the image's tree exactly.
-func compatReadImages(t *testing.T, reader, dir string, manifest *compatManifest) {
+func readImages(t *testing.T, reader, imagesDir string, manifest *imagesManifest) {
 	t.Helper()
 	t.Logf("images built by: %s", manifest.Builder)
-	t.Logf("reader: %s (%s)", reader, compatVersion(t, reader))
-	work := t.TempDir()
+	t.Logf("reader: %s (%s)", reader, nydusVersion(t, reader))
+	workDir := t.TempDir()
 
 	for _, image := range manifest.Images {
-		image := image
 		t.Run(image.Name, func(t *testing.T) {
 			want, ok := manifest.Trees[image.Tree]
-			require.True(t, ok, "no tree %q in the manifest", image.Tree)
-			bootstrap := filepath.Join(dir, image.Bootstrap)
-			blobDir := filepath.Join(dir, image.BlobDir)
+			if !assert.True(t, ok, "no tree %q in the manifest", image.Tree) {
+				return
+			}
+
+			bootstrap := filepath.Join(imagesDir, image.Bootstrap)
+			blobDir := filepath.Join(imagesDir, image.BlobDir)
 			var blobs []string
 			for _, blob := range image.Blobs {
-				blobs = append(blobs, filepath.Join(dir, blob))
+				blobs = append(blobs, filepath.Join(imagesDir, blob))
 			}
-			mnt := filepath.Join(work, image.Name, "mnt")
+			if !assert.NotEmpty(t, blobs, "image %q lists no blobs", image.Name) {
+				return
+			}
+			mountpoint := filepath.Join(workDir, image.Name, "mnt")
+
 			// A merged bootstrap keeps each layer's link count, which a
 			// group broken by an upper layer no longer matches.
-			opts := compatCompareOptions{nlink: !image.Merged}
+			opts := compareOptions{compareNlink: !image.Merged}
 
-			t.Run("Check", func(t *testing.T) {
+			t.Run("check", func(t *testing.T) {
 				for _, blob := range blobs {
-					compatRun(t, reader, "check", "--blob", blob)
+					util.CheckImage(t, reader, "--blob", blob)
 				}
-				compatRun(t, reader, "check", "--bootstrap", bootstrap, "--blob-dir", blobDir)
+				util.CheckImage(t, reader, "--bootstrap", bootstrap, "--blob-dir", blobDir)
 			})
 
 			if !image.Merged {
-				t.Run("FuseBlob", func(t *testing.T) {
-					unmount := mountNydus(t, reader, "", blobs[0], mnt)
+				t.Run("fuse blob", func(t *testing.T) {
+					unmount := util.MountNydusBlob(t, reader, blobs[0], mountpoint)
 					defer unmount()
-					compatVerifyMount(t, mnt, want, opts)
+					verifyMount(t, mountpoint, want, opts)
 				})
 			}
 
-			t.Run("FuseBootstrap", func(t *testing.T) {
-				unmount := mountNydusBootstrap(t, reader, bootstrap, blobDir, mnt)
+			t.Run("fuse bootstrap", func(t *testing.T) {
+				unmount := util.MountNydusBootstrap(t, reader, bootstrap, blobDir, "", mountpoint)
 				defer unmount()
-				compatVerifyMount(t, mnt, want, opts)
+				verifyMount(t, mountpoint, want, opts)
 			})
 
 			if !image.Native {
-				t.Run("FuseBootstrapCache", func(t *testing.T) {
-					cacheDir := filepath.Join(work, image.Name, "cache")
-					unmount := mountNydusBootstrapWithCache(t, reader, bootstrap, blobDir, cacheDir, mnt)
+				t.Run("fuse bootstrap with cache", func(t *testing.T) {
+					cacheDir := filepath.Join(workDir, image.Name, "cache")
+					unmount := util.MountNydusBootstrap(t, reader, bootstrap, blobDir, cacheDir, mountpoint)
 					defer unmount()
-					compatVerifyMount(t, mnt, want, opts)
+					verifyMount(t, mountpoint, want, opts)
 				})
 			}
 
 			if !image.Merged {
-				t.Run("Export", func(t *testing.T) {
-					compatVerifyExport(t, reader, blobs[0], want)
+				t.Run("export", func(t *testing.T) {
+					verifyExport(t, reader, blobs[0], want)
 				})
 			}
 		})
 	}
 }
 
-// compatVerifyMount compares the tree under mnt with want, including the
+// verifyMount compares the tree under mountpoint with want, including the
 // content of every regular file.
-func compatVerifyMount(t *testing.T, mnt string, want []compatEntry, opts compatCompareOptions) {
+func verifyMount(t *testing.T, mountpoint string, want []treeEntry, opts compareOptions) {
 	t.Helper()
-	compatCompareTree(t, want, compatScanTree(t, mnt), opts)
+	compareTrees(t, want, scanTree(t, mountpoint), opts)
+
 	for _, entry := range want {
 		if len(entry.Extents) > 0 {
-			compatVerifyExtents(t, filepath.Join(mnt, string(entry.Path)), entry)
+			verifyExtents(t, filepath.Join(mountpoint, string(entry.Path)), entry)
 		}
 	}
 }
 
-// compatVerifyExtents reads the data extents of a large sparse file, and the
+// verifyExtents reads the data extents of a large sparse file, and the
 // start, middle and end of every gap between them, which must be zeros.
-func compatVerifyExtents(t *testing.T, path string, want compatEntry) {
+func verifyExtents(t *testing.T, path string, want treeEntry) {
 	t.Helper()
 	const probe = 64 << 10
+
 	f, err := os.Open(path)
-	require.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return
+	}
 	defer func() { _ = f.Close() }()
 
 	readAt := func(off, n int64) []byte {
 		buf := make([]byte, n)
 		_, err := f.ReadAt(buf, off)
-		require.NoError(t, err, "%q: read %d bytes at %d", want.Path, n, off)
+		assert.NoError(t, err, "%q: read %d bytes at %d", want.Path, n, off)
 		return buf
 	}
-	zero := make([]byte, probe)
-	gap := func(start, end int64) {
+
+	zeros := make([]byte, probe)
+	checkGap := func(start, end int64) {
 		for _, off := range []int64{start, start + (end-start)/2, end - probe} {
 			off = max(start, off)
 			n := min(int64(probe), end-off)
 			if n > 0 {
-				require.True(t, bytes.Equal(zero[:n], readAt(off, n)), "%q: hole at %d is not zeros", want.Path, off)
+				assert.True(t, bytes.Equal(zeros[:n], readAt(off, n)), "%q: hole at %d is not zeros", want.Path, off)
 			}
 		}
 	}
 
+	// Hash each extent and probe the gap before it and the one after the last.
 	pos := int64(0)
 	for _, extent := range want.Extents {
-		gap(pos, extent.Offset)
+		checkGap(pos, extent.Offset)
 		sum := sha256.Sum256(readAt(extent.Offset, extent.Length))
-		require.Equal(t, extent.SHA256, hex.EncodeToString(sum[:]), "%q: data at %d", want.Path, extent.Offset)
+		assert.Equal(t, extent.SHA256, hex.EncodeToString(sum[:]), "%q: data at %d", want.Path, extent.Offset)
 		pos = extent.Offset + extent.Length
 	}
-	gap(pos, want.Size)
+	checkGap(pos, want.Size)
 }
 
-// compatVerifyExport streams `nydus export` of blob and compares the OCI
+// verifyExport streams `nydus export` of blob and compares the OCI
 // layer with want. A tar has no sockets, no link counts and hardlinks of
 // regular files only.
-func compatVerifyExport(t *testing.T, reader, blob string, want []compatEntry) {
+func verifyExport(t *testing.T, reader, blob string, want []treeEntry) {
 	t.Helper()
 	cmd := exec.Command(reader, "export", blob)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+
 	stdout, err := cmd.StdoutPipe()
-	require.NoError(t, err)
-	require.NoError(t, cmd.Start())
-	got, scanErr := compatScanTar(stdout, want)
+	if !assert.NoError(t, err) {
+		return
+	}
+	if !assert.NoError(t, cmd.Start()) {
+		return
+	}
+
+	// Drain the pipe before waiting, so an export longer than the scan does
+	// not block on a full pipe.
+	got, scanErr := scanLayerTar(stdout, want)
 	_, _ = io.Copy(io.Discard, stdout)
-	require.NoError(t, cmd.Wait(), "nydus export %s: %s", blob, stderr.String())
-	require.NoError(t, scanErr, "reading the exported tar")
-	compatCompareTree(t, compatWithoutSockets(want), got, compatCompareOptions{tar: true})
+	assert.NoError(t, cmd.Wait(), "nydus export %s: %s", blob, stderr.String())
+	assert.NoError(t, scanErr, "reading the exported tar")
+
+	compareTrees(t, withoutSockets(want), got, compareOptions{fromTar: true})
 }
 
-// compatScanTar records the entries of a layer tarball. Large files are
+// scanLayerTar records the entries of a layer tarball. Large files are
 // checked against their extents in want as they stream past.
-func compatScanTar(r io.Reader, want []compatEntry) ([]compatEntry, error) {
-	wantByPath := map[compatBytes]compatEntry{}
+func scanLayerTar(r io.Reader, want []treeEntry) ([]treeEntry, error) {
+	wantByPath := map[byteString]treeEntry{}
 	for _, entry := range want {
 		wantByPath[entry.Path] = entry
 	}
 
-	var entries []compatEntry
-	index := map[string]int{}
+	var entries []treeEntry
+	indexByPath := map[string]int{}
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -239,27 +275,32 @@ func compatScanTar(r io.Reader, want []compatEntry) ([]compatEntry, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		rel := strings.TrimSuffix(strings.TrimPrefix(hdr.Name, "./"), "/")
 		if rel == "" || rel == "." {
 			continue
 		}
 
+		// A link entry copies the entry it points at under its own path.
 		if hdr.Typeflag == tar.TypeLink {
 			target := strings.TrimPrefix(hdr.Linkname, "./")
-			i, ok := index[target]
+			i, ok := indexByPath[target]
 			if !ok {
 				return nil, fmt.Errorf("%q: hardlink to %q, which is not in the tar before it", rel, target)
 			}
 			entry := entries[i]
-			entry.Path = compatBytes(rel)
-			index[rel] = len(entries)
+			entry.Path = byteString(rel)
+			indexByPath[rel] = len(entries)
 			entries = append(entries, entry)
+
 			continue
 		}
 
-		entry := compatEntry{
-			Path:      compatBytes(rel),
-			Mode:      uint32(hdr.Mode & 07777),
+		// Record the header and the xattrs of its PAX records, less the
+		// internal ones.
+		entry := treeEntry{
+			Path:      byteString(rel),
+			Mode:      uint32(hdr.Mode & 0o7777),
 			UID:       uint32(hdr.Uid),
 			GID:       uint32(hdr.Gid),
 			MtimeSec:  hdr.ModTime.Unix(),
@@ -267,13 +308,16 @@ func compatScanTar(r io.Reader, want []compatEntry) ([]compatEntry, error) {
 			inode:     rel,
 		}
 		for key, value := range hdr.PAXRecords {
-			if name, ok := strings.CutPrefix(key, "SCHILY.xattr."); ok && !strings.HasPrefix(name, "trusted.nydus.") {
+			if name, ok := strings.CutPrefix(key, "SCHILY.xattr."); ok && !util.IsInternalXattr(name) {
 				if entry.Xattrs == nil {
-					entry.Xattrs = map[string]compatBytes{}
+					entry.Xattrs = map[string]byteString{}
 				}
-				entry.Xattrs[name] = compatBytes(value)
+				entry.Xattrs[name] = byteString(value)
 			}
 		}
+
+		// Record what the type decides, hashing a regular file in full or
+		// checking its extents as it streams past.
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			entry.Type = "dir"
@@ -281,18 +325,18 @@ func compatScanTar(r io.Reader, want []compatEntry) ([]compatEntry, error) {
 		case tar.TypeReg:
 			entry.Type = "reg"
 			entry.Size = hdr.Size
-			if hdr.Size <= compatFullHashLimit {
+			if hdr.Size <= maxFullHashSize {
 				h := sha256.New()
 				if _, err := io.Copy(h, tr); err != nil {
 					return nil, err
 				}
 				entry.SHA256 = hex.EncodeToString(h.Sum(nil))
-			} else if err := compatVerifySparseStream(tr, wantByPath[entry.Path]); err != nil {
+			} else if err := verifySparseStream(tr, wantByPath[entry.Path]); err != nil {
 				return nil, fmt.Errorf("%q: %w", rel, err)
 			}
 		case tar.TypeSymlink:
 			entry.Type = "symlink"
-			entry.Target = compatBytes(hdr.Linkname)
+			entry.Target = byteString(hdr.Linkname)
 			entry.Size = int64(len(hdr.Linkname))
 		case tar.TypeChar, tar.TypeBlock:
 			entry.Type = "chr"
@@ -306,21 +350,24 @@ func compatScanTar(r io.Reader, want []compatEntry) ([]compatEntry, error) {
 		default:
 			return nil, fmt.Errorf("%q: unexpected tar entry type %q", rel, hdr.Typeflag)
 		}
-		index[rel] = len(entries)
+
+		indexByPath[rel] = len(entries)
 		entries = append(entries, entry)
 	}
-	compatAssignLinks(entries)
+
+	assignLinks(entries)
 	return entries, nil
 }
 
-// compatVerifySparseStream checks a large file's content as it streams: the
+// verifySparseStream checks a large file's content as it streams: the
 // extents of want hash as recorded and everything else is zeros.
-func compatVerifySparseStream(r io.Reader, want compatEntry) error {
+func verifySparseStream(r io.Reader, want treeEntry) error {
 	if want.Size == 0 || len(want.Extents) == 0 {
 		return errors.New("no extents recorded for a large file")
 	}
+
 	buf := make([]byte, 1<<20)
-	zero := make([]byte, len(buf))
+	zeros := make([]byte, len(buf))
 	extents := want.Extents
 	h := sha256.New()
 	for pos := int64(0); pos < want.Size; {
@@ -328,6 +375,9 @@ func compatVerifySparseStream(r io.Reader, want compatEntry) error {
 		if err != nil {
 			return fmt.Errorf("at %d: %w", pos, err)
 		}
+
+		// Feed the part of the buffer inside the current extent to the hash
+		// and compare the part before the next extent with zeros.
 		for data := buf[:n]; len(data) > 0; {
 			if len(extents) > 0 && pos >= extents[0].Offset {
 				end := extents[0].Offset + extents[0].Length
@@ -342,74 +392,85 @@ func compatVerifySparseStream(r io.Reader, want compatEntry) error {
 					h.Reset()
 					extents = extents[1:]
 				}
+
 				continue
 			}
+
 			next := want.Size
 			if len(extents) > 0 {
 				next = extents[0].Offset
 			}
 			m := min(int64(len(data)), next-pos)
-			if !bytes.Equal(data[:m], zero[:m]) {
+			if !bytes.Equal(data[:m], zeros[:m]) {
 				return fmt.Errorf("hole at %d is not zeros", pos)
 			}
 			pos += m
 			data = data[m:]
 		}
 	}
+
 	return nil
 }
 
-// compatCompareOptions relaxes a comparison for what a read path cannot
+// compareOptions relaxes a comparison for what a read path cannot
 // carry.
-type compatCompareOptions struct {
-	// nlink compares the link count of non-directories.
-	nlink bool
-	// tar compares an exported layer: no link counts, and hardlinks of
+type compareOptions struct {
+	// compareNlink compares the link count of non-directories.
+	compareNlink bool
+
+	// fromTar compares an exported layer: no link counts, and hardlinks of
 	// regular files only.
-	tar bool
+	fromTar bool
 }
 
-// compatCompareTree fails the test unless got has exactly the paths of want,
+// compareTrees fails the test unless got has exactly the paths of want,
 // each with the same attributes and content.
-func compatCompareTree(t *testing.T, want, got []compatEntry, opts compatCompareOptions) {
+func compareTrees(t *testing.T, want, got []treeEntry, opts compareOptions) {
 	t.Helper()
 	const maxReported = 20
-	normalize := func(entry compatEntry) compatEntry {
+
+	normalize := func(entry treeEntry) treeEntry {
 		entry.Extents = nil
 		entry.inode = ""
-		if !opts.nlink || opts.tar {
+		if !opts.compareNlink || opts.fromTar {
 			entry.Nlink = 0
 		}
-		if opts.tar && entry.Type != "reg" {
+		if opts.fromTar && entry.Type != "reg" {
 			entry.Link = ""
 		}
 		return entry
 	}
 
-	gotByPath := make(map[compatBytes]compatEntry, len(got))
+	// Match every wanted path and report the first differences in full.
+	gotByPath := make(map[byteString]treeEntry, len(got))
 	for _, entry := range got {
 		gotByPath[entry.Path] = entry
 	}
+
 	var missing, extra []string
-	differ := 0
-	for _, w := range want {
-		g, ok := gotByPath[w.Path]
+	differing := 0
+	for _, wantEntry := range want {
+		gotEntry, ok := gotByPath[wantEntry.Path]
 		if !ok {
-			missing = append(missing, strconv.Quote(string(w.Path)))
+			missing = append(missing, strconv.Quote(string(wantEntry.Path)))
 			continue
 		}
-		delete(gotByPath, w.Path)
-		if w, g := normalize(w), normalize(g); !reflect.DeepEqual(w, g) {
-			differ++
-			if differ <= maxReported {
-				assert.Equal(t, w, g, "%q differs", w.Path)
+		delete(gotByPath, wantEntry.Path)
+
+		if wantEntry, gotEntry := normalize(wantEntry), normalize(gotEntry); !reflect.DeepEqual(wantEntry, gotEntry) {
+			differing++
+			if differing <= maxReported {
+				assert.Equal(t, wantEntry, gotEntry, "%q differs", wantEntry.Path)
 			}
 		}
 	}
+
 	for path := range gotByPath {
 		extra = append(extra, strconv.Quote(string(path)))
 	}
 
+	// Summarize, then stop: the extent checks that follow a mismatching
+	// tree would only repeat it.
 	report := func(what string, paths []string) {
 		if len(paths) > 0 {
 			shown := paths[:min(len(paths), maxReported)]
@@ -418,9 +479,10 @@ func compatCompareTree(t *testing.T, want, got []compatEntry, opts compatCompare
 	}
 	report("missing", missing)
 	report("unexpected", extra)
-	if differ > 0 {
-		t.Errorf("%d entries differ", differ)
+	if differing > 0 {
+		t.Errorf("%d entries differ", differing)
 	}
+
 	if t.Failed() {
 		t.FailNow()
 	}

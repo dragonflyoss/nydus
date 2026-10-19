@@ -15,9 +15,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// errTarUnsupported marks an archive whose reference depends on the host
+// errNoReference marks an archive whose reference depends on the host
 // filesystem's xattr capacity, so it cannot serve as an oracle.
-var errTarUnsupported = errors.New("reference depends on the host filesystem")
+var errNoReference = errors.New("reference depends on the host filesystem")
 
 // typeGNUDumpDir is GNU's incremental directory entry, which Go reads but
 // does not name.
@@ -31,7 +31,9 @@ const typeGNUDumpDir = 'D'
 // get the zero mtime the builder gives them. It returns Apply's error for an
 // archive containerd rejects.
 func extractReference(data []byte, dir string) error {
-	explicit := map[string]bool{}
+	// Normalize the member types and record the directories the archive
+	// names, so the parents Apply creates implicitly can be told apart.
+	explicitDirs := map[string]bool{}
 	normalize := func(hdr *tar.Header) (bool, error) {
 		switch hdr.Typeflag {
 		case tar.TypeGNUSparse, tar.TypeCont:
@@ -39,32 +41,38 @@ func extractReference(data []byte, dir string) error {
 		case typeGNUDumpDir:
 			hdr.Typeflag = tar.TypeDir
 		}
+
+		// Apply resolves symlinks in the parent only, never the member.
 		if hdr.Typeflag == tar.TypeDir {
-			// Apply resolves symlinks in the parent only, never the member.
 			parent, base := filepath.Split(hdr.Name)
 			if resolved, err := fs.RootPath(dir, parent); err == nil {
-				explicit[filepath.Join(resolved, base)] = true
+				explicitDirs[filepath.Join(resolved, base)] = true
 			}
 		}
+
 		return true, nil
 	}
 	keepWhiteouts := func(*tar.Header, string) (bool, error) { return true, nil }
 
+	// Apply the archive. Only the xattr capacity of the host filesystem is
+	// host dependent.
 	_, err := archive.Apply(context.Background(), dir, bytes.NewReader(data),
 		archive.WithFilter(normalize), archive.WithConvertWhiteout(keepWhiteouts))
 	if err != nil {
-		// Only the xattr capacity of the host filesystem is host dependent.
 		if errors.Is(err, unix.ENOSPC) && strings.Contains(err.Error(), "failed to setxattr") {
-			return fmt.Errorf("%w: %v", errTarUnsupported, err)
+			return fmt.Errorf("%w: %v", errNoReference, err)
 		}
+
 		return err
 	}
 
+	// Give the implicit parents the zero mtime the builder gives them.
 	zero := []unix.Timespec{{}, {}}
 	return filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || !entry.IsDir() || path == dir || explicit[path] {
+		if err != nil || !entry.IsDir() || path == dir || explicitDirs[path] {
 			return err
 		}
+
 		return unix.UtimesNanoAt(unix.AT_FDCWD, path, zero, unix.AT_SYMLINK_NOFOLLOW)
 	})
 }

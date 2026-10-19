@@ -4,252 +4,187 @@ package e2e
 // processes are pointed at one --cache-dir, which is the state they contend
 // on, and the assertions read back the cache directory and each process's
 // Prometheus metrics.
-//
-// Some assertions below deliberately pin *current* behaviour that is known to
-// be wrong; each one names the fix that will flip it. That keeps this file
-// mergeable on its own and makes every later fix prove itself by turning a red
-// assertion green.
 
 import (
-	"bufio"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
+	"github.com/dragonflyoss/nydus/tests/e2e/util"
+	"github.com/opencontainers/go-digest"
+	"github.com/stretchr/testify/assert"
 )
 
-// Processes contending on one cache directory. Four is enough to show
-// duplicate work without making the suite heavy.
-const coreProcs = 4
+// contendingProcesses is how many processes contend on one cache directory.
+// Four is enough to show duplicate work without making the suite heavy.
+const contendingProcesses = 4
 
-const coreChunkSize = 4096
+// fixtureChunkSize is the chunk size the fixture images are built with.
+const fixtureChunkSize = 4096
 
-// coreMount is a running `nydus fuse` process together with the Unix
+// fuseMount is a running `nydus fuse` process together with the Unix
 // socket its metrics are served on.
-type coreMount struct {
-	mnt  string
-	sock string
-	cmd  *exec.Cmd
+type fuseMount struct {
+	// mountpoint is where the image is mounted.
+	mountpoint string
+
+	// apiserver is the Unix socket the daemon serves metrics on.
+	apiserver string
+
+	// cmd is the running process.
+	cmd *exec.Cmd
 }
 
-type coreMountOption struct {
+// fuseMountOption describes one `nydus fuse` process to start.
+type fuseMountOption struct {
+	// bootstrap is the image to serve.
 	bootstrap string
-	blobDir   string
-	cacheDir  string
-	mnt       string
-	prefetch  bool
-	// fullPrefetch warms every blob rather than only the priority ones. Plain
+
+	// blobDir holds the image's blobs.
+	blobDir string
+
+	// cacheDir is the shared chunk cache.
+	cacheDir string
+
+	// mountpoint is where to mount the image.
+	mountpoint string
+
+	// prefetch turns on background prefetch.
+	prefetch bool
+
+	// prefetchAll warms every blob rather than only the priority ones. Plain
 	// merged images have no priority blobs, so without this a prefetching
 	// mount does no work at all.
-	fullPrefetch bool
+	prefetchAll bool
 }
 
-// writePrefetchConfig renders the storage config needed to turn on all-blob
-// prefetch, which has no command line flag of its own.
-func writePrefetchConfig(t *testing.T, path, blobDir, cacheDir string) {
-	t.Helper()
-	config := fmt.Sprintf(`backend:
-  type: local
-  config:
-    dir: %s
-storage:
-  dir: %s
-prefetch:
-  scope: all
-  concurrent_blob_count: 4
-`, blobDir, cacheDir)
-	require.NoError(t, os.WriteFile(path, []byte(config), 0644))
-}
-
-// startCoreMount mounts an image and waits until both the mountpoint and
+// startFuseMount mounts an image and waits until both the mountpoint and
 // the metrics endpoint answer.
-func startCoreMount(t *testing.T, nydusBin string, opt coreMountOption) *coreMount {
+func startFuseMount(t *testing.T, option fuseMountOption) *fuseMount {
 	t.Helper()
-
-	_ = exec.Command("fusermount", "-u", opt.mnt).Run()
-	require.NoError(t, os.MkdirAll(opt.mnt, 0755))
-	require.NoError(t, os.MkdirAll(opt.cacheDir, 0755))
-
-	// Keep the socket out of the test's temp dir: Unix socket paths are capped
-	// near 108 bytes and TMPDIR is redirected into the repo for some targets.
-	sockDir, err := os.MkdirTemp("", "nydus-acc")
-	require.NoError(t, err)
-	sock := filepath.Join(sockDir, "api.sock")
-	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	util.Unmount(option.mountpoint)
+	assert.NoError(t, os.MkdirAll(option.mountpoint, 0o755))
+	assert.NoError(t, os.MkdirAll(option.cacheDir, 0o755))
+	dir := t.TempDir()
+	apiserver := filepath.Join(dir, "api.sock")
 
 	args := []string{
 		"fuse",
-		"--bootstrap", opt.bootstrap,
-		"--blob-dir", opt.blobDir,
-		"--cache-dir", opt.cacheDir,
-		"--mountpoint", opt.mnt,
-		"--apiserver", "unix://" + sock,
+		"--bootstrap", option.bootstrap,
+		"--blob-dir", option.blobDir,
+		"--cache-dir", option.cacheDir,
+		"--mountpoint", option.mountpoint,
+		"--apiserver", "unix://" + apiserver,
 	}
-	if opt.prefetch {
+	if option.prefetch {
 		args = append(args, "--prefetch")
 	}
-	if opt.fullPrefetch {
-		configPath := filepath.Join(sockDir, "storage.yaml")
-		writePrefetchConfig(t, configPath, opt.blobDir, opt.cacheDir)
+
+	// All-blob prefetch has no command line flag of its own, so it needs a
+	// storage config.
+	if option.prefetchAll {
+		configPath := filepath.Join(dir, "storage.yaml")
+		util.WriteLocalBackendConfig(t, configPath, option.blobDir, option.cacheDir, "all")
 		args = append(args, "--config", configPath)
 	}
 
+	// Start the process and wait for the mount and the metrics endpoint. A
+	// daemon that never answers stops the test here, before its readers
+	// block on the mount for a minute and fail for the wrong reason.
 	cmd := exec.Command(nydusBin, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-
-	m := &coreMount{mnt: opt.mnt, sock: sock, cmd: cmd}
-	t.Cleanup(m.stop)
-
-	require.Eventually(t, func() bool {
-		return isMountpoint(opt.mnt)
-	}, 30*time.Second, 100*time.Millisecond, "nydus fuse failed to mount %s", opt.mnt)
-	require.Eventually(t, func() bool {
-		_, err := m.tryMetrics()
-		return err == nil
-	}, 30*time.Second, 100*time.Millisecond, "metrics endpoint %s never came up", sock)
-
-	return m
-}
-
-func (m *coreMount) stop() {
-	_ = exec.Command("fusermount", "-u", m.mnt).Run()
-	if m.cmd.Process == nil {
-		return
+	t.Cleanup(util.MountFuse(t, cmd, option.mountpoint, "nydus fuse"))
+	util.WaitAPIServer(t, apiserver)
+	if t.Failed() {
+		t.FailNow()
 	}
-	_ = m.cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() { _, _ = m.cmd.Process.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		_ = m.cmd.Process.Kill()
-	}
+
+	return &fuseMount{mountpoint: option.mountpoint, apiserver: apiserver, cmd: cmd}
 }
 
 // kill terminates the process without giving it a chance to clean up, standing
 // in for a crash.
-func (m *coreMount) kill(t *testing.T) {
+func (m *fuseMount) kill(t *testing.T) {
 	t.Helper()
-	require.NotNil(t, m.cmd.Process)
-	require.NoError(t, m.cmd.Process.Kill())
+	if !assert.NotNil(t, m.cmd.Process) {
+		return
+	}
+
+	assert.NoError(t, m.cmd.Process.Kill())
 	_, _ = m.cmd.Process.Wait()
-	_ = exec.Command("fusermount", "-u", m.mnt).Run()
+	util.Unmount(m.mountpoint)
 }
 
-func (m *coreMount) tryMetrics() (map[string]float64, error) {
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", m.sock)
-			},
-		},
-	}
-	resp, err := client.Get("http://localhost/metrics")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metrics returned %s", resp.Status)
-	}
-	return parsePrometheusText(resp.Body)
-}
-
-func (m *coreMount) metrics(t *testing.T) map[string]float64 {
+// fills returns how many chunk groups the process fetched from the backend
+// for reads of kind, `ondemand` or `prefetch`.
+func (m *fuseMount) fills(t *testing.T, kind string) float64 {
 	t.Helper()
-	values, err := m.tryMetrics()
-	require.NoError(t, err)
-	return values
+	return util.SumMetric(util.FetchMetrics(t, m.apiserver), "nydus_read_chunk_group_total", `type="`+kind+`"`, `storage="backend"`)
 }
 
-// parsePrometheusText reads the exposition format into a name-to-value map.
-// Labeled series keep their `{...}` suffix in the key.
-func parsePrometheusText(r io.Reader) (map[string]float64, error) {
-	values := make(map[string]float64)
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		idx := strings.LastIndexByte(line, ' ')
-		if idx < 0 {
-			continue
-		}
-		value, err := strconv.ParseFloat(line[idx+1:], 64)
-		if err != nil {
-			continue
-		}
-		values[line[:idx]] = value
-	}
-	return values, scanner.Err()
-}
-
-// coreFixture is two images sharing one blob, so the tests can tell
+// sharedBlobFixture is two images sharing one blob, so the tests can tell
 // per-image cache state apart from per-blob cache state.
 //
 //	image1 = blobA + blobB
 //	image2 =         blobB + blobC
-type coreFixture struct {
-	blobDir    string
-	blobA      string
-	blobB      string
-	blobC      string
+type sharedBlobFixture struct {
+	// blobDir holds blobA, blobB and blobC.
+	blobDir string
+
+	// blobA is the blob holding file1.bin.
+	blobA string
+
+	// blobB is the blob holding shared.bin, referenced by both images.
+	blobB string
+
+	// blobC is the blob holding file3.bin.
+	blobC string
+
+	// bootstrap1 is image1, blobA merged with blobB.
 	bootstrap1 string
+
+	// bootstrap2 is image2, blobB merged with blobC.
 	bootstrap2 string
-	// file1 lives in blobA, shared lives in blobB, file3 lives in blobC.
+
+	// files is the content of every file by name: file1.bin lives in blobA,
+	// shared.bin in blobB, file3.bin in blobC.
 	files map[string][]byte
 }
 
-func buildCoreFixture(t *testing.T, nydusBin, root string) *coreFixture {
+// newSharedBlobFixture builds the three blobs and the two merged images under
+// workDir.
+func newSharedBlobFixture(t *testing.T, workDir string) *sharedBlobFixture {
 	t.Helper()
 
-	corpusA := filepath.Join(root, "corpusA")
-	corpusB := filepath.Join(root, "corpusB")
-	corpusC := filepath.Join(root, "corpusC")
-	blobDir := filepath.Join(root, "blobs")
-
+	// Deterministic content keeps blob digests, and therefore cache keys,
+	// reproducible across runs. shared.bin is large enough to span several
+	// chunk groups: with only one chunk group per blob a per-process refetch
+	// would barely register in the fill counter.
 	files := map[string][]byte{
-		"file1.bin": deterministicBytes(1<<20+4096, 1),
-		// Large enough to span several chunk groups: with only one chunk group per blob a
-		// per-process refetch would barely register in the fill counter.
-		"shared.bin": deterministicBytes(12<<20, 2),
-		"file3.bin":  deterministicBytes(1<<20+2048, 3),
+		"file1.bin":  util.RandomBytes(1<<20+4096, 1),
+		"shared.bin": util.RandomBytes(12<<20, 2),
+		"file3.bin":  util.RandomBytes(1<<20+2048, 3),
 	}
-	writeCorpus(t, corpusA, map[string][]byte{"file1.bin": files["file1.bin"]})
-	writeCorpus(t, corpusB, map[string][]byte{"shared.bin": files["shared.bin"]})
-	writeCorpus(t, corpusC, map[string][]byte{"file3.bin": files["file3.bin"]})
+	corpus.NewCorpus(t, filepath.Join(workDir, "corpusA")).CreateFile(t, "file1.bin", files["file1.bin"])
+	corpus.NewCorpus(t, filepath.Join(workDir, "corpusB")).CreateFile(t, "shared.bin", files["shared.bin"])
+	corpus.NewCorpus(t, filepath.Join(workDir, "corpusC")).CreateFile(t, "file3.bin", files["file3.bin"])
 
 	// Distinct file names across the corpora keep overlay merge from shadowing
 	// anything, so every blob stays reachable in the merged images.
-	blobA := buildNydusFSImageToDir(t, nydusBin, "", blobDir, corpusA, coreChunkSize)
-	blobB := buildNydusFSImageToDir(t, nydusBin, "", blobDir, corpusB, coreChunkSize)
-	blobC := buildNydusFSImageToDir(t, nydusBin, "", blobDir, corpusC, coreChunkSize)
+	blobDir := filepath.Join(workDir, "blobs")
+	blobA := util.BuildImage(t, nydusBin, "", blobDir, filepath.Join(workDir, "corpusA"), fixtureChunkSize)
+	blobB := util.BuildImage(t, nydusBin, "", blobDir, filepath.Join(workDir, "corpusB"), fixtureChunkSize)
+	blobC := util.BuildImage(t, nydusBin, "", blobDir, filepath.Join(workDir, "corpusC"), fixtureChunkSize)
+	bootstrap1 := filepath.Join(workDir, "image1.boot")
+	bootstrap2 := filepath.Join(workDir, "image2.boot")
+	util.MergeBootstrap(t, nydusBin, bootstrap1, blobA, blobB)
+	util.MergeBootstrap(t, nydusBin, bootstrap2, blobB, blobC)
 
-	bootstrap1 := filepath.Join(root, "image1.bootstrap")
-	bootstrap2 := filepath.Join(root, "image2.bootstrap")
-	mergeNydusBootstrap(t, nydusBin, bootstrap1, blobA, blobB)
-	mergeNydusBootstrap(t, nydusBin, bootstrap2, blobB, blobC)
-
-	return &coreFixture{
+	return &sharedBlobFixture{
 		blobDir:    blobDir,
 		blobA:      blobA,
 		blobB:      blobB,
@@ -260,416 +195,351 @@ func buildCoreFixture(t *testing.T, nydusBin, root string) *coreFixture {
 	}
 }
 
-func writeCorpus(t *testing.T, dir string, files map[string][]byte) {
-	t.Helper()
-	require.NoError(t, os.MkdirAll(dir, 0755))
-	for name, data := range files {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0644))
-	}
-}
-
-// deterministicBytes builds incompressible-enough content that is stable across
-// runs, so blob digests (and therefore cache keys) stay reproducible.
-func deterministicBytes(size int, seed uint64) []byte {
-	out := make([]byte, size)
-	state := seed*6364136223846793005 + 1442695040888963407
-	for i := range out {
-		state = state*6364136223846793005 + 1442695040888963407
-		out[i] = byte(state >> 33)
-	}
-	return out
-}
-
-func sha256Bytes(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// cacheFileInode returns the inode of a cache sidecar, identifying the file
-// across processes.
-func cacheFileInode(t *testing.T, path string) uint64 {
-	t.Helper()
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok, "unexpected stat type for %s", path)
-	return stat.Ino
-}
-
-func cacheEntries(t *testing.T, cacheDir, suffix string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(cacheDir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	require.NoError(t, err)
-	var out []string
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), suffix) {
-			out = append(out, filepath.Join(cacheDir, entry.Name()))
-		}
-	}
-	return out
-}
-
 // readConcurrently has every mount read the same relative path at once, so the
 // processes genuinely race on a cold cache instead of warming it for each
-// other in turn.
-func readConcurrently(t *testing.T, mounts []*coreMount, rel string) []string {
+// other in turn, and returns the digest each mount read.
+func readConcurrently(t *testing.T, mounts []*fuseMount, name string) []string {
 	t.Helper()
-
 	start := make(chan struct{})
 	digests := make([]string, len(mounts))
 	errs := make([]error, len(mounts))
 
 	var wg sync.WaitGroup
 	for i, m := range mounts {
-		wg.Add(1)
-		go func(i int, m *coreMount) {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
-			data, err := os.ReadFile(filepath.Join(m.mnt, rel))
+			data, err := os.ReadFile(filepath.Join(m.mountpoint, name))
 			if err != nil {
 				errs[i] = err
 				return
 			}
-			digests[i] = sha256Bytes(data)
-		}(i, m)
+			digests[i] = digest.FromBytes(data).Encoded()
+		})
 	}
-
 	close(start)
 	wg.Wait()
 
 	for i, err := range errs {
-		require.NoError(t, err, "mount %d failed to read %s", i, rel)
+		assert.NoError(t, err, "mount %d failed to read %s", i, name)
 	}
+
 	return digests
 }
 
-func skipUnlessRoot(t *testing.T) {
-	t.Helper()
-	if os.Getuid() != 0 {
-		t.Skip("requires root to mount FUSE")
-	}
-}
-
-// sumMetric adds one counter across every mount, which is how the duplicate
-// work of processes sharing a cache directory shows up.
-func sumMetric(t *testing.T, mounts []*coreMount, name string) float64 {
+// sumFills adds the backend fills of kind across every mount, which is how
+// the duplicate work of processes sharing a cache directory shows up.
+func sumFills(t *testing.T, mounts []*fuseMount, kind string) float64 {
 	t.Helper()
 	var total float64
 	for _, m := range mounts {
-		total += m.metrics(t)[name]
+		total += m.fills(t, kind)
 	}
+
 	return total
 }
 
-// TestCoreConcurrentColdReadIsConsistent covers the baseline guarantee:
-// however much duplicate work the processes do, they all observe the same
-// bytes and the cache never serves a torn chunk group.
+// waitFillsSettled polls the backend fills of kind summed across every mount
+// until they are non-zero and unchanged across three consecutive samples,
+// like util.WaitMetricSettled does for one daemon, and returns the sum. The
+// per-blob prefetch lock leaves every mount but the winner at zero, so no
+// single daemon's metric can stand in for the sum.
+func waitFillsSettled(t *testing.T, mounts []*fuseMount, kind string) float64 {
+	t.Helper()
+	return util.WaitSettled(t, kind+" fills", func() (float64, error) { return sumFills(t, mounts, kind), nil })
+}
+
+// TestCacheSharingConcurrentColdReadIsConsistent covers the baseline
+// guarantee: however much duplicate work the processes do, they all observe
+// the same bytes and the cache never serves a torn chunk group.
 func TestCacheSharingConcurrentColdReadIsConsistent(t *testing.T) {
-	skipUnlessRoot(t)
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	workDir := t.TempDir()
+	fixture := newSharedBlobFixture(t, workDir)
+	cacheDir := filepath.Join(workDir, "cache")
 
-	root := t.TempDir()
-	nydusBin := mustLookupExecutable(t, "nydus")
-	fixture := buildCoreFixture(t, nydusBin, root)
-	cacheDir := filepath.Join(root, "cache")
-
-	mounts := make([]*coreMount, coreProcs)
+	// Start every process on one cold cache.
+	mounts := make([]*fuseMount, contendingProcesses)
 	for i := range mounts {
-		mounts[i] = startCoreMount(t, nydusBin, coreMountOption{
-			bootstrap: fixture.bootstrap1,
-			blobDir:   fixture.blobDir,
-			cacheDir:  cacheDir,
-			mnt:       filepath.Join(root, fmt.Sprintf("mnt%d", i)),
+		mounts[i] = startFuseMount(t, fuseMountOption{
+			bootstrap:  fixture.bootstrap1,
+			blobDir:    fixture.blobDir,
+			cacheDir:   cacheDir,
+			mountpoint: filepath.Join(workDir, fmt.Sprintf("mnt%d", i)),
 		})
 	}
 
+	// Every process must read the same bytes.
 	digests := readConcurrently(t, mounts, "shared.bin")
-	want := sha256Bytes(fixture.files["shared.bin"])
+	want := digest.FromBytes(fixture.files["shared.bin"]).Encoded()
 	for i, got := range digests {
-		require.Equal(t, want, got, "mount %d read different bytes", i)
+		assert.Equal(t, want, got, "mount %d read different bytes", i)
 	}
 }
 
-// TestCoreConcurrentColdReadAmplification measures how much duplicate
+// TestCacheSharingConcurrentColdReadAmplification measures how much duplicate
 // fetching the processes do, calibrated against a single process doing the
 // same read so the assertion does not depend on the blob's chunk group count.
 func TestCacheSharingConcurrentColdReadAmplification(t *testing.T) {
-	skipUnlessRoot(t)
-
-	root := t.TempDir()
-	nydusBin := mustLookupExecutable(t, "nydus")
-	fixture := buildCoreFixture(t, nydusBin, root)
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	workDir := t.TempDir()
+	fixture := newSharedBlobFixture(t, workDir)
 
 	// Baseline: one process filling a cold cache on its own.
-	soloCache := filepath.Join(root, "cache-solo")
-	solo := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap: fixture.bootstrap1,
-		blobDir:   fixture.blobDir,
-		cacheDir:  soloCache,
-		mnt:       filepath.Join(root, "mnt-solo"),
+	soloCacheDir := filepath.Join(workDir, "cache-solo")
+	solo := startFuseMount(t, fuseMountOption{
+		bootstrap:  fixture.bootstrap1,
+		blobDir:    fixture.blobDir,
+		cacheDir:   soloCacheDir,
+		mountpoint: filepath.Join(workDir, "mnt-solo"),
 	})
-	readConcurrently(t, []*coreMount{solo}, "shared.bin")
-	soloFill := solo.metrics(t)[`nydus_read_chunk_group_total{backend="local",protocol="",storage="backend",type="ondemand"}`]
-	require.Greater(t, soloFill, 1.0,
+	readConcurrently(t, []*fuseMount{solo}, "shared.bin")
+	soloFill := solo.fills(t, "ondemand")
+	assert.Greater(soloFill, 1.0,
 		"the read must span several chunk groups for the comparison below to mean anything")
 
 	// Contended: the same read, from a cold cache, by several processes.
-	sharedCache := filepath.Join(root, "cache-shared")
-	mounts := make([]*coreMount, coreProcs)
+	sharedCacheDir := filepath.Join(workDir, "cache-shared")
+	mounts := make([]*fuseMount, contendingProcesses)
 	for i := range mounts {
-		mounts[i] = startCoreMount(t, nydusBin, coreMountOption{
-			bootstrap: fixture.bootstrap1,
-			blobDir:   fixture.blobDir,
-			cacheDir:  sharedCache,
-			mnt:       filepath.Join(root, fmt.Sprintf("mnt-shared%d", i)),
+		mounts[i] = startFuseMount(t, fuseMountOption{
+			bootstrap:  fixture.bootstrap1,
+			blobDir:    fixture.blobDir,
+			cacheDir:   sharedCacheDir,
+			mountpoint: filepath.Join(workDir, fmt.Sprintf("mnt-shared%d", i)),
 		})
 	}
 	readConcurrently(t, mounts, "shared.bin")
-	totalFill := sumMetric(t, mounts, `nydus_read_chunk_group_total{backend="local",protocol="",storage="backend",type="ondemand"}`)
-
+	totalFill := sumFills(t, mounts, "ondemand")
 	t.Logf("cold read amplification: solo=%.0f chunk groups, %d processes=%.0f chunk groups (%.2fx)",
-		soloFill, coreProcs, totalFill, totalFill/soloFill)
+		soloFill, contendingProcesses, totalFill, totalFill/soloFill)
 
-	// Whoever wins a chunk group's fetch right publishes it, and the processes that
-	// waited find it ready instead of fetching it again, so the total should
-	// match a single process doing the same read. One chunk group of slack covers a
-	// filesystem that cannot provide the lock and falls back to refetching.
-	require.LessOrEqual(t, totalFill, soloFill+1,
+	// Whoever wins a chunk group's fetch right publishes it, and the processes
+	// that waited find it ready instead of fetching it again, so the total
+	// should match a single process doing the same read. One chunk group of
+	// slack covers a filesystem that cannot provide the lock and falls back to
+	// refetching.
+	assert.LessOrEqual(totalFill, soloFill+1,
 		"concurrent cold reads should not refetch the same chunk groups per process")
 }
 
-// TestCoreConcurrentPrefetchDeduplicates checks the path that already has
-// cross-process exclusion: the per-blob prefetch lock should keep all but one
-// process from streaming the blob.
+// TestCacheSharingConcurrentPrefetchDeduplicates checks the path that already
+// has cross-process exclusion: the per-blob prefetch lock should keep all but
+// one process from streaming the blob.
 func TestCacheSharingConcurrentPrefetchDeduplicates(t *testing.T) {
-	skipUnlessRoot(t)
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	workDir := t.TempDir()
+	fixture := newSharedBlobFixture(t, workDir)
 
-	root := t.TempDir()
-	nydusBin := mustLookupExecutable(t, "nydus")
-	fixture := buildCoreFixture(t, nydusBin, root)
-
-	soloCache := filepath.Join(root, "cache-solo")
-	solo := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap:    fixture.bootstrap1,
-		blobDir:      fixture.blobDir,
-		cacheDir:     soloCache,
-		mnt:          filepath.Join(root, "mnt-solo"),
-		prefetch:     true,
-		fullPrefetch: true,
+	// Baseline: one process prefetching a cold cache on its own. Prefetch runs
+	// in the background, so wait for it to settle rather than sampling a
+	// partial total.
+	soloCacheDir := filepath.Join(workDir, "cache-solo")
+	solo := startFuseMount(t, fuseMountOption{
+		bootstrap:   fixture.bootstrap1,
+		blobDir:     fixture.blobDir,
+		cacheDir:    soloCacheDir,
+		mountpoint:  filepath.Join(workDir, "mnt-solo"),
+		prefetch:    true,
+		prefetchAll: true,
 	})
-	// Prefetch runs in the background, so wait for it to settle rather than
-	// sampling a partial total.
-	var soloFill float64
-	require.Eventually(t, func() bool {
-		current := solo.metrics(t)[`nydus_read_chunk_group_total{backend="local",protocol="",storage="backend",type="prefetch"}`]
-		settled := current == soloFill && current > 0
-		soloFill = current
-		return settled
-	}, 60*time.Second, 500*time.Millisecond, "solo prefetch never settled")
+	soloFill := util.WaitMetricSettled(t, solo.apiserver, "nydus_read_chunk_group_total", `type="prefetch"`, `storage="backend"`)
 
-	sharedCache := filepath.Join(root, "cache-shared")
-	mounts := make([]*coreMount, coreProcs)
+	// Contended: several processes prefetching one cold cache.
+	sharedCacheDir := filepath.Join(workDir, "cache-shared")
+	mounts := make([]*fuseMount, contendingProcesses)
 	for i := range mounts {
-		mounts[i] = startCoreMount(t, nydusBin, coreMountOption{
-			bootstrap:    fixture.bootstrap1,
-			blobDir:      fixture.blobDir,
-			cacheDir:     sharedCache,
-			mnt:          filepath.Join(root, fmt.Sprintf("mnt-shared%d", i)),
-			prefetch:     true,
-			fullPrefetch: true,
+		mounts[i] = startFuseMount(t, fuseMountOption{
+			bootstrap:   fixture.bootstrap1,
+			blobDir:     fixture.blobDir,
+			cacheDir:    sharedCacheDir,
+			mountpoint:  filepath.Join(workDir, fmt.Sprintf("mnt-shared%d", i)),
+			prefetch:    true,
+			prefetchAll: true,
 		})
 	}
-
-	var totalFill float64
-	require.Eventually(t, func() bool {
-		current := sumMetric(t, mounts, `nydus_read_chunk_group_total{backend="local",protocol="",storage="backend",type="prefetch"}`)
-		settled := current == totalFill && current > 0
-		totalFill = current
-		return settled
-	}, 60*time.Second, 500*time.Millisecond, "shared prefetch never settled")
+	totalFill := waitFillsSettled(t, mounts, "prefetch")
 
 	t.Logf("prefetch amplification: solo=%.0f chunk groups, %d processes=%.0f chunk groups",
-		soloFill, coreProcs, totalFill)
-	require.LessOrEqual(t, totalFill, soloFill*1.5,
+		soloFill, contendingProcesses, totalFill)
+	assert.LessOrEqual(totalFill, soloFill*1.5,
 		"the per-blob prefetch lock should keep all but one process from refetching")
 }
 
-// TestCoreSharedBlobUsesOneCacheEntry checks that two images referencing
-// the same blob converge on one set of cache files, which is what makes a node
-// running many images cheap.
+// TestCacheSharingSharedBlobUsesOneCacheEntry checks that two images
+// referencing the same blob converge on one set of cache files, which is what
+// makes a node running many images cheap.
 func TestCacheSharingSharedBlobUsesOneCacheEntry(t *testing.T) {
-	skipUnlessRoot(t)
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	workDir := t.TempDir()
+	fixture := newSharedBlobFixture(t, workDir)
+	cacheDir := filepath.Join(workDir, "cache")
 
-	root := t.TempDir()
-	nydusBin := mustLookupExecutable(t, "nydus")
-	fixture := buildCoreFixture(t, nydusBin, root)
-	cacheDir := filepath.Join(root, "cache")
-
-	image1 := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap: fixture.bootstrap1,
-		blobDir:   fixture.blobDir,
-		cacheDir:  cacheDir,
-		mnt:       filepath.Join(root, "mnt1"),
+	// Serve both images from one cache.
+	image1 := startFuseMount(t, fuseMountOption{
+		bootstrap:  fixture.bootstrap1,
+		blobDir:    fixture.blobDir,
+		cacheDir:   cacheDir,
+		mountpoint: filepath.Join(workDir, "mnt1"),
 	})
-	image2 := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap: fixture.bootstrap2,
-		blobDir:   fixture.blobDir,
-		cacheDir:  cacheDir,
-		mnt:       filepath.Join(root, "mnt2"),
+	image2 := startFuseMount(t, fuseMountOption{
+		bootstrap:  fixture.bootstrap2,
+		blobDir:    fixture.blobDir,
+		cacheDir:   cacheDir,
+		mountpoint: filepath.Join(workDir, "mnt2"),
 	})
 
 	// Touch every blob: file1 only exists in image1, file3 only in image2, and
 	// shared.bin is served by the same blob in both.
-	require.Equal(t, sha256Bytes(fixture.files["file1.bin"]),
-		sha256File(t, filepath.Join(image1.mnt, "file1.bin")))
-	require.Equal(t, sha256Bytes(fixture.files["file3.bin"]),
-		sha256File(t, filepath.Join(image2.mnt, "file3.bin")))
-
-	digests := readConcurrently(t, []*coreMount{image1, image2}, "shared.bin")
-	want := sha256Bytes(fixture.files["shared.bin"])
-	require.Equal(t, []string{want, want}, digests)
+	assert.Equal(digest.FromBytes(fixture.files["file1.bin"]).Encoded(),
+		util.Sha256File(t, filepath.Join(image1.mountpoint, "file1.bin")))
+	assert.Equal(digest.FromBytes(fixture.files["file3.bin"]).Encoded(),
+		util.Sha256File(t, filepath.Join(image2.mountpoint, "file3.bin")))
+	digests := readConcurrently(t, []*fuseMount{image1, image2}, "shared.bin")
+	want := digest.FromBytes(fixture.files["shared.bin"]).Encoded()
+	assert.Equal([]string{want, want}, digests)
 
 	// The cache is keyed by blob content, so the shared blob must not be
 	// cached once per image.
-	sharedKey := sha256File(t, fixture.blobB)
-	require.FileExists(t, filepath.Join(cacheDir, sharedKey+".blob.data"))
-	require.Len(t, cacheEntries(t, cacheDir, ".blob.data"), 3,
-		"expected one cache entry per distinct blob (A, B, C)")
+	sharedBlobKey := util.Sha256File(t, fixture.blobB)
+	assert.FileExists(filepath.Join(cacheDir, sharedBlobKey+".blob.data"))
+	entries, err := filepath.Glob(filepath.Join(cacheDir, "*.blob.data"))
+	assert.NoError(err)
+	assert.Len(entries, 3, "expected one cache entry per distinct blob (A, B, C)")
 }
 
-// TestCorePrefetchAndOnDemandConcurrent runs a prefetching process against
-// an on-demand one on the same cache. Neither may deadlock and both must see
-// correct data.
+// TestCacheSharingPrefetchAndOnDemandConcurrent runs a prefetching process
+// against an on-demand one on the same cache. Neither may deadlock and both
+// must see correct data.
 func TestCacheSharingPrefetchAndOnDemandConcurrent(t *testing.T) {
-	skipUnlessRoot(t)
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	workDir := t.TempDir()
+	fixture := newSharedBlobFixture(t, workDir)
+	cacheDir := filepath.Join(workDir, "cache")
 
-	root := t.TempDir()
-	nydusBin := mustLookupExecutable(t, "nydus")
-	fixture := buildCoreFixture(t, nydusBin, root)
-	cacheDir := filepath.Join(root, "cache")
-
-	prefetcher := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap:    fixture.bootstrap1,
-		blobDir:      fixture.blobDir,
-		cacheDir:     cacheDir,
-		mnt:          filepath.Join(root, "mnt-prefetch"),
-		prefetch:     true,
-		fullPrefetch: true,
+	// One prefetching and one on-demand process on one cache.
+	prefetcher := startFuseMount(t, fuseMountOption{
+		bootstrap:   fixture.bootstrap1,
+		blobDir:     fixture.blobDir,
+		cacheDir:    cacheDir,
+		mountpoint:  filepath.Join(workDir, "mnt-prefetch"),
+		prefetch:    true,
+		prefetchAll: true,
 	})
-	reader := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap: fixture.bootstrap1,
-		blobDir:   fixture.blobDir,
-		cacheDir:  cacheDir,
-		mnt:       filepath.Join(root, "mnt-ondemand"),
+	onDemand := startFuseMount(t, fuseMountOption{
+		bootstrap:  fixture.bootstrap1,
+		blobDir:    fixture.blobDir,
+		cacheDir:   cacheDir,
+		mountpoint: filepath.Join(workDir, "mnt-ondemand"),
 	})
 
-	digests := readConcurrently(t, []*coreMount{prefetcher, reader}, "shared.bin")
-	want := sha256Bytes(fixture.files["shared.bin"])
-	require.Equal(t, []string{want, want}, digests)
+	// Both must read the same bytes while racing on the cold cache.
+	digests := readConcurrently(t, []*fuseMount{prefetcher, onDemand}, "shared.bin")
+	want := digest.FromBytes(fixture.files["shared.bin"]).Encoded()
+	assert.Equal([]string{want, want}, digests)
 
 	// Re-read once the prefetch has had time to finish, covering the handover
 	// from "filled by my own read" to "filled by the other process".
-	require.Eventually(t, func() bool {
-		return prefetcher.metrics(t)[`nydus_read_chunk_group_total{backend="local",protocol="",storage="backend",type="prefetch"}`] > 0
+	assert.Eventually(func() bool {
+		return prefetcher.fills(t, "prefetch") > 0
 	}, 60*time.Second, 200*time.Millisecond, "prefetch never made progress")
-	require.Equal(t, want, sha256File(t, filepath.Join(reader.mnt, "shared.bin")))
+	assert.Equal(want, util.Sha256File(t, filepath.Join(onDemand.mountpoint, "shared.bin")))
 }
 
-// TestCoreSurvivesPeerCrash kills one process mid-flight; the survivors
-// must still complete their reads. Once per-chunk-group locks land this also covers
-// a dead lock holder being taken over.
+// TestCacheSharingSurvivesPeerCrash kills one process mid-flight; the
+// survivors must still complete their reads. Once per-chunk-group locks land
+// this also covers a dead lock holder being taken over.
 func TestCacheSharingSurvivesPeerCrash(t *testing.T) {
-	skipUnlessRoot(t)
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	workDir := t.TempDir()
+	fixture := newSharedBlobFixture(t, workDir)
+	cacheDir := filepath.Join(workDir, "cache")
 
-	root := t.TempDir()
-	nydusBin := mustLookupExecutable(t, "nydus")
-	fixture := buildCoreFixture(t, nydusBin, root)
-	cacheDir := filepath.Join(root, "cache")
-
-	victim := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap:    fixture.bootstrap1,
-		blobDir:      fixture.blobDir,
-		cacheDir:     cacheDir,
-		mnt:          filepath.Join(root, "mnt-victim"),
-		prefetch:     true,
-		fullPrefetch: true,
+	// A prefetching victim and an on-demand survivor on one cache.
+	victim := startFuseMount(t, fuseMountOption{
+		bootstrap:   fixture.bootstrap1,
+		blobDir:     fixture.blobDir,
+		cacheDir:    cacheDir,
+		mountpoint:  filepath.Join(workDir, "mnt-victim"),
+		prefetch:    true,
+		prefetchAll: true,
 	})
-	survivor := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap: fixture.bootstrap1,
-		blobDir:   fixture.blobDir,
-		cacheDir:  cacheDir,
-		mnt:       filepath.Join(root, "mnt-survivor"),
+	survivor := startFuseMount(t, fuseMountOption{
+		bootstrap:  fixture.bootstrap1,
+		blobDir:    fixture.blobDir,
+		cacheDir:   cacheDir,
+		mountpoint: filepath.Join(workDir, "mnt-survivor"),
 	})
 
+	// Crash the victim while its prefetch is in flight.
 	victim.kill(t)
 
+	// The survivor's read must finish with the right bytes.
 	done := make(chan string, 1)
 	go func() {
-		data, err := os.ReadFile(filepath.Join(survivor.mnt, "shared.bin"))
+		data, err := os.ReadFile(filepath.Join(survivor.mountpoint, "shared.bin"))
 		if err != nil {
 			done <- "error: " + err.Error()
 			return
 		}
-		done <- sha256Bytes(data)
+		done <- digest.FromBytes(data).Encoded()
 	}()
-
 	select {
 	case got := <-done:
-		require.Equal(t, sha256Bytes(fixture.files["shared.bin"]), got)
+		assert.Equal(digest.FromBytes(fixture.files["shared.bin"]).Encoded(), got)
 	case <-time.After(60 * time.Second):
-		require.FailNow(t, "survivor blocked after a peer crashed")
+		assert.FailNow("survivor blocked after a peer crashed")
 	}
 }
 
-// TestCoreStaleGroupmapKeepsInode deletes the cached blob data behind a
-// live mount. The readiness bitmap has to be reset, but every process must end
-// up on the same bitmap file: if the reset swaps the inode, a live process
+// TestCacheSharingStaleGroupMapKeepsInode deletes the cached blob data behind
+// a live mount. The readiness bitmap has to be reset, but every process must
+// end up on the same bitmap file: if the reset swaps the inode, a live process
 // keeps publishing readiness that newcomers can never see.
-func TestCacheSharingStaleChunkMapKeepsInode(t *testing.T) {
-	skipUnlessRoot(t)
+func TestCacheSharingStaleGroupMapKeepsInode(t *testing.T) {
+	util.SkipUnlessRoot(t, "mounting FUSE")
+	assert := assert.New(t)
+	workDir := t.TempDir()
+	fixture := newSharedBlobFixture(t, workDir)
+	cacheDir := filepath.Join(workDir, "cache")
 
-	root := t.TempDir()
-	nydusBin := mustLookupExecutable(t, "nydus")
-	fixture := buildCoreFixture(t, nydusBin, root)
-	cacheDir := filepath.Join(root, "cache")
-
-	first := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap: fixture.bootstrap1,
-		blobDir:   fixture.blobDir,
-		cacheDir:  cacheDir,
-		mnt:       filepath.Join(root, "mnt1"),
+	// Fill the cache from the first mount and note the group map's inode.
+	first := startFuseMount(t, fuseMountOption{
+		bootstrap:  fixture.bootstrap1,
+		blobDir:    fixture.blobDir,
+		cacheDir:   cacheDir,
+		mountpoint: filepath.Join(workDir, "mnt1"),
 	})
-	require.Equal(t, sha256Bytes(fixture.files["shared.bin"]),
-		sha256File(t, filepath.Join(first.mnt, "shared.bin")))
-
-	sharedKey := sha256File(t, fixture.blobB)
-	chunkMap := filepath.Join(cacheDir, sharedKey+".group.map")
-	blobData := filepath.Join(cacheDir, sharedKey+".blob.data")
-	require.FileExists(t, chunkMap)
-	require.FileExists(t, blobData)
-	before := cacheFileInode(t, chunkMap)
+	assert.Equal(digest.FromBytes(fixture.files["shared.bin"]).Encoded(),
+		util.Sha256File(t, filepath.Join(first.mountpoint, "shared.bin")))
+	sharedBlobKey := util.Sha256File(t, fixture.blobB)
+	groupMap := filepath.Join(cacheDir, sharedBlobKey+".group.map")
+	cacheData := filepath.Join(cacheDir, sharedBlobKey+".blob.data")
+	assert.FileExists(groupMap)
+	assert.FileExists(cacheData)
+	inodeBefore := util.Inode(t, groupMap)
 
 	// Simulate an external reclaimer that removes only the data file while the
-	// first mount is still running.
-	require.NoError(t, os.Remove(blobData))
-
-	second := startCoreMount(t, nydusBin, coreMountOption{
-		bootstrap: fixture.bootstrap1,
-		blobDir:   fixture.blobDir,
-		cacheDir:  cacheDir,
-		mnt:       filepath.Join(root, "mnt2"),
+	// first mount is still running, then read through a second mount.
+	assert.NoError(os.Remove(cacheData))
+	second := startFuseMount(t, fuseMountOption{
+		bootstrap:  fixture.bootstrap1,
+		blobDir:    fixture.blobDir,
+		cacheDir:   cacheDir,
+		mountpoint: filepath.Join(workDir, "mnt2"),
 	})
-	require.Equal(t, sha256Bytes(fixture.files["shared.bin"]),
-		sha256File(t, filepath.Join(second.mnt, "shared.bin")))
-
-	after := cacheFileInode(t, chunkMap)
-	t.Logf("chunk map inode before=%d after=%d", before, after)
+	assert.Equal(digest.FromBytes(fixture.files["shared.bin"]).Encoded(),
+		util.Sha256File(t, filepath.Join(second.mountpoint, "shared.bin")))
 
 	// The bitmap is reset in place, so both processes keep observing the same
 	// file. Replacing it would split them onto separate inodes and each would
 	// publish readiness the other can never see.
-	require.Equal(t, before, after,
-		"the stale chunk map must be reset in place, not replaced")
+	inodeAfter := util.Inode(t, groupMap)
+	t.Logf("group map inode before=%d after=%d", inodeBefore, inodeAfter)
+	assert.Equal(inodeBefore, inodeAfter,
+		"the stale group map must be reset in place, not replaced")
 }

@@ -6,22 +6,22 @@ client:
 
 scheduler:
   replicas: 1
-  hostNetwork: true
   resources:
     requests:
-      cpu: 100m
-      memory: 256Mi
+      cpu: '0'
+      memory: '0'
     limits:
       cpu: '2'
       memory: 2Gi
 
 seedClient:
+  enable: true
   replicas: 1
   hostNetwork: true
   resources:
     requests:
-      cpu: 100m
-      memory: 256Mi
+      cpu: '0'
+      memory: '0'
     limits:
       cpu: '2'
       memory: 2Gi

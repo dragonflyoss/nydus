@@ -1,0 +1,62 @@
+name: E2E Test With UFFD
+run-name: "E2E Test With UFFD (count=${{ inputs.count || '34' }})"
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'Repetitions of each real-fault case'
+        required: false
+        default: '34'
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  e2e_tests_uffd:
+    name: E2E (uffd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/e2e/go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq erofs-utils
+          sudo modprobe erofs || true
+          mkdir -p /tmp/artifact
+
+      - name: Run E2E test
+        run: |
+          make test-uffd-stability \
+            UFFD_REQUIRE=1 \
+            UFFD_EVIDENCE_DIR=/tmp/artifact/uffd-evidence \
+            UFFD_STABILITY_COUNT="${{ inputs.count || '34' }}"
+
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: uffd-e2e-tests-logs
+          path: /tmp/artifact/**
+          if-no-files-found: ignore

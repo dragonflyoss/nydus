@@ -1,5 +1,5 @@
-name: Convert and Check Top Images
-run-name: "Convert and Check Top Images (concurrency=${{ inputs.concurrency }})"
+name: E2E Test With Top Images
+run-name: "E2E Test With Top Images (concurrency=${{ inputs.concurrency }})"
 
 on:
   workflow_dispatch:
@@ -18,16 +18,12 @@ permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
 env:
   RUST_BACKTRACE: 1
 
 jobs:
-  top-images-convert:
-    name: Convert and validate top images
+  e2e_tests_top_images:
+    name: E2E (top images)
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     timeout-minutes: 150
     steps:
@@ -77,17 +73,17 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      - name: Set up Go
+      - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.5'
+          go-version-file: tests/e2e/go.mod
 
       - name: Build nydusify
         run: |
           make -C nydusify build
           sudo install -m 0755 nydusify/nydusify /usr/local/bin/nydusify
 
-      - name: Run top-images conversion test
+      - name: Run E2E test
         env:
           TOP_IMAGES_CONCURRENCY: ${{ inputs.concurrency }}
           TOP_IMAGES_REGISTRY: ${{ inputs.registry || format('ghcr.io/{0}', github.repository) }}

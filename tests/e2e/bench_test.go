@@ -45,171 +45,215 @@ package e2e
 // whichever cache ended up holding them, which after the first pass is the
 // kernel's page cache in every mode — nydus's FUSE mode hands out effectively
 // infinite attr/entry timeouts plus FOPEN_CACHE_DIR, so even its warm stat
-// and readdir never leave the kernel. Set NYDUSFS_BENCH_WARM=1 to append the
+// and readdir never leave the kernel. Set NYDUS_E2E_BENCH_WARM=1 to append the
 // old steady-state fio and metadata rows for regression tracking.
 //
 // Unavailable modes (missing kernel module, old kernel, feature not compiled
 // in) are skipped individually and their column omitted.
 //
-// Activation: NYDUSFS_RUN_BENCH=1 (set by `make test-bench`). Requires root
+// Activation: NYDUS_E2E_RUN_BENCH=1 (set by `make test-bench`). Requires root
 // and fio; the NBD/ublk modes additionally need their kernel modules and
 // EROFS support, fanotify needs Linux >= 6.15 and an ext4 cache dir
 // (the Makefile sets TMPDIR).
 //
 // Tuning knobs (all optional):
 //
-//	NYDUSFS_PERF_LARGE_FILE_COUNT        Number of large files for read benchmarks (default 8).
-//	NYDUSFS_PERF_LARGE_FILE_SIZE         Size of each large file (default 64MiB).
-//	NYDUSFS_PERF_MEDIUM_FILE_COUNT       Number of medium files in the corpus (default 256).
-//	NYDUSFS_PERF_MEDIUM_FILE             Size of each medium file (default 1MiB).
-//	NYDUSFS_PERF_SMALL_FILE_COUNT        Number of small files for the stat benchmark (default 10000).
-//	NYDUSFS_PERF_FIO_RUNTIME             Fio benchmark duration in seconds (default 8, after a 2s ramp).
-//	NYDUSFS_PERF_FIO_SEQ_NUMJOBS         Sequential-read multi-thread job count (default 4).
-//	NYDUSFS_PERF_FIO_RAND_NUMJOBS        Random-read multi-thread job count (default 4).
-//	NYDUSFS_PERF_READDIR_DIRS            Number of directories for the readdir corpus (default 128).
-//	NYDUSFS_PERF_READDIR_FILES_PER_DIR   Files per directory for the readdir corpus (default 256).
-//	NYDUSFS_PERF_META_SECS               Metadata benchmark duration in seconds (default 3).
-//	NYDUSFS_PERF_READDIR_META_SECS       Readdir benchmark duration in seconds (default 3).
-//	NYDUSFS_PERF_READDIR_PASSES_PER_DIR  Repeated os.ReadDir calls per directory per iteration (default 8).
-//	NYDUSFS_PERF_COLD_RAND_IO_SIZE       Bytes read by the cold random-read pass (default 16MiB).
-//	NYDUSFS_BENCH_MODES                    Comma-separated mode names to run; others are skipped.
-//	NYDUSFS_BENCH_WARM                     Also run and print the steady-state fio/metadata rows.
-//	NYDUSFS_BENCH_FILEIO_NOWARM            Add the fileio-nowarm column (fileio without the FUSE_NOTIFY_STORE prewarm).
-//	NYDUSFS_BENCH_V2_NYDUSD, NYDUSFS_BENCH_V2_IMAGE_BIN  Paths to nydus v2 binaries; both set adds the v2-fuse column.
+//	NYDUS_E2E_PERF_LARGE_FILE_COUNT        Number of large files for read benchmarks (default 8).
+//	NYDUS_E2E_PERF_LARGE_FILE_SIZE         Size of each large file (default 64MiB).
+//	NYDUS_E2E_PERF_MEDIUM_FILE_COUNT       Number of medium files in the corpus (default 256).
+//	NYDUS_E2E_PERF_MEDIUM_FILE             Size of each medium file (default 1MiB).
+//	NYDUS_E2E_PERF_SMALL_FILE_COUNT        Number of small files for the stat benchmark (default 10000).
+//	NYDUS_E2E_PERF_FIO_RUNTIME             Fio benchmark duration in seconds (default 8, after a 2s ramp).
+//	NYDUS_E2E_PERF_FIO_SEQ_NUMJOBS         Sequential-read multi-thread job count (default 4).
+//	NYDUS_E2E_PERF_FIO_RAND_NUMJOBS        Random-read multi-thread job count (default 4).
+//	NYDUS_E2E_PERF_READDIR_DIRS            Number of directories for the readdir corpus (default 128).
+//	NYDUS_E2E_PERF_READDIR_FILES_PER_DIR   Files per directory for the readdir corpus (default 256).
+//	NYDUS_E2E_PERF_META_SECS               Metadata benchmark duration in seconds (default 3).
+//	NYDUS_E2E_PERF_READDIR_META_SECS       Readdir benchmark duration in seconds (default 3).
+//	NYDUS_E2E_PERF_READDIR_PASSES_PER_DIR  Repeated os.ReadDir calls per directory per iteration (default 8).
+//	NYDUS_E2E_PERF_COLD_RAND_IO_SIZE       Bytes read by the cold random-read pass (default 16MiB).
+//	NYDUS_E2E_BENCH_MODES                    Comma-separated mode names to run; others are skipped.
+//	NYDUS_E2E_BENCH_WARM                     Also run and print the steady-state fio/metadata rows.
+//	NYDUS_E2E_BENCH_FILEIO_NOWARM            Add the fileio-nowarm column (fileio without the FUSE_NOTIFY_STORE prewarm).
+//	NYDUS_E2E_BENCH_V2_NYDUSD, NYDUS_E2E_BENCH_V2_IMAGE_BIN  Paths to nydus v2 binaries; both set adds the v2-fuse column.
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
+	"github.com/dragonflyoss/nydus/tests/e2e/util"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
 
 // Fixed corpus layout produced by corpus.MakePerfCorpus.
 const (
-	benchTargetRel   = "large/file_0.bin"
-	benchRandRel     = "large/file_1.bin"
-	benchStatRel     = "small"
-	benchReaddirRel  = "dirs"
-	benchXattrRel    = "xattrs"
-	benchXattrName   = "user.bench"
-	benchErofsfuse   = "erofsfuse"
-	benchStopTimeout = 20 * time.Second
+	// perfColdReadFile is the large file the first read and the cold
+	// sequential read measure.
+	perfColdReadFile = "large/file_0.bin"
+
+	// perfColdRandReadFile is the large file the cold random read measures,
+	// never opened before that pass.
+	perfColdRandReadFile = "large/file_1.bin"
+
+	// perfSmallDir is the directory of small files the stat benchmarks walk.
+	perfSmallDir = "small"
+
+	// perfReaddirDir is the directory fan-out the readdir benchmark reads.
+	perfReaddirDir = "dirs"
+
+	// perfXattrDir is the xattr-bearing tree the xattr benchmarks read.
+	perfXattrDir = "xattrs"
+
+	// perfXattrName is the xattr every file under perfXattrDir carries.
+	perfXattrName = "user.bench"
 )
 
 // benchEnv holds the shared image and per-run paths.
 type benchEnv struct {
-	nydusBin string
-	fioBin   string
+	// fioBin is the fio binary the read benchmarks drive.
+	fioBin string
 
-	workDir   string
-	blobDir   string
+	// workDir is the root of every per-run path.
+	workDir string
+
+	// blobDir holds the blobs of the built image.
+	blobDir string
+
+	// bootstrap is the bootstrap of the built image.
 	bootstrap string
-	blobPath  string // single blob produced by the build, for erofsfuse --device
-	nbdDev    string // free /dev/nbdX picked for the NBD mode
 
-	// Optional nydus v2 (rafs v6) comparison column, enabled by the
-	// NYDUSFS_BENCH_V2_NYDUSD and NYDUSFS_BENCH_V2_IMAGE_BIN environment variables.
-	v2Nydusd    string
-	v2ImageBin  string
+	// fullBlob is the full blob the build writes, for erofsfuse --device.
+	fullBlob string
+
+	// nbdDevice is the free /dev/nbdX picked for the NBD mode.
+	nbdDevice string
+
+	// v2Nydusd is the nydus v2 daemon from NYDUS_E2E_BENCH_V2_NYDUSD; together
+	// with v2ImageBin it enables the optional rafs v6 comparison column.
+	v2Nydusd string
+
+	// v2ImageBin is the nydus v2 image builder from
+	// NYDUS_E2E_BENCH_V2_IMAGE_BIN.
+	v2ImageBin string
+
+	// v2Bootstrap is the bootstrap of the v2 image built from the same
+	// corpus.
 	v2Bootstrap string
-	v2BlobDir   string
+
+	// v2BlobDir holds the blob of the v2 image.
+	v2BlobDir string
 }
 
-// benchMode is one serving mode: how to detect availability and how to
-// mount/unmount it. All other steps are identical across modes.
-type benchMode struct {
-	name  string
-	skip  string // non-empty: mode unavailable, column omitted
-	mnt   string
-	cache string // "" when the mode has no nydus cache (erofsfuse)
-	start func(t *testing.T) (stop func())
+// servingMode is one serving mode: how to detect availability and how to
+// mount and unmount it. All other steps are identical across modes.
+type servingMode struct {
+	// name is the column header.
+	name string
+
+	// skipReason says why the mode is unavailable; the column is omitted when
+	// it is not empty.
+	skipReason string
+
+	// mountpoint is where the measurements read the image.
+	mountpoint string
+
+	// cacheDir is the nydus cache dir, empty when the mode has none
+	// (erofsfuse).
+	cacheDir string
+
+	// start mounts the mode and returns the function that stops it.
+	start func(t *testing.T, mode *servingMode) func()
 }
 
-// benchModeResult collects every measurement for one mode.
-type benchModeResult struct {
-	mountSec          float64
-	coldWalkSec       float64
-	coldWalkEntries   int
-	coldXattrWalkSec  float64
-	negativeLookupOps float64
-	firstReadSec      float64
-	coldSeqMiBps      float64
-	coldSeqCachedMiB  float64 // page cache growth across the cold read
-	fetchedMiB        float64 // < 0 when the mode has no cache
-	coldRandIOPS      float64
-	coldRandLatUs     float64
-	bench             map[string]*benchResult // nil unless NYDUSFS_BENCH_WARM is set
+// modeResult collects every measurement for one mode.
+type modeResult struct {
+	// mountSec is the time from daemon start to a mountable tree.
+	mountSec float64
+
+	// coldWalkSec is the duration of the cold readdir+lstat pass.
+	coldWalkSec float64
+
+	// coldWalkEntries is how many entries the cold walk visited.
+	coldWalkEntries int
+
+	// coldXattrWalkSec is the duration of the cold walk with a listxattr per
+	// entry, on a fresh mount.
+	coldXattrWalkSec float64
+
+	// negativeLookupRate is the rate of lstat calls on missing names.
+	negativeLookupRate float64
+
+	// firstReadSec is the latency of the first 1MiB read of an untouched
+	// file.
+	firstReadSec float64
+
+	// coldSeqMiBps is the throughput of one cold pass over that file.
+	coldSeqMiBps float64
+
+	// coldSeqPageCacheMiB is the page cache growth across the cold read.
+	coldSeqPageCacheMiB float64
+
+	// fetchedMiB is the data pulled from the backend for that file, below
+	// zero when the mode has no cache.
+	fetchedMiB float64
+
+	// coldRandIOPS is the rate of the cold 4K random read pass.
+	coldRandIOPS float64
+
+	// coldRandLatencyUs is the mean latency of the cold 4K random read pass.
+	coldRandLatencyUs float64
+
+	// warm holds the steady-state rows, nil unless NYDUS_E2E_BENCH_WARM is set.
+	warm map[string]*jobResult
 }
 
-// cachedMiB reports the kernel's total page cache from /proc/meminfo.
-//
-// Serving one byte can cache it more than once: the daemon's own copy of the
-// blob cache file, an intermediate object (the FUSE export, a block device),
-// and finally the inode the application reads. Growth across a cold read of a
-// known size is the cheapest way to see how many of those copies survive.
-func cachedMiB(t *testing.T) float64 {
-	t.Helper()
-	data, err := os.ReadFile("/proc/meminfo")
-	require.NoError(t, err)
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "Cached:") {
-			continue
-		}
-		var kb float64
-		if _, err := fmt.Sscanf(strings.TrimPrefix(line, "Cached:"), "%f kB", &kb); err == nil {
-			return kb / 1024
-		}
-	}
-	return -1
-}
-
+// TestBench runs the cold-start comparison across every serving mode this
+// host supports and prints the table.
 func TestBench(t *testing.T) {
-	if os.Getenv("NYDUSFS_RUN_BENCH") == "" {
-		t.Skip("set NYDUSFS_RUN_BENCH=1 to enable")
+	if os.Getenv("NYDUS_E2E_RUN_BENCH") == "" {
+		t.Skip("set NYDUS_E2E_RUN_BENCH=1 to enable")
 	}
-	if os.Getuid() != 0 {
-		t.Fatal("requires root")
+	util.SkipUnlessRoot(t, "mounting FUSE and dropping caches")
+	assert := assert.New(t)
+	fioBin, err := exec.LookPath("fio")
+	if !assert.NoError(err, "fio not found; install with: apt-get install fio") {
+		t.FailNow()
 	}
 
+	// Build the image every mode serves.
+	workDir := t.TempDir()
 	e := &benchEnv{
-		fioBin:   mustLookupFio(t),
-		nydusBin: mustLookupExecutable(t, "nydus"),
+		fioBin:    fioBin,
+		workDir:   workDir,
+		blobDir:   filepath.Join(workDir, "blobs"),
+		bootstrap: filepath.Join(workDir, "image.boot"),
 	}
-	e.workDir = t.TempDir()
-	corpusDir := filepath.Join(e.workDir, "corpus")
-	e.blobDir = filepath.Join(e.workDir, "blobs")
-	e.bootstrap = filepath.Join(e.workDir, "bootstrap.boot")
-
-	t.Log("Generating performance corpus...")
+	corpusDir := filepath.Join(workDir, "corpus")
+	t.Log("generating performance corpus")
 	corpus.MakePerfCorpus(t, corpusDir)
-	t.Log("Building NydusFS image (chunksize=1MiB)...")
-	e.blobPath = buildNydusFSImageToDir(t, e.nydusBin, e.bootstrap, e.blobDir, corpusDir, 1024*1024)
+	t.Log("building nydus image (chunk size 1MiB)")
+	e.fullBlob = util.BuildImage(t, nydusBin, e.bootstrap, e.blobDir, corpusDir, 1024*1024)
 
-	e.v2Nydusd = os.Getenv("NYDUSFS_BENCH_V2_NYDUSD")
-	e.v2ImageBin = os.Getenv("NYDUSFS_BENCH_V2_IMAGE_BIN")
+	// Build the nydus v2 image when both v2 binaries are given.
+	e.v2Nydusd = os.Getenv("NYDUS_E2E_BENCH_V2_NYDUSD")
+	e.v2ImageBin = os.Getenv("NYDUS_E2E_BENCH_V2_IMAGE_BIN")
 	if e.v2Nydusd != "" && e.v2ImageBin != "" {
-		t.Log("Building nydus v2 (rafs v6) image...")
+		t.Log("building nydus v2 (rafs v6) image")
 		e.v2BlobDir = filepath.Join(e.workDir, "v2-blobs")
 		e.v2Bootstrap = filepath.Join(e.workDir, "v2.boot")
-		require.NoError(t, os.MkdirAll(e.v2BlobDir, 0755))
+		assert.NoError(os.MkdirAll(e.v2BlobDir, 0o755))
 		out, err := exec.Command(e.v2ImageBin, "create",
 			"--fs-version", "6", "--compressor", "zstd",
 			"--blob-id", "v2blob",
@@ -217,144 +261,160 @@ func TestBench(t *testing.T) {
 			"--external-blob", filepath.Join(e.workDir, "v2.ext"),
 			"--bootstrap", e.v2Bootstrap,
 			corpusDir).CombinedOutput()
-		require.NoError(t, err, "nydus-image create failed: %s", string(out))
+		assert.NoError(err, "nydus-image create failed: %s", out)
 	}
 
-	modes := e.buildModes(t)
-	// NYDUSFS_BENCH_MODES=fileio,fileio-directio runs just those columns —
+	// NYDUS_E2E_BENCH_MODES=fileio,fileio-buffered runs just those columns:
 	// full runs cost minutes per mode, so comparing two variants should not
 	// pay for the other five.
-	if filter := os.Getenv("NYDUSFS_BENCH_MODES"); filter != "" {
+	modes := e.newServingModes(t)
+	if filter := os.Getenv("NYDUS_E2E_BENCH_MODES"); filter != "" {
 		wanted := make(map[string]bool)
 		for _, name := range strings.Split(filter, ",") {
 			wanted[strings.TrimSpace(name)] = true
 		}
-		for _, m := range modes {
-			if m.skip == "" && !wanted[m.name] {
-				m.skip = "filtered out by NYDUSFS_BENCH_MODES"
+
+		for _, mode := range modes {
+			if mode.skipReason == "" && !wanted[mode.name] {
+				mode.skipReason = "filtered out by NYDUS_E2E_BENCH_MODES"
 			}
 		}
 	}
-	results := make(map[string]*benchModeResult, len(modes))
-	for _, m := range modes {
-		if m.skip != "" {
-			t.Logf("=== %s: SKIPPED (%s) ===", m.name, m.skip)
+
+	// Measure every available mode.
+	results := make(map[string]*modeResult, len(modes))
+	for _, mode := range modes {
+		if mode.skipReason != "" {
+			t.Logf("=== %s: SKIPPED (%s) ===", mode.name, mode.skipReason)
 			continue
 		}
-		t.Logf("=== %s ===", m.name)
-		results[m.name] = e.runMode(t, m)
-	}
-	require.NotEmpty(t, results, "no serving mode is available on this host")
 
-	printBenchTable(t, modes, results)
+		t.Logf("=== %s ===", mode.name)
+		results[mode.name] = e.measureMode(t, mode)
+	}
+
+	assert.NotEmpty(results, "no serving mode is available on this host")
+	printResults(t, modes, results)
 }
 
-// runMode measures one mode end to end. Every measurement below touches data
-// or metadata this mode has not touched yet, with the page cache dropped
+// measureMode measures one mode end to end. Every measurement below touches
+// data or metadata this mode has not touched yet, with the page cache dropped
 // beforehand, because first access is what decides container start time.
-func (e *benchEnv) runMode(t *testing.T, m *benchMode) *benchModeResult {
+func (e *benchEnv) measureMode(t *testing.T, mode *servingMode) *modeResult {
 	t.Helper()
-	if m.cache != "" {
-		wipeCacheDir(m.cache)
+	if mode.cacheDir != "" {
+		util.WipeCache(mode.cacheDir)
 	}
-	dropCaches(t)
+	util.DropCaches(t)
 
-	res := &benchModeResult{fetchedMiB: -1}
+	result := &modeResult{fetchedMiB: -1}
 	func() {
 		mountStart := time.Now()
-		stop := m.start(t)
+		stop := mode.start(t, mode)
 		defer stop()
-		res.mountSec = time.Since(mountStart).Seconds()
-		t.Logf("  mount ready: %.2fs", res.mountSec)
+		result.mountSec = time.Since(mountStart).Seconds()
+		t.Logf("  mount ready: %.2fs", result.mountSec)
 
-		// First, before anything else touches the tree: this is the only
-		// measurement a bootstrap prewarm can move.
-		res.coldWalkSec, res.coldWalkEntries = coldMetadataWalk(t, m.mnt, false)
+		// Walk first, before anything else touches the tree: this is the
+		// only measurement a bootstrap prewarm can move.
+		result.coldWalkSec, result.coldWalkEntries = coldMetadataWalk(t, mode.mountpoint, false)
 		t.Logf("  cold metadata walk: %d entries in %.3fs (%.0f entries/s)",
-			res.coldWalkEntries, res.coldWalkSec, float64(res.coldWalkEntries)/res.coldWalkSec)
+			result.coldWalkEntries, result.coldWalkSec, float64(result.coldWalkEntries)/result.coldWalkSec)
 
-		res.negativeLookupOps = benchNegativeLookup(t, filepath.Join(m.mnt, benchStatRel))
-		t.Logf("  negative lookups: %.0f ops/s", res.negativeLookupOps)
+		// Probe missing names the way module resolution does.
+		result.negativeLookupRate = benchNegativeLookup(t, filepath.Join(mode.mountpoint, perfSmallDir))
+		t.Logf("  negative lookups: %.0f ops/s", result.negativeLookupRate)
 
-		dropCaches(t)
-		target := filepath.Join(m.mnt, benchTargetRel)
+		// Time the first byte of an untouched file.
+		util.DropCaches(t)
+		coldReadFile := filepath.Join(mode.mountpoint, perfColdReadFile)
 		readStart := time.Now()
-		_, err := readSlice(target, 0, 1)
-		require.NoError(t, err, "first cold read failed")
-		res.firstReadSec = time.Since(readStart).Seconds()
-		t.Logf("  first 1MiB cold read: %.3fs", res.firstReadSec)
+		_, err := util.ReadRange(coldReadFile, 0, 1<<20)
+		assert.NoError(t, err, "first cold read failed")
+		result.firstReadSec = time.Since(readStart).Seconds()
+		t.Logf("  first 1MiB cold read: %.3fs", result.firstReadSec)
 
 		// Single cold pass over a file nothing has read: the end-to-end
 		// on-demand fetch path, backend included.
-		cachedBefore := cachedMiB(t)
+		pageCacheBefore := util.PageCacheMiB(t)
 		seqStart := time.Now()
-		n := readWhole(t, target)
-		res.coldSeqMiBps = float64(n) / (1 << 20) / time.Since(seqStart).Seconds()
-		res.coldSeqCachedMiB = cachedMiB(t) - cachedBefore
+		n := util.ReadWhole(t, coldReadFile)
+		result.coldSeqMiBps = float64(n) / (1 << 20) / time.Since(seqStart).Seconds()
+		result.coldSeqPageCacheMiB = util.PageCacheMiB(t) - pageCacheBefore
 		t.Logf("  cold seq read: %.1f MiB at %.1f MiB/s, page cache +%.1f MiB",
-			float64(n)/(1<<20), res.coldSeqMiBps, res.coldSeqCachedMiB)
+			float64(n)/(1<<20), result.coldSeqMiBps, result.coldSeqPageCacheMiB)
 
 		// Snapshot here, while the only data ever fetched is that one file:
 		// anything measured later would fold its fetches into the number.
-		// Backend counters from the daemon's metrics endpoint where available
-		// (v3 daemons); cache-file disk allocation otherwise.
-		if fetched := backendReadMiB(e.apiSocket(m.name)); fetched >= 0 {
-			res.fetchedMiB = fetched
-			t.Logf("  backend bytes for %.1f MiB of file: %.1f MiB", float64(n)/(1<<20), res.fetchedMiB)
-		} else if m.cache != "" {
-			res.fetchedMiB = cacheDirUsedBytes(m.cache)
-			t.Logf("  cache allocation for %.1f MiB of file: %.1f MiB", float64(n)/(1<<20), res.fetchedMiB)
+		// Sum the nydus_read_backend_traffic series of the daemon's metrics
+		// endpoint where available (v3 daemons): bytes actually pulled from
+		// the backend, as opposed to cache-file disk allocation, which a
+		// 4 KiB block per tiny record inflates (a decoded chunk group
+		// publishes its records at block-aligned logical offsets, so `du`
+		// reports about 3x the real transfer on this corpus).
+		if metrics, err := util.TryFetchMetrics(e.apiSocket(mode.name)); err == nil {
+			result.fetchedMiB = util.SumMetric(metrics, "nydus_read_backend_traffic") / (1 << 20)
+			t.Logf("  backend bytes for %.1f MiB of file: %.1f MiB", float64(n)/(1<<20), result.fetchedMiB)
+		} else if mode.cacheDir != "" {
+			cacheFiles, _ := filepath.Glob(filepath.Join(mode.cacheDir, "*.blob.data"))
+			for _, cacheFile := range cacheFiles {
+				result.fetchedMiB += float64(util.AllocatedBytes(t, cacheFile)) / (1 << 20)
+			}
+			t.Logf("  cache allocation for %.1f MiB of file: %.1f MiB", float64(n)/(1<<20), result.fetchedMiB)
 		}
 
-		dropCaches(t)
-		res.coldRandIOPS, res.coldRandLatUs = coldRandRead(t, e.fioBin, filepath.Join(m.mnt, benchRandRel))
-		t.Logf("  cold rand read 4K: %.0f IOPS, %.0f µs", res.coldRandIOPS, res.coldRandLatUs)
+		// Random 4K reads over a second file this mode has never opened.
+		util.DropCaches(t)
+		result.coldRandIOPS, result.coldRandLatencyUs = coldRandRead(t, e.fioBin, filepath.Join(mode.mountpoint, perfColdRandReadFile))
+		t.Logf("  cold rand read 4K: %.0f IOPS, %.0f µs", result.coldRandIOPS, result.coldRandLatencyUs)
 
-		if os.Getenv("NYDUSFS_BENCH_WARM") != "" {
-			statDir := filepath.Join(m.mnt, benchStatRel)
-			res.bench = runBenchmarks(t, e.fioBin, target, statDir, filepath.Join(m.mnt, benchReaddirRel))
-			dropCaches(t)
-			addMetaBenchmarks(t, res.bench, filepath.Join(m.mnt, benchXattrRel), benchXattrName, statDir)
+		// Append the steady-state rows on request.
+		if os.Getenv("NYDUS_E2E_BENCH_WARM") != "" {
+			statDir := filepath.Join(mode.mountpoint, perfSmallDir)
+			result.warm = runWarmBenchmarks(t, e.fioBin, coldReadFile, statDir, filepath.Join(mode.mountpoint, perfReaddirDir))
+			util.DropCaches(t)
+			addMetaBenchmarks(t, result.warm, filepath.Join(mode.mountpoint, perfXattrDir), perfXattrName, statDir)
 		}
 	}()
 
 	// The xattr pass needs its own mount to be comparable with the plain
 	// walk above: a second walk inside one session finds the daemon's own
-	// mappings already built, and dropCaches cannot evict those.
-	if m.cache != "" {
-		wipeCacheDir(m.cache)
+	// mappings already built, and dropping caches cannot evict those.
+	if mode.cacheDir != "" {
+		util.WipeCache(mode.cacheDir)
 	}
-	dropCaches(t)
+	util.DropCaches(t)
 	func() {
-		stop := m.start(t)
+		stop := mode.start(t, mode)
 		defer stop()
-		res.coldXattrWalkSec, _ = coldMetadataWalk(t, m.mnt, true)
+		result.coldXattrWalkSec, _ = coldMetadataWalk(t, mode.mountpoint, true)
 		t.Logf("  cold walk + xattr: %.3fs (xattr delta %+.3fs)",
-			res.coldXattrWalkSec, res.coldXattrWalkSec-res.coldWalkSec)
+			result.coldXattrWalkSec, result.coldXattrWalkSec-result.coldWalkSec)
 	}()
-	return res
-}
 
-// ------------------------------------------------------------------ modes ----
+	return result
+}
 
 // coldMetadataWalk enumerates the whole mount once with the page cache cold:
 // readdir every directory and lstat every entry, optionally adding a
-// listxattr per entry.
+// listxattr per entry. It returns the elapsed seconds and the entry count.
 //
 // Container start enumerates a rootfs once; it does not stat the same inode a
 // million times. A steady-state loop would instead report whichever cache
 // ended up holding the metadata, which for every mode here is the kernel's
 // — nydus's FUSE mode hands out effectively infinite attr/entry timeouts and
 // FOPEN_CACHE_DIR, so its warm stat and readdir are in-kernel too.
-func coldMetadataWalk(t *testing.T, root string, withXattr bool) (float64, int) {
+func coldMetadataWalk(t *testing.T, mountpoint string, withXattr bool) (float64, int) {
 	t.Helper()
 	entries := 0
 	buf := make([]byte, 4096)
+
 	start := time.Now()
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(mountpoint, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+
 		// WalkDir fills DirEntry from getdents alone; Info forces the lstat.
 		if _, err := d.Info(); err != nil {
 			return err
@@ -363,26 +423,30 @@ func coldMetadataWalk(t *testing.T, root string, withXattr bool) (float64, int) 
 			_, _ = unix.Llistxattr(path, buf)
 		}
 		entries++
+
 		return nil
 	})
 	elapsed := time.Since(start).Seconds()
-	require.NoError(t, err)
-	require.NotZero(t, entries)
+
+	assert.NoError(t, err)
+	assert.Greater(t, entries, 1, "%s holds nothing but its root", mountpoint)
+
 	return elapsed, entries
 }
 
 // benchNegativeLookup stats the same set of names that do not exist, over and
-// over, for one second. This is what module resolution does to a rootfs —
-// Node's require walk and Python's sys.path scan probe far more missing paths
-// than existing ones, and they retry the same misses on every import. A
-// filesystem that caches negative dentries answers repeats from the dcache; one
-// that does not pays a round trip per probe, forever.
+// over, for one second, and returns the rate. This is what module resolution
+// does to a rootfs — Node's require walk and Python's sys.path scan probe far
+// more missing paths than existing ones, and they retry the same misses on
+// every import. A filesystem that caches negative dentries answers repeats
+// from the dcache; one that does not pays a round trip per probe, forever.
 func benchNegativeLookup(t *testing.T, dir string) float64 {
 	t.Helper()
 	names := make([]string, 64)
 	for i := range names {
 		names[i] = filepath.Join(dir, fmt.Sprintf("no_such_module_%d.js", i))
 	}
+
 	ops := 0
 	start := time.Now()
 	deadline := start.Add(time.Second)
@@ -394,131 +458,168 @@ func benchNegativeLookup(t *testing.T, dir string) float64 {
 		}
 		ops += len(names)
 	}
+
 	return float64(ops) / time.Since(start).Seconds()
 }
 
 // coldRandRead does a single non-repeating pass of random 4K reads over a
-// file this mode has never touched, so every I/O is an on-demand fetch.
-// fio's random map keeps blocks from repeating, which keeps the page cache
-// out of the measurement.
+// file this mode has never touched, so every I/O is an on-demand fetch, and
+// returns the IOPS and mean latency. fio's random map keeps blocks from
+// repeating, which keeps the page cache out of the measurement.
 func coldRandRead(t *testing.T, fioBin, file string) (float64, float64) {
 	t.Helper()
-	require.FileExists(t, file)
-	ioSize := corpus.EnvInt("NYDUSFS_PERF_COLD_RAND_IO_SIZE", 16*1024*1024)
-	res := runFio(t, fioBin, []string{
+	assert.FileExists(t, file)
+	ioSize := corpus.EnvInt("NYDUS_E2E_PERF_COLD_RAND_IO_SIZE", 16*1024*1024)
+	result := runFio(t, fioBin, []string{
 		"--name=cold_rand", "--filename=" + file,
 		"--rw=randread", "--bs=4k", "--direct=0", "--invalidate=0",
-		fmt.Sprintf("--io_size=%d", ioSize),
+		"--io_size=" + strconv.Itoa(ioSize),
 		"--numjobs=1", "--readonly",
 	})
-	return res.ReadIOPS, res.ReadLat
+
+	return result.ReadIOPS, result.ReadLatency
 }
 
-// buildModes prepares the per-mode dirs/configs and probes availability.
+// newServingModes prepares the per-mode dirs and configs and probes availability.
 // A mode that cannot run on this host gets a skip reason instead of failing
 // the whole benchmark.
-func (e *benchEnv) buildModes(t *testing.T) []*benchMode {
+func (e *benchEnv) newServingModes(t *testing.T) []*servingMode {
 	t.Helper()
-
-	subOK := func(sub string) string {
-		if out, err := exec.Command(e.nydusBin, sub, "--help").CombinedOutput(); err != nil {
-			return fmt.Sprintf("nydus binary lacks the %s subcommand (build with --features cli,%s): %s", sub, sub, firstLine(out))
+	missingSubcommand := func(subcommand string) string {
+		out, err := exec.Command(nydusBin, subcommand, "--help").CombinedOutput()
+		if err != nil {
+			firstLine, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+			return fmt.Sprintf("nydus binary lacks the %s subcommand (build with --features cli,%s): %s", subcommand, subcommand, firstLine)
 		}
+
 		return ""
 	}
-	newMode := func(name string, start func(t *testing.T) func()) *benchMode {
-		m := &benchMode{
-			name:  name,
-			mnt:   filepath.Join(e.workDir, name+"-mnt"),
-			cache: filepath.Join(e.workDir, name+"-cache"),
-			start: start,
+
+	// Every nydus mode gets its own mountpoint, cache dir and local-backend
+	// config. Prefetch stays disabled: a background prefetch would warm the
+	// cache mid-run and corrupt the cold measurements.
+	newMode := func(name string, start func(t *testing.T, mode *servingMode) func()) *servingMode {
+		mode := &servingMode{
+			name:       name,
+			mountpoint: filepath.Join(e.workDir, name+"-mnt"),
+			cacheDir:   filepath.Join(e.workDir, name+"-cache"),
+			start:      start,
 		}
-		require.NoError(t, os.MkdirAll(m.mnt, 0755))
-		require.NoError(t, os.MkdirAll(m.cache, 0755))
-		e.writeConfig(t, name, e.blobDir, m.cache)
-		return m
+		assert.NoError(t, os.MkdirAll(mode.mountpoint, 0o755))
+		assert.NoError(t, os.MkdirAll(mode.cacheDir, 0o755))
+		util.WriteLocalBackendConfig(t, e.configPath(name), e.blobDir, mode.cacheDir, "none")
+
+		return mode
 	}
 
 	fuse := newMode("fuse", e.startFuse)
-	fuse.skip = subOK("fuse")
+	fuse.skipReason = missingSubcommand("fuse")
 
 	nbd := newMode("nbd", e.startNbd)
-	if nbd.skip = subOK("nbd"); nbd.skip == "" {
-		if !erofsSupported() {
-			nbd.skip = "erofs not in /proc/filesystems — kernel lacks EROFS support"
-		} else if dev, err := findFreeNbdDevice(); err != nil {
-			nbd.skip = fmt.Sprintf("no free NBD device: %v (try: modprobe nbd)", err)
+	if nbd.skipReason = missingSubcommand("nbd"); nbd.skipReason == "" {
+		if !util.ErofsSupported() {
+			nbd.skipReason = "erofs not in /proc/filesystems — kernel lacks EROFS support"
+		} else if device, err := util.FindFreeNbdDevice(); err != nil {
+			nbd.skipReason = fmt.Sprintf("no free NBD device: %v (try: modprobe nbd)", err)
 		} else {
-			e.nbdDev = dev
+			e.nbdDevice = device
 		}
 	}
 
 	ublk := newMode("ublk", e.startUblk)
-	if ublk.skip = subOK("ublk"); ublk.skip == "" {
-		if !erofsSupported() {
-			ublk.skip = "erofs not in /proc/filesystems — kernel lacks EROFS support"
-		} else if !ublkAvailable() {
-			ublk.skip = "ublk_drv unavailable (needs Linux 6.0+ and /dev/ublk-control; try: modprobe ublk_drv)"
+	if ublk.skipReason = missingSubcommand("ublk"); ublk.skipReason == "" {
+		if !util.ErofsSupported() {
+			ublk.skipReason = "erofs not in /proc/filesystems — kernel lacks EROFS support"
+		} else if exec.Command("modprobe", "ublk_drv").Run() != nil {
+			ublk.skipReason = "ublk_drv unavailable (needs Linux 6.0+; try: modprobe ublk_drv)"
+		} else if _, err := os.Stat("/dev/ublk-control"); err != nil {
+			ublk.skipReason = fmt.Sprintf("/dev/ublk-control is missing: %v", err)
 		}
 	}
 
-	fan := newMode("fanotify", e.startFanotify)
-	if fan.skip = subOK("fanotify"); fan.skip == "" {
-		if maj, min := kernelVersion(t); maj < 6 || (maj == 6 && min < 15) {
-			fan.skip = fmt.Sprintf("kernel %d.%d < 6.15: fanotify FAN_PRE_ACCESS unavailable", maj, min)
+	fanotify := newMode("fanotify", e.startFanotify)
+	if fanotify.skipReason = missingSubcommand("fanotify"); fanotify.skipReason == "" {
+		if major, minor := util.KernelVersion(t); major < 6 || (major == 6 && minor < 15) {
+			fanotify.skipReason = fmt.Sprintf("kernel %d.%d < 6.15: fanotify FAN_PRE_ACCESS unavailable", major, minor)
 		}
 	}
 
-	fileio := newMode("fileio", e.startFileio)
-	if fileio.skip = subOK("fileio"); fileio.skip == "" {
-		if !erofsSupported() {
-			fileio.skip = "erofs not in /proc/filesystems — kernel lacks EROFS support"
-		} else if maj, min := kernelVersion(t); maj < 6 || (maj == 6 && min < 12) {
-			fileio.skip = fmt.Sprintf("kernel %d.%d < 6.12: CONFIG_EROFS_FS_BACKED_BY_FILE unavailable", maj, min)
+	fileio := newMode("fileio", func(t *testing.T, mode *servingMode) func() { return e.startFileio(t, mode, true, true) })
+	if fileio.skipReason = missingSubcommand("fileio"); fileio.skipReason == "" {
+		if !util.ErofsSupported() {
+			fileio.skipReason = "erofs not in /proc/filesystems — kernel lacks EROFS support"
+		} else if major, minor := util.KernelVersion(t); major < 6 || (major == 6 && minor < 12) {
+			fileio.skipReason = fmt.Sprintf("kernel %d.%d < 6.12: CONFIG_EROFS_FS_BACKED_BY_FILE unavailable", major, minor)
 		}
 	}
-	require.NoError(t, os.MkdirAll(filepath.Join(e.workDir, "fileio-export"), 0755))
 
 	// Same serving path with the bootstrap prewarm off: the delta against the
 	// fileio column is what FUSE_NOTIFY_STORE is worth.
-	fileioNoWarm := newMode("fileio-nowarm", e.startFileioNoWarm)
-	if fileioNoWarm.skip = fileio.skip; fileioNoWarm.skip == "" && os.Getenv("NYDUSFS_BENCH_FILEIO_NOWARM") == "" {
-		fileioNoWarm.skip = "set NYDUSFS_BENCH_FILEIO_NOWARM=1 to enable the fileio-nowarm column"
-	}
-	require.NoError(t, os.MkdirAll(filepath.Join(e.workDir, "fileio-nowarm-export"), 0755))
-
-	fileioBuffered := newMode("fileio-buffered", e.startFileioBuffered)
-	fileioBuffered.skip = fileio.skip
-	require.NoError(t, os.MkdirAll(filepath.Join(e.workDir, "fileio-buffered-export"), 0755))
-
-	cerofs := &benchMode{
-		name:  benchErofsfuse,
-		mnt:   filepath.Join(e.workDir, "erofsfuse-mnt"),
-		start: e.startErofsfuse,
-	}
-	require.NoError(t, os.MkdirAll(cerofs.mnt, 0755))
-	if _, err := lookupCErofsFuseExecutable(); err != nil {
-		cerofs.skip = err.Error()
+	fileioNoWarm := newMode("fileio-nowarm", func(t *testing.T, mode *servingMode) func() { return e.startFileio(t, mode, false, true) })
+	if fileioNoWarm.skipReason = fileio.skipReason; fileioNoWarm.skipReason == "" && os.Getenv("NYDUS_E2E_BENCH_FILEIO_NOWARM") == "" {
+		fileioNoWarm.skipReason = "set NYDUS_E2E_BENCH_FILEIO_NOWARM=1 to enable the fileio-nowarm column"
 	}
 
-	v2 := &benchMode{
-		name:  "v2-fuse",
-		mnt:   filepath.Join(e.workDir, "v2-mnt"),
-		cache: filepath.Join(e.workDir, "v2-cache"),
-		start: e.startV2Fuse,
+	// Same serving path without EROFS 'directio' (the daemon's default is
+	// on): the delta against the fileio column is what holding the image in
+	// the export's page cache as well buys and costs.
+	fileioBuffered := newMode("fileio-buffered", func(t *testing.T, mode *servingMode) func() { return e.startFileio(t, mode, true, false) })
+	fileioBuffered.skipReason = fileio.skipReason
+
+	// The reference reader has no daemon and no cache.
+	erofsfuse := &servingMode{
+		name:       "erofsfuse",
+		mountpoint: filepath.Join(e.workDir, "erofsfuse-mnt"),
+		start:      e.startErofsfuse,
 	}
-	require.NoError(t, os.MkdirAll(v2.mnt, 0755))
-	require.NoError(t, os.MkdirAll(v2.cache, 0755))
+	assert.NoError(t, os.MkdirAll(erofsfuse.mountpoint, 0o755))
+	if _, err := util.LookupErofsFuse(); err != nil {
+		erofsfuse.skipReason = err.Error()
+	}
+
+	v2Fuse := &servingMode{
+		name:       "v2-fuse",
+		mountpoint: filepath.Join(e.workDir, "v2-mnt"),
+		cacheDir:   filepath.Join(e.workDir, "v2-cache"),
+		start:      e.startV2Fuse,
+	}
+	assert.NoError(t, os.MkdirAll(v2Fuse.mountpoint, 0o755))
+	assert.NoError(t, os.MkdirAll(v2Fuse.cacheDir, 0o755))
 	if e.v2Bootstrap == "" {
-		v2.skip = "set NYDUSFS_BENCH_V2_NYDUSD and NYDUSFS_BENCH_V2_IMAGE_BIN to enable the v2 column"
+		v2Fuse.skipReason = "set NYDUS_E2E_BENCH_V2_NYDUSD and NYDUS_E2E_BENCH_V2_IMAGE_BIN to enable the v2 column"
 	}
 
-	return []*benchMode{v2, fuse, nbd, ublk, fan, fileio, fileioNoWarm, fileioBuffered, cerofs}
+	return []*servingMode{v2Fuse, fuse, nbd, ublk, fanotify, fileio, fileioNoWarm, fileioBuffered, erofsfuse}
 }
 
-func (e *benchEnv) startV2Fuse(t *testing.T) func() {
+// configPath returns the storage config of mode name.
+func (e *benchEnv) configPath(name string) string {
+	return filepath.Join(e.workDir, name+".yaml")
+}
+
+// apiSocket returns the Unix socket mode name's daemon serves Prometheus
+// /metrics on.
+func (e *benchEnv) apiSocket(name string) string {
+	return filepath.Join(e.workDir, name+"-api.sock")
+}
+
+// consoleLog returns the console log of mode name's daemon.
+func (e *benchEnv) consoleLog(name string) string {
+	return filepath.Join(e.workDir, name+".log")
+}
+
+// logDir returns the log directory of mode name's daemon, creating it.
+func (e *benchEnv) logDir(name string) string {
+	dir := filepath.Join(e.workDir, name+"-logs")
+	_ = os.MkdirAll(dir, 0o755)
+
+	return dir
+}
+
+// startV2Fuse serves the v2 image with the nydus v2 daemon and returns the
+// function that stops it.
+func (e *benchEnv) startV2Fuse(t *testing.T, mode *servingMode) func() {
 	t.Helper()
-	mnt := filepath.Join(e.workDir, "v2-mnt")
 	config := fmt.Sprintf(`{
   "device": {
     "backend": { "type": "localfs", "config": { "dir": %q } },
@@ -528,622 +629,427 @@ func (e *benchEnv) startV2Fuse(t *testing.T) func() {
   "digest_validate": false,
   "enable_xattr": true,
   "iostats_files": false
-}`, e.v2BlobDir, filepath.Join(e.workDir, "v2-cache"))
+}`, e.v2BlobDir, mode.cacheDir)
 	configPath := filepath.Join(e.workDir, "v2.json")
-	require.NoError(t, os.WriteFile(configPath, []byte(config), 0644))
-	cmd := exec.Command(e.v2Nydusd,
+	assert.NoError(t, os.WriteFile(configPath, []byte(config), 0o644))
+
+	d := &util.Daemon{ConsoleLog: e.consoleLog("v2-fuse")}
+	d.Start(t, exec.Command(e.v2Nydusd,
 		"--config", configPath,
 		"--bootstrap", e.v2Bootstrap,
-		"--mountpoint", mnt,
+		"--mountpoint", mode.mountpoint,
 		"--log-level", "error",
-	)
-	exited := spawnDaemon(t, cmd, e.logPath("v2-fuse"))
-	require.Eventually(t, func() bool {
-		select {
-		case <-exited:
-			require.FailNowf(t, "v2 nydusd exited during startup", "%s", readFileOrEmpty(e.logPath("v2-fuse")))
-		default:
-		}
-		return isMountpoint(mnt)
-	}, 60*time.Second, 200*time.Millisecond, "v2 nydusd did not mount:\n%s", readFileOrEmpty(e.logPath("v2-fuse")))
-	return func() {
-		terminateDaemon(cmd, exited)
-		if isMountpoint(mnt) {
-			unmountFuse(mnt)
-		}
+	))
+	stop := func() {
+		d.Stop()
+		util.Unmount(mode.mountpoint)
 	}
+	t.Cleanup(stop)
+	d.WaitReady(t, func() bool { return util.IsMountpoint(mode.mountpoint) })
+
+	return stop
 }
 
-// writeConfig writes one local-backend storage config per mode: per-mode blob
-// dir and separate cache dirs. Prefetch stays disabled — a background prefetch
-// would warm the cache mid-run and corrupt the cold measurements.
-func (e *benchEnv) writeConfig(t *testing.T, name, blobDir, cacheDir string) {
+// startFuse serves the image with `nydus fuse` and returns the function that
+// stops it.
+func (e *benchEnv) startFuse(t *testing.T, mode *servingMode) func() {
 	t.Helper()
-	config := fmt.Sprintf(
-		"backend:\n  type: local\n  config:\n    dir: %s\nstorage:\n  dir: %s\nprefetch:\n  scope: none\n",
-		blobDir, cacheDir,
-	)
-	require.NoError(t, os.WriteFile(e.configPath(name), []byte(config), 0644))
+	return e.startDaemon(t, mode, exec.Command(nydusBin, "fuse",
+		"--bootstrap", e.bootstrap,
+		"--config", e.configPath("fuse"),
+		"--mountpoint", mode.mountpoint,
+		"--apiserver", "unix://"+e.apiSocket("fuse"),
+	), nil, nil)
 }
 
-func (e *benchEnv) configPath(name string) string {
-	return filepath.Join(e.workDir, name+".yaml")
-}
-
-// apiSocket is where mode `name`'s daemon serves Prometheus /metrics.
-func (e *benchEnv) apiSocket(name string) string {
-	return filepath.Join(e.workDir, name+"-api.sock")
-}
-
-// backendReadMiB sums the nydus_read_backend_traffic series of every backend
-// and type from the daemon's metrics endpoint: bytes actually pulled from the
-// backend, as opposed to cache-file disk allocation, which a 4 KiB block per
-// tiny record inflates (a decoded chunk group publishes its records at
-// block-aligned logical offsets, so `du` reports about 3x the real transfer
-// on this corpus). Returns -1 when the socket is absent or unreadable.
-func backendReadMiB(socket string) float64 {
-	client := http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", socket)
-			},
-		},
-		Timeout: 5 * time.Second,
-	}
-	resp, err := client.Get("http://unix/metrics")
-	if err != nil {
-		return -1
-	}
-	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return -1
-	}
-	var total float64
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		if name, _, _ := strings.Cut(fields[0], "{"); name != "nydus_read_backend_traffic" {
-			continue
-		}
-		if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
-			total += v
-		}
-	}
-	return total / (1024 * 1024)
-}
-
-func (e *benchEnv) logPath(name string) string {
-	return filepath.Join(e.workDir, name+".log")
-}
-
-func (e *benchEnv) logDir(name string) string {
-	d := filepath.Join(e.workDir, name+"-logs")
-	_ = os.MkdirAll(d, 0755)
-	return d
-}
-
-// ---------------------------------------------------------------- daemons ----
-
-// spawnDaemon starts cmd with stdout/stderr appended to logPath and returns
-// the exited channel.
-func spawnDaemon(t *testing.T, cmd *exec.Cmd, logPath string) chan struct{} {
+// startDaemon starts a nydus daemon that mounts mode.mountpoint, registers
+// its stop, which stops the daemon, unmounts and then runs after, and waits
+// for the mount and for ready when one is given.
+func (e *benchEnv) startDaemon(t *testing.T, mode *servingMode, cmd *exec.Cmd, ready func(d *util.Daemon) bool, after func()) func() {
 	t.Helper()
-	logFile, err := os.Create(logPath)
-	require.NoError(t, err)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	require.NoError(t, cmd.Start())
-	_ = logFile.Close()
-	exited := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(exited) }()
-	return exited
-}
-
-// terminateDaemon SIGTERMs cmd and waits up to benchStopTimeout before
-// killing it.
-func terminateDaemon(cmd *exec.Cmd, exited chan struct{}) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	select {
-	case <-exited:
-		return
-	default:
-	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-	select {
-	case <-exited:
-	case <-time.After(benchStopTimeout):
-		_ = cmd.Process.Kill()
-		<-exited
-	}
-}
-
-func (e *benchEnv) startFuse(t *testing.T) func() {
-	return e.startFuseNamed(t, "fuse", e.bootstrap)
-}
-
-func (e *benchEnv) startFuseNamed(t *testing.T, name, bootstrap string) func() {
-	t.Helper()
-	mnt := filepath.Join(e.workDir, name+"-mnt")
-	cmd := exec.Command(e.nydusBin, "fuse",
-		"--bootstrap", bootstrap,
-		"--config", e.configPath(name),
-		"--mountpoint", mnt,
-		"--apiserver", "unix://"+e.apiSocket(name),
-	)
-	exited := spawnDaemon(t, cmd, e.logPath(name))
-	require.Eventually(t, func() bool {
-		select {
-		case <-exited:
-			require.FailNowf(t, "fuse daemon exited during startup", "%s", readFileOrEmpty(e.logPath(name)))
-		default:
-		}
-		return isMountpoint(mnt)
-	}, 60*time.Second, 200*time.Millisecond, "fuse daemon did not mount:\n%s", readFileOrEmpty(e.logPath(name)))
-	return func() {
-		terminateDaemon(cmd, exited)
-		if isMountpoint(mnt) {
-			unmountFuse(mnt)
+	d := &util.Daemon{ConsoleLog: e.consoleLog(mode.name), LogDir: e.logDir(mode.name)}
+	d.Start(t, cmd)
+	stop := func() {
+		d.Stop()
+		util.Unmount(mode.mountpoint)
+		if after != nil {
+			after()
 		}
 	}
+	t.Cleanup(stop)
+	d.WaitReady(t, func() bool {
+		return util.IsMountpoint(mode.mountpoint) && (ready == nil || ready(d))
+	})
+
+	return stop
 }
 
-func (e *benchEnv) startNbd(t *testing.T) func() {
+// startNbd serves the image with `nydus nbd` on the picked device and
+// returns the function that stops it.
+func (e *benchEnv) startNbd(t *testing.T, mode *servingMode) func() {
 	t.Helper()
-	mnt := filepath.Join(e.workDir, "nbd-mnt")
-	cmd := exec.Command(e.nydusBin, "nbd",
+	return e.startDaemon(t, mode, exec.Command(nydusBin, "nbd",
 		"--bootstrap", e.bootstrap,
 		"--config", e.configPath("nbd"),
-		"--device", e.nbdDev,
-		"--mountpoint", mnt,
+		"--device", e.nbdDevice,
+		"--mountpoint", mode.mountpoint,
 		"--log-level", "info",
 		"--log-dir", e.logDir("nbd"),
-	)
-	exited := spawnDaemon(t, cmd, e.logPath("nbd"))
-	require.Eventually(t, func() bool {
-		select {
-		case <-exited:
-			require.FailNowf(t, "nbd daemon exited during startup", "%s", readFileOrEmpty(e.logPath("nbd")))
-		default:
-		}
-		return isMountpoint(mnt)
-	}, 60*time.Second, 200*time.Millisecond, "nbd daemon did not mount:\n%s", readFileOrEmpty(e.logPath("nbd")))
-	return func() {
-		terminateDaemon(cmd, exited)
-		if isMountpoint(mnt) {
-			_ = exec.Command("umount", mnt).Run()
-			_ = exec.Command("umount", "-l", mnt).Run()
-		}
-		waitNbdDeviceRelease(t, e.nbdDev)
-	}
+	), nil, func() { util.WaitNbdDetached(t, e.nbdDevice) })
 }
 
-func (e *benchEnv) startUblk(t *testing.T) func() {
+// startUblk serves the image with `nydus ublk`, mounts the block device it
+// reports with the kernel EROFS driver and returns the function that stops
+// it.
+func (e *benchEnv) startUblk(t *testing.T, mode *servingMode) func() {
 	t.Helper()
-	mnt := filepath.Join(e.workDir, "ublk-mnt")
-	logFile, err := os.Create(e.logPath("ublk"))
-	require.NoError(t, err)
-	cmd := exec.Command(e.nydusBin, "ublk",
+	d := &util.Daemon{ConsoleLog: e.consoleLog("ublk"), LogDir: e.logDir("ublk")}
+	d.Start(t, exec.Command(nydusBin, "ublk",
 		"--bootstrap", e.bootstrap,
 		"--config", e.configPath("ublk"),
 		"--log-level", "info",
 		"--log-dir", e.logDir("ublk"),
 		"--apiserver", "unix://"+e.apiSocket("ublk"),
-	)
-	stdoutPipe, err := cmd.StdoutPipe()
-	require.NoError(t, err)
-	cmd.Stderr = logFile
-	require.NoError(t, cmd.Start())
-	exited := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(exited) }()
+	))
 
-	// The daemon prints the /dev/ublkbN path on stdout once ready; tee every
-	// line into the log file so it is preserved.
-	var devPath string
-	go func() {
-		s := bufio.NewScanner(stdoutPipe)
-		for s.Scan() {
-			line := s.Text()
-			_, _ = logFile.WriteString(line + "\n")
-			trimmed := strings.TrimSpace(line)
-			if devPath == "" && strings.HasPrefix(trimmed, "/dev/ublkb") {
-				devPath = trimmed
+	// Unmount before stopping the daemon: it serves I/O for its own block
+	// device, so unmounting while it exits would deadlock.
+	stop := func() {
+		util.Unmount(mode.mountpoint)
+		d.Stop()
+	}
+	t.Cleanup(stop)
+
+	// The daemon prints the /dev/ublkbN path on stdout once ready.
+	var devicePath string
+	d.WaitReady(t, func() bool {
+		for _, line := range strings.Split(d.Logs(), "\n") {
+			if line = strings.TrimSpace(line); strings.HasPrefix(line, "/dev/ublkb") {
+				devicePath = line
+				return true
 			}
 		}
-	}()
 
-	require.Eventually(t, func() bool {
-		select {
-		case <-exited:
-			require.FailNowf(t, "ublk daemon exited during startup", "%s", readFileOrEmpty(e.logPath("ublk")))
-		default:
-		}
-		return devPath != ""
-	}, 60*time.Second, 200*time.Millisecond, "ublk daemon did not report a device path:\n%s", readFileOrEmpty(e.logPath("ublk")))
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(devPath)
+		return false
+	})
+	assert.Eventually(t, func() bool {
+		_, err := os.Stat(devicePath)
 		return err == nil
-	}, 10*time.Second, 200*time.Millisecond, "%s did not appear", devPath)
+	}, 10*time.Second, 200*time.Millisecond, "%s did not appear", devicePath)
 
-	out, err := exec.Command("mount", "-t", "erofs", "-o", "ro", devPath, mnt).CombinedOutput()
-	require.NoError(t, err, "failed to mount %s as erofs: %s", devPath, out)
-	return func() {
-		// Unmount BEFORE stopping the daemon: it serves I/O for its own
-		// block device, so unmounting while it exits would deadlock.
-		if isMountpoint(mnt) {
-			_ = exec.Command("umount", mnt).Run()
-			_ = exec.Command("umount", "-l", mnt).Run()
-		}
-		terminateDaemon(cmd, exited)
+	out, err := exec.Command("mount", "-t", "erofs", "-o", "ro", devicePath, mode.mountpoint).CombinedOutput()
+	if !assert.NoError(t, err, "failed to mount %s as erofs: %s", devicePath, out) {
+		t.FailNow()
 	}
+
+	return stop
 }
 
-func (e *benchEnv) startFanotify(t *testing.T) func() {
+// startFanotify serves the image with `nydus fanotify` and returns the
+// function that stops it.
+func (e *benchEnv) startFanotify(t *testing.T, mode *servingMode) func() {
 	t.Helper()
-	mnt := filepath.Join(e.workDir, "fanotify-mnt")
-	cmd := exec.Command(e.nydusBin, "fanotify",
+
+	// The mount appears before the event loop serves it, so wait for both.
+	return e.startDaemon(t, mode, exec.Command(nydusBin, "fanotify",
 		"--bootstrap", e.bootstrap,
 		"--config", e.configPath("fanotify"),
-		"--mountpoint", mnt,
+		"--mountpoint", mode.mountpoint,
 		"--log-level", "info",
 		"--log-dir", e.logDir("fanotify"),
-	)
-	exited := spawnDaemon(t, cmd, e.logPath("fanotify"))
-	logs := func() string {
-		var b strings.Builder
-		b.Write(readFileOrEmpty(e.logPath("fanotify")))
-		entries, _ := os.ReadDir(e.logDir("fanotify"))
-		for _, entry := range entries {
-			if entry.Type().IsRegular() {
-				b.Write(readFileOrEmpty(filepath.Join(e.logDir("fanotify"), entry.Name())))
-			}
-		}
-		return b.String()
-	}
-	require.Eventually(t, func() bool {
-		select {
-		case <-exited:
-			require.FailNowf(t, "fanotify daemon exited during startup", "%s", logs())
-		default:
-		}
-		return isMountpoint(mnt) && strings.Contains(logs(), "event loop ready")
-	}, 60*time.Second, 200*time.Millisecond, "fanotify daemon did not mount:\n%s", logs())
-	return func() {
-		terminateDaemon(cmd, exited)
-		if isMountpoint(mnt) {
-			_ = exec.Command("umount", mnt).Run()
-			_ = exec.Command("umount", "-l", mnt).Run()
-		}
-	}
+	), func(d *util.Daemon) bool { return strings.Contains(d.Logs(), "event loop ready") }, nil)
 }
 
 // startFileio exports the flattened image over FUSE and lets the kernel EROFS
 // driver mount that file directly, so the daemon owns both mounts and tears
-// them down in dependency order on shutdown.
-func (e *benchEnv) startFileio(t *testing.T) func() {
-	return e.startFileioMode(t, "fileio", true, true)
-}
-
-// startFileioNoWarm serves the same image with the FUSE_NOTIFY_STORE bootstrap
-// push disabled, so the pair of columns isolates what that prewarm buys.
-func (e *benchEnv) startFileioNoWarm(t *testing.T) func() {
-	return e.startFileioMode(t, "fileio-nowarm", false, true)
-}
-
-// startFileioBuffered mounts without EROFS 'directio' (the daemon's default
-// is on); the delta against the fileio column is what holding the image in
-// the export's page cache as well buys and costs.
-func (e *benchEnv) startFileioBuffered(t *testing.T) func() {
-	return e.startFileioMode(t, "fileio-buffered", true, false)
-}
-
-func (e *benchEnv) startFileioMode(t *testing.T, name string, warmBootstrap, directIO bool) func() {
+// them down in dependency order on shutdown. warmBootstrap pushes the
+// bootstrap into the kernel with FUSE_NOTIFY_STORE and directIO mounts EROFS
+// with 'directio'. It returns the function that stops the daemon.
+func (e *benchEnv) startFileio(t *testing.T, mode *servingMode, warmBootstrap, directIO bool) func() {
 	t.Helper()
-	mnt := filepath.Join(e.workDir, name+"-mnt")
-	export := filepath.Join(e.workDir, name+"-export")
-	cmd := exec.Command(e.nydusBin, "fileio",
+	exportDir := filepath.Join(e.workDir, mode.name+"-export")
+	assert.NoError(t, os.MkdirAll(exportDir, 0o755))
+
+	// The daemon unmounts EROFS before ending the export; the fallback
+	// unmount only matters if it died without running its shutdown path.
+	return e.startDaemon(t, mode, exec.Command(nydusBin, "fileio",
 		"--bootstrap", e.bootstrap,
-		"--config", e.configPath(name),
-		"--export-dir", export,
-		"--mountpoint", mnt,
-		"--warm-bootstrap", fmt.Sprintf("%t", warmBootstrap),
-		"--direct-io", fmt.Sprintf("%t", directIO),
+		"--config", e.configPath(mode.name),
+		"--export-dir", exportDir,
+		"--mountpoint", mode.mountpoint,
+		"--warm-bootstrap", strconv.FormatBool(warmBootstrap),
+		"--direct-io", strconv.FormatBool(directIO),
 		"--log-level", "info",
-		"--log-dir", e.logDir(name),
-		"--apiserver", "unix://"+e.apiSocket(name),
-	)
-	exited := spawnDaemon(t, cmd, e.logPath(name))
-	require.Eventually(t, func() bool {
-		select {
-		case <-exited:
-			require.FailNowf(t, "fileio daemon exited during startup",
-				"%s", readFileOrEmpty(e.logPath(name)))
-		default:
-		}
-		return isMountpoint(mnt)
-	}, 60*time.Second, 200*time.Millisecond, "fileio daemon did not mount:\n%s",
-		readFileOrEmpty(e.logPath(name)))
-	return func() {
-		// The daemon unmounts EROFS before ending the export; the fallbacks
-		// only matter if it died without running its shutdown path.
-		terminateDaemon(cmd, exited)
-		if isMountpoint(mnt) {
-			_ = exec.Command("umount", mnt).Run()
-			_ = exec.Command("umount", "-l", mnt).Run()
-		}
-		if isMountpoint(export) {
-			_ = exec.Command("umount", "-l", export).Run()
-		}
-	}
+		"--log-dir", e.logDir(mode.name),
+		"--apiserver", "unix://"+e.apiSocket(mode.name),
+	), nil, func() { util.Unmount(exportDir) })
 }
 
-func (e *benchEnv) startErofsfuse(t *testing.T) func() {
+// startErofsfuse mounts the image with the C erofsfuse reference reader and
+// returns the function that unmounts it.
+func (e *benchEnv) startErofsfuse(t *testing.T, mode *servingMode) func() {
 	t.Helper()
-	bin := mustLookupCErofsFuse(t)
-	return mountCErofsFuse(t, bin, e.bootstrap, filepath.Join(e.workDir, "erofsfuse-mnt"), e.blobPath)
+	erofsfuseBin, err := util.LookupErofsFuse()
+	assert.NoError(t, err)
+
+	return util.MountErofsFuse(t, erofsfuseBin, e.bootstrap, mode.mountpoint, e.fullBlob)
 }
 
-// ublkAvailable reports whether the ublk_drv module is loadable and its
-// control device is present. Mirrors the gating TestUblkTarget does.
-func ublkAvailable() bool {
-	if err := exec.Command("modprobe", "ublk_drv").Run(); err != nil {
-		return false
-	}
-	if _, err := os.Stat("/dev/ublk-control"); err != nil {
-		return false
-	}
-	return true
-}
-
-// cacheDirUsedBytes returns the allocated (not apparent) MiB of the blob
-// cache files in cacheDir.
-func cacheDirUsedBytes(cacheDir string) float64 {
-	var total int64
-	matches, _ := filepath.Glob(filepath.Join(cacheDir, "*.blob.data"))
-	for _, m := range matches {
-		total += usedBytes(m)
-	}
-	return float64(total) / (1024 * 1024)
-}
-
-func firstLine(b []byte) string {
-	s := strings.TrimSpace(string(b))
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
-}
-
-// ----------------------------------------------------------------- output ----
-
-func printBenchTable(t *testing.T, modes []*benchMode, results map[string]*benchModeResult) {
-	type row struct {
-		label string
-		key   string
-		unit  string
-		get   func(r *benchResult) float64
-	}
-
-	bw := func(r *benchResult) float64 { return r.ReadBW }
-	iops := func(r *benchResult) float64 { return r.ReadIOPS }
-	lat := func(r *benchResult) float64 { return r.ReadLat }
-
-	var active []*benchMode
-	for _, m := range modes {
-		if results[m.name] != nil {
-			active = append(active, m)
+// printResults logs one column per measured mode, the steady-state rows
+// under NYDUS_E2E_BENCH_WARM, and the skipped modes with their reasons.
+func printResults(t *testing.T, modes []*servingMode, results map[string]*modeResult) {
+	// One column per mode that produced a result.
+	var measured []*servingMode
+	for _, mode := range modes {
+		if results[mode.name] != nil {
+			measured = append(measured, mode)
 		}
 	}
 
-	tw := table.NewWriter()
-	tw.SetStyle(table.StyleLight)
-	tw.Style().Options.SeparateRows = false
+	// Build the table header.
+	writer := table.NewWriter()
+	writer.SetStyle(table.StyleLight)
+	writer.Style().Options.SeparateRows = false
 	header := table.Row{"Benchmark"}
-	colCfg := []table.ColumnConfig{{Number: 1, Align: text.AlignLeft}}
-	for i, m := range active {
-		header = append(header, m.name)
-		colCfg = append(colCfg, table.ColumnConfig{Number: 2 + i, Align: text.AlignRight})
+	columns := []table.ColumnConfig{{Number: 1, Align: text.AlignLeft}}
+	for i, mode := range measured {
+		header = append(header, mode.name)
+		columns = append(columns, table.ColumnConfig{Number: 2 + i, Align: text.AlignRight})
 	}
-	tw.AppendHeader(header)
-	tw.SetColumnConfigs(colCfg)
+	writer.AppendHeader(header)
+	writer.SetColumnConfigs(columns)
 
-	appendRow := func(label string, cell func(res *benchModeResult) string) {
+	appendRow := func(label string, cell func(result *modeResult) string) {
 		cells := table.Row{label}
-		for _, m := range active {
-			cells = append(cells, cell(results[m.name]))
+		for _, mode := range measured {
+			cells = append(cells, cell(results[mode.name]))
 		}
-		tw.AppendRow(cells)
+		writer.AppendRow(cells)
 	}
 
-	appendRow("Mount ready", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.2f s", res.mountSec)
+	// Cold-start rows.
+	appendRow("Mount ready", func(result *modeResult) string {
+		return fmt.Sprintf("%.2f s", result.mountSec)
 	})
-	appendRow("Cold metadata walk", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.3f s", res.coldWalkSec)
+	appendRow("Cold metadata walk", func(result *modeResult) string {
+		return fmt.Sprintf("%.3f s", result.coldWalkSec)
 	})
-	appendRow("Cold walk rate", func(res *benchModeResult) string {
-		if res.coldWalkSec <= 0 {
+	appendRow("Cold walk rate", func(result *modeResult) string {
+		if result.coldWalkSec <= 0 {
 			return "—"
 		}
-		return fmt.Sprintf("%.0f ent/s", float64(res.coldWalkEntries)/res.coldWalkSec)
+		return fmt.Sprintf("%.0f ent/s", float64(result.coldWalkEntries)/result.coldWalkSec)
 	})
-	appendRow("Cold walk + xattr", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.3f s", res.coldXattrWalkSec)
+	appendRow("Cold walk + xattr", func(result *modeResult) string {
+		return fmt.Sprintf("%.3f s", result.coldXattrWalkSec)
 	})
-	appendRow("  xattr delta", func(res *benchModeResult) string {
-		return fmt.Sprintf("%+.3f s", res.coldXattrWalkSec-res.coldWalkSec)
+	appendRow("  xattr delta", func(result *modeResult) string {
+		return fmt.Sprintf("%+.3f s", result.coldXattrWalkSec-result.coldWalkSec)
 	})
-	appendRow("Negative lookup ops/s", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.0f op/s", res.negativeLookupOps)
+	appendRow("Negative lookup ops/s", func(result *modeResult) string {
+		return fmt.Sprintf("%.0f op/s", result.negativeLookupRate)
 	})
-	appendRow("First 1MiB cold read", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.3f s", res.firstReadSec)
+	appendRow("First 1MiB cold read", func(result *modeResult) string {
+		return fmt.Sprintf("%.3f s", result.firstReadSec)
 	})
-	appendRow("Cold seq read (64MiB)", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.1f MiB/s", res.coldSeqMiBps)
+	appendRow("Cold seq read (64MiB)", func(result *modeResult) string {
+		return fmt.Sprintf("%.1f MiB/s", result.coldSeqMiBps)
 	})
-	appendRow("  page cache used", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.1f MiB", res.coldSeqCachedMiB)
+	appendRow("  page cache used", func(result *modeResult) string {
+		return fmt.Sprintf("%.1f MiB", result.coldSeqPageCacheMiB)
 	})
-	appendRow("Backend read (that 64MiB)", func(res *benchModeResult) string {
-		if res.fetchedMiB < 0 {
+	appendRow("Backend read (that 64MiB)", func(result *modeResult) string {
+		if result.fetchedMiB < 0 {
 			return "—"
 		}
-		return fmt.Sprintf("%.1f MiB", res.fetchedMiB)
+		return fmt.Sprintf("%.1f MiB", result.fetchedMiB)
 	})
-	appendRow("Cold rand read IOPS (4K)", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.0f IOPS", res.coldRandIOPS)
+	appendRow("Cold rand read IOPS (4K)", func(result *modeResult) string {
+		return fmt.Sprintf("%.0f IOPS", result.coldRandIOPS)
 	})
-	appendRow("Cold rand read Lat (4K)", func(res *benchModeResult) string {
-		return fmt.Sprintf("%.0f µs", res.coldRandLatUs)
+	appendRow("Cold rand read Lat (4K)", func(result *modeResult) string {
+		return fmt.Sprintf("%.0f µs", result.coldRandLatencyUs)
 	})
 
-	// Steady-state rows: only populated under NYDUSFS_BENCH_WARM. They say
+	// Steady-state rows: only populated under NYDUS_E2E_BENCH_WARM. They say
 	// little about container start, and once every mode's metadata is in the
 	// kernel's caches they largely measure the same page-cache path.
-	rows := []row{
-		{"Seq Read BW (128K)", "seq_read_128k", "MiB/s", bw},
-		{"Rand Read BW (128K)", "rand_read_128k", "MiB/s", bw},
-		{"Seq Read BW (4K)", "seq_read_4k", "MiB/s", bw},
-		{"Rand Read IOPS (4K)", "rand_read_4k", "IOPS", iops},
-		{"Rand Read Lat (4K)", "rand_read_4k", "µs", lat},
-		{"Seq 4t BW (128K)", "seq_read_4t_128k", "MiB/s", bw},
-		{"Rand 4t BW (128K)", "rand_read_4t_128k", "MiB/s", bw},
-		{"Seq 4t BW (4K)", "seq_read_4t_4k", "MiB/s", bw},
-		{"Rand 4t BW (4K)", "rand_read_4t_4k", "MiB/s", bw},
-		{"Stat IOPS", "stat", "IOPS", iops},
-		{"Stat Latency", "stat", "µs", lat},
-		{"Readdir IOPS", "readdir", "IOPS", iops},
-		{"Readdir Latency", "readdir", "µs", lat},
-		{"Listxattr IOPS", "listxattr", "IOPS", iops},
-		{"Listxattr Latency", "listxattr", "µs", lat},
-		{"Getxattr IOPS", "getxattr", "IOPS", iops},
-		{"Getxattr Latency", "getxattr", "µs", lat},
-		{"Readdir+stat (ls -l) IOPS", "readdir_stat", "IOPS", iops},
-		{"Readdir+stat (ls -l) Latency", "readdir_stat", "µs", lat},
-	}
-	if os.Getenv("NYDUSFS_BENCH_WARM") != "" {
-		tw.AppendSeparator()
-		for _, r := range rows {
-			appendRow(r.label, func(res *benchModeResult) string {
-				if br, ok := res.bench[r.key]; ok && br != nil {
-					return fmt.Sprintf("%.1f %s", r.get(br), r.unit)
+	if os.Getenv("NYDUS_E2E_BENCH_WARM") != "" {
+		type warmRow struct {
+			label string
+			key   string
+			unit  string
+			value func(job *jobResult) float64
+		}
+		bandwidth := func(job *jobResult) float64 { return job.ReadBW }
+		iops := func(job *jobResult) float64 { return job.ReadIOPS }
+		latency := func(job *jobResult) float64 { return job.ReadLatency }
+		warmRows := []warmRow{
+			{"Seq Read BW (128K)", "seq_read_128k", "MiB/s", bandwidth},
+			{"Rand Read BW (128K)", "rand_read_128k", "MiB/s", bandwidth},
+			{"Seq Read BW (4K)", "seq_read_4k", "MiB/s", bandwidth},
+			{"Rand Read IOPS (4K)", "rand_read_4k", "IOPS", iops},
+			{"Rand Read Lat (4K)", "rand_read_4k", "µs", latency},
+			{"Seq 4t BW (128K)", "seq_read_4t_128k", "MiB/s", bandwidth},
+			{"Rand 4t BW (128K)", "rand_read_4t_128k", "MiB/s", bandwidth},
+			{"Seq 4t BW (4K)", "seq_read_4t_4k", "MiB/s", bandwidth},
+			{"Rand 4t BW (4K)", "rand_read_4t_4k", "MiB/s", bandwidth},
+			{"Stat IOPS", "stat", "IOPS", iops},
+			{"Stat Latency", "stat", "µs", latency},
+			{"Readdir IOPS", "readdir", "IOPS", iops},
+			{"Readdir Latency", "readdir", "µs", latency},
+			{"Listxattr IOPS", "listxattr", "IOPS", iops},
+			{"Listxattr Latency", "listxattr", "µs", latency},
+			{"Getxattr IOPS", "getxattr", "IOPS", iops},
+			{"Getxattr Latency", "getxattr", "µs", latency},
+			{"Readdir+stat (ls -l) IOPS", "readdir_stat", "IOPS", iops},
+			{"Readdir+stat (ls -l) Latency", "readdir_stat", "µs", latency},
+		}
+
+		writer.AppendSeparator()
+		for _, row := range warmRows {
+			appendRow(row.label, func(result *modeResult) string {
+				if job, ok := result.warm[row.key]; ok && job != nil {
+					return fmt.Sprintf("%.1f %s", row.value(job), row.unit)
 				}
 				return "—"
 			})
 		}
 	}
 
+	// Name the skipped modes under the table.
 	var skipped []string
-	for _, m := range modes {
-		if m.skip != "" {
-			skipped = append(skipped, fmt.Sprintf("%s (%s)", m.name, m.skip))
+	for _, mode := range modes {
+		if mode.skipReason != "" {
+			skipped = append(skipped, fmt.Sprintf("%s (%s)", mode.name, mode.skipReason))
 		}
 	}
 	suffix := ""
 	if len(skipped) > 0 {
 		suffix = "\nSkipped modes: " + strings.Join(skipped, "; ")
 	}
-	t.Log("\nCold-start Performance Comparison (local backend, cold page cache)\n" + tw.Render() + suffix)
+
+	t.Log("\nCold-start Performance Comparison (local backend, cold page cache)\n" + writer.Render() + suffix)
 }
 
-// ----------------------------------------------------------- shared suite ----
-
-// runBenchmarks executes the full I/O and metadata benchmark suite and
-// returns the per-benchmark results keyed by name. dropCaches is called
+// runWarmBenchmarks executes the full I/O and metadata benchmark suite and
+// returns the per-benchmark results keyed by name. The page cache is dropped
 // before each fio job to force cache-miss reads. Every job passes
 // --invalidate=0: fio's default invalidate=1 fadvises the target file out of
-// the page cache at job start — cache state must be controlled by dropCaches
-// alone.
-func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string) map[string]*benchResult {
-	require.FileExists(t, targetFile)
+// the page cache at job start, and cache state must be controlled by the
+// drop alone.
+func runWarmBenchmarks(t *testing.T, fioBin, file, statDir, readdirDir string) map[string]*jobResult {
+	assert.FileExists(t, file)
+	fioRuntime := corpus.EnvInt("NYDUS_E2E_PERF_FIO_RUNTIME", 8)
+	fioSeqNumjobs := corpus.EnvInt("NYDUS_E2E_PERF_FIO_SEQ_NUMJOBS", 4)
+	fioRandNumjobs := corpus.EnvInt("NYDUS_E2E_PERF_FIO_RAND_NUMJOBS", 4)
+	results := make(map[string]*jobResult)
 
-	fioRuntime := corpus.EnvInt("NYDUSFS_PERF_FIO_RUNTIME", 8)
-	fioSeqNumjobs := corpus.EnvInt("NYDUSFS_PERF_FIO_SEQ_NUMJOBS", 4)
-	fioRandNumjobs := corpus.EnvInt("NYDUSFS_PERF_FIO_RAND_NUMJOBS", 4)
-	results := make(map[string]*benchResult)
-
-	dropCaches(t)
+	// Single-thread read jobs.
+	util.DropCaches(t)
 	results["seq_read_128k"] = runFio(t, fioBin, []string{
-		"--name=seq_read", "--filename=" + targetFile,
+		"--name=seq_read", "--filename=" + file,
 		"--rw=read", "--bs=128k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based", "--readonly",
 	})
-
-	dropCaches(t)
+	util.DropCaches(t)
 	results["rand_read_128k"] = runFio(t, fioBin, []string{
-		"--name=rand_read", "--filename=" + targetFile,
+		"--name=rand_read", "--filename=" + file,
 		"--rw=randread", "--bs=128k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based", "--readonly",
 	})
-
-	dropCaches(t)
+	util.DropCaches(t)
 	results["seq_read_4k"] = runFio(t, fioBin, []string{
-		"--name=seq_read_4k", "--filename=" + targetFile,
+		"--name=seq_read_4k", "--filename=" + file,
 		"--rw=read", "--bs=4k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based", "--readonly",
 	})
-
-	dropCaches(t)
+	util.DropCaches(t)
 	results["rand_read_4k"] = runFio(t, fioBin, []string{
-		"--name=rand_read_4k", "--filename=" + targetFile,
+		"--name=rand_read_4k", "--filename=" + file,
 		"--rw=randread", "--bs=4k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based", "--readonly",
 	})
 
-	dropCaches(t)
+	// Multi-thread read jobs.
+	util.DropCaches(t)
 	results["seq_read_4t_128k"] = runFio(t, fioBin, []string{
-		"--name=seq_read_4t", "--filename=" + targetFile,
+		"--name=seq_read_4t", "--filename=" + file,
 		"--rw=read", "--bs=128k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioSeqNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based",
 		"--readonly", "--group_reporting",
 	})
-
-	dropCaches(t)
+	util.DropCaches(t)
 	results["rand_read_4t_128k"] = runFio(t, fioBin, []string{
-		"--name=rand_read_4t", "--filename=" + targetFile,
+		"--name=rand_read_4t", "--filename=" + file,
 		"--rw=randread", "--bs=128k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioRandNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based",
 		"--readonly", "--group_reporting",
 	})
-
-	dropCaches(t)
+	util.DropCaches(t)
 	results["seq_read_4t_4k"] = runFio(t, fioBin, []string{
-		"--name=seq_read_4t", "--filename=" + targetFile,
+		"--name=seq_read_4t", "--filename=" + file,
 		"--rw=read", "--bs=4k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioSeqNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based",
 		"--readonly", "--group_reporting",
 	})
-
-	dropCaches(t)
+	util.DropCaches(t)
 	results["rand_read_4t_4k"] = runFio(t, fioBin, []string{
-		"--name=rand_read_4t", "--filename=" + targetFile,
+		"--name=rand_read_4t", "--filename=" + file,
 		"--rw=randread", "--bs=4k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioRandNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--ramp_time=2", "--time_based",
 		"--readonly", "--group_reporting",
 	})
 
-	dropCaches(t)
+	// Metadata jobs.
+	util.DropCaches(t)
 	results["stat"] = benchStat(t, statDir)
-
-	dropCaches(t)
+	util.DropCaches(t)
 	results["readdir"] = benchReaddir(t, readdirDir)
+
 	return results
 }
 
-// benchStat repeatedly stats every file in dir for the configured metadata duration and
-// reports the achieved ops/s and latency.
-func benchStat(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 3)) * time.Second
+// addMetaBenchmarks runs the metadata-only benchmarks (listxattr, getxattr,
+// readdir+stat) and inserts their results into results.
+func addMetaBenchmarks(t *testing.T, results map[string]*jobResult, xattrDir, xattrName, statDir string) {
+	t.Helper()
+	if xattrDir != "" {
+		results["listxattr"] = benchXattr("listxattr", xattrDir, func(file string, buf []byte) { _, _ = unix.Listxattr(file, buf) })
+		if xattrName != "" {
+			results["getxattr"] = benchXattr("getxattr", xattrDir, func(file string, buf []byte) { _, _ = unix.Getxattr(file, xattrName, buf) })
+		}
+	}
+	results["readdir_stat"] = benchReaddirStat(t, statDir)
+}
 
+// benchMetadata runs pass back to back for duration and reports the achieved
+// ops/s and latency of a job that does opsPerPass operations per pass.
+func benchMetadata(name string, duration time.Duration, opsPerPass int, pass func()) *jobResult {
+	iterations := 0
+	start := time.Now()
+	for deadline := start.Add(duration); time.Now().Before(deadline); iterations++ {
+		pass()
+	}
+
+	elapsed := time.Since(start)
+	totalOps := float64(iterations * opsPerPass)
+
+	return &jobResult{
+		Name:        name,
+		ReadIOPS:    totalOps / elapsed.Seconds(),
+		ReadLatency: elapsed.Seconds() / totalOps * 1e6,
+	}
+}
+
+// metaDuration returns the duration of one metadata benchmark job, from the
+// environment variable env in seconds.
+func metaDuration(env string) time.Duration {
+	return time.Duration(corpus.EnvInt(env, 3)) * time.Second
+}
+
+// regularFiles returns every non-directory path under dir.
+func regularFiles(dir string) []string {
 	var files []string
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() {
@@ -1152,230 +1058,137 @@ func benchStat(t *testing.T, dir string) *benchResult {
 
 		return nil
 	})
-	require.NotEmpty(t, files)
 
-	iterations := 0
-	start := time.Now()
-	deadline := start.Add(metaDuration)
-	for time.Now().Before(deadline) {
-		for _, f := range files {
-			_, _ = os.Stat(f)
-		}
-
-		iterations++
-	}
-
-	elapsed := time.Since(start)
-	totalOps := float64(iterations * len(files))
-	return &benchResult{
-		Name:     "stat",
-		ReadIOPS: totalOps / elapsed.Seconds(),
-		ReadLat:  elapsed.Seconds() / totalOps * 1e6,
-	}
+	return files
 }
 
-// benchReaddir repeatedly reads every subdirectory of dir for the configured
-// metadata duration and reports the achieved ops/s and latency.
-func benchReaddir(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_READDIR_META_SECS", 3)) * time.Second
-	passesPerDir := corpus.EnvInt("NYDUSFS_PERF_READDIR_PASSES_PER_DIR", 8)
+// benchStat stats every file under dir per pass.
+func benchStat(t *testing.T, dir string) *jobResult {
+	t.Helper()
+	files := regularFiles(dir)
+	assert.NotEmpty(t, files)
 
+	return benchMetadata("stat", metaDuration("NYDUS_E2E_PERF_META_SECS"), len(files), func() {
+		for _, file := range files {
+			_, _ = os.Stat(file)
+		}
+	})
+}
+
+// benchReaddir reads every subdirectory of dir several times per pass.
+func benchReaddir(t *testing.T, dir string) *jobResult {
+	t.Helper()
+	passesPerDir := corpus.EnvInt("NYDUS_E2E_PERF_READDIR_PASSES_PER_DIR", 8)
 	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
+	assert.NoError(t, err)
+
 	var dirs []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			dirs = append(dirs, filepath.Join(dir, entry.Name()))
 		}
 	}
-	require.NotEmpty(t, dirs)
+	assert.NotEmpty(t, dirs)
 
-	iterations := 0
-	start := time.Now()
-	deadline := start.Add(metaDuration)
-	for time.Now().Before(deadline) {
-		for _, dir := range dirs {
+	return benchMetadata("readdir", metaDuration("NYDUS_E2E_PERF_READDIR_META_SECS"), len(dirs)*passesPerDir, func() {
+		for _, subdir := range dirs {
 			for range passesPerDir {
-				_, _ = os.ReadDir(dir)
+				_, _ = os.ReadDir(subdir)
 			}
 		}
-
-		iterations++
-	}
-
-	elapsed := time.Since(start)
-	totalOps := float64(iterations * len(dirs) * passesPerDir)
-	return &benchResult{
-		Name:     "readdir",
-		ReadIOPS: totalOps / elapsed.Seconds(),
-		ReadLat:  elapsed.Seconds() / totalOps * 1e6,
-	}
-}
-
-// addMetaBenchmarks runs the metadata-only benchmarks (listxattr, getxattr,
-// readdir+stat) and inserts their results into the provided map.
-func addMetaBenchmarks(t *testing.T, results map[string]*benchResult, xattrDir, xattrName, statDir string) {
-	t.Helper()
-
-	if xattrDir != "" {
-		results["listxattr"] = benchListxattr(t, xattrDir)
-		if xattrName != "" {
-			results["getxattr"] = benchGetxattr(t, xattrDir, xattrName)
-		}
-	}
-	results["readdir_stat"] = benchReaddirStat(t, statDir)
-}
-
-// benchListxattr repeatedly calls listxattr on every regular file in dir for
-// the configured metadata duration and reports the achieved ops/s and latency.
-// Returns nil when no regular files are found.
-func benchListxattr(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 3)) * time.Second
-
-	var files []string
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			files = append(files, path)
-		}
-		return nil
 	})
+}
+
+// benchXattr runs the xattr call op on every file under dir per pass, nil
+// when dir holds no files.
+func benchXattr(name, dir string, op func(file string, buf []byte)) *jobResult {
+	files := regularFiles(dir)
 	if len(files) == 0 {
 		return nil
 	}
 
 	buf := make([]byte, 512)
-	iterations := 0
-	start := time.Now()
-	deadline := start.Add(metaDuration)
-	for time.Now().Before(deadline) {
-		for _, f := range files {
-			_, _ = syscall.Listxattr(f, buf)
+	return benchMetadata(name, metaDuration("NYDUS_E2E_PERF_META_SECS"), len(files), func() {
+		for _, file := range files {
+			op(file, buf)
 		}
-		iterations++
-	}
-
-	elapsed := time.Since(start)
-	totalOps := float64(iterations * len(files))
-	return &benchResult{
-		Name:     "listxattr",
-		ReadIOPS: totalOps / elapsed.Seconds(),
-		ReadLat:  elapsed.Seconds() / totalOps * 1e6,
-	}
-}
-
-// benchGetxattr repeatedly calls getxattr(name) on every regular file in dir
-// for the configured metadata duration and reports the achieved ops/s and
-// latency. Returns nil when no regular files are found.
-func benchGetxattr(t *testing.T, dir, xattrName string) *benchResult {
-	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 3)) * time.Second
-
-	var files []string
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			files = append(files, path)
-		}
-		return nil
 	})
-	if len(files) == 0 {
-		return nil
-	}
-
-	buf := make([]byte, 256)
-	iterations := 0
-	start := time.Now()
-	deadline := start.Add(metaDuration)
-	for time.Now().Before(deadline) {
-		for _, f := range files {
-			_, _ = syscall.Getxattr(f, xattrName, buf)
-		}
-		iterations++
-	}
-
-	elapsed := time.Since(start)
-	totalOps := float64(iterations * len(files))
-	return &benchResult{
-		Name:     "getxattr",
-		ReadIOPS: totalOps / elapsed.Seconds(),
-		ReadLat:  elapsed.Seconds() / totalOps * 1e6,
-	}
 }
 
-// benchReaddirStat repeatedly reads dir entries and lstats each one,
-// simulating an "ls -l" workload, for the configured metadata duration.
-// Returns nil when dir has no entries.
-func benchReaddirStat(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 3)) * time.Second
-
-	// Verify the directory is non-empty.
+// benchReaddirStat lists dir and lstats every entry per pass, the `ls -l`
+// workload, nil when dir is empty.
+func benchReaddirStat(t *testing.T, dir string) *jobResult {
+	t.Helper()
 	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 	if len(entries) == 0 {
 		return nil
 	}
 
-	iterations := 0
-	start := time.Now()
-	deadline := start.Add(metaDuration)
-	for time.Now().Before(deadline) {
-		ents, _ := os.ReadDir(dir)
-		for _, ent := range ents {
-			_, _ = os.Lstat(filepath.Join(dir, ent.Name()))
+	return benchMetadata("readdir_stat", metaDuration("NYDUS_E2E_PERF_META_SECS"), 1, func() {
+		listed, _ := os.ReadDir(dir)
+		for _, entry := range listed {
+			_, _ = os.Lstat(filepath.Join(dir, entry.Name()))
 		}
-		iterations++
-	}
-
-	elapsed := time.Since(start)
-	totalOps := float64(iterations)
-	return &benchResult{
-		Name:     "readdir_stat",
-		ReadIOPS: totalOps / elapsed.Seconds(),
-		ReadLat:  elapsed.Seconds() / totalOps * 1e6,
-	}
+	})
 }
 
-// benchResult is the per-job summary extracted from a benchmark run.
-type benchResult struct {
-	// A short name identifying the benchmark, e.g. "seq_read_128k".
+// jobResult is the per-job summary extracted from a benchmark run.
+type jobResult struct {
+	// Name is a short name identifying the benchmark, e.g. "seq_read_128k".
 	Name string
 
-	// Throughput in MB/s.
+	// ReadBW is the throughput in MB/s.
 	ReadBW float64
 
-	// I/O operations per second.
+	// ReadIOPS is the I/O operations per second.
 	ReadIOPS float64
 
-	// Average latency in microseconds.
-	ReadLat float64
+	// ReadLatency is the average latency in microseconds.
+	ReadLatency float64
 }
 
-// fioJSONResult mirrors the subset of fio's JSON output we consume.
+// fioJSONResult mirrors the subset of fio's JSON output the benchmark reads.
 type fioJSONResult struct {
+	// Jobs is one entry per fio job.
 	Jobs []struct {
+		// Jobname is the --name of the job.
 		Jobname string `json:"jobname"`
-		Read    struct {
-			Bw    float64 `json:"bw"` // KB/s
-			Iops  float64 `json:"iops"`
+
+		// Read is the read-side summary of the job.
+		Read struct {
+			// Bw is the bandwidth in KB/s.
+			Bw float64 `json:"bw"`
+
+			// Iops is the I/O operations per second.
+			Iops float64 `json:"iops"`
+
+			// LatNs is the completion latency distribution.
 			LatNs struct {
-				Mean float64 `json:"mean"` // Nanoseconds
+				// Mean is the mean latency in nanoseconds.
+				Mean float64 `json:"mean"`
 			} `json:"lat_ns"`
 		} `json:"read"`
 	} `json:"jobs"`
 }
 
 // runFio runs a single fio job with JSON output and returns its summary.
-func runFio(t *testing.T, fioBin string, args []string) *benchResult {
+func runFio(t *testing.T, fioBin string, args []string) *jobResult {
 	out, err := exec.Command(fioBin, append([]string{"--output-format=json"}, args...)...).CombinedOutput()
-	require.NoError(t, err, "fio failed: %s", string(out))
+	assert.NoError(t, err, "fio failed: %s", out)
 
-	var result fioJSONResult
-	require.NoError(t, json.Unmarshal(out, &result))
-	require.NotEmpty(t, result.Jobs)
+	var output fioJSONResult
+	assert.NoError(t, json.Unmarshal(out, &output))
+	if !assert.NotEmpty(t, output.Jobs) {
+		return &jobResult{}
+	}
 
-	job := result.Jobs[0]
-	return &benchResult{
-		Name:     job.Jobname,
-		ReadBW:   job.Read.Bw / 1024.0,
-		ReadIOPS: job.Read.Iops,
-		ReadLat:  job.Read.LatNs.Mean / 1000.0,
+	job := output.Jobs[0]
+
+	return &jobResult{
+		Name:        job.Jobname,
+		ReadBW:      job.Read.Bw / 1024.0,
+		ReadIOPS:    job.Read.Iops,
+		ReadLatency: job.Read.LatNs.Mean / 1000.0,
 	}
 }

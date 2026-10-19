@@ -1,11 +1,9 @@
 package e2e
 
 import (
-	"context"
-	"crypto/tls"
+	"cmp"
 	"encoding/json"
-	"errors"
-	"io"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -18,335 +16,481 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/dragonflyoss/nydus/tests/e2e/util"
+	"github.com/stretchr/testify/assert"
 )
 
-// dragonflyEnv is the Dragonfly e2e environment the workflow describes through
-// NYDUS_CONFIG, BOOTSTRAP_PATH, WORK_DIR, NYDUS_CACHE_DIR and DRAGONFLY_MODE.
-type dragonflyEnv struct {
-	nydusBin      string
-	configPath    string
-	bootstrap     string
-	mountpoint    string
-	workDir       string
-	cacheDir      string
-	dragonflyMode string
+const (
+	// dragonflyNamespace is the namespace the Dragonfly helm chart is
+	// installed in.
+	dragonflyNamespace = "dragonfly-system"
+
+	// dragonflySeedClient is the seed client statefulset of the chart.
+	dragonflySeedClient = "dragonfly-seed-client"
+
+	// dragonflySchedulerAddr is the scheduler NodePort as the host reaches
+	// it, through the kind port mapping in tests/testdata/kind.
+	dragonflySchedulerAddr = "http://127.0.0.1:8002"
+
+	// dragonflyGateway is the gateway of the kind docker network, the address
+	// under which the seed peers inside the cluster reach services on the
+	// host, and the source address of the host's own requests to it.
+	dragonflyGateway = "172.30.0.1"
+
+	// dragonflyRegistryAddr is the local registry as both the host and the
+	// seed peers reach it.
+	dragonflyRegistryAddr = dragonflyGateway + ":5000"
+
+	// dragonflyProxyAddr is the fault proxy in front of the registry as both
+	// the host and the seed peers reach it.
+	dragonflyProxyAddr = dragonflyGateway + ":18080"
+
+	// dragonflyRepository is the repository the test image is pushed to.
+	dragonflyRepository = "nydus-e2e/dragonfly"
+
+	// dragonflyArtifactDirEnv names the directory the daemon logs are kept in
+	// for the workflow to upload; unset, they go under the test's temp dir.
+	dragonflyArtifactDirEnv = "NYDUS_E2E_ARTIFACT_DIR"
+)
+
+// dragonflyConfig is the nydus registry backend config of one Dragonfly
+// scenario.
+type dragonflyConfig struct {
+	// origin is the registry address the blob URLs name, the registry itself
+	// or the injectable proxy in front of it.
+	origin string
+
+	// httpMaxRetries is how often the origin is retried on 429 or 5xx.
+	httpMaxRetries int
+
+	// dragonflyMaxRetries is how many seed peers a read tries before it goes
+	// back to the origin.
+	dragonflyMaxRetries int
+
+	// backToSourceRateLimit is the origin request rate limit per second.
+	backToSourceRateLimit int
+
+	// prefetchScope is the prefetch scope, `none` or `all`.
+	prefetchScope string
 }
 
-// loadDragonflyEnv reads the environment, failing the test on a missing
-// config or bootstrap.
-func loadDragonflyEnv(t *testing.T) dragonflyEnv {
+// write writes the config under dir and returns its path.
+func (c dragonflyConfig) write(t *testing.T, dir, cacheDir string) string {
 	t.Helper()
-	workDir := envOr("WORK_DIR", "/tmp/nydus-dragonfly")
-	configPath := os.Getenv("NYDUS_CONFIG")
-	bootstrap := os.Getenv("BOOTSTRAP_PATH")
-	require.NotEmpty(t, configPath, "NYDUS_CONFIG must be set")
-	require.NotEmpty(t, bootstrap, "BOOTSTRAP_PATH must be set")
+	config := fmt.Sprintf(`backend:
+  type: registry
+  config:
+    addr: http://%s
+    repository: %s
+    http:
+      request_timeout: 5s
+      max_retries: %d
+    dragonfly:
+      scheduler_endpoint: %s
+      request_timeout: 5s
+      max_retries: %d
+      back_to_source:
+        request_rate_limit: %d
+storage:
+  dir: %s
+prefetch:
+  scope: %s
+`, c.origin, dragonflyRepository, c.httpMaxRetries, dragonflySchedulerAddr, c.dragonflyMaxRetries, c.backToSourceRateLimit, cacheDir, c.prefetchScope)
 
-	nydusBin := os.Getenv("NYDUS_BIN")
-	if nydusBin == "" {
-		nydusBin = mustLookupExecutable(t, "nydus")
-	}
-
-	return dragonflyEnv{
-		nydusBin:      nydusBin,
-		configPath:    configPath,
-		bootstrap:     bootstrap,
-		mountpoint:    filepath.Join(workDir, "mnt"),
-		workDir:       workDir,
-		cacheDir:      envOr("NYDUS_CACHE_DIR", filepath.Join(workDir, "cache")),
-		dragonflyMode: envOr("DRAGONFLY_MODE", "fallback"),
-	}
+	path := filepath.Join(dir, "nydus.yaml")
+	assert.NoError(t, os.WriteFile(path, []byte(config), 0o644))
+	return path
 }
 
-// startFuse mounts the bootstrap with the nydus config and returns the cleanup
-// that unmounts it.
-func (e dragonflyEnv) startFuse(t *testing.T) func() {
+// dragonflyImage is the nydus image a test pushes to the local registry, with
+// the source tree it was built from.
+type dragonflyImage struct {
+	// source is the directory the image was built from.
+	source string
+
+	// bootstrap is the bootstrap of the pushed image.
+	bootstrap string
+}
+
+// dragonflyMount is a nydus mount of the test image with its metrics
+// apiserver.
+type dragonflyMount struct {
+	// mountpoint is where the image is mounted.
+	mountpoint string
+
+	// apiserver is the Unix socket the daemon serves metrics on.
+	apiserver string
+}
+
+// newDragonflyImage builds a small image with a few random files and pushes
+// it to the local registry, so the seed peers can fetch its blobs from there.
+func newDragonflyImage(t *testing.T) *dragonflyImage {
 	t.Helper()
-	require.NoError(t, os.MkdirAll(e.mountpoint, 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(e.workDir, "logs"), 0o755))
+	assert := assert.New(t)
+
+	// Write the source tree.
+	source := filepath.Join(t.TempDir(), "source")
+	assert.NoError(os.MkdirAll(filepath.Join(source, "etc"), 0o755))
+	assert.NoError(os.MkdirAll(filepath.Join(source, "data"), 0o755))
+	assert.NoError(os.WriteFile(filepath.Join(source, "etc", "os-release"), []byte("NAME=\"Nydus Dragonfly E2E\"\nID=nydus-e2e\n"), 0o644))
+	util.WriteRandomFile(t, filepath.Join(source, "data", "blob1.bin"), 4<<20)
+	util.WriteRandomFile(t, filepath.Join(source, "data", "blob2.bin"), 8<<20)
+
+	// Convert and push the image, exporting its bootstrap through the check.
+	ref := fmt.Sprintf("%s/%s:%d", dragonflyRegistryAddr, dragonflyRepository, time.Now().UnixNano())
+	bootstrap := util.ConvertImage(t, nydusifyBin, nydusBin, source, ref, filepath.Join(t.TempDir(), "check"))
+
+	return &dragonflyImage{source: source, bootstrap: bootstrap}
+}
+
+// mount mounts the image from a cold cache with the given config and returns
+// the mount, unmounted when the test ends.
+func (i *dragonflyImage) mount(t *testing.T, config dragonflyConfig) *dragonflyMount {
+	t.Helper()
+	dir := t.TempDir()
+	mountpoint := filepath.Join(dir, "mnt")
+	apiserver := filepath.Join(dir, "api.sock")
+	logDir := filepath.Join(cmp.Or(os.Getenv(dragonflyArtifactDirEnv), dir), "logs", strings.ReplaceAll(t.Name(), "/", "_"))
+	assert.NoError(t, os.MkdirAll(logDir, 0o755))
 
 	cmd := exec.Command(
-		e.nydusBin,
+		nydusBin,
 		"fuse",
-		"--bootstrap", e.bootstrap,
-		"--config", e.configPath,
-		"--mountpoint", e.mountpoint,
-		"--log-level", "debug",
-		"--log-dir", filepath.Join(e.workDir, "logs"),
+		"--bootstrap", i.bootstrap,
+		"--config", config.write(t, dir, filepath.Join(dir, "cache")),
+		"--mountpoint", mountpoint,
+		"--apiserver", "unix://"+apiserver,
+		"--log-level", "info",
+		"--log-dir", logDir,
 	)
+	t.Cleanup(util.MountFuse(t, cmd, mountpoint, "nydus fuse"))
 
-	return startFuseMount(t, cmd, e.mountpoint, "nydus fuse with dragonfly")
+	return &dragonflyMount{mountpoint: mountpoint, apiserver: apiserver}
 }
 
-// readMountedFile reads one regular file from the mounted image, preferring a
-// small set of known paths and falling back to the first file found.
-func readMountedFile(t *testing.T, mountpoint string) (string, []byte, error) {
+// read reads the file at rel from the mount, checks it against the image's
+// source and returns the read error, so a test can expect the failure.
+func (m *dragonflyMount) read(t *testing.T, image *dragonflyImage, rel string) error {
 	t.Helper()
-	candidates := []string{"etc/os-release", "etc/passwd", "etc/group", "usr/bin/env"}
-	for _, rel := range candidates {
-		path := filepath.Join(mountpoint, rel)
-		data, err := os.ReadFile(path)
-		if err == nil && len(data) > 0 {
-			return rel, data, nil
-		}
+	data, err := os.ReadFile(filepath.Join(m.mountpoint, rel))
+	if err != nil {
+		return err
 	}
 
-	var chosen string
-	err := filepath.WalkDir(mountpoint, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		rel, relErr := filepath.Rel(mountpoint, path)
-		if relErr != nil {
-			return nil
-		}
-		if strings.HasPrefix(rel, "proc/") || strings.HasPrefix(rel, "sys/") {
-			return nil
-		}
-		chosen = rel
-		return io.EOF
-	})
-	if errors.Is(err, io.EOF) && chosen != "" {
-		path := filepath.Join(mountpoint, chosen)
-		data, readErr := os.ReadFile(path)
-		return chosen, data, readErr
-	}
+	want, err := os.ReadFile(filepath.Join(image.source, rel))
+	assert.NoError(t, err)
+	assert.Equal(t, want, data, "%s differs from the source", rel)
 
-	return "", nil, os.ErrNotExist
+	return nil
 }
 
-// stopDragonfly takes the Dragonfly deployment down through the shell command
-// in DRAGONFLY_STOP_CMD (CI scales the scheduler and seed client statefulsets
-// to zero and waits for the pods to terminate).
-func stopDragonfly(t *testing.T) {
+// backendReads returns how many reads of kind the backend served over
+// protocol, from the mount's metrics.
+func (m *dragonflyMount) backendReads(t *testing.T, kind, protocol string) float64 {
 	t.Helper()
-	command := os.Getenv("DRAGONFLY_STOP_CMD")
-	require.NotEmpty(t, command, "DRAGONFLY_STOP_CMD must be set")
-	out, err := exec.Command("bash", "-c", command).CombinedOutput()
-	require.NoError(t, err, "stop dragonfly: %s", out)
+	return m.metric(t, "nydus_read_backend_total", kind, protocol)
 }
 
-// TestDragonflyE2E reads a file through Dragonfly, takes Dragonfly down and
-// reads it again from a cold cache. In fallback mode the read is served by the
-// origin registry. In strict mode the configured origin is the injectable
-// proxy, which forwards to the registry for the first read and then injects a
-// 503 on every blob GET, so the second read fails.
-func TestDragonflyE2E(t *testing.T) {
-	env := loadDragonflyEnv(t)
-	strict := env.dragonflyMode == "strict"
-	if strict {
-		_, stopProxy := newInjectableProxy(t)
-		defer stopProxy()
-	}
-
-	cleanup := env.startFuse(t)
-	relPath, data, err := readMountedFile(t, env.mountpoint)
-	require.NoError(t, err)
-	require.NotEmpty(t, data)
-
-	stopDragonfly(t)
-	wipeCacheDir(env.cacheDir)
-	if strict {
-		postInject(t, http.StatusServiceUnavailable, -1)
-	}
-	cleanup()
-	cleanup = env.startFuse(t)
-	defer cleanup()
-
-	data, err = os.ReadFile(filepath.Join(env.mountpoint, relPath))
-	if strict {
-		require.Error(t, err)
-		return
-	}
-	require.NoError(t, err)
-	require.NotEmpty(t, data)
+// backendFailures returns how many reads of kind failed over protocol.
+func (m *dragonflyMount) backendFailures(t *testing.T, kind, protocol string) float64 {
+	t.Helper()
+	return m.metric(t, "nydus_read_backend_failure_total", kind, protocol)
 }
 
-// injectableProxy fronts the local registry and injects error responses on
-// blob GETs on demand, so tests can fail the origin for both Dragonfly
-// back-to-source and direct fallback reads.
-type injectableProxy struct {
-	targetURL *url.URL
-	proxy     *httputil.ReverseProxy
+// metric returns the backend metric name summed over kind and protocol.
+func (m *dragonflyMount) metric(t *testing.T, name, kind, protocol string) float64 {
+	t.Helper()
+	metrics := util.FetchMetrics(t, m.apiserver)
+	return util.SumMetric(metrics, name, fmt.Sprintf(`type="%s"`, kind), fmt.Sprintf(`protocol="%s"`, protocol))
+}
 
-	mu        sync.Mutex
-	status    int
+// scaleSeedClient scales the seed client statefulset to replicas and waits
+// for the pods to be gone or ready.
+func scaleSeedClient(t *testing.T, replicas int) {
+	t.Helper()
+	out, err := exec.Command("kubectl", "--namespace", dragonflyNamespace, "scale", "statefulset", dragonflySeedClient, fmt.Sprintf("--replicas=%d", replicas)).CombinedOutput()
+	assert.NoError(t, err, "scale seed client: %s", out)
+
+	if replicas == 0 {
+		out, err = exec.Command("kubectl", "--namespace", dragonflyNamespace, "wait", "--for=delete", "pod", "--selector", "component=seed-client", "--timeout=3m").CombinedOutput()
+	} else {
+		out, err = exec.Command("kubectl", "--namespace", dragonflyNamespace, "rollout", "status", "statefulset/"+dragonflySeedClient, "--timeout=5m").CombinedOutput()
+	}
+	assert.NoError(t, err, "wait for seed client: %s", out)
+}
+
+// stopSeedClient takes the seed client down for the rest of the test and
+// brings it back when the test ends, so the next test finds Dragonfly whole.
+func stopSeedClient(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() { scaleSeedClient(t, 1) })
+	scaleSeedClient(t, 0)
+}
+
+// faultProxy fronts the local registry and answers the seed peers' blob GETs
+// with an injected error status on demand, so a test can fail the origin
+// behind Dragonfly while the daemon's own fallback reads, which come from the
+// host, still reach the registry. refuse fails the host's reads too.
+type faultProxy struct {
+	// proxy forwards every request it does not inject into.
+	proxy *httputil.ReverseProxy
+
+	// mu guards status and remaining.
+	mu sync.Mutex
+
+	// status is the injected status, zero when disarmed.
+	status int
+
+	// remaining is the budget of blob GETs still to inject into, negative
+	// for every one.
 	remaining int
+
+	// everyone injects into the host's blob GETs too, not only the seed
+	// peers'.
+	everyone bool
+
+	// injected counts the blob GETs answered with the injected status.
+	injected int
 }
 
-// proxyListenAddr binds all interfaces: the Dragonfly seed client reaches the
-// proxy from inside the kind cluster through the docker network gateway.
-const proxyListenAddr = ":18080"
-
-// proxyControlURL is where the tests reach the proxy's inject and clear
-// endpoints.
-const proxyControlURL = "http://127.0.0.1:18080"
-
-// newInjectableProxy serves the proxy in front of PROXY_TARGET_URL and returns
-// it with the shutdown that stops it.
-func newInjectableProxy(t *testing.T) (*injectableProxy, func()) {
+// newFaultProxy serves the proxy on every interface, so the seed peers
+// reach it through the kind docker network, until the test ends.
+func newFaultProxy(t *testing.T) *faultProxy {
 	t.Helper()
-	targetURL, err := url.Parse(envOr("PROXY_TARGET_URL", "http://127.0.0.1:5000"))
-	require.NoError(t, err)
+	target, err := url.Parse("http://" + dragonflyRegistryAddr)
+	assert.NoError(t, err)
 
-	p := &injectableProxy{targetURL: targetURL}
-	p.proxy = httputil.NewSingleHostReverseProxy(targetURL)
-	p.proxy.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+	p := &faultProxy{proxy: httputil.NewSingleHostReverseProxy(target)}
+	director := p.proxy.Director
 	p.proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = p.targetURL.Scheme
-		req.URL.Host = p.targetURL.Host
-		req.Host = p.targetURL.Host
+		director(req)
+		req.Host = target.Host
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/_test/inject", p.inject)
-	mux.HandleFunc("/_test/clear", p.clear)
-	mux.HandleFunc("/", p.serve)
-
-	ln, err := net.Listen("tcp", proxyListenAddr)
-	require.NoError(t, err)
-	srv := &http.Server{Handler: mux}
+	ln, err := net.Listen("tcp", ":18080")
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	srv := &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
 
-	return p, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	}
+	return p
 }
 
-// inject arms the proxy with a status and a budget of blob GETs to inject it
-// into, a negative budget meaning every one.
-func (p *injectableProxy) inject(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	var body struct {
-		Status int `json:"status"`
-		Count  int `json:"count"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	p.mu.Lock()
-	p.status = body.Status
-	p.remaining = body.Count
-	p.mu.Unlock()
-	w.WriteHeader(http.StatusOK)
+// inject arms the proxy with status for the next count seed peer blob GETs,
+// every one when count is negative.
+func (p *faultProxy) inject(status, count int) {
+	p.arm(status, count, false)
 }
 
-// clear disarms the proxy.
-func (p *injectableProxy) clear(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	p.mu.Lock()
-	p.status = 0
-	p.remaining = 0
-	p.mu.Unlock()
-	w.WriteHeader(http.StatusOK)
+// refuse arms the proxy with status for every blob GET from anyone, the
+// daemon's own reads included.
+func (p *faultProxy) refuse(status int) {
+	p.arm(status, -1, true)
 }
 
-// serve injects the configured status into blob GETs, the footer and blob
-// metadata reads of a cold cache included, until the budget runs out; a
-// negative budget never does. Manifest and token requests pass through.
-func (p *injectableProxy) serve(w http.ResponseWriter, r *http.Request) {
+// arm sets the injected status, its budget and whether the host's requests
+// get it too, and restarts the injected count.
+func (p *faultProxy) arm(status, count int, everyone bool) {
 	p.mu.Lock()
-	inject := p.status > 0 && p.remaining != 0 && r.Method == http.MethodGet &&
-		strings.Contains(r.URL.Path, "/blobs/")
+	defer p.mu.Unlock()
+	p.status = status
+	p.remaining = count
+	p.everyone = everyone
+	p.injected = 0
+}
+
+// injectedCount returns how many blob GETs got the injected status since the
+// proxy was last armed.
+func (p *faultProxy) injectedCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.injected
+}
+
+// ServeHTTP injects the armed status into the seed peers' blob GETs, the
+// blob metadata reads of a cold cache included, until the budget runs out.
+// Requests from the host and manifest requests pass through unless the
+// proxy refuses everyone.
+func (p *faultProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	fromSeedPeer := host != dragonflyGateway && !net.ParseIP(host).IsLoopback()
+
+	p.mu.Lock()
+	inject := (fromSeedPeer || p.everyone) && p.status > 0 && p.remaining != 0 && r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/blobs/")
 	if inject {
+		p.injected++
 		if p.remaining > 0 {
 			p.remaining--
 		}
-		status := p.status
-		p.mu.Unlock()
-		w.WriteHeader(status)
-		_, _ = io.WriteString(w, "injected error")
+	}
+	status := p.status
+	p.mu.Unlock()
+
+	if !inject {
+		p.proxy.ServeHTTP(w, r)
 		return
 	}
-	p.mu.Unlock()
-	p.proxy.ServeHTTP(w, r)
+
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "injected"})
 }
 
-// postInject arms the proxy through its inject endpoint.
-func postInject(t *testing.T, status, count int) {
-	t.Helper()
-	payload, err := json.Marshal(map[string]int{"status": status, "count": count})
-	require.NoError(t, err)
-	resp, err := http.Post(proxyControlURL+"/_test/inject", "application/json", strings.NewReader(string(payload)))
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+var (
+	// mockDragonflyConfig reads the registry through Dragonfly and goes back
+	// to the registry itself when the seed peers cannot serve.
+	mockDragonflyConfig = dragonflyConfig{
+		origin:                dragonflyRegistryAddr,
+		httpMaxRetries:        1,
+		dragonflyMaxRetries:   3,
+		backToSourceRateLimit: 1000,
+		prefetchScope:         "none",
+	}
+
+	// mockDragonflyProxyConfig reads through Dragonfly with the fault proxy
+	// as the origin and never retries the origin, so an injected status
+	// reaches the reader as is.
+	mockDragonflyProxyConfig = dragonflyConfig{
+		origin:                dragonflyProxyAddr,
+		httpMaxRetries:        0,
+		dragonflyMaxRetries:   3,
+		backToSourceRateLimit: 1000,
+		prefetchScope:         "none",
+	}
+)
+
+func TestDragonfly_ReadThroughSeedPeer(t *testing.T) {
+	assert := assert.New(t)
+	image := newDragonflyImage(t)
+	m := image.mount(t, mockDragonflyConfig)
+
+	assert.NoError(m.read(t, image, "etc/os-release"))
+	assert.NoError(m.read(t, image, "data/blob2.bin"))
+	assert.Positive(m.backendReads(t, "ondemand", "dragonfly"))
+	assert.Zero(m.backendReads(t, "ondemand", "http"))
 }
 
-// clearInject disarms the proxy through its clear endpoint.
-func clearInject(t *testing.T) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, proxyControlURL+"/_test/clear", nil)
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+func TestDragonfly_ServedFromSeedPeerCache(t *testing.T) {
+	assert := assert.New(t)
+	image := newDragonflyImage(t)
+	proxy := newFaultProxy(t)
+
+	// A first mount pulls the blob into the seed peer through the origin.
+	first := image.mount(t, mockDragonflyProxyConfig)
+	assert.NoError(first.read(t, image, "data/blob2.bin"))
+
+	// With the origin refusing the seed peers from now on, a second cold
+	// mount is still served, from the seed peer's cache, and the origin is
+	// never asked again.
+	proxy.inject(http.StatusServiceUnavailable, -1)
+	second := image.mount(t, mockDragonflyProxyConfig)
+	assert.NoError(second.read(t, image, "data/blob2.bin"))
+	assert.Positive(second.backendReads(t, "ondemand", "dragonfly"))
+	assert.Zero(second.backendReads(t, "ondemand", "http"))
+	assert.Zero(proxy.injectedCount())
 }
 
-// TestProxyErrorSimulation fronts the origin with the injectable proxy and
-// reads from a cold cache under each injected status. The 403 case runs first,
-// while the seed peers' piece caches are still cold, so every path to the
-// origin sees it.
-func TestProxyErrorSimulation(t *testing.T) {
-	env := loadDragonflyEnv(t)
-	_, stopProxy := newInjectableProxy(t)
-	defer stopProxy()
+func TestDragonfly_Prefetch(t *testing.T) {
+	assert := assert.New(t)
+	image := newDragonflyImage(t)
+	config := mockDragonflyConfig
+	config.prefetchScope = "all"
+	m := image.mount(t, config)
+
+	util.WaitMetricSettled(t, m.apiserver, "nydus_read_backend_total", `type="prefetch"`)
+	assert.Positive(m.backendReads(t, "prefetch", "dragonfly"))
+	assert.Zero(m.backendReads(t, "prefetch", "http"))
+	assert.NoError(m.read(t, image, "data/blob1.bin"))
+}
+
+func TestDragonfly_ProxyError(t *testing.T) {
+	proxy := newFaultProxy(t)
 
 	tests := []struct {
 		name   string
 		status int
 		count  int
-		expect func(t *testing.T, data []byte, err error)
+		expect func(t *testing.T, m *dragonflyMount, proxy *faultProxy, err error)
 	}{
 		{
-			name:   "403 on every origin GET fails the read",
+			name:   "403 on every seed peer GET fails the read without falling back",
 			status: http.StatusForbidden,
 			count:  -1,
-			expect: func(t *testing.T, data []byte, err error) {
-				require.Error(t, err)
+			expect: func(t *testing.T, m *dragonflyMount, proxy *faultProxy, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+				assert.Zero(m.backendReads(t, "ondemand", "http"))
+				assert.Positive(m.backendFailures(t, "ondemand", "dragonfly"))
+				assert.Positive(proxy.injectedCount())
 			},
 		},
 		{
-			name:   "429 on one origin GET is retried on the next seed peer or the origin",
+			name:   "429 on one seed peer GET is retried",
 			status: http.StatusTooManyRequests,
 			count:  1,
-			expect: func(t *testing.T, data []byte, err error) {
-				require.NoError(t, err)
-				require.NotEmpty(t, data)
+			expect: func(t *testing.T, m *dragonflyMount, proxy *faultProxy, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Positive(m.backendReads(t, "ondemand", "dragonfly"))
 			},
 		},
 		{
-			name:   "503 on three origin GETs is outlasted by the retries and the fallback",
+			name:   "503 on every seed peer GET falls back to the origin",
 			status: http.StatusServiceUnavailable,
-			count:  3,
-			expect: func(t *testing.T, data []byte, err error) {
-				require.NoError(t, err)
-				require.NotEmpty(t, data)
+			count:  -1,
+			expect: func(t *testing.T, m *dragonflyMount, proxy *faultProxy, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Positive(m.backendReads(t, "ondemand", "http"))
+				assert.Positive(proxy.injectedCount())
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			postInject(t, tc.status, tc.count)
-			defer clearInject(t)
-			wipeCacheDir(env.cacheDir)
-			cleanup := env.startFuse(t)
-			defer cleanup()
+			// Every case gets its own image, so nothing the seed peers cached
+			// for an earlier case serves this one.
+			image := newDragonflyImage(t)
+			proxy.inject(tc.status, tc.count)
+			defer proxy.inject(0, 0)
 
-			_, data, err := readMountedFile(t, env.mountpoint)
-			tc.expect(t, data, err)
+			m := image.mount(t, mockDragonflyProxyConfig)
+			tc.expect(t, m, proxy, m.read(t, image, "data/blob1.bin"))
 		})
 	}
+}
+
+func TestDragonfly_FallbackToOrigin(t *testing.T) {
+	assert := assert.New(t)
+	image := newDragonflyImage(t)
+	m := image.mount(t, mockDragonflyConfig)
+	assert.NoError(m.read(t, image, "data/blob1.bin"))
+
+	// Take the seed peers away under the live mount, so the next uncached
+	// read finds nobody to serve it but the origin.
+	stopSeedClient(t)
+	before := m.backendReads(t, "ondemand", "http")
+	assert.NoError(m.read(t, image, "data/blob2.bin"))
+	assert.Greater(m.backendReads(t, "ondemand", "http"), before)
+}
+
+func TestDragonfly_OriginErrorWithoutSeedPeers(t *testing.T) {
+	assert := assert.New(t)
+	image := newDragonflyImage(t)
+	proxy := newFaultProxy(t)
+	m := image.mount(t, mockDragonflyProxyConfig)
+	assert.NoError(m.read(t, image, "data/blob1.bin"))
+
+	// With the seed peers gone, the daemon reads from the origin itself; take
+	// the registry away too and the read has nowhere left to go. The proxy
+	// sees the daemon's own attempt, and the failure is booked against the
+	// Dragonfly client that owns the read.
+	stopSeedClient(t)
+	proxy.refuse(http.StatusServiceUnavailable)
+	before := m.backendFailures(t, "ondemand", "dragonfly")
+	assert.Error(m.read(t, image, "data/blob2.bin"))
+	assert.Positive(proxy.injectedCount())
+	assert.Greater(m.backendFailures(t, "ondemand", "dragonfly"), before)
 }
