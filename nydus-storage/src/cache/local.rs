@@ -883,6 +883,17 @@ impl BlobCache for LocalBlobCache {
         Ok(())
     }
 
+    fn ensure_range_with_groups(&self, offset: u64, len: u64) -> io::Result<Range<u64>> {
+        self.ensure_range(offset, len)?;
+        if len == 0 {
+            return Ok(offset..offset);
+        }
+        // ensure_range has validated offset + len and recorded the request.
+        let span = self.chunk_group_span(offset, offset + len)?;
+        Ok(self.chunk_group(span.start).logical_range().start
+            ..self.chunk_group(span.end - 1).logical_range().end)
+    }
+
     fn ready_ranges(&self, offset: u64, len: u64) -> io::Result<Vec<Range<u64>>> {
         if len == 0 {
             return Ok(Vec::new());
@@ -1599,6 +1610,98 @@ mod tests {
             .map(|entry| (entry.blob_index, entry.chunk_group_index))
             .collect();
         assert_eq!(entries, vec![(7, 1), (7, 3)]);
+    }
+
+    #[test]
+    fn fetched_groups_exclude_read_ahead_and_preserve_ondemand_record() {
+        let backend_dir = tempdir().unwrap();
+        // Deliberately unequal, sub-64-KiB groups, including zero padding.
+        let groups = vec![
+            vec![vec![0x11; 4096], vec![0x12; 100]],
+            vec![vec![0x21; 4096]],
+            vec![vec![0x31; 12288]],
+        ];
+        let (data, meta) = from_chunk_groups(
+            BlobMetadataCompressor::Zstd,
+            16384,
+            &groups,
+            Some(BlobMetadataDigester::Blake3),
+        );
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let cache_dir = tempdir().unwrap();
+        let backend = CountingBackend::new(backend_dir.path());
+        let recorder = Arc::new(OndemandRecorder::default());
+        let cached = LocalBlobCache::open_with_ondemand_recorder(
+            full_blob_id,
+            7,
+            cache_dir.path(),
+            backend.clone(),
+            Some(recorder.clone()),
+            ReadKind::Ondemand,
+            fetch(1 << 20),
+        )
+        .unwrap();
+        assert_eq!(
+            cached.ensure_range_with_groups(u64::MAX, 0).unwrap(),
+            u64::MAX..u64::MAX
+        );
+        assert_eq!(backend.reads(), 0);
+        assert_eq!(cached.ensure_range_with_groups(4096, 1).unwrap(), 0..8192);
+        // One compressed read warms all groups, but only the first was accessed.
+        assert_eq!(backend.reads(), 1);
+        assert!(cached.is_all_ready());
+        assert_eq!(
+            fs::read(&cached.cache_data_path).unwrap(),
+            uncompressed_data(&groups)
+        );
+        assert_eq!(recorder.snapshot().entries.len(), 1);
+        assert_eq!(recorder.snapshot().entries[0].chunk_group_index, 0);
+        assert_eq!(cached.ensure_range_with_groups(8191, 2).unwrap(), 0..12288);
+        assert_eq!(
+            cached.ensure_range_with_groups(8192, 4096).unwrap(),
+            8192..12288
+        );
+        assert_eq!(recorder.snapshot().entries.len(), 2);
+        assert_eq!(recorder.snapshot().entries[1].chunk_group_index, 1);
+        assert_eq!(backend.reads(), 1);
+        assert_eq!(
+            cached.ensure_range_with_groups(24575, 1).unwrap(),
+            12288..24576
+        );
+        for offset in [24576, u64::MAX] {
+            assert_eq!(
+                cached
+                    .ensure_range_with_groups(offset, 1)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput,
+                "offset={offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetched_groups_propagate_payload_failure() {
+        let backend_dir = tempdir().unwrap();
+        let (data, meta, _, _) = groups_blob();
+        let id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let cache_dir = tempdir().unwrap();
+        let cache = open(
+            id,
+            cache_dir.path(),
+            CountingBackend::new(backend_dir.path()),
+            CacheOptions::default(),
+        );
+        // Truncate the payload because the backend may retain an open fd.
+        File::create(backend_dir.path().join(hex::encode(id))).unwrap();
+        assert!(cache.ensure_range_with_groups(4096, 4096).is_err());
+        assert!(cache.ready_ranges(4096, 4096).unwrap().is_empty());
     }
 
     /// Scattered chunks reach their padded offsets with zero tail gaps,
