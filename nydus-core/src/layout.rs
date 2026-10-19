@@ -67,7 +67,7 @@ impl FlatLayout {
 pub(crate) enum Segment {
     Bootstrap { offset: u64, len: u64 },
     Zero { offset: u64, len: u64 },
-    Blob { range: BlobRangeSpec },
+    Blob { range: BlobRangeSpec, end: u64 },
 }
 
 #[derive(Clone)]
@@ -99,6 +99,7 @@ impl Iterator for Segments<'_> {
             if start < blob.end {
                 self.pos = self.end.min(blob.end);
                 return Some(Segment::Blob {
+                    end: blob.end,
                     range: BlobRangeSpec {
                         index: blob.index,
                         offset: start - blob.start,
@@ -158,7 +159,8 @@ mod tests {
                     offset: 0,
                     len: 4096,
                     source_offset: 8192,
-                }
+                },
+                ..
             }
         ));
         assert!(matches!(
@@ -176,7 +178,8 @@ mod tests {
                     offset: 0,
                     len: 8192,
                     source_offset: 16384,
-                }
+                },
+                ..
             }
         ));
         assert_eq!(layout.size(), 24576);
