@@ -8,6 +8,9 @@ use std::io::{self, BufWriter};
 use std::path::PathBuf;
 use tracing::Level;
 
+/// Tar stream bytes gathered per write to the output.
+const OUTPUT_BUFFER: usize = 1 << 20;
+
 #[derive(Debug, Clone, Parser)]
 pub struct ExportCommand {
     #[arg(help = "Specify the nydus full blob to export the OCI layer tar stream from")]
@@ -78,11 +81,14 @@ impl ExportCommand {
             Some(path) => {
                 let file = File::create(path)
                     .with_context(|| format!("failed to create output: {}", path.display()))?;
-                write_tar(&reader, BufWriter::new(file))?;
+                write_tar(&reader, BufWriter::with_capacity(OUTPUT_BUFFER, file))?;
             }
             None => {
                 let stdout = io::stdout();
-                write_tar(&reader, BufWriter::new(stdout.lock()))?;
+                write_tar(
+                    &reader,
+                    BufWriter::with_capacity(OUTPUT_BUFFER, stdout.lock()),
+                )?;
             }
         }
 
@@ -208,6 +214,51 @@ mod tests {
         }
         expected_pax.push(("mtime".to_string(), b"1700000000.123456789".to_vec()));
         assert_eq!(entries["nested/hello.txt"].3, expected_pax);
+    }
+
+    #[test]
+    fn export_round_trips_a_large_sparse_file() {
+        // Several times the 2 MiB export read buffer: all-zero chunks become
+        // holes between data islands that straddle block and read buffer
+        // boundaries, one island outgrows the 2 MiB chunk group minimum, and
+        // the file ends mid-block.
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let blob = dir.path().join("layer.blob");
+        let tar_path = dir.path().join("layer.tar");
+        fs::create_dir(&source).unwrap();
+        let mib = 1024 * 1024;
+        let mut sparse = vec![0u8; 9 * mib + 123];
+        let len = sparse.len();
+        for range in [
+            0..100,
+            mib - 10..mib + 5000,
+            2 * mib - 3..2 * mib + 3,
+            3 * mib..5 * mib + 777,
+            len - 50..len,
+        ] {
+            for i in range {
+                sparse[i] = (i % 251) as u8 | 1;
+            }
+        }
+        fs::write(source.join("sparse.bin"), &sparse).unwrap();
+        fs::write(source.join("small.txt"), b"small").unwrap();
+        build_and_export(&source, &blob, &tar_path);
+
+        let mut files = BTreeMap::new();
+        let mut archive = tar::Archive::new(File::open(&tar_path).unwrap());
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            files.insert(path, data);
+        }
+        assert_eq!(files["small.txt"], b"small");
+        let exported = &files["sparse.bin"];
+        assert_eq!(exported.len(), sparse.len());
+        let mismatch = exported.iter().zip(&sparse).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "sparse.bin differs");
     }
 
     #[test]

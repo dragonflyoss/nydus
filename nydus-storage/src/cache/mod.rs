@@ -309,6 +309,15 @@ impl ChunkGroupBuffer {
             Ok(&mut self.heap)
         }
     }
+
+    /// The first `len` bytes, where `len` is at most the size given to the
+    /// last [`Self::resize`].
+    fn bytes(&self, len: usize) -> &[u8] {
+        match &self.mapping {
+            Some(mapping) => &mapping[..len],
+            None => &self.heap[..len],
+        }
+    }
 }
 
 /// Read `[offset, offset + len)` through `cache.read_at` into a per-thread

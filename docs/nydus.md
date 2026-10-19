@@ -1101,10 +1101,14 @@ Fields:
 		check` only supports the `local` backend.
 - `storage.dir` is the persistent directory storing each blob's decoded chunk
 	cache file (equivalent to `--cache-dir`). When unset (or the whole
-	`storage` section is omitted), reads run diskless: every read fetches,
-	decodes, and validates the chunk groups it touches from the backend directly,
-	and nothing is written to disk — the kernel page cache above the mount is
-	the only reuse layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
+	`storage` section is omitted), reads run diskless: a read fetches, decodes,
+	and validates the chunk groups it touches from the backend directly, and
+	nothing is written to disk. Validated decoded groups are kept in an
+	in-memory LRU of at most 32 MiB (128 groups) shared by all blobs of the
+	mount, so a run of small reads within one group fetches and decodes it
+	once; groups larger than 8 MiB (a quarter of that budget) are not kept.
+	Beyond that, the kernel page cache above the mount is the only reuse
+	layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
 	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`)
 	and `nydus optimize` require a directory and reject its absence at startup,
 	except that the kernel modes accept an image whose every blob is a native
