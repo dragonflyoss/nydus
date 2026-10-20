@@ -8,14 +8,9 @@ use std::io;
 use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::Backend;
-use nydus_format::blob::{
-    BlobMetadata, BlobMetadataChunkGroupDigest, BlobMetadataChunkGroupExtent,
-    BlobMetadataCompressor,
-};
+use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent, BlobMetadataCompressor};
 
 /// Default on-demand fetch size: the compressed bytes one backend read
 /// covers around a missed chunk group (see [`set_fetch_size`]). 2 MiB.
@@ -115,13 +110,15 @@ pub trait BlobCache: Send + Sync {
     /// order. Groups `skip` accepts are not fetched (a batch made entirely
     /// of them costs no backend read); a group that fails to decode is
     /// logged and skipped, while an error from `cb` aborts the stream.
+    /// Returns the bytes fetched from the backend and the groups that failed
+    /// to decode.
     fn for_each_redirect_chunk_group(
         &self,
         _workers: usize,
         _deadline: Option<Instant>,
         _skip: &(dyn Fn(&BlobMetadataChunkGroupExtent) -> bool + Sync),
         _cb: &(dyn Fn(&BlobMetadataChunkGroupExtent, &[u8]) -> io::Result<()> + Sync),
-    ) -> io::Result<()> {
+    ) -> io::Result<(u64, u64)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "for_each_redirect_chunk_group is not supported by this blob cache",
@@ -209,11 +206,9 @@ pub fn plan_prefetch_batches(
 /// compressed bytes that starts at blob offset `window_base_offset`.
 /// Stored-plain groups borrow the window; compressed groups decode into
 /// `decoded` as scratch storage. The returned slice contains validated
-/// payload bytes. Checksum failures are attributed to `backend`, which
-/// served the window.
+/// payload bytes.
 pub fn decode_chunk_group_from_window<'a>(
     blob_metadata: &BlobMetadata,
-    backend: &Arc<dyn Backend>,
     group: &BlobMetadataChunkGroupExtent,
     window_base_offset: u64,
     window_bytes: &'a [u8],
@@ -254,7 +249,7 @@ pub fn decode_chunk_group_from_window<'a>(
         decoded.as_slice()
     };
 
-    validate_chunk_group_with_metrics(backend, blob_metadata, group, payload)?;
+    validate_decoded_chunk_group(group, payload)?;
     Ok(payload)
 }
 
@@ -384,30 +379,6 @@ pub(crate) fn decode_chunk_group_into(
     Ok(())
 }
 
-/// Validate a decoded chunk group, counting the CRC check and, on a CRC
-/// mismatch, the failure against the backend.
-pub fn validate_chunk_group_with_metrics(
-    backend: &Arc<dyn Backend>,
-    blob_metadata: &BlobMetadata,
-    group: &BlobMetadataChunkGroupExtent,
-    decoded: &[u8],
-) -> io::Result<()> {
-    nydus_telemetry::metrics::collect_validate_chunk_group_started_metrics(
-        backend.kind(),
-        backend.protocol(),
-    );
-    if let Err(err) = validate_decoded_chunk_group(blob_metadata, group, decoded) {
-        if is_chunk_group_crc_mismatch(&err) {
-            nydus_telemetry::metrics::collect_validate_chunk_group_failure_metrics(
-                backend.kind(),
-                backend.protocol(),
-            );
-        }
-        return Err(err);
-    }
-    Ok(())
-}
-
 /// Expand a decoded chunk group onto its span of the address space: the
 /// chunks scattered onto their blocks with zero padding between them and
 /// after the last one.
@@ -434,12 +405,11 @@ pub fn inflate_decoded_chunk_group(
     Ok(padded)
 }
 
-/// Check a decoded chunk group: its length against the chunk table, its
-/// crc32c against the group entry (always — a crc32c over a group is
-/// cheap), and, unless checksum verification is skipped, every chunk's
-/// BLAKE3 digest when the blob carries digests.
+/// Check a decoded chunk group: its length against the chunk table and,
+/// unless checksum verification is skipped, its crc32c against the group
+/// entry. The blob meta's chunk group digests are content identities, not
+/// checked here.
 pub fn validate_decoded_chunk_group(
-    blob_metadata: &BlobMetadata,
     group: &BlobMetadataChunkGroupExtent,
     decoded: &[u8],
 ) -> io::Result<()> {
@@ -454,44 +424,27 @@ pub fn validate_decoded_chunk_group(
             ),
         ));
     }
+    if skip_verify_checksums() {
+        return Ok(());
+    }
     if crc32c::crc32c(decoded) != group.uncompressed_crc32() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             ChunkGroupCrcMismatch,
         ));
     }
-    if skip_verify_checksums() {
-        return Ok(());
-    }
-    let digester = blob_metadata.digester().map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("cannot verify chunk group digests, {err}"),
-        )
-    })?;
-    if digester.is_none() {
-        return Ok(());
-    }
-    let expected = blob_metadata
-        .chunk_group_digest(group.index() as usize)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk group digest missing"))?;
-    if BlobMetadataChunkGroupDigest::from_chunks([decoded]) != expected {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("blob chunk group {} digest mismatch", group.index()),
-        ));
-    }
     Ok(())
 }
 
-/// Process-wide switch skipping per-chunk digest verification (the
-/// default), set at service startup from `storage.skip_verify_checksums`.
-/// The per-group crc32c is always checked. A process serves one mount, so a
+/// Process-wide switch skipping the crc32c check of decoded chunk groups,
+/// off by default, set at service startup from
+/// `storage.skip_verify_checksums`. A process serves one mount, so a
 /// per-cache flag would only thread the same value through every call site.
 static SKIP_VERIFY_CHECKSUMS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+    std::sync::atomic::AtomicBool::new(false);
 
-/// Skip (or re-enable) per-chunk digest verification for this process.
+/// Skip (or re-enable) the crc32c check of decoded chunk groups for this
+/// process.
 pub fn set_skip_verify_checksums(skip: bool) {
     SKIP_VERIFY_CHECKSUMS.store(skip, std::sync::atomic::Ordering::Relaxed);
 }
@@ -540,9 +493,8 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_format::blob::{BlobMetadataDigester, BlobMetadataTableType};
+    use nydus_format::blob::BlobMetadataDigester;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
-    use nydus_format::utils::SHA256_DIGEST_SIZE;
     use nydus_test_utils::blob::uncompressed_data;
     use nydus_test_utils::metadata::from_chunk_groups;
 
@@ -622,7 +574,6 @@ mod tests {
 
     #[test]
     fn window_decode_borrows_plain_payload_and_preserves_validation() {
-        let backend: Arc<dyn Backend> = Arc::new(DragonflyBackend);
         let payload = vec![0x5a; 4096];
         for compressor in [
             BlobMetadataCompressor::None,
@@ -636,15 +587,9 @@ mod tests {
             let mut window = vec![0; 37];
             window.extend_from_slice(&data);
             let mut scratch = Vec::new();
-            let result = decode_chunk_group_from_window(
-                &metadata,
-                &backend,
-                &group,
-                0,
-                &window[37..],
-                &mut scratch,
-            )
-            .unwrap();
+            let result =
+                decode_chunk_group_from_window(&metadata, &group, 0, &window[37..], &mut scratch)
+                    .unwrap();
             assert_eq!(result, payload);
             if group.is_uncompressed(&metadata) {
                 assert_eq!(compressor, BlobMetadataCompressor::None);
@@ -656,7 +601,6 @@ mod tests {
             // A window that does not reach the group's end is rejected.
             assert!(decode_chunk_group_from_window(
                 &metadata,
-                &backend,
                 &group,
                 0,
                 &data[..data.len() - 1],
@@ -664,15 +608,9 @@ mod tests {
             )
             .is_err());
             // A window starting past the group's offset is rejected.
-            assert!(decode_chunk_group_from_window(
-                &metadata,
-                &backend,
-                &group,
-                1,
-                &data,
-                &mut scratch,
-            )
-            .is_err());
+            assert!(
+                decode_chunk_group_from_window(&metadata, &group, 1, &data, &mut scratch).is_err()
+            );
         }
     }
 
@@ -688,8 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn digests_are_checked_when_verification_is_on() {
-        set_skip_verify_checksums(false);
+    fn decoded_groups_are_checked_against_their_length_and_crc() {
         let chunks = vec![vec![1u8; 100], vec![2u8; 5000]];
         let (data, metadata) = from_chunk_groups(
             BlobMetadataCompressor::None,
@@ -698,10 +635,10 @@ mod tests {
             Some(BlobMetadataDigester::Blake3),
         );
         let group = metadata.chunk_group(0).unwrap();
-        validate_decoded_chunk_group(&metadata, &group, &data).unwrap();
+        validate_decoded_chunk_group(&group, &data).unwrap();
 
-        // Same payload and crc, one wrong digest: the digest check fires and
-        // is not a crc mismatch.
+        // A wrong digest is not checked: the digests name content, the crc
+        // guards it.
         let mut digests: Vec<_> = metadata.chunk_group_digests().collect();
         digests[0] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0; 32]);
         let wrong = BlobMetadata::new(
@@ -728,37 +665,15 @@ mod tests {
         )
         .unwrap();
         let wrong_group = wrong.chunk_group(0).unwrap();
-        let err = validate_decoded_chunk_group(&wrong, &wrong_group, &data).unwrap_err();
-        assert!(err.to_string().contains("chunk group 0 digest mismatch"));
-        assert!(!is_chunk_group_crc_mismatch(&err));
+        validate_decoded_chunk_group(&wrong_group, &data).unwrap();
 
-        // A corrupted payload fails the crc before any digest is consulted.
+        // A corrupted payload fails the crc.
         let mut corrupted = data.clone();
         corrupted[0] ^= 0xff;
-        let err = validate_decoded_chunk_group(&metadata, &group, &corrupted).unwrap_err();
+        let err = validate_decoded_chunk_group(&group, &corrupted).unwrap_err();
         assert!(is_chunk_group_crc_mismatch(&err));
         // A short payload fails the length check.
-        assert!(validate_decoded_chunk_group(&metadata, &group, &data[1..]).is_err());
-
-        // A ChunkGroupDigestTable algorithm this reader does not know fails verification
-        // instead of skipping it.
-        let mut raw = Vec::new();
-        metadata.write_to(&mut raw).unwrap();
-        let digest_table = metadata
-            .tables()
-            .iter()
-            .find(|table| table.table_type() == BlobMetadataTableType::CHUNK_GROUP_DIGEST)
-            .unwrap()
-            .range();
-        raw[digest_table.start + 16] = 9;
-        raw[16..20].fill(0);
-        let crc = crc32c::crc32c(&raw);
-        raw[16..20].copy_from_slice(&crc.to_le_bytes());
-        let unknown = BlobMetadata::from_bytes(raw).unwrap();
-        assert!(unknown.digester().is_err());
-        let err = validate_decoded_chunk_group(&unknown, &group, &data).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        assert!(err.to_string().contains("digester 9"), "{err}");
+        assert!(validate_decoded_chunk_group(&group, &data[1..]).is_err());
     }
 
     #[test]
@@ -816,46 +731,9 @@ mod tests {
         assert!(plan_prefetch_batches(&empty, 4096, 4).is_empty());
     }
 
-    /// A backend whose reads are never exercised; only its labels matter.
-    struct DragonflyBackend;
-
-    impl Backend for DragonflyBackend {
-        fn kind(&self) -> nydus_backend::BackendKind {
-            nydus_backend::BackendKind::Registry
-        }
-
-        fn protocol(&self) -> Option<nydus_backend::Protocol> {
-            Some(nydus_backend::Protocol::Dragonfly)
-        }
-
-        fn read_blob_metadata(
-            &self,
-            _blob_id: &[u8; SHA256_DIGEST_SIZE],
-        ) -> io::Result<nydus_format::blob::BlobMetadata> {
-            Err(io::Error::other("unused"))
-        }
-
-        fn read_range_into(
-            &self,
-            _blob_id: &[u8; SHA256_DIGEST_SIZE],
-            _offset: u64,
-            _dst: &mut [u8],
-        ) -> io::Result<()> {
-            Err(io::Error::other("unused"))
-        }
-    }
-
-    fn validate_failures() -> u64 {
-        nydus_telemetry::metrics::VALIDATE_CHUNK_GROUP_FAILURE_COUNT
-            .with_label_values(&["registry", "dragonfly"])
-            .get()
-    }
-
     #[test]
-    fn crc_failure_is_counted_against_the_backend() {
-        let backend: Arc<dyn Backend> = Arc::new(DragonflyBackend);
+    fn crc_mismatch_fails_the_window_decode() {
         let payload = vec![0u8; EROFS_BLOCK_SIZE as usize];
-        // A zeroed block has crc32c != 0, so a group declaring crc 0 mismatches.
         let metadata = BlobMetadata::new(
             1,
             1,
@@ -880,17 +758,12 @@ mod tests {
         .unwrap();
         let group = metadata.chunk_group(0).unwrap();
 
-        let failures_before = validate_failures();
-        let err = validate_chunk_group_with_metrics(&backend, &metadata, &group, &payload)
-            .expect_err("crc must mismatch");
+        let err = validate_decoded_chunk_group(&group, &payload).expect_err("crc must mismatch");
         assert!(is_chunk_group_crc_mismatch(&err));
-        assert_eq!(validate_failures(), failures_before + 1);
         let mut scratch = Vec::new();
-        let err =
-            decode_chunk_group_from_window(&metadata, &backend, &group, 0, &payload, &mut scratch)
-                .expect_err("borrowed payload must still be validated");
+        let err = decode_chunk_group_from_window(&metadata, &group, 0, &payload, &mut scratch)
+            .expect_err("borrowed payload must still be validated");
         assert!(is_chunk_group_crc_mismatch(&err));
         assert_eq!(scratch.capacity(), 0);
-        assert_eq!(validate_failures(), failures_before + 2);
     }
 }

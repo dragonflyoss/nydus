@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -17,11 +18,7 @@ use crate::access_trace::TraceRecorder;
 use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::BlobMetadataChunkGroupExtent;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
-use nydus_telemetry::metrics::{
-    collect_fill_chunk_group_from_redirect_blob_failure_metrics,
-    FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT, FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT,
-    PREFETCH_REDIRECT_BLOB_TRAFFIC,
-};
+use nydus_telemetry::metrics::{Metrics, WriteKind};
 
 use super::remote::DecodedGroupCache;
 use super::{BlobCache, LocalBlobCache, RawDeviceBlobCache, RemoteBlobCache};
@@ -86,6 +83,8 @@ impl BlobSlot {
 /// The set of per-blob lazy caches backing an opened image.
 pub struct BlobCaches {
     slots: HashMap<u16, BlobSlot>,
+    /// The metrics of the image, the backend's.
+    metrics: Arc<Metrics>,
 }
 
 impl BlobCaches {
@@ -94,6 +93,7 @@ impl BlobCaches {
     pub fn empty() -> Self {
         Self {
             slots: HashMap::new(),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -108,6 +108,7 @@ impl BlobCaches {
         trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<Self> {
         let decoded_groups = Arc::new(DecodedGroupCache::default());
+        let metrics = backend.metrics().clone();
         let slots = entries
             .into_iter()
             .map(|(blob_index, blob_id)| {
@@ -125,7 +126,13 @@ impl BlobCaches {
                 )
             })
             .collect();
-        Ok(Self { slots })
+        Ok(Self { slots, metrics })
+    }
+
+    /// The metrics of the image, which the caches and the prefetch over them
+    /// record into.
+    pub fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
     }
 
     /// Whether the set contains the blob identified by `blob_index`.
@@ -196,30 +203,31 @@ impl BlobCaches {
         // Time the ondemand blob prefetch and report how many source groups
         // it warmed versus skipped, so operators can tell whether the warmup
         // outran the workload.
-        let fills = || {
-            FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_COUNT
-                .with_label_values(&[])
-                .get()
-        };
-        let skips = || {
-            FILL_CHUNK_GROUP_FROM_REDIRECT_BLOB_FAILURE_COUNT
-                .with_label_values(&[])
-                .get()
-        };
-        let bytes = || PREFETCH_REDIRECT_BLOB_TRAFFIC.with_label_values(&[]).get();
-        let (fill_before, skip_before, bytes_before) = (fills(), skips(), bytes());
         let start = Instant::now();
-        let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), workers, deadline);
+        let filled = AtomicU64::new(0);
+        let skipped = AtomicU64::new(0);
+        let result = self.prefetch_redirect_blob(
+            blob_index,
+            cache.as_ref(),
+            workers,
+            deadline,
+            &filled,
+            &skipped,
+        );
+        let (bytes, failed) = match &result {
+            Ok(streamed) => *streamed,
+            Err(_) => (0, 0),
+        };
         info!(
             "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} chunk groups, skipped {}, read {} bytes",
             blob_index,
             start.elapsed(),
             workers.max(1),
-            fills() - fill_before,
-            skips() - skip_before,
-            bytes() - bytes_before,
+            filled.into_inner(),
+            skipped.into_inner() + failed,
+            bytes,
         );
-        result
+        result.map(|_| ())
     }
 
     /// Stream a REDIRECT blob in its packed (first-access) order and write
@@ -227,14 +235,19 @@ impl BlobCaches {
     /// early reads hit cache. Groups whose source is already cached (shared
     /// across processes through the source's chunk group map) are not
     /// fetched. Per-group failures are logged and skipped so a bad group can
-    /// neither poison a source cache nor abort the warmup.
+    /// neither poison a source cache nor abort the warmup; `filled` and
+    /// `skipped` count the groups written and the ones that could not be.
+    /// Returns what the stream fetched, see
+    /// [`BlobCache::for_each_redirect_chunk_group`].
     fn prefetch_redirect_blob(
         &self,
         blob_index: u16,
         cache: &dyn BlobCache,
         workers: usize,
         deadline: Option<Instant>,
-    ) -> io::Result<()> {
+        filled: &AtomicU64,
+        skipped: &AtomicU64,
+    ) -> io::Result<(u64, u64)> {
         let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
             let redirect = group.redirect()?;
             match self.try_cache(redirect.source_blob_index(), ReadKind::Prefetch) {
@@ -265,17 +278,26 @@ impl BlobCaches {
         };
         cache.for_each_redirect_chunk_group(workers, deadline, &skip, &|group, payload| {
             let (Some(redirect), Some(source)) = (group.redirect(), source_of(group)) else {
-                collect_fill_chunk_group_from_redirect_blob_failure_metrics();
+                skipped.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .cache
+                    .collect_write_failure_metrics(WriteKind::Redirect);
                 return Ok(());
             };
             let source_index = redirect.source_chunk_group_index() as usize;
-            if let Err(err) = source.fill_chunk_group_from_redirect(source_index, payload) {
-                collect_fill_chunk_group_from_redirect_blob_failure_metrics();
-                warn!(
-                    "failed to fill chunk group {source_index} of blob {} from ondemand blob {blob_index}: {err}",
-                    redirect.source_blob_index()
-                );
-            }
+            match source.fill_chunk_group_from_redirect(source_index, payload) {
+                Ok(()) => filled.fetch_add(1, Ordering::Relaxed),
+                Err(err) => {
+                    self.metrics
+                        .cache
+                        .collect_write_failure_metrics(WriteKind::Redirect);
+                    warn!(
+                        "failed to fill chunk group {source_index} of blob {} from ondemand blob {blob_index}: {err}",
+                        redirect.source_blob_index()
+                    );
+                    skipped.fetch_add(1, Ordering::Relaxed)
+                }
+            };
             Ok(())
         })
     }

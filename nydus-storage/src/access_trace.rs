@@ -1,18 +1,18 @@
 //! Chunk-group-level on-demand access tracing.
 //!
 //! Records, in first-access order, every chunk group touched by an
-//! on-demand (FUSE) read as a `(blob_index, chunk_group_index)` pair. The
-//! resulting ordered list is exposed as JSON by the apiserver's `/trace`
-//! endpoint and feeds `nydus optimize`, which copies exactly those groups
-//! into an ondemand blob the runtime prefetches first. Prefetch reads are
-//! not recorded.
+//! on-demand (FUSE) read as a `(blob_index, chunk_group_index)` pair into
+//! the [`TraceRecorder`] the image's caches were opened with. The resulting
+//! ordered list is exposed as JSON by the apiserver's `/trace` endpoint and
+//! feeds `nydus optimize`, which copies exactly those groups into an
+//! ondemand blob the runtime prefetches first. Prefetch reads are not
+//! recorded.
 //!
 //! Each group is recorded once, at the position of its first on-demand
 //! access, so the trace stays bounded and reflects the access pattern rather
 //! than raw repeat counts.
 
 use std::collections::HashSet;
-use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -103,34 +103,19 @@ impl TraceRecorder {
     }
 }
 
-static TRACE: LazyLock<TraceRecorder> = LazyLock::new(TraceRecorder::default);
-
-/// Record an on-demand access to a chunk group (see
-/// [`TraceRecorder::record_chunk_group_access`]) in the process-global trace.
-pub fn record_chunk_group_access(blob_index: u32, chunk_group_index: u32) {
-    TRACE.record_chunk_group_access(blob_index, chunk_group_index);
-}
-
-/// Serialize the current on-demand chunk group access trace as JSON, e.g.
-/// `{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4}]}`.
-pub fn encode_json() -> String {
-    TRACE.encode_json()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn encode_json_records_first_access_order_and_dedups() {
-        // Use blob indices unique to this test so the assertions are robust
-        // against other tests sharing the process-global trace state.
-        record_chunk_group_access(9001, 7);
-        record_chunk_group_access(9002, 4);
-        record_chunk_group_access(9001, 7); // duplicate, ignored
-        record_chunk_group_access(9002, 5);
+        let recorder = TraceRecorder::default();
+        recorder.record_chunk_group_access(9001, 7);
+        recorder.record_chunk_group_access(9002, 4);
+        recorder.record_chunk_group_access(9001, 7);
+        recorder.record_chunk_group_access(9002, 5);
 
-        let json = encode_json();
+        let json = recorder.encode_json();
         let first = json
             .find("{\"blob_index\":9001,\"chunk_group_index\":7}")
             .expect("first access present");

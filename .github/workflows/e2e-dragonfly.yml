@@ -77,7 +77,7 @@ jobs:
           - mode: seed-peer
             run: '^TestDragonfly_(ReadThroughSeedPeer|ServedFromSeedPeerCache|Prefetch|PrefetchRetry|ProxyError)$'
           - mode: origin
-            run: '^TestDragonfly_(FallbackToOrigin|BackToSourceRateLimit|OriginErrorWithoutSeedPeers)$'
+            run: '^TestDragonfly_(FallbackToOrigin|FallbackRateLimit|OriginErrorWithoutSeedPeers)$'
 
     steps:
       - name: Checkout code

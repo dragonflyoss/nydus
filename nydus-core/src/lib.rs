@@ -41,6 +41,9 @@ pub use blob::{BlobId, BlobInfo, Blobs};
 pub use entry::FileType;
 pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
+pub use nydus_backend::Netns;
+pub use nydus_storage::access_trace::TraceRecorder;
+pub use nydus_telemetry::metrics::Metrics;
 pub use reader::ErofsReader;
 pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
 
@@ -58,7 +61,7 @@ use extent::{BlobRangeSpec, ExtentResolver};
 use layout::{FlatLayout, Segment};
 use nydus_backend::Backend;
 use nydus_config::PrefetchScope;
-use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
+use nydus_storage::access_trace::TraceDocument;
 use nydus_storage::prefetch::BlobPrefetcher;
 
 /// Read-side handle over a nydus image, split into blob data access and
@@ -99,14 +102,19 @@ impl NydusCore {
     /// in access order, then prefetches the remaining blobs.
     /// Dropping the core raises the worker's stop flag so it winds down
     /// instead of retrying throttled prefetches forever.
-    /// The worker shares the reader's blob cache set, so callers that want
-    /// network access (e.g. the virtio-pmem backend) must construct the core
-    /// while the desired network namespace is active so the spawned thread
-    /// inherits it.
+    ///
+    /// A registry backend reaches the registry from `netns` when one is
+    /// given, the caller's network namespace otherwise: every thread of the
+    /// backend's runtime enters it, so the prefetch worker and the callers
+    /// need not (e.g. a virtio-pmem backend passes the guest's namespace).
+    /// Every read, cache fill and prefetch of the core records into
+    /// [`Metrics`] of its own, see [`metrics`], and every on-demand chunk
+    /// group access into a [`TraceRecorder`] of its own.
     ///
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Blobs::fetch
-    pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
+    /// [`metrics`]: Self::metrics
+    pub fn new(bootstrap: &Path, config: Config, netns: Option<Netns>) -> Result<Self> {
         let bootstrap_file = Arc::new(
             OpenOptions::new()
                 .read(true)
@@ -125,11 +133,16 @@ impl NydusCore {
             .len();
         let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
         let prefetch_scope = config.prefetch.scope;
-        let prefetch_timeout = config.prefetch.blob_timeout;
+        let prefetch_timeout = config.prefetch.request_timeout;
         nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
         nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
-        let backend = <dyn Backend>::new(&config.backend, &config.prefetch, None)
-            .context("failed to build blob backend")?;
+        let backend = <dyn Backend>::new(
+            &config.backend,
+            &config.prefetch,
+            netns,
+            Arc::new(Metrics::new()),
+        )
+        .context("failed to build blob backend")?;
         let cache_dir = config.storage.dir.clone();
         if let Some(cache_dir) = &cache_dir {
             std::fs::create_dir_all(cache_dir).with_context(|| {
@@ -239,6 +252,22 @@ impl NydusCore {
     /// Return the bootstrap file backing this core.
     pub fn bootstrap(&self) -> &File {
         &self.bootstrap
+    }
+
+    /// Return the metrics of this core alone: every backend read, cache fill
+    /// and prefetch of it, counters an embedder reads directly or gathers
+    /// from the registry for its own stats endpoint.
+    pub fn metrics(&self) -> &Arc<Metrics> {
+        self.reader.metrics()
+    }
+
+    /// Return the recorder of this core's on-demand chunk group trace, the
+    /// one [`trace_snapshot`] and [`trace_json`] read.
+    ///
+    /// [`trace_snapshot`]: Self::trace_snapshot
+    /// [`trace_json`]: Self::trace_json
+    pub fn trace_recorder(&self) -> &Arc<TraceRecorder> {
+        &self.trace_recorder
     }
 
     /// Return the size of the flattened device view.

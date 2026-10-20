@@ -8,6 +8,7 @@ use nydus_backend::Backend;
 use nydus_config::Config;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
+use nydus_telemetry::metrics::Metrics;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -129,8 +130,13 @@ impl OptimizeCommand {
 
         // Load the storage config.
         let storage_config = Config::load(&self.config)?;
-        let backend = <dyn Backend>::new(&storage_config.backend, &storage_config.prefetch, None)
-            .context("failed to build blob backend")?;
+        let backend = <dyn Backend>::new(
+            &storage_config.backend,
+            &storage_config.prefetch,
+            None,
+            Arc::new(Metrics::new()),
+        )
+        .context("failed to build blob backend")?;
         // Source chunks are read through the local blob cache's backend, so
         // diskless mode cannot apply.
         let Some(cache_dir) = storage_config.storage.dir else {

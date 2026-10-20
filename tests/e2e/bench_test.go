@@ -346,14 +346,14 @@ func (e *benchEnv) measureMode(t *testing.T, mode *servingMode) *modeResult {
 
 		// Snapshot here, while the only data ever fetched is that one file:
 		// anything measured later would fold its fetches into the number.
-		// Sum the nydus_read_backend_traffic series of the daemon's metrics
+		// Sum the nydus_backend_read_bytes_total series of the daemon's metrics
 		// endpoint where available (v3 daemons): bytes actually pulled from
 		// the backend, as opposed to cache-file disk allocation, which a
 		// 4 KiB block per tiny record inflates (a decoded chunk group
 		// publishes its records at block-aligned logical offsets, so `du`
 		// reports about 3x the real transfer on this corpus).
 		if metrics, err := util.TryFetchMetrics(e.apiSocket(mode.name)); err == nil {
-			result.fetchedMiB = util.SumMetric(metrics, "nydus_read_backend_traffic") / (1 << 20)
+			result.fetchedMiB = util.SumMetric(metrics, "nydus_backend_read_bytes_total") / (1 << 20)
 			t.Logf("  backend bytes for %.1f MiB of file: %.1f MiB", float64(n)/(1<<20), result.fetchedMiB)
 		} else if mode.cacheDir != "" {
 			cacheFiles, _ := filepath.Glob(filepath.Join(mode.cacheDir, "*.blob.data"))

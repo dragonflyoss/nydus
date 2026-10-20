@@ -53,13 +53,13 @@ func TestPrefetchScope(t *testing.T) {
 			util.WaitAPIServer(t, apiserver)
 
 			if tc.prefetches {
-				assert.Positive(util.WaitMetricSettled(t, apiserver, "nydus_read_backend_total", `type="prefetch"`))
+				assert.Positive(util.WaitMetricSettled(t, apiserver, "nydus_backend_read_total", `type="prefetch"`))
 			} else {
 				// An on-demand read is the only backend traffic there is.
 				_, err := os.ReadFile(filepath.Join(mountpoint, "files", "large_256k"))
 				assert.NoError(err)
-				assert.Positive(util.SumMetric(util.FetchMetrics(t, apiserver), "nydus_read_backend_total", `type="ondemand"`))
-				assert.Zero(util.SumMetric(util.FetchMetrics(t, apiserver), "nydus_read_backend_total", `type="prefetch"`))
+				assert.Positive(util.SumMetric(util.FetchMetrics(t, apiserver), "nydus_backend_read_total", `type="ondemand"`))
+				assert.Zero(util.SumMetric(util.FetchMetrics(t, apiserver), "nydus_backend_read_total", `type="prefetch"`))
 			}
 
 			if tc.logs != "" {

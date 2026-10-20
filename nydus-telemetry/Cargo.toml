@@ -4,7 +4,7 @@ version = "3.0.0-beta.3"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
-description = "Process-wide telemetry for nydus: the Prometheus metrics registry and, behind the `logging` feature, tracing-subscriber installation for binaries."
+description = "Telemetry for nydus: the Prometheus metrics of an image and, behind the `logging` feature, tracing-subscriber installation for binaries."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 

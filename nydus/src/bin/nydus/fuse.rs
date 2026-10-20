@@ -4,11 +4,12 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{Backend, Local};
 use nydus_config::{
-    default_prefetch_blob_timeout, default_prefetch_concurrent_blob_count, Config, PrefetchScope,
+    default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, Config, PrefetchScope,
 };
-use nydus_core::ErofsReader;
+use nydus_core::{ErofsReader, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn, Level};
@@ -208,7 +209,7 @@ impl FuseCommand {
                     (
                         scope,
                         config.prefetch.concurrent_blob_count,
-                        config.prefetch.blob_timeout,
+                        config.prefetch.request_timeout,
                     )
                 }
                 None => (
@@ -218,13 +219,17 @@ impl FuseCommand {
                         PrefetchScope::None
                     },
                     default_prefetch_concurrent_blob_count(),
-                    default_prefetch_blob_timeout(),
+                    default_prefetch_request_timeout(),
                 ),
             };
 
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
         // explicit `--blob-dir` (local backend) or the backend from `--config`.
+        // The mount serves one image, so one `Metrics` and one access trace
+        // cover it all.
+        let metrics = Arc::new(Metrics::new());
+        let trace_recorder = Arc::new(TraceRecorder::default());
         let backend: Option<Arc<dyn Backend>> = if self.blob.is_some() {
             None
         } else if let Some(dir) = self.blob_dir.as_ref() {
@@ -234,10 +239,10 @@ impl FuseCommand {
                     dir.display()
                 )));
             }
-            Some(Arc::new(Local::new(dir.clone())))
+            Some(Arc::new(Local::new(dir.clone(), metrics.clone())))
         } else if let Some(config) = storage_config.as_ref() {
             Some(
-                <dyn Backend>::new(&config.backend, &config.prefetch, None)
+                <dyn Backend>::new(&config.backend, &config.prefetch, None, metrics.clone())
                     .context("failed to build blob backend")?,
             )
         } else {
@@ -256,10 +261,18 @@ impl FuseCommand {
         let reader = match (&self.blob, &self.bootstrap, backend) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
-            (Some(blob), None, _) => ErofsReader::open_blob(blob, cache_dir.as_deref()),
-            (None, Some(bootstrap), Some(backend)) => {
-                ErofsReader::open_bootstrap(bootstrap, backend, cache_dir.as_deref(), None)
-            }
+            (Some(blob), None, _) => ErofsReader::open_blob(
+                blob,
+                cache_dir.as_deref(),
+                Some(trace_recorder.clone()),
+                metrics,
+            ),
+            (None, Some(bootstrap), Some(backend)) => ErofsReader::open_bootstrap(
+                bootstrap,
+                backend,
+                cache_dir.as_deref(),
+                Some(trace_recorder.clone()),
+            ),
             _ => {
                 return Err(Error::InvalidParameter(
                     "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config".to_string(),
@@ -318,7 +331,11 @@ impl FuseCommand {
         // Optionally expose Prometheus metrics over a Unix socket. A failure here is
         // non-fatal: the mount keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {
-            Some(address) => match api_server::ApiServer::start(address) {
+            Some(address) => match api_server::ApiServer::start(
+                address,
+                reader.metrics().clone(),
+                trace_recorder,
+            ) {
                 Ok(server) => Some(server),
                 Err(err) => {
                     warn!("failed to start metrics apiserver: {}", err.report());

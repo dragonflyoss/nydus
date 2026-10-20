@@ -103,6 +103,7 @@ mod tests {
     use crate::io::pread_exact;
     use nydus_backend::Local;
     use nydus_format::blob::BlobMetadata;
+    use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::FullBlob;
     use tempfile::tempdir;
 
@@ -116,7 +117,10 @@ mod tests {
     fn local_raw_device_maps_the_store_file_directly() {
         let dir = tempdir().unwrap();
         let (payload, blob_id) = write_raw_device_blob(dir.path());
-        let backend: Arc<dyn Backend> = Arc::new(Local::new(dir.path().to_path_buf()));
+        let backend: Arc<dyn Backend> = Arc::new(Local::new(
+            dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ));
         assert!(backend.is_raw_device(&blob_id).unwrap());
         assert!(backend.read_blob_metadata(&blob_id).is_err());
 
@@ -152,12 +156,8 @@ mod tests {
     struct Streamed(Local);
 
     impl Backend for Streamed {
-        fn kind(&self) -> nydus_backend::BackendKind {
-            self.0.kind()
-        }
-
-        fn protocol(&self) -> Option<nydus_backend::Protocol> {
-            self.0.protocol()
+        fn metrics(&self) -> &Arc<Metrics> {
+            self.0.metrics()
         }
 
         fn read_blob_metadata(
@@ -183,7 +183,10 @@ mod tests {
         let (payload, blob_id) = write_raw_device_blob(dir.path());
         let cache = RawDeviceBlobCache::new(
             blob_id,
-            Arc::new(Streamed(Local::new(dir.path().to_path_buf()))),
+            Arc::new(Streamed(Local::new(
+                dir.path().to_path_buf(),
+                Arc::new(Metrics::new()),
+            ))),
         );
         let mut out = vec![0; 100];
         cache.read_at(4000, &mut out).unwrap();

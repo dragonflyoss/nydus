@@ -43,7 +43,7 @@ impl NbdCore {
     /// first touches a blob, so this returns quickly even for large images.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
         // The NBD device addresses in EROFS blocks, so no extra rounding.
-        let image = FlatImage::open(bootstrap, config, BLOCK_SIZE)?;
+        let image = FlatImage::open(bootstrap, config, BLOCK_SIZE, None)?;
         Ok(Self { image })
     }
 

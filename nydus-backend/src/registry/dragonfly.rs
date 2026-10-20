@@ -16,16 +16,16 @@ use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, Proxy
 use dragonfly_client_request::{ExponentialBuilder, GetRequest, Proxy, Request as _};
 
 use nydus_config::{DragonflyConfig, HttpConfig};
-use nydus_telemetry::metrics::collect_read_backend_failure_metrics;
 
 use super::http::{Http, RateLimit};
 use super::response::{Body, Response};
 use super::rt::Runtime;
 use super::Transport;
-use crate::{BackendKind, Protocol, ReadKind};
+use crate::Source;
 
 /// The Dragonfly SDK transport: a blob `GET` rides the SDK to the seed peers
-/// named by the scheduler, one client per read kind.
+/// named by the scheduler, one client per read kind on the backend's
+/// runtime.
 ///
 /// ```text
 /// GET ──▶ seed peer ──▶ 2xx / 3xx / 4xx ────────────────────────────▶ handed back as is
@@ -44,13 +44,15 @@ pub(crate) struct Dragonfly {
     /// failed prefetch is sent once more after the retry interval instead.
     prefetch_client: Proxy,
 
+    /// The rate-limited client an on-demand read falls back to the origin
+    /// through when the seed peers cannot serve it, the registry's `http`
+    /// settings under `fallback_rate_limit`, every attempt claiming a slot
+    /// first.
+    fallback_http_client: Http,
+
     /// The window of the random interval before a prefetch read is sent once
     /// more, the configured interval up to twice that.
     prefetch_retry_interval: RangeInclusive<Duration>,
-
-    /// The rate-limited HTTP client an on-demand read falls back to when the
-    /// seed peers cannot serve it, every attempt claiming a slot first.
-    fallback_http_client: Http,
 
     /// The timeout of each attempt of a request.
     request_timeout: Duration,
@@ -59,38 +61,36 @@ pub(crate) struct Dragonfly {
 /// Implements the Dragonfly transport.
 impl Dragonfly {
     /// Creates the transport, each seed peer client connecting to the
-    /// configured scheduler on the runtime of its read kind, with a fallback
-    /// client built from `http_config` under the configured rate limit.
+    /// configured scheduler on `runtime`, with the fallback client built
+    /// from the registry's `http` settings under `fallback_rate_limit`.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers; a failed prefetch read is sent once more after
     /// `prefetch_retry_interval`.
     pub(crate) fn new(
         config: DragonflyConfig,
-        http_config: &HttpConfig,
+        http: &HttpConfig,
         prefetch_retry_interval: Duration,
         runtime: &Runtime,
     ) -> io::Result<Self> {
         Ok(Self {
             ondemand_client: Self::client(
                 runtime,
-                ReadKind::OnDemand,
                 config.scheduler_endpoint.clone(),
                 config.max_retries as u8,
             )?,
-            prefetch_client: Self::client(
-                runtime,
-                ReadKind::Prefetch,
-                config.scheduler_endpoint,
-                0,
-            )?,
+            prefetch_client: Self::client(runtime, config.scheduler_endpoint, 0)?,
             fallback_http_client: Http::new(
-                http_config,
+                http.request_timeout,
+                http.max_retries,
+                http.proxy.as_ref(),
+                &http.tls,
                 prefetch_retry_interval,
                 Some(RateLimit::new(
-                    config.back_to_source.request_rate_limit,
+                    config.fallback_rate_limit,
                     Duration::from_secs(1),
                 )),
+                Source::Fallback,
             )?,
             request_timeout: config.request_timeout,
             prefetch_retry_interval: prefetch_retry_interval
@@ -98,16 +98,11 @@ impl Dragonfly {
         })
     }
 
-    /// Creates the client of reads of `kind` on that kind's runtime, so the
-    /// scheduler is reached from the runtime's netns, retrying `max_retries`
-    /// times across seed peers with a jittered exponential backoff.
-    fn client(
-        runtime: &Runtime,
-        kind: ReadKind,
-        scheduler_endpoint: String,
-        max_retries: u8,
-    ) -> io::Result<Proxy> {
-        runtime.block_on_worker(kind, async move {
+    /// Creates a seed peer client on the runtime, so the scheduler is reached
+    /// from the runtime's netns, retrying `max_retries` times across seed
+    /// peers with a jittered exponential backoff.
+    fn client(runtime: &Runtime, scheduler_endpoint: String, max_retries: u8) -> io::Result<Proxy> {
+        runtime.block_on_worker(async move {
             Proxy::builder()
                 .scheduler_endpoint(scheduler_endpoint)
                 .max_retries(max_retries)
@@ -143,7 +138,7 @@ impl Transport for Dragonfly {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
                 body: Body::Bytes(body.freeze()),
-                protocol: Protocol::Dragonfly,
+                source: Source::Proxy,
             }),
             Err(Error::ProxyError(ProxyError {
                 status_code: Some(status),
@@ -171,7 +166,7 @@ impl Transport for Dragonfly {
                     })
                     .collect(),
                 body: Body::Bytes(message.unwrap_or_default().into()),
-                protocol: Protocol::Dragonfly,
+                source: Source::Proxy,
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -192,7 +187,7 @@ impl Transport for Dragonfly {
             ),
         }
 
-        // Serve a definitive answer; go back to the origin on anything else.
+        // Serve a definitive answer; fall back to the origin on anything else.
         let err = match result {
             Ok(response) if response.needs_fallback() => response.into_io_error().await,
             Ok(response) => return Ok(response),
@@ -200,19 +195,9 @@ impl Transport for Dragonfly {
         };
         warn!("dragonfly request failed, falling back to the origin: {err}");
 
-        // The origin client logs the outcome and its duration itself.
-        let start = Instant::now();
-        self.fallback_http_client
-            .get(url, headers)
-            .await
-            .inspect_err(|_| {
-                collect_read_backend_failure_metrics(
-                    ReadKind::OnDemand,
-                    BackendKind::Registry,
-                    Some(Protocol::Http),
-                    start.elapsed(),
-                )
-            })
+        // The fallback client logs the outcome and its duration itself; the
+        // backend records the read's metrics once, whichever client failed.
+        self.fallback_http_client.get(url, headers).await
     }
 
     /// Fetches `url` through the prefetch client at `Level3`, so a normal
@@ -237,7 +222,7 @@ impl Transport for Dragonfly {
                     status: response.status_code.unwrap_or(StatusCode::OK),
                     headers: response.header,
                     body: Body::Bytes(body.freeze()),
-                    protocol: Protocol::Dragonfly,
+                    source: Source::Proxy,
                 }),
                 Err(Error::ProxyError(ProxyError {
                     status_code: Some(status),
@@ -265,7 +250,7 @@ impl Transport for Dragonfly {
                         })
                         .collect(),
                     body: Body::Bytes(message.unwrap_or_default().into()),
-                    protocol: Protocol::Dragonfly,
+                    source: Source::Proxy,
                 }),
                 Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,

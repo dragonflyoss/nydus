@@ -357,7 +357,8 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::*;
-    use nydus_config::HttpConfig;
+    use crate::Source;
+    use nydus_config::TlsConfig;
 
     #[test]
     fn from_str_picks_the_challenge_to_answer() {
@@ -473,7 +474,16 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_answers_a_basic_challenge_from_the_config() {
-        let http = Http::new(&HttpConfig::default(), Duration::from_secs(1), None).unwrap();
+        let http = Http::new(
+            Duration::from_secs(5),
+            3,
+            None,
+            &TlsConfig::default(),
+            Duration::from_secs(1),
+            None,
+            Source::Origin,
+        )
+        .unwrap();
         let test_cases: Vec<(Option<&str>, fn(io::Result<()>, Option<HeaderValue>))> = vec![
             (Some("YWxpY2U6c2VjcmV0"), |result, header| {
                 assert!(result.is_ok());
@@ -525,7 +535,16 @@ mod tests {
                 });
             }
         });
-        let http = Http::new(&HttpConfig::default(), Duration::from_secs(1), None).unwrap();
+        let http = Http::new(
+            Duration::from_secs(5),
+            3,
+            None,
+            &TlsConfig::default(),
+            Duration::from_secs(1),
+            None,
+            Source::Origin,
+        )
+        .unwrap();
         let authorizer = Authorizer::new(None).unwrap();
         let challenge = || Challenge::Bearer {
             realm: realm.clone(),

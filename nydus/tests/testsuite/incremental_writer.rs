@@ -7,7 +7,7 @@ use std::sync::Arc;
 use nydus::build::{build_image, BuildImageOptions, DEFAULT_CHUNK_GROUP_MIN_SIZE};
 use nydus_config::Config;
 use nydus_core::writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
-use nydus_core::{BlobId, ErofsReader, NydusCore};
+use nydus_core::{BlobId, ErofsReader, Metrics, NydusCore};
 use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{
     ErofsChunkAddr, ErofsChunkIndex, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_NULL_ADDR,
@@ -114,7 +114,7 @@ fn open_data_writer(
 ) -> (IncrementalWriter, PathBuf) {
     let output_dir = temp.path().to_path_buf();
     let config = local_config(temp.path(), &temp.path().join("cache"));
-    let core = NydusCore::new(parent_bootstrap, config).unwrap();
+    let core = NydusCore::new(parent_bootstrap, config, None).unwrap();
     let writer = core.writer(writer_options(output_dir.clone())).unwrap();
     (writer, output_dir)
 }
@@ -174,8 +174,10 @@ fn commit_and_read_memory(
     writer: IncrementalWriter,
 ) -> Vec<u8> {
     let commit = commit_upper_blob(output_dir, writer);
-    let reader_backend: Arc<dyn nydus_backend::Backend> =
-        Arc::new(nydus_backend::Local::new(temp.path().to_path_buf()));
+    let reader_backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        temp.path().to_path_buf(),
+        Arc::new(Metrics::new()),
+    ));
     let reader =
         ErofsReader::open_bootstrap(&commit.bootstrap_path, reader_backend, None, None).unwrap();
     let nid = find_path(&reader, "memory.bin");
@@ -237,7 +239,10 @@ fn incremental_writer_creates_parentless_image_with_one_data_blob() {
         .unwrap();
     assert_eq!(rootfs_chunks[0].device_id, 1);
 
-    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(output_dir));
+    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        output_dir,
+        Arc::new(Metrics::new()),
+    ));
     let reader = ErofsReader::open_bootstrap(&bootstrap, backend, None, None).unwrap();
     let state = reader
         .read_file_data(state_nid, &state_inode, 0, chunk_size as u32)
@@ -274,6 +279,7 @@ fn incremental_writer_parentless_null_only_image_has_empty_blob() {
     let core = NydusCore::new(
         &bootstrap,
         local_config(&output_dir, &output_dir.join("runtime-cache")),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -304,7 +310,10 @@ fn incremental_writer_adds_file_to_parent_image() {
     writer.commit().unwrap();
 
     let bootstrap = output_dir.join("image.boot");
-    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(output_dir));
+    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        output_dir,
+        Arc::new(Metrics::new()),
+    ));
     let reader = ErofsReader::open_bootstrap(&bootstrap, backend, None, None).unwrap();
     assert_eq!(reader.read_prefetch_order(), vec![1]);
     let parent_nid = find_path(&reader, "memory.bin");
@@ -384,7 +393,10 @@ fn incremental_writer_preserves_flattened_parent_mapping() {
     writer.commit().unwrap();
 
     let bootstrap = output_dir.join("image.boot");
-    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(output_dir));
+    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        output_dir,
+        Arc::new(Metrics::new()),
+    ));
     let reader = ErofsReader::open_bootstrap(&bootstrap, backend, None, None).unwrap();
     assert_eq!(
         reader.blob_infos().unwrap()[0].mapped_blkaddr,
@@ -415,7 +427,10 @@ fn incremental_writer_replace_file_creates_missing_file() {
     writer.commit().unwrap();
 
     let bootstrap = output_dir.join("image.boot");
-    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(output_dir));
+    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        output_dir,
+        Arc::new(Metrics::new()),
+    ));
     let reader = ErofsReader::open_bootstrap(&bootstrap, backend, None, None).unwrap();
     let nid = find_path(&reader, "new.bin");
     let inode = reader.inode(nid).unwrap();
@@ -473,7 +488,10 @@ fn incremental_writer_create_file_preserves_metadata_order_and_tail() {
     writer.commit().unwrap();
 
     let bootstrap = output_dir.join("image.boot");
-    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(output_dir));
+    let backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        output_dir,
+        Arc::new(Metrics::new()),
+    ));
     let reader = ErofsReader::open_bootstrap(&bootstrap, backend, None, None).unwrap();
     let root_nid = reader.superblock().root_nid();
     let root = reader.inode(root_nid).unwrap();
@@ -980,8 +998,10 @@ fn incremental_writer_write_at_patches_partial_parent_chunk() {
     assert_eq!(written, 5);
     let commit = commit_upper_blob(&output_dir, writer);
 
-    let reader_backend: Arc<dyn nydus_backend::Backend> =
-        Arc::new(nydus_backend::Local::new(temp.path().to_path_buf()));
+    let reader_backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        temp.path().to_path_buf(),
+        Arc::new(Metrics::new()),
+    ));
     let reader =
         ErofsReader::open_bootstrap(&commit.bootstrap_path, reader_backend, None, None).unwrap();
     let nid = find_path(&reader, "memory.bin");
@@ -1020,8 +1040,10 @@ fn incremental_writer_write_at_crosses_chunk_boundary() {
     assert_eq!(written, 4);
     let commit = commit_upper_blob(&output_dir, writer);
 
-    let reader_backend: Arc<dyn nydus_backend::Backend> =
-        Arc::new(nydus_backend::Local::new(temp.path().to_path_buf()));
+    let reader_backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        temp.path().to_path_buf(),
+        Arc::new(Metrics::new()),
+    ));
     let reader =
         ErofsReader::open_bootstrap(&commit.bootstrap_path, reader_backend, None, None).unwrap();
     let nid = find_path(&reader, "memory.bin");
@@ -1047,7 +1069,7 @@ fn nydus_core_creates_incremental_writer_reusing_parent_reader() {
     parent_data.extend(vec![b'B'; chunk_size]);
     let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
     let config = local_config(temp.path(), &temp.path().join("cache"));
-    let core = NydusCore::new(&parent_bootstrap, config).unwrap();
+    let core = NydusCore::new(&parent_bootstrap, config, None).unwrap();
 
     let output_dir = temp.path().to_path_buf();
     let mut writer = core
@@ -1061,8 +1083,10 @@ fn nydus_core_creates_incremental_writer_reusing_parent_reader() {
     assert_eq!(written, 4);
     let commit = commit_upper_blob(&output_dir, writer);
 
-    let reader_backend: Arc<dyn nydus_backend::Backend> =
-        Arc::new(nydus_backend::Local::new(temp.path().to_path_buf()));
+    let reader_backend: Arc<dyn nydus_backend::Backend> = Arc::new(nydus_backend::Local::new(
+        temp.path().to_path_buf(),
+        Arc::new(Metrics::new()),
+    ));
     let reader =
         ErofsReader::open_bootstrap(&commit.bootstrap_path, reader_backend, None, None).unwrap();
     let nid = find_path(&reader, "memory.bin");

@@ -19,14 +19,13 @@ backend:
       scheduler_endpoint: http://127.0.0.1:8002
       request_timeout: 10s
       max_retries: 2
-      back_to_source:
-        request_rate_limit: 2
+      fallback_rate_limit: 2
 
 storage:
   dir: /var/lib/nydus/cache
-  skip_verify_checksums: false
+  skip_verify_checksums: true
 
 prefetch:
   concurrent_blob_count: 4
-  blob_timeout: 2m
+  request_timeout: 2m
   scope: all

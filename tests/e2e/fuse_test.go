@@ -98,9 +98,9 @@ func verifyChunkCacheFiles(t *testing.T, cacheDir string, blobs ...string) {
 
 // TestBlobIntegrity corrupts one byte of a blob's data region and reads the
 // file stored there: the blob meta carries a CRC per chunk group that every
-// decode checks, so the read fails instead of serving the corruption whether
-// or not the decoded groups are also verified against their digests. The
-// image is built without compression, so the corruption survives decoding.
+// decode checks by default, so the read fails instead of serving the
+// corruption; with the check skipped the corruption is served. The image is
+// built without compression, so the corruption survives decoding.
 func TestBlobIntegrity(t *testing.T) {
 	util.SkipUnlessRoot(t, "mounting FUSE")
 	workDir := t.TempDir()
@@ -124,13 +124,36 @@ func TestBlobIntegrity(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, f.Close())
 
-	verify := false
+	corrupted, err := os.ReadFile(filepath.Join(source, "data.bin"))
+	assert.NoError(t, err)
+	corrupted[4096] ^= 0xff
+
+	skip := true
 	tests := []struct {
 		name   string
-		verify *bool
+		skip   *bool
+		expect func(t *testing.T, data []byte, err error, logDir string)
 	}{
-		{name: "checksums unverified, the default"},
-		{name: "checksums verified", verify: &verify},
+		{
+			name: "checksums verified, the default",
+			expect: func(t *testing.T, _ []byte, err error, logDir string) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, unix.EIO)
+				assert.Eventually(func() bool {
+					return strings.Contains(util.ReadLogs(logDir), "crc32 mismatch")
+				}, 10*time.Second, 200*time.Millisecond, "the corruption was not caught by the chunk group crc")
+			},
+		},
+		{
+			name: "checksums skipped",
+			skip: &skip,
+			expect: func(t *testing.T, data []byte, err error, logDir string) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(corrupted, data, "the corruption was not served as is")
+				assert.NotContains(util.ReadLogs(logDir), "crc32 mismatch")
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -138,7 +161,7 @@ func TestBlobIntegrity(t *testing.T) {
 			assert := assert.New(t)
 			dir := t.TempDir()
 			config := util.NewLocalBackendConfig(blobDir, filepath.Join(dir, "cache"), "none")
-			config.Storage.SkipVerifyChecksums = tc.verify
+			config.Storage.SkipVerifyChecksums = tc.skip
 			config.Write(t, filepath.Join(dir, "nydus.yaml"))
 			mountpoint := filepath.Join(dir, "mnt")
 			logDir := filepath.Join(dir, "logs")
@@ -146,11 +169,8 @@ func TestBlobIntegrity(t *testing.T) {
 			cmd := exec.Command(nydusBin, "fuse", "--bootstrap", bootstrap, "--config", filepath.Join(dir, "nydus.yaml"), "--mountpoint", mountpoint, "--log-dir", logDir)
 			t.Cleanup(util.MountFuse(t, cmd, mountpoint, "nydus fuse"))
 
-			_, err := os.ReadFile(filepath.Join(mountpoint, "data.bin"))
-			assert.ErrorIs(err, unix.EIO)
-			assert.Eventually(func() bool {
-				return strings.Contains(util.ReadLogs(logDir), "crc32 mismatch")
-			}, 10*time.Second, 200*time.Millisecond, "the corruption was not caught by the chunk group crc")
+			data, err := os.ReadFile(filepath.Join(mountpoint, "data.bin"))
+			tc.expect(t, data, err, logDir)
 		})
 	}
 }

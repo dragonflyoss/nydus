@@ -137,7 +137,7 @@ impl FanotifyCore {
     /// before its `(dev, ino)` identity is recorded from that same opened
     /// descriptor.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let core = Arc::new(NydusCore::new(bootstrap, config)?);
+        let core = Arc::new(NydusCore::new(bootstrap, config, None)?);
         let entries = core
             .blobs
             .prepare_all()

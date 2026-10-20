@@ -22,11 +22,9 @@ use url::Url;
 use nydus_config::{PrefetchConfig, RegistryConfig};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
-use nydus_telemetry::metrics::{
-    collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
-};
+use nydus_telemetry::metrics::Metrics;
 
-use crate::{Backend, BackendKind, Netns, Protocol, ReadKind};
+use crate::{Backend, Netns, ReadKind, Source};
 
 use self::auth::{Authorizer, Challenge};
 #[cfg(feature = "dragonfly")]
@@ -56,15 +54,15 @@ trait Transport: Send + Sync {
 /// A blob backend over an OCI registry: the synchronous [`Backend`] face of
 /// a [`Client`], which does the asynchronous work on the runtime.
 ///
-/// Every read runs as a task on the runtime of its kind and the calling
-/// thread waits on its join handle, so the body flows into the read inside
-/// the worker pool, the connection is opened in the runtime's network
-/// namespace, and the caller is woken once, when the bytes are ready to copy
-/// out.
+/// Every read runs as a task on the runtime and the calling thread waits on
+/// its join handle, so the body flows into the read inside the worker pool,
+/// the connection is opened in the runtime's network namespace, and the
+/// caller is woken once, when the bytes are ready to copy out.
 ///
 /// ```text
 /// Registry
-///   ├─ Runtime            one tokio runtime per read kind
+///   ├─ Runtime            the tokio runtime of every read
+///   ├─ Metrics            the metrics of the image, every read recorded
 ///   └─ Client
 ///        ├─ Authorizer    the challenge and the token that answers it
 ///        ├─ RedirectCache the signed URLs blob GETs were redirected to
@@ -76,8 +74,11 @@ pub(crate) struct Registry {
     /// The registry client, shared with the task of each read.
     client: Arc<Client>,
 
-    /// The runtimes every read runs on, one per read kind.
+    /// The runtime every read runs on.
     runtime: Arc<Runtime>,
+
+    /// The metrics of the image the backend serves.
+    metrics: Arc<Metrics>,
 }
 
 /// The client of one repository on one registry, behind an [`Arc`] so a read
@@ -128,21 +129,35 @@ struct Client {
 
 /// Implements the registry backend construction.
 impl Registry {
-    /// Creates a registry backend from its configuration, running on runtimes
-    /// of its own, one per read kind, bounded by the `http` section, every
-    /// thread of them entering `netns` when one is given, its prefetch reads
-    /// retried after the interval the `prefetch` section sets.
+    /// Creates a registry backend from its configuration, recording into
+    /// `metrics` and running on a runtime of its own, every thread of it
+    /// entering `netns` when one is given, its prefetch reads retried after
+    /// the interval the `prefetch` section sets.
+    ///
+    /// Every origin request goes through the `http` section: the blob
+    /// `GET`s and auth token fetches of a plain registry, and the auth token
+    /// fetches and rate-limited fallback reads of a Dragonfly one.
     pub(crate) fn new(
         config: RegistryConfig,
         prefetch: &PrefetchConfig,
         netns: Option<Netns>,
+        metrics: Arc<Metrics>,
     ) -> io::Result<Self> {
-        let runtime = Arc::new(Runtime::new(
-            config.http.worker_threads,
-            config.http.max_blocking_threads,
-            netns,
-        )?);
-        let http = Http::new(&config.http, prefetch.retry_interval, None)?;
+        let runtime = Arc::new(Runtime::new(netns)?);
+        let http = Http::new(
+            config.http.request_timeout,
+            config.http.max_retries,
+            config.http.proxy.as_ref(),
+            &config.http.tls,
+            prefetch.retry_interval,
+            None,
+            if config.http.proxy.is_some() {
+                Source::Proxy
+            } else {
+                Source::Origin
+            },
+        )?;
+
         #[cfg(feature = "dragonfly")]
         let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
             Some(dragonfly) => Some(Box::new(Dragonfly::new(
@@ -153,6 +168,7 @@ impl Registry {
             )?)),
             None => None,
         };
+
         #[cfg(not(feature = "dragonfly"))]
         let dragonfly: Option<Box<dyn Transport>> = None;
 
@@ -166,20 +182,21 @@ impl Registry {
                 dragonfly,
             }),
             runtime,
+            metrics,
         })
     }
 }
 
 /// Implements the registry requests.
 impl Client {
-    /// Returns how reads are fetched when nothing else is known, the
-    /// `protocol` label of a failed read: Dragonfly when configured,
-    /// otherwise HTTP.
-    fn protocol(&self) -> Protocol {
+    /// Returns where reads are fetched from when nothing else is known, the
+    /// `source` label of a failed read: the seed peers when Dragonfly is
+    /// configured, otherwise wherever the HTTP client reaches.
+    fn source(&self) -> Source {
         if self.dragonfly.is_some() {
-            Protocol::Dragonfly
+            Source::Proxy
         } else {
-            Protocol::Http
+            self.http.source()
         }
     }
 
@@ -417,30 +434,20 @@ impl Client {
 
 /// Implements the blob backend over the registry.
 impl Backend for Registry {
-    /// Returns [`BackendKind::Registry`].
-    fn kind(&self) -> BackendKind {
-        BackendKind::Registry
+    /// Returns the metrics of the image.
+    fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
     }
 
-    /// Returns the configured transport: Dragonfly when configured, otherwise
-    /// HTTP.
-    fn protocol(&self) -> Option<Protocol> {
-        Some(self.client.protocol())
-    }
-
-    /// Recovers the blob's metadata from the registry on the on-demand
-    /// runtime.
+    /// Recovers the blob's metadata from the registry for an on-demand read.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
         self.runtime
-            .block_on_worker(ReadKind::OnDemand, async move {
-                client.read_blob_metadata(&blob_id).await
-            })
+            .block_on_worker(async move { client.read_blob_metadata(&blob_id).await })
     }
 
-    /// Recovers the blob's metadata from the registry on the prefetch
-    /// runtime.
+    /// Recovers the blob's metadata from the registry for a prefetch read.
     fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -448,13 +455,11 @@ impl Backend for Registry {
         let client = self.client.clone();
         let blob_id = *blob_id;
         self.runtime
-            .block_on_worker(ReadKind::Prefetch, async move {
-                client.prefetch_blob_metadata(&blob_id).await
-            })
+            .block_on_worker(async move { client.prefetch_blob_metadata(&blob_id).await })
     }
 
-    /// Fills `buf` with the blob bytes from `offset` on the on-demand
-    /// runtime, recording the read's metrics.
+    /// Fills `buf` with the blob bytes from `offset` for an on-demand read,
+    /// recording the read's metrics.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -465,24 +470,21 @@ impl Backend for Registry {
         let client = self.client.clone();
         let blob_id = *blob_id;
         let length = buf.len();
-        let result = self
-            .runtime
-            .block_on_worker(ReadKind::OnDemand, async move {
-                let range = format!(
-                    "bytes={offset}-{}",
-                    (offset + length as u64).saturating_sub(1)
-                );
-                let response = client.read_range(&blob_id, &range).await?;
-                let protocol = response.protocol;
-                Ok((response.bytes(length).await?, protocol))
-            });
+        let result = self.runtime.block_on_worker(async move {
+            let range = format!(
+                "bytes={offset}-{}",
+                (offset + length as u64).saturating_sub(1)
+            );
+            let response = client.read_range(&blob_id, &range).await?;
+            let source = response.source;
+            Ok((response.bytes(length).await?, source))
+        });
 
         match result {
-            Ok((bytes, protocol)) => {
-                collect_read_backend_finished_metrics(
+            Ok((bytes, source)) => {
+                self.metrics.backend.collect_read_finished_metrics(
                     ReadKind::OnDemand,
-                    BackendKind::Registry,
-                    Some(protocol),
+                    source,
                     length as u64,
                     start.elapsed(),
                 );
@@ -490,18 +492,15 @@ impl Backend for Registry {
                 Ok(())
             }
             Err(err) => {
-                collect_read_backend_failure_metrics(
-                    ReadKind::OnDemand,
-                    BackendKind::Registry,
-                    Some(self.client.protocol()),
-                    start.elapsed(),
-                );
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::OnDemand, self.client.source());
                 Err(err)
             }
         }
     }
 
-    /// Fills `buf` with the blob bytes from `offset` on the prefetch runtime,
+    /// Fills `buf` with the blob bytes from `offset` for a prefetch read,
     /// recording the read's metrics.
     fn prefetch_range_into(
         &self,
@@ -513,24 +512,21 @@ impl Backend for Registry {
         let client = self.client.clone();
         let blob_id = *blob_id;
         let length = buf.len();
-        let result = self
-            .runtime
-            .block_on_worker(ReadKind::Prefetch, async move {
-                let range = format!(
-                    "bytes={offset}-{}",
-                    (offset + length as u64).saturating_sub(1)
-                );
-                let response = client.prefetch_range(&blob_id, &range).await?;
-                let protocol = response.protocol;
-                Ok((response.bytes(length).await?, protocol))
-            });
+        let result = self.runtime.block_on_worker(async move {
+            let range = format!(
+                "bytes={offset}-{}",
+                (offset + length as u64).saturating_sub(1)
+            );
+            let response = client.prefetch_range(&blob_id, &range).await?;
+            let source = response.source;
+            Ok((response.bytes(length).await?, source))
+        });
 
         match result {
-            Ok((bytes, protocol)) => {
-                collect_read_backend_finished_metrics(
+            Ok((bytes, source)) => {
+                self.metrics.backend.collect_read_finished_metrics(
                     ReadKind::Prefetch,
-                    BackendKind::Registry,
-                    Some(protocol),
+                    source,
                     length as u64,
                     start.elapsed(),
                 );
@@ -538,12 +534,9 @@ impl Backend for Registry {
                 Ok(())
             }
             Err(err) => {
-                collect_read_backend_failure_metrics(
-                    ReadKind::Prefetch,
-                    BackendKind::Registry,
-                    Some(self.client.protocol()),
-                    start.elapsed(),
-                );
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::Prefetch, self.client.source());
                 Err(err)
             }
         }
@@ -611,13 +604,13 @@ mod tests {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(body.into()),
-                    protocol: Protocol::Dragonfly,
+                    source: Source::Proxy,
                 }),
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
                     body: Body::Bytes(Bytes::new()),
-                    protocol: Protocol::Dragonfly,
+                    source: Source::Proxy,
                 }),
             }
         }
@@ -662,7 +655,7 @@ mod tests {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(Bytes::from_static(b"ok")),
-                    protocol: Protocol::Dragonfly,
+                    source: Source::Proxy,
                 });
             }
             self.challenges.fetch_add(1, Ordering::SeqCst);
@@ -675,7 +668,7 @@ mod tests {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
                 body: Body::Bytes(Bytes::new()),
-                protocol: Protocol::Dragonfly,
+                source: Source::Proxy,
             })
         }
     }
@@ -747,26 +740,34 @@ mod tests {
                 repository: "library/ubuntu".to_string(),
                 authorizer: Authorizer::new(auth).unwrap(),
                 redirects: RedirectCache::new(),
-                http: Http::new(&http, PrefetchConfig::default().retry_interval, None).unwrap(),
+                http: Http::new(
+                    http.request_timeout,
+                    http.max_retries,
+                    None,
+                    &http.tls,
+                    PrefetchConfig::default().retry_interval,
+                    None,
+                    Source::Origin,
+                )
+                .unwrap(),
                 dragonfly: Some(Box::new(transport)),
             }),
-            runtime: Arc::new(
-                Runtime::new(http.worker_threads, http.max_blocking_threads, None).unwrap(),
-            ),
+            runtime: Arc::new(Runtime::new(None).unwrap()),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
-    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Protocol> {
-        registry.runtime.tokio(kind).block_on(async {
+    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Source> {
+        registry.runtime.tokio().block_on(async {
             let client = &registry.client;
             let range = format!("bytes=0-{}", buf.len() - 1);
             let response = match kind {
                 ReadKind::OnDemand => client.read_range(&TEST_BLOB_ID, &range).await?,
                 ReadKind::Prefetch => client.prefetch_range(&TEST_BLOB_ID, &range).await?,
             };
-            let protocol = response.protocol;
+            let source = response.source;
             buf.copy_from_slice(&response.bytes(buf.len()).await?);
-            Ok(protocol)
+            Ok(source)
         })
     }
 
@@ -795,7 +796,13 @@ mod tests {
             let config: RegistryConfig =
                 serde_yaml::from_str(&format!("addr: {addr}\nrepository: library/ubuntu\n"))
                     .unwrap();
-            let registry = Registry::new(config, &PrefetchConfig::default(), None).unwrap();
+            let registry = Registry::new(
+                config,
+                &PrefetchConfig::default(),
+                None,
+                Arc::new(Metrics::new()),
+            )
+            .unwrap();
             assert_eq!(registry.client.blob_url("abc123"), expected, "addr={addr}");
         }
     }
@@ -808,13 +815,19 @@ repository: library/ubuntu
 auth: YWxpY2U6c2VjcmV0
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let registry = Registry::new(config, &PrefetchConfig::default(), None).unwrap();
+        let registry = Registry::new(
+            config,
+            &PrefetchConfig::default(),
+            None,
+            Arc::new(Metrics::new()),
+        )
+        .unwrap();
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
         );
         assert!(registry.client.dragonfly.is_none());
-        assert_eq!(registry.client.protocol(), Protocol::Http);
+        assert_eq!(registry.client.source(), Source::Origin);
     }
 
     #[test]
@@ -851,7 +864,13 @@ auth: YWxpY2U6c2VjcmV0
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(config, &PrefetchConfig::default(), None).unwrap();
+        let registry = Registry::new(
+            config,
+            &PrefetchConfig::default(),
+            None,
+            Arc::new(Metrics::new()),
+        )
+        .unwrap();
 
         let mut buf = vec![0u8; 4];
         let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();
@@ -956,9 +975,9 @@ auth: YWxpY2U6c2VjcmV0
             .insert(&hex, "http://cdn.example.com/signed".to_string());
 
         let mut buf = vec![0u8; body.len()];
-        let protocol = read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
+        let source = read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
 
-        assert_eq!(protocol, Protocol::Dragonfly);
+        assert_eq!(source, Source::Proxy);
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);

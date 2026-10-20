@@ -7,7 +7,7 @@ use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::Protocol;
+use crate::Source;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
 /// and headers up front, plus the body.
@@ -21,8 +21,8 @@ pub(crate) struct Response {
     /// The body.
     pub(crate) body: Body,
 
-    /// How the answer was fetched: the origin over HTTP, or Dragonfly.
-    pub(crate) protocol: Protocol,
+    /// Where the answer was fetched from, the `source` label of the read.
+    pub(crate) source: Source,
 }
 
 /// The body of a response.
@@ -166,7 +166,7 @@ mod tests {
                 status,
                 headers: HeaderMap::new(),
                 body: Body::Bytes(Bytes::new()),
-                protocol: Protocol::Http,
+                source: Source::Origin,
             };
             assert_eq!(response.needs_fallback(), expected, "{status}");
             assert_eq!(response.needs_retry(), expected, "{status}");
@@ -210,7 +210,7 @@ mod tests {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
                 body,
-                protocol: Protocol::Http,
+                source: Source::Origin,
             };
             assert_fn(response.bytes(4).await);
         }
@@ -222,7 +222,7 @@ mod tests {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
             body: Body::Stream(Box::new(io::Cursor::new(b"no such blob".to_vec()))),
-            protocol: Protocol::Http,
+            source: Source::Origin,
         };
         assert_eq!(
             response.into_io_error().await.to_string(),

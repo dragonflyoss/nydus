@@ -119,11 +119,11 @@ func (m *fuseMount) kill(t *testing.T) {
 	util.Unmount(m.mountpoint)
 }
 
-// fills returns how many chunk groups the process fetched from the backend
-// for reads of kind, `ondemand` or `prefetch`.
+// fills returns how many chunk groups the process wrote into the cache for
+// reads of kind, `ondemand` or `prefetch`.
 func (m *fuseMount) fills(t *testing.T, kind string) float64 {
 	t.Helper()
-	return util.SumMetric(util.FetchMetrics(t, m.apiserver), "nydus_read_chunk_group_total", `type="`+kind+`"`, `storage="backend"`)
+	return util.SumMetric(util.FetchMetrics(t, m.apiserver), "nydus_cache_write_total", `type="`+kind+`"`)
 }
 
 // sharedBlobFixture is two images sharing one blob, so the tests can tell
@@ -344,7 +344,7 @@ func TestCacheSharingConcurrentPrefetchDeduplicates(t *testing.T) {
 		prefetch:    true,
 		prefetchAll: true,
 	})
-	soloFill := util.WaitMetricSettled(t, solo.apiserver, "nydus_read_chunk_group_total", `type="prefetch"`, `storage="backend"`)
+	soloFill := util.WaitMetricSettled(t, solo.apiserver, "nydus_cache_write_total", `type="prefetch"`)
 
 	// Contended: several processes prefetching one cold cache.
 	sharedCacheDir := filepath.Join(workDir, "cache-shared")

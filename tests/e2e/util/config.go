@@ -46,7 +46,8 @@ type BackendSettings struct {
 	// Auth is the Basic credential, the base64 of user:password.
 	Auth string `yaml:"auth,omitempty"`
 
-	// HTTP is the client of requests to the registry.
+	// HTTP is the client of requests to the registry, the reads Dragonfly
+	// falls back to the origin with included.
 	HTTP *HTTPConfig `yaml:"http,omitempty"`
 
 	// Dragonfly routes blob GETs through the Dragonfly seed peers.
@@ -95,14 +96,9 @@ type DragonflyConfig struct {
 	// goes back to the origin.
 	MaxRetries int `yaml:"max_retries"`
 
-	// BackToSource is the daemon's own fallback to the origin.
-	BackToSource BackToSourceConfig `yaml:"back_to_source"`
-}
-
-// BackToSourceConfig is the daemon's own fallback to the origin.
-type BackToSourceConfig struct {
-	// RequestRateLimit is the origin requests allowed per second.
-	RequestRateLimit int `yaml:"request_rate_limit"`
+	// FallbackRateLimit is the origin requests per second the reads the
+	// seed peers cannot serve are allowed, through the registry's HTTP.
+	FallbackRateLimit int `yaml:"fallback_rate_limit"`
 }
 
 // StorageConfig is the chunk cache.
@@ -110,8 +106,8 @@ type StorageConfig struct {
 	// Dir holds the cache files.
 	Dir string `yaml:"dir"`
 
-	// SkipVerifyChecksums leaves decoded chunk groups unverified, the
-	// daemon's default; nil keeps that default.
+	// SkipVerifyChecksums leaves decoded chunk groups unchecked against
+	// their crc32c; nil keeps the daemon's default, which checks them.
 	SkipVerifyChecksums *bool `yaml:"skip_verify_checksums,omitempty"`
 }
 
@@ -121,8 +117,8 @@ type PrefetchConfig struct {
 	Scope string `yaml:"scope"`
 
 	// RetryInterval is the interval before a prefetch read the backend
-	// answered with 429, 5xx or 408 is sent once more, the daemon's six
-	// hours by default.
+	// answered with 429, 5xx or 408 is sent once more, drawn at random
+	// between it and twice it, the daemon's 6 to 12 hours by default.
 	RetryInterval string `yaml:"retry_interval,omitempty"`
 }
 

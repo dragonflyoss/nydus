@@ -69,7 +69,7 @@ func FetchMetrics(t *testing.T, socket string) map[string]float64 {
 }
 
 // SumMetric sums the series of every metric whose name matches name, a
-// bare name or a `*` glob such as `nydus_read_backend_total`, and whose
+// bare name or a `*` glob such as `nydus_backend_read_total`, and whose
 // labels carry every given `label="value"` pair, 0 when absent.
 func SumMetric(metrics map[string]float64, name string, labels ...string) float64 {
 	var total float64

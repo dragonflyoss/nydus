@@ -1003,7 +1003,10 @@ mod tests {
             .unwrap();
             let reader = ErofsReader::open_bootstrap(
                 &bootstrap,
-                Arc::new(Local::new(directory.path().to_path_buf())),
+                Arc::new(Local::new(
+                    directory.path().to_path_buf(),
+                    Arc::new(nydus_core::Metrics::new()),
+                )),
                 Some(&directory.path().join(format!("cache-{reverse}"))),
                 None,
             )

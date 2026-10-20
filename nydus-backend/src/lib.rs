@@ -18,6 +18,7 @@ use std::sync::Arc;
 use nydus_config::{BackendConfig, PrefetchConfig};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
+use nydus_telemetry::metrics::Metrics;
 
 pub use local::Local;
 pub use netns::{Netns, NetnsId};
@@ -25,7 +26,8 @@ pub use netns::{Netns, NetnsId};
 #[cfg(feature = "registry")]
 pub(crate) use registry::Registry;
 
-pub use nydus_config::{BackendKind, Protocol, ReadKind};
+pub use nydus_config::ReadKind;
+pub use nydus_telemetry::metrics::Source;
 
 /// A raw EROFS device backed by the range
 /// `[data_offset, data_offset + data_size)` of a local file.
@@ -58,13 +60,9 @@ pub struct RawDeviceFile {
 /// defaults forward to the on-demand methods for a backend that serves both
 /// reads alike.
 pub trait Backend: Send + Sync {
-    /// Returns which backend this is, the `backend` label of its metrics.
-    fn kind(&self) -> BackendKind;
-
-    /// Returns how this backend fetches bytes when nothing else is known, the
-    /// `protocol` label of the metrics recorded outside a read, `None` for a
-    /// backend without a protocol.
-    fn protocol(&self) -> Option<Protocol>;
+    /// Returns the metrics of the image the backend serves, which its reads
+    /// and the caches, prefetcher and filesystem above it record into.
+    fn metrics(&self) -> &Arc<Metrics>;
 
     /// Returns the full blob digest of `blob_id`, the digest the blob's cache
     /// files are named by.
@@ -138,22 +136,25 @@ pub trait Backend: Send + Sync {
 
 /// Implements the blob backend construction.
 impl dyn Backend {
-    /// Creates the blob backend `config` describes, its prefetch reads
-    /// following `prefetch`, a registry backend reaching the registry from
-    /// `netns` when one is given, the caller's network namespace otherwise.
+    /// Creates the blob backend `config` describes, recording into
+    /// `metrics`, its prefetch reads following `prefetch`, a registry
+    /// backend reaching the registry from `netns` when one is given, the
+    /// caller's network namespace otherwise.
     #[cfg_attr(not(feature = "registry"), allow(unused_variables))]
     pub fn new(
         config: &BackendConfig,
         prefetch: &PrefetchConfig,
         netns: Option<Netns>,
+        metrics: Arc<Metrics>,
     ) -> io::Result<Arc<dyn Backend>> {
         match config {
-            BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone()))),
+            BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone(), metrics))),
             #[cfg(feature = "registry")]
             BackendConfig::Registry(registry) => Ok(Arc::new(Registry::new(
                 (**registry).clone(),
                 prefetch,
                 netns,
+                metrics,
             )?)),
             #[cfg(not(feature = "registry"))]
             BackendConfig::Registry(_) => Err(io::Error::new(
@@ -172,7 +173,13 @@ mod tests {
     fn new_builds_a_local_backend() {
         let config: BackendConfig =
             serde_yaml::from_str("type: local\nconfig:\n  dir: /blobs\n").unwrap();
-        assert!(<dyn Backend>::new(&config, &PrefetchConfig::default(), None).is_ok());
+        assert!(<dyn Backend>::new(
+            &config,
+            &PrefetchConfig::default(),
+            None,
+            Arc::new(Metrics::new())
+        )
+        .is_ok());
     }
 
     #[cfg(feature = "registry")]
@@ -182,7 +189,13 @@ mod tests {
             "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
         )
         .unwrap();
-        assert!(<dyn Backend>::new(&config, &PrefetchConfig::default(), None).is_ok());
+        assert!(<dyn Backend>::new(
+            &config,
+            &PrefetchConfig::default(),
+            None,
+            Arc::new(Metrics::new())
+        )
+        .is_ok());
     }
 
     #[cfg(not(feature = "registry"))]
@@ -192,9 +205,14 @@ mod tests {
             "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
         )
         .unwrap();
-        let err = <dyn Backend>::new(&config, &PrefetchConfig::default(), None)
-            .err()
-            .unwrap();
+        let err = <dyn Backend>::new(
+            &config,
+            &PrefetchConfig::default(),
+            None,
+            Arc::new(Metrics::new()),
+        )
+        .err()
+        .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("registry"));
     }

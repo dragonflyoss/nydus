@@ -222,7 +222,6 @@ pub fn build_ondemand_blob(
                 let group = meta.chunk_group(index as usize).unwrap();
                 decode_chunk_group_from_window(
                     meta,
-                    &backend,
                     &group,
                     first.compressed_offset(),
                     &window,

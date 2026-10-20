@@ -19,6 +19,7 @@ use nydus_format::erofs::{
 use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
 use nydus_storage::prefetch::PrefetchPlan;
+use nydus_telemetry::metrics::Metrics;
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct RawDirEntry {
@@ -98,9 +99,16 @@ impl ErofsReader {
 
     /// Open a self-contained full blob (`payload + bootstrap + blob meta +
     /// footer`): everything is served from the file itself, no remote
-    /// backend is involved. `cache_dir`, when given, caches the decoded
-    /// chunk groups so repeat reads skip re-decoding from the blob.
-    pub fn open_blob(blob_path: &Path, cache_dir: Option<&Path>) -> io::Result<Self> {
+    /// backend is involved, and reads record into `metrics`. `cache_dir`,
+    /// when given, caches the decoded chunk groups so repeat reads skip
+    /// re-decoding from the blob; `trace_recorder`, when given, records
+    /// on-demand chunk group accesses for `nydus optimize`.
+    pub fn open_blob(
+        blob_path: &Path,
+        cache_dir: Option<&Path>,
+        trace_recorder: Option<Arc<TraceRecorder>>,
+        metrics: Arc<Metrics>,
+    ) -> io::Result<Self> {
         let mmap = Self::mmap_file(blob_path, false)?;
         let (mmap, image_offset) = match Self::unpack_embedded_image(mmap)? {
             (mmap, Some(image_offset)) => (mmap, image_offset),
@@ -122,8 +130,8 @@ impl ErofsReader {
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
         let backend: Arc<dyn Backend> = match blob_infos.as_slice() {
-            [info] => Arc::new(Local::from_full_blob(info.blob_id, blob_path)?),
-            _ => Arc::new(Local::new(blob_dir.to_path_buf())),
+            [info] => Arc::new(Local::from_full_blob(info.blob_id, blob_path, metrics)?),
+            _ => Arc::new(Local::new(blob_dir.to_path_buf(), metrics)),
         };
         let blobs = BlobCaches::new(
             blob_infos
@@ -131,7 +139,7 @@ impl ErofsReader {
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             cache_dir,
-            None,
+            trace_recorder,
         )?;
 
         Ok(Self {
@@ -378,6 +386,12 @@ impl ErofsReader {
     /// e.g. to construct a [`nydus_storage::prefetch::BlobPrefetcher`].
     pub fn blob_caches(&self) -> Arc<BlobCaches> {
         self.blobs.clone()
+    }
+
+    /// The metrics of the image: the backend's, which the caches and the
+    /// prefetch record into too, and the filesystem above the reader should.
+    pub fn metrics(&self) -> &Arc<Metrics> {
+        self.blobs.metrics()
     }
 
     /// The (lazily opened) blob cache for the blob identified by `blob_index`,

@@ -242,7 +242,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     let (bootstrap, config, blob_id, _corpus) = build_flattened_test_image(dir.path());
     let blob_id = BlobId::from(blob_id);
 
-    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config, None).unwrap();
     assert_eq!(core.bootstrap_size, fs::metadata(&bootstrap).unwrap().len());
     assert_eq!(core.bootstrap_size % EROFS_BLOCK_SIZE as u64, 0);
     let blobs = core.blobs.prepare_all().unwrap();
@@ -334,7 +334,7 @@ fn flat_geometry_does_not_prepare_caches_for_bootstrap_or_holes() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, blob_id, _) = build_flattened_test_image(dir.path());
     fs::remove_file(dir.path().join("blobs").join(hex::encode(blob_id))).unwrap();
-    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config, None).unwrap();
     let start = FLATTENED_BLOB_ALIGNMENT;
     assert!(start > core.bootstrap_size);
     let ranges = core.probe_flat_ranges(0, start).unwrap();
@@ -402,7 +402,7 @@ fn flat_ranges_leave_unrelated_blobs_unopened() {
     // Keep a cache dir so construction itself does not validate raw devices.
     fs::remove_file(&upper).unwrap();
     for fetch_first in [false, true] {
-        let core = NydusCore::new(&bootstrap, config.clone()).unwrap();
+        let core = NydusCore::new(&bootstrap, config.clone(), None).unwrap();
         let offset = infos[0].mapped_blkaddr * EROFS_BLOCK_SIZE as u64;
         let len = infos[0].blocks * EROFS_BLOCK_SIZE as u64;
         let ranges = if fetch_first {
@@ -445,7 +445,7 @@ fn core_maps_local_native_layers_without_a_cache() {
         store.display(),
     ))
     .unwrap();
-    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config, None).unwrap();
     let blobs = core.blobs.prepare_all().unwrap();
     assert_eq!(blobs.len(), 2);
     for (blob, source) in blobs.iter().zip([&lower, &upper]) {
@@ -497,7 +497,7 @@ fn core_requires_a_cache_for_chunked_layers() {
     let dir = tempdir().unwrap();
     let (bootstrap, mut config, _, _) = build_flattened_test_image(dir.path());
     config.storage.dir = None;
-    let error = NydusCore::new(&bootstrap, config).err().unwrap();
+    let error = NydusCore::new(&bootstrap, config, None).err().unwrap();
     assert!(
         error.to_string().contains("storage.dir is required"),
         "{error}"
@@ -583,7 +583,7 @@ fn core_static_filesystem_api_reads_metadata_and_data() {
     let (bootstrap, config, blob_id, corpus) = build_test_image(dir.path());
     let blob_id = BlobId::from(blob_id);
 
-    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config, None).unwrap();
 
     let root_entry = core.fs.open("/").unwrap();
     let root = root_entry.metadata().unwrap();
@@ -663,7 +663,7 @@ fn node_fetch_populates_blob_cache_without_reading_data() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, _blob_id, _corpus) = build_test_image(dir.path());
 
-    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config, None).unwrap();
     let blobs = core.blobs.prepare_all().unwrap();
     let before = fs::read(&blobs[0].cache_path).unwrap();
     assert!(before.iter().all(|byte| *byte == 0));
@@ -688,7 +688,7 @@ fn core_reads_back_duplicate_corpus_image() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, _blob_id, corpus) = build_duplicate_corpus_test_image(dir.path());
 
-    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config, None).unwrap();
 
     for (name, expected) in &corpus {
         let entry = core.fs.open(name).unwrap();
@@ -750,7 +750,7 @@ fn core_reads_back_small_files_image() {
         .any(|group| u64::from(group.uncompressed_size()) < group.logical_size()));
     assert!(blob_metadata.uncompressed_size() < blob_metadata.logical_size());
 
-    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config, None).unwrap();
     for (name, expected) in &corpus {
         let entry = core.fs.open(name).unwrap();
         let all = entry.read().unwrap();

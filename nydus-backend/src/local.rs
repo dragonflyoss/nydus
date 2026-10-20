@@ -11,11 +11,9 @@ use std::time::Instant;
 
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::{sha256_reader, SHA256_DIGEST_SIZE};
-use nydus_telemetry::metrics::{
-    collect_read_backend_failure_metrics, collect_read_backend_finished_metrics,
-};
+use nydus_telemetry::metrics::Metrics;
 
-use crate::{Backend, BackendKind, Protocol, RawDeviceFile, ReadKind};
+use crate::{Backend, RawDeviceFile, ReadKind, Source};
 
 /// An open full blob file, its footer locating the data and blob metadata
 /// regions inside it.
@@ -62,21 +60,26 @@ pub struct Local {
 
     /// The opened full blobs by blob digest.
     full_blobs: RwLock<HashMap<[u8; SHA256_DIGEST_SIZE], Arc<FullBlob>>>,
+
+    /// The metrics of the image the backend serves.
+    metrics: Arc<Metrics>,
 }
 
 /// Implements the local directory backend.
 impl Local {
-    /// Creates a backend over the full blobs in `dir`.
-    pub fn new(dir: PathBuf) -> Self {
+    /// Creates a backend over the full blobs in `dir`, recording into
+    /// `metrics`.
+    pub fn new(dir: PathBuf, metrics: Arc<Metrics>) -> Self {
         Self {
             dir,
             full_blobs: RwLock::new(HashMap::new()),
+            metrics,
         }
     }
 
     /// Creates a backend from the self-contained full blob at `path`, serving
     /// `blob_id` from the file itself and any other blob from the file's
-    /// directory.
+    /// directory, recording into `metrics`.
     ///
     /// `blob_id` comes from the bootstrap embedded in the file, which names
     /// the blob by the digest of its data region rather than of the whole
@@ -84,7 +87,11 @@ impl Local {
     /// serving anything: once whole, for the full blob digest its cache files
     /// are named by, and once over the data region, to verify it against
     /// `blob_id`.
-    pub fn from_full_blob(blob_id: [u8; SHA256_DIGEST_SIZE], path: &Path) -> io::Result<Self> {
+    pub fn from_full_blob(
+        blob_id: [u8; SHA256_DIGEST_SIZE],
+        path: &Path,
+        metrics: Arc<Metrics>,
+    ) -> io::Result<Self> {
         let mut file = File::open(path).map_err(|err| {
             io::Error::new(
                 err.kind(),
@@ -104,7 +111,10 @@ impl Local {
             ));
         }
 
-        let backend = Self::new(path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        let backend = Self::new(
+            path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            metrics,
+        );
         backend
             .full_blobs
             .write()
@@ -167,14 +177,9 @@ impl Local {
 
 /// Implements the blob backend over the local directory.
 impl Backend for Local {
-    /// Returns [`BackendKind::Local`].
-    fn kind(&self) -> BackendKind {
-        BackendKind::Local
-    }
-
-    /// Returns `None`, a local read having no protocol.
-    fn protocol(&self) -> Option<Protocol> {
-        None
+    /// Returns the metrics of the image.
+    fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
     }
 
     /// Returns the digest of the whole blob file: `blob_id` itself for a blob
@@ -275,21 +280,17 @@ impl Backend for Local {
                     .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
             })
             .inspect(|()| {
-                collect_read_backend_finished_metrics(
+                self.metrics.backend.collect_read_finished_metrics(
                     ReadKind::OnDemand,
-                    BackendKind::Local,
-                    None,
+                    Source::Local,
                     buf.len() as u64,
                     start.elapsed(),
                 )
             })
             .inspect_err(|_| {
-                collect_read_backend_failure_metrics(
-                    ReadKind::OnDemand,
-                    BackendKind::Local,
-                    None,
-                    start.elapsed(),
-                )
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::OnDemand, Source::Local)
             })
     }
 
@@ -319,21 +320,17 @@ impl Backend for Local {
                     .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
             })
             .inspect(|()| {
-                collect_read_backend_finished_metrics(
+                self.metrics.backend.collect_read_finished_metrics(
                     ReadKind::Prefetch,
-                    BackendKind::Local,
-                    None,
+                    Source::Local,
                     buf.len() as u64,
                     start.elapsed(),
                 )
             })
             .inspect_err(|_| {
-                collect_read_backend_failure_metrics(
-                    ReadKind::Prefetch,
-                    BackendKind::Local,
-                    None,
-                    start.elapsed(),
-                )
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::Prefetch, Source::Local)
             })
     }
 }
@@ -360,7 +357,7 @@ mod tests {
             }
             let full_blob_id = blob.save_in(dir.path());
             let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
-            let backend = Local::new(dir.path().to_path_buf());
+            let backend = Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new()));
 
             let blob_metadata = backend.read_blob_metadata(&full_blob_id).unwrap();
             let mut data = vec![0u8; 4096];
@@ -385,8 +382,8 @@ mod tests {
         let path = dir.path().join(hex::encode(full_blob_id));
         let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
 
-        let backend = Local::from_full_blob(data_blob_id, &path).unwrap();
+        let backend = Local::from_full_blob(data_blob_id, &path, Arc::new(Metrics::new())).unwrap();
         assert_eq!(backend.full_blob_id(&data_blob_id).unwrap(), full_blob_id);
-        assert!(Local::from_full_blob(full_blob_id, &path).is_err());
+        assert!(Local::from_full_blob(full_blob_id, &path, Arc::new(Metrics::new())).is_err());
     }
 }

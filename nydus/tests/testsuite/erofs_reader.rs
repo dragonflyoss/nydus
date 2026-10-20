@@ -25,6 +25,7 @@ use nydus_format::erofs::{
     Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::sha256_reader;
+use nydus_telemetry::metrics::Metrics;
 use nydus_test_utils::blob::FullBlob;
 
 struct CountingBackend {
@@ -84,7 +85,10 @@ fn read_z_fixture_range(
     file.write_all(bootstrap)?;
     let reader = ErofsReader::open_bootstrap(
         file.path(),
-        Arc::new(Local::new(dir.path().to_path_buf())),
+        Arc::new(Local::new(
+            dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        )),
         None,
         None,
     )?;
@@ -129,7 +133,10 @@ fn z_reader_rejects_head_distance_before_cached_extent() {
         file.write_all(&bootstrap).unwrap();
         let reader = ErofsReader::open_bootstrap(
             file.path(),
-            Arc::new(Local::new(dir.path().to_path_buf())),
+            Arc::new(Local::new(
+                dir.path().to_path_buf(),
+                Arc::new(Metrics::new()),
+            )),
             None,
             None,
         )
@@ -595,12 +602,8 @@ fn zstd_config_windowlog_range() {
 }
 
 impl Backend for CountingBackend {
-    fn kind(&self) -> nydus_backend::BackendKind {
-        self.local.kind()
-    }
-
-    fn protocol(&self) -> Option<nydus_backend::Protocol> {
-        self.local.protocol()
+    fn metrics(&self) -> &Arc<Metrics> {
+        self.local.metrics()
     }
 
     fn read_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
@@ -666,7 +669,7 @@ fn z_fragments_reuse_decoded_pclusters_across_files_and_threads() {
         let bootstrap = dir.path().join("bootstrap");
         fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
         let backend = Arc::new(CountingBackend {
-            local: Local::new(dir.path().to_path_buf()),
+            local: Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new())),
             reads: AtomicUsize::new(0),
             fail_next: AtomicBool::new(true),
         });
@@ -820,7 +823,10 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         fs::write(dir.path().join(hex::encode(image.full_blob_digest)), blob).unwrap();
         let parent = dir.path().join("parent");
         fs::write(&parent, image.standalone_bootstrap.unwrap()).unwrap();
-        let backend = Arc::new(Local::new(dir.path().to_path_buf()));
+        let backend = Arc::new(Local::new(
+            dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ));
         // Trace every chunk group, last one first.
         let patterns: Vec<ChunkGroupRef> = image
             .blob_metadata
@@ -868,7 +874,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         let bootstrap = dir.path().join("optimized");
         fs::write(&bootstrap, &optimized.bootstrap).unwrap();
         let backend = Arc::new(CountingBackend {
-            local: Local::new(dir.path().to_path_buf()),
+            local: Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new())),
             reads: AtomicUsize::new(0),
             fail_next: AtomicBool::new(false),
         });
@@ -974,7 +980,10 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         let optimized = build_ondemand_blob(
             &parent,
             &patterns,
-            Arc::new(Local::new(directory.path().to_path_buf())),
+            Arc::new(Local::new(
+                directory.path().to_path_buf(),
+                Arc::new(Metrics::new()),
+            )),
             &directory.path().join("build-cache"),
         )
         .unwrap();
@@ -1017,7 +1026,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         let bootstrap = directory.path().join("optimized");
         fs::write(&bootstrap, &optimized.bootstrap).unwrap();
         let backend = Arc::new(CountingBackend {
-            local: Local::new(directory.path().to_path_buf()),
+            local: Local::new(directory.path().to_path_buf(), Arc::new(Metrics::new())),
             reads: AtomicUsize::new(0),
             fail_next: AtomicBool::new(false),
         });
@@ -1195,8 +1204,9 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let bootstrap_path = dir.path().join("bootstrap");
     fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");
 
-    let backend: std::sync::Arc<dyn nydus_backend::Backend> =
-        std::sync::Arc::new(nydus_backend::Local::new(dir.path().to_path_buf()));
+    let backend: std::sync::Arc<dyn nydus_backend::Backend> = std::sync::Arc::new(
+        nydus_backend::Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new())),
+    );
     let reader =
         ErofsReader::open_bootstrap(&bootstrap_path, backend, None, None).expect("open reader");
     let root = reader

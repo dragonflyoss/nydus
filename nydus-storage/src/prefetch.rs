@@ -12,9 +12,6 @@ use tracing::{info, warn};
 
 use nydus_backend::ReadKind;
 use nydus_config::PrefetchScope;
-use nydus_telemetry::metrics::{
-    collect_prefetch_task_failure_metrics, collect_prefetch_task_started_metrics,
-};
 
 use crate::cache::BlobCaches;
 
@@ -215,14 +212,17 @@ impl BlobPrefetcher {
             if self.stopped() {
                 return;
             }
-            collect_prefetch_task_started_metrics();
+            let metrics = &self.caches.metrics().storage;
             match self
                 .caches
                 .prefetch_blob(blob_index, self.threads, self.timeout)
             {
-                Ok(()) => info!("prefetched priority blob {}", blob_index),
+                Ok(()) => {
+                    metrics.collect_prefetch_task_finished_metrics();
+                    info!("prefetched priority blob {}", blob_index)
+                }
                 Err(err) => {
-                    collect_prefetch_task_failure_metrics();
+                    metrics.collect_prefetch_task_failure_metrics();
                     warn!("failed to prefetch priority blob {}: {}", blob_index, err)
                 }
             }
@@ -256,11 +256,14 @@ impl BlobPrefetcher {
                         let Some(blob_index) = blob_index else {
                             break;
                         };
-                        collect_prefetch_task_started_metrics();
+                        let metrics = &blobs.metrics().storage;
                         match blobs.prefetch_blob(blob_index, 1, timeout) {
-                            Ok(()) => info!("prefetched blob {}", blob_index),
+                            Ok(()) => {
+                                metrics.collect_prefetch_task_finished_metrics();
+                                info!("prefetched blob {}", blob_index)
+                            }
                             Err(err) => {
-                                collect_prefetch_task_failure_metrics();
+                                metrics.collect_prefetch_task_failure_metrics();
                                 warn!("failed to prefetch blob {}: {}", blob_index, err)
                             }
                         }
@@ -286,6 +289,7 @@ mod tests {
     use nydus_backend::{Backend, Local};
     use nydus_format::blob::BlobMetadata;
     use nydus_format::utils::SHA256_DIGEST_SIZE;
+    use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::{single_chunk_group, single_chunk_group_redirect};
     use tempfile::tempdir;
@@ -300,7 +304,7 @@ mod tests {
     impl FlakyBackend {
         fn new(dir: &Path, failures: usize, error: fn() -> io::Error) -> Arc<Self> {
             Arc::new(Self {
-                inner: Local::new(dir.to_path_buf()),
+                inner: Local::new(dir.to_path_buf(), Arc::new(Metrics::new())),
                 failures,
                 error,
                 attempts: AtomicUsize::new(0),
@@ -313,12 +317,8 @@ mod tests {
     }
 
     impl Backend for FlakyBackend {
-        fn kind(&self) -> nydus_backend::BackendKind {
-            self.inner.kind()
-        }
-
-        fn protocol(&self) -> Option<nydus_backend::Protocol> {
-            self.inner.protocol()
+        fn metrics(&self) -> &Arc<Metrics> {
+            self.inner.metrics()
         }
 
         fn read_blob_metadata(
@@ -389,17 +389,19 @@ mod tests {
             &payload,
             &meta,
         );
-        let failures = || {
-            nydus_telemetry::metrics::PREFETCH_TASK_FAILURE_COUNT
-                .with_label_values(&[])
-                .get()
-        };
-        let failures_before = failures();
-
         prefetcher.run();
 
         assert_eq!(backend.attempts(), 1);
-        assert!(failures() > failures_before);
+        let failures: f64 = backend
+            .metrics()
+            .registry()
+            .gather()
+            .iter()
+            .filter(|family| family.get_name() == "nydus_storage_prefetch_task_failure_total")
+            .flat_map(|family| family.get_metric())
+            .map(|metric| metric.get_counter().get_value())
+            .sum();
+        assert_eq!(failures, 1.0);
     }
 
     #[test]
@@ -430,12 +432,8 @@ mod tests {
     }
 
     impl Backend for RecordingBackend {
-        fn kind(&self) -> nydus_backend::BackendKind {
-            self.inner.kind()
-        }
-
-        fn protocol(&self) -> Option<nydus_backend::Protocol> {
-            self.inner.protocol()
+        fn metrics(&self) -> &Arc<Metrics> {
+            self.inner.metrics()
         }
 
         fn read_blob_metadata(
@@ -476,7 +474,7 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(backend_dir);
         let backend = Arc::new(RecordingBackend {
-            inner: Local::new(backend_dir.to_path_buf()),
+            inner: Local::new(backend_dir.to_path_buf(), Arc::new(Metrics::new())),
             reads: Mutex::new(Vec::new()),
         });
         let caches = Arc::new(

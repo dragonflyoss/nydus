@@ -129,24 +129,25 @@ func (m *registryMount) read(t *testing.T, image *registryImage, rel string) err
 	return nil
 }
 
-// backendReads returns how many reads of kind the backend served over
-// protocol, from the mount's metrics.
-func (m *registryMount) backendReads(t *testing.T, kind, protocol string) float64 {
+// backendReads returns how many reads of kind the backend made from
+// source, `origin`, `proxy` or `fallback`, failed ones included, from the
+// mount's metrics.
+func (m *registryMount) backendReads(t *testing.T, kind, source string) float64 {
 	t.Helper()
-	return m.metric(t, "nydus_read_backend_total", kind, protocol)
+	return m.metric(t, "nydus_backend_read_total", kind, source)
 }
 
-// backendFailures returns how many reads of kind failed over protocol.
-func (m *registryMount) backendFailures(t *testing.T, kind, protocol string) float64 {
+// backendFailures returns how many reads of kind failed from source.
+func (m *registryMount) backendFailures(t *testing.T, kind, source string) float64 {
 	t.Helper()
-	return m.metric(t, "nydus_read_backend_failure_total", kind, protocol)
+	return m.metric(t, "nydus_backend_read_failure_total", kind, source)
 }
 
-// metric returns the backend metric name summed over kind and protocol.
-func (m *registryMount) metric(t *testing.T, name, kind, protocol string) float64 {
+// metric returns the backend metric name summed over kind and source.
+func (m *registryMount) metric(t *testing.T, name, kind, source string) float64 {
 	t.Helper()
 	metrics := util.FetchMetrics(t, m.apiserver)
-	return util.SumMetric(metrics, name, fmt.Sprintf(`type="%s"`, kind), fmt.Sprintf(`protocol="%s"`, protocol))
+	return util.SumMetric(metrics, name, fmt.Sprintf(`type="%s"`, kind), fmt.Sprintf(`source="%s"`, source))
 }
 
 // failedReads returns how many reads the daemon logged as failed with the
@@ -198,8 +199,8 @@ func TestRegistry_ReadThroughOrigin(t *testing.T) {
 
 	assert.NoError(m.read(t, image, "etc/os-release"))
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
-	assert.Positive(m.backendReads(t, "ondemand", "http"))
-	assert.Zero(m.backendFailures(t, "ondemand", "http"))
+	assert.Positive(m.backendReads(t, "ondemand", "origin"))
+	assert.Zero(m.backendFailures(t, "ondemand", "origin"))
 	assert.Positive(proxy.BlobGets())
 }
 
@@ -220,7 +221,7 @@ func TestRegistry_BasicAuth(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Positive(proxy.Challenges())
-				assert.Zero(m.backendFailures(t, "ondemand", "http"))
+				assert.Zero(m.backendFailures(t, "ondemand", "origin"))
 			},
 		},
 		{
@@ -259,7 +260,7 @@ func TestRegistry_BearerAuth(t *testing.T) {
 	assert.Positive(challenges)
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
 	assert.Equal(challenges, proxy.Challenges())
-	assert.Zero(m.backendFailures(t, "ondemand", "http"))
+	assert.Zero(m.backendFailures(t, "ondemand", "origin"))
 }
 
 func TestRegistry_Redirect(t *testing.T) {
@@ -275,7 +276,7 @@ func TestRegistry_Redirect(t *testing.T) {
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
 	assert.Equal(1, proxy.Redirects())
 	assert.Greater(proxy.BlobGets(), 1)
-	assert.Zero(m.backendFailures(t, "ondemand", "http"))
+	assert.Zero(m.backendFailures(t, "ondemand", "origin"))
 }
 
 func TestRegistry_Retry(t *testing.T) {
@@ -305,7 +306,7 @@ func TestRegistry_Retry(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Equal(2, proxy.Injected())
-				assert.Zero(m.backendFailures(t, "ondemand", "http"))
+				assert.Zero(m.backendFailures(t, "ondemand", "origin"))
 			},
 		},
 		{
@@ -361,7 +362,9 @@ func TestRegistry_ForwardProxy(t *testing.T) {
 
 	assert.NoError(m.read(t, image, "data/blob1.bin"))
 	assert.Positive(relayed.Load())
-	assert.Zero(m.backendFailures(t, "ondemand", "http"))
+	assert.Positive(m.backendReads(t, "ondemand", "proxy"))
+	assert.Zero(m.backendReads(t, "ondemand", "origin"))
+	assert.Zero(m.backendFailures(t, "ondemand", "proxy"))
 }
 
 func TestRegistry_TLS(t *testing.T) {
@@ -429,9 +432,9 @@ func TestRegistry_PrefetchRetry(t *testing.T) {
 	assert.Eventually(func() bool { return proxy.Injected() > 0 }, 30*time.Second, 100*time.Millisecond, "the prefetch never reached the origin")
 	proxy.Inject(0, 0, nil)
 
-	util.WaitMetricSettled(t, m.apiserver, "nydus_read_backend_total", `type="prefetch"`)
+	util.WaitMetricSettled(t, m.apiserver, "nydus_backend_read_total", `type="prefetch"`)
 	m.waitLogs(t, "retrying in")
-	assert.Positive(m.backendReads(t, "prefetch", "http"))
+	assert.Positive(m.backendReads(t, "prefetch", "origin"))
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
 }
 

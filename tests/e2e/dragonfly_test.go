@@ -60,10 +60,11 @@ func newDragonflySuite(t *testing.T) (*registryImage, *util.RegistryProxy) {
 }
 
 // dragonflyConfig returns the config of the image read through Dragonfly
-// with origin, the registry or the proxy, as the back-to-source and fallback
-// target: a read tries three seed peers before the daemon's own fallback,
-// which retries the origin once and is allowed 1000 requests per second, so
-// neither limit shows in a test that is not about it.
+// with origin, the registry or the proxy, as the origin the seed peers read
+// and the daemon falls back to: a read tries three seed peers before the
+// daemon's own fallback, which retries the origin once and is allowed 1000
+// requests per second, so neither limit shows in a test that is not about
+// it.
 func dragonflyConfig(image *registryImage, origin string) util.Config {
 	config := image.config("http://" + origin)
 	config.Backend.Config.HTTP.MaxRetries = 1
@@ -71,7 +72,7 @@ func dragonflyConfig(image *registryImage, origin string) util.Config {
 		SchedulerEndpoint: dragonflySchedulerAddr,
 		RequestTimeout:    "5s",
 		MaxRetries:        3,
-		BackToSource:      util.BackToSourceConfig{RequestRateLimit: 1000},
+		FallbackRateLimit: 1000,
 	}
 
 	return config
@@ -115,8 +116,8 @@ func TestDragonfly_ReadThroughSeedPeer(t *testing.T) {
 
 	assert.NoError(m.read(t, image, "etc/os-release"))
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
-	assert.Positive(m.backendReads(t, "ondemand", "dragonfly"))
-	assert.Zero(m.backendReads(t, "ondemand", "http"))
+	assert.Positive(m.backendReads(t, "ondemand", "proxy"))
+	assert.Zero(m.backendReads(t, "ondemand", "fallback"))
 }
 
 func TestDragonfly_ServedFromSeedPeerCache(t *testing.T) {
@@ -135,8 +136,8 @@ func TestDragonfly_ServedFromSeedPeerCache(t *testing.T) {
 	proxy.Inject(http.StatusServiceUnavailable, -1, fromSeedPeer)
 	second := image.mount(t, config)
 	assert.NoError(second.read(t, image, "data/blob2.bin"))
-	assert.Positive(second.backendReads(t, "ondemand", "dragonfly"))
-	assert.Zero(second.backendReads(t, "ondemand", "http"))
+	assert.Positive(second.backendReads(t, "ondemand", "proxy"))
+	assert.Zero(second.backendReads(t, "ondemand", "fallback"))
 	assert.Zero(proxy.Injected())
 }
 
@@ -147,9 +148,9 @@ func TestDragonfly_Prefetch(t *testing.T) {
 	config.Prefetch.Scope = "all"
 	m := image.mount(t, config)
 
-	util.WaitMetricSettled(t, m.apiserver, "nydus_read_backend_total", `type="prefetch"`)
-	assert.Positive(m.backendReads(t, "prefetch", "dragonfly"))
-	assert.Zero(m.backendReads(t, "prefetch", "http"))
+	util.WaitMetricSettled(t, m.apiserver, "nydus_backend_read_total", `type="prefetch"`)
+	assert.Positive(m.backendReads(t, "prefetch", "proxy"))
+	assert.Zero(m.backendReads(t, "prefetch", "fallback"))
 	assert.NoError(m.read(t, image, "data/blob1.bin"))
 }
 
@@ -171,9 +172,9 @@ func TestDragonfly_PrefetchRetry(t *testing.T) {
 	m.waitLogs(t, "retrying in")
 	proxy.Inject(0, 0, nil)
 
-	util.WaitMetricSettled(t, m.apiserver, "nydus_read_backend_total", `type="prefetch"`)
-	assert.Positive(m.backendReads(t, "prefetch", "dragonfly"))
-	assert.Zero(m.backendReads(t, "prefetch", "http"))
+	util.WaitMetricSettled(t, m.apiserver, "nydus_backend_read_total", `type="prefetch"`)
+	assert.Positive(m.backendReads(t, "prefetch", "proxy"))
+	assert.Zero(m.backendReads(t, "prefetch", "fallback"))
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
 }
 
@@ -193,7 +194,7 @@ func TestDragonfly_ProxyError(t *testing.T) {
 			expect: func(t *testing.T, m *registryMount, err error) {
 				assert := assert.New(t)
 				assert.Error(err)
-				assert.Zero(m.backendReads(t, "ondemand", "http"))
+				assert.Zero(m.backendReads(t, "ondemand", "fallback"))
 				assert.Positive(proxy.Injected())
 			},
 		},
@@ -204,7 +205,7 @@ func TestDragonfly_ProxyError(t *testing.T) {
 			expect: func(t *testing.T, m *registryMount, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Positive(m.backendReads(t, "ondemand", "dragonfly"))
+				assert.Positive(m.backendReads(t, "ondemand", "proxy"))
 			},
 		},
 		{
@@ -214,7 +215,7 @@ func TestDragonfly_ProxyError(t *testing.T) {
 			expect: func(t *testing.T, m *registryMount, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Positive(m.backendReads(t, "ondemand", "http"))
+				assert.Positive(m.backendReads(t, "ondemand", "fallback"))
 				assert.Positive(proxy.Injected())
 			},
 		},
@@ -245,12 +246,12 @@ func TestDragonfly_FallbackToOrigin(t *testing.T) {
 	// Take the seed peers away under the live mount, so the next uncached
 	// read finds nobody to serve it but the origin.
 	stopSeedClient(t)
-	before := m.backendReads(t, "ondemand", "http")
+	before := m.backendReads(t, "ondemand", "fallback")
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
-	assert.Greater(m.backendReads(t, "ondemand", "http"), before)
+	assert.Greater(m.backendReads(t, "ondemand", "fallback"), before)
 }
 
-func TestDragonfly_BackToSourceRateLimit(t *testing.T) {
+func TestDragonfly_FallbackRateLimit(t *testing.T) {
 	assert := assert.New(t)
 	image, proxy := newDragonflySuite(t)
 
@@ -260,7 +261,7 @@ func TestDragonfly_BackToSourceRateLimit(t *testing.T) {
 	stopSeedClient(t)
 	config := dragonflyConfig(image, dragonflyProxyAddr)
 	config.Backend.Config.Dragonfly.MaxRetries = 1
-	config.Backend.Config.Dragonfly.BackToSource.RequestRateLimit = 1
+	config.Backend.Config.Dragonfly.FallbackRateLimit = 1
 	m := image.mount(t, config)
 	start := time.Now()
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
@@ -283,8 +284,8 @@ func TestDragonfly_OriginErrorWithoutSeedPeers(t *testing.T) {
 	// the registry away too and the read has nowhere left to go.
 	stopSeedClient(t)
 	proxy.Inject(http.StatusServiceUnavailable, -1, nil)
-	before := m.backendFailures(t, "ondemand", "dragonfly")
+	before := m.backendFailures(t, "ondemand", "proxy")
 	assert.Error(m.read(t, image, "data/blob2.bin"))
 	assert.Positive(proxy.Injected())
-	assert.Greater(m.backendFailures(t, "ondemand", "dragonfly"), before)
+	assert.Greater(m.backendFailures(t, "ondemand", "proxy"), before)
 }

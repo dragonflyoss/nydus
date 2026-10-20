@@ -63,7 +63,7 @@ pub struct UffdCore {
 
 impl UffdCore {
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let core = Arc::new(NydusCore::new(bootstrap, config)?);
+        let core = Arc::new(NydusCore::new(bootstrap, config, None)?);
         let device_size = align_up_u64(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)
             .ok_or_else(|| Error::Overflow("alignment overflow".to_string()))?;
 
