@@ -143,17 +143,20 @@ impl ErofsReader {
         inode: &ErofsInode<'_>,
         name: &[u8],
     ) -> io::Result<Option<u64>> {
-        let dir_size = inode.size() as usize;
+        let dir_size = inode.size();
         if dir_size == 0 {
             return Ok(None);
         }
-        match self.read_flat_data(nid, inode, 0, dir_size) {
-            Ok(data) => Ok(Self::find_dir_entry(data, dir_size, name)),
-            Err(_) => {
-                let data = self.read_flat_data_vec(nid, inode, 0, dir_size)?;
-                Ok(Self::find_dir_entry(&data, dir_size, name))
-            }
-        }
+        let block_size = EROFS_BLOCK_SIZE as u64;
+        let nblocks = dir_size.div_ceil(block_size) as usize;
+
+        // Read one block at a time: the FLAT_INLINE block region is block-aligned,
+        // so no block straddles the inline tail and every read is zero-copy.
+        let block_at = |index: usize| {
+            let pos = index as u64 * block_size;
+            self.read_flat_data(nid, inode, pos, (dir_size - pos).min(block_size) as usize)
+        };
+        Self::find_dir_entry(nblocks, block_at, name)
     }
 
     /// Entry `index` of one directory block as `(nid, name)`. `dirent_count`
@@ -202,17 +205,28 @@ impl ErofsReader {
         Some((block_data, count))
     }
 
-    fn find_dir_entry(data: &[u8], dir_size: usize, target: &[u8]) -> Option<u64> {
-        let block_size = EROFS_BLOCK_SIZE as usize;
-        let nblocks = dir_size.div_ceil(block_size);
+    /// Searches `nblocks` directory blocks fetched through `block_at` for `target`.
+    ///
+    /// Malformed directory data yields `Ok(None)`; read errors propagate.
+    fn find_dir_entry<'a>(
+        nblocks: usize,
+        block_at: impl Fn(usize) -> io::Result<&'a [u8]>,
+        target: &[u8],
+    ) -> io::Result<Option<u64>> {
+        let load_block = |index: usize| -> io::Result<Option<(&'a [u8], usize)>> {
+            let data = block_at(index)?;
+            Ok(Self::dir_block(data, data.len(), 0))
+        };
 
         // Rightmost block whose first entry name is <= target.
         let (mut lo, mut hi) = (0usize, nblocks);
         while hi - lo > 1 {
             let mid = (lo + hi) / 2;
-            let first_name = Self::dir_block(data, dir_size, mid)
-                .and_then(|(bd, count)| Self::dir_block_entry(bd, count, 0))
-                .map(|(_, name)| name)?;
+            let Some((_, first_name)) =
+                load_block(mid)?.and_then(|(bd, count)| Self::dir_block_entry(bd, count, 0))
+            else {
+                return Ok(None);
+            };
             if first_name <= target {
                 lo = mid;
             } else {
@@ -220,18 +234,23 @@ impl ErofsReader {
             }
         }
 
-        let (block_data, count) = Self::dir_block(data, dir_size, lo)?;
+        let Some((block_data, count)) = load_block(lo)? else {
+            return Ok(None);
+        };
         let (mut left, mut right) = (0usize, count);
         while left < right {
             let mid = left + (right - left) / 2;
-            let (entry_nid, entry_name) = Self::dir_block_entry(block_data, count, mid)?;
+            let Some((entry_nid, entry_name)) = Self::dir_block_entry(block_data, count, mid)
+            else {
+                return Ok(None);
+            };
             match entry_name.cmp(target) {
-                std::cmp::Ordering::Equal => return Some(entry_nid),
+                std::cmp::Ordering::Equal => return Ok(Some(entry_nid)),
                 std::cmp::Ordering::Less => left = mid + 1,
                 std::cmp::Ordering::Greater => right = mid,
             }
         }
-        None
+        Ok(None)
     }
 
     /// Read flat data (FLAT_PLAIN / FLAT_INLINE) as an mmap slice.
