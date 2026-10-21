@@ -640,8 +640,29 @@ mod nbd {
                     .help("Number of worker threads to serve NBD requests")
                     .value_parser(thread_validator)
                     .required(false),
+            )
+            .arg(
+                Arg::new("timeout")
+                    .long("timeout")
+                    .default_value("60")
+                    .help("Seconds the kernel waits for a reply to one NBD request before it marks the connection dead; must exceed the worst-case backend fetch, including time queued behind other requests")
+                    .value_parser(nbd_timeout_validator)
+                    .required(false),
             );
         cmd.subcommand(subcmd)
+    }
+
+    fn nbd_timeout_validator(v: &str) -> std::result::Result<String, String> {
+        // 0 makes the kernel fall back to 30s with multiple connections; above
+        // u32::MAX / 1000 the kernel's jiffies value overflows at HZ=1000.
+        match v.parse::<u64>() {
+            Ok(t) if t > 0 && t <= u32::MAX as u64 / 1000 => Ok(v.to_string()),
+            _ => Err(format!(
+                "invalid NBD timeout {}, valid range: [1-{}]",
+                v,
+                u32::MAX / 1000
+            )),
+        }
     }
 
     pub(super) fn process_nbd_service(
@@ -706,10 +727,13 @@ mod nbd {
             .value_of("threads")
             .map(|n| n.parse().unwrap_or(1))
             .unwrap_or(1);
+        // Safe to unwrap because `timeout` has a default value and is validated.
+        let timeout: u64 = args.value_of("timeout").unwrap().parse().unwrap();
 
         let daemon = create_nbd_daemon(
             device,
             threads,
+            timeout,
             entry,
             bti,
             id,
