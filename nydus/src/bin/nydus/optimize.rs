@@ -5,13 +5,13 @@ use nydus::optimize::{
     build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, ChunkGroupRef,
 };
 use nydus_backend::Backend;
-use nydus_config::Config;
+use nydus_config::{Config, StorageConfig};
 use nydus_core::CacheOptions;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
 use nydus_telemetry::metrics::Metrics;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
 use tracing::{info, Level};
@@ -96,10 +96,10 @@ impl OptimizeCommand {
 
         // Prepares the access patterns, blob backend, cache directory and
         // cache options from the raw CLI flags.
-        let (patterns, backend, cache_dir, cache_options) = self.prepare()?;
+        let (patterns, backend, storage) = self.prepare()?;
 
         // Runs the optimize pipeline, persisting its artifacts and printing the summary.
-        self.run(&patterns, backend, &cache_dir, cache_options)
+        self.run(&patterns, backend, &storage)
     }
 
     /// Validates the flag combination before any expensive work: the
@@ -115,9 +115,9 @@ impl OptimizeCommand {
     }
 
     /// Lowers the raw CLI flags into the optimize inputs: the access patterns
-    /// from the trace source, the blob backend, and the local cache directory
-    /// the source blobs' metadata is loaded through.
-    fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, PathBuf, CacheOptions)> {
+    /// from the trace source, the blob backend, and the storage section the
+    /// source blobs' caches are opened with.
+    fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
             (Some(path), _) => load_patterns_from_file(path)?,
             (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
@@ -139,17 +139,8 @@ impl OptimizeCommand {
             Arc::new(Metrics::new()),
         )
         .context("failed to build blob backend")?;
-        // Source chunks are read through the local blob cache's backend, so
-        // diskless mode cannot apply.
-        let cache_options = CacheOptions::from(&storage_config.storage);
-        let Some(cache_dir) = storage_config.storage.dir else {
-            return Err(Error::InvalidConfig(
-                "optimize requires storage.dir: source chunks are read through the local blob cache"
-                    .to_string(),
-            ));
-        };
 
-        Ok((patterns, backend, cache_dir, cache_options))
+        Ok((patterns, backend, storage_config.storage))
     }
 
     /// Runs the optimize pipeline: builds the ondemand blob, persists the
@@ -158,9 +149,16 @@ impl OptimizeCommand {
         &self,
         patterns: &[ChunkGroupRef],
         backend: Arc<dyn Backend>,
-        cache_dir: &Path,
-        cache_options: CacheOptions,
+        storage: &StorageConfig,
     ) -> Result<()> {
+        // Source chunks are read through the local blob cache's backend, so
+        // diskless mode cannot apply.
+        let Some(cache_dir) = &storage.dir else {
+            return Err(Error::InvalidConfig(
+                "optimize requires storage.dir: source chunks are read through the local blob cache"
+                    .to_string(),
+            ));
+        };
         fs::create_dir_all(cache_dir).with_context(|| {
             format!("failed to create cache directory: {}", cache_dir.display())
         })?;
@@ -170,7 +168,7 @@ impl OptimizeCommand {
             patterns,
             backend,
             cache_dir,
-            cache_options,
+            CacheOptions::from(storage),
         )?;
         let digest_hex = hex::encode(ondemand.full_blob_digest);
 
