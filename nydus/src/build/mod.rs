@@ -720,8 +720,14 @@ mod tests {
         );
         assert!(backend.is_raw_device(&layer.full_blob_digest).unwrap());
         let cache_dir = dir.path().join("cache");
-        let reader =
-            ErofsReader::open_bootstrap(&bootstrap, backend, Some(&cache_dir), None).unwrap();
+        let reader = ErofsReader::open_bootstrap(
+            &bootstrap,
+            backend,
+            Some(&cache_dir),
+            None,
+            nydus_core::CacheOptions::default(),
+        )
+        .unwrap();
         let root_nid = reader.superblock().root_nid();
         let root = reader.inode(root_nid).unwrap();
         for (name, expected) in [
@@ -752,6 +758,7 @@ mod tests {
             None,
             None,
             std::sync::Arc::new(nydus_core::Metrics::new()),
+            nydus_core::CacheOptions::default(),
         )
         .unwrap();
         let root_nid = reader.superblock().root_nid();

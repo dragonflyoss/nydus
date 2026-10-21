@@ -2334,6 +2334,7 @@ dependencies = [
  "nydus-format",
  "nydus-telemetry",
  "nydus-test-utils",
+ "prometheus",
  "serde",
  "serde_json",
  "sha2 0.10.9",

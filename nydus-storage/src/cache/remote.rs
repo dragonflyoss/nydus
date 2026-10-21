@@ -114,17 +114,21 @@ pub struct RemoteBlobCache {
     blob_metadata: BlobMetadata,
     backend: Arc<dyn Backend>,
     decoded_groups: Arc<DecodedGroupCache>,
+    /// Skip the crc32c check of decoded chunk groups.
+    skip_verify_checksums: bool,
 }
 
 impl RemoteBlobCache {
     /// Open the blob's metadata from the backend, `kind` attributing that
     /// fetch; no local file is created. Decoded groups are kept in
-    /// `decoded_groups`, which other blobs of the same set share.
+    /// `decoded_groups`, which other blobs of the same set share, and their
+    /// crc32c check is skipped when `skip_verify_checksums`.
     pub(crate) fn open(
         blob_id: [u8; SHA256_DIGEST_SIZE],
         backend: Arc<dyn Backend>,
         decoded_groups: Arc<DecodedGroupCache>,
         kind: ReadKind,
+        skip_verify_checksums: bool,
     ) -> io::Result<Self> {
         let blob_metadata = match kind {
             ReadKind::OnDemand => backend.read_blob_metadata(&blob_id)?,
@@ -135,6 +139,7 @@ impl RemoteBlobCache {
             blob_metadata,
             backend,
             decoded_groups,
+            skip_verify_checksums,
         })
     }
 }
@@ -224,7 +229,7 @@ impl BlobCache for RemoteBlobCache {
                 decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
                 out
             };
-            validate_decoded_chunk_group(group, payload)?;
+            validate_decoded_chunk_group(group, payload, self.skip_verify_checksums)?;
             copy_group_chunks(meta, group, payload, offset, dst)?;
             if !self.decoded_groups.admits(len) {
                 continue;
@@ -342,9 +347,14 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(dir);
         let backend = Counting::new(dir);
-        let remote =
-            RemoteBlobCache::open(blob_id, backend.clone(), decoded_groups, ReadKind::OnDemand)
-                .unwrap();
+        let remote = RemoteBlobCache::open(
+            blob_id,
+            backend.clone(),
+            decoded_groups,
+            ReadKind::OnDemand,
+            false,
+        )
+        .unwrap();
         (remote, backend)
     }
 
@@ -367,9 +377,14 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let remote =
-            RemoteBlobCache::open(full_blob_id, backend, Arc::default(), ReadKind::OnDemand)
-                .unwrap();
+        let remote = RemoteBlobCache::open(
+            full_blob_id,
+            backend,
+            Arc::default(),
+            ReadKind::OnDemand,
+            false,
+        )
+        .unwrap();
 
         let mut buf = vec![0u8; 1024];
         remote.read_at(512, &mut buf).unwrap();
@@ -411,9 +426,14 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let remote =
-            RemoteBlobCache::open(full_blob_id, backend, Arc::default(), ReadKind::OnDemand)
-                .unwrap();
+        let remote = RemoteBlobCache::open(
+            full_blob_id,
+            backend,
+            Arc::default(),
+            ReadKind::OnDemand,
+            false,
+        )
+        .unwrap();
         let mut all = vec![0xffu8; image.len()];
         remote.read_at(0, &mut all).unwrap();
         assert_eq!(all, image);
@@ -440,9 +460,14 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let remote =
-            RemoteBlobCache::open(full_blob_id, backend, Arc::default(), ReadKind::OnDemand)
-                .unwrap();
+        let remote = RemoteBlobCache::open(
+            full_blob_id,
+            backend,
+            Arc::default(),
+            ReadKind::OnDemand,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             remote.prepare().unwrap_err().kind(),

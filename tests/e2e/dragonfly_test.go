@@ -116,7 +116,7 @@ func TestDragonfly_ReadThroughSeedPeer(t *testing.T) {
 
 	assert.NoError(m.read(t, image, "etc/os-release"))
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
-	assert.Positive(m.backendReads(t, "ondemand", "proxy"))
+	assert.Positive(m.backendReads(t, "ondemand", "dragonfly"))
 	assert.Zero(m.backendReads(t, "ondemand", "fallback"))
 }
 
@@ -136,7 +136,7 @@ func TestDragonfly_ServedFromSeedPeerCache(t *testing.T) {
 	proxy.Inject(http.StatusServiceUnavailable, -1, fromSeedPeer)
 	second := image.mount(t, config)
 	assert.NoError(second.read(t, image, "data/blob2.bin"))
-	assert.Positive(second.backendReads(t, "ondemand", "proxy"))
+	assert.Positive(second.backendReads(t, "ondemand", "dragonfly"))
 	assert.Zero(second.backendReads(t, "ondemand", "fallback"))
 	assert.Zero(proxy.Injected())
 }
@@ -149,7 +149,7 @@ func TestDragonfly_Prefetch(t *testing.T) {
 	m := image.mount(t, config)
 
 	util.WaitMetricSettled(t, m.apiserver, "nydus_backend_read_total", `type="prefetch"`)
-	assert.Positive(m.backendReads(t, "prefetch", "proxy"))
+	assert.Positive(m.backendReads(t, "prefetch", "dragonfly"))
 	assert.Zero(m.backendReads(t, "prefetch", "fallback"))
 	assert.NoError(m.read(t, image, "data/blob1.bin"))
 }
@@ -173,7 +173,7 @@ func TestDragonfly_PrefetchRetry(t *testing.T) {
 	proxy.Inject(0, 0, nil)
 
 	util.WaitMetricSettled(t, m.apiserver, "nydus_backend_read_total", `type="prefetch"`)
-	assert.Positive(m.backendReads(t, "prefetch", "proxy"))
+	assert.Positive(m.backendReads(t, "prefetch", "dragonfly"))
 	assert.Zero(m.backendReads(t, "prefetch", "fallback"))
 	assert.NoError(m.read(t, image, "data/blob2.bin"))
 }
@@ -205,7 +205,7 @@ func TestDragonfly_ProxyError(t *testing.T) {
 			expect: func(t *testing.T, m *registryMount, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Positive(m.backendReads(t, "ondemand", "proxy"))
+				assert.Positive(m.backendReads(t, "ondemand", "dragonfly"))
 			},
 		},
 		{
@@ -284,8 +284,8 @@ func TestDragonfly_OriginErrorWithoutSeedPeers(t *testing.T) {
 	// the registry away too and the read has nowhere left to go.
 	stopSeedClient(t)
 	proxy.Inject(http.StatusServiceUnavailable, -1, nil)
-	before := m.backendFailures(t, "ondemand", "proxy")
+	before := m.backendFailures(t, "ondemand", "dragonfly")
 	assert.Error(m.read(t, image, "data/blob2.bin"))
 	assert.Positive(proxy.Injected())
-	assert.Greater(m.backendFailures(t, "ondemand", "proxy"), before)
+	assert.Greater(m.backendFailures(t, "ondemand", "dragonfly"), before)
 }

@@ -194,7 +194,7 @@ impl Client {
     /// configured, otherwise wherever the HTTP client reaches.
     fn source(&self) -> Source {
         if self.dragonfly.is_some() {
-            Source::Proxy
+            Source::Dragonfly
         } else {
             self.http.source()
         }
@@ -604,13 +604,13 @@ mod tests {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(body.into()),
-                    source: Source::Proxy,
+                    source: Source::Dragonfly,
                 }),
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
                     body: Body::Bytes(Bytes::new()),
-                    source: Source::Proxy,
+                    source: Source::Dragonfly,
                 }),
             }
         }
@@ -655,7 +655,7 @@ mod tests {
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(Bytes::from_static(b"ok")),
-                    source: Source::Proxy,
+                    source: Source::Dragonfly,
                 });
             }
             self.challenges.fetch_add(1, Ordering::SeqCst);
@@ -668,7 +668,7 @@ mod tests {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
                 body: Body::Bytes(Bytes::new()),
-                source: Source::Proxy,
+                source: Source::Dragonfly,
             })
         }
     }
@@ -977,7 +977,7 @@ auth: YWxpY2U6c2VjcmV0
         let mut buf = vec![0u8; body.len()];
         let source = read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
 
-        assert_eq!(source, Source::Proxy);
+        assert_eq!(source, Source::Dragonfly);
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);

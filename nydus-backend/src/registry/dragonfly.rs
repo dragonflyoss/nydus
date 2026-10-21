@@ -138,7 +138,7 @@ impl Transport for Dragonfly {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
                 body: Body::Bytes(body.freeze()),
-                source: Source::Proxy,
+                source: Source::Dragonfly,
             }),
             Err(Error::ProxyError(ProxyError {
                 status_code: Some(status),
@@ -166,7 +166,7 @@ impl Transport for Dragonfly {
                     })
                     .collect(),
                 body: Body::Bytes(message.unwrap_or_default().into()),
-                source: Source::Proxy,
+                source: Source::Dragonfly,
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -222,7 +222,7 @@ impl Transport for Dragonfly {
                     status: response.status_code.unwrap_or(StatusCode::OK),
                     headers: response.header,
                     body: Body::Bytes(body.freeze()),
-                    source: Source::Proxy,
+                    source: Source::Dragonfly,
                 }),
                 Err(Error::ProxyError(ProxyError {
                     status_code: Some(status),
@@ -250,7 +250,7 @@ impl Transport for Dragonfly {
                         })
                         .collect(),
                     body: Body::Bytes(message.unwrap_or_default().into()),
-                    source: Source::Proxy,
+                    source: Source::Dragonfly,
                 }),
                 Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,

@@ -30,7 +30,7 @@ use nydus_format::blob::{
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
-use nydus_storage::cache::{decode_chunk_group_from_window, LocalBlobCache};
+use nydus_storage::cache::{decode_chunk_group_from_window, CacheOptions, LocalBlobCache};
 use sha2::{Digest, Sha256};
 
 /// Longest contiguous run of source chunk groups fetched in one backend
@@ -103,6 +103,7 @@ pub fn build_ondemand_blob(
     patterns: &[ChunkGroupRef],
     backend: Arc<dyn Backend>,
     cache_dir: &Path,
+    options: CacheOptions,
 ) -> Result<OndemandBlob> {
     let reader = ErofsReader::open_metadata_only(parent_bootstrap).with_context(|| {
         format!(
@@ -135,9 +136,14 @@ pub fn build_ondemand_blob(
                     "source blob {blob_index} is a native EROFS layer with no blob meta; refusing to optimize"
                 )));
             }
-            let cache =
-                LocalBlobCache::open(info.blob_id, blob_index as u32, cache_dir, backend.clone())
-                    .with_context(|| format!("failed to open source blob: {blob_index}"))?;
+            let cache = LocalBlobCache::open(
+                info.blob_id,
+                blob_index as u32,
+                cache_dir,
+                backend.clone(),
+                options,
+            )
+            .with_context(|| format!("failed to open source blob: {blob_index}"))?;
             if cache.blob_metadata().is_redirect() {
                 return Err(Error::InvalidImage(format!(
                     "source blob {blob_index} is already an ondemand blob; refusing to optimize"
@@ -226,6 +232,7 @@ pub fn build_ondemand_blob(
                     first.compressed_offset(),
                     &window,
                     &mut scratch,
+                    options.skip_verify_checksums,
                 )
                 .with_context(|| {
                     format!("chunk group {index} of blob {blob_index} failed validation")

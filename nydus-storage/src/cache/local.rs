@@ -20,7 +20,10 @@ use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::WriteKind;
 
 use super::chunk_group_lock::ChunkGroupLocks;
-use super::{plan_prefetch_batches, validate_decoded_chunk_group, BlobCache, ChunkGroupBuffers};
+use super::{
+    plan_prefetch_batches, validate_decoded_chunk_group, write_failure_reason, BlobCache,
+    CacheOptions, ChunkGroupBuffers,
+};
 
 #[derive(Clone)]
 enum FlightResult {
@@ -112,14 +115,19 @@ pub struct LocalBlobCache {
     /// Keeps the processes sharing this cache from each fetching the same
     /// cold group.
     chunk_group_locks: ChunkGroupLocks,
+    /// The options of the image's caches: fetch size, checksum verification.
+    options: CacheOptions,
 }
 
 impl LocalBlobCache {
+    /// Open the blob's cache under `cache_dir` with `options`, fetching the
+    /// blob metadata as an on-demand read when the directory lacks it.
     pub fn open(
         blob_id: [u8; SHA256_DIGEST_SIZE],
         blob_index: u32,
         cache_dir: &Path,
         backend: Arc<dyn Backend>,
+        options: CacheOptions,
     ) -> io::Result<Self> {
         Self::open_with_trace(
             blob_id,
@@ -128,6 +136,7 @@ impl LocalBlobCache {
             backend,
             None,
             ReadKind::OnDemand,
+            options,
         )
     }
 
@@ -140,6 +149,7 @@ impl LocalBlobCache {
         backend: Arc<dyn Backend>,
         trace_recorder: Option<Arc<TraceRecorder>>,
         kind: ReadKind,
+        options: CacheOptions,
     ) -> io::Result<Self> {
         fs::create_dir_all(cache_dir)?;
 
@@ -183,26 +193,6 @@ impl LocalBlobCache {
             );
         }
 
-        // The cache gauge: what the blob decodes to in full, uncached until
-        // proven otherwise, and what an earlier run or another process
-        // already left in the cache file. A redirect blob never fills a
-        // cache file of its own, its groups land in their source blobs, so
-        // it adds nothing.
-        if !blob_metadata.is_redirect() {
-            let metrics = &backend.metrics().cache;
-            metrics.collect_blob_opened_metrics(blob_metadata.uncompressed_size());
-            for index in 0..blob_metadata.chunk_group_count() {
-                if chunk_group_map.is_ready(index)? {
-                    metrics.collect_chunk_group_cached_metrics(u64::from(
-                        blob_metadata
-                            .chunk_group(index)
-                            .expect("chunk group index within the blob meta")
-                            .uncompressed_size(),
-                    ));
-                }
-            }
-        }
-
         let prefetch_lock_path = cache_dir.join(format!("{hex}.prefetch.lock"));
         // Byte `i` of the group map file stands for group `i` in the
         // cross-process fetch locks; the bytes locked and the bytes the map
@@ -226,6 +216,7 @@ impl LocalBlobCache {
             inflight: Mutex::new(HashMap::new()),
             cache_mmap: OnceLock::new(),
             chunk_group_locks,
+            options,
         })
     }
 
@@ -399,7 +390,7 @@ impl LocalBlobCache {
         first: usize,
         inflight: &HashMap<usize, Arc<Flight>>,
     ) -> io::Result<Range<usize>> {
-        let budget = super::fetch_size();
+        let budget = self.options.fetch_size;
         if budget == 0 {
             return Ok(first..first + 1);
         }
@@ -572,7 +563,7 @@ impl LocalBlobCache {
             )?;
             out
         };
-        validate_decoded_chunk_group(group, payload)?;
+        validate_decoded_chunk_group(group, payload, self.options.skip_verify_checksums)?;
         Ok(payload)
     }
 
@@ -597,14 +588,15 @@ impl LocalBlobCache {
             let group = self.chunk_group(index);
             self.decode_group(&group, base, encoded, decoded)
                 .and_then(|payload| self.write_chunk_group(&group, payload, cache_file))
-                .inspect(|&first| {
-                    let length = u64::from(group.uncompressed_size());
-                    metrics.collect_write_finished_metrics(kind.into(), length);
-                    if first {
-                        metrics.collect_chunk_group_cached_metrics(length);
-                    }
+                .inspect(|()| {
+                    metrics.collect_write_finished_metrics(
+                        kind.into(),
+                        u64::from(group.uncompressed_size()),
+                    )
                 })
-                .inspect_err(|_| metrics.collect_write_failure_metrics(kind.into()))?;
+                .inspect_err(|err| {
+                    metrics.collect_write_failure_metrics(kind.into(), write_failure_reason(err))
+                })?;
         }
         Ok(())
     }
@@ -642,10 +634,10 @@ impl LocalBlobCache {
                 Ok(payload) => cb(&group, payload)?,
                 Err(err) => {
                     failed += 1;
-                    self.backend
-                        .metrics()
-                        .cache
-                        .collect_write_failure_metrics(WriteKind::Redirect);
+                    self.backend.metrics().cache.collect_write_failure_metrics(
+                        WriteKind::Redirect,
+                        write_failure_reason(&err),
+                    );
                     warn!(
                         "skipping redirect chunk group {index} of blob {}: {err}",
                         self.blob_index
@@ -706,14 +698,13 @@ impl LocalBlobCache {
         }
     }
 
-    /// Scatter a validated decoded group into the cache file and publish it,
-    /// returning whether this write was the one that made the group ready.
+    /// Scatter a validated decoded group into the cache file and publish it.
     fn write_chunk_group(
         &self,
         group: &BlobMetadataChunkGroupExtent,
         payload: &[u8],
         cache_file: &File,
-    ) -> io::Result<bool> {
+    ) -> io::Result<()> {
         let mut batch = ScatterBatch::new(cache_file);
         for (offset, bytes) in group
             .chunks(&self.blob_metadata, payload)
@@ -776,7 +767,7 @@ impl BlobCache for LocalBlobCache {
         // behind a full batch.
         let workers = workers.max(1);
         let ramp = if workers > 1 { workers } else { 0 };
-        let batches = plan_prefetch_batches(&self.blob_metadata, super::fetch_size(), ramp);
+        let batches = plan_prefetch_batches(&self.blob_metadata, self.options.fetch_size, ramp);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
             self.prefetch_batch(batch.clone(), buffers, cache_file.as_ref())
         })?;
@@ -902,7 +893,7 @@ impl BlobCache for LocalBlobCache {
         // sources already hold are trimmed away before any backend read.
         let workers = workers.max(1);
         let ramp = if workers > 1 { workers } else { 0 };
-        let batches = plan_prefetch_batches(&self.blob_metadata, super::fetch_size(), ramp);
+        let batches = plan_prefetch_batches(&self.blob_metadata, self.options.fetch_size, ramp);
         let bytes = AtomicU64::new(0);
         let failed = AtomicU64::new(0);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
@@ -936,15 +927,13 @@ impl BlobCache for LocalBlobCache {
         // crc32 and chunk lengths were copied from this group at optimize
         // time, so any divergence (stale optimize artifact, corrupted
         // transfer) is caught here before it can poison the cache.
-        validate_decoded_chunk_group(&group, payload)?;
+        validate_decoded_chunk_group(&group, payload, self.options.skip_verify_checksums)?;
         let cache_file = self.cache_file()?;
-        let first = self.write_chunk_group(&group, payload, cache_file.as_ref())?;
-        let metrics = &self.backend.metrics().cache;
-        let length = u64::from(group.uncompressed_size());
-        metrics.collect_write_finished_metrics(WriteKind::Redirect, length);
-        if first {
-            metrics.collect_chunk_group_cached_metrics(length);
-        }
+        self.write_chunk_group(&group, payload, cache_file.as_ref())?;
+        self.backend.metrics().cache.collect_write_finished_metrics(
+            WriteKind::Redirect,
+            u64::from(group.uncompressed_size()),
+        );
         Ok(())
     }
 
@@ -1009,6 +998,17 @@ impl BlobCache for LocalBlobCache {
 
     fn is_all_ready(&self) -> bool {
         self.chunk_group_map.is_all_ready()
+    }
+
+    fn cached_bytes(&self) -> Option<(u64, u64)> {
+        if self.blob_metadata.is_redirect() {
+            return None;
+        }
+        let cached = (0..self.blob_metadata.chunk_group_count())
+            .filter(|&index| self.chunk_group_map.is_ready(index).unwrap_or(false))
+            .map(|index| u64::from(self.chunk_group(index).uncompressed_size()))
+            .sum();
+        Some((cached, self.blob_metadata.uncompressed_size()))
     }
 }
 
@@ -1170,6 +1170,7 @@ impl<'a> ScatterBatch<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::BlobCaches;
     use super::*;
     use nydus_backend::Local;
     use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
@@ -1181,12 +1182,11 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::tempdir;
 
-    /// Serializes the tests that set the process-wide fetch size or
-    /// verification switch, which would otherwise race across test threads.
-    static ENV: Mutex<()> = Mutex::new(());
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn fetch(fetch_size: u64) -> CacheOptions {
+        CacheOptions {
+            fetch_size,
+            ..CacheOptions::default()
+        }
     }
 
     /// Chunk groups as lists of chunks.
@@ -1222,8 +1222,16 @@ mod tests {
         full_blob_id: [u8; SHA256_DIGEST_SIZE],
         cache_dir: &Path,
         backend: Arc<CountingBackend>,
+        options: CacheOptions,
     ) -> LocalBlobCache {
-        LocalBlobCache::open(full_blob_id, 1, cache_dir, backend as Arc<dyn Backend>).unwrap()
+        LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir,
+            backend as Arc<dyn Backend>,
+            options,
+        )
+        .unwrap()
     }
 
     /// With a zero window a miss fetches its own group only; a window
@@ -1231,7 +1239,6 @@ mod tests {
     /// ready group cost no backend traffic.
     #[test]
     fn reads_fill_group_windows() {
-        let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
         let full_blob_id = FullBlob::new(&data)
@@ -1239,10 +1246,9 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
-        super::super::set_fetch_size(0);
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone());
+        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(0));
         assert_eq!(cached.blob_metadata().chunk_group_count(), 4);
 
         let mut buf = vec![0u8; 100];
@@ -1264,10 +1270,14 @@ mod tests {
         assert!(cached.is_chunk_group_ready(0));
         assert!(!cached.chunk_group_map.is_all_ready());
 
-        super::super::set_fetch_size(1 << 20);
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone());
+        let cached = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend.clone(),
+            fetch(1 << 20),
+        );
         let mut all = vec![0u8; image.len()];
         cached.read_at(0, &mut all).unwrap();
         assert_eq!(all, image);
@@ -1281,7 +1291,6 @@ mod tests {
     /// more, and a later miss in the same cell finds them ready.
     #[test]
     fn fetch_size_cells_bound_a_miss() {
-        let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
         let full_blob_id = FullBlob::new(&data)
@@ -1290,13 +1299,12 @@ mod tests {
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone());
-
         // Two groups' worth of compressed bytes: a window from the start of
         // the data region covers groups 0 and 1 (and whatever of group 2
         // overlaps the cell), never the whole blob.
         let two = meta.chunk_group(1).unwrap().compressed_range().end;
-        super::super::set_fetch_size(two);
+        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(two));
+
         let mut buf = vec![0u8; 16];
         cached.read_at(0, &mut buf).unwrap();
         assert_eq!(buf, image[..16]);
@@ -1316,9 +1324,6 @@ mod tests {
     /// unless checksum verification is skipped.
     #[test]
     fn reads_reject_bad_checksums_unless_skipped() {
-        let _env = env_lock();
-        super::super::set_skip_verify_checksums(false);
-        super::super::set_fetch_size(0);
         let backend_dir = tempdir().unwrap();
         let (data, meta, groups, _) = groups_blob();
         let digests: Vec<_> = meta.chunk_group_digests().collect();
@@ -1369,7 +1374,7 @@ mod tests {
 
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend);
+        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(0));
         let mut buf = vec![0u8; 100];
         cached.read_at(16384, &mut buf).unwrap();
         assert_eq!(buf, groups[1][0][..100]);
@@ -1379,18 +1384,25 @@ mod tests {
         cached.read_at(0, &mut buf).unwrap();
         assert_eq!(buf, groups[0][0][..100]);
 
-        super::super::set_skip_verify_checksums(true);
-        cached.read_at(2 * 16384, &mut buf).unwrap();
+        let unchecked = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend,
+            CacheOptions {
+                skip_verify_checksums: true,
+                fetch_size: 0,
+            },
+        );
+        unchecked.read_at(2 * 16384, &mut buf).unwrap();
         assert_eq!(buf, groups[2][0][..100]);
+        assert!(unchecked.is_chunk_group_ready(2));
         assert!(cached.is_chunk_group_ready(2));
-        super::super::set_skip_verify_checksums(false);
     }
 
     /// Prefetch fills the whole blob in window-sized batches and skips the
     /// groups other readers already published.
     #[test]
     fn prefetch_fills_in_batches_and_skips_ready_groups() {
-        let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
         let full_blob_id = FullBlob::new(&data)
@@ -1399,9 +1411,8 @@ mod tests {
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone());
+        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(0));
 
-        super::super::set_fetch_size(0);
         let mut buf = vec![0u8; 16];
         cached.read_at(2 * 16384, &mut buf).unwrap();
         assert_eq!(backend.reads(), 1);
@@ -1415,10 +1426,14 @@ mod tests {
         assert_eq!(backend.reads(), 4);
 
         // A generous window prefetches a cold blob in one read.
-        super::super::set_fetch_size(1 << 20);
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone());
+        let cached = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend.clone(),
+            fetch(1 << 20),
+        );
         cached.prefetch_all(1, None).unwrap();
         assert_eq!(backend.reads(), 1);
         assert!(cached.is_all_ready());
@@ -1426,10 +1441,9 @@ mod tests {
         // A worker pool ramps with single-group batches (one read each for
         // the first `workers` groups), then streams the rest in windows, and
         // still leaves the blob fully and correctly cached.
-        super::super::set_fetch_size(8192);
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone());
+        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(8192));
         cached.prefetch_all(2, None).unwrap();
         assert_eq!(backend.reads(), 3, "2 ramp reads + 1 window of 2 groups");
         assert!(cached.is_all_ready());
@@ -1439,7 +1453,6 @@ mod tests {
     /// Every chunk group a read touches lands in the trace once, hit or miss.
     #[test]
     fn reads_trace_the_chunk_groups_they_touch() {
-        let _env = env_lock();
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
         let full_blob_id = FullBlob::new(&data)
@@ -1456,9 +1469,9 @@ mod tests {
             backend as Arc<dyn Backend>,
             Some(recorder.clone()),
             ReadKind::OnDemand,
+            fetch(1 << 20),
         )
         .unwrap();
-        super::super::set_fetch_size(1 << 20);
         let mut buf = vec![0u8; 8192];
         // Chunks 5 and 6 of group 1 (group offsets 4 KiB and 8 KiB).
         cached.read_at(16384 + 4096, &mut buf).unwrap();
@@ -1591,7 +1604,14 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
 
         let mut buf = vec![0u8; 1024];
         cached.read_at(512, &mut buf).unwrap();
@@ -1603,9 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_bytes_follow_the_blob_and_the_cache_file() {
-        let _env = env_lock();
-        super::super::set_fetch_size(0);
+    fn cache_bytes_are_read_from_the_shared_group_map_when_gathered() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (data, meta, _, image) = groups_blob();
@@ -1613,45 +1631,66 @@ mod tests {
             .with_blob_metadata(&meta)
             .with_blob_metadata_file()
             .save_in(backend_dir.path());
-        let metrics = Arc::new(Metrics::new());
-        let backend: Arc<dyn Backend> = Arc::new(Local::new(
-            backend_dir.path().to_path_buf(),
-            metrics.clone(),
-        ));
-        let gauge = |status: &str| -> f64 {
+        let gauge = |metrics: &Metrics, status: &str| -> Option<f64> {
             metrics
                 .registry()
                 .gather()
                 .iter()
                 .filter(|family| family.get_name() == "nydus_cache_bytes")
                 .flat_map(|family| family.get_metric())
-                .filter(|metric| metric.get_label()[0].get_value() == status)
+                .find(|metric| metric.get_label()[0].get_value() == status)
                 .map(|metric| metric.get_gauge().get_value())
-                .sum()
+        };
+        let open = |metrics: &Arc<Metrics>| {
+            let backend: Arc<dyn Backend> = Arc::new(Local::new(
+                backend_dir.path().to_path_buf(),
+                metrics.clone(),
+            ));
+            BlobCaches::new(
+                [(1u16, full_blob_id)],
+                backend,
+                Some(cache_dir.path()),
+                None,
+                fetch(0),
+            )
+            .unwrap()
         };
         let blob_bytes = meta.uncompressed_size() as f64;
         let group_bytes = f64::from(meta.chunk_group(0).unwrap().uncompressed_size());
 
-        {
-            let cached =
-                LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
-            assert_eq!(gauge("cached"), 0.0);
-            assert_eq!(gauge("uncached"), blob_bytes);
+        let metrics = Arc::new(Metrics::new());
+        let caches = open(&metrics);
+        assert_eq!(gauge(&metrics, "cached"), Some(0.0));
+        assert_eq!(gauge(&metrics, "uncached"), Some(0.0));
 
-            let mut buf = vec![0u8; 16];
-            cached.read_at(0, &mut buf).unwrap();
-            assert_eq!(buf, image[..16]);
-            assert_eq!(gauge("cached"), group_bytes);
-            assert_eq!(gauge("uncached"), blob_bytes - group_bytes);
+        let cache = caches.cache(1, ReadKind::OnDemand).unwrap();
+        assert_eq!(gauge(&metrics, "cached"), Some(0.0));
+        assert_eq!(gauge(&metrics, "uncached"), Some(blob_bytes));
 
-            cached.read_at(8, &mut buf).unwrap();
-            assert_eq!(gauge("cached"), group_bytes);
-        }
+        let mut buf = vec![0u8; 16];
+        cache.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, image[..16]);
+        assert_eq!(gauge(&metrics, "cached"), Some(group_bytes));
+        assert_eq!(gauge(&metrics, "uncached"), Some(blob_bytes - group_bytes));
 
-        let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
-        assert!(reopened.is_chunk_group_ready(0));
-        assert_eq!(gauge("cached"), 2.0 * group_bytes);
-        assert_eq!(gauge("uncached"), 2.0 * (blob_bytes - group_bytes));
+        let other = open(&Arc::new(Metrics::new()));
+        other
+            .cache(1, ReadKind::OnDemand)
+            .unwrap()
+            .read_at(16384, &mut buf)
+            .unwrap();
+        assert_eq!(gauge(&metrics, "cached"), Some(2.0 * group_bytes));
+        assert_eq!(
+            gauge(&metrics, "uncached"),
+            Some(blob_bytes - 2.0 * group_bytes)
+        );
+
+        drop(caches);
+        assert_eq!(gauge(&metrics, "cached"), None);
+
+        let reopened = open(&metrics);
+        reopened.cache(1, ReadKind::OnDemand).unwrap();
+        assert_eq!(gauge(&metrics, "cached"), Some(2.0 * group_bytes));
     }
 
     #[test]
@@ -1672,8 +1711,14 @@ mod tests {
         // Warm the cache: data file created, group marked ready, sticky
         // all-ready flag latched.
         {
-            let cached =
-                LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
+            let cached = LocalBlobCache::open(
+                full_blob_id,
+                1,
+                cache_dir.path(),
+                backend.clone(),
+                CacheOptions::default(),
+            )
+            .unwrap();
             let mut buf = vec![0u8; 1024];
             cached.read_at(0, &mut buf).unwrap();
             assert!(cached.chunk_group_map.is_all_ready());
@@ -1685,7 +1730,14 @@ mod tests {
         let prefix = hex::encode(backend.full_blob_id(&full_blob_id).unwrap());
         fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
 
-        let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let reopened = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
         assert!(!reopened.is_chunk_group_ready(0));
         assert!(!reopened.chunk_group_map.is_all_ready());
 
@@ -1714,8 +1766,14 @@ mod tests {
 
         // A live handle keeps the group map mapped throughout, standing in for
         // a process that is already running when the accident happens.
-        let live =
-            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
+        let live = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone(),
+            CacheOptions::default(),
+        )
+        .unwrap();
         let mut buf = vec![0u8; 1024];
         live.read_at(0, &mut buf).unwrap();
         assert!(live.is_chunk_group_ready(0));
@@ -1725,7 +1783,14 @@ mod tests {
         let before = fs::metadata(&group_map_path).unwrap().ino();
         fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
 
-        let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let reopened = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
         assert_eq!(
             fs::metadata(&group_map_path).unwrap().ino(),
             before,
@@ -1757,9 +1822,22 @@ mod tests {
         // Two handles on the same cache directory model two concurrent
         // processes (flock contention applies across file descriptors even
         // within one process).
-        let owner =
-            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
-        let waiter = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let owner = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone(),
+            CacheOptions::default(),
+        )
+        .unwrap();
+        let waiter = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
 
         let guard = owner.prefetch_lock().expect("first handle takes the lock");
 
@@ -1790,7 +1868,14 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
 
         // Make the lock path unopenable for writing (it is a directory):
         // locking must degrade to None instead of failing or hanging, and the
@@ -1817,9 +1902,22 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let owner =
-            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
-        let reader = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let owner = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone(),
+            CacheOptions::default(),
+        )
+        .unwrap();
+        let reader = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
 
         // Another instance holds the prefetch lock; the on-demand read path
         // must proceed immediately (fetch the cold group itself) rather than
@@ -1842,8 +1940,18 @@ mod tests {
             .save_in(backend_dir.path());
 
         let backend = CountingBackend::new(backend_dir.path());
-        let first = open(full_blob_id, cache_dir.path(), backend.clone());
-        let second = open(full_blob_id, cache_dir.path(), backend.clone());
+        let first = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend.clone(),
+            CacheOptions::default(),
+        );
+        let second = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend.clone(),
+            CacheOptions::default(),
+        );
 
         // The "owner" instance prefetches everything from the backend.
         let guard = first.prefetch_lock();
@@ -1891,7 +1999,13 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let err = match LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend) {
+        let err = match LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        ) {
             Ok(_) => panic!("corrupted blob meta crc32 should be rejected"),
             Err(err) => err,
         };
@@ -1940,7 +2054,14 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
 
         let err = cached.prefetch_all(4, None).unwrap_err();
 
@@ -1964,7 +2085,14 @@ mod tests {
             backend_dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend,
+            CacheOptions::default(),
+        )
+        .unwrap();
 
         let mut buf = vec![0u8; 512];
         cached.read_at(256, &mut buf).unwrap();

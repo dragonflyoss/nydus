@@ -43,6 +43,7 @@ pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
 pub use nydus_backend::Netns;
 pub use nydus_storage::access_trace::TraceRecorder;
+pub use nydus_storage::cache::CacheOptions;
 pub use nydus_telemetry::metrics::Metrics;
 pub use reader::ErofsReader;
 pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
@@ -134,8 +135,7 @@ impl NydusCore {
         let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
         let prefetch_scope = config.prefetch.scope;
         let prefetch_timeout = config.prefetch.request_timeout;
-        nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
-        nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
+        let cache_options = CacheOptions::from(&config.storage);
         let backend = <dyn Backend>::new(
             &config.backend,
             &config.prefetch,
@@ -156,6 +156,7 @@ impl NydusCore {
             backend.clone(),
             cache_dir.as_deref(),
             Some(trace_recorder.clone()),
+            cache_options,
         )
         .context("failed to open nydus bootstrap")?;
         let raw_blob_infos = reader

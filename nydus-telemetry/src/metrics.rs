@@ -21,7 +21,8 @@
 //! ```text
 //! type      what triggered the backend read        ondemand | prefetch
 //!           or what wrote the chunk group           ondemand | prefetch | redirect
-//! source    where the backend read the bytes       local | origin | proxy | fallback
+//! source    where the backend read the bytes       local | origin | proxy | dragonfly | fallback
+//! reason    why the cache write failed             decode | checksum | io | unknown_source
 //! status    whether the image bytes are cached     cached | uncached
 //! operation the FUSE operation                     lookup | read | getattr | ...
 //! ```
@@ -31,29 +32,30 @@
 //! `state="data|free|misc"` and nginx-module-vts's cache bytes carry their
 //! cache `status`: `nydus_cache_bytes{status}` splits the image the cache
 //! serves into the bytes it holds and the bytes it does not, and the image's
-//! total is their sum.
+//! total is their sum. That gauge is the one metric not moved by a
+//! `collect_*_metrics` call: the blob cache set registers a collector that
+//! computes it when the registry is gathered, from the chunk group maps it
+//! shares with every process using the cache directory, so it is never
+//! stale across them.
 //!
 //! `source` is `local` for the local directory backend, `origin` for the
 //! registry backend reading the origin registry itself, `proxy` for it
-//! reading through an HTTP forward proxy or the Dragonfly seed peers and
-//! `fallback` for a read Dragonfly could not serve that went back to the
-//! origin. `type` is `redirect` only on the cache writes, for a chunk group
-//! filled into its source blob from the ondemand (redirect) blob.
+//! reading through an HTTP forward proxy, `dragonfly` for it reading the
+//! Dragonfly seed peers and `fallback` for a read Dragonfly could not serve
+//! that went back to the origin. `type` is `redirect` only on the cache
+//! writes, for a chunk group filled into its source blob from the ondemand
+//! (redirect) blob. `reason` tells a corrupted chunk group (`checksum`, the
+//! crc32c mismatched; `decode`, it did not decompress to its declared
+//! size) from a cache that cannot be written (`io`) and, on the redirect
+//! fills, from a redirect naming a blob the image does not have
+//! (`unknown_source`).
 
 use std::fmt;
 use std::time::Duration;
 
-use prometheus::{
-    exponential_buckets, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
-};
+use prometheus::{exponential_buckets, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
 
 pub use nydus_config::ReadKind;
-
-/// The `status` label value of the image bytes the cache holds.
-const CACHED: &str = "cached";
-
-/// The `status` label value of the image bytes the cache does not hold yet.
-const UNCACHED: &str = "uncached";
 
 /// The metrics of one image, grouped by the module that records them and
 /// every one registered in a [`Registry`] of its own.
@@ -162,10 +164,6 @@ impl Metrics {
 
         self.registry
             .register(Box::new(self.cache.write_bytes.clone()))
-            .expect("metric can be registered");
-
-        self.registry
-            .register(Box::new(self.cache.bytes.clone()))
             .expect("metric can be registered");
 
         self.registry
@@ -340,8 +338,7 @@ impl StorageMetrics {
 }
 
 /// The metrics of the local blob cache, subsystem `cache`: the chunk groups
-/// it serves and fills, counted and in uncompressed bytes, and how many of
-/// the image's bytes it holds.
+/// it serves and fills, counted and in uncompressed bytes.
 #[derive(Debug)]
 pub struct CacheMetrics {
     /// Used to count the number of cache reads.
@@ -358,15 +355,13 @@ pub struct CacheMetrics {
 
     /// Used to count the cache write bytes.
     write_bytes: IntCounterVec,
-
-    /// Used to record the image bytes by cache status.
-    bytes: IntGaugeVec,
 }
 
 /// Implements the cache metrics.
 impl CacheMetrics {
-    /// The subsystem of the metric names.
-    const SUBSYSTEM: &'static str = "cache";
+    /// The subsystem of the metric names, shared with the `nydus_cache_bytes`
+    /// gauge the blob cache set collects.
+    pub const SUBSYSTEM: &'static str = "cache";
 
     /// Creates the metrics.
     fn new() -> Self {
@@ -402,7 +397,7 @@ impl CacheMetrics {
                 )
                 .namespace(nydus_config::NAME)
                 .subsystem(Self::SUBSYSTEM),
-                &["type"],
+                &["type", "reason"],
             )
             .expect("metric can be created"),
             write_bytes: IntCounterVec::new(
@@ -413,16 +408,6 @@ impl CacheMetrics {
                 .namespace(nydus_config::NAME)
                 .subsystem(Self::SUBSYSTEM),
                 &["type"],
-            )
-            .expect("metric can be created"),
-            bytes: IntGaugeVec::new(
-                Opts::new(
-                    "bytes",
-                    "Gauge of the bytes of the image the cache serves, by cache status.",
-                )
-                .namespace(nydus_config::NAME)
-                .subsystem(Self::SUBSYSTEM),
-                &["status"],
             )
             .expect("metric can be created"),
         }
@@ -453,33 +438,16 @@ impl CacheMetrics {
             .inc_by(length);
     }
 
-    /// Collects the cache write failure metrics of one chunk group.
-    pub fn collect_write_failure_metrics(&self, kind: WriteKind) {
+    /// Collects the cache write failure metrics of one chunk group, `reason`
+    /// why it did not reach the cache.
+    pub fn collect_write_failure_metrics(&self, kind: WriteKind, reason: WriteFailureReason) {
         self.write_count
             .with_label_values(&[&kind.to_string()])
             .inc();
 
         self.write_failure_count
-            .with_label_values(&[&kind.to_string()])
+            .with_label_values(&[&kind.to_string(), &reason.to_string()])
             .inc();
-    }
-
-    /// Collects the blob opened metrics: `length` uncompressed bytes of a
-    /// blob the cache was opened for, all of them uncached until a chunk
-    /// group is found or written in the cache file.
-    pub fn collect_blob_opened_metrics(&self, length: u64) {
-        self.bytes
-            .with_label_values(&[UNCACHED])
-            .add(i64::try_from(length).unwrap_or(i64::MAX));
-    }
-
-    /// Collects the chunk group cached metrics: `length` uncompressed bytes
-    /// the cache holds that it did not before, written by this instance or
-    /// found in the cache file when the blob was opened.
-    pub fn collect_chunk_group_cached_metrics(&self, length: u64) {
-        let length = i64::try_from(length).unwrap_or(i64::MAX);
-        self.bytes.with_label_values(&[CACHED]).add(length);
-        self.bytes.with_label_values(&[UNCACHED]).sub(length);
     }
 }
 
@@ -568,9 +536,11 @@ pub enum Source {
     /// The origin registry, reached directly.
     Origin,
 
-    /// An HTTP forward proxy in front of the origin, or the Dragonfly seed
-    /// peers.
+    /// An HTTP forward proxy in front of the origin.
     Proxy,
+
+    /// The Dragonfly seed peers.
+    Dragonfly,
 
     /// The origin registry, reached after Dragonfly could not serve the read.
     Fallback,
@@ -584,6 +554,7 @@ impl fmt::Display for Source {
             Source::Local => write!(f, "local"),
             Source::Origin => write!(f, "origin"),
             Source::Proxy => write!(f, "proxy"),
+            Source::Dragonfly => write!(f, "dragonfly"),
             Source::Fallback => write!(f, "fallback"),
         }
     }
@@ -624,6 +595,36 @@ impl fmt::Display for WriteKind {
             WriteKind::Ondemand => write!(f, "ondemand"),
             WriteKind::Prefetch => write!(f, "prefetch"),
             WriteKind::Redirect => write!(f, "redirect"),
+        }
+    }
+}
+
+/// Represents why a chunk group did not reach the local cache, the `reason`
+/// label of the cache write failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteFailureReason {
+    /// The chunk group did not decompress to its declared size.
+    Decode,
+
+    /// The decoded chunk group's crc32c did not match the blob meta.
+    Checksum,
+
+    /// The cache file could not be written.
+    Io,
+
+    /// The redirect names a source blob the image does not have.
+    UnknownSource,
+}
+
+/// Implements the Display trait.
+impl fmt::Display for WriteFailureReason {
+    /// fmt formats the WriteFailureReason.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            WriteFailureReason::Decode => write!(f, "decode"),
+            WriteFailureReason::Checksum => write!(f, "checksum"),
+            WriteFailureReason::Io => write!(f, "io"),
+            WriteFailureReason::UnknownSource => write!(f, "unknown_source"),
         }
     }
 }
@@ -706,6 +707,7 @@ mod tests {
             (ReadKind::OnDemand, Source::Origin),
             (ReadKind::OnDemand, Source::Proxy),
             (ReadKind::Prefetch, Source::Proxy),
+            (ReadKind::OnDemand, Source::Dragonfly),
             (ReadKind::OnDemand, Source::Fallback),
         ];
 
@@ -757,7 +759,15 @@ mod tests {
             ("local", Source::Local.to_string()),
             ("origin", Source::Origin.to_string()),
             ("proxy", Source::Proxy.to_string()),
+            ("dragonfly", Source::Dragonfly.to_string()),
             ("fallback", Source::Fallback.to_string()),
+            ("decode", WriteFailureReason::Decode.to_string()),
+            ("checksum", WriteFailureReason::Checksum.to_string()),
+            ("io", WriteFailureReason::Io.to_string()),
+            (
+                "unknown_source",
+                WriteFailureReason::UnknownSource.to_string(),
+            ),
             ("ondemand", WriteKind::Ondemand.to_string()),
             ("prefetch", WriteKind::Prefetch.to_string()),
             ("redirect", WriteKind::Redirect.to_string()),
@@ -799,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_writes_are_counted_by_type_with_their_failures() {
+    fn cache_writes_are_counted_by_type_with_their_failures_by_reason() {
         let test_cases = vec![
             WriteKind::Ondemand,
             WriteKind::Prefetch,
@@ -810,17 +820,25 @@ mod tests {
             let metrics = Metrics::new().cache;
             let kind_label = kind.to_string();
             metrics.collect_write_finished_metrics(kind, 4096);
-            metrics.collect_write_failure_metrics(kind);
+            metrics.collect_write_failure_metrics(kind, WriteFailureReason::Checksum);
+            metrics.collect_write_failure_metrics(kind, WriteFailureReason::Io);
 
             assert_eq!(
                 metrics.write_count.with_label_values(&[&kind_label]).get(),
-                2,
+                3,
                 "kind: {kind:?}"
             );
             assert_eq!(
                 metrics
                     .write_failure_count
-                    .with_label_values(&[&kind_label])
+                    .with_label_values(&[&kind_label, "checksum"])
+                    .get(),
+                1
+            );
+            assert_eq!(
+                metrics
+                    .write_failure_count
+                    .with_label_values(&[&kind_label, "io"])
                     .get(),
                 1
             );
@@ -829,18 +847,6 @@ mod tests {
                 4096
             );
         }
-    }
-
-    #[test]
-    fn cache_bytes_move_from_uncached_to_cached() {
-        let metrics = Metrics::new().cache;
-        metrics.collect_blob_opened_metrics(8192);
-        metrics.collect_blob_opened_metrics(4096);
-        metrics.collect_chunk_group_cached_metrics(1024);
-        metrics.collect_chunk_group_cached_metrics(4096);
-
-        assert_eq!(metrics.bytes.with_label_values(&[CACHED]).get(), 5120);
-        assert_eq!(metrics.bytes.with_label_values(&[UNCACHED]).get(), 7168);
     }
 
     #[test]
@@ -886,8 +892,6 @@ mod tests {
         metrics
             .cache
             .collect_write_finished_metrics(WriteKind::Ondemand, 10);
-        metrics.cache.collect_blob_opened_metrics(20);
-        metrics.cache.collect_chunk_group_cached_metrics(10);
         metrics
             .fs
             .collect_op_finished_metrics(FsOp::Read, Duration::from_millis(1));
@@ -910,8 +914,6 @@ mod tests {
             r#"nydus_cache_read_bytes_total 10"#,
             r#"nydus_cache_write_total{type="ondemand"} 1"#,
             r#"nydus_cache_write_bytes_total{type="ondemand"} 10"#,
-            r#"nydus_cache_bytes{status="cached"} 10"#,
-            r#"nydus_cache_bytes{status="uncached"} 10"#,
             r#"nydus_fs_op_total{operation="read"} 1"#,
             r#"nydus_fs_op_duration_milliseconds_count{operation="read"} 1"#,
         ];

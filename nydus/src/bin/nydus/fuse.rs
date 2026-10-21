@@ -6,7 +6,7 @@ use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, Config, PrefetchScope,
 };
-use nydus_core::{ErofsReader, TraceRecorder};
+use nydus_core::{CacheOptions, ErofsReader, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
 use nydus_telemetry::metrics::Metrics;
@@ -162,10 +162,6 @@ impl FuseCommand {
             Some(path) => Some(Config::load(path)?),
             None => None,
         };
-        if let Some(config) = storage_config.as_ref() {
-            nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
-            nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
-        }
 
         // Runs the FUSE service until shutdown.
         self.run(storage_config)
@@ -258,6 +254,10 @@ impl FuseCommand {
             }
         }
 
+        let cache_options = storage_config
+            .as_ref()
+            .map(|config| CacheOptions::from(&config.storage))
+            .unwrap_or_default();
         let reader = match (&self.blob, &self.bootstrap, backend) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
@@ -266,12 +266,14 @@ impl FuseCommand {
                 cache_dir.as_deref(),
                 Some(trace_recorder.clone()),
                 metrics,
+                cache_options,
             ),
             (None, Some(bootstrap), Some(backend)) => ErofsReader::open_bootstrap(
                 bootstrap,
                 backend,
                 cache_dir.as_deref(),
                 Some(trace_recorder.clone()),
+                cache_options,
             ),
             _ => {
                 return Err(Error::InvalidParameter(

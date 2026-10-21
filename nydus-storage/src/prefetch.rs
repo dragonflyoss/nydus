@@ -283,6 +283,7 @@ impl BlobPrefetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::CacheOptions;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
@@ -354,7 +355,14 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(backend_dir);
         let caches = Arc::new(
-            BlobCaches::new([(0u16, full_blob_id)], backend, Some(cache_dir), None).unwrap(),
+            BlobCaches::new(
+                [(0u16, full_blob_id)],
+                backend,
+                Some(cache_dir),
+                None,
+                CacheOptions::default(),
+            )
+            .unwrap(),
         );
         BlobPrefetcher::new(
             caches,
@@ -483,6 +491,7 @@ mod tests {
                 backend.clone(),
                 Some(cache_dir),
                 None,
+                CacheOptions::default(),
             )
             .unwrap(),
         );

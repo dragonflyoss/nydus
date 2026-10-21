@@ -1009,6 +1009,7 @@ mod tests {
                 )),
                 Some(&directory.path().join(format!("cache-{reverse}"))),
                 None,
+                nydus_core::CacheOptions::default(),
             )
             .unwrap();
             let packed_nid = reader.superblock().packed_nid().unwrap();

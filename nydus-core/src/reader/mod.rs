@@ -17,7 +17,7 @@ use nydus_format::erofs::{
     EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
 use nydus_storage::access_trace::TraceRecorder;
-use nydus_storage::cache::BlobCaches;
+use nydus_storage::cache::{BlobCaches, CacheOptions};
 use nydus_storage::prefetch::PrefetchPlan;
 use nydus_telemetry::metrics::Metrics;
 
@@ -102,12 +102,14 @@ impl ErofsReader {
     /// backend is involved, and reads record into `metrics`. `cache_dir`,
     /// when given, caches the decoded chunk groups so repeat reads skip
     /// re-decoding from the blob; `trace_recorder`, when given, records
-    /// on-demand chunk group accesses for `nydus optimize`.
+    /// on-demand chunk group accesses for `nydus optimize`; `options` is the
+    /// `storage` section the caches follow.
     pub fn open_blob(
         blob_path: &Path,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
         metrics: Arc<Metrics>,
+        options: CacheOptions,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(blob_path, false)?;
         let (mmap, image_offset) = match Self::unpack_embedded_image(mmap)? {
@@ -140,6 +142,7 @@ impl ErofsReader {
             backend,
             cache_dir,
             trace_recorder,
+            options,
         )?;
 
         Ok(Self {
@@ -154,13 +157,14 @@ impl ErofsReader {
 
     /// Open a standalone bootstrap whose blob data is served by `backend`
     /// through per-blob caches under `cache_dir` (a temporary directory when
-    /// `None`). `trace_recorder`, when given, records on-demand chunk group
-    /// accesses for `nydus optimize`.
+    /// `None`) following `options`. `trace_recorder`, when given, records
+    /// on-demand chunk group accesses for `nydus optimize`.
     pub fn open_bootstrap(
         bootstrap_path: &Path,
         backend: Arc<dyn Backend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
+        options: CacheOptions,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(bootstrap_path, true)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
@@ -176,6 +180,7 @@ impl ErofsReader {
             backend,
             cache_dir,
             trace_recorder,
+            options,
         )?;
 
         Ok(Self {

@@ -797,9 +797,15 @@ mod tests {
             let dir = tempdir().unwrap();
             let (full_blob_digest, _) = write_minimal_blob_with_kind(dir.path(), kind);
             let blob_path = dir.path().join(hex::encode(full_blob_digest));
-            let err = ErofsReader::open_blob(&blob_path, None, None, Arc::new(Metrics::new()))
-                .err()
-                .expect("data-only blob must be rejected");
+            let err = ErofsReader::open_blob(
+                &blob_path,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+                nydus_core::CacheOptions::default(),
+            )
+            .err()
+            .expect("data-only blob must be rejected");
             assert!(err.to_string().contains(expected), "{err}");
         }
     }

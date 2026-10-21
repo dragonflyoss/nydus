@@ -12,7 +12,7 @@
 //! describes the configuration ([`nydus_config::ReadKind`]) is defined there
 //! and re-exported from [`metrics`], which maps it to a label value; the
 //! enums that only exist for metrics ([`metrics::Source`],
-//! [`metrics::WriteKind`], [`metrics::FsOp`]) are
+//! [`metrics::WriteKind`], [`metrics::WriteFailureReason`], [`metrics::FsOp`]) are
 //! owned here.
 
 #[cfg(feature = "logging")]

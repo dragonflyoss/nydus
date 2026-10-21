@@ -301,26 +301,23 @@ impl ChunkGroupMap {
         Ok(ranges)
     }
 
-    /// Mark group `index` ready, returning whether this call did it: `false`
-    /// when another reader or process had already.
-    pub fn set_ready(&self, index: usize) -> io::Result<bool> {
+    pub fn set_ready(&self, index: usize) -> io::Result<()> {
         validate_index(index, self.chunk_group_count)?;
         let mask = 1u8 << (index % 8);
         let previous = self.bit_byte(index).fetch_or(mask, Ordering::AcqRel);
-        if previous & mask != 0 {
-            return Ok(false);
+        if previous & mask == 0 {
+            // This call made the 0→1 transition (exactly one process does,
+            // per group), so it owns bumping the shared ready count. When the
+            // count reaches the total, latch the sticky ALL_READY flag.
+            let count = self
+                .header_u32(GROUP_MAP_READY_COUNT_OFFSET)
+                .fetch_add(1, Ordering::AcqRel)
+                + 1;
+            if count as usize >= self.chunk_group_count {
+                self.mark_all_ready();
+            }
         }
-        // This call made the 0→1 transition (exactly one process does, per
-        // group), so it owns bumping the shared ready count. When the count
-        // reaches the total, latch the sticky ALL_READY flag.
-        let count = self
-            .header_u32(GROUP_MAP_READY_COUNT_OFFSET)
-            .fetch_add(1, Ordering::AcqRel)
-            + 1;
-        if count as usize >= self.chunk_group_count {
-            self.mark_all_ready();
-        }
-        Ok(true)
+        Ok(())
     }
 
     /// O(1) fast-path check: true when the sticky ALL_READY header state bit is
