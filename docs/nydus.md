@@ -1339,17 +1339,19 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 | Label | Meaning | Values |
 | --- | --- | --- |
 | `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `redirect` |
-| `source` | where the backend read its bytes | `local`, `origin`, `proxy`, `fallback` |
+| `source` | where the backend read its bytes | `local`, `origin`, `proxy`, `dragonfly`, `fallback` |
+| `reason` | why the cache write failed | `decode`, `checksum`, `io`, `unknown_source` |
 | `status` | whether the image bytes are in the local cache | `cached`, `uncached` |
 | `operation` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
 
 `source` is `local` for the local directory backend, `origin` for the
 registry backend reading the origin registry itself, `proxy` for it reading
-through an HTTP forward proxy (`http.proxy`) or the Dragonfly seed peers, and
-`fallback` for a read Dragonfly could not serve that went back to the origin
-through `http` under `dragonfly.fallback_rate_limit`. A failed read counts once, under
-the source it would have read from: `proxy` on a Dragonfly daemon, whether
-the seed peers or the origin fallback failed last; the cause is in the logs.
+through an HTTP forward proxy (`http.proxy`), `dragonfly` for it reading the
+Dragonfly seed peers, and `fallback` for a read Dragonfly could not serve
+that went back to the origin through `http` under
+`dragonfly.fallback_rate_limit`. A failed read counts once, under the source
+it would have read from: `dragonfly` on a Dragonfly daemon, whether the seed
+peers or the origin fallback failed last; the cause is in the logs.
 
 Backend (`nydus_backend_*`):
 
@@ -1380,33 +1382,38 @@ Cache (`nydus_cache_*`):
 	below, and a prefetch skipping a chunk group another reader or process
 	already cached is no read at all.
 - `nydus_cache_write_total{type}`,
-	`nydus_cache_write_failure_total{type}`,
+	`nydus_cache_write_failure_total{type,reason}`,
 	`nydus_cache_write_bytes_total{type}` — chunk groups written into the
 	cache, failed ones included, the failed ones alone, and the uncompressed
 	bytes of the successful ones: `type="ondemand"` after an on-demand miss,
 	`type="prefetch"` by the prefetch of a regular blob, `type="redirect"`
 	filled into a source blob from the ondemand (redirect) blob during
-	phase-0 prefetch. A failure is a group that could not be decoded,
-	validated or written (for `redirect` also an unknown source blob);
-	normally zero. Summing `type="ondemand"` across the instances sharing a
+	phase-0 prefetch. A failure is a group that did not reach the cache,
+	`reason` saying why: `checksum`, its crc32c mismatched the blob meta
+	(corruption in transit or at rest); `decode`, it did not decompress to
+	its declared size; `io`, the cache file refused the write; and on the
+	`redirect` fills `unknown_source`, the redirect names a blob the image
+	does not have. Normally zero. Summing `type="ondemand"` across the instances sharing a
 	cache directory shows how much duplicate fetching they do. After an
 	optimized mount's prefetch quiesces,
 	`nydus_cache_write_total{type="redirect"}` equals the number of traced
 	chunk groups filled into local storage.
 - `nydus_cache_bytes{status}` — a gauge of the image the cache serves,
 	its uncompressed bytes split by whether the cache file holds them:
-	`status="cached"` the ones this instance wrote plus the ones an earlier
-	run or another process had left there when the blob was opened,
-	`status="uncached"` the rest. The label partitions the image, so
+	`status="cached"` the chunk groups ready in the cache file, whoever
+	wrote them, `status="uncached"` the rest. It is computed when `/metrics`
+	is gathered, by a collector reading the chunk group maps every process
+	using the cache directory shares (the way the prometheus crate's process
+	collector reads `/proc`), so a group another daemon filled counts the
+	moment it is ready. The label partitions the image, so
 	`sum without (status) (nydus_cache_bytes)` is the image's total, every
 	chunk group of the blobs opened so far (every blob up front for the
 	kernel-served modes, lazily for FUSE) with the ondemand (redirect) blob
 	excluded since its groups land in their source blobs, and
 	`nydus_cache_bytes{status="cached"} / ignoring (status) sum without
-	(status) (nydus_cache_bytes)` is how much of it is cached. A group two
-	readers decode at once moves once. The way mysqld_exporter's
-	`mysql_global_status_innodb_buffer_pool_pages{state}` splits a cache's
-	pages, never a label mixing a total with its part.
+	(status) (nydus_cache_bytes)` is how much of it is cached. The way
+	mysqld_exporter's `mysql_global_status_innodb_buffer_pool_pages{state}`
+	splits a cache's pages, never a label mixing a total with its part.
 
 Filesystem (`nydus_fs_*`):
 
