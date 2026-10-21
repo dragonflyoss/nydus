@@ -138,12 +138,14 @@ impl Collector for CacheBytesCollector {
     }
 
     /// Sums the cached and total bytes of the opened blobs and collects the
-    /// gauge.
+    /// gauge. A slot being opened holds its write lock while the blob
+    /// metadata is fetched, so it is skipped rather than waited for: it is
+    /// not open yet.
     fn collect(&self) -> Vec<MetricFamily> {
         let (cached, total) = self
             .slots
             .values()
-            .filter_map(|slot| slot.cache.read().unwrap().clone())
+            .filter_map(|slot| slot.cache.try_read().ok()?.clone())
             .filter_map(|cache| cache.cached_bytes())
             .fold(
                 (0u64, 0u64),
