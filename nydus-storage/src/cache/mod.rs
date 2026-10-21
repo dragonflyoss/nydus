@@ -87,6 +87,25 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
+    /// Ensure the requested bytes as in [`Self::ensure_range`] and return the
+    /// ready span covering them. Chunked caches expand to the complete logical
+    /// groups intersecting the request, including their zero padding. Other
+    /// caches return the request unchanged.
+    ///
+    /// Expansion must not include groups merely made ready by read-ahead or
+    /// prefetch, or record accesses outside the original request. The returned
+    /// span is not necessarily aligned to host pages. Empty requests return an
+    /// empty span without I/O; overflow and fetch failures are errors.
+    fn ensure_range_with_groups(&self, offset: u64, len: u64) -> io::Result<Range<u64>> {
+        let end = offset.checked_add(len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
+        })?;
+        if len != 0 {
+            self.ensure_range(offset, len)?;
+        }
+        Ok(offset..end)
+    }
+
     /// Return ready byte intervals overlapping `[offset, offset + len)`.
     /// This must not trigger backend fetch.
     fn ready_ranges(&self, _offset: u64, _len: u64) -> io::Result<Vec<Range<u64>>> {

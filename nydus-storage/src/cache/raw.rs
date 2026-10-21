@@ -140,6 +140,22 @@ mod tests {
             dir.path().join(hex::encode(blob_id))
         );
         cache.ensure_range(0, 8192).unwrap();
+        assert_eq!(cache.ensure_range_with_groups(4096, 1).unwrap(), 4096..4097);
+        assert_eq!(
+            cache.ensure_range_with_groups(u64::MAX, 0).unwrap(),
+            u64::MAX..u64::MAX
+        );
+        assert_eq!(
+            cache.ensure_range_with_groups(8192, 1).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            cache
+                .ensure_range_with_groups(u64::MAX, 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(
             cache.ensure_range(4096, 8192).unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
