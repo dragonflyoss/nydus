@@ -72,8 +72,9 @@ impl NbdService {
     ///
     /// It opens the NBD device at `nbd_path` and initialize it according to information from
     /// the block device composed from a RAFSv6 image. The caller needs to ensure that the NBD
-    /// device is available.
-    pub fn new(device: Arc<BlockDevice>, nbd_path: String) -> Result<Self> {
+    /// device is available. `timeout` is how many seconds the kernel waits for a reply to one
+    /// request before it marks the connection dead.
+    pub fn new(device: Arc<BlockDevice>, nbd_path: String, timeout: u64) -> Result<Self> {
         // Initialize the NBD device: set block size, block count and flags.
         let nbd_dev = OpenOptions::new()
             .read(true)
@@ -84,7 +85,7 @@ impl NbdService {
             })?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_BLOCK_SIZE, device.block_size())?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_BLOCKS, device.blocks() as u64)?;
-        nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_TIMEOUT, 60)?;
+        nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_TIMEOUT, timeout)?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_CLEAR_SOCK, 0)?;
         nbd_ioctl(
             nbd_dev.as_raw_fd(),
@@ -290,6 +291,7 @@ impl NbdDaemon {
     fn new(
         nbd_path: String,
         threads: u32,
+        timeout: u64,
         blob_entry: BlobCacheEntry,
         trigger: std::sync::mpsc::Sender<DaemonStateMachineInput>,
         receiver: std::sync::mpsc::Receiver<NydusResult<()>>,
@@ -303,7 +305,7 @@ impl NbdDaemon {
         cache_mgr.add_blob_entry(&blob_entry)?;
         let block_device = BlockDevice::new_with_cache_manager(blob_id.clone(), cache_mgr.clone())?;
         #[allow(clippy::arc_with_non_send_sync)]
-        let nbd_service = NbdService::new(Arc::new(block_device), nbd_path)?;
+        let nbd_service = NbdService::new(Arc::new(block_device), nbd_path, timeout)?;
 
         Ok(NbdDaemon {
             cache_mgr,
@@ -469,6 +471,7 @@ impl NydusDaemon for NbdDaemon {
 pub fn create_nbd_daemon(
     device: String,
     threads: u32,
+    timeout: u64,
     blob_entry: BlobCacheEntry,
     bti: BuildTimeInfo,
     id: Option<String>,
@@ -480,6 +483,7 @@ pub fn create_nbd_daemon(
     let daemon = NbdDaemon::new(
         device,
         threads,
+        timeout,
         blob_entry,
         trigger,
         result_receiver,
@@ -605,7 +609,7 @@ mod tests {
         tokio_uring::start(async {
             let tmpdir = TempDir::new().unwrap();
             let device = create_block_device(tmpdir.as_path().to_path_buf()).unwrap();
-            let nbd = NbdService::new(device, "/dev/nbd15".to_string()).unwrap();
+            let nbd = NbdService::new(device, "/dev/nbd15".to_string(), 60).unwrap();
             let nbd = Arc::new(nbd);
             let nbd2 = nbd.clone();
             let worker1 = nbd.create_worker().unwrap();
