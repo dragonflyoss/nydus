@@ -80,7 +80,7 @@ nydus-storage = { version = "3.0.0-beta.3", path = "../nydus-storage" }
 nydus-telemetry = { version = "3.0.0-beta.3", path = "../nydus-telemetry", features = [
   "logging",
 ] }
-prometheus = { version = "0.13", default-features = false, optional = true }
+prometheus = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sendfd = { version = "0.4", optional = true }

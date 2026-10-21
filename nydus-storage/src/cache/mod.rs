@@ -506,8 +506,9 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 }
 
 /// The `reason` a cache write failed with `err`: a crc32c mismatch is
-/// `checksum`, any other malformed chunk group `decode`, and everything
-/// else, the cache file refusing the write, `io`.
+/// `checksum`; any other malformed chunk group, a redirect pointing past
+/// its source blob's chunk groups included, `decode`; and everything else,
+/// the cache file refusing the write, `io`.
 pub(crate) fn write_failure_reason(err: &io::Error) -> WriteFailureReason {
     if is_chunk_group_crc_mismatch(err) {
         WriteFailureReason::Checksum

@@ -1237,8 +1237,8 @@ Fields under `backend.config`:
 	to the origin registry through `http`. Only available when the
 	binary is built with the `dragonfly` feature; a build without it rejects
 	the block when the config is loaded. Omit to talk to the origin directly.
-	Each read is counted under the backend that served it (see
-	[Metrics](#metrics)).
+	Each read is counted under the `source` that served it, `dragonfly` for
+	the seed peers and `fallback` for the origin (see [Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
 	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times
@@ -1391,9 +1391,10 @@ Cache (`nydus_cache_*`):
 	phase-0 prefetch. A failure is a group that did not reach the cache,
 	`reason` saying why: `checksum`, its crc32c mismatched the blob meta
 	(corruption in transit or at rest); `decode`, it did not decompress to
-	its declared size; `io`, the cache file refused the write; and on the
-	`redirect` fills `unknown_source`, the redirect names a blob the image
-	does not have. Normally zero. Summing `type="ondemand"` across the instances sharing a
+	its declared size, or on a `redirect` fill the redirect points past its
+	source blob's chunk groups (a stale optimize artifact); `io`, the cache
+	file refused the write; and on the `redirect` fills `unknown_source`,
+	the redirect names a blob the image does not have. Normally zero. Summing `type="ondemand"` across the instances sharing a
 	cache directory shows how much duplicate fetching they do. After an
 	optimized mount's prefetch quiesces,
 	`nydus_cache_write_total{type="redirect"}` equals the number of traced

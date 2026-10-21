@@ -46,9 +46,9 @@
 //! writes, for a chunk group filled into its source blob from the ondemand
 //! (redirect) blob. `reason` tells a corrupted chunk group (`checksum`, the
 //! crc32c mismatched; `decode`, it did not decompress to its declared
-//! size) from a cache that cannot be written (`io`) and, on the redirect
-//! fills, from a redirect naming a blob the image does not have
-//! (`unknown_source`).
+//! size, or a redirect points past its source blob's chunk groups) from a
+//! cache that cannot be written (`io`) and, on the redirect fills, from a
+//! redirect naming a blob the image does not have (`unknown_source`).
 
 use std::fmt;
 use std::time::Duration;
@@ -603,7 +603,8 @@ impl fmt::Display for WriteKind {
 /// label of the cache write failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteFailureReason {
-    /// The chunk group did not decompress to its declared size.
+    /// The chunk group did not decompress to its declared size, or the
+    /// redirect points past its source blob's chunk groups.
     Decode,
 
     /// The decoded chunk group's crc32c did not match the blob meta.
