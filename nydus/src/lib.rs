@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+#[cfg(feature = "api-server")]
+pub mod api_server;
 pub mod build;
 pub mod check;
 pub mod export;
