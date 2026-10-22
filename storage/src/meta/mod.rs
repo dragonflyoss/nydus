@@ -432,6 +432,13 @@ impl BlobCompressionContextInfo {
                     meta_path, err
                 ))
             })?;
+        // Other processes sharing the cache directory may open the same file, so create, fill, and
+        // check it under a file lock. Once its header is valid, openers stop writing it.
+        if enable_write {
+            file.lock()?;
+        } else {
+            file.lock_shared()?;
+        }
 
         let aligned_uncompressed_size = round_up_4k(uncompressed_size);
         let expected_size = BLOB_CCT_HEADER_SIZE as usize + aligned_uncompressed_size;
@@ -475,6 +482,8 @@ impl BlobCompressionContextInfo {
                 )));
             }
         }
+        // The mapping holds a duplicate of `file`, which shares the lock, so release it explicitly.
+        file.unlock()?;
 
         let chunk_infos = BlobMetaChunkArray::from_file_map(&filemap, blob_info)?;
         let mut state = BlobCompressionContext {
@@ -2182,6 +2191,68 @@ pub(crate) mod tests {
                 &meta_data[..0xa3 * size_of::<BlobChunkInfoV2Ondisk>()]
             );
         }
+    }
+
+    #[test]
+    fn test_load_meta_waits_for_initializing_process() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let id = "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a";
+        let meta_data = std::fs::read(
+            PathBuf::from(root_dir).join(format!("../tests/texture/zran/{}.blob.meta", id)),
+        )
+        .unwrap();
+        let dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let blob_path = dir.as_path().join(id).display().to_string();
+        let meta_path = format!("{}.{}", blob_path, BLOB_CCT_FILE_SUFFIX);
+
+        // Act as another process that has created the meta file and is still downloading it.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&meta_path)
+            .unwrap();
+        file.set_len(meta_data.len() as u64).unwrap();
+        file.lock().unwrap();
+
+        let features = BlobFeatures::ALIGNED
+            | BlobFeatures::INLINED_FS_META
+            | BlobFeatures::CHUNK_INFO_V2
+            | BlobFeatures::ZRAN;
+        let mut blob_info = BlobInfo::new(
+            0,
+            id.to_string(),
+            0x16c6000,
+            9839040,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0xa3,
+            features,
+        );
+        blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
+        // Any download from this empty blob fails, so the opener can only succeed by waiting.
+        let empty_blob = vmm_sys_util::tempfile::TempFile::new().unwrap();
+        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
+            metrics: BackendMetrics::new(id, "localfs"),
+            file: empty_blob.into_file(),
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            let meta =
+                BlobCompressionContextInfo::new(&blob_path, &blob_info, Some(&reader), false);
+            tx.send(meta.map(|m| m.state.chunk_info_array.len()))
+                .unwrap();
+        });
+
+        // A second creator must wait for the first one's download instead of downloading the
+        // metadata again or reading it halfway through.
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+        file.write_all_at(&meta_data, 0).unwrap();
+        file.unlock().unwrap();
+        assert_eq!(rx.recv().unwrap().unwrap(), 0xa3);
+        opener.join().unwrap();
     }
 
     #[test]
