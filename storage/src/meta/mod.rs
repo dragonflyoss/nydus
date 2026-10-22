@@ -37,6 +37,7 @@ use std::sync::Arc;
 use nydus_utils::compress::zlib_random::ZranContext;
 use nydus_utils::crypt::decrypt_with_context;
 use nydus_utils::digest::{DigestData, RafsDigest};
+use nydus_utils::filemap::FromMapped;
 use nydus_utils::filemap::{FileMapState, MappedOrOwned, MappedSlice};
 use nydus_utils::{compress, crypt};
 
@@ -114,6 +115,8 @@ pub struct BlobCompressionContextHeader {
     /// Second magic number to identify the blob meta data header.
     s_magic2: u32,
 }
+
+unsafe impl FromMapped for BlobCompressionContextHeader {}
 
 impl Default for BlobCompressionContextHeader {
     fn default() -> Self {
@@ -448,19 +451,16 @@ impl BlobCompressionContextInfo {
         }
 
         // The tables below borrow this mapping, so it stays read-only, and downloaded metadata is
-        // written through the file instead.
-        let filemap = Arc::new(FileMapState::new(
-            file.try_clone()?,
-            0,
-            expected_size,
-            false,
-        )?);
-        // Safe because the header is plain integers and bytes, and each header reference ends
-        // with its validate_header call, so none is held while read_metadata writes the file.
+        // written through the file instead. Safe because each header reference ends with its
+        // validate_header call, so none is alive while read_metadata writes the file, and this
+        // process doesn't write the file once its header is valid.
+        let filemap =
+            Arc::new(unsafe { FileMapState::new(file.try_clone()?, 0, expected_size, false) }?);
         let header_is_valid = || {
-            Self::validate_header(blob_info, unsafe {
-                filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)
-            }?)
+            Self::validate_header(
+                blob_info,
+                filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)?,
+            )
         };
         if !header_is_valid()? {
             if let Some(reader) = reader {
@@ -486,31 +486,27 @@ impl BlobCompressionContextInfo {
             ..Default::default()
         };
 
-        // Safe because the header, context tables, and dictionaries are plain integers and bytes,
-        // and the meta file isn't written once its header is valid.
-        let header =
-            unsafe { filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size) }?;
+        let header = filemap.get_ref::<BlobCompressionContextHeader>(aligned_uncompressed_size)?;
         if blob_info.has_feature(BlobFeatures::BATCH) {
-            state.batch_info_array = MappedOrOwned::Mapped(unsafe {
-                MappedSlice::new(
-                    filemap.clone(),
-                    header.s_ci_zran_offset as usize,
-                    header.s_ci_zran_count as usize,
-                )
-            }?);
+            state.batch_info_array = MappedOrOwned::Mapped(MappedSlice::new(
+                filemap.clone(),
+                header.s_ci_zran_offset as usize,
+                header.s_ci_zran_count as usize,
+            )?);
         } else if blob_info.has_feature(BlobFeatures::ZRAN) {
             let zran_offset = header.s_ci_zran_offset as usize;
             let zran_count = header.s_ci_zran_count as usize;
-            state.zran_info_array = MappedOrOwned::Mapped(unsafe {
-                MappedSlice::new(filemap.clone(), zran_offset, zran_count)
-            }?);
+            state.zran_info_array =
+                MappedOrOwned::Mapped(MappedSlice::new(filemap.clone(), zran_offset, zran_count)?);
             let zran_size = zran_count * size_of::<ZranInflateContext>();
             let dict_size = (header.s_ci_zran_size as usize)
                 .checked_sub(zran_size)
                 .ok_or_else(|| einval!("invalid ZRan dictionary size"))?;
-            state.zran_dict_table = MappedOrOwned::Mapped(unsafe {
-                MappedSlice::new(filemap.clone(), zran_offset + zran_size, dict_size)
-            }?);
+            state.zran_dict_table = MappedOrOwned::Mapped(MappedSlice::new(
+                filemap.clone(),
+                zran_offset + zran_size,
+                dict_size,
+            )?);
         }
 
         if load_chunk_digest && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
@@ -554,11 +550,10 @@ impl BlobCompressionContextInfo {
                 )));
             }
 
-            let file_map = Arc::new(FileMapState::new(file, 0, size, false)?);
-            // Safe because digests are plain bytes and the digest file isn't written once it exists.
-            state.chunk_digest_array = MappedOrOwned::Mapped(unsafe {
-                MappedSlice::new(file_map, 0, chunk_count as usize)
-            }?);
+            // Safe because the digest file isn't written once it exists.
+            let file_map = Arc::new(unsafe { FileMapState::new(file, 0, size, false) }?);
+            state.chunk_digest_array =
+                MappedOrOwned::Mapped(MappedSlice::new(file_map, 0, chunk_count as usize)?);
         }
 
         Ok(BlobCompressionContextInfo {
@@ -1225,13 +1220,11 @@ impl BlobMetaChunkArray {
 impl BlobMetaChunkArray {
     fn from_file_map(filemap: &Arc<FileMapState>, blob_info: &BlobInfo) -> Result<Self> {
         let chunk_count = blob_info.chunk_count() as usize;
-        // Safe because chunk info entries are plain integers and the meta file isn't written once
-        // its header is valid.
         if blob_info.has_feature(BlobFeatures::CHUNK_INFO_V2) {
-            let chunks = unsafe { MappedSlice::new(filemap.clone(), 0, chunk_count) }?;
+            let chunks = MappedSlice::new(filemap.clone(), 0, chunk_count)?;
             Ok(BlobMetaChunkArray::V2(MappedOrOwned::Mapped(chunks)))
         } else {
-            let chunks = unsafe { MappedSlice::new(filemap.clone(), 0, chunk_count) }?;
+            let chunks = MappedSlice::new(filemap.clone(), 0, chunk_count)?;
             Ok(BlobMetaChunkArray::V1(MappedOrOwned::Mapped(chunks)))
         }
     }
@@ -2099,8 +2092,10 @@ pub(crate) mod tests {
             let bytes = vec![0x12; 2 * entry_size];
             std::fs::write(file.as_path(), &bytes).unwrap();
             let mapping = Arc::new(
-                FileMapState::new(file.as_file().try_clone().unwrap(), 0, bytes.len(), false)
-                    .unwrap(),
+                unsafe {
+                    FileMapState::new(file.as_file().try_clone().unwrap(), 0, bytes.len(), false)
+                }
+                .unwrap(),
             );
             let info = BlobInfo::new(0, "test".to_owned(), 4096, 4096, 4096, 2, features);
             let mut chunks = BlobMetaChunkArray::from_file_map(&mapping, &info).unwrap();

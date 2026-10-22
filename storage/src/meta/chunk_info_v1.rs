@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::meta::{BlobCompressionContext, BlobMetaChunkInfo, BLOB_CCT_CHUNK_SIZE_MASK};
+use nydus_utils::filemap::FromMapped;
 use std::io::Result;
 
 const BLOB_CC_V1_CHUNK_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
@@ -22,6 +23,8 @@ pub struct BlobChunkInfoV1Ondisk {
     // 20bits: size (low), 4bits: size (high), offset: 40bits
     pub(crate) comp_info: u64,
 }
+
+unsafe impl FromMapped for BlobChunkInfoV1Ondisk {}
 
 impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
     fn compressed_offset(&self) -> u64 {

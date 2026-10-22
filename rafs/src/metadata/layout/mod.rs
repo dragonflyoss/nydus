@@ -92,6 +92,9 @@ macro_rules! impl_bootstrap_converter {
                 unsafe { std::slice::from_raw_parts_mut(ptr, size_of::<$T>()) }
             }
         }
+
+        // Safe because the conversions above already treat any bytes as a valid `$T`.
+        unsafe impl nydus_utils::filemap::FromMapped for $T {}
     };
 }
 
