@@ -58,6 +58,10 @@ COMPAT_READER ?=
 # Directory the compatibility images and their manifest are built into by
 # test-compat-build and read from by test-compat-read.
 COMPAT_IMAGES ?=
+FUSE_CONTINUITY_TIMEOUT ?= 600s
+FUSE_CONTINUITY_COUNT ?= 1
+FUSE_CONTINUITY_GO_TEST_ARGS ?=
+FUSE_CONTINUITY_PREDECESSOR ?=
 
 FS_TIMEOUT ?= 1800s
 FS_COUNT ?= 1
@@ -86,7 +90,7 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH
 	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
 
-.PHONY: build release nydusify test test-nydusify test-e2e test-tooci test-tar-corpus test-compat test-compat-build test-compat-read test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-nydusify test-e2e test-fuse-continuity test-tooci test-tar-corpus test-compat test-compat-build test-compat-read test-uffd test-uffd-stability test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -243,6 +247,18 @@ test-fanotify: release nydusify
 		NYDUS_E2E_FANOTIFY_RUN_FAIL_CLOSED="$(NYDUS_E2E_FANOTIFY_RUN_FAIL_CLOSED)" \
 		NYDUS_E2E_FANOTIFY_RUN_STRACE="$(NYDUS_E2E_FANOTIFY_RUN_STRACE)" \
 		$(GO_BIN) test -v -run '^TestFanotify$$' -count $(FANOTIFY_COUNT) -timeout $(FANOTIFY_TIMEOUT) $(FANOTIFY_GO_TEST_ARGS) .
+
+# Run the FUSE hot-upgrade E2E tests (requires root: mounting needs
+# CAP_SYS_ADMIN). Uses a LOCAL backend (nydus build --blob-dir, no
+# docker/registry) so the test is hermetic. Covers hot upgrade, pre-READY
+# rollback, owner exclusion, API-free startup and shutdown, and descriptor validation.
+test-fuse-continuity: release nydusify
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	mkdir -p $(CURDIR)/.test-tmp
+	cd tests/e2e && \
+		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
+		NYDUS_E2E_FUSE_PREDECESSOR="$(FUSE_CONTINUITY_PREDECESSOR)" \
+		$(GO_BIN) test -v -run '^Test(RecvFDsExact|Fuse(HotUpgrade|PreReadyRollback|LiveOwnerWithoutControl|WithoutAPIServer))$$' -count $(FUSE_CONTINUITY_COUNT) -timeout $(FUSE_CONTINUITY_TIMEOUT) $(FUSE_CONTINUITY_GO_TEST_ARGS) .
 
 # Run the NBD E2E test (requires root, the nbd kernel module, EROFS support).
 # Builds nydus with the nbd feature. Uses a LOCAL backend (nydus build
