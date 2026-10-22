@@ -320,9 +320,8 @@ impl TarBuilder {
                             break;
                         } else {
                             let node = self.create_directory(&target_paths[..=idx])?;
-                            tmp_tree.insert_child(Tree::new(node));
-                            let last_idx = tmp_tree.children.len() - 1;
-                            tmp_tree = &mut tmp_tree.children[last_idx];
+                            let child_idx = tmp_tree.insert_child(Tree::new(node));
+                            tmp_tree = &mut tmp_tree.children[child_idx];
                         }
                     }
                 }
@@ -379,6 +378,68 @@ mod tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use super::*;
+
+    #[test]
+    fn test_tar_builder_insert_into_tree_implicit_directories() {
+        let cases: &[&[&str]] = &[
+            &[
+                "/usr/local/runfiles/keep",
+                "/usr/local/bin/tool",
+                "/app/config/settings.json",
+            ],
+            &[
+                "/a/b/file",
+                "/z/keep",
+                "/m/n/file",
+                "/m/n/another",
+                "/zz/last",
+            ],
+        ];
+
+        for version in [RafsVersion::V5, RafsVersion::V6] {
+            for paths in cases {
+                let mut builder = TarBuilder::new(true, 0, version);
+                let root = builder.create_directory(&[OsString::from("/")]).unwrap();
+                let mut tree = Tree::new(root);
+
+                // Insert only files, as tar archives can omit all directory entries.
+                for path in *paths {
+                    let target = Path::new(path);
+                    let mut node = builder
+                        .create_directory(&Node::generate_target_vec(target))
+                        .unwrap();
+                    node.inode.set_mode(0o644 | crate::mode_bits(libc::S_IFREG));
+                    builder.insert_into_tree(&mut tree, node).unwrap();
+                }
+
+                for path in *paths {
+                    let target = Path::new(path);
+                    let entry = tree
+                        .get_node(target)
+                        .unwrap_or_else(|| panic!("missing file {path} for {version:?}"));
+                    let node = entry.borrow_mut_node();
+                    assert!(node.is_reg());
+                    assert_eq!(node.target(), target);
+
+                    for parent in target.ancestors().skip(1) {
+                        let directory = tree.get_node(parent).unwrap();
+                        assert!(directory.borrow_mut_node().is_dir());
+                        assert_eq!(directory.borrow_mut_node().target(), parent);
+                    }
+                }
+
+                let mut files = 0;
+                tree.walk_dfs_pre(&mut |entry| {
+                    if entry.borrow_mut_node().is_reg() {
+                        files += 1;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(files, paths.len());
+            }
+        }
+    }
 
     #[test]
     fn test_tar_builder_is_stargz_special_files() {
