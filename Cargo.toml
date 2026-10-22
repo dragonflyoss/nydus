@@ -2,6 +2,11 @@
 resolver = "2"
 members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry", "nydus-test-utils"]
 
+# Use fuser's handoff APIs until dragonflyoss/fuser#1 lands
+# (Zephyrcf/fuser branch session-handoff-and-recovery).
+[patch.crates-io]
+fuser = { git = "https://github.com/Zephyrcf/fuser.git", rev = "675d99605556c609079d23c5600222cd5e569922" }
+
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env", "string"] }
 hex = "0.4"
