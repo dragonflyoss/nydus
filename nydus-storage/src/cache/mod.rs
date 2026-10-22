@@ -297,7 +297,7 @@ pub fn decode_chunk_group_from_window<'a>(
         decoded.as_slice()
     };
 
-    validate_decoded_chunk_group(group, payload, skip_verify_checksums)?;
+    validate_group_payload(blob_metadata, group, payload, skip_verify_checksums)?;
     Ok(payload)
 }
 
@@ -481,6 +481,28 @@ pub fn validate_decoded_chunk_group(
             io::ErrorKind::InvalidData,
             ChunkGroupCrcMismatch,
         ));
+    }
+    Ok(())
+}
+
+/// Validate both the transport checksum and the stored content identity.
+pub(crate) fn validate_group_payload(
+    metadata: &BlobMetadata,
+    group: &BlobMetadataChunkGroupExtent,
+    payload: &[u8],
+    skip_verify_checksums: bool,
+) -> io::Result<()> {
+    validate_decoded_chunk_group(group, payload, skip_verify_checksums)?;
+    if !skip_verify_checksums {
+        if let Some(expected) = metadata.chunk_group_digest(group.index() as usize) {
+            let actual = nydus_format::blob::BlobMetadataChunkGroupDigest::from_chunks([payload]);
+            if expected != actual {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "chunk group digest mismatch",
+                ));
+            }
+        }
     }
     Ok(())
 }

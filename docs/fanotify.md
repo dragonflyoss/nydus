@@ -342,19 +342,16 @@ core builds unless explicitly enabled.
 
 ## Verification
 
-`make test-fanotify` runs the end-to-end suite
-([`tests/e2e/fanotify_test.go`](../tests/e2e/fanotify_test.go),
-cases C0–C12). It builds a nydus image, pushes it to a throwaway local
-`registry:2`, exports the bootstrap, starts the daemon against the registry
-backend, and asserts correctness (byte-exact partial and full reads,
-demand-paged cache growth), robustness (concurrent readers, warm re-read fast
-path, restart persistence, graceful unmount), and — via an `strace` case —
-that the daemon reads pre-content events, writes responses, and pwrites the
-cache, i.e. that it is on the read path. It preflight-checks the kernel
-version, privileges, and required binaries, and skips loudly on an unsupported
-host. `make test-bench` runs the unified cold-start benchmark that compares
-fanotify against the FUSE, NBD, and ublk transports
-([`tests/e2e/bench_test.go`](../tests/e2e/bench_test.go)).
+`make e2e-experimental` runs the end-to-end suite
+([`tests/e2e/experimental/fanotify`](../tests/e2e/experimental/fanotify)).
+It serves images from an in-process registry and runs the filesystem
+contract shared by every mount mode, plus demand-paged cache growth,
+concurrent readers, restart persistence and — via an `strace` case — that
+the daemon reads pre-content events, writes responses, and pwrites the
+cache, i.e. that it is on the read path. `make test-bench` runs the
+unified cold-start benchmark that compares fanotify against the FUSE,
+fileio, NBD, and ublk transports
+([`tests/e2e/manual/bench`](../tests/e2e/manual/bench)).
 
 Sources: dragonflyoss/nydus#1826; erofs-utils `lib/backends/fanotify.c` and
 `mount/main.c` (`erofsmount_fanotify`); LWN "fanotify: add pre-content hooks".

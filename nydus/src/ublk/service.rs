@@ -139,7 +139,10 @@ pub struct UblkHandle {
 impl UblkHandle {
     /// Stop the device, which makes [`UblkService::run`] return.
     pub fn stop(&self) {
-        if let Err(err) = self.ctrl.kill_dev() {
+        // Control rings are thread-local. Construct a non-owning controller
+        // on the signal thread instead of using the creator's uninitialized ring.
+        let id = self.ctrl.dev_info().dev_id as i32;
+        if let Err(err) = UblkCtrl::new_simple(id).and_then(|ctrl| ctrl.kill_dev()) {
             error!("failed to stop ublk device: {err}");
         }
     }

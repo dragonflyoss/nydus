@@ -21,8 +21,8 @@ use nydus_telemetry::metrics::WriteKind;
 
 use super::chunk_group_lock::ChunkGroupLocks;
 use super::{
-    plan_prefetch_batches, validate_decoded_chunk_group, write_failure_reason, BlobCache,
-    CacheOptions, ChunkGroupBuffers,
+    plan_prefetch_batches, validate_group_payload, write_failure_reason, BlobCache, CacheOptions,
+    ChunkGroupBuffers,
 };
 
 #[derive(Clone)]
@@ -306,7 +306,7 @@ impl LocalBlobCache {
     /// group is ready, `None` when the blob is still filling (callers then
     /// take the ensure + pread path).
     fn all_ready_slice(&self, offset: u64, len: usize) -> io::Result<Option<&[u8]>> {
-        if !self.chunk_group_map.is_all_ready() {
+        if !self.options.skip_verify_checksums || !self.chunk_group_map.is_all_ready() {
             return Ok(None);
         }
         let mmap = if let Some(mmap) = self.cache_mmap.get() {
@@ -563,7 +563,12 @@ impl LocalBlobCache {
             )?;
             out
         };
-        validate_decoded_chunk_group(group, payload, self.options.skip_verify_checksums)?;
+        validate_group_payload(
+            &self.blob_metadata,
+            group,
+            payload,
+            self.options.skip_verify_checksums,
+        )?;
         Ok(payload)
     }
 
@@ -705,6 +710,7 @@ impl LocalBlobCache {
         payload: &[u8],
         cache_file: &File,
     ) -> io::Result<()> {
+        self.ensure_data_file_linked(cache_file)?;
         let mut batch = ScatterBatch::new(cache_file);
         for (offset, bytes) in group
             .chunks(&self.blob_metadata, payload)
@@ -713,12 +719,14 @@ impl LocalBlobCache {
             batch.push(offset, bytes)?;
         }
         batch.flush()?;
+        self.ensure_data_file_linked(cache_file)?;
         self.chunk_group_map.set_ready(group.index() as usize)
     }
 
     /// Ensure every group overlapping `[offset, offset + len)` is decoded and
     /// written to the cache file. Shared by `read_at` and `ensure_range`.
     fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
+        self.ensure_data_file_linked(cache_file)?;
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
@@ -737,6 +745,23 @@ impl LocalBlobCache {
         }
 
         self.ensure_chunk_groups(offset, end, cache_file)
+    }
+
+    fn read_verified_group(&self, index: usize, file: &File) -> io::Result<Vec<u8>> {
+        let group = self.chunk_group(index);
+        let mut padded = vec![0; group.logical_size() as usize];
+        file.read_exact_at(&mut padded, group.logical_offset())?;
+        let layout = vec![0; u64::from(group.uncompressed_size()) as usize];
+        let mut payload = Vec::with_capacity(layout.len());
+        for (offset, bytes) in group
+            .chunks(&self.blob_metadata, &layout)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        {
+            let start = (offset - group.logical_offset()) as usize;
+            payload.extend_from_slice(&padded[start..start + bytes.len()]);
+        }
+        validate_group_payload(&self.blob_metadata, &group, &payload, false)?;
+        Ok(padded)
     }
 }
 
@@ -797,6 +822,21 @@ impl BlobCache for LocalBlobCache {
         let cache_file = self.cache_file()?;
         self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref())?;
 
+        if !self.options.skip_verify_checksums {
+            let end = offset + dst.len() as u64;
+            for index in self.chunk_group_span(offset, end)? {
+                let group = self.chunk_group(index);
+                let padded = self.read_verified_group(index, &cache_file)?;
+                let first = offset.max(group.logical_offset());
+                let last = end.min(group.logical_range().end);
+                dst[(first - offset) as usize..(last - offset) as usize].copy_from_slice(
+                    &padded[(first - group.logical_offset()) as usize
+                        ..(last - group.logical_offset()) as usize],
+                );
+            }
+            return Ok(());
+        }
+
         // The cache file mirrors the padded address space, so once the
         // covering groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
@@ -831,7 +871,13 @@ impl BlobCache for LocalBlobCache {
         }
         self.record_ondemand_range(offset, usize::try_from(len).unwrap_or(usize::MAX));
         let cache_file = self.cache_file()?;
-        self.ensure_byte_range(offset, len, cache_file.as_ref())
+        self.ensure_byte_range(offset, len, cache_file.as_ref())?;
+        if !self.options.skip_verify_checksums {
+            for index in self.chunk_group_span(offset, offset + len)? {
+                self.read_verified_group(index, &cache_file)?;
+            }
+        }
+        Ok(())
     }
 
     fn ready_ranges(&self, offset: u64, len: u64) -> io::Result<Vec<Range<u64>>> {
@@ -927,7 +973,12 @@ impl BlobCache for LocalBlobCache {
         // crc32 and chunk lengths were copied from this group at optimize
         // time, so any divergence (stale optimize artifact, corrupted
         // transfer) is caught here before it can poison the cache.
-        validate_decoded_chunk_group(&group, payload, self.options.skip_verify_checksums)?;
+        validate_group_payload(
+            &self.blob_metadata,
+            &group,
+            payload,
+            self.options.skip_verify_checksums,
+        )?;
         let cache_file = self.cache_file()?;
         self.write_chunk_group(&group, payload, cache_file.as_ref())?;
         self.backend.metrics().cache.collect_write_finished_metrics(
@@ -962,6 +1013,7 @@ impl BlobCache for LocalBlobCache {
         };
 
         let mut contention_logged = false;
+        let start = Instant::now();
         loop {
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if rc == 0 {
@@ -983,6 +1035,10 @@ impl BlobCache for LocalBlobCache {
             // stop waiting; the caller's prefetch then reduces to a cheap
             // all-ready scan.
             if self.chunk_group_map.latch_all_ready() {
+                return None;
+            }
+            if start.elapsed() >= Duration::from_secs(2) {
+                warn!("prefetch lock timeout; prefetching without cross-process lock");
                 return None;
             }
             if !contention_logged {

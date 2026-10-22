@@ -437,9 +437,10 @@ fn cache_identity(path: &Path, expected_size: u64) -> Result<FileId> {
     }
     #[allow(clippy::unnecessary_cast)]
     let size = st.st_size as u64;
-    if size != expected_size {
+    // Native full blobs append metadata and a footer after the device region.
+    if size < expected_size {
         return Err(Error::InvalidParameter(format!(
-            "blob cache file size {size} does not match device size {expected_size}"
+            "blob cache file size {size} is smaller than device size {expected_size}"
         )));
     }
     #[allow(clippy::unnecessary_cast)]

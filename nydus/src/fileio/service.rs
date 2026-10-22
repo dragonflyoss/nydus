@@ -108,6 +108,11 @@ impl FileioService {
         self.erofs_mountpoint = Some(mountpoint.to_path_buf());
     }
 
+    /// Forget an externally detached mount rather than unmount its successor.
+    pub fn clear_erofs_mountpoint(&mut self) {
+        self.erofs_mountpoint = None;
+    }
+
     /// Unmount EROFS first, then unmount the export and end the session.
     pub fn shutdown(self) {
         if let Some(mountpoint) = &self.erofs_mountpoint {

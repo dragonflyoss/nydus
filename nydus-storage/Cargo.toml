@@ -27,5 +27,10 @@ zstd = "0.13"
 lz4_flex = "0.11"
 
 [dev-dependencies]
-nydus-test-utils = { path = "../nydus-test-utils" }
+nydus-test-utils = { path = "../nydus-test-utils", features = ["fault-backend"] }
 sha2 = { workspace = true }
+
+# The ptrace child must run on the process leader, not a libtest worker.
+[[test]]
+name = "group_map_process"
+harness = false

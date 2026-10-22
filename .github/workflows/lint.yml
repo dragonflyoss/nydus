@@ -3,13 +3,26 @@ name: Lint
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   rustfmt:
@@ -75,3 +88,26 @@ jobs:
         with:
           version: v2.7
           working-directory: ${{ matrix.module }}
+
+  e2e-conventions:
+    name: E2E conventions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache-dependency-path: tests/e2e/go.sum
+
+      # Layout rules (one test per file, t.Parallel, no t.Skip), the
+      # harness's own unprivileged tests, and the build-tagged manual
+      # suites, which golangci-lint does not compile.
+      - name: Check
+        working-directory: tests/e2e
+        run: |
+          go test -count=1 ./internal/...
+          go vet -tags manual ./manual/...
+          go build -o /dev/null ./cmd/golden-gen

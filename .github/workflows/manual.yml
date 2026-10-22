@@ -1,0 +1,142 @@
+name: Manual
+run-name: "Manual (${{ inputs.suite }})"
+
+# Benchmarks and the large corpus run on demand; CI also calls the ublk suite.
+# ublk needs ublk_drv: an unavailable module is a failing precondition, not a skip.
+# E2E_UBLK_RUNNER can override the hosted default with matching labels.
+# Hugetar exercises a 60 GB sparse tar corpus. Top images has its own workflow
+# (top-images-convert.yml).
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite to run"
+        required: true
+        type: choice
+        options: [bench, ublk, hugetar]
+  workflow_call:
+    inputs:
+      suite:
+        description: "Suite to run (bench, ublk, hugetar)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
+  GO_VERSION: "1.25.5"
+  FEATURES: cli,fuse,fileio
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
+
+jobs:
+  run:
+    name: ${{ inputs.suite }}
+    runs-on: ${{ fromJSON(inputs.suite == 'ublk' && (vars.E2E_UBLK_RUNNER || '["ubuntu-24.04"]') || inputs.suite == 'bench' && (vars.E2E_BENCH_RUNNER || '["ubuntu-24.04"]') || (vars.E2E_FILEIO_RUNNER || '["ubuntu-24.04"]')) }}
+    timeout-minutes: ${{ inputs.suite == 'ublk' && 5 || 90 }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-manual-${{ inputs.suite }}
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
+
+      - name: Install test dependencies
+        run: |
+          packages=(erofs-utils fuse3)
+          if [ "${{ inputs.suite }}" = bench ]; then packages+=(fio); fi
+          bash tests/scripts/install_ci_packages.sh "${packages[@]}"
+          sudo modprobe fuse
+
+      - name: Install erofsfuse (optional bench column)
+        if: inputs.suite == 'bench'
+        run: sudo bash tests/scripts/setup_erofsfuse.sh
+
+      - name: Build
+        id: build
+        env:
+          BENCH_FEATURES: ${{ vars.E2E_BENCH_FEATURES || 'cli,fuse,fileio' }}
+        run: |
+          if [ "${{ inputs.suite }}" = ublk ]; then FEATURES=cli,ublk; fi
+          if [ "${{ inputs.suite }}" = bench ]; then FEATURES="$BENCH_FEATURES"; fi
+          make ci-build nydusify FEATURES="$FEATURES"
+
+      - name: Run bench
+        if: inputs.suite == 'bench'
+        env:
+          NYDUSFS_BENCH_MODES: ${{ vars.E2E_BENCH_MODES || 'fuse,fileio' }}
+          NYDUSFS_BENCH_HOST: ${{ vars.E2E_BENCH_HOST }}
+          NYDUSFS_BENCH_BASELINE: ${{ vars.E2E_BENCH_BASELINE }}
+          NYDUSFS_BENCH_MAX_REGRESSION_PERCENT: ${{ vars.E2E_BENCH_MAX_REGRESSION_PERCENT }}
+          NYDUSFS_BENCH_OUTPUT: ${{ github.workspace }}/bench-results.json
+        run: make e2e-run PKG=./manual/bench/ E2E_TAGS=manual E2E_REQUIRE=1 E2E_TIMEOUT=60m E2E_GO_TEST_ARGS=-v
+
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.suite == 'bench'
+        with:
+          name: bench-results
+          path: bench-results.json
+          if-no-files-found: warn
+
+      - name: Run ublk Rust tests
+        if: inputs.suite == 'ublk'
+        run: |
+          cargo test -p nydus --features cli,ublk --no-fail-fast
+
+      - name: Upload ublk binaries
+        if: ${{ !cancelled() && inputs.suite == 'ublk' && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-ublk-binaries
+          path: |
+            target/ci/nydus
+            nydusify/nydusify
+          if-no-files-found: error
+
+      - name: Run hugetar
+        if: inputs.suite == 'hugetar'
+        run: make e2e-run PKG=./manual/hugetar/ E2E_TAGS=manual E2E_REQUIRE=1 E2E_TIMEOUT=80m
+
+  ublk-e2e:
+    name: ublk E2E
+    needs: run
+    if: ${{ !cancelled() && inputs.suite == 'ublk' }}
+    runs-on: ${{ fromJSON(vars.E2E_UBLK_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+      - uses: actions/download-artifact@v7
+        with:
+          name: e2e-ublk-binaries
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh erofs-utils
+          uname -r
+          sudo modprobe ublk_drv
+      - name: Run ublk E2E
+        # Bound device/worker pressure without serializing independent mounts.
+        run: make e2e-run PKG=./experimental/ublk/... E2E_REQUIRE=1 E2E_PARALLEL=2 E2E_TIMEOUT=4m

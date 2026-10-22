@@ -1,81 +1,405 @@
 name: CI
 
+# Pull request gate: Rust and nydusify unit tests, and every GA e2e suite
+# (tests/e2e) against one nydus binary built once with the ci profile.
+# Reusable workflows also run experimental transports and fuzzing on PRs.
+# Release separately verifies shipped binaries. Heavy workloads stay manual.
+
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
-  schedule:
-    - cron: '0 4 * * *'
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
+  GO_VERSION: "1.25.5"
+  # The GA binary: GA mount modes plus the Dragonfly backend.
+  E2E_FEATURES: cli,fuse,fileio,dragonfly
+  DRAGONFLY_VERSION: 2.4.3
+  DRAGONFLY_CLIENT_VERSION: 1.3.3
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
+
 jobs:
-  check:
-    name: Cargo check
+  rust-test:
+    name: Rust unit and integration tests
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    runs-on: ubuntu-latest
+    env:
+      NYDUS_TEST_REQUIRE_NETNS: "1"
+      NYDUS_TEST_REQUIRE_PTRACE: "1"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GH_TOKEN }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run cargo check
-        run: |
-          cargo check --all --all-targets --all-features
-
-  test:
-    name: Run tests
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GH_TOKEN }}
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+      # After the toolchain, so the cache key covers it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
 
       - name: Run tests
+        # ublk is built and tested independently so it cannot block other features.
         run: |
-          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+          bash tests/scripts/install_ci_packages.sh iproute2
+          cargo llvm-cov --workspace --no-fail-fast \
+            --features 'nydus/cli,nydus/fileio,nydus/dragonfly,nydus/nbd,nydus/fanotify,nydus/uffd,nydus-test-utils/fault-backend' \
+            --lcov --output-path lcov.info
 
-      - name: Install Go
-        uses: actions/setup-go@v5
+      # Coverage is reported on the pull request, never gates it.
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
         with:
-          go-version-file: nydusify/go.mod
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  build:
+    name: Build e2e binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-ci
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
+
+      - name: Build nydus (ci profile) and nydusify
+        run: make ci-build nydusify FEATURES="$E2E_FEATURES"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-binaries
+          path: |
+            target/ci/nydus
+            target/ci/examples/writer-fixture
+            nydusify/nydusify
+          if-no-files-found: error
+          retention-days: 3
+
+  nydusify-test:
+    name: nydusify unit tests
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-binaries
 
       - name: Run nydusify tests
         run: |
-          make test-nydusify
+          chmod +x target/ci/nydus nydusify/nydusify
+          make test-nydusify NYDUS_TEST_BUILDER="$GITHUB_WORKSPACE/target/ci/nydus"
+
+  e2e:
+    name: E2E (${{ matrix.suite }})
+    needs: build
+    # Missing kernel capabilities fail inside the suite, never queue forever.
+    runs-on: ${{ fromJSON(vars.E2E_FILEIO_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: build
+            pkgs: ./internal/... ./build/... ./export/... ./nydusify/... ./golden/... ./kernel/...
+            parallel: 8
+            package_parallel: 2
+            run: ""
+            test_timeout: 4m
+          - suite: contract-fuse-semantics
+            pkgs: ./contract/...
+            run: ^TestFUSE$$/^(Semantic|C[0-9]+_.*)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fuse-zstd
+            pkgs: ./contract/...
+            run: ^TestFUSE$$/^Data$$/^zstd-4k$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fuse-other
+            pkgs: ./contract/...
+            run: ^TestFUSE$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fileio-semantics
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^(Semantic|C[0-9]+_.*)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fileio-zstd
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^Data$$/^zstd-4k$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fileio-other
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: api-registry
+            pkgs: ./api/... ./registry/...
+            parallel: 4
+            package_parallel: 2
+            run: ""
+            test_timeout: 4m
+          - suite: fault
+            pkgs: ./fault/...
+            parallel: 4
+            package_parallel: 1
+            run: ""
+            test_timeout: 4m
+          - suite: cache
+            pkgs: ./cache/... ./soak/...
+            parallel: 2
+            package_parallel: 1
+            run: ""
+            test_timeout: 4m
+          - suite: tar
+            pkgs: ./tar/...
+            parallel: 8
+            package_parallel: 2
+            run: ""
+            test_timeout: 4m
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-binaries
+
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus target/ci/examples/writer-fixture nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo modprobe fuse
+
+      # Keep the mount-heavy suites bounded on shared runners:
+      # Go's -parallel is per package, while -p controls concurrent packages.
+      # Split repeated full-tree reads by adapter and image group. Each shard
+      # retains its complete case/mode matrix; conventions tests check coverage.
+      - name: Run suites
+        run: make e2e-run PKG="${{ matrix.pkgs }}" E2E_RUN='${{ matrix.run }}' E2E_REQUIRE=1 E2E_PARALLEL=${{ matrix.parallel }} E2E_TIMEOUT=${{ matrix.test_timeout }} E2E_GO_TEST_ARGS='-p=${{ matrix.package_parallel }} -v'
+
+  feature-compat:
+    name: Feature-disabled CLI (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: minimal
+            features: cli
+          - variant: registry
+            features: cli,registry
+          - variant: fileio
+            features: cli,registry,fileio
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: feature-${{ matrix.variant }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+      - name: Build exactly the requested features
+        run: cargo build -p nydus --profile ci --no-default-features --features '${{ matrix.features }}'
+      - name: Exercise the real reduced binary
+        env:
+          NYDUS_E2E_FEATURE_VARIANT: ${{ matrix.variant }}
+        run: make e2e-run PKG=./compat/... E2E_REQUIRE=1 E2E_TIMEOUT=2m E2E_GO_TEST_ARGS=-v
+
+  rust-privileged:
+    name: Rust process and network namespace contracts
+    runs-on: ${{ fromJSON(vars.E2E_RUST_PRIVILEGED_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: 30
+    env:
+      NYDUS_TEST_REQUIRE_NETNS: "1"
+      NYDUS_TEST_REQUIRE_PTRACE: "1"
+      # Compile as the runner user; elevate only the test executables.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-privileged
+      - name: Prepare namespace tooling
+        run: |
+          mkdir -p "$RUNNER_TEMP/nydus-test-tmp"
+          bash tests/scripts/install_ci_packages.sh iproute2
+      - name: Process-shared publication and owner death
+        run: TMPDIR="$RUNNER_TEMP/nydus-test-tmp" cargo test -p nydus-storage --test group_map_process
+      - name: Real HTTP reads in configured network namespaces
+        if: ${{ !cancelled() }}
+        run: TMPDIR="$RUNNER_TEMP/nydus-test-tmp" cargo test -p nydus-backend --features registry --test netns_registry
+
+  extended:
+    name: Experimental transports and fuzz
+    uses: ./.github/workflows/nightly.yml
+
+  ublk:
+    name: ublk build and tests
+    uses: ./.github/workflows/manual.yml
+    with:
+      suite: ublk
+
+  e2e-dragonfly:
+    name: E2E (dragonfly)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Dragonfly binaries
+        id: dragonfly-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dragonfly-bin
+          key: dragonfly-${{ env.DRAGONFLY_VERSION }}-client-${{ env.DRAGONFLY_CLIENT_VERSION }}-linux-amd64
+
+      - name: Download Dragonfly binaries
+        if: steps.dragonfly-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/dragonfly-bin
+          curl -fsSL "https://github.com/dragonflyoss/dragonfly/releases/download/v${DRAGONFLY_VERSION}/dragonfly-${DRAGONFLY_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C /tmp/dragonfly-bin manager scheduler
+          curl -fsSL "https://github.com/dragonflyoss/client/releases/download/v${DRAGONFLY_CLIENT_VERSION}/dragonfly-client-v${DRAGONFLY_CLIENT_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz --strip-components=1 -C /tmp/dragonfly-bin
+
+      # The cluster (MySQL and Redis in docker, then manager, scheduler and
+      # dfdaemon) comes up in the background while the rest is set up.
+      - name: Start the Dragonfly cluster
+        run: |
+          sudo install -m 0755 /tmp/dragonfly-bin/manager /tmp/dragonfly-bin/scheduler /tmp/dragonfly-bin/dfdaemon /usr/local/bin/
+          sudo nohup misc/dragonfly/cluster.sh up 180 > /tmp/dragonfly-up.log 2>&1 &
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-binaries
+
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh fuse3
+          sudo modprobe fuse
+
+      - name: Wait for the cluster
+        run: |
+          sudo misc/dragonfly/cluster.sh wait-ready 180 || { cat /tmp/dragonfly-up.log; exit 1; }
+
+      - name: Run suite
+        env:
+          NYDUS_E2E_DRAGONFLY_SCHEDULER: http://127.0.0.1:8002
+        run: make e2e-run PKG=./dragonfly/... E2E_REQUIRE=1 E2E_TIMEOUT=10m E2E_GO_TEST_ARGS=-v
+
+      - name: Collect cluster logs
+        if: failure()
+        run: |
+          cat /tmp/dragonfly-up.log || true
+          sudo misc/dragonfly/cluster.sh logs || true
+          sudo chmod -R a+rX /tmp/dragonfly/logs || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: dragonfly-logs
+          path: /tmp/dragonfly/logs
+          if-no-files-found: ignore
+
+  # Aggregate this workflow, including reusable experimental/fuzz/ublk jobs.
+  # The Release workflow independently checks both shipped architectures on PRs.
+  gate:
+    name: CI gate
+    if: always()
+    needs: [rust-test, rust-privileged, nydusify-test, e2e, e2e-dragonfly, feature-compat, extended, ublk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = success ] || exit 1
+          done

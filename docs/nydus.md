@@ -120,14 +120,12 @@ Version references:
 - [Linux 6.15 compact time decoding](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v6.15/fs/erofs/inode.c)
 - [Extra-device high-field repair](https://github.com/torvalds/linux/commit/63c2f06198ca7513433f1c92f2c654869d72417e)
 
-The native metadata gate is `make test-e2e E2E_TEST=TestErofsKernelCompatibility`,
-with root, EROFS, loop devices, util-linux and erofs-utils available. It checks
-fresh, merged and optimized images using decoded devices, fsck and native
-content/timestamp comparisons. CI attempts `modprobe erofs` first. The test
-skips when the running kernel is older than 5.16 or EROFS is absent from
-`/proc/filesystems`; both built-in and loaded-module support are accepted.
-Other prerequisites remain mandatory on supported kernels. A skipped test is
-not native compatibility validation.
+The native metadata gate is the kernel e2e suite (`make e2e PKG=./kernel/...`,
+`tests/e2e/kernel`), with root, EROFS, loop devices, util-linux and
+erofs-utils available. It mounts every native layout and merged native
+images with the kernel EROFS driver and compares them with the source tree
+and with the FUSE reader; the build suite runs fsck.erofs on every layout.
+A missing prerequisite skips locally and fails in CI (`E2E_REQUIRE=1`).
 
 ## Crate Architecture
 
@@ -773,6 +771,11 @@ Current implementation notes:
 - `--config` supplies the blob directory through the storage config's
 	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
+- After printing the report (table or JSON), the command exits non-zero for
+	structural errors. With `--blob`, `--blob-dir`, or a configured blob directory,
+	it also fails if any blob is unresolved or unverified, including a caller-named
+	`--blob-id` whose digest cannot be verified. Metadata-only `--bootstrap`
+	inspection does not require blob verification.
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
 	`max_bytes_per_chunk_group`, `bytes_per_chunk_group_index`, `chunk_group_count`,
 	`chunk_compressor`, the chunk, digest
@@ -2610,7 +2613,7 @@ ready is not fetched at all.
 
 **What this buys.** With the claims in place the backend cost of a cold
 node is independent of how many instances share the cache: the end-to-end
-suite in `tests/e2e/cache_sharing_test.go` reads the same cold file from
+suite in `tests/e2e/cache/` reads the same cold file from
 four processes at once and requires the summed
 `nydus_cache_write_total{type="ondemand"}` to stay
 within one group of a single
@@ -3275,9 +3278,9 @@ PAX nanosecond timestamps, ownership, whiteouts and device metadata without
 mounting or creating host device nodes. Without that environment variable the
 real-builder test explicitly skips; unit success alone is not this gate.
 
-Registry/mount tests (`make test-e2e`, `make test-tooci`, `make test-ublk`,
-`make test-nbd`, `make test-fanotify`, `make test-uffd`) need their documented
-root, kernel and registry prerequisites. Run them only in an isolated test
+The e2e suites (`make e2e-ga`, `make e2e-experimental`; see
+`tests/e2e/README.md`) need their documented root and kernel
+prerequisites. Run them only in an isolated test
 environment. Guest DAX and workload performance require separate measurements.
 
 The current validation surface is:

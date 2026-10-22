@@ -103,7 +103,8 @@ impl ApiServer {
 
     /// Stops the server, joins its thread and unlinks the socket.
     pub fn stop(mut self) {
-        self.shutdown.notify_waiters();
+        // Retain a permit if stop races the server thread's first poll.
+        self.shutdown.notify_one();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }

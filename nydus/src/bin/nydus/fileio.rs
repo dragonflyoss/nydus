@@ -220,11 +220,25 @@ impl FileioCommand {
         // The export is served on background threads, so the daemon parks
         // here until the signal thread reports a termination signal.
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+        let watcher = self
+            .mountpoint
+            .as_ref()
+            .map(|mountpoint| {
+                let tx = shutdown_tx.clone();
+                nydus::mount::MountWatcher::start(mountpoint, move || {
+                    let _ = tx.send(());
+                })
+            })
+            .transpose()?;
         let signal_thread = signal::spawn_signal_thread("fileio", signals, move || {
             let _ = shutdown_tx.send(());
         })?;
         let _ = shutdown_rx.recv();
 
+        if watcher.as_ref().is_some_and(|watcher| watcher.detached()) {
+            service.clear_erofs_mountpoint();
+        }
+        drop(watcher);
         service.shutdown();
         if let Some(server) = api_server {
             server.stop();

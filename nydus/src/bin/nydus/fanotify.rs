@@ -206,6 +206,9 @@ impl FanotifyCommand {
             }
         }
 
+        let watched_stop = stop.clone();
+        let watcher = nydus::mount::MountWatcher::start(&mountpoint, move || watched_stop.stop())?;
+
         // Wait for the event loop to exit (clean stop or fatal error). It hands back
         // the group fd in both cases, having already denied outstanding events so the
         // mount is quiescent.
@@ -220,14 +223,18 @@ impl FanotifyCommand {
         // bounded window, deny-draining newly queued events in between — a reader
         // racing the shutdown gets EPERM (fail-closed) instead of blocking forever
         // and wedging the unmount.
-        if let Err(err) = unmount(&mountpoint, || {
-            if let Err(err) = deny_queued_events(&fan_fd) {
-                warn!(
-                    "deny-draining fanotify events between unmount retries failed: {}",
-                    err.report()
-                );
-            }
-        }) {
+        if let Err(err) = if watcher.detached() {
+            Ok(())
+        } else {
+            unmount(&mountpoint, || {
+                if let Err(err) = deny_queued_events(&fan_fd) {
+                    warn!(
+                        "deny-draining fanotify events between unmount retries failed: {}",
+                        err.report()
+                    );
+                }
+            })
+        } {
             error!(
                 "{}; dropping the fanotify chunk_group fd will fail-open residual events and \
                  unfetched ranges on the still-live mount will read as zeros — stop remaining \
