@@ -3,10 +3,8 @@ use fuser::{Config as FuseConfig, MountOption, SessionACL};
 use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{Backend, Local};
-use nydus_config::{
-    default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, Config, PrefetchScope,
-};
-use nydus_core::{CacheOptions, ErofsReader, TraceRecorder};
+use nydus_config::{Config, PrefetchConfig, PrefetchScope};
+use nydus_core::{ErofsReader, TraceRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
 use nydus_telemetry::metrics::Metrics;
@@ -185,39 +183,26 @@ impl FuseCommand {
     fn run(&self, storage_config: Option<Config>) -> Result<()> {
         let mountpoint = &self.mountpoint;
 
-        let cache_dir = if let Some(dir) = self.cache_dir.clone() {
-            Some(dir)
-        } else {
-            storage_config
-                .as_ref()
-                .and_then(|config| config.storage.dir.clone())
-        };
+        // `--cache-dir` overrides the config's storage directory.
+        let mut storage = storage_config
+            .as_ref()
+            .map(|config| config.storage.clone())
+            .unwrap_or_default();
+        if let Some(dir) = &self.cache_dir {
+            storage.dir = Some(dir.clone());
+        }
 
-        let (prefetch_scope, prefetch_concurrent_blob_count, prefetch_timeout) =
-            match storage_config.as_ref() {
-                Some(config) => {
-                    // `--prefetch` forces prefetch on when the config disables it.
-                    let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        config.prefetch.scope
-                    };
-                    (
-                        scope,
-                        config.prefetch.concurrent_blob_count,
-                        config.prefetch.request_timeout,
-                    )
-                }
-                None => (
-                    if self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        PrefetchScope::None
-                    },
-                    default_prefetch_concurrent_blob_count(),
-                    default_prefetch_request_timeout(),
-                ),
-            };
+        // `--prefetch` forces prefetch on when the config disables it.
+        let mut prefetch = storage_config
+            .as_ref()
+            .map(|config| config.prefetch.clone())
+            .unwrap_or_else(|| PrefetchConfig {
+                scope: PrefetchScope::None,
+                ..PrefetchConfig::default()
+            });
+        if prefetch.scope == PrefetchScope::None && self.prefetch {
+            prefetch.scope = PrefetchScope::default();
+        }
 
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
@@ -245,7 +230,7 @@ impl FuseCommand {
             None
         };
 
-        if let Some(cache_dir) = &cache_dir {
+        if let Some(cache_dir) = &storage.dir {
             if cache_dir.exists() && !cache_dir.is_dir() {
                 return Err(Error::InvalidParameter(format!(
                     "cache-dir {} is not a directory",
@@ -254,26 +239,20 @@ impl FuseCommand {
             }
         }
 
-        let cache_options = storage_config
-            .as_ref()
-            .map(|config| CacheOptions::from(&config.storage))
-            .unwrap_or_default();
         let reader = match (&self.blob, &self.bootstrap, backend) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
             (Some(blob), None, _) => ErofsReader::open_blob(
                 blob,
-                cache_dir.as_deref(),
+                &storage,
                 Some(trace_recorder.clone()),
                 metrics,
-                cache_options,
             ),
             (None, Some(bootstrap), Some(backend)) => ErofsReader::open_bootstrap(
                 bootstrap,
                 backend,
-                cache_dir.as_deref(),
+                &storage,
                 Some(trace_recorder.clone()),
-                cache_options,
             ),
             _ => {
                 return Err(Error::InvalidParameter(
@@ -305,25 +284,20 @@ impl FuseCommand {
         let session = FuseService::mount(fs, mountpoint, &config)?;
 
         let mut prefetch_stop = None;
-        if prefetch_scope == PrefetchScope::None {
+        if prefetch.scope == PrefetchScope::None {
             info!("blob prefetch disabled (enable with --prefetch or the config's prefetch.scope)");
-        } else if cache_dir.is_none() {
+        } else if storage.dir.is_none() {
             info!("blob prefetch disabled: diskless reads have no cache to warm (set --cache-dir or storage.dir)");
         } else {
-            let prefetcher = BlobPrefetcher::new(
-                reader.blob_caches(),
-                reader.prefetch_plan(),
-                prefetch_concurrent_blob_count,
-                prefetch_scope,
-                prefetch_timeout,
-            );
+            let prefetcher =
+                BlobPrefetcher::new(reader.blob_caches(), reader.prefetch_plan(), &prefetch);
             let stop = prefetcher.stop_flag();
             match prefetcher.spawn() {
                 Ok(_handle) => {
                     prefetch_stop = Some(stop);
                     info!(
                         "started blob prefetch (concurrent_blob_count={}, scope={:?})",
-                        prefetch_concurrent_blob_count, prefetch_scope
+                        prefetch.concurrent_blob_count, prefetch.scope
                     );
                 }
                 Err(err) => warn!("failed to start blob prefetch: {}", err),

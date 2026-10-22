@@ -43,7 +43,6 @@ pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
 pub use nydus_backend::Netns;
 pub use nydus_storage::access_trace::TraceRecorder;
-pub use nydus_storage::cache::CacheOptions;
 pub use nydus_telemetry::metrics::Metrics;
 pub use reader::ErofsReader;
 pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
@@ -132,10 +131,6 @@ impl NydusCore {
             .metadata()
             .with_context(|| format!("failed to stat bootstrap: {}", bootstrap.display()))?
             .len();
-        let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
-        let prefetch_scope = config.prefetch.scope;
-        let prefetch_timeout = config.prefetch.request_timeout;
-        let cache_options = CacheOptions::from(&config.storage);
         let backend = <dyn Backend>::new(
             &config.backend,
             &config.prefetch,
@@ -143,8 +138,7 @@ impl NydusCore {
             Arc::new(Metrics::new()),
         )
         .context("failed to build blob backend")?;
-        let cache_dir = config.storage.dir.clone();
-        if let Some(cache_dir) = &cache_dir {
+        if let Some(cache_dir) = &config.storage.dir {
             std::fs::create_dir_all(cache_dir).with_context(|| {
                 format!("failed to create cache directory: {}", cache_dir.display())
             })?;
@@ -154,9 +148,8 @@ impl NydusCore {
         let reader = ErofsReader::open_bootstrap(
             bootstrap,
             backend.clone(),
-            cache_dir.as_deref(),
+            &config.storage,
             Some(trace_recorder.clone()),
-            cache_options,
         )
         .context("failed to open nydus bootstrap")?;
         let raw_blob_infos = reader
@@ -168,7 +161,7 @@ impl NydusCore {
                 "bootstrap contains no blobs".to_string(),
             ));
         }
-        if cache_dir.is_none() {
+        if config.storage.dir.is_none() {
             for info in &raw_blob_infos {
                 let mapped = backend
                     .open_raw_device_file(&info.blob_id)
@@ -197,20 +190,19 @@ impl NydusCore {
         // teardown. The core retains only the worker's stop flag, raised on
         // drop so the worker winds down after its current blob.
         let mut prefetch_stop = None;
-        if prefetch_scope != PrefetchScope::None {
+        if config.prefetch.scope != PrefetchScope::None {
             let prefetcher = BlobPrefetcher::new(
                 reader.blob_caches(),
                 reader.prefetch_plan(),
-                prefetch_concurrent_blob_count,
-                prefetch_scope,
-                prefetch_timeout,
+                &config.prefetch,
             );
             let stop_flag = prefetcher.stop_flag();
             match prefetcher.spawn() {
                 Ok(_handle) => {
                     prefetch_stop = Some(stop_flag);
                     tracing::info!(
-                        "nydus core: background prefetch started (scope={prefetch_scope:?})"
+                        "nydus core: background prefetch started (scope={:?})",
+                        config.prefetch.scope
                     );
                 }
                 Err(err) => {

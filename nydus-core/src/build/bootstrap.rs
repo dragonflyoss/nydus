@@ -468,7 +468,7 @@ fn place_dir_data(
 }
 
 fn write_zeros(writer: &mut impl Write, n: usize) -> Result<()> {
-    nydus_storage::io::write_zeros(writer, n as u64).context("failed to write bootstrap padding")
+    nydus_format::utils::write_zeros(writer, n as u64).context("failed to write bootstrap padding")
 }
 
 /// Rewrite a rendered bootstrap's device table with flattened mapped block

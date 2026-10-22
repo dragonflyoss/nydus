@@ -1,7 +1,8 @@
 use clap::Parser;
 use nydus::error::{Context, Error, Result};
 use nydus::export::write_tar;
-use nydus_core::{CacheOptions, ErofsReader, Metrics};
+use nydus_config::StorageConfig;
+use nydus_core::{ErofsReader, Metrics};
 use nydus_telemetry::logging::init_command_tracing;
 use std::fs::File;
 use std::io::{self, BufWriter};
@@ -77,10 +78,9 @@ impl ExportCommand {
     fn run(&self) -> Result<()> {
         let reader = ErofsReader::open_blob(
             &self.source,
-            None,
+            &StorageConfig::default(),
             None,
             Arc::new(Metrics::new()),
-            CacheOptions::default(),
         )
         .with_context(|| format!("failed to open nydus blob: {}", self.source.display()))?;
 
@@ -128,10 +128,9 @@ mod tests {
 
         let reader = ErofsReader::open_blob(
             blob,
-            None,
+            &StorageConfig::default(),
             None,
             Arc::new(Metrics::new()),
-            CacheOptions::default(),
         )
         .unwrap();
         let tar_file = File::create(tar_path).unwrap();

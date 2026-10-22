@@ -459,7 +459,7 @@ fn core_maps_local_native_layers_without_a_cache() {
         assert_eq!(extents[0].len, blob.cache_size);
         assert_eq!(extents[0].source_offset, blob.mapped_offset);
         let mut mapped = vec![0u8; blob.cache_size as usize];
-        nydus_storage::io::pread_exact(extents[0].fd, &mut mapped, 0).unwrap();
+        nydus_core::extent::pread_exact(extents[0].fd, &mut mapped, 0).unwrap();
         assert_eq!(
             mapped,
             fs::read(source).unwrap()[..blob.cache_size as usize]

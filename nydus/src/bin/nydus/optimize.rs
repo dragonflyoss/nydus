@@ -6,7 +6,6 @@ use nydus::optimize::{
 };
 use nydus_backend::Backend;
 use nydus_config::{Config, StorageConfig};
-use nydus_core::CacheOptions;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
 use nydus_telemetry::metrics::Metrics;
@@ -163,13 +162,7 @@ impl OptimizeCommand {
             format!("failed to create cache directory: {}", cache_dir.display())
         })?;
 
-        let ondemand = build_ondemand_blob(
-            &self.parent_bootstrap,
-            patterns,
-            backend,
-            cache_dir,
-            CacheOptions::from(storage),
-        )?;
+        let ondemand = build_ondemand_blob(&self.parent_bootstrap, patterns, backend, storage)?;
         let digest_hex = hex::encode(ondemand.full_blob_digest);
 
         fs::create_dir_all(&self.blob_dir).with_context(|| {

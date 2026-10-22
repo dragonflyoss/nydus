@@ -723,9 +723,11 @@ mod tests {
         let reader = ErofsReader::open_bootstrap(
             &bootstrap,
             backend,
-            Some(&cache_dir),
+            &nydus_config::StorageConfig {
+                dir: Some(cache_dir.clone()),
+                ..Default::default()
+            },
             None,
-            nydus_core::CacheOptions::default(),
         )
         .unwrap();
         let root_nid = reader.superblock().root_nid();
@@ -755,10 +757,9 @@ mod tests {
         // The self-contained blob reads the same way.
         let reader = ErofsReader::open_blob(
             &blob_path,
-            None,
+            &nydus_config::StorageConfig::default(),
             None,
             std::sync::Arc::new(nydus_core::Metrics::new()),
-            nydus_core::CacheOptions::default(),
         )
         .unwrap();
         let root_nid = reader.superblock().root_nid();

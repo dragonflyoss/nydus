@@ -13,8 +13,12 @@
 //! and re-exported from [`metrics`], which maps it to a label value; the
 //! enums that only exist for metrics ([`metrics::Source`],
 //! [`metrics::WriteKind`], [`metrics::WriteFailureReason`], [`metrics::FsOp`]) are
-//! owned here.
+//! owned here. The [`prometheus`] crate is re-exported, so the crates that
+//! register a collector of their own or encode a registry reach it through
+//! this one.
 
 #[cfg(feature = "logging")]
 pub mod logging;
 pub mod metrics;
+
+pub use prometheus;

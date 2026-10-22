@@ -11,10 +11,11 @@ use tempfile::{tempdir, NamedTempFile, TempDir};
 
 use nydus::build::{build_image, BuildImageOptions, NativeLayout};
 use nydus_backend::{Backend, Local};
+use nydus_config::StorageConfig;
 use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
 use nydus_core::build::bootstrap::render_bootstrap;
 use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, ChildRef, InodeData, InodeInfo};
-use nydus_core::{CacheOptions, ErofsReader};
+use nydus_core::ErofsReader;
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::{
     ErofsChunkAddr, ErofsDeviceSlot, ErofsInode, ErofsInodeExtended, ErofsSuperblock, XattrEntry,
@@ -89,9 +90,8 @@ fn read_z_fixture_range(
             dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         )),
+        &StorageConfig::default(),
         None,
-        None,
-        CacheOptions::default(),
     )?;
     let inode = reader.inode(nid)?;
     let mut output = Vec::new();
@@ -138,9 +138,8 @@ fn z_reader_rejects_head_distance_before_cached_extent() {
                 dir.path().to_path_buf(),
                 Arc::new(Metrics::new()),
             )),
+            &StorageConfig::default(),
             None,
-            None,
-            CacheOptions::default(),
         )
         .unwrap();
         let inode = reader.inode(nid).unwrap();
@@ -678,9 +677,8 @@ fn z_fragments_reuse_decoded_pclusters_across_files_and_threads() {
         let reader = ErofsReader::open_bootstrap(
             &bootstrap,
             backend.clone(),
+            &StorageConfig::default(),
             None,
-            None,
-            CacheOptions::default(),
         )
         .unwrap();
         assert!(reader.superblock().packed_nid().is_some());
@@ -782,9 +780,8 @@ fn z_fragments_reuse_decoded_pclusters_across_files_and_threads() {
         let other = ErofsReader::open_bootstrap(
             &bootstrap,
             backend.clone(),
+            &StorageConfig::default(),
             None,
-            None,
-            CacheOptions::default(),
         )
         .unwrap();
         let inode = other.inode(first_nid).unwrap();
@@ -866,8 +863,10 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
             &parent,
             &patterns,
             backend.clone(),
-            &dir.path().join("build-cache"),
-            CacheOptions::default(),
+            &StorageConfig {
+                dir: Some(dir.path().join("build-cache")),
+                ..Default::default()
+            },
         );
         let optimized = match (algorithm, optimized) {
             (Some(_), Err(err)) => {
@@ -898,9 +897,11 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         let reader = ErofsReader::open_bootstrap(
             &bootstrap,
             backend.clone(),
-            Some(&dir.path().join("read-cache")),
+            &StorageConfig {
+                dir: Some(dir.path().join("read-cache")),
+                ..Default::default()
+            },
             None,
-            CacheOptions::default(),
         )
         .unwrap();
         if let Some(algorithm) = algorithm {
@@ -1002,8 +1003,10 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
                 directory.path().to_path_buf(),
                 Arc::new(Metrics::new()),
             )),
-            &directory.path().join("build-cache"),
-            CacheOptions::default(),
+            &StorageConfig {
+                dir: Some(directory.path().join("build-cache")),
+                ..Default::default()
+            },
         )
         .unwrap();
         let meta = &optimized.blob_metadata;
@@ -1053,9 +1056,11 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         let reader = ErofsReader::open_bootstrap(
             &bootstrap,
             backend.clone(),
-            Some(&read_cache),
+            &StorageConfig {
+                dir: Some(read_cache),
+                ..Default::default()
+            },
             None,
-            CacheOptions::default(),
         )
         .unwrap();
         reader
@@ -1231,14 +1236,9 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let backend: std::sync::Arc<dyn nydus_backend::Backend> = std::sync::Arc::new(
         nydus_backend::Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new())),
     );
-    let reader = ErofsReader::open_bootstrap(
-        &bootstrap_path,
-        backend,
-        None,
-        None,
-        CacheOptions::default(),
-    )
-    .expect("open reader");
+    let reader =
+        ErofsReader::open_bootstrap(&bootstrap_path, backend, &StorageConfig::default(), None)
+            .expect("open reader");
     let root = reader
         .inode(reader.superblock().root_nid())
         .expect("root inode");
