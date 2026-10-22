@@ -45,7 +45,7 @@ type OptimizeOption struct {
 	// the ondemand blob is built from. Required.
 	TraceFile string
 	// Type is the artifact `nydus optimize --type` builds. Defaults to
-	// "ondemand-blob".
+	// "ondemand".
 	Type string
 	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
 	BuilderPath string

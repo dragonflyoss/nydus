@@ -770,7 +770,7 @@ func optimizeCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "type",
-				Usage: "artifact to build, passed through to nydus optimize --type: ondemand-blob",
+				Usage: "artifact to build, passed through to nydus optimize --type: ondemand",
 				Value: nydus.DefaultOptimizeType,
 			},
 			&cli.StringFlag{

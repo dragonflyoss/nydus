@@ -706,7 +706,7 @@ nydus optimize \
 
 Current implementation notes:
 
-- `--type` selects the artifact to build; `ondemand-blob`, the default and
+- `--type` selects the artifact to build; `ondemand`, the default and
 	only value today, builds the ondemand blob described here.
 - `--apiserver` is the apiserver address of a **running** `nydus fuse` mount
 	(the same `unix:///path` form as `nydus fuse --apiserver`). Optimize fetches
@@ -3235,7 +3235,7 @@ snapshot). Record the pattern from a mount **without** prefetch so it captures
 the pure on-demand access pattern, exercise the workload, then save the ondemand record.
 Mount the optimized image **with** `--prefetch` to get the phase-0 ondemand
 blob warmup. `--type` selects the artifact and is passed through to `nydus
-optimize --type`; `ondemand-blob` is the default and only value today. Shared
+optimize --type`; `ondemand` is the default and only value today. Shared
 flags (`--builder`, `--work-dir`, `--platform`, source/target
 `--*-insecure` and `--*-plain-http`, `--log-level`) behave as in `nydusify convert`. No root is
 required: optimize never extracts OCI layers, it only rewrites metadata and

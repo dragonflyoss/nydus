@@ -21,7 +21,7 @@ use tracing::{info, Level};
 pub enum OptimizeType {
     /// An ondemand blob: the recorded chunk groups copied out of their source
     /// blobs in first-access order, with the bootstrap rewritten to prefetch it.
-    OndemandBlob,
+    Ondemand,
 }
 
 /// The subcommand of optimize.
@@ -30,9 +30,9 @@ pub struct OptimizeCommand {
     #[arg(
         long,
         value_enum,
-        default_value_t = OptimizeType::OndemandBlob,
+        default_value_t = OptimizeType::Ondemand,
         env = "NYDUS_OPTIMIZE_TYPE",
-        help = "Specify the artifact to build: ondemand-blob copies the recorded chunk groups into an ondemand blob and rewrites the bootstrap to prefetch it"
+        help = "Specify the artifact to build: ondemand copies the recorded chunk groups into an ondemand blob and rewrites the bootstrap to prefetch it"
     )]
     r#type: OptimizeType,
 
@@ -119,7 +119,7 @@ impl OptimizeCommand {
         // Runs the pipeline of the requested artifact, persisting its
         // artifacts and printing the summary.
         match self.r#type {
-            OptimizeType::OndemandBlob => self.run_ondemand_blob(&patterns, backend, &storage),
+            OptimizeType::Ondemand => self.run_ondemand_blob(&patterns, backend, &storage),
         }
     }
 

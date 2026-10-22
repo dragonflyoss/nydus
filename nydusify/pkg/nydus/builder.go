@@ -26,7 +26,7 @@ const DefaultBuilder = "nydus"
 const DefaultLogLevel = "info"
 
 // DefaultOptimizeType is the artifact `nydus optimize` builds by default.
-const DefaultOptimizeType = "ondemand-blob"
+const DefaultOptimizeType = "ondemand"
 
 // BuildOption describes a single `nydus build` invocation that converts a
 // directory tree or tar stream into a nydus full blob.
