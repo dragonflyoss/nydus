@@ -1,192 +1,266 @@
-use std::mem::MaybeUninit;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nydus_error::{Context, Error, Result};
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use tracing::{error, info, warn};
-
 use super::fs::ErofsFs;
-use super::mount::{finish_session, mount_dev_of};
+use super::mount::{connection_dead, finish_session, mount_dev_of};
+use super::upgrade::{
+    validate_fuse_connection, FuseInitState, SessionOwner, SessionRuntimeHandle, SessionTransfer,
+};
+use nydus_error::{Context, Error, Result};
 
-/// Mask over the termination signals ([`TERM_SIGNALS`] plus `SIGHUP`) that the
-/// mount lifecycle handles via `sigwait` instead of asynchronous handlers.
-pub struct TermSignalMask {
-    mask: libc::sigset_t,
-    restore_on_drop: bool,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SessionOrigin {
+    Fresh,
+    Adopted,
 }
 
-impl TermSignalMask {
-    fn new() -> Result<Self> {
-        let mut mask = unsafe { MaybeUninit::<libc::sigset_t>::zeroed().assume_init() };
-        let empty_ret = unsafe { libc::sigemptyset(&mut mask) };
-        if empty_ret != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("failed to initialize signal mask");
-        }
-        for signal in termination_signals() {
-            let add_ret = unsafe { libc::sigaddset(&mut mask, *signal) };
-            if add_ret != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("failed to add signal {signal} to mask"));
-            }
-        }
-
-        Ok(Self {
-            mask,
-            restore_on_drop: false,
-        })
-    }
-
-    /// Blocks the termination signals on the calling thread (and every thread
-    /// it spawns afterwards), returning a guard that restores the previous
-    /// mask on drop.
-    pub fn block() -> Result<Self> {
-        let mut mask = Self::new()?;
-
-        let mask_ret =
-            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &mask.mask, std::ptr::null_mut()) };
-        if mask_ret != 0 {
-            return Err(std::io::Error::from_raw_os_error(mask_ret))
-                .context("failed to block termination signals");
-        }
-
-        mask.restore_on_drop = true;
-        Ok(mask)
-    }
-
-    fn wait(&self) -> Result<i32> {
-        let mut signal = 0;
-        let wait_ret = unsafe { libc::sigwait(&self.mask, &mut signal) };
-        if wait_ret != 0 {
-            return Err(std::io::Error::from_raw_os_error(wait_ret))
-                .context("failed to wait for termination signal");
-        }
-        Ok(signal)
-    }
-}
-
-fn termination_signals() -> impl Iterator<Item = &'static libc::c_int> {
-    TERM_SIGNALS.iter().chain(std::iter::once(&SIGHUP))
-}
-
-impl Drop for TermSignalMask {
-    fn drop(&mut self) {
-        if self.restore_on_drop {
-            let _ = unsafe {
-                libc::pthread_sigmask(libc::SIG_UNBLOCK, &self.mask, std::ptr::null_mut())
-            };
-        }
-    }
-}
-
-/// A FUSE filesystem mounted and served on background threads, remembering
-/// which mount it created so teardown never unmounts a successor's mount.
+/// Background FUSE workers with ownership-aware teardown.
 pub struct FuseService {
     session: fuser::BackgroundSession,
     mountpoint: PathBuf,
+    handle: SessionRuntimeHandle,
+    origin: SessionOrigin,
+    mount_dev: Option<String>,
+    /// The ownership guard, shared with the filesystem so workers keep it alive.
+    owner: Arc<Mutex<Option<SessionOwner>>>,
 }
 
 impl FuseService {
     /// Mounts `fs` at `mountpoint` and starts serving it in the background.
+    ///
+    /// `mountpoint` must be absolute; relative paths are rejected before mounting.
     pub fn mount(fs: ErofsFs, mountpoint: &Path, config: &fuser::Config) -> Result<Self> {
-        let session = fuser::Session::new(fs, mountpoint, config)
-            .with_context(|| format!("failed to mount fuse session: {}", mountpoint.display()))?;
-        let session = session.spawn().context("failed to spawn fuse session")?;
+        if !mountpoint.is_absolute() {
+            return Err(Error::InvalidParameter(
+                "FUSE mountpoint must be an absolute path".into(),
+            ));
+        }
+        let owner = Arc::clone(&fs.owner);
+        let session = fuser::Session::new(fs, mountpoint, config).context("mount failed")?;
+        Self::start(session, mountpoint, SessionOrigin::Fresh, None, owner)
+    }
+
+    /// Adopts a transferred session with workers parked.
+    pub(super) fn adopt(
+        fs: ErofsFs,
+        mountpoint: &Path,
+        config: &fuser::Config,
+        transfer: SessionTransfer,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let (metadata, fuse_fd) = transfer.into_adoption();
+        if Path::new(&metadata.mountpoint) != mountpoint {
+            return Err(Error::InvalidParameter(format!(
+                "session transfer mountpoint mismatch: transfer uses {}, adoption requested {}",
+                metadata.mountpoint,
+                mountpoint.display()
+            )));
+        }
+        validate_fuse_connection(fuse_fd.as_fd()).context("invalid handed-over FUSE connection")?;
+        let state = metadata.fuse_session_state;
+        let negotiated = fuser::InitFlags::from_bits_retain(state.negotiated_init_flags);
+        fs.restore_init_flags(negotiated);
+        let owner = Arc::clone(&fs.owner);
+        let session = fuser::Session::from_initialized_fd(
+            fs,
+            fuse_fd,
+            config.acl,
+            config.clone(),
+            fuser::InitState {
+                proto_version: fuser::Version(state.proto_major, state.proto_minor),
+                negotiated,
+                kernel_capabilities: fuser::InitFlags::from_bits_retain(state.kernel_init_flags),
+            },
+        )
+        .context("failed to build a session on the handed-over fd")?;
+        Self::start(
+            session,
+            mountpoint,
+            SessionOrigin::Adopted,
+            Some(timeout),
+            owner,
+        )
+        .context("failed to adopt fuse session")
+    }
+
+    fn start(
+        session: fuser::Session<ErofsFs>,
+        mountpoint: &Path,
+        origin: SessionOrigin,
+        park_timeout: Option<Duration>,
+        owner: Arc<Mutex<Option<SessionOwner>>>,
+    ) -> Result<Self> {
+        // Capture handoff state before spawn consumes the session.
+        let fuse_fd = session
+            .as_fd()
+            .try_clone_to_owned()
+            .context("failed to dup the fuse fd")?;
+        let fuser::InitState {
+            proto_version: fuser::Version(proto_major, proto_minor),
+            negotiated,
+            kernel_capabilities,
+        } = session.init_state();
+        let init_state = FuseInitState {
+            proto_major,
+            proto_minor,
+            negotiated_init_flags: negotiated.bits(),
+            kernel_init_flags: kernel_capabilities.bits(),
+        };
+        let mount_dev = Some(
+            mount_dev_of(mountpoint)
+                .with_context(|| {
+                    format!(
+                        "failed to record the mount device of {}",
+                        mountpoint.display()
+                    )
+                })?
+                .ok_or_else(|| {
+                    Error::Runtime(format!(
+                        "no mount device found for {}",
+                        mountpoint.display()
+                    ))
+                })?,
+        );
+        let session = match park_timeout {
+            Some(timeout) => session
+                .spawn_paused(timeout)
+                .context("failed to prepare paused fuse workers")?,
+            None => session.spawn().context("spawn failed")?,
+        };
+        let handle =
+            SessionRuntimeHandle::new(session.pauser(), fuse_fd, init_state, Arc::clone(&owner));
         Ok(Self {
             session,
             mountpoint: mountpoint.to_path_buf(),
+            handle,
+            origin,
+            mount_dev,
+            owner,
         })
     }
 
-    /// Serves until the session ends on its own or a termination signal
-    /// arrives, then tears the mount down and returns the session's join
-    /// result. The caller is expected to have blocked the termination signals
-    /// with [`TermSignalMask::block`] before spawning any threads.
-    pub fn serve(self) -> Result<std::io::Result<()>> {
+    pub(super) fn runtime_handle(&self) -> SessionRuntimeHandle {
+        self.handle.clone()
+    }
+
+    pub(super) fn set_owner(&mut self, owner: SessionOwner) -> Result<()> {
+        let mut slot = self.owner.lock().unwrap();
+        if slot.is_some() {
+            return Err(Error::Runtime(
+                "session ownership is already assigned".into(),
+            ));
+        }
+        *slot = Some(owner);
+        Ok(())
+    }
+
+    pub(super) fn start_serving(&self) {
+        self.handle.resume();
+    }
+
+    /// Stops a failed startup: unmount fresh resources, preserve adopted mounts for retry.
+    pub(super) fn stop_unpublished(self) -> Result<()> {
+        let FuseService {
+            session,
+            mountpoint,
+            handle,
+            origin,
+            mount_dev,
+            owner,
+        } = self;
+        let _owner = owner;
+        if origin == SessionOrigin::Adopted {
+            // An adopted session owns no mount, so this cannot unmount it.
+            handle.exit();
+            return session
+                .join()
+                .context("failed to join the stopped fuse successor");
+        }
+        let released = handle.lifecycle().is_released();
+        finish_session(session, &mountpoint, origin, released, mount_dev.as_deref())
+            .context("failed to stop unpublished FUSE session")
+    }
+
+    /// Serves until shutdown or connection exit, then tears down only the owned mount.
+    pub fn serve(self, shutdown: &AtomicBool) -> std::io::Result<()> {
         let FuseService {
             session: bg,
             mountpoint,
+            handle,
+            origin,
+            mount_dev,
+            owner,
         } = self;
 
-        let wait_signals = TermSignalMask::new()?;
-        // Captured before anything can replace the mount, so the teardown below
-        // can tell our own mount apart from a successor's at the same path.
-        let our_dev = mount_dev_of(&mountpoint)
-            .with_context(|| format!("failed to read mount device of {}", mountpoint.display()))?;
-        let (unmount_tx, unmount_rx) = mpsc::channel::<i32>();
-        let (result_tx, result_rx) = mpsc::channel::<std::io::Result<()>>();
+        let _owner = owner;
+        let lifecycle = handle.lifecycle();
+        let fuse_fd = handle.fuse_fd_owner();
+        while !shutdown.load(Ordering::Relaxed)
+            && !lifecycle.is_released()
+            && !connection_dead(fuse_fd.as_fd())
+            && !bg.is_finished()
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Even a dead connection must exclude a concurrent handoff before teardown.
+        lifecycle.begin_teardown();
+        finish_session(
+            bg,
+            &mountpoint,
+            origin,
+            lifecycle.is_released(),
+            mount_dev.as_deref(),
+        )
+    }
+}
 
-        std::thread::Builder::new()
-            .name("nydus_fuse_controller".to_string())
-            .spawn(move || {
-                let mut bg = Some(bg);
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixStream;
 
-                loop {
-                    if bg.as_ref().is_some_and(|bg| bg.is_finished()) {
-                        let session = bg.take().expect("background session already taken");
-                        let result = finish_session(session, &mountpoint, our_dev.clone());
-                        let _ = result_tx.send(result);
-                        return;
-                    }
+    use super::*;
+    use crate::fuse::upgrade::test_support::{empty_session, fuse_init_state};
 
-                    match unmount_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(signal) => {
-                            let session = bg.take().expect("background session already taken");
-                            let result = finish_session(session, &mountpoint, our_dev.clone());
-                            if let Err(err) = &result {
-                                error!(
-                                    "failed to unmount after receiving signal {}: {:?}",
-                                    signal, err
-                                );
-                            }
-                            let _ = result_tx.send(result);
-                            return;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            let session = bg.take().expect("background session already taken");
-                            let result = finish_session(session, &mountpoint, our_dev.clone());
-                            let _ = result_tx.send(result);
-                            return;
-                        }
-                    }
-                }
-            })
-            .context("failed to spawn fuse controller thread")?;
+    fn stub_service(origin: SessionOrigin) -> (FuseService, UnixStream) {
+        let (session, kernel) = empty_session(fuser::InitFlags::empty());
+        let fuse_fd = session.as_fd().try_clone_to_owned().unwrap();
+        let background = if origin == SessionOrigin::Adopted {
+            session.spawn_paused(Duration::from_secs(5)).unwrap()
+        } else {
+            session.spawn().unwrap()
+        };
+        let owner = Arc::new(Mutex::new(None));
+        let handle = SessionRuntimeHandle::new(
+            background.pauser(),
+            fuse_fd,
+            fuse_init_state(),
+            Arc::clone(&owner),
+        );
+        let service = FuseService {
+            session: background,
+            mountpoint: PathBuf::from("/nonexistent-shutdown-unpublished-stub"),
+            handle,
+            origin,
+            mount_dev: None,
+            owner,
+        };
+        (service, kernel)
+    }
 
-        std::thread::Builder::new()
-            .name("nydus_fuse_signal".to_string())
-            .spawn(move || {
-                // The first termination signal hands the shutdown to the
-                // controller thread; a second signal while that graceful
-                // shutdown is in progress (e.g. a wedged unmount keeping the
-                // join blocked) forces exit rather than requiring SIGKILL.
-                let mut unmount_tx = Some(unmount_tx);
-                loop {
-                    match wait_signals.wait() {
-                        Ok(signal) => match unmount_tx.take() {
-                            Some(tx) => {
-                                info!("received signal {signal}, stopping nydus fuse session");
-                                let _ = tx.send(signal);
-                            }
-                            None => {
-                                warn!("received second signal {signal}, forcing immediate exit");
-                                std::process::exit(130);
-                            }
-                        },
-                        Err(err) => {
-                            error!("signal wait error: {}", err);
-                            return;
-                        }
-                    }
-                }
-            })
-            .context("failed to spawn signal thread")?;
+    #[test]
+    fn stop_unpublished_stops_fresh_and_adopted_sessions_without_a_real_mount() {
+        for origin in [SessionOrigin::Fresh, SessionOrigin::Adopted] {
+            let (service, _kernel) = stub_service(origin);
+            service.stop_unpublished().unwrap();
+        }
+    }
 
-        result_rx.recv().map_err(|err| {
-            Error::Runtime(format!("failed to receive fuse controller result: {err}"))
-        })
+    #[test]
+    fn serving_observes_shutdown_without_a_signal_thread() {
+        let (service, _kernel) = stub_service(SessionOrigin::Adopted);
+        service.serve(&AtomicBool::new(true)).unwrap();
     }
 }

@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuser::{
@@ -34,6 +34,8 @@ pub struct ErofsFs {
     reader: Arc<ErofsReader>,
     /// The image's metrics, every operation recorded into its `fs` group.
     metrics: Arc<metrics::Metrics>,
+    /// Workers retain ownership even if fuser detaches them during failed teardown.
+    pub(super) owner: Arc<Mutex<Option<super::upgrade::SessionOwner>>>,
     /// Kernel accepts ENOSYS from open/opendir as "stop sending them": file
     /// and directory opens then cost no FUSE round-trip at all and the dummy
     /// handles keep the page cache (KEEP_CACHE, and CACHE_DIR for dirs).
@@ -53,10 +55,23 @@ impl ErofsFs {
         Ok(Self {
             metrics: reader.metrics().clone(),
             reader,
+            owner: Arc::new(Mutex::new(None)),
             no_open: AtomicBool::new(false),
             no_opendir: AtomicBool::new(false),
             no_xattr,
         })
+    }
+
+    /// Restores INIT-derived opt-outs for an adopted session, which never sees INIT.
+    pub(super) fn restore_init_flags(&self, negotiated: InitFlags) {
+        self.no_open.store(
+            negotiated.contains(InitFlags::FUSE_NO_OPEN_SUPPORT),
+            Ordering::Relaxed,
+        );
+        self.no_opendir.store(
+            negotiated.contains(InitFlags::FUSE_NO_OPENDIR_SUPPORT),
+            Ordering::Relaxed,
+        );
     }
 
     fn ino_to_nid(&self, ino: u64) -> u64 {
@@ -782,6 +797,44 @@ mod tests {
         let marker = XattrEntry::new(b"trusted.nydus.no_xattr", b"1".to_vec()).unwrap();
         assert!(should_hide_xattr(FUSE_ROOT_ID, &marker));
         assert!(!should_hide_xattr(FUSE_ROOT_ID + 1, &marker));
+    }
+
+    #[test]
+    fn adopted_sessions_restore_init_opt_outs() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let mut writer = crate::build::plain_blob_writer(
+            fs::File::create(directory.path().join("data")).unwrap(),
+            EROFS_BLOCK_SIZE,
+        );
+        let mut inodes =
+            build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        writer.finish().unwrap();
+        resolve_chunk_addrs(&mut inodes, &writer).unwrap();
+        let bootstrap = directory.path().join("bootstrap");
+        fs::write(
+            &bootstrap,
+            render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap(),
+        )
+        .unwrap();
+        let filesystem = ErofsFs::new(Arc::new(
+            ErofsReader::open_metadata_only(&bootstrap).unwrap(),
+        ))
+        .unwrap();
+        for (negotiated, no_open, no_opendir) in [
+            (InitFlags::empty(), false, false),
+            (InitFlags::FUSE_NO_OPEN_SUPPORT, true, false),
+            (
+                InitFlags::FUSE_NO_OPEN_SUPPORT | InitFlags::FUSE_NO_OPENDIR_SUPPORT,
+                true,
+                true,
+            ),
+        ] {
+            filesystem.restore_init_flags(negotiated);
+            assert_eq!(filesystem.no_open.load(Ordering::Relaxed), no_open);
+            assert_eq!(filesystem.no_opendir.load(Ordering::Relaxed), no_opendir);
+        }
     }
 
     #[test]
