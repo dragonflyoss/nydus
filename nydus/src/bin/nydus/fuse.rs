@@ -4,8 +4,8 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_backend::{Backend, Local};
 use nydus_config::{Config, PrefetchConfig, PrefetchScope};
-use nydus_core::{ErofsReader, OndemandRecorder};
-use nydus_storage::prefetch::BlobPrefetcher;
+use nydus_core::prefetch::BlobPrefetcher;
+use nydus_core::{ErofsReader, OndemandRecord};
 use nydus_telemetry::logging::init_tracing;
 use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
@@ -207,10 +207,10 @@ impl FuseCommand {
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
         // explicit `--blob-dir` (local backend) or the backend from `--config`.
-        // The mount serves one image, so one `Metrics` and one ondemand record
+        // The mount serves one image, so one `Metrics` and one `OndemandRecord`
         // cover it all.
         let metrics = Arc::new(Metrics::new());
-        let ondemand_recorder = Arc::new(OndemandRecorder::default());
+        let ondemand_record = Arc::new(OndemandRecord::default());
         let backend: Option<Arc<dyn Backend>> = if self.blob.is_some() {
             None
         } else if let Some(dir) = self.blob_dir.as_ref() {
@@ -245,14 +245,14 @@ impl FuseCommand {
             (Some(blob), None, _) => ErofsReader::open_blob(
                 blob,
                 &storage,
-                Some(ondemand_recorder.clone()),
+                Some(ondemand_record.clone()),
                 metrics,
             ),
             (None, Some(bootstrap), Some(backend)) => ErofsReader::open_bootstrap(
                 bootstrap,
                 backend,
                 &storage,
-                Some(ondemand_recorder.clone()),
+                Some(ondemand_record.clone()),
             ),
             _ => {
                 return Err(Error::InvalidParameter(
@@ -307,17 +307,19 @@ impl FuseCommand {
         // Optionally expose Prometheus metrics over a Unix socket. A failure here is
         // non-fatal: the mount keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {
-            Some(address) => match api_server::ApiServer::start(
-                address,
-                reader.metrics().clone(),
-                ondemand_recorder,
-            ) {
-                Ok(server) => Some(server),
-                Err(err) => {
-                    warn!("failed to start metrics apiserver: {}", err.report());
-                    None
+            Some(address) => {
+                match api_server::ApiServer::start(
+                    address,
+                    reader.metrics().clone(),
+                    ondemand_record,
+                ) {
+                    Ok(server) => Some(server),
+                    Err(err) => {
+                        warn!("failed to start metrics apiserver: {}", err.report());
+                        None
+                    }
                 }
-            },
+            }
             None => None,
         };
 

@@ -17,10 +17,10 @@ use nydus_format::erofs::{
     ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
-use nydus_storage::cache::BlobCaches;
-use nydus_storage::ondemand::OndemandRecorder;
-use nydus_storage::prefetch::PrefetchPlan;
+use nydus_storage::{BlobCaches, OndemandRecord};
 use nydus_telemetry::metrics::Metrics;
+
+use crate::prefetch::PrefetchPlan;
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct RawDirEntry {
@@ -103,12 +103,12 @@ impl ErofsReader {
     /// backend is involved, and reads record into `metrics`. The caches
     /// follow the `storage` section; its `dir`, when set, caches the decoded
     /// chunk groups so repeat reads skip re-decoding from the blob.
-    /// `ondemand_recorder`, when given, records on-demand chunk group accesses
+    /// `ondemand_record`, when given, records on-demand chunk group accesses
     /// for `nydus optimize`.
     pub fn open_blob(
         blob_path: &Path,
         storage: &StorageConfig,
-        ondemand_recorder: Option<Arc<OndemandRecorder>>,
+        ondemand_record: Option<Arc<OndemandRecord>>,
         metrics: Arc<Metrics>,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(blob_path, false)?;
@@ -141,7 +141,7 @@ impl ErofsReader {
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             storage,
-            ondemand_recorder,
+            ondemand_record,
         )?;
 
         Ok(Self {
@@ -156,13 +156,13 @@ impl ErofsReader {
 
     /// Open a standalone bootstrap whose blob data is served by `backend`
     /// through per-blob caches following the `storage` section, diskless
-    /// without a `storage.dir`. `ondemand_recorder`, when given, records
-    /// on-demand chunk group accesses for `nydus optimize`.
+    /// without a `storage.dir`. `ondemand_record`, when given, records
+    /// the on-demand chunk group accesses `nydus optimize` reads.
     pub fn open_bootstrap(
         bootstrap_path: &Path,
         backend: Arc<dyn Backend>,
         storage: &StorageConfig,
-        ondemand_recorder: Option<Arc<OndemandRecorder>>,
+        ondemand_record: Option<Arc<OndemandRecord>>,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(bootstrap_path, true)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
@@ -177,7 +177,7 @@ impl ErofsReader {
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             storage,
-            ondemand_recorder,
+            ondemand_record,
         )?;
 
         Ok(Self {
@@ -385,7 +385,7 @@ impl ErofsReader {
     }
 
     /// The storage-side cache set shared with the read and prefetch paths,
-    /// e.g. to construct a [`nydus_storage::prefetch::BlobPrefetcher`].
+    /// e.g. to construct a [`crate::prefetch::BlobPrefetcher`].
     pub fn blob_caches(&self) -> Arc<BlobCaches> {
         self.blobs.clone()
     }
@@ -401,7 +401,7 @@ impl ErofsReader {
     pub(crate) fn blob_cache(
         &self,
         blob_index: u16,
-    ) -> io::Result<std::sync::Arc<dyn nydus_storage::cache::BlobCache>> {
+    ) -> io::Result<std::sync::Arc<dyn nydus_storage::BlobCache>> {
         self.blobs.cache(blob_index)
     }
 

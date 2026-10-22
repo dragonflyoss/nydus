@@ -116,8 +116,8 @@ impl Blobs {
                     .reader
                     .blob_cache(info.blob_index)
                     .with_context(|| format!("failed to open blob {}", info.blob_index))?;
-                let cache_path = cache.prepare().with_context(|| {
-                    format!("failed to prepare cache file for blob {}", info.blob_index)
+                let cache_path = cache.create_cache_file().with_context(|| {
+                    format!("failed to create cache file for blob {}", info.blob_index)
                 })?;
                 let cache_size = info
                     .blocks
@@ -168,10 +168,7 @@ impl Blobs {
     }
 
     /// Resolve a blob id to its device-table index and opened cache.
-    fn blob_cache_for(
-        &self,
-        id: &BlobId,
-    ) -> Result<(u16, Arc<dyn nydus_storage::cache::BlobCache>)> {
+    fn blob_cache_for(&self, id: &BlobId) -> Result<(u16, Arc<dyn nydus_storage::BlobCache>)> {
         let blob_index = *self.index_by_blob_id.get(id).ok_or_else(|| {
             Error::NotFound("blob is not referenced by the bootstrap".to_string())
         })?;

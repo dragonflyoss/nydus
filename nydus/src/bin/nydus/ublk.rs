@@ -160,14 +160,14 @@ impl UblkCommand {
             unprivileged: self.unprivileged,
         };
         let metrics = core.core().metrics().clone();
-        let ondemand_recorder = core.core().ondemand_recorder().clone();
+        let ondemand_record = core.core().ondemand_record().clone();
         let service = UblkService::new(core, &options)?;
         println!("{}", service.dev_path());
 
         // Non-fatal like the fuse service: the device keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {
             Some(address) => {
-                match crate::api_server::ApiServer::start(address, metrics, ondemand_recorder) {
+                match crate::api_server::ApiServer::start(address, metrics, ondemand_record) {
                     Ok(server) => Some(server),
                     Err(err) => {
                         warn!("failed to start metrics apiserver: {}", err.report());

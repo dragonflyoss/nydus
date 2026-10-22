@@ -1,6 +1,8 @@
 //! The blob-level prefetch after a mount: warms the local caches with the
 //! priority blobs the image declares, and optionally every remaining blob,
-//! so on-demand reads hit the cache instead of the backend.
+//! so on-demand reads hit the cache instead of the backend. The reader
+//! plans which blobs come first from the bootstrap, the caches of
+//! `nydus-storage` stream each blob; this module schedules them.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +14,7 @@ use tracing::{info, warn};
 
 use nydus_config::{PrefetchConfig, PrefetchScope};
 
-use crate::cache::BlobCaches;
+use nydus_storage::BlobCaches;
 
 /// The blob prefetch order: the `priority` blobs stream first, sequentially
 /// and in declared order; the `rest` follow through the worker pool when

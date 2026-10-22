@@ -3,6 +3,7 @@
 //! using the directory.
 
 mod chunk_group_map;
+mod flight;
 mod scatter;
 
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,115 +26,16 @@ use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::WriteKind;
 
-use super::decode::{
-    decode_chunk_group, verify_chunk_group, write_failure_reason, ChunkGroupBuffers,
-};
-use super::{write_data_via_scratch, BlobCache};
-use crate::ondemand::OndemandRecorder;
+use crate::buffer::ChunkGroupBuffers;
+use crate::decode::{decode_chunk_group, verify_chunk_group, write_failure_reason};
+use crate::{write_data_via_scratch, BlobCache, OndemandEntry, OndemandRecord};
 
 use self::chunk_group_map::ChunkGroupMap;
+use self::flight::{Flight, LeaderGuard};
 use self::scatter::ScatterBatch;
 
 /// The interval between two attempts at the cross-process prefetch lock.
 const PREFETCH_LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-
-/// The outcome of an in-process fill, published to its followers.
-#[derive(Clone)]
-enum FlightResult {
-    /// The fill succeeded.
-    Success,
-
-    /// The fill failed; the error is replayed to every follower.
-    Failure {
-        /// The kind of the error.
-        kind: io::ErrorKind,
-
-        /// The message of the error.
-        message: Arc<str>,
-    },
-}
-
-/// One in-process fill in progress: the leader publishes its result, every
-/// other reader of the same chunk groups waits for it.
-struct Flight {
-    /// The result, `None` until the leader publishes it.
-    result: Mutex<Option<FlightResult>>,
-
-    /// Wakes the followers once the result is published.
-    done: Condvar,
-}
-
-/// Implements the flight.
-impl Flight {
-    /// Creates a flight whose result is pending.
-    fn new() -> Self {
-        Self {
-            result: Mutex::new(None),
-            done: Condvar::new(),
-        }
-    }
-
-    /// Publishes `result` to every follower. Idempotent: a result already
-    /// published, by the leader or its guard, stays.
-    fn complete(&self, result: &io::Result<()>) {
-        let mut guard = self.result.lock().unwrap();
-        if guard.is_some() {
-            return;
-        }
-
-        *guard = Some(match result {
-            Ok(()) => FlightResult::Success,
-            Err(err) => FlightResult::Failure {
-                kind: err.kind(),
-                message: Arc::from(err.to_string()),
-            },
-        });
-        self.done.notify_all();
-    }
-
-    /// Waits for the result.
-    fn wait(&self) -> io::Result<()> {
-        let mut result = self.result.lock().unwrap();
-        while result.is_none() {
-            result = self.done.wait(result).unwrap();
-        }
-
-        match result.as_ref().unwrap() {
-            FlightResult::Success => Ok(()),
-            FlightResult::Failure { kind, message } => {
-                Err(io::Error::new(*kind, message.to_string()))
-            }
-        }
-    }
-}
-
-/// The guard of a fill's leader: publishes a failure to the followers and
-/// frees the in-flight slots when dropped, so a panic in the fill never
-/// leaves the followers waiting forever.
-struct LeaderGuard<'a> {
-    /// The flight the leader runs.
-    flight: Arc<Flight>,
-
-    /// The in-flight keys the leader registered: every chunk group of its
-    /// window.
-    keys: Range<usize>,
-
-    /// The in-flight fills of the cache.
-    inflight: &'a Mutex<HashMap<usize, Arc<Flight>>>,
-}
-
-/// Implements the release of the leader's flight.
-impl Drop for LeaderGuard<'_> {
-    fn drop(&mut self) {
-        self.flight.complete(&Err(io::Error::other(
-            "chunk group leader panicked or was abandoned",
-        )));
-        let mut inflight = self.inflight.lock().unwrap();
-        for key in self.keys.clone() {
-            inflight.remove(&key);
-        }
-    }
-}
 
 /// The plaintext blob cache: a sparse file mirroring the blob's padded
 /// address space, filled chunk group by chunk group from the backend, with
@@ -200,8 +102,8 @@ pub struct LocalBlobCache {
     /// The backend serving the blob.
     backend: Arc<dyn Backend>,
 
-    /// The ondemand record of the image, `None` when accesses are not traced.
-    ondemand_recorder: Option<Arc<OndemandRecorder>>,
+    /// The ondemand record of the image, `None` when accesses are not recorded.
+    ondemand_record: Option<Arc<OndemandRecord>>,
 
     /// The in-process fills by chunk group index; one flight covers every
     /// chunk group of its fetch window.
@@ -302,7 +204,7 @@ impl LocalBlobCache {
     /// Opens the cache of the blob `blob_id` described by `blob_metadata`
     /// under the storage directory, served by `backend` and following the
     /// `storage` section, recording its on-demand accesses as blob
-    /// `blob_index` into `ondemand_recorder` when set.
+    /// `blob_index` into `ondemand_record` when set.
     ///
     /// The cache file is created sparse and sized to the padded address
     /// space, and the chunk group map opened against it. A map left behind
@@ -314,7 +216,7 @@ impl LocalBlobCache {
         blob_metadata: BlobMetadata,
         backend: Arc<dyn Backend>,
         storage: &StorageConfig,
-        ondemand_recorder: Option<Arc<OndemandRecorder>>,
+        ondemand_record: Option<Arc<OndemandRecord>>,
     ) -> io::Result<Self> {
         let cache_dir = Self::cache_dir(storage)?;
         fs::create_dir_all(cache_dir)?;
@@ -363,7 +265,7 @@ impl LocalBlobCache {
             prefetch_lock_path: cache_dir.join(format!("{hex}.prefetch.lock")),
             cache_file: RwLock::new(None),
             backend,
-            ondemand_recorder,
+            ondemand_record,
             inflight: Mutex::new(HashMap::new()),
             cache_mmap: OnceLock::new(),
             skip_verify_checksums: storage.skip_verify_checksums,
@@ -463,7 +365,7 @@ impl LocalBlobCache {
     /// Runs ahead of the all-ready fast paths; a range an invalid read would
     /// reject is left to the read itself.
     fn record_ondemand_range(&self, offset: u64, len: usize) {
-        let Some(ondemand_recorder) = &self.ondemand_recorder else {
+        let Some(ondemand_record) = &self.ondemand_record else {
             return;
         };
         if self.recorded_chunk_groups.is_empty() || len == 0 {
@@ -478,7 +380,10 @@ impl LocalBlobCache {
 
         for index in span {
             if !self.recorded_chunk_groups[index].swap(true, Ordering::Relaxed) {
-                ondemand_recorder.record_chunk_group_access(self.blob_index, index as u32);
+                ondemand_record.push(OndemandEntry {
+                    blob_index: self.blob_index,
+                    chunk_group_index: index as u32,
+                });
             }
         }
     }
@@ -940,7 +845,7 @@ impl BlobCache for LocalBlobCache {
 
     /// Creates the sparse cache file sized to the padded address space and
     /// returns its path.
-    fn prepare(&self) -> io::Result<PathBuf> {
+    fn create_cache_file(&self) -> io::Result<PathBuf> {
         self.cache_file()?;
         Ok(self.cache_data_path.clone())
     }
@@ -1069,7 +974,7 @@ impl BlobCache for LocalBlobCache {
     /// chunk lengths the redirect copied at optimize time, so a stale
     /// optimize artifact or a corrupted transfer is caught before it can
     /// poison the cache, then writes and publishes it.
-    fn fill_chunk_group_from_redirect(
+    fn fill_chunk_group_from_ondemand_blob(
         &self,
         chunk_group_index: usize,
         payload: &[u8],
@@ -1226,9 +1131,9 @@ fn check_prefetch_deadline(deadline: Option<Instant>) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::decode::is_chunk_group_crc_mismatch;
-    use super::super::BlobCaches;
     use super::*;
+    use crate::decode::is_chunk_group_crc_mismatch;
+    use crate::BlobCaches;
     use nydus_backend::Local;
     use nydus_format::blob::{
         BlobMetadataChunkGroup, BlobMetadataChunkLength, BlobMetadataCompressor,
@@ -1557,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn read_at_traces_every_chunk_group_it_touches_once() {
+    fn read_at_records_every_chunk_group_it_touches_once() {
         let backend_dir = tempdir().unwrap();
         let (data, blob_metadata, _, image) = groups_blob();
         let full_blob_id = FullBlob::new(&data)
@@ -1566,7 +1471,7 @@ mod tests {
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = local_backend(backend_dir.path());
-        let recorder = Arc::new(OndemandRecorder::default());
+        let record = Arc::new(OndemandRecord::default());
         let storage = storage(cache_dir.path(), 1 << 20);
         let cached = LocalBlobCache::open(
             full_blob_id,
@@ -1574,7 +1479,7 @@ mod tests {
             LocalBlobCache::read_blob_metadata(full_blob_id, &backend, &storage).unwrap(),
             backend,
             &storage,
-            Some(recorder.clone()),
+            Some(record.clone()),
         )
         .unwrap();
 
@@ -1584,9 +1489,8 @@ mod tests {
         cached.read_at(16384 + 4096, &mut buf).unwrap();
         cached.read_at(3 * 16384, &mut buf[..16]).unwrap();
         cached.read_at(3 * 16384 + 16, &mut buf[..16]).unwrap();
-        let entries: Vec<(u16, u32)> = recorder
-            .snapshot()
-            .entries
+        let entries: Vec<(u16, u32)> = record
+            .entries()
             .iter()
             .map(|entry| (entry.blob_index, entry.chunk_group_index))
             .collect();

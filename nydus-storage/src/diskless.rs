@@ -18,8 +18,9 @@ use nydus_backend::Backend;
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-use super::decode::{verify_chunk_group, ChunkGroupBuffer};
-use super::BlobCache;
+use crate::buffer::ChunkGroupBuffer;
+use crate::decode::verify_chunk_group;
+use crate::BlobCache;
 
 /// A blob's chunk group: the blob id and the chunk group's table index.
 type ChunkGroupKey = ([u8; SHA256_DIGEST_SIZE], u32);
@@ -72,7 +73,7 @@ struct DecodedChunkGroupState {
 /// Implements the default cache, with the default limits.
 impl Default for DecodedChunkGroupCache {
     fn default() -> Self {
-        Self::with_limits(Self::DEFAULT_MAX_BYTES, Self::DEFAULT_MAX_ENTRIES)
+        Self::new(Self::DEFAULT_MAX_BYTES, Self::DEFAULT_MAX_ENTRIES)
     }
 }
 
@@ -87,7 +88,7 @@ impl DecodedChunkGroupCache {
 
     /// Creates an empty cache keeping at most `max_bytes` decoded bytes and
     /// `max_entries` chunk groups.
-    fn with_limits(max_bytes: usize, max_entries: usize) -> Self {
+    fn new(max_bytes: usize, max_entries: usize) -> Self {
         Self {
             max_bytes,
             max_entries,
@@ -113,10 +114,10 @@ impl DecodedChunkGroupCache {
         Some(group)
     }
 
-    /// Inserts the chunk group of `key`, evicting the least recently used
-    /// ones until it fits; a chunk group too large to admit or already
-    /// present is dropped.
-    fn insert(&self, key: ChunkGroupKey, group: DecodedChunkGroup) {
+    /// Puts the chunk group of `key` into the cache, evicting the least
+    /// recently used ones until it fits; a chunk group too large to admit or
+    /// already present is dropped.
+    fn put(&self, key: ChunkGroupKey, group: DecodedChunkGroup) {
         if !self.admits(group.len) {
             return;
         }
@@ -292,7 +293,7 @@ impl BlobCache for DisklessBlobCache {
                 continue;
             }
 
-            self.decoded_chunk_groups.insert(
+            self.decoded_chunk_groups.put(
                 (self.blob_id, group.index()),
                 DecodedChunkGroup {
                     buffer: decoded,
@@ -485,7 +486,7 @@ mod tests {
         );
 
         assert_eq!(
-            remote.prepare().unwrap_err().kind(),
+            remote.create_cache_file().unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
@@ -555,7 +556,7 @@ mod tests {
         let image = uncompressed_data(&groups);
         for (budget, fetches) in test_cases {
             let dir = tempdir().unwrap();
-            let cache = Arc::new(DecodedChunkGroupCache::with_limits(budget, 16));
+            let cache = Arc::new(DecodedChunkGroupCache::new(budget, 16));
             let (remote, backend) = open(dir.path(), BlobMetadataCompressor::Zstd, &groups, cache);
             let mut buf = vec![0u8; 4096];
             remote.read_at(0, &mut buf).unwrap();
@@ -572,7 +573,7 @@ mod tests {
         for (max_bytes, max_entries, capacity) in test_cases {
             let dir = tempdir().unwrap();
             let groups = groups(capacity + 1);
-            let cache = Arc::new(DecodedChunkGroupCache::with_limits(max_bytes, max_entries));
+            let cache = Arc::new(DecodedChunkGroupCache::new(max_bytes, max_entries));
             let (remote, backend) = open(
                 dir.path(),
                 BlobMetadataCompressor::Zstd,
@@ -604,7 +605,7 @@ mod tests {
     #[test]
     fn the_blobs_of_one_set_share_the_budget() {
         let groups = groups(3);
-        let cache = Arc::new(DecodedChunkGroupCache::with_limits(32 * 1024, 16));
+        let cache = Arc::new(DecodedChunkGroupCache::new(32 * 1024, 16));
         let first = tempdir().unwrap();
         let second = tempdir().unwrap();
         let (a, _) = open(

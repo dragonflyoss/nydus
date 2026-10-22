@@ -12,7 +12,7 @@ use std::time::Instant;
 use nydus_backend::{Backend, RawDeviceFile};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-use super::BlobCache;
+use crate::BlobCache;
 
 /// A blob cache passing every read through to the backend unchanged.
 ///
@@ -98,8 +98,8 @@ impl BlobCache for RawDeviceBlobCache {
         Ok((offset < end).then_some(offset..end).into_iter().collect())
     }
 
-    /// Returns the path of the backend's local file.
-    fn prepare(&self) -> io::Result<PathBuf> {
+    /// Returns the path of the backend's local file, which exists already.
+    fn create_cache_file(&self) -> io::Result<PathBuf> {
         Ok(self.mapped()?.path.clone())
     }
 
@@ -153,7 +153,7 @@ mod tests {
 
         assert!(cache.is_all_ready());
         assert_eq!(
-            cache.prepare().unwrap(),
+            cache.create_cache_file().unwrap(),
             dir.path().join(hex::encode(blob_id))
         );
         cache.ensure_range(0, 8192).unwrap();
@@ -216,7 +216,7 @@ mod tests {
         assert!(!cache.is_all_ready());
         for result in [
             cache.ensure_range(0, 4096),
-            cache.prepare().map(drop),
+            cache.create_cache_file().map(drop),
             cache.ready_ranges(0, 4096).map(drop),
         ] {
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);

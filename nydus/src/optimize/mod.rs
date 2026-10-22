@@ -1,10 +1,10 @@
-//! The `optimize` pipeline: turning a recorded chunk group ondemand record into
+//! The `optimize` pipeline: turning the ondemand record of a workload into
 //! an "ondemand" blob plus a rewritten bootstrap that prefetches it first.
 //!
 //! This is a top-level pipeline composing the read stack ([`nydus_core::reader`],
 //! `nydus-storage`) with the builder ([`crate::build`]): access patterns
 //! come from the apiserver `/trace` endpoint of a running `nydus fuse` mount
-//! ([`load_patterns_from_apiserver`]) or from a saved JSON ondemand document
+//! ([`load_patterns_from_apiserver`]) or from a saved JSON ondemand record
 //! ([`load_patterns_from_file`]); [`build_ondemand_blob`] then copies the
 //! accessed chunk groups out of the source blobs, byte for byte, into a
 //! ondemand blob in access order, and assembles the ondemand artifact and
@@ -30,8 +30,7 @@ use nydus_format::blob::{
     BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
-use nydus_storage::cache::{decode_chunk_group, LocalBlobCache};
-use nydus_storage::ondemand::{OndemandDocument, OndemandEntry, ONDEMAND_DOCUMENT_VERSION};
+use nydus_storage::{decode_chunk_group, LocalBlobCache, OndemandEntry, OndemandRecord};
 use sha2::{Digest, Sha256};
 
 /// Longest contiguous run of source chunk groups fetched in one backend
@@ -79,7 +78,7 @@ pub struct OndemandBlob {
     pub source_blob_count: usize,
 }
 
-/// One validated chunk group reference from the trace: a [`OndemandEntry`]
+/// One validated chunk group reference from the ondemand record: an [`OndemandEntry`]
 /// narrowed to the device-table index width, deduplicated and
 /// order-preserving.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -339,46 +338,39 @@ pub fn build_ondemand_blob(
 pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<ChunkGroupRef>> {
     let raw = fetch_ondemand_record(apiserver)
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
-    parse_ondemand_document(&raw)
+    parse_ondemand_record(&raw)
         .with_context(|| format!("failed to parse /trace response from {apiserver}"))
 }
 
-/// Load access patterns from a versioned JSON ondemand document
+/// Load access patterns from a versioned JSON ondemand record
 /// (`{"version":1,"patterns":[...]}`), exactly as produced by the
 /// apiserver `/trace` endpoint.
 pub fn load_patterns_from_file(path: &Path) -> Result<Vec<ChunkGroupRef>> {
     let raw =
         fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
-    parse_ondemand_document(&raw)
+    parse_ondemand_record(&raw)
         .with_context(|| format!("failed to parse trace file: {}", path.display()))
 }
 
-/// Parse the versioned ondemand document `{"version":1,"patterns":[...]}`.
-fn parse_ondemand_document(raw: &[u8]) -> Result<Vec<ChunkGroupRef>> {
-    let envelope: OndemandDocument = serde_json::from_slice(raw)?;
-    if envelope.version != ONDEMAND_DOCUMENT_VERSION {
-        return Err(Error::Unsupported(format!(
-            "unsupported ondemand document version: {}",
-            envelope.version
-        )));
-    }
-    dedup_patterns(envelope.entries)
+/// Parse the versioned ondemand record `{"version":1,"patterns":[...]}`.
+fn parse_ondemand_record(raw: &[u8]) -> Result<Vec<ChunkGroupRef>> {
+    dedup_patterns(OndemandRecord::from_json(raw)?.entries())
 }
 
 /// Deduplicate `(blob_index, chunk_group_index)` pairs while preserving
 /// first-access order, validating that every blob index is non-zero.
-fn dedup_patterns(patterns: Vec<OndemandEntry>) -> Result<Vec<ChunkGroupRef>> {
+fn dedup_patterns(entries: Vec<OndemandEntry>) -> Result<Vec<ChunkGroupRef>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for pattern in patterns {
-        if pattern.blob_index == 0 {
+    for entry in entries {
+        if entry.blob_index == 0 {
             return Err(Error::InvalidParameter(
                 "pattern blob index must be non-zero".to_string(),
             ));
         }
         let group = ChunkGroupRef {
-            blob_index: pattern.blob_index,
-            chunk_group_index: pattern.chunk_group_index,
+            blob_index: entry.blob_index,
+            chunk_group_index: entry.chunk_group_index,
         };
         if seen.insert(group) {
             ordered.push(group);
@@ -434,7 +426,7 @@ mod tests {
             {"blob_index":1,"chunk_group_index":4},
             {"blob_index":1,"chunk_group_index":4},
             {"blob_index":2,"chunk_group_index":7}]}"#;
-        let patterns = parse_ondemand_document(doc).unwrap();
+        let patterns = parse_ondemand_record(doc).unwrap();
         assert_eq!(
             patterns,
             vec![
@@ -450,10 +442,10 @@ mod tests {
         );
 
         // Wrong version is rejected.
-        let err = parse_ondemand_document(br#"{"version":2,"patterns":[]}"#).unwrap_err();
+        let err = parse_ondemand_record(br#"{"version":2,"patterns":[]}"#).unwrap_err();
         assert!(err.to_string().contains("version"), "{err}");
 
         // The legacy unversioned document is no longer accepted.
-        assert!(parse_ondemand_document(br#"{"patterns":[]}"#).is_err());
+        assert!(parse_ondemand_record(br#"{"patterns":[]}"#).is_err());
     }
 }
