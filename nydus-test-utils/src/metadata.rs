@@ -3,7 +3,7 @@
 
 use nydus_format::blob::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
-    BlobMetadataChunkGroupOndemandSource, BlobMetadataChunkLength, BlobMetadataCompressor,
+    BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength, BlobMetadataCompressor,
     BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
@@ -127,7 +127,7 @@ pub fn single_chunk_group_upper(payload: &[u8]) -> BlobMetadata {
     .unwrap()
 }
 
-/// [`single_chunk_group`] with a ChunkGroupOndemandSourceTable: the blob meta of a
+/// [`single_chunk_group`] with a ChunkGroupRedirectTable: the blob meta of a
 /// ondemand blob, whose one group copies group 0 of the blob in device slot
 /// `source_blob_index`.
 pub fn single_chunk_group_ondemand(payload: &[u8], source_blob_index: u16) -> BlobMetadata {
@@ -146,7 +146,7 @@ pub fn single_chunk_group_ondemand(payload: &[u8], source_blob_index: u16) -> Bl
         chunk_groups,
         chunk_lengths,
         Vec::new(),
-        vec![BlobMetadataChunkGroupOndemandSource::new(source_blob_index, 0).unwrap()],
+        vec![BlobMetadataChunkGroupRedirect::new(source_blob_index, 0).unwrap()],
     )
     .unwrap()
 }

@@ -635,11 +635,11 @@ impl LocalBlobCache {
                 Err(err) => {
                     failed += 1;
                     self.backend.metrics().cache.collect_write_failure_metrics(
-                        WriteKind::OndemandBlob,
+                        WriteKind::Redirect,
                         write_failure_reason(&err),
                     );
                     warn!(
-                        "skipping ondemand chunk group {index} of blob {}: {err}",
+                        "skipping redirect chunk group {index} of blob {}: {err}",
                         self.blob_index
                     );
                 }
@@ -906,7 +906,7 @@ impl BlobCache for LocalBlobCache {
         Ok((bytes.into_inner(), failed.into_inner()))
     }
 
-    fn fill_chunk_group_from_ondemand_blob(
+    fn fill_chunk_group_from_redirect(
         &self,
         chunk_group_index: usize,
         payload: &[u8],
@@ -917,13 +917,13 @@ impl BlobCache for LocalBlobCache {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "ondemand fill chunk group index out of range",
+                    "redirect fill chunk group index out of range",
                 )
             })?;
         if self.chunk_group_ready(chunk_group_index)? {
             return Ok(());
         }
-        // Cross-check against this blob's own metadata: the ondemand group's
+        // Cross-check against this blob's own metadata: the redirect group's
         // crc32 and chunk lengths were copied from this group at optimize
         // time, so any divergence (stale optimize artifact, corrupted
         // transfer) is caught here before it can poison the cache.
@@ -931,7 +931,7 @@ impl BlobCache for LocalBlobCache {
         let cache_file = self.cache_file()?;
         self.write_chunk_group(&group, payload, cache_file.as_ref())?;
         self.backend.metrics().cache.collect_write_finished_metrics(
-            WriteKind::OndemandBlob,
+            WriteKind::Redirect,
             u64::from(group.uncompressed_size()),
         );
         Ok(())

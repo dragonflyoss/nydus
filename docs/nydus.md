@@ -526,7 +526,7 @@ fewer entries, smaller groups let a read of one small file fetch and decode
 less and let the ondemand blob copy less around the recorded chunks. The
 on-demand fetch size (`storage.fetch_size`) is independent of it and is
 the read-ahead knob. `nydus check` reports the group, chunk, digest and
-ondemand source counts and the payload size per blob.
+redirect counts and the payload size per blob.
 
 #### Native EROFS output
 
@@ -675,7 +675,7 @@ The `nydus optimize` command builds a compact "ondemand" blob from a recorded
 chunk group access pattern and rewrites the bootstrap so the runtime
 prefetches it first. The ondemand blob holds the recorded
 chunk groups, in first-access order, copied byte for byte out of their
-source blobs — encoded payload, chunk lengths and digests — with an ondemand source
+source blobs — encoded payload, chunk lengths and digests — with a redirect
 table naming the source blob and chunk group of every copy. Nothing is
 decoded or recompressed, and the bootstrap keeps every chunk index pointing
 at the source blobs: the ondemand blob is never read through the filesystem.
@@ -715,7 +715,7 @@ Current implementation notes:
 	one entry per chunk group read); entries are deduplicated preserving
 	first-access order. Run the workload against the mount before invoking
 	optimize so the ondemand record is populated.
-- `--trace-file` (alias `--pattern`) is the offline alternative to `--apiserver` (the two are
+- `--trace-file` is the offline alternative to `--apiserver` (the two are
 	mutually exclusive; one of them is required). It accepts the same versioned
 	ondemand document as produced by the `/trace` endpoint, so a record captured
 	from a pmem/core mount can be replayed without a live apiserver.
@@ -742,7 +742,7 @@ Current implementation notes:
 	blob digest-free too.
 - The ondemand artifact layout is `[chunk groups][blob meta][footer]` with
 	`bootstrap_size = 0` (no embedded bootstrap); its blob meta carries a
-	ChunkGroupOndemandSourceTable, see
+	ChunkGroupRedirectTable, see
 	[Ondemand blob layout](#ondemand-blob-layout). It is
 	fetched and checked like any blob but never builds a cache of its own.
 
@@ -776,7 +776,7 @@ Current implementation notes:
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
 	`max_bytes_per_chunk_group`, `bytes_per_chunk_group_index`, `chunk_group_count`,
 	`chunk_compressor`, the chunk, digest
-	and ondemand source counts (`BLOB META ONDEMAND SOURCES` is non-zero only for an ondemand
+	and redirect counts (`BLOB META REDIRECTS` is non-zero only for an ondemand
 	blob), and payload/compressed/uncompressed totals when the referenced blob
 	can be resolved.
 - `--blob-dir` resolves by scanning full blob candidates. Device slots normally
@@ -1340,7 +1340,7 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 
 | Label | Meaning | Values |
 | --- | --- | --- |
-| `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `ondemand_blob` |
+| `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `redirect` |
 | `source` | where the backend read its bytes | `local`, `origin`, `proxy`, `dragonfly`, `fallback` |
 | `reason` | why the cache write failed | `decode`, `checksum`, `io`, `unknown_source` |
 | `status` | whether the image bytes are in the local cache | `cached`, `uncached` |
@@ -1388,18 +1388,18 @@ Cache (`nydus_cache_*`):
 	`nydus_cache_write_bytes_total{type}` — chunk groups written into the
 	cache, failed ones included, the failed ones alone, and the uncompressed
 	bytes of the successful ones: `type="ondemand"` after an on-demand miss,
-	`type="prefetch"` by the prefetch of a regular blob, `type="ondemand_blob"`
+	`type="prefetch"` by the prefetch of a regular blob, `type="redirect"`
 	filled into a source blob from the ondemand blob during
 	phase-0 prefetch. A failure is a group that did not reach the cache,
 	`reason` saying why: `checksum`, its crc32c mismatched the blob meta
 	(corruption in transit or at rest); `decode`, it did not decompress to
-	its declared size, or on an `ondemand_blob` fill the ondemand source points past its
+	its declared size, or on a `redirect` fill the redirect points past its
 	source blob's chunk groups (a stale optimize artifact); `io`, the cache
-	file refused the write; and on the `ondemand_blob` fills `unknown_source`,
-	the ondemand source names a blob the image does not have. Normally zero. Summing `type="ondemand"` across the instances sharing a
+	file refused the write; and on the `redirect` fills `unknown_source`,
+	the redirect names a blob the image does not have. Normally zero. Summing `type="ondemand"` across the instances sharing a
 	cache directory shows how much duplicate fetching they do. After an
 	optimized mount's prefetch quiesces,
-	`nydus_cache_write_total{type="ondemand_blob"}` equals the number of recorded
+	`nydus_cache_write_total{type="redirect"}` equals the number of recorded
 	chunk groups filled into local storage.
 - `nydus_cache_bytes{status}` — a gauge of the image the cache serves,
 	its uncompressed bytes split by whether the cache file holds them:
@@ -1713,7 +1713,7 @@ table_count tables back to back, each at the next 8-byte boundary:
   ChunkLengthTable        type 2  16-byte header + chunk_count * 4 bytes
   ChunkGroupIndexTable type 3  24-byte header + ceil(cache_bytes / bytes_per_chunk_group_index) * 4 bytes
   ChunkGroupDigestTable       type 4  24-byte header + group_count * 32 bytes, when enabled
-  ChunkGroupOndemandSourceTable     type 5  16-byte header + group_count * 8 bytes, ondemand blobs only
+  ChunkGroupRedirectTable     type 5  16-byte header + group_count * 8 bytes, ondemand blobs only
 Zero padding to a 4096-byte multiple
 ```
 
@@ -1810,7 +1810,7 @@ The last entry ends the table: its first three fields contain total data
 bytes, total cache blocks and total chunks; its payload size and CRC fields
 are reserved (written zero, ignored by readers).
 The group count is therefore the entry count minus one; the header does not
-store it. The last entry has no ChunkGroupDigestTable or ChunkGroupOndemandSourceTable entry. An empty
+store it. The last entry has no ChunkGroupDigestTable or ChunkGroupRedirectTable entry. An empty
 blob has just this zero last entry and no other table entries.
 
 Stored size equal to decoded payload size means plain data, even if the
@@ -1872,7 +1872,7 @@ meta preserves the tables the reader does not know.
 	`crc32c` guards the bytes (`storage.skip_verify_checksums`), the digest
 	names them.
 
-Ondemand source details (ondemand blobs only):
+Redirect details (ondemand blobs only):
 
 - Entry `i` is 8 bytes: a two-byte nonzero `source_blob_index`, the EROFS
 	device index of a source blob, two reserved bytes, and a four-byte
@@ -2010,10 +2010,10 @@ Hash and validation summary:
 
 `nydus optimize` emits one extra "ondemand" blob and appends it to the image
 as a new layer. It is a full blob without an embedded bootstrap
-(`bootstrap_size = 0`) whose blob meta carries a ChunkGroupOndemandSourceTable:
+(`bootstrap_size = 0`) whose blob meta carries a ChunkGroupRedirectTable:
 every chunk group is a byte-exact copy of a recorded chunk group of a source
 blob — encoded payload, payload size, chunk lengths, digest and CRC32C —
-laid out in first-access order, and the ondemand source table names the source
+laid out in first-access order, and the redirect table names the source
 blob and chunk group of each copy. Groups are decoded for validation but
 their encoded bytes are copied without recompression, so the blob shares the sources' compressor
 and introduces no new filesystem addresses.
@@ -2027,13 +2027,13 @@ ondemand blob — named by SHA256(full blob), one new nydus layer
 |  source groups, in first-access|
 |  order                         |
 +--------------------------------+
-| blob meta (has ChunkGroupOndemandSourceTable)  |
+| blob meta (has ChunkGroupRedirectTable)  |
 |  Header (24 bytes, crc32c)      |
 |  ChunkGroupTable                    |
 |  ChunkLengthTable                    |
 |  ChunkGroupIndexTable             |
 |  ChunkGroupDigestTable                   |
-|  ChunkGroupOndemandSourceTable                 |
+|  ChunkGroupRedirectTable                 |
 |   (source blob, source group)  |
 +--------------------------------+
 | footer (bootstrap_size = 0)    |
@@ -2404,7 +2404,7 @@ ChunkGroupTable        data/block/chunk starts, payload sizes and CRC32C
 ChunkLengthTable        u32 length for every stored chunk
 ChunkGroupIndexTable u32 group index per `bytes_per_chunk_group_index`
 ChunkGroupDigestTable       BLAKE3 per group, when enabled
-ChunkGroupOndemandSourceTable     source blob and group, for ondemand blobs only
+ChunkGroupRedirectTable     source blob and group, for ondemand blobs only
 
 <hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
 +---------------------------------+----------------------+
@@ -2462,7 +2462,7 @@ way a classic nydusd mount would. The resolution is logged.
 1. Priority blobs are prefetched first, sequentially, in the order listed by the
         root inode's `trusted.nydus.prefetch.blobs` xattr (a comma-separated list of
         device ids). The list is deduplicated and filtered to existing devices. The
-        "ondemand" priority blobs (their blob meta carries a ChunkGroupOndemandSourceTable) are
+        "ondemand" priority blobs (their blob meta carries a ChunkGroupRedirectTable) are
         always streamed first regardless of their position in the list. Under
         `ondemand` they are the only blobs warmed; other priority blobs are skipped
         so backend bandwidth is not spent pulling whole source blobs. Under `all` the
@@ -2477,13 +2477,13 @@ way a classic nydusd mount would. The resolution is logged.
         rather than after it; the `auto` decision reuses those opens. An
         optimized image lists every blob in its prefetch xattr, so without this
         the phase 1 ondemand blob checks alone would open the caches
-	one blob at a time; with it neither those checks, nor the ondemand blob fills
+	one blob at a time; with it neither those checks, nor the redirect fills
 	into the source caches, nor a later first read of any blob, nor a
 	block-device frontend's probe of many blobs right after the device appears
 	pays the round trips serially.
 
 The ondemand blob (produced by `nydus optimize`, listed first in the xattr)
-is an ondemand blob (its blob meta has a ChunkGroupOndemandSourceTable): it is streamed in the order it was packed — the
+is an ondemand blob (its blob meta has a ChunkGroupRedirectTable): it is streamed in the order it was packed — the
 workload's first-access order — and every decoded group is written into its
 **source** blob's cache at the source group's blocks (after the length and
 CRC32C checks) and marked ready there, so the earliest reads find their
@@ -2493,7 +2493,7 @@ file of its own. Groups whose source is already cached — by another process
 sharing the directory, or by a previous run — are trimmed off the batches
 and not fetched. Per-group failures (decode or CRC errors, an unknown source
 blob, a failed fill) are logged, counted in
-`nydus_cache_write_failure_total{type="ondemand_blob"}`
+`nydus_cache_write_failure_total{type="redirect"}`
 and skipped, so a bad copy can only lose warmup, never poison a source cache
 or abort the prefetch. The prefetch logs how long the ondemand blob took and
 how many groups it filled and skipped, so operators can tell whether the
@@ -3225,7 +3225,7 @@ Publishes an optimized copy of a nydus image from a recorded access pattern:
 	ids and history are updated.
 4. Push the result to `--target`.
 
-`--trace-file` (alias `--pattern`) is the JSON saved from a mount's
+`--trace-file` is the JSON saved from a mount's
 `GET /trace` endpoint, the same file `nydus optimize --trace-file` takes
 (`{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4},...]}`,
 one entry per chunk group read). It can be

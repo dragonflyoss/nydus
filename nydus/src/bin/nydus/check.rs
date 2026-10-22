@@ -531,8 +531,8 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         blob_meta_chunks: String,
         #[tabled(rename = "BLOB META DIGESTER")]
         blob_meta_digester: String,
-        #[tabled(rename = "BLOB META ONDEMAND SOURCES")]
-        blob_meta_ondemand_sources: String,
+        #[tabled(rename = "BLOB META REDIRECTS")]
+        blob_meta_redirects: String,
         #[tabled(rename = "BLOB PAYLOAD SIZE")]
         blob_payload_size: String,
         #[tabled(rename = "BLOB COMPRESSED SIZE")]
@@ -576,9 +576,7 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
             chunk_compressor: blob_metadata_field(blob, |meta| meta.compressor),
             blob_meta_chunks: blob_metadata_field(blob, |meta| meta.chunk_count),
             blob_meta_digester: blob_metadata_field(blob, |meta| meta.digester.clone()),
-            blob_meta_ondemand_sources: blob_metadata_field(blob, |meta| {
-                meta.ondemand_source_count
-            }),
+            blob_meta_redirects: blob_metadata_field(blob, |meta| meta.redirect_count),
             blob_payload_size: blob_metadata_field(blob, |meta| meta.total_payload_size),
             blob_compressed_size: blob_metadata_field_or(
                 blob,

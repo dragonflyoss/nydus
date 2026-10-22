@@ -169,9 +169,9 @@ pub struct BlobMetadataSummary {
     /// The chunk group digester, `none` without one, or why the reader
     /// cannot tell.
     pub digester: String,
-    /// Ondemand source table entries: every chunk group of an ondemand
+    /// Redirect table entries: every chunk group of an ondemand
     /// blob, zero otherwise.
-    pub ondemand_source_count: usize,
+    pub redirect_count: usize,
 }
 
 /// Which digest the device slot's blob ID turned out to be.
@@ -684,7 +684,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
             Ok(None) => "none".to_string(),
             Err(err) => err.to_string(),
         },
-        ondemand_source_count: if blob_metadata.is_ondemand() {
+        redirect_count: if blob_metadata.is_ondemand() {
             blob_metadata.chunk_group_count()
         } else {
             0

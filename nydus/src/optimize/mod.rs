@@ -25,7 +25,7 @@ use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{
-    BlobFooter, BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupOndemandSource,
+    BlobFooter, BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect,
     BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
@@ -96,7 +96,7 @@ pub struct ChunkGroupRef {
 /// Every recorded chunk group's encoded payload is read from its source blob
 /// (and decoded once to validate it), then appended verbatim to the new
 /// blob in access order together with its chunk lengths and digests; the
-/// ondemand source table names the source of every copy. The bootstrap keeps every
+/// redirect table names the source of every copy. The bootstrap keeps every
 /// chunk index as it was: the ondemand blob is never read through it.
 pub fn build_ondemand_blob(
     parent_bootstrap: &Path,
@@ -256,7 +256,7 @@ pub fn build_ondemand_blob(
     // one ends.
     let mut data = Vec::new();
     let mut chunk_groups = Vec::with_capacity(patterns.len() + 1);
-    let mut ondemand_sources = Vec::with_capacity(patterns.len());
+    let mut redirects = Vec::with_capacity(patterns.len());
     let mut members = Vec::new();
     let mut digests = Vec::new();
     let mut logical_block_offset = 0u32;
@@ -277,7 +277,7 @@ pub fn build_ondemand_blob(
             group.uncompressed_size(),
             group.uncompressed_crc32(),
         ));
-        ondemand_sources.push(BlobMetadataChunkGroupOndemandSource::new(
+        redirects.push(BlobMetadataChunkGroupRedirect::new(
             reference.blob_index,
             reference.chunk_group_index,
         )?);
@@ -318,7 +318,7 @@ pub fn build_ondemand_blob(
         chunk_groups,
         members,
         digests,
-        ondemand_sources,
+        redirects,
     )
     .context("failed to assemble ondemand blob meta")?;
     let uncompressed_blocks = blob_metadata.logical_block_count();

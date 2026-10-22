@@ -23,9 +23,8 @@ pub use digester::BlobMetadataDigester;
 pub use footer::BlobFooter;
 pub use metadata::{
     BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
-    BlobMetadataChunkGroupExtent, BlobMetadataChunkGroupIndex,
-    BlobMetadataChunkGroupOndemandSource, BlobMetadataChunkLength, BlobMetadataHeader,
-    BlobMetadataTable, BlobMetadataTableType,
+    BlobMetadataChunkGroupExtent, BlobMetadataChunkGroupIndex, BlobMetadataChunkGroupRedirect,
+    BlobMetadataChunkLength, BlobMetadataHeader, BlobMetadataTable, BlobMetadataTableType,
 };
 
 /// Finishes a full blob by appending everything behind the data region to

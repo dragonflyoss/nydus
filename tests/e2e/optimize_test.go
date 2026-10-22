@@ -21,12 +21,12 @@ import (
 //  2. Mount the nydus image WITHOUT prefetch, replay a read workload, and
 //     verify the baseline metrics show on-demand backend reads. Save the
 //     recorded /trace pattern to a file and run `nydusify optimize
-//     --pattern` to repack the recorded chunks into the ondemand blob and push
+//     --trace-file` to repack the recorded chunks into the ondemand blob and push
 //     the optimized image.
 //  3. Mount the optimized image WITH prefetch on a cold cache, wait for
 //     prefetch to quiesce, replay the same workload, and verify:
 //     - every recorded chunk group was filled into its source blob's cache
-//     through the ondemand blob path (nydus_cache_write_total{type="ondemand_blob"}
+//     through the redirect path (nydus_cache_write_total{type="redirect"}
 //     == ondemand record size, no failures),
 //     - the workload triggered zero on-demand backend reads
 //     (nydus_backend_read_total{type="ondemand"} == 0), proving the
@@ -98,18 +98,18 @@ func TestNydusifyOptimize(t *testing.T) {
 		metrics := util.FetchMetrics(t, socket)
 		assert.Greater(util.SumMetric(metrics, "nydus_backend_read_total", `type="ondemand"`), 0.0,
 			"baseline workload must trigger on-demand backend reads")
-		assert.Zero(util.SumMetric(metrics, "nydus_cache_write_total", `type="ondemand_blob"`))
+		assert.Zero(util.SumMetric(metrics, "nydus_cache_write_total", `type="redirect"`))
 		assert.Zero(util.SumMetric(metrics, "nydus_backend_read_total", `type="prefetch"`),
 			"baseline mount must not prefetch")
 
-		ondemandCount = util.SaveOndemandRecord(t, socket, filepath.Join(workDir, "pattern.json"))
+		ondemandCount = util.SaveOndemandRecord(t, socket, filepath.Join(workDir, "trace.json"))
 		assert.Greater(ondemandCount, 1, "ondemand record must cover multiple groups")
 		t.Logf("baseline: ondemand_reads=%v ondemand_chunk_groups=%d",
 			util.SumMetric(metrics, "nydus_backend_read_total", `type="ondemand"`), ondemandCount)
 
 		t.Log("Optimizing with the saved ondemand record...")
 		util.RunNydusify(t, nydusifyBin, nydusBin, "optimize",
-			"--pattern", filepath.Join(workDir, "pattern.json"),
+			"--trace-file", filepath.Join(workDir, "trace.json"),
 			"--source", nydusRef,
 			"--target", optimizedRef,
 			"--work-dir", filepath.Join(workDir, "optimize"))
@@ -123,26 +123,26 @@ func TestNydusifyOptimize(t *testing.T) {
 		defer unmount()
 
 		// Prefetch must pull the ondemand blob and fill every recorded group
-		// through the ondemand blob path without an on-demand read.
+		// through the redirect path without an on-demand read.
 		socket := filepath.Join(optimizedWorkDir, "apiserver.sock")
 		util.WaitMetricSettled(t, socket, "nydus_backend_read_total", `type="prefetch"`)
 		metrics := util.FetchMetrics(t, socket)
 		assert.Greater(util.SumMetric(metrics, "nydus_backend_read_total", `type="prefetch"`), 0.0,
 			"prefetch must fetch the ondemand blob from the backend")
-		assert.Equal(float64(ondemandCount), util.SumMetric(metrics, "nydus_cache_write_total", `type="ondemand_blob"`),
-			"every recorded group must be filled into its source cache from the ondemand blob")
-		assert.Zero(util.SumMetric(metrics, "nydus_cache_write_failure_total", `type="ondemand_blob"`),
-			"no ondemand chunk group may be skipped on a cold cache")
+		assert.Equal(float64(ondemandCount), util.SumMetric(metrics, "nydus_cache_write_total", `type="redirect"`),
+			"every recorded group must be filled into its source cache via redirect")
+		assert.Zero(util.SumMetric(metrics, "nydus_cache_write_failure_total", `type="redirect"`),
+			"no redirect chunk group may be skipped on a cold cache")
 		assert.Zero(util.SumMetric(metrics, "nydus_backend_read_total", `type="ondemand"`),
 			"prefetch warmup must not issue on-demand reads")
 		cachedBytes := util.SumMetric(metrics, "nydus_cache_bytes", `status="cached"`)
-		assert.Equal(util.SumMetric(metrics, "nydus_cache_write_bytes_total", `type="ondemand_blob"`), cachedBytes,
-			"the warmed bytes are exactly the ondemand blob fills on a cold cache")
+		assert.Equal(util.SumMetric(metrics, "nydus_cache_write_bytes_total", `type="redirect"`), cachedBytes,
+			"the warmed bytes are exactly the redirect fills on a cold cache")
 		assert.GreaterOrEqual(util.SumMetric(metrics, "nydus_cache_bytes", `status="uncached"`), 0.0,
 			"the cache cannot hold more than the image")
-		t.Logf("optimized after prefetch: prefetch_reads=%v ondemand_blob_fills=%v cached_bytes=%v image_bytes=%v",
+		t.Logf("optimized after prefetch: prefetch_reads=%v redirect_fills=%v cached_bytes=%v image_bytes=%v",
 			util.SumMetric(metrics, "nydus_backend_read_total", `type="prefetch"`),
-			util.SumMetric(metrics, "nydus_cache_write_total", `type="ondemand_blob"`),
+			util.SumMetric(metrics, "nydus_cache_write_total", `type="redirect"`),
 			cachedBytes,
 			util.SumMetric(metrics, "nydus_cache_bytes"))
 

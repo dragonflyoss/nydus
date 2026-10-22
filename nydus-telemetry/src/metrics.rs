@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! type      what triggered the backend read        ondemand | prefetch
-//!           or what wrote the chunk group           ondemand | prefetch | ondemand_blob
+//!           or what wrote the chunk group           ondemand | prefetch | redirect
 //! source    where the backend read the bytes       local | origin | proxy | dragonfly | fallback
 //! reason    why the cache write failed             decode | checksum | io | unknown_source
 //! status    whether the image bytes are cached     cached | uncached
@@ -42,13 +42,13 @@
 //! registry backend reading the origin registry itself, `proxy` for it
 //! reading through an HTTP forward proxy, `dragonfly` for it reading the
 //! Dragonfly seed peers and `fallback` for a read Dragonfly could not serve
-//! that went back to the origin. `type` is `ondemand_blob` only on the cache
+//! that went back to the origin. `type` is `redirect` only on the cache
 //! writes, for a chunk group filled into its source blob from the ondemand
 //! blob. `reason` tells a corrupted chunk group (`checksum`, the
 //! crc32c mismatched; `decode`, it did not decompress to its declared
-//! size, or an ondemand source points past its source blob's chunk groups) from a
-//! cache that cannot be written (`io`) and, on the ondemand blob fills, from a
-//! an ondemand source naming a blob the image does not have (`unknown_source`).
+//! size, or a redirect points past its source blob's chunk groups) from a
+//! cache that cannot be written (`io`) and, on the redirect fills, from a
+//! redirect naming a blob the image does not have (`unknown_source`).
 
 use std::fmt;
 use std::time::Duration;
@@ -572,7 +572,7 @@ pub enum WriteKind {
 
     /// The fill of a source blob's chunk group from the ondemand
     /// blob.
-    OndemandBlob,
+    Redirect,
 }
 
 /// Implements the conversion of the read kind that missed the cache into
@@ -594,7 +594,7 @@ impl fmt::Display for WriteKind {
         match self {
             WriteKind::Ondemand => write!(f, "ondemand"),
             WriteKind::Prefetch => write!(f, "prefetch"),
-            WriteKind::OndemandBlob => write!(f, "ondemand_blob"),
+            WriteKind::Redirect => write!(f, "redirect"),
         }
     }
 }
@@ -604,7 +604,7 @@ impl fmt::Display for WriteKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteFailureReason {
     /// The chunk group did not decompress to its declared size, or the
-    /// ondemand source points past its source blob's chunk groups.
+    /// redirect points past its source blob's chunk groups.
     Decode,
 
     /// The decoded chunk group's crc32c did not match the blob meta.
@@ -613,7 +613,7 @@ pub enum WriteFailureReason {
     /// The cache file could not be written.
     Io,
 
-    /// The ondemand source names a source blob the image does not have.
+    /// The redirect names a source blob the image does not have.
     UnknownSource,
 }
 
@@ -771,7 +771,7 @@ mod tests {
             ),
             ("ondemand", WriteKind::Ondemand.to_string()),
             ("prefetch", WriteKind::Prefetch.to_string()),
-            ("ondemand_blob", WriteKind::OndemandBlob.to_string()),
+            ("redirect", WriteKind::Redirect.to_string()),
             ("ondemand", WriteKind::from(ReadKind::Ondemand).to_string()),
             ("prefetch", WriteKind::from(ReadKind::Prefetch).to_string()),
             ("readdirplus", FsOp::Readdirplus.to_string()),
@@ -814,7 +814,7 @@ mod tests {
         let test_cases = vec![
             WriteKind::Ondemand,
             WriteKind::Prefetch,
-            WriteKind::OndemandBlob,
+            WriteKind::Redirect,
         ];
 
         for kind in test_cases {

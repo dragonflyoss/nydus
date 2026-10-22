@@ -167,16 +167,16 @@ pub trait BlobCache: Send + Sync {
     /// Write the decoded payload of this blob's chunk group
     /// `chunk_group_index`, obtained from an ondemand blob, into the local
     /// cache and mark the group ready. The payload is validated against this
-    /// blob's own metadata first, so a stale or corrupt ondemand copy never
+    /// blob's own metadata first, so a stale or corrupt redirect copy never
     /// reaches the cache. A no-op when the group is already ready.
-    fn fill_chunk_group_from_ondemand_blob(
+    fn fill_chunk_group_from_redirect(
         &self,
         _chunk_group_index: usize,
         _payload: &[u8],
     ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "fill_chunk_group_from_ondemand_blob is not supported by this blob cache",
+            "fill_chunk_group_from_redirect is not supported by this blob cache",
         ))
     }
 
@@ -506,7 +506,7 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
 }
 
 /// The `reason` a cache write failed with `err`: a crc32c mismatch is
-/// `checksum`; any other malformed chunk group, an ondemand source pointing past
+/// `checksum`; any other malformed chunk group, a redirect pointing past
 /// its source blob's chunk groups included, `decode`; and everything else,
 /// the cache file refusing the write, `io`.
 pub(crate) fn write_failure_reason(err: &io::Error) -> WriteFailureReason {

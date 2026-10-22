@@ -764,7 +764,6 @@ func optimizeCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "trace-file",
-				Aliases:  []string{"pattern"},
 				Usage:    "path to the JSON saved from a mount's apiserver /trace endpoint: the chunk groups the workload read on demand, which the ondemand blob is built from",
 				Required: true,
 			},

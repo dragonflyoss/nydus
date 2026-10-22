@@ -369,53 +369,53 @@ impl BlobCaches {
         skipped: &AtomicU64,
     ) -> io::Result<(u64, u64)> {
         let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
-            let ondemand_source = group.ondemand_source()?;
-            match self.try_cache(ondemand_source.source_blob_index(), ReadKind::Prefetch) {
+            let redirect = group.redirect()?;
+            match self.try_cache(redirect.source_blob_index(), ReadKind::Prefetch) {
                 Some(Ok(source)) => Some(source),
                 Some(Err(err)) => {
                     warn!(
                         "failed to open source blob {} of ondemand blob {blob_index}: {err}",
-                        ondemand_source.source_blob_index()
+                        redirect.source_blob_index()
                     );
                     None
                 }
                 None => {
                     warn!(
-                        "ondemand blob {blob_index} names unknown source blob {}",
-                        ondemand_source.source_blob_index()
+                        "ondemand blob {blob_index} redirects to unknown blob {}",
+                        redirect.source_blob_index()
                     );
                     None
                 }
             }
         };
         let skip = |group: &BlobMetadataChunkGroupExtent| -> bool {
-            match (group.ondemand_source(), source_of(group)) {
-                (Some(ondemand_source), Some(source)) => {
-                    source.is_chunk_group_ready(ondemand_source.source_chunk_group_index() as usize)
+            match (group.redirect(), source_of(group)) {
+                (Some(redirect), Some(source)) => {
+                    source.is_chunk_group_ready(redirect.source_chunk_group_index() as usize)
                 }
                 _ => false,
             }
         };
         cache.for_each_ondemand_blob_chunk_group(workers, deadline, &skip, &|group, payload| {
-            let (Some(ondemand_source), Some(source)) = (group.ondemand_source(), source_of(group)) else {
+            let (Some(redirect), Some(source)) = (group.redirect(), source_of(group)) else {
                 skipped.fetch_add(1, Ordering::Relaxed);
                 self.metrics.cache.collect_write_failure_metrics(
-                    WriteKind::OndemandBlob,
+                    WriteKind::Redirect,
                     WriteFailureReason::UnknownSource,
                 );
                 return Ok(());
             };
-            let source_index = ondemand_source.source_chunk_group_index() as usize;
-            match source.fill_chunk_group_from_ondemand_blob(source_index, payload) {
+            let source_index = redirect.source_chunk_group_index() as usize;
+            match source.fill_chunk_group_from_redirect(source_index, payload) {
                 Ok(()) => filled.fetch_add(1, Ordering::Relaxed),
                 Err(err) => {
                     self.metrics.cache.collect_write_failure_metrics(
-                        WriteKind::OndemandBlob,
+                        WriteKind::Redirect,
                         write_failure_reason(&err),
                     );
                     warn!(
                         "failed to fill chunk group {source_index} of blob {} from ondemand blob {blob_index}: {err}",
-                        ondemand_source.source_blob_index()
+                        redirect.source_blob_index()
                     );
                     skipped.fetch_add(1, Ordering::Relaxed)
                 }

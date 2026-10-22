@@ -46,7 +46,6 @@ pub struct OptimizeCommand {
 
     #[arg(
         long,
-        visible_alias = "pattern",
         conflicts_with = "apiserver",
         env = "NYDUS_OPTIMIZE_TRACE_FILE",
         help = "Specify the path to a JSON trace file containing access patterns: the versioned `{\"version\":1,\"patterns\":[{\"blob_index\":..,\"chunk_group_index\":..}]}` document, exactly as produced by the apiserver `/trace` endpoint. Mutually exclusive with `--apiserver`"
@@ -262,15 +261,14 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn optimize_parses_the_type_default_and_the_pattern_alias() {
+    fn optimize_parses_the_type_default_and_explicit_value() {
         let test_cases = vec![
             (
                 vec!["--trace-file", "/tmp/trace.json"],
                 OptimizeType::Ondemand,
             ),
-            (vec!["--pattern", "/tmp/trace.json"], OptimizeType::Ondemand),
             (
-                vec!["--pattern", "/tmp/trace.json", "--type", "ondemand"],
+                vec!["--trace-file", "/tmp/trace.json", "--type", "ondemand"],
                 OptimizeType::Ondemand,
             ),
         ];
@@ -311,9 +309,9 @@ mod tests {
             "/tmp/config.yaml",
         ];
         let test_cases = vec![
-            vec!["--trace-file", "/tmp/trace.json", "--type", "ondemand-blob"],
+            vec!["--trace-file", "/tmp/trace.json", "--type", "redirect"],
             vec![
-                "--pattern",
+                "--trace-file",
                 "/tmp/trace.json",
                 "--apiserver",
                 "unix:///tmp/api.sock",

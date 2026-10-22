@@ -43,7 +43,7 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
   are fetched, validated, decoded, and cached.
 - **Extensible blob metadata** — a 24-byte header followed by ChunkGroupTable,
   ChunkLengthTable, ChunkGroupIndexTable, and optional ChunkGroupDigestTable and
-  ChunkGroupOndemandSourceTable, each with its own header; compat and incompat feature bits
+  ChunkGroupRedirectTable, each with its own header; compat and incompat feature bits
   replace a version field, so newer tables and fields stay readable by older
   readers. Every chunk has a four-byte length; a mapped direct lookup table
   needs no auxiliary runtime index. Images from older experimental layouts
