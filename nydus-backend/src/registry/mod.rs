@@ -483,7 +483,7 @@ impl Backend for Registry {
         match result {
             Ok((bytes, source)) => {
                 self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::OnDemand,
+                    ReadKind::Ondemand,
                     source,
                     length as u64,
                     start.elapsed(),
@@ -494,7 +494,7 @@ impl Backend for Registry {
             Err(err) => {
                 self.metrics
                     .backend
-                    .collect_read_failure_metrics(ReadKind::OnDemand, self.client.source());
+                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source());
                 Err(err)
             }
         }
@@ -762,7 +762,7 @@ mod tests {
             let client = &registry.client;
             let range = format!("bytes=0-{}", buf.len() - 1);
             let response = match kind {
-                ReadKind::OnDemand => client.read_range(&TEST_BLOB_ID, &range).await?,
+                ReadKind::Ondemand => client.read_range(&TEST_BLOB_ID, &range).await?,
                 ReadKind::Prefetch => client.prefetch_range(&TEST_BLOB_ID, &range).await?,
             };
             let source = response.source;
@@ -832,7 +832,7 @@ auth: YWxpY2U6c2VjcmV0
 
     #[test]
     fn definitive_answers_are_terminal_for_both_read_kinds() {
-        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             for terminal in [
                 StatusCode::FORBIDDEN,
                 StatusCode::NOT_FOUND,
@@ -873,7 +873,7 @@ auth: YWxpY2U6c2VjcmV0
         .unwrap();
 
         let mut buf = vec![0u8; 4];
-        let err = read(&registry, ReadKind::OnDemand, &mut buf).unwrap_err();
+        let err = read(&registry, ReadKind::Ondemand, &mut buf).unwrap_err();
 
         assert!(err.to_string().contains("503"), "{err}");
         assert_eq!(origin.hits(), 1);
@@ -881,7 +881,7 @@ auth: YWxpY2U6c2VjcmV0
 
     #[test]
     fn unauthorized_answer_triggers_the_auth_handshake() {
-        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let body = b"authorized".to_vec();
             let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
             let mut challenge = HeaderMap::new();
@@ -910,7 +910,7 @@ auth: YWxpY2U6c2VjcmV0
 
     #[test]
     fn read_blob_metadata_fetches_the_footer_through_the_transport() {
-        for kind in [ReadKind::OnDemand, ReadKind::Prefetch] {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
             let transport = ScriptedTransport::new(vec![Scripted::Status(
                 StatusCode::NOT_FOUND,
@@ -919,7 +919,7 @@ auth: YWxpY2U6c2VjcmV0
             let registry = scripted_registry(origin.addr, None, transport.clone());
 
             let err = match kind {
-                ReadKind::OnDemand => registry.read_blob_metadata(&TEST_BLOB_ID),
+                ReadKind::Ondemand => registry.read_blob_metadata(&TEST_BLOB_ID),
                 ReadKind::Prefetch => registry.prefetch_blob_metadata(&TEST_BLOB_ID),
             }
             .unwrap_err();
@@ -975,7 +975,7 @@ auth: YWxpY2U6c2VjcmV0
             .insert(&hex, "http://cdn.example.com/signed".to_string());
 
         let mut buf = vec![0u8; body.len()];
-        let source = read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
+        let source = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
 
         assert_eq!(source, Source::Dragonfly);
         assert_eq!(buf, body);
@@ -999,7 +999,7 @@ auth: YWxpY2U6c2VjcmV0
             .insert(&hex, "http://cdn.example.com/expired".to_string());
 
         let mut buf = vec![0u8; body.len()];
-        read(&registry, ReadKind::OnDemand, &mut buf).unwrap();
+        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
 
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 2);

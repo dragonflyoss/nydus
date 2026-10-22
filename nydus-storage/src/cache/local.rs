@@ -135,7 +135,7 @@ impl LocalBlobCache {
             cache_dir,
             backend,
             None,
-            ReadKind::OnDemand,
+            ReadKind::Ondemand,
             options,
         )
     }
@@ -465,7 +465,7 @@ impl LocalBlobCache {
             let mut buffers = ChunkGroupBuffers::default();
             self.fill_chunk_group_window(
                 window.clone(),
-                ReadKind::OnDemand,
+                ReadKind::Ondemand,
                 &mut buffers,
                 cache_file,
             )?;
@@ -527,7 +527,7 @@ impl LocalBlobCache {
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
         match kind {
-            ReadKind::OnDemand => {
+            ReadKind::Ondemand => {
                 self.backend
                     .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?
             }
@@ -604,7 +604,7 @@ impl LocalBlobCache {
     /// Fetch one ondemand-blob batch, trimmed at the groups `skip` accepts,
     /// and hand every decoded group to `cb`. A group that fails to decode
     /// or validate is logged and skipped; `cb` errors abort the stream.
-    fn stream_ondemand_batch(
+    fn stream_ondemand_blob_batch(
         &self,
         batch: Range<usize>,
         buffers: &mut ChunkGroupBuffers,
@@ -871,7 +871,7 @@ impl BlobCache for LocalBlobCache {
             .unwrap_or(false)
     }
 
-    fn for_each_ondemand_chunk_group(
+    fn for_each_ondemand_blob_chunk_group(
         &self,
         workers: usize,
         deadline: Option<Instant>,
@@ -898,7 +898,7 @@ impl BlobCache for LocalBlobCache {
         let failed = AtomicU64::new(0);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
             let (batch_bytes, batch_failed) =
-                self.stream_ondemand_batch(batch.clone(), buffers, skip, cb)?;
+                self.stream_ondemand_blob_batch(batch.clone(), buffers, skip, cb)?;
             bytes.fetch_add(batch_bytes, Ordering::Relaxed);
             failed.fetch_add(batch_failed, Ordering::Relaxed);
             Ok(())
@@ -906,7 +906,7 @@ impl BlobCache for LocalBlobCache {
         Ok((bytes.into_inner(), failed.into_inner()))
     }
 
-    fn fill_chunk_group_from_ondemand(
+    fn fill_chunk_group_from_ondemand_blob(
         &self,
         chunk_group_index: usize,
         payload: &[u8],
@@ -1027,7 +1027,7 @@ fn load_or_fetch_blob_metadata(
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
         let blob_metadata = match kind {
-            ReadKind::OnDemand => backend.read_blob_metadata(&blob_id)?,
+            ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
             ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
         };
         blob_metadata.save(tmp.path()).map_err(io::Error::other)?;
@@ -1468,7 +1468,7 @@ mod tests {
             cache_dir.path(),
             backend as Arc<dyn Backend>,
             Some(recorder.clone()),
-            ReadKind::OnDemand,
+            ReadKind::Ondemand,
             fetch(1 << 20),
         )
         .unwrap();
@@ -1663,7 +1663,7 @@ mod tests {
         assert_eq!(gauge(&metrics, "cached"), Some(0.0));
         assert_eq!(gauge(&metrics, "uncached"), Some(0.0));
 
-        let cache = caches.cache(1, ReadKind::OnDemand).unwrap();
+        let cache = caches.cache(1, ReadKind::Ondemand).unwrap();
         assert_eq!(gauge(&metrics, "cached"), Some(0.0));
         assert_eq!(gauge(&metrics, "uncached"), Some(blob_bytes));
 
@@ -1675,7 +1675,7 @@ mod tests {
 
         let other = open(&Arc::new(Metrics::new()));
         other
-            .cache(1, ReadKind::OnDemand)
+            .cache(1, ReadKind::Ondemand)
             .unwrap()
             .read_at(16384, &mut buf)
             .unwrap();
@@ -1689,7 +1689,7 @@ mod tests {
         assert_eq!(gauge(&metrics, "cached"), None);
 
         let reopened = open(&metrics);
-        reopened.cache(1, ReadKind::OnDemand).unwrap();
+        reopened.cache(1, ReadKind::Ondemand).unwrap();
         assert_eq!(gauge(&metrics, "cached"), Some(2.0 * group_bytes));
     }
 

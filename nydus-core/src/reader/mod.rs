@@ -405,7 +405,7 @@ impl ErofsReader {
         &self,
         blob_index: u16,
     ) -> io::Result<std::sync::Arc<dyn nydus_storage::cache::BlobCache>> {
-        self.blobs.cache(blob_index, ReadKind::OnDemand)
+        self.blobs.cache(blob_index, ReadKind::Ondemand)
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
@@ -501,7 +501,7 @@ impl ErofsReader {
     ) -> io::Result<()> {
         let cache = self
             .blobs
-            .try_cache(blob_index, ReadKind::OnDemand)
+            .try_cache(blob_index, ReadKind::Ondemand)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
@@ -524,7 +524,7 @@ impl ErofsReader {
     ) -> io::Result<()> {
         let cache = self
             .blobs
-            .try_cache(blob_index, ReadKind::OnDemand)
+            .try_cache(blob_index, ReadKind::Ondemand)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,

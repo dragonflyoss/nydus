@@ -151,7 +151,7 @@ pub trait BlobCache: Send + Sync {
     /// logged and skipped, while an error from `cb` aborts the stream.
     /// Returns the bytes fetched from the backend and the groups that failed
     /// to decode.
-    fn for_each_ondemand_chunk_group(
+    fn for_each_ondemand_blob_chunk_group(
         &self,
         _workers: usize,
         _deadline: Option<Instant>,
@@ -160,7 +160,7 @@ pub trait BlobCache: Send + Sync {
     ) -> io::Result<(u64, u64)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "for_each_ondemand_chunk_group is not supported by this blob cache",
+            "for_each_ondemand_blob_chunk_group is not supported by this blob cache",
         ))
     }
 
@@ -169,14 +169,14 @@ pub trait BlobCache: Send + Sync {
     /// cache and mark the group ready. The payload is validated against this
     /// blob's own metadata first, so a stale or corrupt ondemand copy never
     /// reaches the cache. A no-op when the group is already ready.
-    fn fill_chunk_group_from_ondemand(
+    fn fill_chunk_group_from_ondemand_blob(
         &self,
         _chunk_group_index: usize,
         _payload: &[u8],
     ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "fill_chunk_group_from_ondemand is not supported by this blob cache",
+            "fill_chunk_group_from_ondemand_blob is not supported by this blob cache",
         ))
     }
 

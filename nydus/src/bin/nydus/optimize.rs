@@ -255,3 +255,75 @@ impl OptimizeCommand {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn optimize_parses_the_type_default_and_the_pattern_alias() {
+        let test_cases = vec![
+            (
+                vec!["--trace-file", "/tmp/trace.json"],
+                OptimizeType::Ondemand,
+            ),
+            (vec!["--pattern", "/tmp/trace.json"], OptimizeType::Ondemand),
+            (
+                vec!["--pattern", "/tmp/trace.json", "--type", "ondemand"],
+                OptimizeType::Ondemand,
+            ),
+        ];
+
+        for (flags, expected_type) in test_cases {
+            let mut args = vec![
+                "optimize",
+                "--parent-bootstrap",
+                "/tmp/parent",
+                "--bootstrap",
+                "/tmp/bootstrap",
+                "--blob-dir",
+                "/tmp/blobs",
+                "--config",
+                "/tmp/config.yaml",
+            ];
+            args.extend(flags);
+            let cmd = OptimizeCommand::try_parse_from(args).unwrap();
+            assert_eq!(cmd.r#type, expected_type);
+            assert_eq!(
+                cmd.trace_file.as_deref(),
+                Some(Path::new("/tmp/trace.json"))
+            );
+        }
+    }
+
+    #[test]
+    fn optimize_rejects_an_unknown_type_and_a_trace_file_with_an_apiserver() {
+        let base = [
+            "optimize",
+            "--parent-bootstrap",
+            "/tmp/parent",
+            "--bootstrap",
+            "/tmp/bootstrap",
+            "--blob-dir",
+            "/tmp/blobs",
+            "--config",
+            "/tmp/config.yaml",
+        ];
+        let test_cases = vec![
+            vec!["--trace-file", "/tmp/trace.json", "--type", "ondemand-blob"],
+            vec![
+                "--pattern",
+                "/tmp/trace.json",
+                "--apiserver",
+                "unix:///tmp/api.sock",
+            ],
+            vec![],
+        ];
+
+        for flags in test_cases {
+            let args = base.iter().copied().chain(flags).collect::<Vec<_>>();
+            assert!(OptimizeCommand::try_parse_from(args).is_err());
+        }
+    }
+}

@@ -358,7 +358,7 @@ impl BlobCaches {
     /// neither poison a source cache nor abort the warmup; `filled` and
     /// `skipped` count the groups written and the ones that could not be.
     /// Returns what the stream fetched, see
-    /// [`BlobCache::for_each_ondemand_chunk_group`].
+    /// [`BlobCache::for_each_ondemand_blob_chunk_group`].
     fn prefetch_ondemand_blob(
         &self,
         blob_index: u16,
@@ -396,7 +396,7 @@ impl BlobCaches {
                 _ => false,
             }
         };
-        cache.for_each_ondemand_chunk_group(workers, deadline, &skip, &|group, payload| {
+        cache.for_each_ondemand_blob_chunk_group(workers, deadline, &skip, &|group, payload| {
             let (Some(ondemand_source), Some(source)) = (group.ondemand_source(), source_of(group)) else {
                 skipped.fetch_add(1, Ordering::Relaxed);
                 self.metrics.cache.collect_write_failure_metrics(
@@ -406,7 +406,7 @@ impl BlobCaches {
                 return Ok(());
             };
             let source_index = ondemand_source.source_chunk_group_index() as usize;
-            match source.fill_chunk_group_from_ondemand(source_index, payload) {
+            match source.fill_chunk_group_from_ondemand_blob(source_index, payload) {
                 Ok(()) => filled.fetch_add(1, Ordering::Relaxed),
                 Err(err) => {
                     self.metrics.cache.collect_write_failure_metrics(
