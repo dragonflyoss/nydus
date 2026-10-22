@@ -31,9 +31,45 @@ func HasMountOption(t *testing.T, mountpoint, option string) bool {
 	return false
 }
 
-// IsMountpoint reports whether path is currently a mountpoint.
+// IsMountpoint reports whether path is currently present in this process's
+// mount table. It does not stat the path: detached FUSE mounts can retain
+// open handles whose path lookup blocks after the serving daemon exits.
 func IsMountpoint(path string) bool {
-	return exec.Command("mountpoint", "-q", path).Run() == nil
+	target, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(mountinfo), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 4 && unescapeMountInfoPath(fields[4]) == target {
+			return true
+		}
+	}
+	return false
+}
+
+// unescapeMountInfoPath decodes the octal escapes mountinfo uses for space,
+// tab, newline and backslash.
+func unescapeMountInfoPath(path string) string {
+	var decoded strings.Builder
+	decoded.Grow(len(path))
+	for index := 0; index < len(path); {
+		if path[index] == '\\' && index+3 < len(path) {
+			a, b, c := path[index+1], path[index+2], path[index+3]
+			if a >= '0' && a <= '7' && b >= '0' && b <= '7' && c >= '0' && c <= '7' {
+				decoded.WriteByte((a-'0')<<6 | (b-'0')<<3 | (c - '0'))
+				index += 4
+				continue
+			}
+		}
+		decoded.WriteByte(path[index])
+		index++
+	}
+	return decoded.String()
 }
 
 // MountFuse starts the prepared FUSE daemon cmd, waits for mountpoint to
