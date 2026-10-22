@@ -8,6 +8,7 @@ package e2e
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,47 +16,59 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	mathrand "math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
-	"github.com/stretchr/testify/require"
+	"github.com/dragonflyoss/nydus/tests/e2e/util"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	// compatManifestName is the file in the images directory that lists the
+	// imagesManifestName is the file in the images directory that lists the
 	// images and the trees they must reproduce.
-	compatManifestName = "manifest.json"
-	// compatManifestVersion guards against reading images built by a
+	imagesManifestName = "manifest.json"
+
+	// imagesManifestVersion guards against reading images built by a
 	// different revision of this file.
-	compatManifestVersion = 1
-	compatSeed            = 20260930
-	// compatFullHashLimit bounds the files hashed in full. Larger files are
+	imagesManifestVersion = 1
+
+	// corpusSeed seeds the generator every corpus draws its content from.
+	corpusSeed = 20260930
+
+	// maxFullHashSize bounds the files hashed in full. Larger files are
 	// sparse and are verified by their data extents instead, so a mount does
 	// not have to stream gigabytes of holes.
-	compatFullHashLimit = 64 << 20
+	maxFullHashSize = 64 << 20
 )
 
-// compatLayout is one `nydus build` configuration exercised by the check.
-type compatLayout struct {
+// buildLayout is one `nydus build` configuration exercised by the check.
+type buildLayout struct {
+	// name is the name of the image and of its subtests.
 	name string
+
 	// native layouts (erofs-*) carry no blob meta and need no cache to mount.
 	native bool
-	// tar layouts stream-convert an OCI layer tarball of the corpus, as
+
+	// fromTar layouts stream-convert an OCI layer tarball of the corpus, as
 	// nydusify does, instead of walking the directory.
-	tar  bool
+	fromTar bool
+
+	// args are the `nydus build` flags of the layout.
 	args []string
 }
 
-var compatLayouts = []compatLayout{
+// singleLayerLayouts are the layouts every single-layer image is built with.
+var singleLayerLayouts = []buildLayout{
 	{name: "zstd", args: []string{"--compressor", "zstd"}},
 	{name: "zstd-4k", args: []string{"--compressor", "zstd", "--chunk-size", "4096"}},
 	{name: "zstd-4k-group-64k", args: []string{"--compressor", "zstd", "--chunk-size", "4096", "--chunk-group-minimum-size", "65536"}},
@@ -67,141 +80,196 @@ var compatLayouts = []compatLayout{
 	{name: "erofs-none-64k-align-64k", native: true, args: []string{"--compressor", "erofs-none", "--chunk-size", "65536", "--erofs-data-alignment", "65536"}},
 	{name: "erofs-lz4", native: true, args: []string{"--compressor", "erofs-lz4"}},
 	{name: "erofs-zstd", native: true, args: []string{"--compressor", "erofs-zstd"}},
-	{name: "tar-zstd", tar: true, args: []string{"--compressor", "zstd"}},
-	{name: "tar-erofs-lz4", tar: true, native: true, args: []string{"--compressor", "erofs-lz4"}},
+	{name: "tar-zstd", fromTar: true, args: []string{"--compressor", "zstd"}},
+	{name: "tar-erofs-lz4", fromTar: true, native: true, args: []string{"--compressor", "erofs-lz4"}},
 }
 
-// compatMergeLayouts are the layer layouts merged into an overlaid bootstrap.
-var compatMergeLayouts = []compatLayout{
+// mergeLayouts are the layer layouts merged into an overlaid bootstrap.
+var mergeLayouts = []buildLayout{
 	{name: "zstd-4k", args: []string{"--compressor", "zstd", "--chunk-size", "4096"}},
 	{name: "erofs-lz4", native: true, args: []string{"--compressor", "erofs-lz4"}},
-	{name: "tar-zstd", tar: true, args: []string{"--compressor", "zstd"}},
+	{name: "tar-zstd", fromTar: true, args: []string{"--compressor", "zstd"}},
 }
 
-// compatManifest describes the images in an images directory. Paths are
+// imagesManifest describes the images in an images directory. Paths are
 // relative to that directory, so it can be restored anywhere.
-type compatManifest struct {
+type imagesManifest struct {
+	// Version is the imagesManifestVersion of the revision that wrote the
+	// manifest.
 	Version int `json:"version"`
+
 	// Builder is the `nydus --version` of the binary that built the images.
-	Builder string                   `json:"builder"`
-	Trees   map[string][]compatEntry `json:"trees"`
-	Images  []compatImage            `json:"images"`
+	Builder string `json:"builder"`
+
+	// Trees are the expected trees, by the name builtImage.Tree refers to.
+	Trees map[string][]treeEntry `json:"trees"`
+
+	// Images are the built images.
+	Images []builtImage `json:"images"`
 }
 
-// compatImage is one built image and the tree it must reproduce.
-type compatImage struct {
-	Name   string `json:"name"`
-	Native bool   `json:"native,omitempty"`
-	Merged bool   `json:"merged,omitempty"`
-	// Tree names the expected tree in compatManifest.Trees.
-	Tree      string `json:"tree"`
+// builtImage is one built image and the tree it must reproduce.
+type builtImage struct {
+	// Name is the layout name, prefixed with merged- for a merged image.
+	Name string `json:"name"`
+
+	// Native marks an erofs-* layout, which has no chunk cache to exercise.
+	Native bool `json:"native,omitempty"`
+
+	// Merged marks a bootstrap merged from several layers.
+	Merged bool `json:"merged,omitempty"`
+
+	// Tree names the expected tree in imagesManifest.Trees.
+	Tree string `json:"tree"`
+
+	// Bootstrap is the path of the bootstrap.
 	Bootstrap string `json:"bootstrap"`
-	BlobDir   string `json:"blob_dir"`
+
+	// BlobDir is the directory holding the blobs.
+	BlobDir string `json:"blob_dir"`
+
 	// Blobs are the full blobs, one per layer.
 	Blobs []string `json:"blobs"`
 }
 
-// compatEntry is the state of one path of a tree: what the source holds and
+// treeEntry is the state of one path of a tree: what the source holds and
 // what every read path of the image must report back.
-type compatEntry struct {
-	Path      compatBytes `json:"path"`
-	Type      string      `json:"type"`
-	Mode      uint32      `json:"mode"`
-	UID       uint32      `json:"uid"`
-	GID       uint32      `json:"gid"`
-	MtimeSec  int64       `json:"mtime_sec"`
-	MtimeNsec int64       `json:"mtime_nsec"`
+type treeEntry struct {
+	// Path is the path relative to the root of the tree.
+	Path byteString `json:"path"`
+
+	// Type is dir, reg, symlink, chr, blk, fifo or socket.
+	Type string `json:"type"`
+
+	// Mode is the permission and special bits.
+	Mode uint32 `json:"mode"`
+
+	// UID is the owner.
+	UID uint32 `json:"uid"`
+
+	// GID is the group.
+	GID uint32 `json:"gid"`
+
+	// MtimeSec is the whole seconds of the modification time.
+	MtimeSec int64 `json:"mtime_sec"`
+
+	// MtimeNsec is the nanosecond part of the modification time.
+	MtimeNsec int64 `json:"mtime_nsec"`
+
 	// Size of regular files and symlinks.
 	Size int64 `json:"size,omitempty"`
+
 	// Nlink of non-directories.
-	Nlink  uint64      `json:"nlink,omitempty"`
-	Major  uint32      `json:"major,omitempty"`
-	Minor  uint32      `json:"minor,omitempty"`
-	Target compatBytes `json:"target,omitempty"`
+	Nlink uint64 `json:"nlink,omitempty"`
+
+	// Major is the device major number of chr and blk.
+	Major uint32 `json:"major,omitempty"`
+
+	// Minor is the device minor number of chr and blk.
+	Minor uint32 `json:"minor,omitempty"`
+
+	// Target is the symlink target.
+	Target byteString `json:"target,omitempty"`
+
 	// Link is the smallest path of the entry's hardlink group, if any.
-	Link   compatBytes            `json:"link,omitempty"`
-	Xattrs map[string]compatBytes `json:"xattrs,omitempty"`
-	// SHA256 of the content of regular files up to compatFullHashLimit.
+	Link byteString `json:"link,omitempty"`
+
+	// Xattrs are the extended attributes, less the trusted.nydus.* ones.
+	Xattrs map[string]byteString `json:"xattrs,omitempty"`
+
+	// SHA256 of the content of regular files up to maxFullHashSize.
 	SHA256 string `json:"sha256,omitempty"`
+
 	// Extents are the data of larger regular files; the rest reads as zeros.
-	Extents []compatExtent `json:"extents,omitempty"`
+	Extents []dataExtent `json:"extents,omitempty"`
 
 	// inode identifies the entry's inode while a tree is scanned.
 	inode string
 }
 
-// compatExtent is a data range of a large sparse file.
-type compatExtent struct {
-	Offset int64  `json:"offset"`
-	Length int64  `json:"length"`
+// dataExtent is a data range of a large sparse file.
+type dataExtent struct {
+	// Offset is the start of the range.
+	Offset int64 `json:"offset"`
+
+	// Length is the length of the range.
+	Length int64 `json:"length"`
+
+	// SHA256 of the data in the range.
 	SHA256 string `json:"sha256"`
 }
 
-// compatBytes is a byte string (a file name, link target or xattr value) that
+// byteString is a byte string (a file name, link target or xattr value) that
 // round-trips through JSON as a Go-quoted string, so names and values that are
 // not valid UTF-8 survive.
-type compatBytes string
+type byteString string
 
-func (b compatBytes) MarshalText() ([]byte, error) {
+// MarshalText returns the bytes as a Go-quoted string.
+func (b byteString) MarshalText() ([]byte, error) {
 	return []byte(strconv.Quote(string(b))), nil
 }
 
-func (b *compatBytes) UnmarshalText(text []byte) error {
+// UnmarshalText sets the bytes from a Go-quoted string.
+func (b *byteString) UnmarshalText(text []byte) error {
 	s, err := strconv.Unquote(string(text))
-	*b = compatBytes(s)
+	*b = byteString(s)
 	return err
 }
 
-// compatBuildImages stages the corpus and merge layers, builds every image
-// into out with builder and writes the manifest the reader side checks them
+// buildImages stages the corpus and merge layers, builds every image
+// into imagesDir with builder and writes the manifest the reader side checks them
 // against.
-func compatBuildImages(t *testing.T, builder, out string) *compatManifest {
+func buildImages(t *testing.T, builder, imagesDir string) *imagesManifest {
 	t.Helper()
-	require.NoError(t, os.RemoveAll(out))
-	require.NoError(t, os.MkdirAll(out, 0755))
-	work := t.TempDir()
+	assert.NoError(t, os.RemoveAll(imagesDir))
+	assert.NoError(t, os.MkdirAll(imagesDir, 0o755))
+	workDir := t.TempDir()
+
 	rel := func(path string) string {
-		r, err := filepath.Rel(out, path)
-		require.NoError(t, err)
+		r, err := filepath.Rel(imagesDir, path)
+		assert.NoError(t, err)
 		return r
 	}
 
-	src := filepath.Join(work, "corpus")
-	compatMakeCorpus(t, src)
-	tree := compatScanSource(t, src)
+	// Stage the corpus and the merge layers, and record the trees the images
+	// must reproduce, once as walked and once as a layer tarball carries them.
+	source := filepath.Join(workDir, "corpus")
+	stageCorpus(t, source)
+	corpusTree := scanSource(t, source)
 
 	layerDirs := []string{
-		filepath.Join(work, "layer1"),
-		filepath.Join(work, "layer2"),
-		filepath.Join(work, "layer3"),
+		filepath.Join(workDir, "layer1"),
+		filepath.Join(workDir, "layer2"),
+		filepath.Join(workDir, "layer3"),
 	}
-	compatMakeMergeLayers(t, layerDirs)
-	var layerTrees, layerTarTrees [][]compatEntry
-	for _, dir := range layerDirs {
-		layerTree := compatScanSource(t, dir)
+	stageMergeLayers(t, layerDirs)
+	var layerTrees, layerTarTrees [][]treeEntry
+	for _, layerDir := range layerDirs {
+		layerTree := scanSource(t, layerDir)
 		layerTrees = append(layerTrees, layerTree)
-		layerTarTrees = append(layerTarTrees, compatTarSource(layerTree))
+		layerTarTrees = append(layerTarTrees, tarSource(layerTree))
 	}
 
-	manifest := &compatManifest{
-		Version: compatManifestVersion,
-		Builder: compatVersion(t, builder),
-		Trees: map[string][]compatEntry{
-			"corpus":     tree,
-			"corpus-tar": compatTarSource(tree),
-			"merged":     compatOverlay(layerTrees...),
-			"merged-tar": compatOverlay(layerTarTrees...),
+	manifest := &imagesManifest{
+		Version: imagesManifestVersion,
+		Builder: nydusVersion(t, builder),
+		Trees: map[string][]treeEntry{
+			"corpus":     corpusTree,
+			"corpus-tar": tarSource(corpusTree),
+			"merged":     overlayLayers(layerTrees...),
+			"merged-tar": overlayLayers(layerTarTrees...),
 		},
 	}
 
-	for _, layout := range compatLayouts {
-		layout := layout
+	// Build one image of the corpus per layout.
+	for _, layout := range singleLayerLayouts {
 		t.Run(layout.name, func(t *testing.T) {
-			dir := filepath.Join(out, layout.name)
-			blobDir := filepath.Join(dir, "blobs")
-			bootstrap := filepath.Join(dir, "image.bootstrap")
-			blob := compatBuild(t, builder, blobDir, bootstrap, src, layout)
-			image := compatImage{
+			imageDir := filepath.Join(imagesDir, layout.name)
+			blobDir := filepath.Join(imageDir, "blobs")
+			bootstrap := filepath.Join(imageDir, "image.boot")
+			blob := buildLayer(t, builder, blobDir, bootstrap, source, layout)
+
+			image := builtImage{
 				Name:      layout.name,
 				Native:    layout.native,
 				Tree:      "corpus",
@@ -209,21 +277,22 @@ func compatBuildImages(t *testing.T, builder, out string) *compatManifest {
 				BlobDir:   rel(blobDir),
 				Blobs:     []string{rel(blob)},
 			}
-			if layout.tar {
+			if layout.fromTar {
 				image.Tree = "corpus-tar"
 			}
 			manifest.Images = append(manifest.Images, image)
 		})
 	}
 
-	for _, layout := range compatMergeLayouts {
-		layout := layout
+	// Build the three layers per merge layout and merge their bootstraps.
+	for _, layout := range mergeLayouts {
 		name := "merged-" + layout.name
 		t.Run(name, func(t *testing.T) {
-			dir := filepath.Join(out, name)
-			blobDir := filepath.Join(dir, "blobs")
-			bootstrap := filepath.Join(dir, "merged.bootstrap")
-			image := compatImage{
+			imageDir := filepath.Join(imagesDir, name)
+			blobDir := filepath.Join(imageDir, "blobs")
+			bootstrap := filepath.Join(imageDir, "merged.boot")
+
+			image := builtImage{
 				Name:      name,
 				Native:    layout.native,
 				Merged:    true,
@@ -231,151 +300,152 @@ func compatBuildImages(t *testing.T, builder, out string) *compatManifest {
 				Bootstrap: rel(bootstrap),
 				BlobDir:   rel(blobDir),
 			}
-			if layout.tar {
+			if layout.fromTar {
 				image.Tree = "merged-tar"
 			}
+
 			var blobs []string
 			for i, layerDir := range layerDirs {
-				layerBootstrap := filepath.Join(dir, fmt.Sprintf("layer%d.bootstrap", i+1))
-				blob := compatBuild(t, builder, blobDir, layerBootstrap, layerDir, layout)
+				layerBootstrap := filepath.Join(imageDir, fmt.Sprintf("layer%d.boot", i+1))
+				blob := buildLayer(t, builder, blobDir, layerBootstrap, layerDir, layout)
 				blobs = append(blobs, blob)
 				image.Blobs = append(image.Blobs, rel(blob))
 			}
-			compatRun(t, builder, append([]string{"merge", "--bootstrap", bootstrap}, blobs...)...)
+
+			util.MergeBootstrap(t, builder, bootstrap, blobs...)
 			manifest.Images = append(manifest.Images, image)
 		})
 	}
 
-	require.False(t, t.Failed(), "not writing a manifest for a failed build")
+	// Write the manifest, unless a build failed and it would describe images
+	// that are not there.
+	if !assert.False(t, t.Failed(), "not writing a manifest for a failed build") {
+		return nil
+	}
+
 	data, err := json.MarshalIndent(manifest, "", " ")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(out, compatManifestName), data, 0644))
+	assert.NoError(t, err)
+	assert.NoError(t, os.WriteFile(filepath.Join(imagesDir, imagesManifestName), data, 0o644))
+
 	return manifest
 }
 
-// compatLoadManifest reads the manifest of an images directory.
-func compatLoadManifest(t *testing.T, dir string) *compatManifest {
+// loadImagesManifest reads the manifest of an images directory.
+func loadImagesManifest(t *testing.T, dir string) *imagesManifest {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, compatManifestName))
-	require.NoError(t, err)
-	var manifest compatManifest
-	require.NoError(t, json.Unmarshal(data, &manifest))
-	require.Equal(t, compatManifestVersion, manifest.Version, "images were built by a different revision of the compatibility check")
-	require.NotEmpty(t, manifest.Images)
+	data, err := os.ReadFile(filepath.Join(dir, imagesManifestName))
+	assert.NoError(t, err)
+
+	var manifest imagesManifest
+	assert.NoError(t, json.Unmarshal(data, &manifest))
+	assert.Equal(t, imagesManifestVersion, manifest.Version, "images were built by a different revision of the compatibility check")
+	assert.NotEmpty(t, manifest.Images)
+
 	return &manifest
 }
 
-// compatVersion returns the `nydus --version` line of bin.
-func compatVersion(t *testing.T, bin string) string {
+// nydusVersion returns the `nydus --version` line of bin.
+func nydusVersion(t *testing.T, bin string) string {
 	t.Helper()
 	out, err := exec.Command(bin, "--version").CombinedOutput()
-	require.NoError(t, err, "%s --version: %s", bin, out)
+	assert.NoError(t, err, "%s --version: %s", bin, out)
 	return strings.TrimSpace(string(out))
 }
 
-// compatRun runs bin with args, failing the test with its output on error.
-func compatRun(t *testing.T, bin string, args ...string) {
-	t.Helper()
-	out, err := exec.Command(bin, args...).CombinedOutput()
-	require.NoError(t, err, "nydus %s failed: %s", strings.Join(args, " "), out)
-	t.Logf("nydus %s:\n%s", strings.Join(args, " "), out)
-}
-
-// compatBuild builds src into blobDir with bootstrap alongside and returns the
+// buildLayer builds source into blobDir with bootstrap alongside and returns the
 // path of the single new full blob, which must be named by its SHA256. A tar
-// layout streams a tarball of src through stdin.
-func compatBuild(t *testing.T, bin, blobDir, bootstrap, src string, layout compatLayout) string {
+// layout streams a tarball of source through stdin.
+func buildLayer(t *testing.T, bin, blobDir, bootstrap, source string, layout buildLayout) string {
 	t.Helper()
-	require.NoError(t, os.MkdirAll(blobDir, 0755))
-	before := listFilesInDir(t, blobDir)
+	assert.NoError(t, os.MkdirAll(blobDir, 0o755))
+	before := util.ListFiles(t, blobDir)
 
+	// Run the build, feeding a tar layout the tarball through a pipe.
 	args := append([]string{"build", "--blob-dir", blobDir, "--bootstrap", bootstrap}, layout.args...)
 	var out []byte
 	var err error
-	if layout.tar {
+	if layout.fromTar {
 		pr, pw := io.Pipe()
 		written := make(chan error, 1)
 		go func() {
-			err := compatWriteTar(pw, src)
+			err := writeLayerTar(t, pw, source)
 			_ = pw.CloseWithError(err)
 			written <- err
 		}()
+
 		cmd := exec.Command(bin, append(args, "--source-type", "tar", "/dev/stdin")...)
 		cmd.Stdin = pr
 		out, err = cmd.CombinedOutput()
 		_ = pr.CloseWithError(io.ErrClosedPipe)
+
 		if writeErr := <-written; err == nil && writeErr != nil {
 			err = writeErr
 		}
 	} else {
-		out, err = exec.Command(bin, append(args, src)...).CombinedOutput()
+		out, err = exec.Command(bin, append(args, source)...).CombinedOutput()
 	}
-	require.NoError(t, err, "nydus %s %s failed: %s", strings.Join(args, " "), src, out)
+	assert.NoError(t, err, "nydus %s %s failed: %s", strings.Join(args, " "), source, out)
 
-	var blobs, metas []string
-	for path := range listFilesInDir(t, blobDir) {
-		if _, existed := before[path]; existed {
-			continue
-		}
-		switch base := filepath.Base(path); {
-		case sha256FilenamePattern.MatchString(base):
-			blobs = append(blobs, path)
-		case blobMetaFilenamePattern.MatchString(base):
-			metas = append(metas, path)
-		default:
-			require.Failf(t, "unexpected build output", "%s", path)
-		}
+	// The build must leave exactly one blob, named by its digest, and a blob
+	// meta beside it unless the layout is native.
+	blobs, blobMetas := util.NewBlobFiles(t, blobDir, before)
+	if !assert.Len(t, blobs, 1, "expected exactly one new blob in %s", blobDir) {
+		return ""
 	}
-	require.Len(t, blobs, 1, "expected exactly one new blob in %s", blobDir)
-	require.Equal(t, filepath.Base(blobs[0]), sha256File(t, blobs[0]), "blob must be named by its SHA256")
+	assert.Equal(t, filepath.Base(blobs[0]), util.Sha256File(t, blobs[0]), "blob must be named by its SHA256")
 	if layout.native {
-		require.Empty(t, metas, "native layers carry no blob meta")
+		assert.Empty(t, blobMetas, "native layers carry no blob meta")
 	} else {
-		require.Equal(t, []string{blobs[0] + ".blob.meta"}, metas)
+		assert.Equal(t, []string{blobs[0] + ".blob.meta"}, blobMetas)
 	}
+
 	return blobs[0]
 }
 
-// compatTarSafe reports whether s can be carried in a PAX record through
+// isTarSafe reports whether s can be carried in a PAX record through
 // `nydus build --source-type tar`: the tar crate splits PAX records at
 // newlines, so it rejects a record containing one.
-func compatTarSafe(s string) bool {
+func isTarSafe(s string) bool {
 	return !strings.Contains(s, "\n")
 }
 
-// compatTarXattr reports whether compatWriteTar carries the xattr name=value.
+// tarCarriesXattr reports whether writeLayerTar carries the xattr name=value.
 // trusted.* is left out: the builder drops it from a layer tar as
 // containerd's Apply does, while older releases keep it.
-func compatTarXattr(name string, value compatBytes) bool {
-	return !strings.HasPrefix(name, "trusted.") && compatTarSafe(name) && compatTarSafe(string(value))
+func tarCarriesXattr(name string, value byteString) bool {
+	return !strings.HasPrefix(name, "trusted.") && isTarSafe(name) && isTarSafe(string(value))
 }
 
-// compatWriteTar writes the tree under root as an OCI layer tarball: PAX
+// writeLayerTar writes the tree under root as an OCI layer tarball: PAX
 // headers carrying xattrs and nanosecond mtimes, and hardlinks as link entries
 // to the first path of the inode. It leaves out sockets, which tar cannot
-// carry, what compatTarSafe rejects and the xattrs compatTarXattr rejects.
-func compatWriteTar(w io.Writer, root string) error {
+// carry, what isTarSafe rejects and the xattrs tarCarriesXattr rejects.
+func writeLayerTar(t *testing.T, w io.Writer, root string) error {
+	t.Helper()
 	tw := tar.NewWriter(w)
-	first := map[uint64]string{}
+	firstPath := map[uint64]string{}
+
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || path == root {
 			return err
 		}
+
+		// Leave out what the tarball cannot carry.
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		if !compatTarSafe(rel) {
+		if !isTarSafe(rel) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		var st unix.Stat_t
-		if err := unix.Lstat(path, &st); err != nil {
+		var stat unix.Stat_t
+		if err := unix.Lstat(path, &stat); err != nil {
 			return err
 		}
-		kind := st.Mode & unix.S_IFMT
+		kind := stat.Mode & unix.S_IFMT
 		if kind == unix.S_IFSOCK {
 			return nil
 		}
@@ -384,25 +454,22 @@ func compatWriteTar(w io.Writer, root string) error {
 			if target, err = os.Readlink(path); err != nil {
 				return err
 			}
-			if !compatTarSafe(target) {
+			if !isTarSafe(target) {
 				return nil
 			}
 		}
 
+		// Carry the metadata in a PAX header.
 		hdr := &tar.Header{
 			Name:    rel,
-			Mode:    int64(st.Mode & 07777),
-			Uid:     int(st.Uid),
-			Gid:     int(st.Gid),
-			ModTime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec),
+			Mode:    int64(stat.Mode & 0o7777),
+			Uid:     int(stat.Uid),
+			Gid:     int(stat.Gid),
+			ModTime: time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec),
 			Format:  tar.FormatPAX,
 		}
-		xattrs, err := compatListXattrs(path)
-		if err != nil {
-			return err
-		}
-		for name, value := range xattrs {
-			if !compatTarXattr(name, value) {
+		for name, value := range listXattrs(t, path) {
+			if !tarCarriesXattr(name, value) {
 				continue
 			}
 			if hdr.PAXRecords == nil {
@@ -411,13 +478,14 @@ func compatWriteTar(w io.Writer, root string) error {
 			hdr.PAXRecords["SCHILY.xattr."+name] = string(value)
 		}
 
-		if kind != unix.S_IFDIR && st.Nlink > 1 {
-			if target, ok := first[st.Ino]; ok {
+		// Every path of an inode after the firstPath is a link entry to it.
+		if kind != unix.S_IFDIR && stat.Nlink > 1 {
+			if target, ok := firstPath[stat.Ino]; ok {
 				hdr.Typeflag = tar.TypeLink
 				hdr.Linkname = target
 				return tw.WriteHeader(hdr)
 			}
-			first[st.Ino] = rel
+			firstPath[stat.Ino] = rel
 		}
 
 		switch kind {
@@ -426,7 +494,7 @@ func compatWriteTar(w io.Writer, root string) error {
 			hdr.Name += "/"
 		case unix.S_IFREG:
 			hdr.Typeflag = tar.TypeReg
-			hdr.Size = st.Size
+			hdr.Size = stat.Size
 			if err := tw.WriteHeader(hdr); err != nil {
 				return err
 			}
@@ -445,39 +513,43 @@ func compatWriteTar(w io.Writer, root string) error {
 			if kind == unix.S_IFBLK {
 				hdr.Typeflag = tar.TypeBlock
 			}
-			hdr.Devmajor = int64(unix.Major(st.Rdev))
-			hdr.Devminor = int64(unix.Minor(st.Rdev))
+			hdr.Devmajor = int64(unix.Major(stat.Rdev))
+			hdr.Devminor = int64(unix.Minor(stat.Rdev))
 		case unix.S_IFIFO:
 			hdr.Typeflag = tar.TypeFifo
 		default:
 			return fmt.Errorf("%s: unsupported file type %o", rel, kind)
 		}
+
 		return tw.WriteHeader(hdr)
 	})
 	if err != nil {
 		return err
 	}
+
 	return tw.Close()
 }
 
-// compatScanSource records the tree under root, including the data extents of
+// scanSource records the tree under root, including the data extents of
 // the files too large to hash in full.
-func compatScanSource(t *testing.T, root string) []compatEntry {
+func scanSource(t *testing.T, root string) []treeEntry {
 	t.Helper()
-	entries := compatScanTree(t, root)
+	entries := scanTree(t, root)
+
 	for i := range entries {
 		if entries[i].Type == "reg" && entries[i].SHA256 == "" {
-			entries[i].Extents = compatDataExtents(t, filepath.Join(root, string(entries[i].Path)), entries[i].Size)
+			entries[i].Extents = dataExtents(t, filepath.Join(root, string(entries[i].Path)), entries[i].Size)
 		}
 	}
+
 	return entries
 }
 
-// compatScanTree records every path under root, root itself aside: the root
+// scanTree records every path under root, root itself aside: the root
 // of an image is synthesized by the builder and carries its own xattrs.
-func compatScanTree(t *testing.T, root string) []compatEntry {
+func scanTree(t *testing.T, root string) []treeEntry {
 	t.Helper()
-	var entries []compatEntry
+	var entries []treeEntry
 	err := filepath.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
 		if err != nil || path == root {
 			return err
@@ -486,135 +558,120 @@ func compatScanTree(t *testing.T, root string) []compatEntry {
 		if err != nil {
 			return err
 		}
-		entry, err := compatScanPath(path, rel)
+		entry, err := scanPath(t, path, rel)
 		if err != nil {
 			return err
 		}
 		entries = append(entries, entry)
 		return nil
 	})
-	require.NoError(t, err, "scanning %s", root)
-	compatAssignLinks(entries)
+	assert.NoError(t, err, "scanning %s", root)
+
+	assignLinks(entries)
 	return entries
 }
 
-func compatScanPath(path, rel string) (compatEntry, error) {
-	var st unix.Stat_t
-	if err := unix.Lstat(path, &st); err != nil {
-		return compatEntry{}, err
+// scanPath records the state of path, known as rel in its tree, without
+// following a symlink.
+func scanPath(t *testing.T, path, rel string) (treeEntry, error) {
+	t.Helper()
+	var stat unix.Stat_t
+	if err := unix.Lstat(path, &stat); err != nil {
+		return treeEntry{}, err
 	}
-	entry := compatEntry{
-		Path:      compatBytes(rel),
-		Mode:      st.Mode & 07777,
-		UID:       st.Uid,
-		GID:       st.Gid,
-		MtimeSec:  st.Mtim.Sec,
-		MtimeNsec: st.Mtim.Nsec,
+
+	entry := treeEntry{
+		Path:      byteString(rel),
+		Mode:      stat.Mode & 0o7777,
+		UID:       stat.Uid,
+		GID:       stat.Gid,
+		MtimeSec:  stat.Mtim.Sec,
+		MtimeNsec: stat.Mtim.Nsec,
 	}
-	switch st.Mode & unix.S_IFMT {
+
+	// Record what the type decides: the content hash of a regular file up to
+	// maxFullHashSize, the target of a symlink and the numbers of a device.
+	switch stat.Mode & unix.S_IFMT {
 	case unix.S_IFDIR:
 		entry.Type = "dir"
 	case unix.S_IFREG:
 		entry.Type = "reg"
-		entry.Size = st.Size
-		if st.Size <= compatFullHashLimit {
-			sum, err := compatHashFile(path)
+		entry.Size = stat.Size
+		if stat.Size <= maxFullHashSize {
+			f, err := os.Open(path)
 			if err != nil {
-				return compatEntry{}, err
+				return treeEntry{}, err
 			}
-			entry.SHA256 = sum
+			defer func() { _ = f.Close() }()
+			h := sha256.New()
+			if _, err := io.Copy(h, f); err != nil {
+				return treeEntry{}, err
+			}
+			entry.SHA256 = hex.EncodeToString(h.Sum(nil))
 		}
 	case unix.S_IFLNK:
 		entry.Type = "symlink"
-		entry.Size = st.Size
+		entry.Size = stat.Size
 		target, err := os.Readlink(path)
 		if err != nil {
-			return compatEntry{}, err
+			return treeEntry{}, err
 		}
-		entry.Target = compatBytes(target)
+		entry.Target = byteString(target)
 	case unix.S_IFCHR, unix.S_IFBLK:
 		entry.Type = "chr"
-		if st.Mode&unix.S_IFMT == unix.S_IFBLK {
+		if stat.Mode&unix.S_IFMT == unix.S_IFBLK {
 			entry.Type = "blk"
 		}
-		entry.Major = unix.Major(st.Rdev)
-		entry.Minor = unix.Minor(st.Rdev)
+		entry.Major = unix.Major(stat.Rdev)
+		entry.Minor = unix.Minor(stat.Rdev)
 	case unix.S_IFIFO:
 		entry.Type = "fifo"
 	case unix.S_IFSOCK:
 		entry.Type = "socket"
 	default:
-		return compatEntry{}, fmt.Errorf("%s: unsupported file type %o", rel, st.Mode&unix.S_IFMT)
+		return treeEntry{}, fmt.Errorf("%s: unsupported file type %o", rel, stat.Mode&unix.S_IFMT)
 	}
+
+	// Directories have no hardlink group.
 	if entry.Type != "dir" {
-		entry.Nlink = st.Nlink
-		entry.inode = fmt.Sprintf("%d:%d", st.Dev, st.Ino)
+		entry.Nlink = stat.Nlink
+		entry.inode = fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
 	}
-	xattrs, err := compatListXattrs(path)
-	if err != nil {
-		return compatEntry{}, fmt.Errorf("%s: %w", rel, err)
-	}
-	entry.Xattrs = xattrs
+
+	entry.Xattrs = listXattrs(t, path)
+
 	return entry, nil
 }
 
-func compatHashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// compatListXattrs returns the xattrs of path without following symlinks,
-// less the trusted.nydus.* ones the builder adds for the runtime.
-func compatListXattrs(path string) (map[string]compatBytes, error) {
-	size, err := unix.Llistxattr(path, nil)
-	if err != nil || size == 0 {
-		return nil, err
-	}
-	buf := make([]byte, size)
-	n, err := unix.Llistxattr(path, buf)
-	if err != nil {
-		return nil, err
-	}
-	var xattrs map[string]compatBytes
-	for _, name := range strings.Split(string(buf[:n]), "\x00") {
-		if name == "" || strings.HasPrefix(name, "trusted.nydus.") {
+// listXattrs returns the xattrs of path without following symlinks, less
+// the internal ones the builder adds for the runtime, nil when there are
+// none.
+func listXattrs(t *testing.T, path string) map[string]byteString {
+	t.Helper()
+	var xattrs map[string]byteString
+	for _, name := range util.ListXattr(t, path) {
+		if util.IsInternalXattr(name) {
 			continue
 		}
-		size, err := unix.Lgetxattr(path, name, nil)
-		if err != nil {
-			return nil, fmt.Errorf("getxattr %s: %w", name, err)
-		}
-		value := make([]byte, size)
-		if size > 0 {
-			if size, err = unix.Lgetxattr(path, name, value); err != nil {
-				return nil, fmt.Errorf("getxattr %s: %w", name, err)
-			}
-		}
 		if xattrs == nil {
-			xattrs = map[string]compatBytes{}
+			xattrs = map[string]byteString{}
 		}
-		xattrs[name] = compatBytes(value[:size])
+		xattrs[name] = byteString(util.GetXattr(t, path, name))
 	}
-	return xattrs, nil
+
+	return xattrs
 }
 
-// compatAssignLinks points every member of a hardlink group at the group's
+// assignLinks points every member of a hardlink group at the group's
 // smallest path, which identifies the group the same way in every tree.
-func compatAssignLinks(entries []compatEntry) {
+func assignLinks(entries []treeEntry) {
 	groups := map[string][]int{}
 	for i, entry := range entries {
 		if entry.inode != "" {
 			groups[entry.inode] = append(groups[entry.inode], i)
 		}
 	}
+
 	for _, members := range groups {
 		if len(members) < 2 {
 			for _, i := range members {
@@ -622,98 +679,95 @@ func compatAssignLinks(entries []compatEntry) {
 			}
 			continue
 		}
-		link := entries[members[0]].Path
+		smallest := slices.MinFunc(members, func(a, b int) int { return cmp.Compare(entries[a].Path, entries[b].Path) })
 		for _, i := range members {
-			if entries[i].Path < link {
-				link = entries[i].Path
-			}
-		}
-		for _, i := range members {
-			entries[i].Link = link
+			entries[i].Link = entries[smallest].Path
 		}
 	}
 }
 
-// compatRegroupLinks recomputes Link after entries were dropped or replaced,
-// using the group each entry was in (keyed by prefix, e.g. its layer).
-func compatRegroupLinks(entries []compatEntry, prefix func(compatEntry) string) {
+// regroupLinks recomputes Link after entries were dropped or replaced,
+// using the group each entry was in.
+func regroupLinks(entries []treeEntry) {
 	for i := range entries {
-		entries[i].inode = ""
-		if entries[i].Link != "" {
-			entries[i].inode = prefix(entries[i]) + string(entries[i].Link)
-		}
+		entries[i].inode = string(entries[i].Link)
 	}
-	compatAssignLinks(entries)
+
+	assignLinks(entries)
+
 	for i := range entries {
 		entries[i].inode = ""
 	}
 }
 
-// compatWithoutSockets drops the sockets a tarball cannot carry.
-func compatWithoutSockets(entries []compatEntry) []compatEntry {
-	var out []compatEntry
-	for _, entry := range entries {
-		if entry.Type != "socket" {
-			out = append(out, entry)
-		}
-	}
-	compatRegroupLinks(out, func(compatEntry) string { return "" })
+// withoutSockets drops the sockets a tarball cannot carry.
+func withoutSockets(entries []treeEntry) []treeEntry {
+	out := slices.DeleteFunc(slices.Clone(entries), func(entry treeEntry) bool { return entry.Type == "socket" })
+	regroupLinks(out)
 	return out
 }
 
-// compatTarSource is the tree an image built from compatWriteTar's tarball of
+// tarSource is the tree an image built from writeLayerTar's tarball of
 // entries holds.
-func compatTarSource(entries []compatEntry) []compatEntry {
-	var out []compatEntry
-	for _, entry := range compatWithoutSockets(entries) {
-		if !compatTarSafe(string(entry.Path)) || !compatTarSafe(string(entry.Target)) {
+func tarSource(entries []treeEntry) []treeEntry {
+	// Drop what writeLayerTar leaves out.
+	var out []treeEntry
+	for _, entry := range withoutSockets(entries) {
+		if !isTarSafe(string(entry.Path)) || !isTarSafe(string(entry.Target)) {
 			continue
 		}
+
 		xattrs := entry.Xattrs
 		entry.Xattrs = nil
 		for name, value := range xattrs {
-			if compatTarXattr(name, value) {
+			if tarCarriesXattr(name, value) {
 				if entry.Xattrs == nil {
-					entry.Xattrs = map[string]compatBytes{}
+					entry.Xattrs = map[string]byteString{}
 				}
 				entry.Xattrs[name] = value
 			}
 		}
+
 		out = append(out, entry)
 	}
-	compatRegroupLinks(out, func(compatEntry) string { return "" })
+	regroupLinks(out)
+
 	// A tarball's hardlinks are all the links an inode gets.
-	members := map[compatBytes]uint64{}
+	linkCount := map[byteString]uint64{}
 	for _, entry := range out {
-		members[entry.Link]++
+		linkCount[entry.Link]++
 	}
+
 	for i := range out {
 		if out[i].Type != "dir" {
 			out[i].Nlink = 1
 			if out[i].Link != "" {
-				out[i].Nlink = members[out[i].Link]
+				out[i].Nlink = linkCount[out[i].Link]
 			}
 		}
 	}
+
 	return out
 }
 
-// compatOverlay applies OCI layer semantics to the layer trees, lowest first:
+// overlayLayers applies OCI layer semantics to the layer trees, lowest first:
 // an opaque marker hides everything below in its directory, `.wh.<name>`
 // removes <name> and its subtree from below, a non-directory replaces
 // whatever is below, and directories merge with the upper metadata winning.
 // Hardlink groups never span layers.
-func compatOverlay(layers ...[]compatEntry) []compatEntry {
+func overlayLayers(layers ...[]treeEntry) []treeEntry {
 	const whiteoutPrefix = ".wh."
 	const opaqueMarker = ".wh..wh..opq"
-	split := func(path compatBytes) (string, string) {
+
+	splitPath := func(path byteString) (string, string) {
 		p := string(path)
 		if i := strings.LastIndexByte(p, '/'); i >= 0 {
 			return p[:i], p[i+1:]
 		}
 		return "", p
 	}
-	merged := map[compatBytes]compatEntry{}
+
+	merged := map[byteString]treeEntry{}
 	removeBelow := func(dir string, self bool) {
 		for path := range merged {
 			p := string(path)
@@ -723,9 +777,10 @@ func compatOverlay(layers ...[]compatEntry) []compatEntry {
 		}
 	}
 
+	// Apply a layer's whiteouts to what is below, then lay its entries over.
 	for layer, entries := range layers {
 		for _, entry := range entries {
-			dir, name := split(entry.Path)
+			dir, name := splitPath(entry.Path)
 			if name == opaqueMarker {
 				removeBelow(dir, false)
 			} else if target, ok := strings.CutPrefix(name, whiteoutPrefix); ok {
@@ -735,139 +790,159 @@ func compatOverlay(layers ...[]compatEntry) []compatEntry {
 				removeBelow(target, true)
 			}
 		}
+
 		for _, entry := range entries {
-			if _, name := split(entry.Path); strings.HasPrefix(name, whiteoutPrefix) {
+			if _, name := splitPath(entry.Path); strings.HasPrefix(name, whiteoutPrefix) {
 				continue
 			}
 			if lower, ok := merged[entry.Path]; ok && lower.Type == "dir" && entry.Type != "dir" {
 				removeBelow(string(entry.Path), false)
 			}
 			if entry.Link != "" {
-				entry.Link = compatBytes(fmt.Sprintf("%d/%s", layer, entry.Link))
+				entry.Link = byteString(fmt.Sprintf("%d/%s", layer, entry.Link))
 			}
 			merged[entry.Path] = entry
 		}
 	}
 
-	out := make([]compatEntry, 0, len(merged))
-	for _, entry := range merged {
-		out = append(out, entry)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	compatRegroupLinks(out, func(compatEntry) string { return "" })
+	out := slices.SortedFunc(maps.Values(merged), func(a, b treeEntry) int { return cmp.Compare(a.Path, b.Path) })
+	regroupLinks(out)
+
 	return out
 }
 
-// compatDataExtents maps the data of a large sparse file: its non-zero 4KiB
+// dataExtents maps the data of a large sparse file: its non-zero 4KiB
 // blocks, coalesced into extents and hashed. Everything else reads as zeros.
-func compatDataExtents(t *testing.T, path string, size int64) []compatExtent {
+func dataExtents(t *testing.T, path string, size int64) []dataExtent {
 	t.Helper()
 	const block = 4096
+
 	f, err := os.Open(path)
-	require.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return nil
+	}
 	defer func() { _ = f.Close() }()
 
-	var extents []compatExtent
+	// Walk the data ranges the filesystem reports and keep the blocks in them
+	// that are not zeros, coalescing neighbours.
+	var extents []dataExtent
 	buf := make([]byte, block)
 	zero := make([]byte, block)
 	for off := int64(0); off < size; {
 		data, err := unix.Seek(int(f.Fd()), off, unix.SEEK_DATA)
-		if errors.Is(err, unix.ENXIO) {
+		if errors.Is(err, unix.ENXIO) || !assert.NoError(t, err) {
 			break
 		}
-		require.NoError(t, err)
 		hole, err := unix.Seek(int(f.Fd()), data, unix.SEEK_HOLE)
-		require.NoError(t, err)
+		if !assert.NoError(t, err) {
+			break
+		}
 		for pos := data &^ (block - 1); pos < hole; pos += block {
 			n := min(int64(block), size-pos)
 			_, err := f.ReadAt(buf[:n], pos)
-			require.NoError(t, err)
+			assert.NoError(t, err)
 			if bytes.Equal(buf[:n], zero[:n]) {
 				continue
 			}
 			if last := len(extents) - 1; last >= 0 && extents[last].Offset+extents[last].Length == pos {
 				extents[last].Length += n
 			} else {
-				extents = append(extents, compatExtent{Offset: pos, Length: n})
+				extents = append(extents, dataExtent{Offset: pos, Length: n})
 			}
 		}
 		off = hole
 	}
 
+	// Hash each extent.
 	for i := range extents {
 		data := make([]byte, extents[i].Length)
 		_, err := f.ReadAt(data, extents[i].Offset)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		sum := sha256.Sum256(data)
 		extents[i].SHA256 = hex.EncodeToString(sum[:])
 	}
-	require.NotEmpty(t, extents, "%s: a large file needs data to locate", path)
+
+	assert.NotEmpty(t, extents, "%s: a large file needs data to locate", path)
 	return extents
 }
 
-// compatCorpus stages a deterministic tree: content comes from a seeded
-// generator and finish pins the timestamps of every entry.
-type compatCorpus struct {
+// seededCorpus stages a deterministic tree: content comes from a seeded
+// generator and pinTimes pins the timestamps of every entry.
+type seededCorpus struct {
 	*corpus.Corpus
-	rng   *mathrand.Rand
+
+	// rng is the seeded generator the content is drawn from.
+	rng *mathrand.Rand
+
+	// times are the timestamps set explicitly, by relative path, which pinTimes
+	// pins before the default ones.
 	times map[string]unix.Timespec
 }
 
-func newCompatCorpus(t *testing.T, dir string, seed int64) *compatCorpus {
-	return &compatCorpus{
+// newSeededCorpus returns an empty corpus at dir whose content is drawn from
+// seed.
+func newSeededCorpus(t *testing.T, dir string, seed int64) *seededCorpus {
+	return &seededCorpus{
 		Corpus: corpus.NewCorpus(t, dir),
 		rng:    mathrand.New(mathrand.NewSource(seed)),
 		times:  map[string]unix.Timespec{},
 	}
 }
 
-var compatWords = strings.Fields("nydus erofs chunk blob meta bootstrap layer image overlay " +
+// textWords is the vocabulary text draws its words from.
+var textWords = strings.Fields("nydus erofs chunk blob meta bootstrap layer image overlay " +
 	"whiteout hole sparse inode xattr dirent symlink device fifo socket hardlink compact " +
 	"extended superblock digest zstd lz4 prefetch cache fuse mount export registry")
 
 // random returns n incompressible bytes.
-func (c *compatCorpus) random(n int) []byte {
+func (c *seededCorpus) random(n int) []byte {
 	b := make([]byte, n)
 	_, _ = c.rng.Read(b)
 	return b
 }
 
 // text returns n bytes of compressible, but not repetitive, text.
-func (c *compatCorpus) text(n int) []byte {
+func (c *seededCorpus) text(n int) []byte {
 	var b bytes.Buffer
 	for b.Len() < n {
-		b.WriteString(compatWords[c.rng.Intn(len(compatWords))])
+		b.WriteString(textWords[c.rng.Intn(len(textWords))])
 		if c.rng.Intn(12) == 0 {
 			b.WriteByte('\n')
 		} else {
 			b.WriteByte(' ')
 		}
 	}
+
 	return b.Bytes()[:n]
 }
 
-func (c *compatCorpus) setTime(name string, sec, nsec int64) {
+// setTime records the timestamp pinTimes pins on name.
+func (c *seededCorpus) setTime(name string, sec, nsec int64) {
 	c.times[name] = unix.Timespec{Sec: sec, Nsec: nsec}
 }
 
-func (c *compatCorpus) lsetxattr(t *testing.T, name, key string, value []byte) {
-	require.NoError(t, unix.Lsetxattr(filepath.Join(c.Dir, name), key, value, 0), "%s: %s", name, key)
+// lsetxattr sets the xattr key of name itself, where corpus.SetXattr follows
+// a symlink.
+func (c *seededCorpus) lsetxattr(t *testing.T, name, key string, value []byte) {
+	assert.NoError(t, unix.Lsetxattr(filepath.Join(c.Dir, name), key, value, 0), "%s: %s", name, key)
 }
 
-func (c *compatCorpus) socket(t *testing.T, name string) {
+// createSocket creates the socket node name with mknod, so it needs no listener and
+// gets the mode of a regular node.
+func (c *seededCorpus) createSocket(t *testing.T, name string) {
 	path := filepath.Join(c.Dir, name)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
-	require.NoError(t, unix.Mknod(path, unix.S_IFSOCK|0755, 0))
+	assert.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	assert.NoError(t, unix.Mknod(path, unix.S_IFSOCK|0o755, 0))
 }
 
-// finish pins the timestamps of every entry: the explicit ones, then a
+// pinTimes pins the timestamps of every entry: the explicit ones, then a
 // default for the rest, which mostly carry whole seconds (a compact inode
 // cannot hold nanoseconds of its own) with every fifth one extended by a
 // nanosecond part. Hardlinks share their inode's timestamp.
-func (c *compatCorpus) finish(t *testing.T) {
+func (c *seededCorpus) pinTimes(t *testing.T) {
 	t.Helper()
 	var paths []string
-	require.NoError(t, filepath.WalkDir(c.Dir, func(path string, _ fs.DirEntry, err error) error {
+	assert.NoError(t, filepath.WalkDir(c.Dir, func(path string, _ fs.DirEntry, err error) error {
 		if err != nil || path == c.Dir {
 			return err
 		}
@@ -876,25 +951,23 @@ func (c *compatCorpus) finish(t *testing.T) {
 		return err
 	}))
 
+	// Set each inode once, so the first path to reach it wins.
 	done := map[uint64]bool{}
 	set := func(rel string, ts unix.Timespec) {
 		path := filepath.Join(c.Dir, rel)
-		var st unix.Stat_t
-		require.NoError(t, unix.Lstat(path, &st))
-		if done[st.Ino] {
+		var stat unix.Stat_t
+		assert.NoError(t, unix.Lstat(path, &stat))
+		if done[stat.Ino] {
 			return
 		}
-		done[st.Ino] = true
-		require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, path, []unix.Timespec{ts, ts}, unix.AT_SYMLINK_NOFOLLOW), rel)
+		done[stat.Ino] = true
+		assert.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, path, []unix.Timespec{ts, ts}, unix.AT_SYMLINK_NOFOLLOW), rel)
 	}
-	explicit := make([]string, 0, len(c.times))
-	for rel := range c.times {
-		explicit = append(explicit, rel)
-	}
-	sort.Strings(explicit)
-	for _, rel := range explicit {
+
+	for _, rel := range slices.Sorted(maps.Keys(c.times)) {
 		set(rel, c.times[rel])
 	}
+
 	for i, rel := range paths {
 		ts := unix.Timespec{Sec: 1_700_000_000 + int64(i)*61}
 		if i%5 == 4 {
@@ -905,26 +978,26 @@ func (c *compatCorpus) finish(t *testing.T) {
 	set(".", unix.Timespec{Sec: 1_700_000_000})
 }
 
-// compatMakeCorpus stages the tree every single-layer image is built from.
-func compatMakeCorpus(t *testing.T, dir string) {
+// stageCorpus stages the tree every single-layer image is built from.
+func stageCorpus(t *testing.T, dir string) {
 	t.Helper()
-	c := newCompatCorpus(t, dir, compatSeed)
-	compatCorpusData(t, c)
-	compatCorpusHoles(t, c)
-	compatCorpusMetadata(t, c)
-	compatCorpusLinks(t, c)
-	compatCorpusXattrs(t, c)
-	compatCorpusNames(t, c)
-	compatCorpusDirs(t, c)
-	compatCorpusSymlinks(t, c)
-	compatCorpusSpecial(t, c)
-	c.finish(t)
+	c := newSeededCorpus(t, dir, corpusSeed)
+	stageFileData(t, c)
+	stageSparseFiles(t, c)
+	stageInodeMetadata(t, c)
+	stageHardlinks(t, c)
+	stageXattrs(t, c)
+	stageFileNames(t, c)
+	stageDirs(t, c)
+	stageSymlinks(t, c)
+	stageSpecialFiles(t, c)
+	c.pinTimes(t)
 }
 
-// compatCorpusData covers file data: sizes against every block, pcluster and
+// stageFileData covers file data: sizes against every block, pcluster and
 // chunk boundary of the layouts, inline tails, content that compresses well,
 // badly or to nothing, and content that deduplicates.
-func compatCorpusData(t *testing.T, c *compatCorpus) {
+func stageFileData(t *testing.T, c *seededCorpus) {
 	// Full, one byte short and one byte over the 4KiB block, the 64KiB
 	// chunk and pcluster, and the 1MiB, 2MiB and 8MiB chunks.
 	for i, size := range []int{
@@ -957,12 +1030,15 @@ func compatCorpusData(t *testing.T, c *compatCorpus) {
 	for _, size := range []int{4095, 4096, 65537, 2<<20 + 1} {
 		c.CreateFile(t, fmt.Sprintf("data/content/zeros_%08d", size), make([]byte, size))
 	}
+
 	// A chunk that is zero but for its first or last byte is data.
 	for _, at := range []int{0, 4095, 4096, 65535, 2<<20 - 1, 2 << 20, 4<<20 + 2} {
 		data := make([]byte, 4<<20+3)
 		data[at] = 0xa5
 		c.CreateFile(t, fmt.Sprintf("data/content/lone_byte_%08d", at), data)
 	}
+
+	// Content that compresses well, badly or to nothing.
 	pattern := make([]byte, 3<<20+5)
 	for i := range pattern {
 		pattern[i] = byte(i)
@@ -970,11 +1046,13 @@ func compatCorpusData(t *testing.T, c *compatCorpus) {
 	c.CreateFile(t, "data/content/pattern", pattern)
 	c.CreateFile(t, "data/content/text", c.text(1<<20+17))
 	c.CreateFile(t, "data/content/random", c.random(128<<10))
+
 	barely := c.random(256 << 10)
 	for i := 0; i < len(barely); i += 16 {
 		barely[i] = 0
 	}
 	c.CreateFile(t, "data/content/barely_compressible", barely)
+
 	// Zero blocks inside data chunks, so no chunk is a hole.
 	mixed := make([]byte, 1<<20)
 	for off := 0; off < len(mixed); off += 8192 {
@@ -982,22 +1060,24 @@ func compatCorpusData(t *testing.T, c *compatCorpus) {
 	}
 	c.CreateFile(t, "data/content/mixed_blocks", mixed)
 
+	// Content shared by several files, which chunk deduplication may fold.
 	shared := c.random(2<<20 + 8193)
 	c.CreateFile(t, "data/dedup/orig", shared)
 	c.CreateFile(t, "data/dedup/copy", shared)
 	c.CreateFile(t, "data/dedup/prefix", append(append([]byte{}, shared[:1<<20]...), c.random(1<<20+5)...))
 	c.CreateFile(t, "data/dedup/suffix", append(c.random(64<<10), shared[64<<10:]...))
 	c.CreateFile(t, "data/dedup/repeated", bytes.Repeat(c.random(64<<10), 24))
+
 	small := c.text(5000)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		c.CreateFile(t, fmt.Sprintf("data/dedup/small_%d", i), small)
 	}
 }
 
-// compatCorpusHoles covers sparse files: holes that start, end and span each
+// stageSparseFiles covers sparse files: holes that start, end and span each
 // block, pcluster and chunk boundary, all-hole files, alternating runs, written
 // zeros next to real holes, and files past 4GiB.
-func compatCorpusHoles(t *testing.T, c *compatCorpus) {
+func stageSparseFiles(t *testing.T, c *seededCorpus) {
 	const block = 4096
 	const chunk = 2 << 20
 
@@ -1005,19 +1085,23 @@ func compatCorpusHoles(t *testing.T, c *compatCorpus) {
 	for _, size := range []int64{1, block - 1, block, block + 1, 65536, 65537, chunk, chunk + 1, 9 << 20} {
 		c.CreateSparseFile(t, fmt.Sprintf("holes/empty/%08d", size), size, nil)
 	}
+
 	// A leading hole, then 16 bytes of data ending the file, the data
 	// starting just before, on and just after each boundary.
 	for _, off := range []int64{1, block - 1, block, block + 1, 65535, 65536, 65537, 1<<20 - 8, 1 << 20, chunk - 1, chunk, chunk + 1, 3*chunk - 8} {
 		c.CreateSparseFile(t, fmt.Sprintf("holes/leading/%08d", off), off+16, map[int64][]byte{off: c.random(16)})
 	}
+
 	// Data from offset zero, then a trailing hole such as truncate leaves.
 	for _, n := range []int{1, block - 1, block, block + 1, 65536, chunk - 1, chunk, chunk + 1} {
 		c.CreateSparseFile(t, fmt.Sprintf("holes/trailing/%08d", n), 6<<20, map[int64][]byte{0: c.random(n)})
 	}
+
 	// A dozen bytes straddling a boundary, holes on both sides.
 	for _, at := range []int64{block, 2 * block, 65536, 1 << 20, chunk, 2 * chunk} {
 		c.CreateSparseFile(t, fmt.Sprintf("holes/straddle/%08d", at), 3*chunk, map[int64][]byte{at - 6: c.random(12)})
 	}
+
 	// Holes of one block, one 64KiB unit and several chunks between data.
 	c.CreateSparseFile(t, "holes/gap/one_block", 3*block, map[int64][]byte{
 		0: c.random(block), 2 * block: c.random(block),
@@ -1028,75 +1112,85 @@ func compatCorpusHoles(t *testing.T, c *compatCorpus) {
 	c.CreateSparseFile(t, "holes/gap/chunks", 5*chunk+100, map[int64][]byte{
 		0: c.random(block), 4 * chunk: c.random(block), 5 * chunk: c.random(100),
 	})
+
 	// A partial block of data at the end of the file, after a long hole.
 	c.CreateSparseFile(t, "holes/gap/partial_tail", chunk+2*block+100, map[int64][]byte{
 		chunk + 2*block: c.random(100),
 	})
+
 	// Alternating data and holes at block granularity in both phases (the
 	// shape xfstests punch-alternating makes), per 64KiB, and per chunk.
-	for phase := int64(0); phase < 2; phase++ {
+	for phase := range int64(2) {
 		writes := map[int64][]byte{}
-		for b := int64(0); b < 128; b++ {
+		for b := range int64(128) {
 			if b%2 == phase {
 				writes[b*block] = c.random(block)
 			}
 		}
 		c.CreateSparseFile(t, fmt.Sprintf("holes/alternating/block_%d", phase), 128*block, writes)
 	}
+
 	writes := map[int64][]byte{}
 	for i := int64(0); i < 32; i += 2 {
 		writes[i*65536] = c.text(65536)
 	}
 	c.CreateSparseFile(t, "holes/alternating/64k", 32*65536, writes)
+
 	writes = map[int64][]byte{}
 	for i := int64(0); i < 6; i += 2 {
 		writes[i*chunk] = c.random(block)
 		writes[(i+1)*chunk-block] = c.random(block)
 	}
 	c.CreateSparseFile(t, "holes/alternating/chunk", 6*chunk, writes)
+
 	// Written zeros read the same as a hole.
 	c.CreateFile(t, "holes/zeros/written", make([]byte, chunk+4097))
 	c.CreateSparseFile(t, "holes/zeros/sparse", chunk+4097, nil)
 	c.CreateSparseFile(t, "holes/zeros/written_chunk", 3*chunk, map[int64][]byte{
 		0: c.random(16), chunk: make([]byte, chunk), 3*chunk - 16: c.random(16),
 	})
+
 	// Islands of random length at random distances.
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		writes := map[int64][]byte{}
 		off := int64(c.rng.Intn(3 * block))
-		for j := 0; j < 6; j++ {
+		for range 6 {
 			n := 1 + c.rng.Intn(20000)
 			writes[off] = c.random(n)
 			off += int64(n) + int64(1+c.rng.Intn(600000))
 		}
 		c.CreateSparseFile(t, fmt.Sprintf("holes/islands/%02d", i), off+int64(c.rng.Intn(block)), writes)
 	}
+
 	// Past 4GiB an inode needs the extended form for its 64-bit size and
 	// file offsets pass 32 bits; u32::MAX is the largest compact size.
-	const g4 = int64(1) << 32
-	c.CreateSparseFile(t, "holes/huge/4g_minus_1", g4-1, map[int64][]byte{
-		0: c.random(16), g4 - 17: c.random(16),
+	const fourGiB = int64(1) << 32
+	c.CreateSparseFile(t, "holes/huge/4g_minus_1", fourGiB-1, map[int64][]byte{
+		0: c.random(16), fourGiB - 17: c.random(16),
 	})
-	c.CreateSparseFile(t, "holes/huge/4g_plus_4097", g4+4097, map[int64][]byte{
-		0: c.random(16), chunk - 8: c.random(16), g4 - 8: c.random(16), g4 + 4097 - 16: c.random(16),
+	c.CreateSparseFile(t, "holes/huge/4g_plus_4097", fourGiB+4097, map[int64][]byte{
+		0: c.random(16), chunk - 8: c.random(16), fourGiB - 8: c.random(16), fourGiB + 4097 - 16: c.random(16),
 	})
 }
 
-// compatCorpusMetadata covers inode attributes: permission and special mode
+// stageInodeMetadata covers inode attributes: permission and special mode
 // bits, owners either side of the 16-bit compact limit, and timestamps at the
 // epoch, with nanoseconds, and past 2038 and 2106.
-func compatCorpusMetadata(t *testing.T, c *compatCorpus) {
-	for _, mode := range []uint32{0, 01, 07, 070, 0400, 0444, 0600, 0640, 0644, 0664, 0700, 0711, 0755, 0777, 01000, 01777, 02000, 02755, 04000, 04755, 06755, 07777} {
+func stageInodeMetadata(t *testing.T, c *seededCorpus) {
+	// Permission and special bits on files and directories.
+	for _, mode := range []uint32{0, 0o1, 0o7, 0o70, 0o400, 0o444, 0o600, 0o640, 0o644, 0o664, 0o700, 0o711, 0o755, 0o777, 0o1000, 0o1777, 0o2000, 0o2755, 0o4000, 0o4755, 0o6755, 0o7777} {
 		name := fmt.Sprintf("meta/mode/file_%04o", mode)
 		c.CreateFile(t, name, []byte(name))
 		c.Chmod(t, name, mode)
 	}
-	for _, mode := range []uint32{0, 0500, 0555, 0700, 0711, 0755, 0777, 01777, 02775, 03777, 07755} {
+
+	for _, mode := range []uint32{0, 0o500, 0o555, 0o700, 0o711, 0o755, 0o777, 0o1777, 0o2775, 0o3777, 0o7755} {
 		name := fmt.Sprintf("meta/mode/dir_%04o", mode)
 		c.CreateFile(t, name+"/inner", []byte(name))
 		c.Chmod(t, name, mode)
 	}
 
+	// Owners either side of the 16-bit compact limit, on every inode form.
 	for _, id := range [][2]int{
 		{0, 0}, {1, 2}, {1000, 1000}, {65534, 65534}, {65535, 65535}, {65535, 65536},
 		{65536, 65535}, {65536, 65536}, {100000, 200000}, {2147483647, 2147483647},
@@ -1106,11 +1200,13 @@ func compatCorpusMetadata(t *testing.T, c *compatCorpus) {
 		c.CreateFile(t, name, []byte(name))
 		c.Chown(t, name, id[0], id[1])
 	}
+
 	c.CreateFile(t, "meta/owner/dir_70000/inner", nil)
 	c.Chown(t, "meta/owner/dir_70000", 70000, 70001)
 	c.CreateSymlink(t, "meta/owner/symlink", "file_0_0")
 	c.Chown(t, "meta/owner/symlink", 12345, 54321)
 
+	// Timestamps at the epoch, with nanoseconds, and past 2038 and 2106.
 	for i, ts := range [][2]int64{
 		{0, 0}, {0, 1}, {1, 0}, {1, 999999999}, {1234567890, 0}, {1234567890, 123456789},
 		{1<<31 - 1, 0}, {1 << 31, 0}, {1<<32 - 1, 0}, {1 << 32, 0}, {1<<32 + 1, 500000000},
@@ -1120,6 +1216,7 @@ func compatCorpusMetadata(t *testing.T, c *compatCorpus) {
 		c.CreateFile(t, name, []byte(name))
 		c.setTime(name, ts[0], ts[1])
 	}
+
 	c.CreateFile(t, "meta/mtime/dir_nsec/inner", nil)
 	c.setTime("meta/mtime/dir_nsec", 1600000000, 987654321)
 	c.CreateDir(t, "meta/mtime/dir_future")
@@ -1128,32 +1225,35 @@ func compatCorpusMetadata(t *testing.T, c *compatCorpus) {
 	c.setTime("meta/mtime/symlink_nsec", 1500000000, 1)
 }
 
-// compatCorpusLinks covers hardlink groups: within and across directories,
+// stageHardlinks covers hardlink groups: within and across directories,
 // large, of empty, sparse and attribute-laden files, and of every
 // non-directory type.
-func compatCorpusLinks(t *testing.T, c *compatCorpus) {
+func stageHardlinks(t *testing.T, c *seededCorpus) {
 	c.CreateFile(t, "links/pair/a", c.text(3000))
 	c.CreateHardlink(t, "links/pair/b", "links/pair/a")
 	c.CreateFile(t, "links/cross/x/f", c.random(10000))
 	c.CreateHardlink(t, "links/cross/y/f", "links/cross/x/f")
 	c.CreateHardlink(t, "links/cross/z/deeper/f", "links/cross/x/f")
+
 	c.CreateFile(t, "links/many/target", []byte("many"))
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		c.CreateHardlink(t, fmt.Sprintf("links/many/l%03d", i), "links/many/target")
 	}
+
 	c.CreateFile(t, "links/empty/a", nil)
 	c.CreateHardlink(t, "links/empty/b", "links/empty/a")
 	c.CreateSparseFile(t, "links/sparse/a", 3<<20, map[int64][]byte{1 << 20: c.random(100)})
 	c.CreateHardlink(t, "links/sparse/b", "links/sparse/a")
+	c.CreateFile(t, "links/big/a", c.text(3<<20))
+	c.CreateHardlink(t, "links/big/b", "links/big/a")
+
 	c.CreateFile(t, "links/meta/a", c.random(5000))
-	c.Chmod(t, "links/meta/a", 04750)
+	c.Chmod(t, "links/meta/a", 0o4750)
 	c.Chown(t, "links/meta/a", 70000, 70001)
 	c.SetXattr(t, "links/meta/a", "user.link", []byte("shared by the group"))
 	c.setTime("links/meta/a", 1650000000, 424242424)
 	c.CreateHardlink(t, "links/meta/b", "links/meta/a")
 	c.CreateHardlink(t, "links/meta/c", "links/meta/a")
-	c.CreateFile(t, "links/big/a", c.text(3<<20))
-	c.CreateHardlink(t, "links/big/b", "links/big/a")
 
 	c.CreateFIFO(t, "links/special/fifo_a")
 	c.CreateHardlink(t, "links/special/fifo_b", "links/special/fifo_a")
@@ -1161,34 +1261,38 @@ func compatCorpusLinks(t *testing.T, c *compatCorpus) {
 	c.CreateHardlink(t, "links/special/chr_b", "links/special/chr_a")
 	c.CreateBlockDev(t, "links/special/blk_a", 8, 16)
 	c.CreateHardlink(t, "links/special/blk_b", "links/special/blk_a")
-	c.socket(t, "links/special/sock_a")
+	c.createSocket(t, "links/special/sock_a")
 	c.CreateHardlink(t, "links/special/sock_b", "links/special/sock_a")
 	c.CreateSymlink(t, "links/special/symlink_a", "../pair/a")
 	c.CreateHardlink(t, "links/special/symlink_b", "links/special/symlink_a")
 }
 
-// compatCorpusXattrs covers extended attributes: empty, binary and long
+// stageXattrs covers extended attributes: empty, binary and long
 // values, long names, many per inode, identical ones shared across inodes,
 // every name prefix EROFS indexes, and xattrs on every file type.
-func compatCorpusXattrs(t *testing.T, c *compatCorpus) {
+func stageXattrs(t *testing.T, c *seededCorpus) {
 	c.CreateFile(t, "xattr/small", []byte("x"))
 	c.SetXattr(t, "xattr/small", "user.a", []byte("1"))
 	c.CreateFile(t, "xattr/empty_value", []byte("x"))
 	c.lsetxattr(t, "xattr/empty_value", "user.empty", nil)
+
 	binary := make([]byte, 256)
 	for i := range binary {
 		binary[i] = byte(i)
 	}
 	c.CreateFile(t, "xattr/binary_value", []byte("x"))
 	c.SetXattr(t, "xattr/binary_value", "user.binary", binary)
+
 	c.CreateFile(t, "xattr/long_value", []byte("x"))
 	c.SetXattr(t, "xattr/long_value", "user.long", c.text(3000))
 	c.CreateFile(t, "xattr/long_name", []byte("x"))
 	c.SetXattr(t, "xattr/long_name", "user."+corpus.LongName('n', 250), []byte("v"))
+
 	c.CreateFile(t, "xattr/many", []byte("x"))
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		c.SetXattr(t, "xattr/many", fmt.Sprintf("user.m%03d", i), c.random(1+i%8))
 	}
+
 	// Entries are padded to 4 bytes, so name and value lengths cover every
 	// remainder.
 	c.CreateFile(t, "xattr/alignment", []byte("x"))
@@ -1197,15 +1301,18 @@ func compatCorpusXattrs(t *testing.T, c *compatCorpus) {
 			c.SetXattr(t, "xattr/alignment", fmt.Sprintf("user.%s%d", corpus.LongName('a', n), v), bytes.Repeat([]byte{'v'}, v))
 		}
 	}
+
 	// Identical xattrs on many inodes, which EROFS may share.
 	shared := c.text(600)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		name := fmt.Sprintf("xattr/shared/f%02d", i)
 		c.CreateFile(t, name, []byte{byte(i)})
 		c.SetXattr(t, name, "user.shared", shared)
 		c.SetXattr(t, name, "user.common", []byte("c"))
 		c.SetXattr(t, name, "user.own", []byte(name))
 	}
+
+	// Every name prefix EROFS indexes, including the system ones.
 	c.CreateFile(t, "xattr/prefixes", []byte("x"))
 	c.SetXattr(t, "xattr/prefixes", "user.p", []byte("user"))
 	c.SetXattr(t, "xattr/prefixes", "trusted.p", []byte("trusted"))
@@ -1213,7 +1320,7 @@ func compatCorpusXattrs(t *testing.T, c *compatCorpus) {
 	c.CreateFile(t, "xattr/selinux", []byte("x"))
 	c.SetXattr(t, "xattr/selinux", "security.selinux", []byte("system_u:object_r:bin_t:s0\x00"))
 	c.CreateFile(t, "xattr/capability", []byte("x"))
-	c.Chmod(t, "xattr/capability", 0755)
+	c.Chmod(t, "xattr/capability", 0o755)
 	c.SetFileCaps(t, "xattr/capability", 1<<13, 0)
 	c.CreateFile(t, "xattr/acl", []byte("x"))
 	c.SetACL(t, "xattr/acl", corpus.MinimalACL(1000), false)
@@ -1231,16 +1338,17 @@ func compatCorpusXattrs(t *testing.T, c *compatCorpus) {
 	c.lsetxattr(t, "xattr/types/fifo", "trusted.fifo", []byte("fifo"))
 	c.CreateCharDev(t, "xattr/types/chr", 1, 5)
 	c.lsetxattr(t, "xattr/types/chr", "trusted.chr", []byte("chr"))
-	c.socket(t, "xattr/types/socket")
+	c.createSocket(t, "xattr/types/socket")
 	c.lsetxattr(t, "xattr/types/socket", "trusted.socket", []byte("socket"))
 }
 
-// compatCorpusNames covers file names: every length up to 255 bytes, special
+// stageFileNames covers file names: every length up to 255 bytes, special
 // characters, bytes that are not UTF-8, and names that sort as prefixes.
-func compatCorpusNames(t *testing.T, c *compatCorpus) {
+func stageFileNames(t *testing.T, c *seededCorpus) {
 	for n := 1; n <= 255; n++ {
 		c.CreateFile(t, "names/length/"+corpus.LongName('n', n), nil)
 	}
+
 	for i, name := range []string{
 		" leading", "trailing ", "mid space", "tab\there", "new\nline", "quote'sq", `quote"dq`,
 		`back\slash`, "star*", "question?", "brack[et]", "dollar$", "semi;colon", "pct%d",
@@ -1249,6 +1357,7 @@ func compatCorpusNames(t *testing.T, c *compatCorpus) {
 	} {
 		c.CreateFile(t, "names/special/"+name, []byte{byte(i)})
 	}
+
 	for _, name := range []string{
 		"latin1_caf\xe9", "cp1252_\x93quoted\x94", "gbk_\xd6\xd0\xce\xc4", "lone_surrogate_\xed\xa0\x80",
 		"overlong_\xc0\xaf", "truncated_\xe4\xb8", "ctrl_\x01\x02\x1f\x7f", "\xff", "\xfe\xff",
@@ -1256,32 +1365,37 @@ func compatCorpusNames(t *testing.T, c *compatCorpus) {
 	} {
 		c.CreateFile(t, "names/raw/"+name, []byte(name))
 	}
+
 	for _, name := range []string{"pre", "pre0", "preA", "prea", "pre_", "pre~", "pre\x7f", "pre\x80", "pre\xff"} {
 		c.CreateFile(t, "names/prefix/"+name, []byte(name))
 	}
 }
 
-// compatCorpusDirs covers directories: empty, deeply nested, spanning many
+// stageDirs covers directories: empty, deeply nested, spanning many
 // blocks with short, mixed and 255-byte names, entries that end exactly on,
 // just short of and just past a 4KiB directory block, and one of each type.
-func compatCorpusDirs(t *testing.T, c *compatCorpus) {
+func stageDirs(t *testing.T, c *seededCorpus) {
 	c.CreateDir(t, "dirs/empty")
 	c.CreateDir(t, "dirs/empty_chain/a/b/c/d")
+
 	path := "dirs/deep"
 	for depth := 1; depth <= 40; depth++ {
 		path = fmt.Sprintf("%s/d%02d", path, depth)
 		c.CreateFile(t, path+"/leaf", []byte(path))
 	}
-	for i := 0; i < 1000; i++ {
+
+	// Directories spanning many blocks, with short, mixed and 255-byte names.
+	for i := range 1000 {
 		c.CreateFile(t, fmt.Sprintf("dirs/wide_short/%03d", i), nil)
 	}
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		c.CreateFile(t, fmt.Sprintf("dirs/wide_mixed/%0*d", 1+i%255, i), nil)
 	}
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		c.CreateFile(t, fmt.Sprintf("dirs/wide_long/%s%03d", corpus.LongName('l', 252), i), nil)
 	}
-	for i := 0; i < 300; i++ {
+
+	for i := range 300 {
 		c.CreateDir(t, fmt.Sprintf("dirs/subdirs/s%03d", i))
 	}
 
@@ -1304,15 +1418,16 @@ func compatCorpusDirs(t *testing.T, c *compatCorpus) {
 	c.CreateFIFO(t, "dirs/types/fifo")
 	c.CreateCharDev(t, "dirs/types/chr", 1, 7)
 	c.CreateBlockDev(t, "dirs/types/blk", 7, 0)
-	c.socket(t, "dirs/types/socket")
+	c.createSocket(t, "dirs/types/socket")
 }
 
-// compatCorpusSymlinks covers symlink targets of every length class up to
+// stageSymlinks covers symlink targets of every length class up to
 // PATH_MAX, around the inline limits, and unusual targets.
-func compatCorpusSymlinks(t *testing.T, c *compatCorpus) {
+func stageSymlinks(t *testing.T, c *seededCorpus) {
 	for _, n := range []int{1, 2, 31, 32, 33, 255, 256, 1023, 1024, 2048, 4031, 4032, 4033, 4063, 4064, 4065, 4094, 4095} {
 		c.CreateSymlink(t, fmt.Sprintf("symlinks/length_%04d", n), corpus.LongName('t', n))
 	}
+
 	for name, target := range map[string]string{
 		"dangling": "missing/target",
 		"absolute": "/etc/hostname",
@@ -1330,30 +1445,34 @@ func compatCorpusSymlinks(t *testing.T, c *compatCorpus) {
 	}
 }
 
-// compatCorpusSpecial covers device, fifo and socket nodes, with device
+// stageSpecialFiles covers device, fifo and socket nodes, with device
 // numbers past 8 bits up to the 12-bit major and 20-bit minor limits.
-func compatCorpusSpecial(t *testing.T, c *compatCorpus) {
+func stageSpecialFiles(t *testing.T, c *seededCorpus) {
 	c.CreateFIFO(t, "special/fifo")
 	c.CreateFIFO(t, "special/fifo_0600")
-	c.Chmod(t, "special/fifo_0600", 0600)
+	c.Chmod(t, "special/fifo_0600", 0o600)
+
 	for _, dev := range [][2]uint32{{1, 3}, {4, 64}, {10, 200}, {136, 1}, {255, 255}, {256, 0}, {0, 256}, {259, 65536}, {4095, 1048575}} {
 		c.CreateCharDev(t, fmt.Sprintf("special/chr_%d_%d", dev[0], dev[1]), dev[0], dev[1])
 		c.CreateBlockDev(t, fmt.Sprintf("special/blk_%d_%d", dev[0], dev[1]), dev[0], dev[1])
 	}
-	c.socket(t, "special/socket")
-	c.socket(t, "special/socket_0700")
-	c.Chmod(t, "special/socket_0700", 0700)
+
+	c.createSocket(t, "special/socket")
+	c.createSocket(t, "special/socket_0700")
+	c.Chmod(t, "special/socket_0700", 0o700)
 }
 
-// compatMakeMergeLayers stages three layers whose overlay exercises every
+// stageMergeLayers stages three layers whose overlay exercises every
 // whiteout form, type changes in both directions, metadata overrides of files
 // and directories, hardlink groups broken or removed by upper layers, and a
 // name removed and re-added.
-func compatMakeMergeLayers(t *testing.T, dirs []string) {
+func stageMergeLayers(t *testing.T, layerDirs []string) {
 	t.Helper()
-	require.Len(t, dirs, 3)
+	if !assert.Len(t, layerDirs, 3) {
+		return
+	}
 
-	lower := newCompatCorpus(t, dirs[0], compatSeed+1)
+	lower := newSeededCorpus(t, layerDirs[0], corpusSeed+1)
 	shared := lower.random(3<<20 + 17)
 	lower.CreateFile(t, "keep/text", lower.text(10000))
 	lower.CreateFile(t, "keep/random", shared)
@@ -1365,6 +1484,7 @@ func compatMakeMergeLayers(t *testing.T, dirs []string) {
 	lower.CreateCharDev(t, "keep/chr", 1, 3)
 	lower.CreateFile(t, "keep/owner", nil)
 	lower.Chown(t, "keep/owner", 70000, 70000)
+
 	lower.CreateFile(t, "change/replaced", lower.text(5000))
 	lower.CreateFile(t, "change/removed", []byte("removed"))
 	lower.CreateFile(t, "change/removed_dir/a", nil)
@@ -1382,6 +1502,7 @@ func compatMakeMergeLayers(t *testing.T, dirs []string) {
 	lower.CreateFile(t, "change/meta_dir/lower_child", nil)
 	lower.SetXattr(t, "change/meta_dir", "user.dir", []byte("lower"))
 	lower.Chown(t, "change/meta_dir", 1000, 1000)
+
 	lower.CreateFile(t, "links/a", lower.text(4000))
 	lower.CreateHardlink(t, "links/b", "links/a")
 	lower.CreateHardlink(t, "links/c", "links/a")
@@ -1389,17 +1510,19 @@ func compatMakeMergeLayers(t *testing.T, dirs []string) {
 	lower.CreateHardlink(t, "links/q", "links/p")
 	lower.CreateFile(t, "links/whole/x", nil)
 	lower.CreateHardlink(t, "links/whole/y", "links/whole/x")
-	lower.finish(t)
 
-	middle := newCompatCorpus(t, dirs[1], compatSeed+2)
+	lower.pinTimes(t)
+
+	middle := newSeededCorpus(t, layerDirs[1], corpusSeed+2)
 	middle.CreateFile(t, "keep_copy/random", shared)
+
 	middle.CreateFile(t, "change/.wh.removed", nil)
 	middle.CreateFile(t, "change/.wh.removed_dir", nil)
 	middle.CreateFile(t, "change/.wh.never_existed", nil)
 	middle.CreateFile(t, "change/opaque/.wh..wh..opq", nil)
 	middle.CreateFile(t, "change/opaque/new", []byte("new"))
 	middle.CreateFile(t, "change/replaced", middle.random(70000))
-	middle.Chmod(t, "change/replaced", 0600)
+	middle.Chmod(t, "change/replaced", 0o600)
 	middle.CreateFile(t, "change/file_to_dir/inner", []byte("inner"))
 	middle.CreateFile(t, "change/dir_to_file", []byte("now a file"))
 	middle.CreateSymlink(t, "change/file_to_symlink", "replaced")
@@ -1411,22 +1534,26 @@ func compatMakeMergeLayers(t *testing.T, dirs []string) {
 	middle.CreateFile(t, "change/meta_dir/middle_child", nil)
 	middle.SetXattr(t, "change/meta_dir", "user.dir", []byte("middle"))
 	middle.Chown(t, "change/meta_dir", 2000, 2000)
-	middle.Chmod(t, "change/meta_dir", 0700)
+	middle.Chmod(t, "change/meta_dir", 0o700)
+
 	middle.CreateFile(t, "links/b", []byte("breaks the group"))
 	middle.CreateFile(t, "links/.wh.q", nil)
 	middle.CreateFile(t, "links/.wh.whole", nil)
 	middle.CreateFile(t, "links/new_a", middle.text(300))
 	middle.CreateHardlink(t, "links/new_b", "links/new_a")
-	middle.finish(t)
 
-	upper := newCompatCorpus(t, dirs[2], compatSeed+3)
+	middle.pinTimes(t)
+
+	upper := newSeededCorpus(t, layerDirs[2], corpusSeed+3)
 	upper.CreateFile(t, "change/readded", []byte("v3"))
 	upper.CreateFile(t, "change/.wh.file_to_dir", nil)
 	upper.CreateFile(t, "change/opaque/.wh.new", nil)
 	upper.CreateFile(t, "change/opaque/newest", nil)
 	upper.CreateFile(t, "fresh/deep/er/file", upper.text(2000))
+
 	upper.CreateDir(t, "change/meta_dir")
 	upper.SetXattr(t, "change/meta_dir", "user.dir", []byte("upper"))
 	upper.setTime("change/meta_dir", 1800000000, 123)
-	upper.finish(t)
+
+	upper.pinTimes(t)
 }

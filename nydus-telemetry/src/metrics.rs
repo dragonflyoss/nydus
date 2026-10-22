@@ -1,116 +1,637 @@
-//! Self-contained Prometheus metrics for nydus.
+//! The Prometheus metrics of a nydus image: [`Metrics`], grouped by the
+//! module that records them, and the `collect_*_metrics` methods that move
+//! them. Every opened image records into a [`Metrics`] of its own, held by
+//! its blob backend; whoever serves `/metrics` encodes
+//! `metrics.registry().gather()` with a [`prometheus::TextEncoder`].
 //!
-//! Each opened image may own a private [`prometheus::Registry`] through
-//! [`ImageMetrics`]. A separate process-wide registry backs the free helper
-//! functions for legacy callers; it is not an aggregate of the image
-//! registries. Other modules never touch Prometheus types directly. Keeping
-//! all metric definitions here makes the exported surface easy to audit and
-//! keeps callers trivial.
+//! Every metric name is `nydus_<subsystem>_<operation>_<unit>`: the `nydus`
+//! namespace, the module recording it as the subsystem, `backend` for the
+//! blob backend reads, `storage` for the prefetch tasks, `cache` for the
+//! chunk groups the local blob cache serves from the cache file and writes
+//! into it, `fs` for the FUSE operations, then the operation in the
+//! singular the way dragonfly-client-metric names them,
+//! `nydus_backend_read_total`, `nydus_storage_prefetch_task_total`,
+//! `nydus_cache_read_bytes_total`, `nydus_fs_op_total`. Counters end in
+//! `_total`, byte counters in `_bytes_total`, duration histograms in
+//! `_duration_milliseconds`, the gauge in its unit alone, `nydus_cache_bytes`;
+//! a count with failures has a `_failure_total` twin counting them, and a
+//! duration histogram observes the successes alone. Dimensions are labels,
+//! each with a fixed vocabulary, the `Display` of the enum that names it:
+//!
+//! ```text
+//! type      what triggered the backend read        ondemand | prefetch
+//!           or what wrote the chunk group           ondemand | prefetch | redirect
+//! source    where the backend read the bytes       local | origin | proxy | dragonfly | fallback
+//! reason    why the cache write failed             decode | checksum | io | unknown_source
+//! status    whether the image bytes are cached     cached | uncached
+//! operation the FUSE operation                     lookup | read | getattr | ...
+//! ```
+//!
+//! A label partitions one quantity, so that the sum over its values stays
+//! meaningful, the way mysqld_exporter's buffer pool pages carry
+//! `state="data|free|misc"` and nginx-module-vts's cache bytes carry their
+//! cache `status`: `nydus_cache_bytes{status}` splits the image the cache
+//! serves into the bytes it holds and the bytes it does not, and the image's
+//! total is their sum. That gauge is the one metric not moved by a
+//! `collect_*_metrics` call: the blob cache set registers a collector that
+//! computes it when the registry is gathered, from the chunk group maps it
+//! shares with every process using the cache directory, so it is never
+//! stale across them.
+//!
+//! `source` is `local` for the local directory backend, `origin` for the
+//! registry backend reading the origin registry itself, `proxy` for it
+//! reading through an HTTP forward proxy, `dragonfly` for it reading the
+//! Dragonfly seed peers and `fallback` for a read Dragonfly could not serve
+//! that went back to the origin. `type` is `redirect` only on the cache
+//! writes, for a chunk group filled into its source blob from the ondemand
+//! (redirect) blob. `reason` tells a corrupted chunk group (`checksum`, the
+//! crc32c mismatched; `decode`, it did not decompress to its declared
+//! size, or a redirect points past its source blob's chunk groups) from a
+//! cache that cannot be written (`io`) and, on the redirect fills, from a
+//! redirect naming a blob the image does not have (`unknown_source`).
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::fmt;
 use std::time::Duration;
 
-use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
-    TextEncoder,
-};
-use serde::Serialize;
+use prometheus::{exponential_buckets, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
 
-/// Byte length of the SHA-256 digests used as blob cache keys. Defined
-/// locally so this crate stays a dependency leaf.
-const SHA256_DIGEST_SIZE: usize = 32;
+pub use nydus_config::ReadKind;
 
-/// Reads slower than this are counted as "high latency" for their source.
-const HIGH_LATENCY_THRESHOLD: Duration = Duration::from_millis(250);
+/// The metrics of one image, grouped by the module that records them and
+/// every one registered in a [`Registry`] of its own.
+///
+/// Instances are independent: what one records never shows in another. The
+/// backend of an image holds the instance and the caches, the prefetcher and
+/// the filesystem above it record into the same one, every move a
+/// `collect_*_metrics` call; readers take the values from [`Metrics::registry`].
+///
+/// ```text
+/// Metrics
+///   ├─ backend   BackendMetrics   nydus_backend_*   the blob backend's reads
+///   ├─ storage   StorageMetrics   nydus_storage_*   the prefetch tasks
+///   ├─ cache     CacheMetrics     nydus_cache_*     the local blob cache's reads and writes
+///   └─ fs        FsMetrics        nydus_fs_*        the FUSE operations
+/// ```
+#[derive(Debug)]
+pub struct Metrics {
+    /// Used to register all metrics.
+    registry: Registry,
 
-/// Exponential latency buckets covering 1ms up to ~8.19s.
-fn latency_buckets() -> Vec<f64> {
-    prometheus::exponential_buckets(0.001, 2.0, 14).expect("valid latency buckets")
+    /// The metrics of the blob backend.
+    pub backend: BackendMetrics,
+
+    /// The metrics of the storage layer.
+    pub storage: StorageMetrics,
+
+    /// The metrics of the local blob cache.
+    pub cache: CacheMetrics,
+
+    /// The metrics of the FUSE filesystem.
+    pub fs: FsMetrics,
 }
 
-/// Which side of the backend served a read: the origin registry directly, or a
-/// proxy (HTTP mirror or Dragonfly SDK).
+/// Implements the default metrics.
+impl Default for Metrics {
+    /// Creates the metrics of an image.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Implements the metrics.
+impl Metrics {
+    /// Creates the metrics of an image, every metric registered in a
+    /// registry of its own.
+    pub fn new() -> Self {
+        let metrics = Self {
+            registry: Registry::new(),
+            backend: BackendMetrics::new(),
+            storage: StorageMetrics::new(),
+            cache: CacheMetrics::new(),
+            fs: FsMetrics::new(),
+        };
+        metrics.register_custom_metrics();
+        metrics
+    }
+
+    /// Returns the registry every metric is registered in, the one a
+    /// `/metrics` handler gathers.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    /// Registers all metrics.
+    fn register_custom_metrics(&self) {
+        self.registry
+            .register(Box::new(self.backend.read_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.backend.read_failure_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.backend.read_bytes.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.backend.read_duration.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.storage.prefetch_task_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.storage.prefetch_task_failure_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.cache.read_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.cache.read_bytes.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.cache.write_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.cache.write_failure_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.cache.write_bytes.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.fs.op_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.fs.op_failure_count.clone()))
+            .expect("metric can be registered");
+
+        self.registry
+            .register(Box::new(self.fs.op_duration.clone()))
+            .expect("metric can be registered");
+    }
+}
+
+/// The metrics of the blob backend, subsystem `backend`: every read it
+/// serves, by read kind and source.
+#[derive(Debug)]
+pub struct BackendMetrics {
+    /// Used to count the number of backend reads.
+    read_count: IntCounterVec,
+
+    /// Used to count the failed number of backend reads.
+    read_failure_count: IntCounterVec,
+
+    /// Used to count the backend read bytes.
+    read_bytes: IntCounterVec,
+
+    /// Used to record the backend read duration.
+    read_duration: HistogramVec,
+}
+
+/// Implements the backend metrics.
+impl BackendMetrics {
+    /// The subsystem of the metric names.
+    const SUBSYSTEM: &'static str = "backend";
+
+    /// Creates the metrics.
+    fn new() -> Self {
+        Self {
+            read_count: IntCounterVec::new(
+                Opts::new("read_total", "Counter of the number of the backend read.")
+                    .namespace(nydus_config::NAME)
+                    .subsystem(Self::SUBSYSTEM),
+                &["type", "source"],
+            )
+            .expect("metric can be created"),
+            read_failure_count: IntCounterVec::new(
+                Opts::new(
+                    "read_failure_total",
+                    "Counter of the number of failed of the backend read.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &["type", "source"],
+            )
+            .expect("metric can be created"),
+            read_bytes: IntCounterVec::new(
+                Opts::new(
+                    "read_bytes_total",
+                    "Counter of the bytes of the backend read.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &["type", "source"],
+            )
+            .expect("metric can be created"),
+            read_duration: HistogramVec::new(
+                HistogramOpts::new(
+                    "read_duration_milliseconds",
+                    "Histogram of the backend read duration.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM)
+                .buckets(exponential_buckets(1.0, 2.0, 24).unwrap()),
+                &["type", "source"],
+            )
+            .expect("metric can be created"),
+        }
+    }
+
+    /// Collects the backend read finished metrics, `length` the compressed
+    /// bytes read.
+    pub fn collect_read_finished_metrics(
+        &self,
+        kind: ReadKind,
+        source: Source,
+        length: u64,
+        cost: Duration,
+    ) {
+        self.read_count
+            .with_label_values(&[&kind.to_string(), &source.to_string()])
+            .inc();
+
+        self.read_bytes
+            .with_label_values(&[&kind.to_string(), &source.to_string()])
+            .inc_by(length);
+
+        self.read_duration
+            .with_label_values(&[&kind.to_string(), &source.to_string()])
+            .observe(cost.as_millis() as f64);
+    }
+
+    /// Collects the backend read failure metrics.
+    pub fn collect_read_failure_metrics(&self, kind: ReadKind, source: Source) {
+        self.read_count
+            .with_label_values(&[&kind.to_string(), &source.to_string()])
+            .inc();
+
+        self.read_failure_count
+            .with_label_values(&[&kind.to_string(), &source.to_string()])
+            .inc();
+    }
+}
+
+/// The metrics of the storage layer, subsystem `storage`: the blob prefetch
+/// tasks and how many of them failed.
+#[derive(Debug)]
+pub struct StorageMetrics {
+    /// Used to count the number of prefetch tasks.
+    prefetch_task_count: IntCounterVec,
+
+    /// Used to count the failed number of prefetch tasks.
+    prefetch_task_failure_count: IntCounterVec,
+}
+
+/// Implements the storage metrics.
+impl StorageMetrics {
+    /// The subsystem of the metric names.
+    const SUBSYSTEM: &'static str = "storage";
+
+    /// Creates the metrics.
+    fn new() -> Self {
+        Self {
+            prefetch_task_count: IntCounterVec::new(
+                Opts::new(
+                    "prefetch_task_total",
+                    "Counter of the number of the prefetch task.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &[],
+            )
+            .expect("metric can be created"),
+            prefetch_task_failure_count: IntCounterVec::new(
+                Opts::new(
+                    "prefetch_task_failure_total",
+                    "Counter of the number of failed of the prefetch task.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &[],
+            )
+            .expect("metric can be created"),
+        }
+    }
+
+    /// Collects the prefetch task finished metrics.
+    pub fn collect_prefetch_task_finished_metrics(&self) {
+        self.prefetch_task_count.with_label_values(&[]).inc();
+    }
+
+    /// Collects the prefetch task failure metrics.
+    pub fn collect_prefetch_task_failure_metrics(&self) {
+        self.prefetch_task_count.with_label_values(&[]).inc();
+
+        self.prefetch_task_failure_count
+            .with_label_values(&[])
+            .inc();
+    }
+}
+
+/// The metrics of the local blob cache, subsystem `cache`: the chunk groups
+/// it serves and fills, counted and in uncompressed bytes.
+#[derive(Debug)]
+pub struct CacheMetrics {
+    /// Used to count the number of cache reads.
+    read_count: IntCounterVec,
+
+    /// Used to count the cache read bytes.
+    read_bytes: IntCounterVec,
+
+    /// Used to count the number of cache writes.
+    write_count: IntCounterVec,
+
+    /// Used to count the failed number of cache writes.
+    write_failure_count: IntCounterVec,
+
+    /// Used to count the cache write bytes.
+    write_bytes: IntCounterVec,
+}
+
+/// Implements the cache metrics.
+impl CacheMetrics {
+    /// The subsystem of the metric names, shared with the `nydus_cache_bytes`
+    /// gauge the blob cache set collects.
+    pub const SUBSYSTEM: &'static str = "cache";
+
+    /// Creates the metrics.
+    fn new() -> Self {
+        Self {
+            read_count: IntCounterVec::new(
+                Opts::new("read_total", "Counter of the number of the cache read.")
+                    .namespace(nydus_config::NAME)
+                    .subsystem(Self::SUBSYSTEM),
+                &[],
+            )
+            .expect("metric can be created"),
+            read_bytes: IntCounterVec::new(
+                Opts::new(
+                    "read_bytes_total",
+                    "Counter of the bytes of the cache read.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &[],
+            )
+            .expect("metric can be created"),
+            write_count: IntCounterVec::new(
+                Opts::new("write_total", "Counter of the number of the cache write.")
+                    .namespace(nydus_config::NAME)
+                    .subsystem(Self::SUBSYSTEM),
+                &["type"],
+            )
+            .expect("metric can be created"),
+            write_failure_count: IntCounterVec::new(
+                Opts::new(
+                    "write_failure_total",
+                    "Counter of the number of failed of the cache write.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &["type", "reason"],
+            )
+            .expect("metric can be created"),
+            write_bytes: IntCounterVec::new(
+                Opts::new(
+                    "write_bytes_total",
+                    "Counter of the bytes of the cache write.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &["type"],
+            )
+            .expect("metric can be created"),
+        }
+    }
+
+    /// Collects the cache read metrics of one chunk group an on-demand read
+    /// found in the cache, `length` its uncompressed bytes. Only on-demand
+    /// reads read the cache; a chunk group it did not hold is a write, see
+    /// [`collect_write_finished_metrics`], and a prefetch skipping a cached
+    /// chunk group is no read at all.
+    ///
+    /// [`collect_write_finished_metrics`]: Self::collect_write_finished_metrics
+    pub fn collect_read_metrics(&self, length: u64) {
+        self.read_count.with_label_values(&[]).inc();
+
+        self.read_bytes.with_label_values(&[]).inc_by(length);
+    }
+
+    /// Collects the cache write finished metrics of one chunk group,
+    /// `length` its uncompressed bytes.
+    pub fn collect_write_finished_metrics(&self, kind: WriteKind, length: u64) {
+        self.write_count
+            .with_label_values(&[&kind.to_string()])
+            .inc();
+
+        self.write_bytes
+            .with_label_values(&[&kind.to_string()])
+            .inc_by(length);
+    }
+
+    /// Collects the cache write failure metrics of one chunk group, `reason`
+    /// why it did not reach the cache.
+    pub fn collect_write_failure_metrics(&self, kind: WriteKind, reason: WriteFailureReason) {
+        self.write_count
+            .with_label_values(&[&kind.to_string()])
+            .inc();
+
+        self.write_failure_count
+            .with_label_values(&[&kind.to_string(), &reason.to_string()])
+            .inc();
+    }
+}
+
+/// The metrics of the FUSE filesystem, subsystem `fs`: every operation it
+/// answers, by op and result, and the read duration.
+#[derive(Debug)]
+pub struct FsMetrics {
+    /// Used to count the number of filesystem operations.
+    op_count: IntCounterVec,
+
+    /// Used to count the failed number of filesystem operations.
+    op_failure_count: IntCounterVec,
+
+    /// Used to record the filesystem operation duration.
+    op_duration: HistogramVec,
+}
+
+/// Implements the filesystem metrics.
+impl FsMetrics {
+    /// The subsystem of the metric names.
+    const SUBSYSTEM: &'static str = "fs";
+
+    /// Creates the metrics.
+    fn new() -> Self {
+        Self {
+            op_count: IntCounterVec::new(
+                Opts::new(
+                    "op_total",
+                    "Counter of the number of the filesystem operation.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &["operation"],
+            )
+            .expect("metric can be created"),
+            op_failure_count: IntCounterVec::new(
+                Opts::new(
+                    "op_failure_total",
+                    "Counter of the number of failed of the filesystem operation.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM),
+                &["operation"],
+            )
+            .expect("metric can be created"),
+            op_duration: HistogramVec::new(
+                HistogramOpts::new(
+                    "op_duration_milliseconds",
+                    "Histogram of the filesystem operation duration.",
+                )
+                .namespace(nydus_config::NAME)
+                .subsystem(Self::SUBSYSTEM)
+                .buckets(exponential_buckets(1.0, 2.0, 24).unwrap()),
+                &["operation"],
+            )
+            .expect("metric can be created"),
+        }
+    }
+
+    /// Collects the filesystem operation finished metrics.
+    pub fn collect_op_finished_metrics(&self, op: FsOp, cost: Duration) {
+        self.op_count.with_label_values(&[&op.to_string()]).inc();
+
+        self.op_duration
+            .with_label_values(&[&op.to_string()])
+            .observe(cost.as_millis() as f64);
+    }
+
+    /// Collects the filesystem operation failure metrics.
+    pub fn collect_op_failure_metrics(&self, op: FsOp) {
+        self.op_count.with_label_values(&[&op.to_string()]).inc();
+
+        self.op_failure_count
+            .with_label_values(&[&op.to_string()])
+            .inc();
+    }
+}
+
+/// Represents where a backend read fetched its bytes, the `source` label of
+/// the backend metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendTarget {
+pub enum Source {
+    /// The local directory backend's blob files.
+    Local,
+
+    /// The origin registry, reached directly.
     Origin,
+
+    /// An HTTP forward proxy in front of the origin.
     Proxy,
+
+    /// The Dragonfly seed peers.
+    Dragonfly,
+
+    /// The origin registry, reached after Dragonfly could not serve the read.
+    Fallback,
 }
 
-/// What kind of backend read this is — a user-triggered on-demand read or a
-/// background prefetch. The storage layer keys retry, throttling and
-/// proxy-priority policies off it (re-exported there as its policy type), and
-/// metrics attribute reads to the on-demand or prefetch counter families by
-/// it. Defined here so this crate stays a dependency leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadKind {
-    /// User-triggered read that blocks a FUSE request.
-    #[default]
-    OnDemand,
-    /// Background prefetch read after mount.
-    Prefetch,
-}
-
-impl ReadKind {
-    fn as_str(self) -> &'static str {
+/// Implements the Display trait.
+impl fmt::Display for Source {
+    /// fmt formats the Source.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ReadKind::OnDemand => "ondemand",
-            ReadKind::Prefetch => "prefetch",
+            Source::Local => write!(f, "local"),
+            Source::Origin => write!(f, "origin"),
+            Source::Proxy => write!(f, "proxy"),
+            Source::Dragonfly => write!(f, "dragonfly"),
+            Source::Fallback => write!(f, "fallback"),
         }
     }
-
-    const ALL: [ReadKind; 2] = [ReadKind::OnDemand, ReadKind::Prefetch];
 }
 
-/// Classification of a failed Dragonfly SDK read, labelling the
-/// `backend_dragonfly_read_errors` counter. Mirrors the failure classes the
-/// registry backend's load-shedding policy distinguishes. Defined here so
-/// this crate stays a dependency leaf.
+/// Represents what wrote a chunk group into the local cache, the `type`
+/// label of the cache writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DragonflyErrorClass {
-    /// The Dragonfly proxy answered HTTP 429.
-    RateLimited,
-    /// The Dragonfly proxy answered HTTP 403.
-    Forbidden,
-    /// The request timed out.
-    Timeout,
-    /// The local dfdaemon could not be reached.
-    Connect,
-    /// The proxy or the backend behind it answered HTTP 5xx.
-    ServerError,
-    /// The response body failed mid-stream after a successful start.
-    Stream,
-    /// Any other SDK transport error.
-    Other,
+pub enum WriteKind {
+    /// An on-demand read that missed the cache.
+    Ondemand,
+
+    /// The prefetch of a regular blob.
+    Prefetch,
+
+    /// The fill of a source blob's chunk group from the ondemand (redirect)
+    /// blob.
+    Redirect,
 }
 
-impl DragonflyErrorClass {
-    fn as_str(self) -> &'static str {
-        match self {
-            DragonflyErrorClass::RateLimited => "rate_limited",
-            DragonflyErrorClass::Forbidden => "forbidden",
-            DragonflyErrorClass::Timeout => "timeout",
-            DragonflyErrorClass::Connect => "connect",
-            DragonflyErrorClass::ServerError => "server_error",
-            DragonflyErrorClass::Stream => "stream",
-            DragonflyErrorClass::Other => "other",
+/// Implements the conversion of the read kind that missed the cache into
+/// the kind of the write filling it.
+impl From<ReadKind> for WriteKind {
+    /// Converts the read kind into the write kind.
+    fn from(kind: ReadKind) -> Self {
+        match kind {
+            ReadKind::OnDemand => WriteKind::Ondemand,
+            ReadKind::Prefetch => WriteKind::Prefetch,
         }
     }
-
-    /// All classes, used to pre-create label series so every class appears in
-    /// the exposition output even before it is first hit.
-    const ALL: [DragonflyErrorClass; 7] = [
-        DragonflyErrorClass::RateLimited,
-        DragonflyErrorClass::Forbidden,
-        DragonflyErrorClass::Timeout,
-        DragonflyErrorClass::Connect,
-        DragonflyErrorClass::ServerError,
-        DragonflyErrorClass::Stream,
-        DragonflyErrorClass::Other,
-    ];
 }
 
-/// A FUSE filesystem operation, mirroring nydus `StatsFop` for label parity.
+/// Implements the Display trait.
+impl fmt::Display for WriteKind {
+    /// fmt formats the WriteKind.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            WriteKind::Ondemand => write!(f, "ondemand"),
+            WriteKind::Prefetch => write!(f, "prefetch"),
+            WriteKind::Redirect => write!(f, "redirect"),
+        }
+    }
+}
+
+/// Represents why a chunk group did not reach the local cache, the `reason`
+/// label of the cache write failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteFailureReason {
+    /// The chunk group did not decompress to its declared size, or the
+    /// redirect points past its source blob's chunk groups.
+    Decode,
+
+    /// The decoded chunk group's crc32c did not match the blob meta.
+    Checksum,
+
+    /// The cache file could not be written.
+    Io,
+
+    /// The redirect names a source blob the image does not have.
+    UnknownSource,
+}
+
+/// Implements the Display trait.
+impl fmt::Display for WriteFailureReason {
+    /// fmt formats the WriteFailureReason.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            WriteFailureReason::Decode => write!(f, "decode"),
+            WriteFailureReason::Checksum => write!(f, "checksum"),
+            WriteFailureReason::Io => write!(f, "io"),
+            WriteFailureReason::UnknownSource => write!(f, "unknown_source"),
+        }
+    }
+}
+
+/// Represents a FUSE filesystem operation, mirroring nydus `StatsFop` for
+/// label parity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsOp {
     Getattr,
@@ -129,842 +650,27 @@ pub enum FsOp {
     Forget,
 }
 
-impl FsOp {
-    fn as_str(self) -> &'static str {
+/// Implements the Display trait.
+impl fmt::Display for FsOp {
+    /// fmt formats the FsOp.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            FsOp::Getattr => "getattr",
-            FsOp::Readlink => "readlink",
-            FsOp::Open => "open",
-            FsOp::Release => "release",
-            FsOp::Read => "read",
-            FsOp::Statfs => "statfs",
-            FsOp::Getxattr => "getxattr",
-            FsOp::Listxattr => "listxattr",
-            FsOp::Opendir => "opendir",
-            FsOp::Lookup => "lookup",
-            FsOp::Readdir => "readdir",
-            FsOp::Readdirplus => "readdirplus",
-            FsOp::Access => "access",
-            FsOp::Forget => "forget",
+            FsOp::Getattr => write!(f, "getattr"),
+            FsOp::Readlink => write!(f, "readlink"),
+            FsOp::Open => write!(f, "open"),
+            FsOp::Release => write!(f, "release"),
+            FsOp::Read => write!(f, "read"),
+            FsOp::Statfs => write!(f, "statfs"),
+            FsOp::Getxattr => write!(f, "getxattr"),
+            FsOp::Listxattr => write!(f, "listxattr"),
+            FsOp::Opendir => write!(f, "opendir"),
+            FsOp::Lookup => write!(f, "lookup"),
+            FsOp::Readdir => write!(f, "readdir"),
+            FsOp::Readdirplus => write!(f, "readdirplus"),
+            FsOp::Access => write!(f, "access"),
+            FsOp::Forget => write!(f, "forget"),
         }
     }
-
-    /// All operations, used to pre-create label series so every op appears in
-    /// the exposition output even before it is first invoked.
-    const ALL: [FsOp; 14] = [
-        FsOp::Getattr,
-        FsOp::Readlink,
-        FsOp::Open,
-        FsOp::Release,
-        FsOp::Read,
-        FsOp::Statfs,
-        FsOp::Getxattr,
-        FsOp::Listxattr,
-        FsOp::Opendir,
-        FsOp::Lookup,
-        FsOp::Readdir,
-        FsOp::Readdirplus,
-        FsOp::Access,
-        FsOp::Forget,
-    ];
-}
-
-/// Metrics owned by one opened nydus image.
-///
-/// Clone the surrounding [`Arc`] when the image data path is split across
-/// backend, cache and prefetch workers. A separate value must be created for
-/// each image so snapshots never mix activity from unrelated images.
-pub struct ImageMetrics {
-    registry: Registry,
-
-    backend_origin_read_count: IntCounter,
-    backend_origin_read_errors: IntCounter,
-    backend_proxy_read_count: IntCounter,
-    backend_proxy_read_errors: IntCounter,
-    backend_origin_read_latency: Histogram,
-    backend_proxy_read_latency: Histogram,
-    backend_origin_read_bytes: IntCounter,
-    backend_proxy_read_bytes: IntCounter,
-
-    backend_prefetch_read_count: IntCounter,
-    backend_prefetch_read_bytes: IntCounter,
-    backend_ondemand_read_count: IntCounter,
-    backend_ondemand_read_bytes: IntCounter,
-    backend_prefetch_read_errors: IntCounter,
-    backend_prefetch_read_high_latency_count: IntCounter,
-    backend_ondemand_read_errors: IntCounter,
-    backend_ondemand_read_high_latency_count: IntCounter,
-
-    backend_origin_crc_check_errors: IntCounter,
-    backend_proxy_crc_check_errors: IntCounter,
-
-    backend_dragonfly_read_errors: IntCounterVec,
-    backend_fallback_read_count: IntCounter,
-    backend_fallback_read_errors: IntCounter,
-    backend_fallback_throttle_wait: Histogram,
-
-    prefetch_reschedule_count: IntCounter,
-    prefetch_reschedule_run_count: IntCounter,
-
-    fs_op_count: IntCounterVec,
-    fs_op_errors: IntCounterVec,
-    fs_read_latency: Histogram,
-
-    cache_opened_files: IntGauge,
-    cache_hit_chunk_group: IntCounter,
-    cache_total_chunk_group: IntGauge,
-    cache_fill_chunk_group: IntCounter,
-    cache_ondemand_fill_chunk_group: IntCounter,
-    cache_redirect_fill_chunk_group: IntCounter,
-    cache_redirect_skip_chunk_group: IntCounter,
-    tracked_blobs: Mutex<HashMap<[u8; SHA256_DIGEST_SIZE], TrackedBlob>>,
-}
-
-impl Default for ImageMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ImageMetrics {
-    pub fn new() -> Self {
-        let registry = Registry::new();
-
-        fn counter(registry: &Registry, name: &str, help: &str) -> IntCounter {
-            let counter = IntCounter::with_opts(Opts::new(name, help)).expect("valid counter");
-            registry
-                .register(Box::new(counter.clone()))
-                .expect("register");
-            counter
-        }
-
-        fn gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
-            let gauge = IntGauge::with_opts(Opts::new(name, help)).expect("valid gauge");
-            registry
-                .register(Box::new(gauge.clone()))
-                .expect("register");
-            gauge
-        }
-
-        fn histogram(registry: &Registry, name: &str, help: &str) -> Histogram {
-            let histogram =
-                Histogram::with_opts(HistogramOpts::new(name, help).buckets(latency_buckets()))
-                    .expect("valid histogram");
-            registry
-                .register(Box::new(histogram.clone()))
-                .expect("register");
-            histogram
-        }
-
-        let fs_op_count = IntCounterVec::new(
-            Opts::new("fs_op_count", "Successful FUSE filesystem operations by op"),
-            &["op"],
-        )
-        .expect("valid counter vec");
-        registry
-            .register(Box::new(fs_op_count.clone()))
-            .expect("register");
-
-        let fs_op_errors = IntCounterVec::new(
-            Opts::new("fs_op_errors", "Failed FUSE filesystem operations by op"),
-            &["op"],
-        )
-        .expect("valid counter vec");
-        registry
-            .register(Box::new(fs_op_errors.clone()))
-            .expect("register");
-
-        // Pre-create every op series so they appear in the output at zero.
-        for op in FsOp::ALL {
-            fs_op_count.with_label_values(&[op.as_str()]);
-            fs_op_errors.with_label_values(&[op.as_str()]);
-        }
-
-        let backend_dragonfly_read_errors = IntCounterVec::new(
-            Opts::new(
-                "backend_dragonfly_read_errors",
-                "Failed Dragonfly SDK reads by error class and read kind",
-            ),
-            &["class", "kind"],
-        )
-        .expect("valid counter vec");
-        registry
-            .register(Box::new(backend_dragonfly_read_errors.clone()))
-            .expect("register");
-
-        // Pre-create every class/kind series so they appear at zero.
-        for class in DragonflyErrorClass::ALL {
-            for kind in ReadKind::ALL {
-                backend_dragonfly_read_errors.with_label_values(&[class.as_str(), kind.as_str()]);
-            }
-        }
-
-        Self {
-            backend_origin_read_count: counter(
-                &registry,
-                "backend_origin_read_count",
-                "Backend reads served by the origin registry",
-            ),
-            backend_origin_read_errors: counter(
-                &registry,
-                "backend_origin_read_errors",
-                "Failed backend reads against the origin registry",
-            ),
-            backend_proxy_read_count: counter(
-                &registry,
-                "backend_proxy_read_count",
-                "Backend reads served by a proxy (HTTP mirror or Dragonfly)",
-            ),
-            backend_proxy_read_errors: counter(
-                &registry,
-                "backend_proxy_read_errors",
-                "Failed backend reads against a proxy",
-            ),
-            backend_origin_read_latency: histogram(
-                &registry,
-                "backend_origin_read_latency",
-                "Origin backend read latency in seconds",
-            ),
-            backend_proxy_read_latency: histogram(
-                &registry,
-                "backend_proxy_read_latency",
-                "Proxy backend read latency in seconds",
-            ),
-            backend_origin_read_bytes: counter(
-                &registry,
-                "backend_origin_read_bytes",
-                "Bytes read from the origin registry",
-            ),
-            backend_proxy_read_bytes: counter(
-                &registry,
-                "backend_proxy_read_bytes",
-                "Bytes read from a proxy",
-            ),
-            backend_prefetch_read_count: counter(
-                &registry,
-                "backend_prefetch_read_count",
-                "Backend reads triggered by prefetch",
-            ),
-            backend_prefetch_read_bytes: counter(
-                &registry,
-                "backend_prefetch_read_bytes",
-                "Bytes read by prefetch",
-            ),
-            backend_ondemand_read_count: counter(
-                &registry,
-                "backend_ondemand_read_count",
-                "Backend reads triggered on demand",
-            ),
-            backend_ondemand_read_bytes: counter(
-                &registry,
-                "backend_ondemand_read_bytes",
-                "Bytes read on demand",
-            ),
-            backend_prefetch_read_errors: counter(
-                &registry,
-                "backend_prefetch_read_errors",
-                "Failed prefetch backend reads",
-            ),
-            backend_prefetch_read_high_latency_count: counter(
-                &registry,
-                "backend_prefetch_read_high_latency_count",
-                "Prefetch backend reads slower than the high-latency threshold",
-            ),
-            backend_ondemand_read_errors: counter(
-                &registry,
-                "backend_ondemand_read_errors",
-                "Failed on-demand backend reads",
-            ),
-            backend_ondemand_read_high_latency_count: counter(
-                &registry,
-                "backend_ondemand_read_high_latency_count",
-                "On-demand backend reads slower than the high-latency threshold",
-            ),
-            backend_origin_crc_check_errors: counter(
-                &registry,
-                "backend_origin_crc_check_errors",
-                "CRC validation failures on data fetched from the origin",
-            ),
-            backend_proxy_crc_check_errors: counter(
-                &registry,
-                "backend_proxy_crc_check_errors",
-                "CRC validation failures on data fetched from a proxy",
-            ),
-            backend_dragonfly_read_errors,
-            backend_fallback_read_count: counter(
-                &registry,
-                "backend_fallback_read_count",
-                "Origin requests issued as Dragonfly fallbacks",
-            ),
-            backend_fallback_read_errors: counter(
-                &registry,
-                "backend_fallback_read_errors",
-                "Failed origin requests issued as Dragonfly fallbacks",
-            ),
-            backend_fallback_throttle_wait: histogram(
-                &registry,
-                "backend_fallback_throttle_wait",
-                "Seconds a Dragonfly fallback waited on the origin throttle",
-            ),
-            prefetch_reschedule_count: counter(
-                &registry,
-                "prefetch_reschedule_count",
-                "Blob prefetches rescheduled after a throttled (429) backend failure",
-            ),
-            prefetch_reschedule_run_count: counter(
-                &registry,
-                "prefetch_reschedule_run_count",
-                "Re-attempts of previously rescheduled blob prefetches",
-            ),
-            fs_op_count,
-            fs_op_errors,
-            fs_read_latency: histogram(
-                &registry,
-                "fs_read_latency",
-                "FUSE read operation latency in seconds",
-            ),
-            cache_opened_files: gauge(
-                &registry,
-                "cache_opened_files",
-                "Open blob data cache files (excluding .blob.meta and .group.map)",
-            ),
-            cache_hit_chunk_group: counter(
-                &registry,
-                "cache_hit_chunk_group",
-                "Chunk groups served from cache without a backend read",
-            ),
-            cache_total_chunk_group: gauge(
-                &registry,
-                "cache_total_chunk_group",
-                "Total chunk groups across loaded blob metas, counted once per blob",
-            ),
-            cache_fill_chunk_group: counter(
-                &registry,
-                "cache_fill_chunk_group",
-                "Chunk groups written into a blob's own cache by regular blob prefetch",
-            ),
-            cache_ondemand_fill_chunk_group: counter(
-                &registry,
-                "cache_ondemand_fill_chunk_group",
-                "Chunk groups written into a blob's own cache by an on-demand read",
-            ),
-            cache_redirect_fill_chunk_group: counter(
-                &registry,
-                "cache_redirect_fill_chunk_group",
-                "Chunk groups written into a source blob's cache from a redirect (ondemand) blob",
-            ),
-            cache_redirect_skip_chunk_group: counter(
-                &registry,
-                "cache_redirect_skip_chunk_group",
-                "Redirect (ondemand) blob chunk groups skipped: already cached, or failed to decode or fill",
-            ),
-            tracked_blobs: Mutex::new(HashMap::new()),
-            registry,
-        }
-    }
-}
-
-static METRICS: LazyLock<Arc<ImageMetrics>> = LazyLock::new(|| Arc::new(ImageMetrics::new()));
-
-/// Return the process-wide compatibility metrics handle.
-///
-/// New image owners should create their own [`ImageMetrics`] and pass it
-/// through the `*_with_metrics` constructors instead. This registry does not
-/// aggregate metrics from independently created [`ImageMetrics`] values.
-pub fn process_metrics() -> Arc<ImageMetrics> {
-    METRICS.clone()
-}
-
-impl ImageMetrics {
-    pub fn record_backend_read(
-        &self,
-        target: BackendTarget,
-        kind: ReadKind,
-        bytes: u64,
-        duration: Duration,
-        is_err: bool,
-    ) {
-        let secs = duration.as_secs_f64();
-        let high_latency = duration >= HIGH_LATENCY_THRESHOLD;
-
-        match target {
-            BackendTarget::Origin => {
-                self.backend_origin_read_count.inc();
-                self.backend_origin_read_latency.observe(secs);
-                if is_err {
-                    self.backend_origin_read_errors.inc();
-                } else {
-                    self.backend_origin_read_bytes.inc_by(bytes);
-                }
-            }
-            BackendTarget::Proxy => {
-                self.backend_proxy_read_count.inc();
-                self.backend_proxy_read_latency.observe(secs);
-                if is_err {
-                    self.backend_proxy_read_errors.inc();
-                } else {
-                    self.backend_proxy_read_bytes.inc_by(bytes);
-                }
-            }
-        }
-
-        match kind {
-            ReadKind::OnDemand => {
-                self.backend_ondemand_read_count.inc();
-                if is_err {
-                    self.backend_ondemand_read_errors.inc();
-                } else {
-                    self.backend_ondemand_read_bytes.inc_by(bytes);
-                }
-                if high_latency {
-                    self.backend_ondemand_read_high_latency_count.inc();
-                }
-            }
-            ReadKind::Prefetch => {
-                self.backend_prefetch_read_count.inc();
-                if is_err {
-                    self.backend_prefetch_read_errors.inc();
-                } else {
-                    self.backend_prefetch_read_bytes.inc_by(bytes);
-                }
-                if high_latency {
-                    self.backend_prefetch_read_high_latency_count.inc();
-                }
-            }
-        }
-    }
-
-    pub fn record_backend_crc_error(&self, target: BackendTarget) {
-        match target {
-            BackendTarget::Origin => self.backend_origin_crc_check_errors.inc(),
-            BackendTarget::Proxy => self.backend_proxy_crc_check_errors.inc(),
-        }
-    }
-
-    pub fn record_fs_op(&self, op: FsOp, duration: Duration, is_err: bool) {
-        if is_err {
-            self.fs_op_errors.with_label_values(&[op.as_str()]).inc();
-        } else {
-            self.fs_op_count.with_label_values(&[op.as_str()]).inc();
-        }
-        if op == FsOp::Read {
-            self.fs_read_latency.observe(duration.as_secs_f64());
-        }
-    }
-
-    pub fn inc_cache_opened_files(&self) {
-        self.cache_opened_files.inc();
-    }
-
-    pub fn dec_cache_opened_files(&self) {
-        self.cache_opened_files.dec();
-    }
-
-    pub fn track_blob_chunk_groups(
-        &self,
-        cache_key: [u8; SHA256_DIGEST_SIZE],
-        chunk_group_count: u64,
-    ) {
-        let mut tracked = match self.tracked_blobs.lock() {
-            Ok(tracked) => tracked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let entry = tracked.entry(cache_key).or_insert(TrackedBlob {
-            chunk_group_count,
-            holder_count: 0,
-        });
-        entry.holder_count += 1;
-        if entry.holder_count == 1 {
-            self.cache_total_chunk_group
-                .add(entry.chunk_group_count as i64);
-        }
-    }
-
-    pub fn untrack_blob_chunk_groups(&self, cache_key: &[u8; SHA256_DIGEST_SIZE]) {
-        let mut tracked = match self.tracked_blobs.lock() {
-            Ok(tracked) => tracked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let Some(entry) = tracked.get_mut(cache_key) else {
-            return;
-        };
-        entry.holder_count -= 1;
-        if entry.holder_count == 0 {
-            self.cache_total_chunk_group
-                .sub(entry.chunk_group_count as i64);
-            tracked.remove(cache_key);
-        }
-    }
-
-    pub fn inc_cache_hit_chunk_group(&self) {
-        self.cache_hit_chunk_group.inc();
-    }
-
-    pub fn inc_cache_fill_chunk_group(&self) {
-        self.cache_fill_chunk_group.inc();
-    }
-
-    pub fn cache_fill_chunk_group_total(&self) -> u64 {
-        self.cache_fill_chunk_group.get()
-    }
-
-    pub fn inc_cache_ondemand_fill_chunk_group(&self) {
-        self.cache_ondemand_fill_chunk_group.inc();
-    }
-
-    pub fn inc_cache_redirect_fill_chunk_group(&self) {
-        self.cache_redirect_fill_chunk_group.inc();
-    }
-
-    pub fn cache_redirect_fill_chunk_group_total(&self) -> u64 {
-        self.cache_redirect_fill_chunk_group.get()
-    }
-
-    pub fn inc_cache_redirect_skip_chunk_group(&self) {
-        self.cache_redirect_skip_chunk_group.inc();
-    }
-
-    pub fn cache_redirect_skip_chunk_group_total(&self) -> u64 {
-        self.cache_redirect_skip_chunk_group.get()
-    }
-
-    pub fn record_dragonfly_error(&self, class: DragonflyErrorClass, kind: ReadKind) {
-        self.backend_dragonfly_read_errors
-            .with_label_values(&[class.as_str(), kind.as_str()])
-            .inc();
-    }
-
-    pub fn record_fallback_read(&self, is_err: bool) {
-        self.backend_fallback_read_count.inc();
-        if is_err {
-            self.backend_fallback_read_errors.inc();
-        }
-    }
-
-    pub fn record_fallback_throttle_wait(&self, wait: Duration) {
-        self.backend_fallback_throttle_wait
-            .observe(wait.as_secs_f64());
-    }
-
-    pub fn inc_prefetch_reschedule(&self) {
-        self.prefetch_reschedule_count.inc();
-    }
-
-    pub fn inc_prefetch_reschedule_run(&self) {
-        self.prefetch_reschedule_run_count.inc();
-    }
-
-    pub fn prefetch_reschedule_total(&self) -> u64 {
-        self.prefetch_reschedule_count.get()
-    }
-
-    pub fn prefetch_reschedule_run_total(&self) -> u64 {
-        self.prefetch_reschedule_run_count.get()
-    }
-
-    pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            families: self.registry.gather(),
-        }
-    }
-
-    pub fn encode_text(&self) -> String {
-        encode_metric_families(self.registry.gather())
-    }
-
-    pub fn backend_read_total(&self, target: BackendTarget) -> u64 {
-        match target {
-            BackendTarget::Origin => self.backend_origin_read_count.get(),
-            BackendTarget::Proxy => self.backend_proxy_read_count.get(),
-        }
-    }
-
-    pub fn dragonfly_error_total(&self, class: DragonflyErrorClass, kind: ReadKind) -> u64 {
-        self.backend_dragonfly_read_errors
-            .with_label_values(&[class.as_str(), kind.as_str()])
-            .get()
-    }
-
-    pub fn backend_fallback_read_error_total(&self) -> u64 {
-        self.backend_fallback_read_errors.get()
-    }
-
-    pub fn backend_fallback_read_total(&self) -> u64 {
-        self.backend_fallback_read_count.get()
-    }
-
-    pub fn backend_crc_error_total(&self, target: BackendTarget) -> u64 {
-        match target {
-            BackendTarget::Origin => self.backend_origin_crc_check_errors.get(),
-            BackendTarget::Proxy => self.backend_proxy_crc_check_errors.get(),
-        }
-    }
-
-    #[cfg(test)]
-    fn tracked_blob_refs(&self, cache_key: &[u8; SHA256_DIGEST_SIZE]) -> Option<usize> {
-        let tracked = match self.tracked_blobs.lock() {
-            Ok(tracked) => tracked,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        tracked.get(cache_key).map(|entry| entry.holder_count)
-    }
-}
-
-/// Record a single logical backend read: its target, kind, transferred byte
-/// count (on success), duration and outcome. One call updates every relevant
-/// origin/proxy and on-demand/prefetch counter, byte total and latency series.
-pub fn record_backend_read(
-    target: BackendTarget,
-    kind: ReadKind,
-    bytes: u64,
-    duration: Duration,
-    is_err: bool,
-) {
-    METRICS.record_backend_read(target, kind, bytes, duration, is_err);
-}
-
-/// Record a CRC validation failure on data fetched from `target`.
-pub fn record_backend_crc_error(target: BackendTarget) {
-    METRICS.record_backend_crc_error(target);
-}
-
-/// Record the outcome of a FUSE operation, plus read latency for `read`.
-pub fn record_fs_op(op: FsOp, duration: Duration, is_err: bool) {
-    METRICS.record_fs_op(op, duration, is_err);
-}
-
-/// Increment the count of open blob data cache files.
-pub fn inc_cache_opened_files() {
-    METRICS.inc_cache_opened_files();
-}
-
-/// Decrement the count of open blob data cache files.
-pub fn dec_cache_opened_files() {
-    METRICS.dec_cache_opened_files();
-}
-
-/// Blobs currently contributing to one image's `cache_total_chunk_group`,
-/// with how many caches in that image hold each one.
-struct TrackedBlob {
-    chunk_group_count: u64,
-    holder_count: usize,
-}
-
-/// Count `chunk_group_count` towards the total-chunk-groups gauge for the
-/// blob `cache_key`, unless another cache already counted it.
-pub fn track_blob_chunk_groups(cache_key: [u8; SHA256_DIGEST_SIZE], chunk_group_count: u64) {
-    METRICS.track_blob_chunk_groups(cache_key, chunk_group_count);
-}
-
-/// Drop one cache's claim on the blob `cache_key`, uncounting its chunk
-/// groups once the last cache over that blob is gone.
-pub fn untrack_blob_chunk_groups(cache_key: &[u8; SHA256_DIGEST_SIZE]) {
-    METRICS.untrack_blob_chunk_groups(cache_key);
-}
-
-/// Record a chunk group served from cache without a backend read.
-pub fn inc_cache_hit_chunk_group() {
-    METRICS.inc_cache_hit_chunk_group();
-}
-
-/// Record a chunk group decoded into a blob's own cache by regular blob
-/// prefetch.
-pub fn inc_cache_fill_chunk_group() {
-    METRICS.inc_cache_fill_chunk_group();
-}
-
-/// Current count of chunk groups filled by regular blob prefetch.
-pub fn cache_fill_chunk_group_total() -> u64 {
-    METRICS.cache_fill_chunk_group_total()
-}
-
-/// Record a chunk group decoded into a blob's own cache to satisfy an
-/// on-demand read. Summing this across the processes sharing a cache
-/// directory shows how much duplicate fetching they do.
-pub fn inc_cache_ondemand_fill_chunk_group() {
-    METRICS.inc_cache_ondemand_fill_chunk_group();
-}
-
-/// Record a chunk group written into a source blob's cache from a redirect
-/// (ondemand) blob.
-pub fn inc_cache_redirect_fill_chunk_group() {
-    METRICS.inc_cache_redirect_fill_chunk_group();
-}
-
-/// Current count of chunk groups filled from redirect blobs.
-pub fn cache_redirect_fill_chunk_group_total() -> u64 {
-    METRICS.cache_redirect_fill_chunk_group_total()
-}
-
-/// Record a redirect blob chunk group that was skipped: its source was
-/// already cached, or it failed to decode or fill.
-pub fn inc_cache_redirect_skip_chunk_group() {
-    METRICS.inc_cache_redirect_skip_chunk_group();
-}
-
-/// Current count of skipped redirect blob chunk groups.
-pub fn cache_redirect_skip_chunk_group_total() -> u64 {
-    METRICS.cache_redirect_skip_chunk_group_total()
-}
-
-/// Record a failed Dragonfly SDK read, attributed to its error class and to
-/// the kind of read (on-demand or prefetch) that hit it.
-pub fn record_dragonfly_error(class: DragonflyErrorClass, kind: ReadKind) {
-    METRICS.record_dragonfly_error(class, kind);
-}
-
-/// Record an origin request issued as a Dragonfly fallback. These reads also
-/// count towards the regular origin counters via [`record_backend_read`];
-/// this pair isolates the fallback volume operators watch during Dragonfly
-/// degradation.
-pub fn record_fallback_read(is_err: bool) {
-    METRICS.record_fallback_read(is_err);
-}
-
-/// Record how long a Dragonfly fallback waited on the origin throttle before
-/// its request was allowed to start.
-pub fn record_fallback_throttle_wait(wait: Duration) {
-    METRICS.record_fallback_throttle_wait(wait);
-}
-
-/// Record a blob prefetch rescheduled for a delayed retry after a throttled
-/// (429) backend failure.
-pub fn inc_prefetch_reschedule() {
-    METRICS.inc_prefetch_reschedule();
-}
-
-/// Record the execution of a previously rescheduled blob prefetch.
-pub fn inc_prefetch_reschedule_run() {
-    METRICS.inc_prefetch_reschedule_run();
-}
-
-/// How many caches currently claim the blob `cache_key`, for tests. The gauge
-/// itself is process-global and other tests move it concurrently, so the
-/// refcount is what can be asserted deterministically.
-#[cfg(test)]
-fn tracked_blob_refs(cache_key: &[u8; SHA256_DIGEST_SIZE]) -> Option<usize> {
-    METRICS.tracked_blob_refs(cache_key)
-}
-
-/// A serializable view over the live prometheus registry.
-///
-/// Rather than mirror every counter by hand, this wraps the gathered metric
-/// families straight from the owning [`ImageMetrics`] registry, so it always stays in sync
-/// when metrics are added or removed. Serializing it yields a flat JSON object
-/// mapping each metric name to its value, which embedders (e.g. a hypervisor's
-/// stats endpoint) include to reason about runtime behavior: in particular
-/// `backend_ondemand_read_count > 0` means the prefetch did not cover the
-/// access pattern and the workload fell back to the network.
-///
-/// Encoding rules:
-/// - counters serialize as unsigned integers, gauges as signed integers;
-/// - histograms expand to `<name>_sum` (float) and `<name>_count` (integer);
-/// - labeled series are keyed as `<name>{label="value",...}` so they never
-///   collide under a single metric name.
-#[derive(Debug, Clone, Default)]
-pub struct Snapshot {
-    families: Vec<prometheus::proto::MetricFamily>,
-}
-
-impl Serialize for Snapshot {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-
-        let mut map = serializer.serialize_map(None)?;
-        for family in &self.families {
-            let base = family.get_name();
-            let field_type = family.get_field_type();
-            for metric in family.get_metric() {
-                let labels = metric.get_label();
-                let key = if labels.is_empty() {
-                    base.to_string()
-                } else {
-                    let pairs: Vec<String> = labels
-                        .iter()
-                        .map(|label| format!("{}=\"{}\"", label.get_name(), label.get_value()))
-                        .collect();
-                    format!("{}{{{}}}", base, pairs.join(","))
-                };
-
-                match field_type {
-                    prometheus::proto::MetricType::COUNTER => {
-                        map.serialize_entry(&key, &(metric.get_counter().get_value() as u64))?;
-                    }
-                    prometheus::proto::MetricType::GAUGE => {
-                        map.serialize_entry(&key, &(metric.get_gauge().get_value() as i64))?;
-                    }
-                    prometheus::proto::MetricType::HISTOGRAM => {
-                        let histogram = metric.get_histogram();
-                        map.serialize_entry(&format!("{key}_sum"), &histogram.get_sample_sum())?;
-                        map.serialize_entry(
-                            &format!("{key}_count"),
-                            &histogram.get_sample_count(),
-                        )?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        map.end()
-    }
-}
-
-/// Capture a serializable snapshot of every registered metric, sourced
-/// directly from the process compatibility registry.
-pub fn snapshot() -> Snapshot {
-    METRICS.snapshot()
-}
-
-/// Current count of failed Dragonfly reads for one error class and read kind.
-pub fn dragonfly_error_total(class: DragonflyErrorClass, kind: ReadKind) -> u64 {
-    METRICS.dragonfly_error_total(class, kind)
-}
-
-/// Current count of origin requests issued as Dragonfly fallbacks.
-pub fn backend_fallback_read_total() -> u64 {
-    METRICS.backend_fallback_read_total()
-}
-
-/// Current count of failed origin requests issued as Dragonfly fallbacks.
-pub fn backend_fallback_read_error_total() -> u64 {
-    METRICS.backend_fallback_read_error_total()
-}
-
-/// Current count of backend reads attributed to `target`.
-pub fn backend_read_total(target: BackendTarget) -> u64 {
-    METRICS.backend_read_total(target)
-}
-
-/// Current count of CRC validation failures attributed to `target`.
-pub fn backend_crc_error_total(target: BackendTarget) -> u64 {
-    METRICS.backend_crc_error_total(target)
-}
-
-/// Current count of blob prefetches rescheduled after a throttled failure.
-pub fn prefetch_reschedule_total() -> u64 {
-    METRICS.prefetch_reschedule_total()
-}
-
-/// Current count of re-attempts of rescheduled blob prefetches.
-pub fn prefetch_reschedule_run_total() -> u64 {
-    METRICS.prefetch_reschedule_run_total()
-}
-
-/// Encode all metrics in the Prometheus text exposition format.
-pub fn encode_text() -> String {
-    METRICS.encode_text()
-}
-
-fn encode_metric_families(metric_families: Vec<prometheus::proto::MetricFamily>) -> String {
-    let mut buffer = Vec::new();
-    let encoder = TextEncoder::new();
-    if encoder.encode(&metric_families, &mut buffer).is_err() {
-        return String::new();
-    }
-    String::from_utf8(buffer).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -972,149 +678,249 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encode_text_contains_registered_metrics() {
-        record_backend_read(
-            BackendTarget::Origin,
-            ReadKind::OnDemand,
-            1024,
-            Duration::from_millis(5),
-            false,
-        );
-        record_fs_op(FsOp::Read, Duration::from_millis(2), false);
-        inc_cache_hit_chunk_group();
-        track_blob_chunk_groups([7u8; SHA256_DIGEST_SIZE], 3);
-        inc_cache_opened_files();
+    fn instances_record_apart() {
+        let metrics = Metrics::new();
+        metrics.storage.collect_prefetch_task_finished_metrics();
 
-        let text = encode_text();
-        assert!(text.contains("backend_origin_read_count"));
-        assert!(text.contains("backend_ondemand_read_bytes"));
-        assert!(text.contains("fs_op_count"));
-        assert!(text.contains("fs_read_latency"));
-        assert!(text.contains("cache_hit_chunk_group"));
-        assert!(text.contains("cache_total_chunk_group"));
-        assert!(text.contains("cache_redirect_fill_chunk_group"));
-        assert!(text.contains("cache_opened_files"));
+        assert_eq!(
+            metrics
+                .storage
+                .prefetch_task_count
+                .with_label_values(&[])
+                .get(),
+            1
+        );
+        assert_eq!(
+            Metrics::default()
+                .storage
+                .prefetch_task_count
+                .with_label_values(&[])
+                .get(),
+            0
+        );
     }
 
     #[test]
-    fn image_metrics_are_isolated() {
-        let first = ImageMetrics::new();
-        let second = ImageMetrics::new();
+    fn backend_reads_are_counted_by_type_and_source_with_their_failures() {
+        let test_cases = vec![
+            (ReadKind::OnDemand, Source::Local),
+            (ReadKind::Prefetch, Source::Local),
+            (ReadKind::OnDemand, Source::Origin),
+            (ReadKind::OnDemand, Source::Proxy),
+            (ReadKind::Prefetch, Source::Proxy),
+            (ReadKind::OnDemand, Source::Dragonfly),
+            (ReadKind::OnDemand, Source::Fallback),
+        ];
 
-        first.record_backend_read(
-            BackendTarget::Origin,
+        for (kind, source) in test_cases {
+            let metrics = Metrics::new().backend;
+            let kind_label = kind.to_string();
+            let source_label = source.to_string();
+            metrics.collect_read_finished_metrics(kind, source, 1024, Duration::from_millis(3));
+            metrics.collect_read_finished_metrics(kind, source, 1024, Duration::from_millis(5));
+            metrics.collect_read_failure_metrics(kind, source);
+
+            assert_eq!(
+                metrics
+                    .read_count
+                    .with_label_values(&[&kind_label, &source_label])
+                    .get(),
+                3,
+                "kind: {kind:?}, source: {source:?}"
+            );
+            assert_eq!(
+                metrics
+                    .read_failure_count
+                    .with_label_values(&[&kind_label, &source_label])
+                    .get(),
+                1
+            );
+            assert_eq!(
+                metrics
+                    .read_bytes
+                    .with_label_values(&[&kind_label, &source_label])
+                    .get(),
+                2048
+            );
+            assert_eq!(
+                metrics
+                    .read_duration
+                    .with_label_values(&[&kind_label, &source_label])
+                    .get_sample_count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn labels_are_the_display_of_their_enums() {
+        let test_cases: Vec<(&str, String)> = vec![
+            ("ondemand", ReadKind::OnDemand.to_string()),
+            ("prefetch", ReadKind::Prefetch.to_string()),
+            ("local", Source::Local.to_string()),
+            ("origin", Source::Origin.to_string()),
+            ("proxy", Source::Proxy.to_string()),
+            ("dragonfly", Source::Dragonfly.to_string()),
+            ("fallback", Source::Fallback.to_string()),
+            ("decode", WriteFailureReason::Decode.to_string()),
+            ("checksum", WriteFailureReason::Checksum.to_string()),
+            ("io", WriteFailureReason::Io.to_string()),
+            (
+                "unknown_source",
+                WriteFailureReason::UnknownSource.to_string(),
+            ),
+            ("ondemand", WriteKind::Ondemand.to_string()),
+            ("prefetch", WriteKind::Prefetch.to_string()),
+            ("redirect", WriteKind::Redirect.to_string()),
+            ("ondemand", WriteKind::from(ReadKind::OnDemand).to_string()),
+            ("prefetch", WriteKind::from(ReadKind::Prefetch).to_string()),
+            ("readdirplus", FsOp::Readdirplus.to_string()),
+        ];
+
+        for (expected, label) in test_cases {
+            assert_eq!(label, expected);
+        }
+    }
+
+    #[test]
+    fn prefetch_tasks_are_counted_with_their_failures() {
+        let metrics = Metrics::new().storage;
+        metrics.collect_prefetch_task_finished_metrics();
+        metrics.collect_prefetch_task_failure_metrics();
+        metrics.collect_prefetch_task_failure_metrics();
+
+        assert_eq!(metrics.prefetch_task_count.with_label_values(&[]).get(), 3);
+        assert_eq!(
+            metrics
+                .prefetch_task_failure_count
+                .with_label_values(&[])
+                .get(),
+            2
+        );
+    }
+
+    #[test]
+    fn cache_reads_are_counted_with_their_bytes() {
+        let metrics = Metrics::new().cache;
+        metrics.collect_read_metrics(4096);
+        metrics.collect_read_metrics(1024);
+
+        assert_eq!(metrics.read_count.with_label_values(&[]).get(), 2);
+        assert_eq!(metrics.read_bytes.with_label_values(&[]).get(), 5120);
+    }
+
+    #[test]
+    fn cache_writes_are_counted_by_type_with_their_failures_by_reason() {
+        let test_cases = vec![
+            WriteKind::Ondemand,
+            WriteKind::Prefetch,
+            WriteKind::Redirect,
+        ];
+
+        for kind in test_cases {
+            let metrics = Metrics::new().cache;
+            let kind_label = kind.to_string();
+            metrics.collect_write_finished_metrics(kind, 4096);
+            metrics.collect_write_failure_metrics(kind, WriteFailureReason::Checksum);
+            metrics.collect_write_failure_metrics(kind, WriteFailureReason::Io);
+
+            assert_eq!(
+                metrics.write_count.with_label_values(&[&kind_label]).get(),
+                3,
+                "kind: {kind:?}"
+            );
+            assert_eq!(
+                metrics
+                    .write_failure_count
+                    .with_label_values(&[&kind_label, "checksum"])
+                    .get(),
+                1
+            );
+            assert_eq!(
+                metrics
+                    .write_failure_count
+                    .with_label_values(&[&kind_label, "io"])
+                    .get(),
+                1
+            );
+            assert_eq!(
+                metrics.write_bytes.with_label_values(&[&kind_label]).get(),
+                4096
+            );
+        }
+    }
+
+    #[test]
+    fn fs_ops_are_counted_and_timed_by_op_with_their_failures() {
+        let metrics = Metrics::new().fs;
+        metrics.collect_op_finished_metrics(FsOp::Lookup, Duration::from_millis(1));
+        metrics.collect_op_finished_metrics(FsOp::Read, Duration::from_millis(2));
+        metrics.collect_op_failure_metrics(FsOp::Read);
+
+        assert_eq!(metrics.op_count.with_label_values(&["lookup"]).get(), 1);
+        assert_eq!(metrics.op_count.with_label_values(&["read"]).get(), 2);
+        assert_eq!(
+            metrics.op_failure_count.with_label_values(&["read"]).get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .op_duration
+                .with_label_values(&["lookup"])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .op_duration
+                .with_label_values(&["read"])
+                .get_sample_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn registry_gathers_every_metric_under_the_nydus_namespace() {
+        let metrics = Metrics::new();
+        metrics.backend.collect_read_finished_metrics(
             ReadKind::OnDemand,
-            4096,
+            Source::Origin,
+            10,
             Duration::from_millis(1),
-            false,
         );
+        metrics.storage.collect_prefetch_task_finished_metrics();
+        metrics.cache.collect_read_metrics(10);
+        metrics
+            .cache
+            .collect_write_finished_metrics(WriteKind::Ondemand, 10);
+        metrics
+            .fs
+            .collect_op_finished_metrics(FsOp::Read, Duration::from_millis(1));
 
-        assert_eq!(first.backend_read_total(BackendTarget::Origin), 1);
-        assert_eq!(second.backend_read_total(BackendTarget::Origin), 0);
-        assert!(first.encode_text().contains("backend_origin_read_count 1"));
-        assert!(second.encode_text().contains("backend_origin_read_count 0"));
-    }
+        let mut buffer = Vec::new();
+        prometheus::Encoder::encode(
+            &prometheus::TextEncoder::new(),
+            &metrics.registry().gather(),
+            &mut buffer,
+        )
+        .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
 
-    #[test]
-    fn high_latency_counts_when_over_threshold() {
-        record_backend_read(
-            BackendTarget::Proxy,
-            ReadKind::Prefetch,
-            0,
-            Duration::from_millis(500),
-            true,
-        );
-        let text = encode_text();
-        assert!(text.contains("backend_prefetch_read_high_latency_count"));
-    }
+        let test_cases = vec![
+            r#"nydus_backend_read_total{source="origin",type="ondemand"} 1"#,
+            r#"nydus_backend_read_bytes_total{source="origin",type="ondemand"} 10"#,
+            r#"nydus_backend_read_duration_milliseconds_count{source="origin",type="ondemand"} 1"#,
+            r#"nydus_storage_prefetch_task_total 1"#,
+            r#"nydus_cache_read_total 1"#,
+            r#"nydus_cache_read_bytes_total 10"#,
+            r#"nydus_cache_write_total{type="ondemand"} 1"#,
+            r#"nydus_cache_write_bytes_total{type="ondemand"} 10"#,
+            r#"nydus_fs_op_total{operation="read"} 1"#,
+            r#"nydus_fs_op_duration_milliseconds_count{operation="read"} 1"#,
+        ];
 
-    #[test]
-    fn dragonfly_policy_metrics_move_and_expose() {
-        let errors_before =
-            dragonfly_error_total(DragonflyErrorClass::RateLimited, ReadKind::Prefetch);
-        let fallbacks_before = backend_fallback_read_total();
-        let fallback_errors_before = backend_fallback_read_error_total();
-        let reschedules_before = prefetch_reschedule_total();
-        let reschedule_runs_before = prefetch_reschedule_run_total();
-
-        record_dragonfly_error(DragonflyErrorClass::RateLimited, ReadKind::Prefetch);
-        record_fallback_read(false);
-        record_fallback_read(true);
-        record_fallback_throttle_wait(Duration::from_millis(10));
-        inc_prefetch_reschedule();
-        inc_prefetch_reschedule_run();
-
-        assert_eq!(
-            dragonfly_error_total(DragonflyErrorClass::RateLimited, ReadKind::Prefetch),
-            errors_before + 1
-        );
-        assert_eq!(backend_fallback_read_total(), fallbacks_before + 2);
-        assert_eq!(
-            backend_fallback_read_error_total(),
-            fallback_errors_before + 1
-        );
-        assert_eq!(prefetch_reschedule_total(), reschedules_before + 1);
-        assert_eq!(prefetch_reschedule_run_total(), reschedule_runs_before + 1);
-
-        let text = encode_text();
-        assert!(
-            text.contains(r#"backend_dragonfly_read_errors{class="rate_limited",kind="prefetch"}"#)
-        );
-        // Series for classes never hit are pre-created at zero.
-        assert!(
-            text.contains(r#"backend_dragonfly_read_errors{class="forbidden",kind="ondemand"}"#)
-        );
-        assert!(text.contains("backend_fallback_read_count"));
-        assert!(text.contains("backend_fallback_read_errors"));
-        assert!(text.contains("backend_fallback_throttle_wait"));
-        assert!(text.contains("prefetch_reschedule_count"));
-        assert!(text.contains("prefetch_reschedule_run_count"));
-    }
-
-    #[test]
-    fn snapshot_serializes_metrics_as_json_object() {
-        record_backend_read(
-            BackendTarget::Origin,
-            ReadKind::OnDemand,
-            2048,
-            Duration::from_millis(3),
-            false,
-        );
-        record_fs_op(FsOp::Read, Duration::from_millis(1), false);
-
-        let json = serde_json::to_value(snapshot()).expect("snapshot serializes");
-        let obj = json.as_object().expect("snapshot is a JSON object");
-
-        // Non-labeled counters keyed by their bare metric name.
-        assert!(obj.contains_key("backend_ondemand_read_count"));
-        assert!(json["backend_ondemand_read_count"].as_u64().unwrap() >= 1);
-        // Gauges keyed by their bare name too.
-        assert!(obj.contains_key("cache_total_chunk_group"));
-        // Labeled series are disambiguated with a brace-suffixed key.
-        assert!(obj.keys().any(|k| k.starts_with("fs_op_count{op=")));
-        // Histograms expand to _sum / _count.
-        assert!(obj.contains_key("fs_read_latency_count"));
-        assert!(obj.contains_key("fs_read_latency_sum"));
-    }
-
-    #[test]
-    fn blob_chunk_groups_are_counted_once_per_blob_and_released() {
-        // The gauge moves with the refcount transitions asserted here, and is
-        // itself process-global, so this pins the transitions instead.
-        let key = [42u8; SHA256_DIGEST_SIZE];
-        assert_eq!(tracked_blob_refs(&key), None);
-
-        // A second cache over the same blob joins the existing entry rather
-        // than counting the blob's chunk groups again.
-        track_blob_chunk_groups(key, 10);
-        assert_eq!(tracked_blob_refs(&key), Some(1));
-        track_blob_chunk_groups(key, 10);
-        assert_eq!(tracked_blob_refs(&key), Some(2));
-
-        // The chunk groups stay counted until the last cache is gone.
-        untrack_blob_chunk_groups(&key);
-        assert_eq!(tracked_blob_refs(&key), Some(1));
-        untrack_blob_chunk_groups(&key);
-        assert_eq!(tracked_blob_refs(&key), None);
+        for expected in test_cases {
+            assert!(text.contains(expected), "missing {expected}\n{text}");
+        }
     }
 }

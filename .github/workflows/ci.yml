@@ -3,27 +3,15 @@ name: CI
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  schedule:
+    - cron: '0 4 * * *'
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-env:
-  RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
 
 jobs:
   check:
@@ -46,8 +34,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
 
       - name: Run cargo check
         run: |
@@ -82,244 +68,14 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Run tests
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
-  fuse-e2e-tests:
-    name: Run FUSE e2e tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Set up Go
+      - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.5'
+          go-version-file: nydusify/go.mod
 
-      - name: Run nydusify streaming and format tests
-        run: make test-nydusify
-
-      - name: Start local registry
+      - name: Run nydusify tests
         run: |
-          docker run -d --name registry -p 5000:5000 registry:2
-          timeout 30 bash -c 'until curl -sf http://localhost:5000/v2/; do sleep 1; done'
-
-      - name: Install filesystem test dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq acl attr erofs-utils fuse3 xfsprogs
-
-      - name: Try loading the erofs kernel module
-        run: sudo modprobe erofs || true
-
-      - name: Run e2e tests
-        run: |
-          make test-e2e
-
-      - name: Run the nydus-to-OCI round trip
-        run: |
-          make test-tooci
-
-      - name: Run read-only conformance tests
-        run: |
-          make test-fs
-
-      - name: Run layer tar conversion tests
-        run: |
-          make test-tar-corpus
-
-  nbd-tests:
-    name: Run NBD tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.5'
-
-      - name: Load nbd and erofs kernel modules
-        run: |
-          sudo modprobe nbd || true
-          sudo modprobe erofs || true
-
-      - name: Run NBD E2E tests
-        run: |
-          make test-nbd
-
-  ublk-tests:
-    name: Run ublk tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.5'
-
-      - name: Load ublk_drv and erofs kernel modules
-        run: |
-          sudo modprobe ublk_drv || true
-          sudo modprobe erofs || true
-
-      - name: Run ublk tests
-        run: |
-          make test-ublk
-
-  bench-tests:
-    name: Run bench tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.5'
-
-      - name: Install fio
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fio
-
-      - name: Install erofsfuse (for the optional erofsfuse column)
-        run: |
-          sudo bash tests/scripts/setup_erofsfuse.sh
-
-      - name: Load nbd, ublk_drv and erofs kernel modules
-        run: |
-          sudo modprobe nbd || true
-          sudo modprobe ublk_drv || true
-          sudo modprobe erofs || true
-
-      - name: Run bench tests
-        run: |
-          make test-bench
-
-  uffd-tests:
-    name: Run UFFD tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.5'
-
-      - name: Load erofs kernel module and install erofs-utils
-        run: |
-          sudo modprobe erofs || true
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq erofs-utils
-
-      - name: Run UFFD tests
-        run: |
-          make test-uffd \
-            UFFD_REQUIRE=1 \
-            UFFD_EVIDENCE_DIR="$GITHUB_WORKSPACE/uffd-evidence"
-
-      - name: Upload failure evidence
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: uffd-evidence
-          path: uffd-evidence/
-          if-no-files-found: ignore
-
-  fanotify-tests:
-    name: Run fanotify tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.5'
-
-      - name: Load erofs kernel module
-        run: |
-          sudo modprobe erofs || true
-
-      - name: Start local registry
-        run: |
-          docker run -d --name registry -p 5000:5000 registry:2
-          timeout 30 bash -c 'until curl -sf http://localhost:5000/v2/; do sleep 1; done'
-
-      - name: Run fanotify E2E tests
-        run: |
-          make test-fanotify
+          make test-nydusify

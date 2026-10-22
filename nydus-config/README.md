@@ -13,6 +13,12 @@ It also owns the package identity — the name and the git commit constants
 baked in by its build script — the CLI version flag parser built on them, and
 the binary's default directories.
 
+## Features
+
+| Feature | Description |
+| --- | --- |
+| `dragonfly` | Accepts the `dragonfly` block of a registry backend. Enabled by `nydus-backend/dragonfly`; a build without it rejects the block when the configuration is loaded. |
+
 ## License
 
 Apache-2.0. This crate is part of the

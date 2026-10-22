@@ -1,39 +1,52 @@
-//! Lightweight HTTP server exposing Prometheus metrics over a Unix socket.
+//! The HTTP server behind `--apiserver`: an image's metrics and access trace
+//! over a Unix socket.
 //!
-//! The server is intentionally tiny: it serves `GET /metrics` (the Prometheus
-//! text exposition produced by [`nydus_telemetry::metrics`]) and returns `404` for
-//! everything else. It runs on its own current-thread Tokio runtime in a
-//! background thread so it stays independent of the backend's runtime and of
-//! any cargo feature, and is shut down cleanly when the mount exits.
+//! It serves `GET /metrics`, the Prometheus text exposition of the
+//! [`Metrics`] it was started with, and `GET /trace`, the on-demand chunk
+//! group access trace `nydus optimize` reads, and answers `404` to everything
+//! else. It runs on a current-thread Tokio runtime of its own in a background
+//! thread, so it stays independent of the backend's runtime and of any cargo
+//! feature, and is torn down with its socket on [`ApiServer::stop`].
 
-use nydus::error::{Context, Result};
-use nydus::parse_unix_address;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use http_body_util::Full;
-use hyper::body::Bytes;
+use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use nydus_telemetry::metrics::ImageMetrics;
+use prometheus::{Encoder, TextEncoder};
 use tokio::net::UnixListener;
 use tokio::runtime::Builder;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
-/// A running metrics HTTP server bound to a Unix socket.
+use nydus::error::{Context, Result};
+use nydus::parse_unix_address;
+use nydus_core::{Metrics, TraceRecorder};
+
+/// A running HTTP server of one image's metrics and access trace, bound to a
+/// Unix socket until stopped.
 pub struct ApiServer {
+    /// The socket the server listens on, unlinked on stop.
     socket_path: PathBuf,
+
+    /// Woken once to stop the accept loop.
     shutdown: Arc<Notify>,
+
+    /// The thread the server runs on, joined on stop.
     handle: Option<JoinHandle<()>>,
 }
 
+/// Implements the API server.
 impl ApiServer {
-    /// Start serving metrics at `address`, which must be `unix:///path/to.sock`.
-    pub fn start(address: &str, metrics: Arc<ImageMetrics>) -> Result<Self> {
+    /// Starts serving `metrics` and `trace` at `address`, which must be
+    /// `unix:///path/to.sock`, creating the socket's directory and replacing
+    /// a stale socket a previous run left behind.
+    pub fn start(address: &str, metrics: Arc<Metrics>, trace: Arc<TraceRecorder>) -> Result<Self> {
         let socket_path = parse_unix_address(address)?;
 
         if let Some(parent) = socket_path.parent() {
@@ -43,7 +56,6 @@ impl ApiServer {
                 })?;
             }
         }
-        // Remove a stale socket left behind by a previous run.
         if socket_path.exists() {
             std::fs::remove_file(&socket_path).with_context(|| {
                 format!(
@@ -70,7 +82,7 @@ impl ApiServer {
         let handle = std::thread::Builder::new()
             .name("nydus_apiserver".to_string())
             .spawn(move || {
-                runtime.block_on(serve(listener, shutdown_for_thread, metrics));
+                runtime.block_on(serve(listener, shutdown_for_thread, metrics, trace));
             })
             .context("failed to spawn apiserver thread")?;
 
@@ -85,7 +97,7 @@ impl ApiServer {
         })
     }
 
-    /// Stop the server, join its thread, and unlink the socket.
+    /// Stops the server, joins its thread and unlinks the socket.
     pub fn stop(mut self) {
         self.shutdown.notify_waiters();
         if let Some(handle) = self.handle.take() {
@@ -95,7 +107,14 @@ impl ApiServer {
     }
 }
 
-async fn serve(listener: UnixListener, shutdown: Arc<Notify>, metrics: Arc<ImageMetrics>) {
+/// Accepts connections until `shutdown` is woken, answering each on a task of
+/// its own.
+async fn serve(
+    listener: UnixListener,
+    shutdown: Arc<Notify>,
+    metrics: Arc<Metrics>,
+    trace: Arc<TraceRecorder>,
+) {
     loop {
         tokio::select! {
             _ = shutdown.notified() => break,
@@ -103,12 +122,13 @@ async fn serve(listener: UnixListener, shutdown: Arc<Notify>, metrics: Arc<Image
                 Ok((stream, _addr)) => {
                     let io = TokioIo::new(stream);
                     let metrics = metrics.clone();
+                    let trace = trace.clone();
                     tokio::task::spawn(async move {
                         if let Err(err) = http1::Builder::new()
                             .serve_connection(
                                 io,
-                                service_fn(move |request| {
-                                    handle_request(request, metrics.clone())
+                                service_fn(move |req| {
+                                    handle_request(req, metrics.clone(), trace.clone())
                                 }),
                             )
                             .await
@@ -123,23 +143,27 @@ async fn serve(listener: UnixListener, shutdown: Arc<Notify>, metrics: Arc<Image
     }
 }
 
-async fn handle_request<B>(
-    req: Request<B>,
-    metrics: Arc<ImageMetrics>,
+/// Answers one request: the metrics, the trace, or `404`.
+async fn handle_request(
+    req: Request<Incoming>,
+    metrics: Arc<Metrics>,
+    trace: Arc<TraceRecorder>,
 ) -> std::result::Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
-        let body = metrics.encode_text();
+        let mut body = Vec::new();
+        if let Err(err) = TextEncoder::new().encode(&metrics.registry().gather(), &mut body) {
+            error!("failed to encode metrics: {err}");
+        }
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain; version=0.0.4")
             .body(Full::new(Bytes::from(body)))
             .expect("valid metrics response")
     } else if req.method() == Method::GET && req.uri().path() == "/trace" {
-        let body = nydus_storage::access_trace::encode_json();
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(body)))
+            .body(Full::new(Bytes::from(trace.encode_json())))
             .expect("valid trace response")
     } else {
         Response::builder()
@@ -153,36 +177,64 @@ async fn handle_request<B>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::BodyExt;
-    use nydus_telemetry::metrics::{BackendTarget, ReadKind};
-    use std::time::Duration;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use tempfile::tempdir;
 
-    async fn metrics_body(metrics: Arc<ImageMetrics>) -> String {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("/metrics")
-            .body(())
+    fn get(socket_path: &Path, path: &str) -> String {
+        let mut stream = UnixStream::connect(socket_path).unwrap();
+        stream
+            .write_all(format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").as_bytes())
             .unwrap();
-        let response = handle_request(request, metrics).await.unwrap();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        String::from_utf8(bytes.to_vec()).unwrap()
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
     }
 
-    #[tokio::test]
-    async fn metrics_endpoint_uses_the_selected_image_registry() {
-        let first = Arc::new(ImageMetrics::new());
-        let second = Arc::new(ImageMetrics::new());
-        first.record_backend_read(
-            BackendTarget::Origin,
-            ReadKind::OnDemand,
-            4096,
-            Duration::from_millis(1),
-            false,
-        );
+    #[test]
+    fn serves_the_metrics_and_trace_it_was_started_with() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("run").join("api.sock");
+        let metrics = Arc::new(Metrics::new());
+        let trace = Arc::new(TraceRecorder::default());
+        metrics.storage.collect_prefetch_task_finished_metrics();
+        trace.record_chunk_group_access(1, 4);
+        let server =
+            ApiServer::start(&format!("unix://{}", socket_path.display()), metrics, trace).unwrap();
 
-        let first_body = metrics_body(first).await;
-        let second_body = metrics_body(second).await;
-        assert!(first_body.contains("backend_origin_read_count 1\n"));
-        assert!(second_body.contains("backend_origin_read_count 0\n"));
+        let test_cases = vec![
+            ("/metrics", " 200 ", "nydus_storage_prefetch_task_total 1"),
+            (
+                "/trace",
+                " 200 ",
+                r#"{"blob_index":1,"chunk_group_index":4}"#,
+            ),
+            ("/other", " 404 ", "not found"),
+        ];
+
+        for (path, status, body) in test_cases {
+            let response = get(&socket_path, path);
+            assert!(response.contains(status), "{path}: {response}");
+            assert!(response.contains(body), "{path}: {response}");
+        }
+
+        server.stop();
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn start_replaces_a_stale_socket() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("api.sock");
+        std::fs::write(&socket_path, b"stale").unwrap();
+        let server = ApiServer::start(
+            &format!("unix://{}", socket_path.display()),
+            Arc::new(Metrics::new()),
+            Arc::new(TraceRecorder::default()),
+        )
+        .unwrap();
+        assert!(get(&socket_path, "/metrics").contains(" 200 "));
+        server.stop();
     }
 }

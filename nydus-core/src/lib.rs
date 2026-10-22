@@ -41,6 +41,10 @@ pub use blob::{BlobId, BlobInfo, Blobs};
 pub use entry::FileType;
 pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
+pub use nydus_backend::Netns;
+pub use nydus_storage::access_trace::TraceRecorder;
+pub use nydus_storage::cache::CacheOptions;
+pub use nydus_telemetry::metrics::Metrics;
 pub use reader::ErofsReader;
 pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
 
@@ -56,11 +60,10 @@ use nydus_error::{Context, Error, Result};
 use entry::ImageFs;
 use extent::{BlobRangeSpec, ExtentResolver};
 use layout::{FlatLayout, Segment};
-use nydus_backend::build_backend_with_metrics;
+use nydus_backend::Backend;
 use nydus_config::PrefetchScope;
-use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
+use nydus_storage::access_trace::TraceDocument;
 use nydus_storage::prefetch::BlobPrefetcher;
-use nydus_telemetry::metrics::ImageMetrics;
 
 /// Read-side handle over a nydus image, split into blob data access and
 /// static filesystem metadata/data access.
@@ -79,8 +82,8 @@ pub struct NydusCore {
     address_layout: FlatLayout,
     trace_recorder: Arc<TraceRecorder>,
     /// Stop flag of the detached background prefetch worker, raised on drop
-    /// so the worker exits its retry/reschedule loop instead of holding the
-    /// cache and backend alive forever after the core is gone.
+    /// so the worker starts no new blob instead of holding the cache and
+    /// backend alive after the core is gone.
     prefetch_stop: Option<Arc<AtomicBool>>,
 }
 
@@ -100,14 +103,19 @@ impl NydusCore {
     /// in access order, then prefetches the remaining blobs.
     /// Dropping the core raises the worker's stop flag so it winds down
     /// instead of retrying throttled prefetches forever.
-    /// The worker shares the reader's blob cache set, so callers that want
-    /// network access (e.g. the virtio-pmem backend) must construct the core
-    /// while the desired network namespace is active so the spawned thread
-    /// inherits it.
+    ///
+    /// A registry backend reaches the registry from `netns` when one is
+    /// given, the caller's network namespace otherwise: every thread of the
+    /// backend's runtime enters it, so the prefetch worker and the callers
+    /// need not (e.g. a virtio-pmem backend passes the guest's namespace).
+    /// Every read, cache fill and prefetch of the core records into
+    /// [`Metrics`] of its own, see [`metrics`], and every on-demand chunk
+    /// group access into a [`TraceRecorder`] of its own.
     ///
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Blobs::fetch
-    pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
+    /// [`metrics`]: Self::metrics
+    pub fn new(bootstrap: &Path, config: Config, netns: Option<Netns>) -> Result<Self> {
         let bootstrap_file = Arc::new(
             OpenOptions::new()
                 .read(true)
@@ -126,14 +134,15 @@ impl NydusCore {
             .len();
         let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
         let prefetch_scope = config.prefetch.scope;
-        let prefetch_timeout = config.prefetch.timeout;
-        let prefetch_retry_delay_min = config.prefetch.retry_delay_min;
-        let prefetch_retry_delay_max = config.prefetch.retry_delay_max;
-        nydus_storage::cache::set_skip_verify_checksums(config.storage.skip_verify_checksums);
-        nydus_storage::cache::set_fetch_size(config.storage.fetch_size);
-        let metrics = Arc::new(ImageMetrics::new());
-        let backend = build_backend_with_metrics(&config.backend, metrics.clone())
-            .context("failed to build blob backend")?;
+        let prefetch_timeout = config.prefetch.request_timeout;
+        let cache_options = CacheOptions::from(&config.storage);
+        let backend = <dyn Backend>::new(
+            &config.backend,
+            &config.prefetch,
+            netns,
+            Arc::new(Metrics::new()),
+        )
+        .context("failed to build blob backend")?;
         let cache_dir = config.storage.dir.clone();
         if let Some(cache_dir) = &cache_dir {
             std::fs::create_dir_all(cache_dir).with_context(|| {
@@ -142,12 +151,12 @@ impl NydusCore {
         }
 
         let trace_recorder = Arc::new(TraceRecorder::default());
-        let reader = ErofsReader::open_bootstrap_with_metrics(
+        let reader = ErofsReader::open_bootstrap(
             bootstrap,
             backend.clone(),
             cache_dir.as_deref(),
             Some(trace_recorder.clone()),
-            metrics,
+            cache_options,
         )
         .context("failed to open nydus bootstrap")?;
         let raw_blob_infos = reader
@@ -162,7 +171,7 @@ impl NydusCore {
         if cache_dir.is_none() {
             for info in &raw_blob_infos {
                 let mapped = backend
-                    .raw_device_file(&info.blob_id)
+                    .open_raw_device_file(&info.blob_id)
                     .with_context(|| format!("failed to resolve blob {}", info.blob_index))?
                     .is_some_and(|file| file.data_offset == 0);
                 if !mapped {
@@ -186,8 +195,7 @@ impl NydusCore {
         // of the returned core. The handle is detached: prefetch is
         // best-effort warmup and must never block core construction or
         // teardown. The core retains only the worker's stop flag, raised on
-        // drop so the worker winds down instead of rescheduling throttled
-        // prefetches forever.
+        // drop so the worker winds down after its current blob.
         let mut prefetch_stop = None;
         if prefetch_scope != PrefetchScope::None {
             let prefetcher = BlobPrefetcher::new(
@@ -196,8 +204,6 @@ impl NydusCore {
                 prefetch_concurrent_blob_count,
                 prefetch_scope,
                 prefetch_timeout,
-                prefetch_retry_delay_min,
-                prefetch_retry_delay_max,
             );
             let stop_flag = prefetcher.stop_flag();
             match prefetcher.spawn() {
@@ -249,9 +255,20 @@ impl NydusCore {
         &self.bootstrap
     }
 
-    /// Metrics collected only for this opened image.
-    pub fn metrics(&self) -> Arc<ImageMetrics> {
+    /// Return the metrics of this core alone: every backend read, cache fill
+    /// and prefetch of it, counters an embedder reads directly or gathers
+    /// from the registry for its own stats endpoint.
+    pub fn metrics(&self) -> &Arc<Metrics> {
         self.reader.metrics()
+    }
+
+    /// Return the recorder of this core's on-demand chunk group trace, the
+    /// one [`trace_snapshot`] and [`trace_json`] read.
+    ///
+    /// [`trace_snapshot`]: Self::trace_snapshot
+    /// [`trace_json`]: Self::trace_json
+    pub fn trace_recorder(&self) -> &Arc<TraceRecorder> {
+        &self.trace_recorder
     }
 
     /// Return the size of the flattened device view.
@@ -323,8 +340,7 @@ impl NydusCore {
 
 impl Drop for NydusCore {
     /// Raise the background prefetch worker's stop flag so it stops starting
-    /// new work and exits its reschedule loop, instead of retrying throttled
-    /// prefetches forever after the core is gone.
+    /// new work after the core is gone.
     fn drop(&mut self) {
         if let Some(stop) = &self.prefetch_stop {
             stop.store(true, Ordering::Relaxed);

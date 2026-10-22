@@ -13,7 +13,7 @@ path = "src/bin/nydus/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["backend-registry"]
+default = ["registry"]
 # FUSE mount support (ErofsFs over fuser).
 fuse = ["dep:fuser", "dep:signal-hook"]
 # The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
@@ -26,6 +26,7 @@ cli = [
   "dep:http-body-util",
   "dep:hyper",
   "dep:hyper-util",
+  "dep:prometheus",
   "dep:signal-hook",
   "dep:tabled",
   "dep:tokio",
@@ -44,11 +45,11 @@ nbd = ["dep:signal-hook"]
 # (CONFIG_EROFS_FS_BACKED_BY_FILE).
 fileio = ["fuse", "dep:signal-hook"]
 # Container image registry backend (OCI distribution).
-backend-registry = ["nydus-backend/backend-registry"]
-# Dragonfly P2P SDK proxy support for the registry backend.
-backend-dragonfly-proxy = [
-  "backend-registry",
-  "nydus-backend/backend-dragonfly-proxy",
+registry = ["nydus-backend/registry"]
+# Dragonfly P2P reads for the registry backend.
+dragonfly = [
+  "registry",
+  "nydus-backend/dragonfly",
 ]
 # ublk block device target: expose the flattened image as /dev/ublkbN so the
 # kernel EROFS driver can mount it directly. Requires Linux >= 6.0 (ublk_drv).
@@ -79,6 +80,7 @@ nydus-storage = { version = "3.0.0-beta.3", path = "../nydus-storage" }
 nydus-telemetry = { version = "3.0.0-beta.3", path = "../nydus-telemetry", features = [
   "logging",
 ] }
+prometheus = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sendfd = { version = "0.4", optional = true }

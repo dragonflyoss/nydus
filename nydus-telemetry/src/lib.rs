@@ -1,17 +1,19 @@
 //! Telemetry for nydus, following the observability pillars:
 //!
-//! - [`metrics`]: independent Prometheus registries for opened images, plus a
-//!   process-wide compatibility registry for legacy constructors;
+//! - [`metrics`]: the Prometheus metrics of an image, one instance per
+//!   opened image;
 //! - [`logging`] (feature `logging`): `tracing`-subscriber installation
 //!   (stdout + rolling files + panic hook). Only binaries enable this —
 //!   libraries emit through the `tracing` facade and never install
 //!   subscribers.
 //!
-//! This crate is a dependency leaf: it must not depend on other nydus crates,
-//! so every layer (data plane and control plane alike) can record metrics.
-//! Label vocabularies ([`metrics::BackendTarget`], [`metrics::FsOp`]) are
-//! owned here; [`metrics::ReadKind`] is defined here for the same reason and
-//! re-exported by the storage backend as its read-policy type.
+//! This crate depends on no nydus crate but [`nydus_config`], so every layer
+//! (data plane and control plane alike) can record metrics. The enum that
+//! describes the configuration ([`nydus_config::ReadKind`]) is defined there
+//! and re-exported from [`metrics`], which maps it to a label value; the
+//! enums that only exist for metrics ([`metrics::Source`],
+//! [`metrics::WriteKind`], [`metrics::WriteFailureReason`], [`metrics::FsOp`]) are
+//! owned here.
 
 #[cfg(feature = "logging")]
 pub mod logging;

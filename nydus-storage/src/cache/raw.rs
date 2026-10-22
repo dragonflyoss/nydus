@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nydus_backend::{BlobBackend, RawDeviceFile, ReadContext, ReadKind};
+use nydus_backend::{Backend, RawDeviceFile};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use super::BlobCache;
@@ -20,15 +20,15 @@ use super::BlobCache;
 /// A blob cache that passes reads through to the backend unchanged.
 pub struct RawDeviceBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
-    backend: Arc<dyn BlobBackend>,
+    backend: Arc<dyn Backend>,
     file: Option<RawDeviceFile>,
 }
 
 impl RawDeviceBlobCache {
     /// Wrap `backend` for the raw device blob `blob_id`.
-    pub fn new(blob_id: [u8; SHA256_DIGEST_SIZE], backend: Arc<dyn BlobBackend>) -> Self {
+    pub fn new(blob_id: [u8; SHA256_DIGEST_SIZE], backend: Arc<dyn Backend>) -> Self {
         let file = backend
-            .raw_device_file(&blob_id)
+            .open_raw_device_file(&blob_id)
             .ok()
             .flatten()
             .filter(|file| file.data_offset == 0);
@@ -49,12 +49,7 @@ impl BlobCache for RawDeviceBlobCache {
         if dst.is_empty() {
             return Ok(());
         }
-        self.backend.read_range_into(
-            &self.blob_id,
-            offset,
-            dst,
-            ReadContext::raw(ReadKind::OnDemand),
-        )
+        self.backend.read_range_into(&self.blob_id, offset, dst)
     }
 
     /// A raw device holds no chunk groups to warm.
@@ -106,8 +101,9 @@ fn unsupported() -> io::Error {
 mod tests {
     use super::*;
     use crate::io::pread_exact;
-    use nydus_backend::{metered, Local};
+    use nydus_backend::Local;
     use nydus_format::blob::BlobMetadata;
+    use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::FullBlob;
     use tempfile::tempdir;
 
@@ -121,9 +117,12 @@ mod tests {
     fn local_raw_device_maps_the_store_file_directly() {
         let dir = tempdir().unwrap();
         let (payload, blob_id) = write_raw_device_blob(dir.path());
-        let backend = metered(Arc::new(Local::new(dir.path().to_path_buf())));
+        let backend: Arc<dyn Backend> = Arc::new(Local::new(
+            dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ));
         assert!(backend.is_raw_device(&blob_id).unwrap());
-        assert!(backend.blob_metadata(&blob_id).is_err());
+        assert!(backend.read_blob_metadata(&blob_id).is_err());
 
         let cache = RawDeviceBlobCache::new(blob_id, backend);
         let mut out = vec![0u8; 100];
@@ -156,9 +155,16 @@ mod tests {
 
     struct Streamed(Local);
 
-    impl BlobBackend for Streamed {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.0.blob_metadata(blob_id)
+    impl Backend for Streamed {
+        fn metrics(&self) -> &Arc<Metrics> {
+            self.0.metrics()
+        }
+
+        fn read_blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+        ) -> io::Result<BlobMetadata> {
+            self.0.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -166,9 +172,8 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            context: ReadContext,
         ) -> io::Result<()> {
-            self.0.read_range_into(blob_id, offset, dst, context)
+            self.0.read_range_into(blob_id, offset, dst)
         }
     }
 
@@ -178,7 +183,10 @@ mod tests {
         let (payload, blob_id) = write_raw_device_blob(dir.path());
         let cache = RawDeviceBlobCache::new(
             blob_id,
-            Arc::new(Streamed(Local::new(dir.path().to_path_buf()))),
+            Arc::new(Streamed(Local::new(
+                dir.path().to_path_buf(),
+                Arc::new(Metrics::new()),
+            ))),
         );
         let mut out = vec![0; 100];
         cache.read_at(4000, &mut out).unwrap();

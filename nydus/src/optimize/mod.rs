@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::build::merge::rewrite_bootstrap_with_ondemand_blob;
 use crate::parse_unix_address;
-use nydus_backend::{BlobBackend, ReadContext, ReadKind};
+use nydus_backend::Backend;
 use nydus_core::reader::RawBlobInfo;
 use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
@@ -30,7 +30,7 @@ use nydus_format::blob::{
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
 use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
-use nydus_storage::cache::{decode_chunk_group_from_window, LocalBlobCache};
+use nydus_storage::cache::{decode_chunk_group_from_window, CacheOptions, LocalBlobCache};
 use sha2::{Digest, Sha256};
 
 /// Longest contiguous run of source chunk groups fetched in one backend
@@ -101,8 +101,9 @@ pub struct ChunkGroupRef {
 pub fn build_ondemand_blob(
     parent_bootstrap: &Path,
     patterns: &[ChunkGroupRef],
-    backend: Arc<dyn BlobBackend>,
+    backend: Arc<dyn Backend>,
     cache_dir: &Path,
+    options: CacheOptions,
 ) -> Result<OndemandBlob> {
     let reader = ErofsReader::open_metadata_only(parent_bootstrap).with_context(|| {
         format!(
@@ -127,9 +128,22 @@ pub fn build_ondemand_blob(
             let info = infos_by_index.get(&blob_index).ok_or_else(|| {
                 Error::InvalidParameter(format!("pattern references unknown blob {blob_index}"))
             })?;
-            let cache =
-                LocalBlobCache::open(info.blob_id, blob_index as u32, cache_dir, backend.clone())
-                    .with_context(|| format!("failed to open source blob: {blob_index}"))?;
+            if backend
+                .is_raw_device(&info.blob_id)
+                .with_context(|| format!("failed to inspect source blob: {blob_index}"))?
+            {
+                return Err(Error::Unsupported(format!(
+                    "source blob {blob_index} is a native EROFS layer with no blob meta; refusing to optimize"
+                )));
+            }
+            let cache = LocalBlobCache::open(
+                info.blob_id,
+                blob_index as u32,
+                cache_dir,
+                backend.clone(),
+                options,
+            )
+            .with_context(|| format!("failed to open source blob: {blob_index}"))?;
             if cache.blob_metadata().is_redirect() {
                 return Err(Error::InvalidImage(format!(
                     "source blob {blob_index} is already an ondemand blob; refusing to optimize"
@@ -200,13 +214,8 @@ pub fn build_ondemand_blob(
             let len = usize::try_from(last.compressed_range().end - first.compressed_offset())
                 .map_err(|err| Error::Overflow(format!("copy read exceeds usize: {err}")))?;
             let mut window = vec![0u8; len];
-            let ctx = ReadContext::chunk_group(
-                ReadKind::Prefetch,
-                first.logical_offset(),
-                last.logical_range().end - first.logical_offset(),
-            );
             backend
-                .read_range_into(&blob_id, first.compressed_offset(), &mut window, ctx)
+                .prefetch_range_into(&blob_id, first.compressed_offset(), &mut window)
                 .with_context(|| {
                     format!(
                         "failed to read chunk groups {}..={} of blob {blob_index}",
@@ -219,11 +228,11 @@ pub fn build_ondemand_blob(
                 let group = meta.chunk_group(index as usize).unwrap();
                 decode_chunk_group_from_window(
                     meta,
-                    &backend,
                     &group,
                     first.compressed_offset(),
                     &window,
                     &mut scratch,
+                    options.skip_verify_checksums,
                 )
                 .with_context(|| {
                     format!("chunk group {index} of blob {blob_index} failed validation")

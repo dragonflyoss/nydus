@@ -13,12 +13,11 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use nydus_backend::{BlobBackend, ReadContext, ReadKind};
+use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
-use nydus_telemetry::metrics::ImageMetrics;
 
-use super::{decode_chunk_group_into, validate_chunk_group_for_image, BlobCache, ChunkGroupBuffer};
+use super::{decode_chunk_group_into, validate_decoded_chunk_group, BlobCache, ChunkGroupBuffer};
 
 /// Decoded bytes the diskless caches of one blob set keep in memory.
 const DECODED_GROUP_CACHE_BYTES: usize = 32 << 20;
@@ -113,41 +112,34 @@ impl DecodedGroupCache {
 pub struct RemoteBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
     blob_metadata: BlobMetadata,
-    backend: Arc<dyn BlobBackend>,
-    metrics: Arc<ImageMetrics>,
+    backend: Arc<dyn Backend>,
     decoded_groups: Arc<DecodedGroupCache>,
+    /// Skip the crc32c check of decoded chunk groups.
+    skip_verify_checksums: bool,
 }
 
 impl RemoteBlobCache {
-    /// Open the blob's metadata from the backend; no local file is created.
-    /// The blob gets a decoded-group cache of its own.
-    pub fn open(
+    /// Open the blob's metadata from the backend, `kind` attributing that
+    /// fetch; no local file is created. Decoded groups are kept in
+    /// `decoded_groups`, which other blobs of the same set share, and their
+    /// crc32c check is skipped when `skip_verify_checksums`.
+    pub(crate) fn open(
         blob_id: [u8; SHA256_DIGEST_SIZE],
-        backend: Arc<dyn BlobBackend>,
-    ) -> io::Result<Self> {
-        Self::open_with_group_cache(
-            blob_id,
-            backend,
-            nydus_telemetry::metrics::process_metrics(),
-            Arc::default(),
-        )
-    }
-
-    /// Like [`Self::open`], recording into `metrics` and keeping decoded
-    /// groups in `decoded_groups`, which other blobs of the same set share.
-    pub(crate) fn open_with_group_cache(
-        blob_id: [u8; SHA256_DIGEST_SIZE],
-        backend: Arc<dyn BlobBackend>,
-        metrics: Arc<ImageMetrics>,
+        backend: Arc<dyn Backend>,
         decoded_groups: Arc<DecodedGroupCache>,
+        kind: ReadKind,
+        skip_verify_checksums: bool,
     ) -> io::Result<Self> {
-        let blob_metadata = backend.blob_metadata(&blob_id)?;
+        let blob_metadata = match kind {
+            ReadKind::OnDemand => backend.read_blob_metadata(&blob_id)?,
+            ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
+        };
         Ok(Self {
             blob_id,
             blob_metadata,
             backend,
-            metrics,
             decoded_groups,
+            skip_verify_checksums,
         })
     }
 }
@@ -222,16 +214,8 @@ impl BlobCache for RemoteBlobCache {
         })?;
         let mut encoded = ChunkGroupBuffer::default();
         let encoded = encoded.resize(encoded_len)?;
-        self.backend.read_range_into(
-            &self.blob_id,
-            head.compressed_offset(),
-            encoded,
-            ReadContext::chunk_group(
-                ReadKind::OnDemand,
-                head.logical_offset(),
-                tail.logical_range().end - head.logical_offset(),
-            ),
-        )?;
+        self.backend
+            .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?;
 
         for group in &missed {
             let start = (group.compressed_offset() - head.compressed_offset()) as usize;
@@ -245,7 +229,7 @@ impl BlobCache for RemoteBlobCache {
                 decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
                 out
             };
-            validate_chunk_group_for_image(&self.backend, meta, group, payload, &self.metrics)?;
+            validate_decoded_chunk_group(group, payload, self.skip_verify_checksums)?;
             copy_group_chunks(meta, group, payload, offset, dst)?;
             if !self.decoded_groups.admits(len) {
                 continue;
@@ -285,6 +269,7 @@ mod tests {
     use super::*;
     use nydus_backend::Local;
     use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
+    use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::{uncompressed_data, FullBlob};
     use nydus_test_utils::metadata::from_chunk_groups;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -300,7 +285,7 @@ mod tests {
     impl Counting {
         fn new(dir: &std::path::Path) -> Arc<Self> {
             Arc::new(Self {
-                inner: Local::new(dir.to_path_buf()),
+                inner: Local::new(dir.to_path_buf(), Arc::new(Metrics::new())),
                 reads: AtomicUsize::new(0),
                 corrupt_next: AtomicBool::new(false),
             })
@@ -311,9 +296,16 @@ mod tests {
         }
     }
 
-    impl BlobBackend for Counting {
-        fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
-            self.inner.blob_metadata(blob_id)
+    impl Backend for Counting {
+        fn metrics(&self) -> &Arc<Metrics> {
+            self.inner.metrics()
+        }
+
+        fn read_blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+        ) -> io::Result<BlobMetadata> {
+            self.inner.read_blob_metadata(blob_id)
         }
 
         fn read_range_into(
@@ -321,10 +313,9 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
-            context: ReadContext,
         ) -> io::Result<()> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst, context)?;
+            self.inner.read_range_into(blob_id, offset, dst)?;
             if self.corrupt_next.swap(false, Ordering::SeqCst) {
                 dst[0] ^= 0xff;
             }
@@ -356,11 +347,12 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(dir);
         let backend = Counting::new(dir);
-        let remote = RemoteBlobCache::open_with_group_cache(
+        let remote = RemoteBlobCache::open(
             blob_id,
             backend.clone(),
-            nydus_telemetry::metrics::process_metrics(),
             decoded_groups,
+            ReadKind::OnDemand,
+            false,
         )
         .unwrap();
         (remote, backend)
@@ -381,8 +373,18 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
-        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
-        let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(Local::new(
+            backend_dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ));
+        let remote = RemoteBlobCache::open(
+            full_blob_id,
+            backend,
+            Arc::default(),
+            ReadKind::OnDemand,
+            false,
+        )
+        .unwrap();
 
         let mut buf = vec![0u8; 1024];
         remote.read_at(512, &mut buf).unwrap();
@@ -420,8 +422,18 @@ mod tests {
             .with_blob_metadata(&meta)
             .with_blob_metadata_file()
             .save_in(backend_dir.path());
-        let backend = Arc::new(Local::new(backend_dir.path().to_path_buf()));
-        let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
+        let backend = Arc::new(Local::new(
+            backend_dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ));
+        let remote = RemoteBlobCache::open(
+            full_blob_id,
+            backend,
+            Arc::default(),
+            ReadKind::OnDemand,
+            false,
+        )
+        .unwrap();
         let mut all = vec![0xffu8; image.len()];
         remote.read_at(0, &mut all).unwrap();
         assert_eq!(all, image);
@@ -444,8 +456,18 @@ mod tests {
             .with_blob_metadata_file()
             .save_in(backend_dir.path());
 
-        let backend: Arc<dyn BlobBackend> = Arc::new(Local::new(backend_dir.path().to_path_buf()));
-        let remote = RemoteBlobCache::open(full_blob_id, backend).unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(Local::new(
+            backend_dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ));
+        let remote = RemoteBlobCache::open(
+            full_blob_id,
+            backend,
+            Arc::default(),
+            ReadKind::OnDemand,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             remote.prepare().unwrap_err().kind(),

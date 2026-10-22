@@ -715,12 +715,19 @@ mod tests {
         std::fs::write(&blob_path, &data).unwrap();
         let bootstrap = dir.path().join("bootstrap");
         std::fs::write(&bootstrap, layer.standalone_bootstrap.unwrap()).unwrap();
-        let backend: std::sync::Arc<dyn nydus_backend::BlobBackend> =
-            std::sync::Arc::new(nydus_backend::Local::new(store));
+        let backend: std::sync::Arc<dyn nydus_backend::Backend> = std::sync::Arc::new(
+            nydus_backend::Local::new(store, std::sync::Arc::new(nydus_core::Metrics::new())),
+        );
         assert!(backend.is_raw_device(&layer.full_blob_digest).unwrap());
         let cache_dir = dir.path().join("cache");
-        let reader =
-            ErofsReader::open_bootstrap(&bootstrap, backend, Some(&cache_dir), None).unwrap();
+        let reader = ErofsReader::open_bootstrap(
+            &bootstrap,
+            backend,
+            Some(&cache_dir),
+            None,
+            nydus_core::CacheOptions::default(),
+        )
+        .unwrap();
         let root_nid = reader.superblock().root_nid();
         let root = reader.inode(root_nid).unwrap();
         for (name, expected) in [
@@ -746,7 +753,14 @@ mod tests {
             .unwrap_or(true));
 
         // The self-contained blob reads the same way.
-        let reader = ErofsReader::open_blob(&blob_path, None).unwrap();
+        let reader = ErofsReader::open_blob(
+            &blob_path,
+            None,
+            None,
+            std::sync::Arc::new(nydus_core::Metrics::new()),
+            nydus_core::CacheOptions::default(),
+        )
+        .unwrap();
         let root_nid = reader.superblock().root_nid();
         let root = reader.inode(root_nid).unwrap();
         let nid = reader

@@ -10,16 +10,16 @@ use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
 
-use nydus_backend::{BlobBackend, Local};
+use nydus_backend::{Backend, Local, ReadKind};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::erofs::{
     ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
 use nydus_storage::access_trace::TraceRecorder;
-use nydus_storage::cache::BlobCaches;
+use nydus_storage::cache::{BlobCaches, CacheOptions};
 use nydus_storage::prefetch::PrefetchPlan;
-use nydus_telemetry::metrics::ImageMetrics;
+use nydus_telemetry::metrics::Metrics;
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct RawDirEntry {
@@ -63,7 +63,6 @@ fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
 pub struct ErofsReader {
     pub(crate) mmap: Mmap,
     blobs: Arc<BlobCaches>,
-    metrics: Arc<ImageMetrics>,
     z_pclusters: z_cache::PclusterCache,
     /// Memoised device table. Pre-populated by the open paths that already
     /// parse it; metadata-only readers fill it on first use.
@@ -88,11 +87,9 @@ impl ErofsReader {
         let sb = Self::superblock_from(&mmap, sb_offset)?;
         Self::validate_superblock(sb)?;
 
-        let metrics = nydus_telemetry::metrics::process_metrics();
         Ok(Self {
             mmap,
             blobs: Arc::new(BlobCaches::empty()),
-            metrics,
             z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::new(),
             image_offset,
@@ -102,20 +99,17 @@ impl ErofsReader {
 
     /// Open a self-contained full blob (`payload + bootstrap + blob meta +
     /// footer`): everything is served from the file itself, no remote
-    /// backend is involved. `cache_dir`, when given, caches the decoded
-    /// chunk groups so repeat reads skip re-decoding from the blob.
-    pub fn open_blob(blob_path: &Path, cache_dir: Option<&Path>) -> io::Result<Self> {
-        Self::open_blob_with_metrics(
-            blob_path,
-            cache_dir,
-            nydus_telemetry::metrics::process_metrics(),
-        )
-    }
-
-    pub fn open_blob_with_metrics(
+    /// backend is involved, and reads record into `metrics`. `cache_dir`,
+    /// when given, caches the decoded chunk groups so repeat reads skip
+    /// re-decoding from the blob; `trace_recorder`, when given, records
+    /// on-demand chunk group accesses for `nydus optimize`; `options` is the
+    /// `storage` section the caches follow.
+    pub fn open_blob(
         blob_path: &Path,
         cache_dir: Option<&Path>,
-        metrics: Arc<ImageMetrics>,
+        trace_recorder: Option<Arc<TraceRecorder>>,
+        metrics: Arc<Metrics>,
+        options: CacheOptions,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(blob_path, false)?;
         let (mmap, image_offset) = match Self::unpack_embedded_image(mmap)? {
@@ -137,28 +131,23 @@ impl ErofsReader {
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
-        let backend: Arc<dyn BlobBackend> = match blob_infos.as_slice() {
-            [info] => Arc::new(Local::with_full_blob_source(
-                blob_dir.to_path_buf(),
-                info.blob_id,
-                blob_path,
-            )?),
-            _ => Arc::new(Local::new(blob_dir.to_path_buf())),
+        let backend: Arc<dyn Backend> = match blob_infos.as_slice() {
+            [info] => Arc::new(Local::from_full_blob(info.blob_id, blob_path, metrics)?),
+            _ => Arc::new(Local::new(blob_dir.to_path_buf(), metrics)),
         };
-        let blobs = BlobCaches::new_with_metrics(
+        let blobs = BlobCaches::new(
             blob_infos
                 .iter()
                 .map(|info| (info.blob_index, info.blob_id)),
-            nydus_backend::metered_with_metrics(backend, metrics.clone()),
+            backend,
             cache_dir,
-            None,
-            metrics.clone(),
+            trace_recorder,
+            options,
         )?;
 
         Ok(Self {
             mmap,
             blobs: Arc::new(blobs),
-            metrics,
             z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::from(blob_infos),
             image_offset,
@@ -168,29 +157,14 @@ impl ErofsReader {
 
     /// Open a standalone bootstrap whose blob data is served by `backend`
     /// through per-blob caches under `cache_dir` (a temporary directory when
-    /// `None`). `trace_recorder`, when given, records on-demand chunk group
-    /// accesses for `nydus optimize`.
+    /// `None`) following `options`. `trace_recorder`, when given, records
+    /// on-demand chunk group accesses for `nydus optimize`.
     pub fn open_bootstrap(
         bootstrap_path: &Path,
-        backend: Arc<dyn BlobBackend>,
+        backend: Arc<dyn Backend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
-    ) -> io::Result<Self> {
-        Self::open_bootstrap_with_metrics(
-            bootstrap_path,
-            backend,
-            cache_dir,
-            trace_recorder,
-            nydus_telemetry::metrics::process_metrics(),
-        )
-    }
-
-    pub fn open_bootstrap_with_metrics(
-        bootstrap_path: &Path,
-        backend: Arc<dyn BlobBackend>,
-        cache_dir: Option<&Path>,
-        trace_recorder: Option<Arc<TraceRecorder>>,
-        metrics: Arc<ImageMetrics>,
+        options: CacheOptions,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(bootstrap_path, true)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
@@ -199,20 +173,19 @@ impl ErofsReader {
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
 
-        let blobs = BlobCaches::new_with_metrics(
+        let blobs = BlobCaches::new(
             blob_infos
                 .iter()
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             cache_dir,
             trace_recorder,
-            metrics.clone(),
+            options,
         )?;
 
         Ok(Self {
             mmap,
             blobs: Arc::new(blobs),
-            metrics,
             z_pclusters: z_cache::PclusterCache::default(),
             blob_infos: OnceLock::from(blob_infos),
             image_offset: 0,
@@ -420,9 +393,10 @@ impl ErofsReader {
         self.blobs.clone()
     }
 
-    /// Metrics collected by this reader's backend and blob caches.
-    pub fn metrics(&self) -> Arc<ImageMetrics> {
-        self.metrics.clone()
+    /// The metrics of the image: the backend's, which the caches and the
+    /// prefetch record into too, and the filesystem above the reader should.
+    pub fn metrics(&self) -> &Arc<Metrics> {
+        self.blobs.metrics()
     }
 
     /// The (lazily opened) blob cache for the blob identified by `blob_index`,
@@ -431,7 +405,7 @@ impl ErofsReader {
         &self,
         blob_index: u16,
     ) -> io::Result<std::sync::Arc<dyn nydus_storage::cache::BlobCache>> {
-        self.blobs.cache(blob_index)
+        self.blobs.cache(blob_index, ReadKind::OnDemand)
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
@@ -525,12 +499,15 @@ impl ErofsReader {
         chunk_off: u64,
         dst: &mut [u8],
     ) -> io::Result<()> {
-        let cache = self.blobs.try_cache(blob_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("blob {blob_index} not available"),
-            )
-        })??;
+        let cache = self
+            .blobs
+            .try_cache(blob_index, ReadKind::OnDemand)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("blob {blob_index} not available"),
+                )
+            })??;
         let absolute_offset = blob_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read offset overflow")
         })?;
@@ -545,12 +522,15 @@ impl ErofsReader {
         len: usize,
         writer: &mut dyn Write,
     ) -> io::Result<()> {
-        let cache = self.blobs.try_cache(blob_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("blob {blob_index} not available"),
-            )
-        })??;
+        let cache = self
+            .blobs
+            .try_cache(blob_index, ReadKind::OnDemand)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("blob {blob_index} not available"),
+                )
+            })??;
         let absolute_offset = blob_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
         })?;

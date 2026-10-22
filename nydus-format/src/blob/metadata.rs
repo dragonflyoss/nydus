@@ -246,9 +246,9 @@ impl BlobMetadataTable {
             }
             _ => return Ok(()),
         };
-        if !self
+        if self
             .header_extension_size
-            .is_some_and(|size| size >= required)
+            .is_none_or(|size| size < required)
         {
             return Err(Error::InvalidImage(format!(
                 "blob meta table {} header extension is shorter than its {required} bytes",
@@ -962,7 +962,7 @@ impl BlobMetadataChunkGroupIndex {
             .enumerate()
             .flat_map(|(index, pair)| {
                 let entry_count = entries_before(&pair[1]) - entries_before(&pair[0]);
-                std::iter::repeat(Self(index as u32)).take(entry_count as usize)
+                std::iter::repeat_n(Self(index as u32), entry_count as usize)
             })
             .collect()
     }

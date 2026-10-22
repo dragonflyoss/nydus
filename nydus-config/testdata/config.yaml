@@ -8,7 +8,7 @@ backend:
     repository: library/nydus-demo
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     http:
-      timeout: 30s
+      request_timeout: 30s
       max_retries: 5
       proxy:
         addr: http://127.0.0.1:65001
@@ -16,13 +16,16 @@ backend:
         skip_verify: true
         ca_cert: /etc/nydus/certs/registry-ca.pem
     dragonfly:
-      scheduler_endpoint: http://127.0.0.1:65000
+      scheduler_endpoint: http://127.0.0.1:8002
+      request_timeout: 10s
+      max_retries: 2
+      fallback_rate_limit: 2
 
 storage:
   dir: /var/lib/nydus/cache
-  skip_verify_checksums: false
+  skip_verify_checksums: true
 
 prefetch:
   concurrent_blob_count: 4
-  timeout: 2m
+  request_timeout: 2m
   scope: all

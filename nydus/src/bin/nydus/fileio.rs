@@ -139,7 +139,7 @@ impl FileioCommand {
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         // The kernel EROFS driver reads the backing file in whole blocks.
         let flat = Arc::new(
-            FlatImage::open(&self.bootstrap, config, BLOCK_SIZE)
+            FlatImage::open(&self.bootstrap, config, BLOCK_SIZE, None)
                 .context("failed to build the flattened view")?,
         );
         // Warm the blob preparation (meta download + cache file sizing) in
@@ -203,15 +203,17 @@ impl FileioCommand {
 
         // Non-fatal like the fuse service: the export keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {
-            Some(address) => {
-                match crate::api_server::ApiServer::start(address, flat.core().metrics()) {
-                    Ok(server) => Some(server),
-                    Err(err) => {
-                        warn!("failed to start metrics apiserver: {}", err.report());
-                        None
-                    }
+            Some(address) => match crate::api_server::ApiServer::start(
+                address,
+                flat.core().metrics().clone(),
+                flat.core().trace_recorder().clone(),
+            ) {
+                Ok(server) => Some(server),
+                Err(err) => {
+                    warn!("failed to start metrics apiserver: {}", err.report());
+                    None
                 }
-            }
+            },
             None => None,
         };
 

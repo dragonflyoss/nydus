@@ -14,9 +14,11 @@ use nydus_error::{Context, Error, Result};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use serde::Deserialize;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use url::Url;
 
 /// The name of the package.
 pub const NAME: &str = "nydus";
@@ -42,11 +44,11 @@ pub fn default_log_dir() -> PathBuf {
     PathBuf::from("/var/log/nydus/")
 }
 
-/// Returns the default per-request timeout of the registry backend. Kept
+/// Returns the default timeout of a request to the origin registry. Kept
 /// short because a read holds the chunk group's fetch claim for its whole duration,
 /// and the readers waiting behind that claim are FUSE worker threads.
 #[inline]
-fn default_registry_http_timeout() -> Duration {
+fn default_registry_http_request_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
@@ -63,56 +65,48 @@ pub fn default_prefetch_concurrent_blob_count() -> usize {
     10
 }
 
-/// Returns the default per-blob prefetch timeout. Generous, because a blob
-/// prefetch downloads every chunk group of the blob in the background; the bound
-/// only exists to unwedge a stalled blob.
+/// Returns the default timeout of prefetching one blob. Generous, because a
+/// blob prefetch downloads every chunk group of the blob in the background; the
+/// bound only exists to unwedge a stalled blob.
 #[inline]
-pub fn default_prefetch_timeout() -> Duration {
+pub fn default_prefetch_request_timeout() -> Duration {
     Duration::from_secs(60 * 60)
 }
 
-/// Returns the default lower bound of the delay before a blob prefetch that
-/// was throttled by the backend (Dragonfly `429`) is re-attempted.
+/// Returns the default interval before a failed prefetch read is sent once
+/// more, six hours, the retry landing 6 to 12 hours later.
 #[inline]
-pub fn default_prefetch_retry_delay_min() -> Duration {
+pub fn default_prefetch_retry_interval() -> Duration {
     Duration::from_secs(6 * 60 * 60)
 }
 
-/// Returns the default upper bound of the delay before a blob prefetch that
-/// was throttled by the backend (Dragonfly `429`) is re-attempted.
+/// Returns the default timeout of each attempt of a request through the
+/// Dragonfly seed peers.
 #[inline]
-pub fn default_prefetch_retry_delay_max() -> Duration {
-    Duration::from_secs(12 * 60 * 60)
+fn default_registry_dragonfly_request_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 
-/// Returns the default number of Dragonfly retry attempts for a retryable
-/// (timeout / connection / 5xx) on-demand read failure before falling back
-/// to the origin registry.
+/// Returns the default maximum number of retries of an on-demand blob `GET`
+/// through Dragonfly on a transient failure.
 #[inline]
-fn default_dragonfly_ondemand_max_retries() -> u32 {
-    3
+fn default_registry_dragonfly_max_retries() -> u32 {
+    1
 }
 
-/// Returns the default number of Dragonfly retry attempts for a retryable
-/// (timeout / connection / 5xx) prefetch read failure before the read fails.
+/// Returns the default rate limit of the origin requests on-demand reads fall
+/// back to when the Dragonfly seed peers cannot serve them, one request per
+/// second per process.
 #[inline]
-fn default_dragonfly_prefetch_max_retries() -> u32 {
-    10
+fn default_registry_dragonfly_fallback_rate_limit() -> u64 {
+    1
 }
 
-/// Returns the default minimum interval between origin requests issued as
-/// Dragonfly fallbacks: one second, i.e. the fallback path is shaped to
-/// 1 QPS per process.
-#[inline]
-fn default_dragonfly_fallback_interval() -> Duration {
-    Duration::from_secs(1)
-}
-
-/// Returns the default for skipping decoded chunk group checksum
-/// verification.
+/// Returns the default for skipping the crc32c check of decoded chunk
+/// groups: every group is checked.
 #[inline]
 fn default_storage_skip_verify_checksums() -> bool {
-    true
+    false
 }
 
 /// The local backend configuration, serving blobs from a directory.
@@ -137,19 +131,32 @@ pub enum BackendConfig {
     Local(LocalConfig),
 
     /// Serve blobs from an OCI image registry. Parsed unconditionally so a
-    /// build without the `backend-registry` feature rejects the configuration
-    /// loudly at backend construction instead of silently ignoring it.
-    Registry(RegistryConfig),
+    /// build without the `registry` feature rejects the configuration
+    /// loudly at backend construction instead of silently ignoring it. Boxed
+    /// as it dwarfs the local variant.
+    Registry(Box<RegistryConfig>),
 }
 
-/// Implement BackendConfig.
-impl BackendConfig {
-    /// The `type` tag this configuration is selected by.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            BackendConfig::Local(_) => "local",
-            BackendConfig::Registry(_) => "registry",
-        }
+/// What triggered a backend read. Retry, throttling and Dragonfly priority
+/// key off it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReadKind {
+    /// A user-triggered read blocking a FUSE request.
+    #[default]
+    OnDemand,
+
+    /// A background prefetch read after mount.
+    Prefetch,
+}
+
+/// Implements the display of a read kind as its `ondemand` or `prefetch`
+/// label, the value metrics and logs carry.
+impl fmt::Display for ReadKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ReadKind::OnDemand => "ondemand",
+            ReadKind::Prefetch => "prefetch",
+        })
     }
 }
 
@@ -158,10 +165,10 @@ impl BackendConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
-    /// The registry address including the scheme, e.g.
-    /// `https://registry-1.docker.io` or `http://127.0.0.1:5000`. The scheme
-    /// selects between TLS and plain HTTP.
-    pub addr: String,
+    /// The registry address, an `http` or `https` origin carrying no path,
+    /// query or fragment, e.g. `https://registry-1.docker.io` or
+    /// `http://127.0.0.1:5000`. The scheme selects between TLS and plain HTTP.
+    pub addr: Url,
 
     /// The image repository (no tag or digest), e.g. `library/ubuntu`.
     pub repository: String,
@@ -171,18 +178,18 @@ pub struct RegistryConfig {
     #[serde(default)]
     pub auth: Option<String>,
 
-    /// The HTTP client configuration: timeouts, retries, and TLS trust. The
-    /// timeout also applies to Dragonfly SDK requests; retry counts for
-    /// Dragonfly reads are governed by the `dragonfly` policy knobs instead.
+    /// The HTTP client configuration of requests to the origin registry:
+    /// timeouts, retries, and TLS trust. Every origin request goes through
+    /// it, the on-demand reads a Dragonfly backend falls back to the origin
+    /// with included.
     #[serde(default)]
     pub http: HttpConfig,
 
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
-    /// hitting the origin registry directly. Only honored when built with the
-    /// `backend-dragonfly-proxy` feature; parsed unconditionally so a build
-    /// without the feature can reject the block loudly instead of silently
-    /// ignoring it.
+    /// hitting the origin registry directly. Parsed unconditionally so a
+    /// build without the `dragonfly` feature rejects the block loudly when
+    /// the configuration is loaded instead of silently ignoring it.
     #[serde(default)]
     pub dragonfly: Option<DragonflyConfig>,
 }
@@ -191,16 +198,18 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
-    /// The per-request timeout (connect + read), e.g. `5s` or `1m`; `0s`
-    /// disables the timeout. A request fetches one chunk group, so this
-    /// bounds a single chunk group download.
-    #[serde(default = "default_registry_http_timeout", with = "humantime_serde")]
-    pub timeout: Duration,
+    /// The timeout of a request to the origin registry (connect + read), e.g.
+    /// `5s` or `1m`, greater than zero. A request fetches one chunk group, so
+    /// this bounds a single chunk group download.
+    #[serde(
+        default = "default_registry_http_request_timeout",
+        with = "humantime_serde"
+    )]
+    pub request_timeout: Duration,
 
     /// The maximum number of retry attempts per request, applied by the HTTP
-    /// client's retry middleware on direct origin requests — including origin
-    /// requests issued as Dragonfly fallbacks, so the default of 3 is what
-    /// bounds "origin failing 3 attempts" before a fallback read errors out.
+    /// client's retry middleware. A prefetch read still failing after them is
+    /// sent once more after `prefetch.retry_interval`.
     #[serde(default = "default_registry_http_max_retries")]
     pub max_retries: u32,
 
@@ -213,21 +222,6 @@ pub struct HttpConfig {
     /// The TLS configuration for connections to the registry.
     #[serde(default)]
     pub tls: TlsConfig,
-
-    /// The async worker threads of the process-wide runtime that drives the
-    /// registry client's sockets; `0` selects the backend's default (2). The
-    /// runtime is shared by every registry backend in the process, so only
-    /// the first backend constructed with a non-zero value can configure it;
-    /// a later, different value is logged and ignored.
-    #[serde(default)]
-    pub worker_threads: usize,
-
-    /// The upper bound on the runtime's on-demand blocking threads, which
-    /// serve DNS lookups and are released after 10 s idle; `0` selects the
-    /// backend's default (8). Shares the first-backend-wins rule of
-    /// [`worker_threads`](Self::worker_threads).
-    #[serde(default)]
-    pub max_blocking_threads: usize,
 }
 
 /// The proxy configuration for the registry backend's HTTP client.
@@ -244,12 +238,10 @@ pub struct ProxyConfig {
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            timeout: default_registry_http_timeout(),
+            request_timeout: default_registry_http_request_timeout(),
             max_retries: default_registry_http_max_retries(),
             proxy: None,
             tls: TlsConfig::default(),
-            worker_threads: 0,
-            max_blocking_threads: 0,
         }
     }
 }
@@ -302,34 +294,82 @@ impl TlsConfig {
 
 /// The Dragonfly configuration for the registry backend, routing blob `GET`s
 /// through the Dragonfly client SDK.
+///
+/// A seed peer answers with the error type header saying which layer failed,
+/// and the status code decides what nydus does next:
+///
+/// ```text
+/// nydus ──GET──▶ seed peer ──▶ dfdaemon ──miss──▶ origin registry
+///                    │             │                    │
+///                proxy error   dfdaemon error      backend error
+/// ```
+///
+/// | Layer    | Status                                | Meaning                                         |
+/// |----------|---------------------------------------|-------------------------------------------------|
+/// | proxy    | `400` / `401` / `403`                 | bad request, bad proxy credentials, blocklisted |
+/// | proxy    | `429`                                 | the seed peer is rate limited                   |
+/// | dfdaemon | `400` / `422`                         | invalid request, or the origin sent no length   |
+/// | dfdaemon | `507`                                 | the seed peer has no room for the blob          |
+/// | dfdaemon | `500`                                 | scheduling, peer download or streaming failed   |
+/// | backend  | the origin's own status               | the origin refused or failed the request        |
+///
+/// Whatever the layer, the status alone drives the outcome. A definitive answer
+/// is settled at once for both read kinds, a transient one splits by read kind:
+///
+/// ```text
+///                        ┌─ 2xx / 3xx ─────────────────▶ served
+///                        │
+/// seed peer answer ──────┼─ 401 ───────────────────────▶ auth handshake, resent
+///                        │
+///                        ├─ 400 / 403 / 404 / 422 ─────▶ read fails
+///                        │
+///                        └─ 429 / 5xx / 408 / timeout ─┬─ on-demand ─▶ retry, then origin
+///                                                      │
+///                                                      └─ prefetch ──▶ retried once, hours later
+/// ```
+///
+/// | Answer                        | On-demand                                      | Prefetch                              |
+/// |-------------------------------|------------------------------------------------|---------------------------------------|
+/// | `2xx` / `3xx`                 | served, a `3xx` followed through Dragonfly     | same                                  |
+/// | `401`                         | registry auth handshake, then resent once      | same                                  |
+/// | `400` / `403` / `404` / `422` | read fails, no retry, no origin                | same                                  |
+/// | `429` / `5xx` / `408`         | retried on the next seed peer, then the origin | retried once hours later, no origin   |
+///
+/// On-demand reads retry `max_retries` times and fall back to the origin
+/// through the registry's `http` client, under `fallback_rate_limit`. A
+/// timeout or connection failure counts as a transient answer.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DragonflyConfig {
-    /// The Dragonfly scheduler endpoint (gRPC), e.g. `http://127.0.0.1:65000`.
+    /// The Dragonfly scheduler service address with the scheme, e.g.
+    /// `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
     pub scheduler_endpoint: String,
 
-    /// The number of Dragonfly retry attempts for a retryable (timeout,
-    /// connection, or 5xx) on-demand read failure before the read falls back
-    /// to the origin registry.
-    #[serde(default = "default_dragonfly_ondemand_max_retries")]
-    pub ondemand_max_retries: u32,
-
-    /// The number of Dragonfly retry attempts for a retryable (timeout,
-    /// connection, or 5xx) prefetch read failure before the read fails.
-    /// Prefetch reads never fall back to the origin, so a Dragonfly outage
-    /// degrades prefetch instead of flooding the registry.
-    #[serde(default = "default_dragonfly_prefetch_max_retries")]
-    pub prefetch_max_retries: u32,
-
-    /// The minimum interval between origin requests issued as Dragonfly
-    /// fallbacks, e.g. `1s` (the default, i.e. 1 QPS per process). `0s`
-    /// disables the throttle. Only fallback reads are shaped; direct reads
-    /// and auth token fetches are never throttled.
+    /// The timeout of each attempt of a request through the seed peers, e.g.
+    /// `5s` or `1m`. A request fetches one chunk group, so this bounds a
+    /// single chunk group download from a seed peer.
     #[serde(
-        default = "default_dragonfly_fallback_interval",
+        default = "default_registry_dragonfly_request_timeout",
         with = "humantime_serde"
     )]
-    pub fallback_interval: Duration,
+    pub request_timeout: Duration,
+
+    /// The maximum number of retries of an on-demand blob `GET` through
+    /// Dragonfly on a transient failure (timeout, connection, dfdaemon, `5xx`,
+    /// `408` or `429`), each sent to the next seed peer after an exponential
+    /// backoff, at most 3. Any other answer returns at once. A prefetch read
+    /// is instead sent once more after a random delay of hours.
+    #[serde(default = "default_registry_dragonfly_max_retries")]
+    pub max_retries: u32,
+
+    /// The rate limit of the origin requests on-demand reads fall back to
+    /// when the seed peers cannot serve them, in requests per second, `1` by
+    /// default and at least `1`. The requests themselves go through the
+    /// registry's `http` client; every attempt, retries included, waits for
+    /// a slot, so the origin never sees more than this many a second from
+    /// one process however many seed peers fail.
+    #[serde(default = "default_registry_dragonfly_fallback_rate_limit")]
+    pub fallback_rate_limit: u64,
 }
 
 /// The storage configuration: where downloaded blob data is kept.
@@ -346,9 +386,9 @@ pub struct StorageConfig {
     #[serde(default)]
     pub dir: Option<PathBuf>,
 
-    /// Skip verifying decoded chunk groups against their stored checksums
-    /// before they are served (the default). Set to `false` to verify every
-    /// decoded chunk group when the transport is not trusted end to end.
+    /// Skip checking decoded chunk groups against their crc32c before they
+    /// are served, `false` by default: every group is checked. Set to `true`
+    /// when the transport is trusted end to end.
     #[serde(default = "default_storage_skip_verify_checksums")]
     pub skip_verify_checksums: bool,
 
@@ -385,28 +425,23 @@ pub struct PrefetchConfig {
     #[serde(default = "default_prefetch_concurrent_blob_count")]
     pub concurrent_blob_count: usize,
 
-    /// The per-blob prefetch timeout, e.g. `1h`: bounds how long prefetching
-    /// one whole blob may take, while `http.timeout` bounds each chunk group
-    /// request within it; `0s` disables the bound.
-    #[serde(default = "default_prefetch_timeout", with = "humantime_serde")]
-    pub timeout: Duration,
+    /// The timeout of prefetching one whole blob, e.g. `1h`, while
+    /// `http.request_timeout` bounds each chunk group request within it; `0s`
+    /// disables the bound.
+    #[serde(default = "default_prefetch_request_timeout", with = "humantime_serde")]
+    pub request_timeout: Duration,
+
+    /// The interval before a prefetch read answered with `429`, `5xx` or
+    /// `408` is sent once more, drawn at random between `retry_interval` and
+    /// twice `retry_interval`: `6h` by default, so 6 to 12 hours.
+    #[serde(default = "default_prefetch_retry_interval", with = "humantime_serde")]
+    pub retry_interval: Duration,
 
     /// The scope of blob prefetch: nothing, only the "ondemand" blob, all
     /// blobs, or `auto` (the default): the "ondemand" blob when the image has
     /// one, otherwise all blobs.
     #[serde(default)]
     pub scope: PrefetchScope,
-
-    /// The lower bound of the random delay before a blob prefetch that was
-    /// throttled by the backend (Dragonfly `429`) is re-attempted, e.g. `6h`.
-    #[serde(default = "default_prefetch_retry_delay_min", with = "humantime_serde")]
-    pub retry_delay_min: Duration,
-
-    /// The upper bound of the random delay before a blob prefetch that was
-    /// throttled by the backend (Dragonfly `429`) is re-attempted, e.g. `12h`.
-    /// Must not be smaller than `retry_delay_min`.
-    #[serde(default = "default_prefetch_retry_delay_max", with = "humantime_serde")]
-    pub retry_delay_max: Duration,
 }
 
 /// The scope of blob prefetch: which blobs it pulls.
@@ -444,10 +479,9 @@ impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
             concurrent_blob_count: default_prefetch_concurrent_blob_count(),
-            timeout: default_prefetch_timeout(),
+            request_timeout: default_prefetch_request_timeout(),
+            retry_interval: default_prefetch_retry_interval(),
             scope: PrefetchScope::default(),
-            retry_delay_min: default_prefetch_retry_delay_min(),
-            retry_delay_max: default_prefetch_retry_delay_max(),
         }
     }
 }
@@ -506,10 +540,35 @@ impl Config {
                 "prefetch.concurrent_blob_count must be at least 1".to_string(),
             ));
         }
-        if self.prefetch.retry_delay_min > self.prefetch.retry_delay_max {
-            return Err(Error::InvalidConfig(
-                "prefetch.retry_delay_min must not exceed prefetch.retry_delay_max".to_string(),
-            ));
+
+        if let BackendConfig::Registry(registry) = &self.backend {
+            if registry.http.request_timeout.is_zero() {
+                return Err(Error::InvalidConfig(
+                    "http.request_timeout must be greater than 0s".to_string(),
+                ));
+            }
+
+            #[cfg(not(feature = "dragonfly"))]
+            if let Some(dragonfly) = &registry.dragonfly {
+                return Err(Error::InvalidConfig(format!(
+                    "dragonfly.scheduler_endpoint is set ({}) but this build lacks the `dragonfly` feature",
+                    dragonfly.scheduler_endpoint
+                )));
+            }
+
+            if let Some(dragonfly) = &registry.dragonfly {
+                if dragonfly.max_retries > 3 {
+                    return Err(Error::InvalidConfig(
+                        "dragonfly.max_retries must not exceed 3".to_string(),
+                    ));
+                }
+
+                if dragonfly.fallback_rate_limit == 0 {
+                    return Err(Error::InvalidConfig(
+                        "dragonfly.fallback_rate_limit must be at least 1".to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -552,6 +611,18 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::Write;
 
+    #[cfg(not(feature = "dragonfly"))]
+    #[test]
+    fn load_config_file_rejects_the_dragonfly_block_without_the_feature() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/config.yaml"));
+        let err = Config::load(path).unwrap_err();
+        assert!(
+            err.to_string().contains("lacks the `dragonfly` feature"),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "dragonfly")]
     #[test]
     fn load_config_file_correctly() {
         let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/config.yaml"));
@@ -560,13 +631,13 @@ mod tests {
         let BackendConfig::Registry(registry) = &config.backend else {
             panic!("expected a registry backend, got {:?}", config.backend);
         };
-        assert_eq!(registry.addr, "http://127.0.0.1:5000");
+        assert_eq!(registry.addr.as_str(), "http://127.0.0.1:5000/");
         assert_eq!(registry.repository, "library/nydus-demo");
         assert_eq!(
             registry.auth.as_deref(),
             Some("dGVzdHVzZXI6dGVzdHBhc3N3b3Jk")
         );
-        assert_eq!(registry.http.timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert_eq!(
             registry.http.proxy.as_ref().unwrap().addr,
@@ -577,19 +648,20 @@ mod tests {
             registry.http.tls.ca_cert.as_deref(),
             Some(Path::new("/etc/nydus/certs/registry-ca.pem"))
         );
-        assert_eq!(
-            registry.dragonfly.as_ref().unwrap().scheduler_endpoint,
-            "http://127.0.0.1:65000"
-        );
+        let dragonfly = registry.dragonfly.as_ref().unwrap();
+        assert_eq!(dragonfly.scheduler_endpoint, "http://127.0.0.1:8002");
+        assert_eq!(dragonfly.request_timeout, Duration::from_secs(10));
+        assert_eq!(dragonfly.max_retries, 2);
+        assert_eq!(dragonfly.fallback_rate_limit, 2);
 
         assert_eq!(
             config.storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
-        assert!(!config.storage.skip_verify_checksums);
+        assert!(config.storage.skip_verify_checksums);
 
         assert_eq!(config.prefetch.concurrent_blob_count, 4);
-        assert_eq!(config.prefetch.timeout, Duration::from_secs(120));
+        assert_eq!(config.prefetch.request_timeout, Duration::from_secs(120));
         assert_eq!(config.prefetch.scope, PrefetchScope::All);
     }
 
@@ -606,7 +678,6 @@ config:
             panic!("expected a local backend, got {backend:?}");
         };
         assert_eq!(local.dir, Path::new("/blobs"));
-        assert_eq!(backend.kind(), "local");
     }
 
     #[test]
@@ -618,23 +689,23 @@ config:
   repository: library/ubuntu
   auth: YWxpY2U6c2VjcmV0
   http:
-    timeout: 30s
+    request_timeout: 30s
     max_retries: 5
     tls:
       skip_verify: true
       ca_cert: /etc/nydus/certs/registry-ca.pem
   dragonfly:
-    scheduler_endpoint: http://127.0.0.1:65000
+    scheduler_endpoint: http://127.0.0.1:8002
 "#;
 
         let backend: BackendConfig = serde_yaml::from_str(yaml).unwrap();
         let BackendConfig::Registry(registry) = &backend else {
             panic!("expected a registry backend, got {backend:?}");
         };
-        assert_eq!(registry.addr, "http://127.0.0.1:5000");
+        assert_eq!(registry.addr.as_str(), "http://127.0.0.1:5000/");
         assert_eq!(registry.repository, "library/ubuntu");
         assert_eq!(registry.auth.as_deref(), Some("YWxpY2U6c2VjcmV0"));
-        assert_eq!(registry.http.timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert!(registry.http.tls.skip_verify);
         assert_eq!(
@@ -643,38 +714,37 @@ config:
         );
         assert_eq!(
             registry.dragonfly.as_ref().unwrap().scheduler_endpoint,
-            "http://127.0.0.1:65000"
+            "http://127.0.0.1:8002"
         );
-        assert_eq!(backend.kind(), "registry");
     }
 
     #[test]
-    fn dragonfly_policy_knobs_default_and_deserialize() {
+    fn dragonfly_knobs_default_and_deserialize() {
         let defaults: DragonflyConfig =
-            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:65000\n").unwrap();
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:8002\n").unwrap();
         assert_eq!(
-            defaults.ondemand_max_retries,
-            default_dragonfly_ondemand_max_retries()
+            defaults.request_timeout,
+            default_registry_dragonfly_request_timeout()
         );
         assert_eq!(
-            defaults.prefetch_max_retries,
-            default_dragonfly_prefetch_max_retries()
+            defaults.max_retries,
+            default_registry_dragonfly_max_retries()
         );
         assert_eq!(
-            defaults.fallback_interval,
-            default_dragonfly_fallback_interval()
+            defaults.fallback_rate_limit,
+            default_registry_dragonfly_fallback_rate_limit()
         );
 
         let yaml = r#"
-scheduler_endpoint: http://127.0.0.1:65000
-ondemand_max_retries: 5
-prefetch_max_retries: 0
-fallback_interval: 250ms
+scheduler_endpoint: http://127.0.0.1:8002
+request_timeout: 5s
+max_retries: 0
+fallback_rate_limit: 3
 "#;
         let dragonfly: DragonflyConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(dragonfly.ondemand_max_retries, 5);
-        assert_eq!(dragonfly.prefetch_max_retries, 0);
-        assert_eq!(dragonfly.fallback_interval, Duration::from_millis(250));
+        assert_eq!(dragonfly.request_timeout, Duration::from_secs(5));
+        assert_eq!(dragonfly.max_retries, 0);
+        assert_eq!(dragonfly.fallback_rate_limit, 3);
     }
 
     #[test]
@@ -690,7 +760,10 @@ config:
         let BackendConfig::Registry(registry) = &backend else {
             panic!("expected a registry backend, got {backend:?}");
         };
-        assert_eq!(registry.http.timeout, default_registry_http_timeout());
+        assert_eq!(
+            registry.http.request_timeout,
+            default_registry_http_request_timeout()
+        );
         assert_eq!(
             registry.http.max_retries,
             default_registry_http_max_retries()
@@ -698,32 +771,8 @@ config:
         assert!(registry.http.proxy.is_none());
         assert!(!registry.http.tls.skip_verify);
         assert!(registry.http.tls.ca_cert.is_none());
-        assert_eq!(registry.http.worker_threads, 0);
-        assert_eq!(registry.http.max_blocking_threads, 0);
         assert!(registry.auth.is_none());
         assert!(registry.dragonfly.is_none());
-    }
-
-    #[test]
-    fn deserialize_registry_http_runtime_threads() {
-        let yaml = r#"
-type: registry
-config:
-  addr: https://registry-1.docker.io
-  repository: library/ubuntu
-  http:
-    worker_threads: 4
-    max_blocking_threads: 16
-"#;
-
-        let backend: BackendConfig = serde_yaml::from_str(yaml).unwrap();
-        let BackendConfig::Registry(registry) = &backend else {
-            panic!("expected a registry backend, got {backend:?}");
-        };
-        assert_eq!(registry.http.worker_threads, 4);
-        assert_eq!(registry.http.max_blocking_threads, 16);
-        // The other http fields keep their defaults alongside the new keys.
-        assert_eq!(registry.http.timeout, default_registry_http_timeout());
     }
 
     #[test]
@@ -745,7 +794,6 @@ config:
 
     #[test]
     fn rejects_unknown_backend_keys() {
-        // Unknown key next to `type`/`config`.
         let yaml = r#"
 type: local
 config:
@@ -753,8 +801,6 @@ config:
 junk: 1
 "#;
         assert!(serde_yaml::from_str::<BackendConfig>(yaml).is_err());
-
-        // Unknown key inside the selected backend's settings.
         let yaml = r#"
 type: registry
 config:
@@ -772,11 +818,11 @@ config:
             storage.dir.as_deref(),
             Some(Path::new("/var/lib/nydus/cache"))
         );
-        assert!(storage.skip_verify_checksums);
+        assert!(!storage.skip_verify_checksums);
 
         let storage: StorageConfig =
-            serde_yaml::from_str("dir: /cache\nskip_verify_checksums: false\n").unwrap();
-        assert!(!storage.skip_verify_checksums);
+            serde_yaml::from_str("dir: /cache\nskip_verify_checksums: true\n").unwrap();
+        assert!(storage.skip_verify_checksums);
     }
 
     #[test]
@@ -801,13 +847,13 @@ backend:
     fn deserialize_prefetch_correctly() {
         let yaml = r#"
 concurrent_blob_count: 8
-timeout: 2m
+request_timeout: 2m
 scope: all
 "#;
 
         let prefetch: PrefetchConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(prefetch.concurrent_blob_count, 8);
-        assert_eq!(prefetch.timeout, Duration::from_secs(120));
+        assert_eq!(prefetch.request_timeout, Duration::from_secs(120));
         assert_eq!(prefetch.scope, PrefetchScope::All);
     }
 
@@ -818,10 +864,8 @@ scope: all
             prefetch.concurrent_blob_count,
             default_prefetch_concurrent_blob_count()
         );
-        assert_eq!(prefetch.timeout, default_prefetch_timeout());
+        assert_eq!(prefetch.request_timeout, default_prefetch_request_timeout());
         assert_eq!(prefetch.scope, PrefetchScope::Auto);
-        assert_eq!(prefetch.retry_delay_min, default_prefetch_retry_delay_min());
-        assert_eq!(prefetch.retry_delay_max, default_prefetch_retry_delay_max());
     }
 
     #[test]
@@ -844,31 +888,68 @@ scope: all
     }
 
     #[test]
-    fn prefetch_retry_delay_deserializes() {
-        let yaml = "retry_delay_min: 30s\nretry_delay_max: 2m\n";
-        let prefetch: PrefetchConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(prefetch.retry_delay_min, Duration::from_secs(30));
-        assert_eq!(prefetch.retry_delay_max, Duration::from_secs(120));
+    fn registry_addr_is_parsed_as_a_url() {
+        let test_cases = vec![
+            ("http://127.0.0.1:5000", Some("http://127.0.0.1:5000/")),
+            (
+                "https://registry-1.docker.io",
+                Some("https://registry-1.docker.io/"),
+            ),
+            (
+                "https://registry.example.com/mirror",
+                Some("https://registry.example.com/mirror"),
+            ),
+            ("registry.example.com", None),
+        ];
+
+        for (addr, expected) in test_cases {
+            let yaml = format!(
+                "backend:\n  type: registry\n  config:\n    addr: {addr}\n    repository: library/ubuntu\n"
+            );
+            let parsed = Config::from_yaml(&yaml)
+                .ok()
+                .map(|config| match config.backend {
+                    BackendConfig::Registry(registry) => registry.addr.to_string(),
+                    backend => panic!("expected a registry backend, got {backend:?}"),
+                });
+            assert_eq!(parsed.as_deref(), expected, "addr={addr}");
+        }
     }
 
     #[test]
-    fn rejects_inverted_prefetch_retry_delay_window() {
-        let yaml = r#"
-backend:
-  type: local
-  config:
-    dir: /blobs
-storage:
-  dir: /cache
-prefetch:
-  retry_delay_min: 2h
-  retry_delay_max: 1h
-"#;
+    fn rejects_zero_registry_http_bounds() {
+        let test_cases = vec![(
+            "request_timeout: 0s",
+            "http.request_timeout must be greater than 0s",
+        )];
 
-        let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("prefetch.retry_delay_min must not exceed prefetch.retry_delay_max"));
+        for (field, expected) in test_cases {
+            let yaml = format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    http:\n      {field}\n"
+            );
+            let err = Config::from_yaml(&yaml).unwrap_err();
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn rejects_dragonfly_values_out_of_range() {
+        let test_cases = vec![
+            ("max_retries: 4", "dragonfly.max_retries must not exceed 3"),
+            (
+                "fallback_rate_limit: 0",
+                "dragonfly.fallback_rate_limit must be at least 1",
+            ),
+        ];
+
+        for (field, expected) in test_cases {
+            let yaml = format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:8002\n      {field}\n"
+            );
+            let err = Config::from_yaml(&yaml).unwrap_err();
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]
@@ -1037,5 +1118,17 @@ Y+f+/xlWpHEkSQ==
         let result = parser.parse_ref(&cmd, None, value);
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn read_kind_displays_its_label() {
+        let test_cases = vec![
+            (ReadKind::OnDemand, "ondemand"),
+            (ReadKind::Prefetch, "prefetch"),
+        ];
+
+        for (kind, expected) in test_cases {
+            assert_eq!(kind.to_string(), expected);
+        }
     }
 }
