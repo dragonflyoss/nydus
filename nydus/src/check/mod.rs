@@ -158,7 +158,7 @@ pub struct BlobMetadataSummary {
     pub bytes_per_chunk_group_index: u32,
     pub compressor: BlobMetadataCompressor,
     pub total_uncompressed_size: u64,
-    pub is_redirect: bool,
+    pub is_ondemand: bool,
     pub is_incremental: bool,
     pub total_compressed_size: u64,
     /// Bytes the chunk groups decode to: the padded size minus the tail
@@ -169,7 +169,7 @@ pub struct BlobMetadataSummary {
     /// The chunk group digester, `none` without one, or why the reader
     /// cannot tell.
     pub digester: String,
-    /// Redirect table entries: every chunk group of an ondemand (REDIRECT)
+    /// Redirect table entries: every chunk group of an ondemand
     /// blob, zero otherwise.
     pub redirect_count: usize,
 }
@@ -675,7 +675,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
         compressor: blob_metadata.compressor(),
         total_uncompressed_size: blob_metadata.logical_size(),
         total_compressed_size: blob_metadata.compressed_size(),
-        is_redirect: blob_metadata.is_redirect(),
+        is_ondemand: blob_metadata.is_ondemand(),
         is_incremental: blob_metadata.is_incremental(),
         total_payload_size: blob_metadata.uncompressed_size(),
         chunk_count: blob_metadata.chunk_count(),
@@ -684,7 +684,7 @@ fn blob_metadata_summary_from_bytes(data: &[u8]) -> Result<BlobMetadataSummary> 
             Ok(None) => "none".to_string(),
             Err(err) => err.to_string(),
         },
-        redirect_count: if blob_metadata.is_redirect() {
+        redirect_count: if blob_metadata.is_ondemand() {
             blob_metadata.chunk_group_count()
         } else {
             0
@@ -785,14 +785,14 @@ mod tests {
         .unwrap();
         let metadata = resolved.get(&1).unwrap().blob_metadata.as_ref().unwrap();
         assert!(metadata.is_incremental);
-        assert!(!metadata.is_redirect);
+        assert!(!metadata.is_ondemand);
     }
 
     #[test]
     fn reader_rejects_data_only_blobs_as_standalone() {
         for (kind, expected) in [
             (BlobKind::Incremental, "incremental blob"),
-            (BlobKind::Redirect, "redirect blob"),
+            (BlobKind::Ondemand, "ondemand blob"),
         ] {
             let dir = tempdir().unwrap();
             let (full_blob_digest, _) = write_minimal_blob_with_kind(dir.path(), kind);
@@ -817,7 +817,7 @@ mod tests {
     enum BlobKind {
         Full,
         Incremental,
-        Redirect,
+        Ondemand,
     }
 
     fn write_minimal_blob_with_kind(
@@ -828,7 +828,7 @@ mod tests {
         let blob_metadata = match kind {
             BlobKind::Full => metadata::single_chunk_group(&data),
             BlobKind::Incremental => metadata::single_chunk_group_upper(&data),
-            BlobKind::Redirect => metadata::single_chunk_group_redirect(&data, 1),
+            BlobKind::Ondemand => metadata::single_chunk_group_ondemand(&data, 1),
         };
         let full_blob_id = FullBlob::new(&data)
             .without_bootstrap()

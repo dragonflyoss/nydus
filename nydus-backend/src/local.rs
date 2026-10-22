@@ -281,7 +281,7 @@ impl Backend for Local {
             })
             .inspect(|()| {
                 self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::OnDemand,
+                    ReadKind::Ondemand,
                     Source::Local,
                     buf.len() as u64,
                     start.elapsed(),
@@ -290,7 +290,7 @@ impl Backend for Local {
             .inspect_err(|_| {
                 self.metrics
                     .backend
-                    .collect_read_failure_metrics(ReadKind::OnDemand, Source::Local)
+                    .collect_read_failure_metrics(ReadKind::Ondemand, Source::Local)
             })
     }
 

@@ -143,7 +143,7 @@ pub enum BackendConfig {
 pub enum ReadKind {
     /// A user-triggered read blocking a FUSE request.
     #[default]
-    OnDemand,
+    Ondemand,
 
     /// A background prefetch read after mount.
     Prefetch,
@@ -154,7 +154,7 @@ pub enum ReadKind {
 impl fmt::Display for ReadKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            ReadKind::OnDemand => "ondemand",
+            ReadKind::Ondemand => "ondemand",
             ReadKind::Prefetch => "prefetch",
         })
     }
@@ -1123,7 +1123,7 @@ Y+f+/xlWpHEkSQ==
     #[test]
     fn read_kind_displays_its_label() {
         let test_cases = vec![
-            (ReadKind::OnDemand, "ondemand"),
+            (ReadKind::Ondemand, "ondemand"),
             (ReadKind::Prefetch, "prefetch"),
         ];
 

@@ -42,7 +42,7 @@ pub use entry::FileType;
 pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
 pub use nydus_backend::Netns;
-pub use nydus_storage::access_trace::TraceRecorder;
+pub use nydus_storage::ondemand::OndemandRecorder;
 pub use nydus_telemetry::metrics::Metrics;
 pub use reader::ErofsReader;
 pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
@@ -61,7 +61,7 @@ use extent::{BlobRangeSpec, ExtentResolver};
 use layout::{FlatLayout, Segment};
 use nydus_backend::Backend;
 use nydus_config::PrefetchScope;
-use nydus_storage::access_trace::TraceDocument;
+use nydus_storage::ondemand::OndemandDocument;
 use nydus_storage::prefetch::BlobPrefetcher;
 
 /// Read-side handle over a nydus image, split into blob data access and
@@ -79,7 +79,7 @@ pub struct NydusCore {
     bootstrap: Arc<File>,
     zero_file: Arc<File>,
     address_layout: FlatLayout,
-    trace_recorder: Arc<TraceRecorder>,
+    ondemand_recorder: Arc<OndemandRecorder>,
     /// Stop flag of the detached background prefetch worker, raised on drop
     /// so the worker starts no new blob instead of holding the cache and
     /// backend alive after the core is gone.
@@ -109,7 +109,7 @@ impl NydusCore {
     /// need not (e.g. a virtio-pmem backend passes the guest's namespace).
     /// Every read, cache fill and prefetch of the core records into
     /// [`Metrics`] of its own, see [`metrics`], and every on-demand chunk
-    /// group access into a [`TraceRecorder`] of its own.
+    /// group access into a [`OndemandRecorder`] of its own.
     ///
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Blobs::fetch
@@ -144,12 +144,12 @@ impl NydusCore {
             })?;
         }
 
-        let trace_recorder = Arc::new(TraceRecorder::default());
+        let ondemand_recorder = Arc::new(OndemandRecorder::default());
         let reader = ErofsReader::open_bootstrap(
             bootstrap,
             backend.clone(),
             &config.storage,
-            Some(trace_recorder.clone()),
+            Some(ondemand_recorder.clone()),
         )
         .context("failed to open nydus bootstrap")?;
         let raw_blob_infos = reader
@@ -225,7 +225,7 @@ impl NydusCore {
             bootstrap: bootstrap_file,
             zero_file,
             address_layout,
-            trace_recorder,
+            ondemand_recorder,
             prefetch_stop,
         })
     }
@@ -254,13 +254,13 @@ impl NydusCore {
         self.reader.metrics()
     }
 
-    /// Return the recorder of this core's on-demand chunk group trace, the
-    /// one [`trace_snapshot`] and [`trace_json`] read.
+    /// Return the recorder of this core's on-demand chunk group record, the
+    /// one [`ondemand_snapshot`] and [`ondemand_json`] read.
     ///
-    /// [`trace_snapshot`]: Self::trace_snapshot
-    /// [`trace_json`]: Self::trace_json
-    pub fn trace_recorder(&self) -> &Arc<TraceRecorder> {
-        &self.trace_recorder
+    /// [`ondemand_snapshot`]: Self::ondemand_snapshot
+    /// [`ondemand_json`]: Self::ondemand_json
+    pub fn ondemand_recorder(&self) -> &Arc<OndemandRecorder> {
+        &self.ondemand_recorder
     }
 
     /// Return the size of the flattened device view.
@@ -290,14 +290,14 @@ impl NydusCore {
         self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
 
-    /// Return a stable snapshot of this core's on-demand chunk group trace.
-    pub fn trace_snapshot(&self) -> TraceDocument {
-        self.trace_recorder.snapshot()
+    /// Return a stable snapshot of this core's on-demand chunk group record.
+    pub fn ondemand_snapshot(&self) -> OndemandDocument {
+        self.ondemand_recorder.snapshot()
     }
 
-    /// Serialize this core's on-demand chunk group trace as optimize-compatible JSON.
-    pub fn trace_json(&self) -> String {
-        self.trace_recorder.encode_json()
+    /// Serialize this core's on-demand chunk group record as optimize-compatible JSON.
+    pub fn ondemand_json(&self) -> String {
+        self.ondemand_recorder.encode_json()
     }
 
     fn resolve_flat_ranges(&self, offset: u64, len: u64, mode: ResolveMode) -> Result<Vec<Extent>> {

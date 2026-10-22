@@ -1,8 +1,8 @@
-//! On-demand access tracing at chunk group granularity.
+//! On-demand access recording at chunk group granularity.
 //!
 //! Every chunk group an on-demand read touches is recorded once, at its
 //! first access, as a `(blob_index, chunk_group_index)` pair into the
-//! [`TraceRecorder`] the image's caches were opened with. The ordered list
+//! [`OndemandRecorder`] the image's caches were opened with. The ordered list
 //! is served as JSON by the apiserver's `/trace` endpoint and feeds `nydus
 //! optimize`, which copies exactly those groups into an ondemand blob the
 //! runtime prefetches first. Prefetch reads are not recorded.
@@ -12,13 +12,13 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-/// The version of the serialized trace document, bumped on incompatible
+/// The version of the serialized ondemand document, bumped on incompatible
 /// changes.
-pub const TRACE_DOCUMENT_VERSION: u32 = 1;
+pub const ONDEMAND_DOCUMENT_VERSION: u32 = 1;
 
-/// One chunk group access of the on-demand trace.
+/// One chunk group access of the ondemand record.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct TraceEntry {
+pub struct OndemandEntry {
     /// The blob's device index in the merged image, 1-based for the
     /// external blobs; device 0 is the bootstrap itself and never produces
     /// chunk reads.
@@ -28,26 +28,26 @@ pub struct TraceEntry {
     pub chunk_group_index: u32,
 }
 
-/// The serialized trace document, `{"version":1,"patterns":[...]}`.
+/// The serialized ondemand document, `{"version":1,"patterns":[...]}`.
 ///
 /// The explicit version lets fields be added, or the pattern shape change,
 /// without breaking consumers, and keeps the document self-describing
 /// wherever it travels: files, HTTP bodies, embedding hosts.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TraceDocument {
-    /// The format version of the document, [`TRACE_DOCUMENT_VERSION`].
+pub struct OndemandDocument {
+    /// The format version of the document, [`ONDEMAND_DOCUMENT_VERSION`].
     pub version: u32,
 
     /// The chunk groups accessed, in first-access order.
     #[serde(rename = "patterns")]
-    pub entries: Vec<TraceEntry>,
+    pub entries: Vec<OndemandEntry>,
 }
 
-/// Implements the default trace document: the current version, no entries.
-impl Default for TraceDocument {
+/// Implements the default ondemand document: the current version, no entries.
+impl Default for OndemandDocument {
     fn default() -> Self {
         Self {
-            version: TRACE_DOCUMENT_VERSION,
+            version: ONDEMAND_DOCUMENT_VERSION,
             entries: Vec::new(),
         }
     }
@@ -55,27 +55,27 @@ impl Default for TraceDocument {
 
 /// The accesses recorded so far.
 #[derive(Default)]
-struct TraceState {
+struct OndemandState {
     /// The entries in first-access order.
-    entries: Vec<TraceEntry>,
+    entries: Vec<OndemandEntry>,
 
     /// The entries recorded, so a chunk group is appended once.
-    seen: HashSet<TraceEntry>,
+    seen: HashSet<OndemandEntry>,
 }
 
 /// The recorder of an image's on-demand chunk group accesses.
 #[derive(Default)]
-pub struct TraceRecorder {
+pub struct OndemandRecorder {
     /// The accesses recorded so far.
-    state: Mutex<TraceState>,
+    state: Mutex<OndemandState>,
 }
 
-/// Implements the trace recorder.
-impl TraceRecorder {
+/// Implements the ondemand recorder.
+impl OndemandRecorder {
     /// Records an on-demand access to chunk group `chunk_group_index` of
     /// blob `blob_index`, appended at its first access and ignored after.
     pub fn record_chunk_group_access(&self, blob_index: u16, chunk_group_index: u32) {
-        let entry = TraceEntry {
+        let entry = OndemandEntry {
             blob_index,
             chunk_group_index,
         };
@@ -85,18 +85,18 @@ impl TraceRecorder {
         }
     }
 
-    /// Returns a snapshot of the trace collected so far.
-    pub fn snapshot(&self) -> TraceDocument {
-        TraceDocument {
-            version: TRACE_DOCUMENT_VERSION,
+    /// Returns a snapshot of the record collected so far.
+    pub fn snapshot(&self) -> OndemandDocument {
+        OndemandDocument {
+            version: ONDEMAND_DOCUMENT_VERSION,
             entries: self.state.lock().unwrap().entries.clone(),
         }
     }
 
-    /// Serializes the trace collected so far as JSON, such as
+    /// Serializes the record collected so far as JSON, such as
     /// `{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4}]}`.
     pub fn encode_json(&self) -> String {
-        serde_json::to_string(&self.snapshot()).expect("a trace document is plain data")
+        serde_json::to_string(&self.snapshot()).expect("an ondemand document is plain data")
     }
 }
 
@@ -106,26 +106,26 @@ mod tests {
 
     #[test]
     fn record_chunk_group_access_keeps_first_access_order_and_dedups() {
-        let recorder = TraceRecorder::default();
+        let recorder = OndemandRecorder::default();
         recorder.record_chunk_group_access(9001, 7);
         recorder.record_chunk_group_access(9002, 4);
         recorder.record_chunk_group_access(9001, 7);
         recorder.record_chunk_group_access(9002, 5);
 
         let snapshot = recorder.snapshot();
-        assert_eq!(snapshot.version, TRACE_DOCUMENT_VERSION);
+        assert_eq!(snapshot.version, ONDEMAND_DOCUMENT_VERSION);
         assert_eq!(
             snapshot.entries,
             vec![
-                TraceEntry {
+                OndemandEntry {
                     blob_index: 9001,
                     chunk_group_index: 7,
                 },
-                TraceEntry {
+                OndemandEntry {
                     blob_index: 9002,
                     chunk_group_index: 4,
                 },
-                TraceEntry {
+                OndemandEntry {
                     blob_index: 9002,
                     chunk_group_index: 5,
                 },
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn encode_json_writes_the_versioned_document() {
-        let recorder = TraceRecorder::default();
+        let recorder = OndemandRecorder::default();
         assert_eq!(recorder.encode_json(), "{\"version\":1,\"patterns\":[]}");
 
         recorder.record_chunk_group_access(1, 4);

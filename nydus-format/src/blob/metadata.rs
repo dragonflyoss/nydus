@@ -45,7 +45,7 @@ impl BlobMetadataTableType {
     pub const CHUNK_GROUP_DIGEST: Self = Self(4);
 
     /// ChunkGroupRedirectTable, the chunk group of another blob that every
-    /// chunk group copies, present in redirect blobs only. Entries are
+    /// chunk group copies, present in ondemand blobs only. Entries are
     /// [`BlobMetadataChunkGroupRedirect`].
     pub const CHUNK_GROUP_REDIRECT: Self = Self(5);
 
@@ -523,7 +523,7 @@ impl BlobMetadataChunkGroup {
 
 /// One chunk group with its extent in every layer, joined from its
 /// ChunkGroupTable entry and the next. A group of one or more chunks is the
-/// compression, decode, cache fill, readiness and trace unit.
+/// compression, decode, cache fill, readiness and record unit.
 ///
 /// ```text
 /// logical       the address space the cache mirrors, groups back to back,
@@ -718,7 +718,7 @@ impl BlobMetadataChunkGroupExtent {
         self.start.uncompressed_crc32
     }
 
-    /// The source this group copies, in a redirect blob.
+    /// The source this group copies, in an ondemand blob.
     pub fn redirect(&self) -> Option<BlobMetadataChunkGroupRedirect> {
         self.redirect
     }
@@ -1095,7 +1095,7 @@ impl BlobMetadataChunkGroupDigest {
 
 /// One ChunkGroupRedirectTable entry, the chunk group of another blob of
 /// the image that the chunk group at the same index copies. Present only
-/// in a redirect blob (an `optimize` output), one entry per chunk group.
+/// in an ondemand blob (an `optimize` output), one entry per chunk group.
 ///
 /// ```text
 /// offset  size  field
@@ -1433,14 +1433,14 @@ impl BlobMetadataHeader {
 /// ChunkLengthTable            2  required                        none                                              chunks * 4 B
 /// ChunkGroupIndexTable        3  required                        BlobMetadataChunkGroupIndexTableHeaderExtension   ceil(blocks / stride) * 4 B
 /// ChunkGroupDigestTable       4  optional, with a digester       BlobMetadataChunkGroupDigestTableHeaderExtension  groups * 32 B
-/// ChunkGroupRedirectTable     5  optional, in redirect blobs     none                                              groups * 8 B
+/// ChunkGroupRedirectTable     5  optional, in ondemand blobs     none                                              groups * 8 B
 /// ```
 ///
 /// The table headers are the compatibility contract. A reader rejects
 /// unknown incompat bits of any table, skips a table of unknown type
 /// otherwise, reads known tables through their
 /// declared sizes, and keeps every byte so [`Self::write_to`] preserves what
-/// it does not know. A redirect blob (an `optimize` output) copies chunk
+/// it does not know. An ondemand blob (an `optimize` output) copies chunk
 /// groups of other blobs byte for byte and names their sources in
 /// ChunkGroupRedirectTable.
 #[derive(Debug)]
@@ -1545,7 +1545,7 @@ impl BlobMetadata {
             .transpose()?;
 
         // ChunkGroupRedirectTable takes one source group per group and is
-        // written only for a redirect blob. It has no header extension.
+        // written only for an ondemand blob. It has no header extension.
         let chunk_group_redirect_table = if chunk_group_redirects.is_empty() {
             None
         } else {
@@ -1621,24 +1621,24 @@ impl BlobMetadata {
     }
 
     /// Inspect data-only artifact features without allocating or decoding
-    /// metadata tables. Returns `(incremental, redirect)`.
+    /// metadata tables. Returns `(incremental, ondemand)`.
     pub fn artifact_features_from_bytes(bytes: &[u8]) -> Result<(bool, bool)> {
         let header = BlobMetadataHeader::from_bytes(bytes)?;
         let mut end = BlobMetadataHeader::SIZE;
-        let mut redirect = false;
+        let mut ondemand = false;
         for _ in 0..header.table_count {
             let table = BlobMetadataTable::from_bytes(bytes, end)?;
-            redirect |= table.table_type() == BlobMetadataTableType::CHUNK_GROUP_REDIRECT;
+            ondemand |= table.table_type() == BlobMetadataTableType::CHUNK_GROUP_REDIRECT;
             end = table.range().end;
         }
         let incremental = header.feature_incompat & NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL != 0;
-        if incremental && redirect {
+        if incremental && ondemand {
             return Err(Error::InvalidImage(
-                "blob metadata cannot be both redirect and incremental".to_string(),
+                "blob metadata cannot be both ondemand and incremental".to_string(),
             ));
         }
 
-        Ok((incremental, redirect))
+        Ok((incremental, ondemand))
     }
 
     /// Parses a blob meta from its bytes, which it keeps. The header, the table
@@ -1720,7 +1720,7 @@ impl BlobMetadata {
                 }
             };
 
-        // ChunkGroupRedirectTable is optional, present in a redirect blob only.
+        // ChunkGroupRedirectTable is optional, present in an ondemand blob only.
         // It holds the group of another blob that every group copies, one
         // entry per group in ChunkGroupTable order. It has no header
         // extension.
@@ -1762,9 +1762,9 @@ impl BlobMetadata {
     /// call for. Runs on both sides, so a constructed blob meta is valid by
     /// definition.
     fn validate_fields(&self) -> Result<()> {
-        if self.is_incremental() && self.is_redirect() {
+        if self.is_incremental() && self.is_ondemand() {
             return Err(Error::InvalidImage(
-                "blob metadata cannot be both redirect and incremental".to_string(),
+                "blob metadata cannot be both ondemand and incremental".to_string(),
             ));
         }
 
@@ -2020,7 +2020,7 @@ impl BlobMetadata {
     }
 
     /// The redirect of chunk group `index`, `None` past the table or in a
-    /// blob that is not a redirect blob.
+    /// blob that is not an ondemand blob.
     pub fn chunk_group_redirect(&self, index: usize) -> Option<BlobMetadataChunkGroupRedirect> {
         let entries = self.chunk_group_redirects?;
         if index >= entries.len() {
@@ -2030,9 +2030,9 @@ impl BlobMetadata {
         Some(entries.get(&self.bytes, index))
     }
 
-    /// Whether the blob is a redirect blob, its chunk groups copied from other
+    /// Whether the blob is an ondemand blob, its chunk groups copied from other
     /// blobs named in ChunkGroupRedirectTable.
-    pub fn is_redirect(&self) -> bool {
+    pub fn is_ondemand(&self) -> bool {
         self.chunk_group_redirects.is_some()
     }
 
@@ -2194,7 +2194,7 @@ mod tests {
             blob_metadata.digester().unwrap(),
             Some(BlobMetadataDigester::Blake3)
         );
-        assert!(!blob_metadata.is_redirect());
+        assert!(!blob_metadata.is_ondemand());
         assert_eq!(blob_metadata.max_blocks_per_chunk_group(), 16);
         assert_eq!(blob_metadata.max_bytes_per_chunk_group(), 65536);
         assert_eq!(blob_metadata.blocks_per_chunk_group_index(), 1);
@@ -2822,7 +2822,7 @@ mod tests {
     #[test]
     fn new_rejects_inconsistent_tables() {
         let (chunk_groups, chunk_lengths, chunk_group_digests) = entries(&chunks());
-        let redirect = BlobMetadataChunkGroupRedirect::new(1, 0).unwrap();
+        let ondemand = BlobMetadataChunkGroupRedirect::new(1, 0).unwrap();
         let mut extra_chunk_length = chunk_lengths.clone();
         extra_chunk_length.push(BlobMetadataChunkLength::new(5));
         let mut extra_chunk_named = chunk_groups.clone();
@@ -2894,7 +2894,7 @@ mod tests {
                 chunk_groups.clone(),
                 chunk_lengths.clone(),
                 vec![],
-                vec![redirect],
+                vec![ondemand],
                 "blob meta ChunkGroupRedirectTable does not hold one entry per chunk group",
             ),
             (
@@ -3108,7 +3108,7 @@ mod tests {
             chunk_group_redirects.clone(),
         )
         .unwrap();
-        assert!(blob_metadata.is_redirect());
+        assert!(blob_metadata.is_ondemand());
         assert_eq!(blob_metadata.chunk_group_count(), 2);
         assert_eq!(blob_metadata.chunk_count(), 4);
         assert_eq!(blob_metadata.logical_block_count(), 5);
@@ -3133,7 +3133,7 @@ mod tests {
         ];
 
         for loaded in test_cases {
-            assert!(loaded.is_redirect());
+            assert!(loaded.is_ondemand());
             assert_eq!(
                 loaded.chunk_group_redirect(0),
                 Some(chunk_group_redirects[0])

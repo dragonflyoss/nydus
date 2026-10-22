@@ -35,7 +35,7 @@ pub use local::LocalBlobCache;
 use self::decode::write_failure_reason;
 use self::diskless::{DecodedChunkGroupCache, DisklessBlobCache};
 use self::raw_device::RawDeviceBlobCache;
-use crate::access_trace::TraceRecorder;
+use crate::ondemand::OndemandRecorder;
 
 /// A blob's cache: its dense decoded block address space, where the chunks
 /// sit on their blocks with zero padding between them, read by absolute
@@ -111,10 +111,10 @@ pub trait BlobCache: Send + Sync {
     }
 
     /// Returns whether the blob is an ondemand blob, the `nydus optimize`
-    /// output: a redirect blob whose chunk groups copy other blobs' chunk
+    /// output: an ondemand blob whose chunk groups copy other blobs' chunk
     /// groups, which the prefetch streams into those source blobs' caches
     /// first.
-    fn is_redirect(&self) -> bool {
+    fn is_ondemand(&self) -> bool {
         false
     }
 
@@ -125,7 +125,7 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
-    /// Streams the chunk groups of a redirect blob: fetches them in batches
+    /// Streams the chunk groups of an ondemand blob: fetches them in batches
     /// of the fetch size through up to `workers` threads, decodes and
     /// verifies each against the blob's metadata, and hands the payload to
     /// `f` in blob order. Chunk groups `skip` accepts are not fetched, a
@@ -133,7 +133,7 @@ pub trait BlobCache: Send + Sync {
     /// fails to decode is logged and skipped, while an error of `f` aborts
     /// the stream. Returns the bytes read from the backend and the chunk
     /// groups that failed to decode.
-    fn for_each_redirect_chunk_group(
+    fn for_each_ondemand_blob_chunk_group(
         &self,
         _workers: usize,
         _deadline: Option<Instant>,
@@ -142,12 +142,12 @@ pub trait BlobCache: Send + Sync {
     ) -> io::Result<(u64, u64)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "for_each_redirect_chunk_group is not supported by this blob cache",
+            "for_each_ondemand_blob_chunk_group is not supported by this blob cache",
         ))
     }
 
     /// Writes `payload`, the decoded chunk group `chunk_group_index` of the
-    /// blob obtained from a redirect blob, into the local cache and marks
+    /// blob obtained from an ondemand blob, into the local cache and marks
     /// the chunk group ready. The payload is verified against the blob's own
     /// metadata first, so a stale or corrupt copy never reaches the cache. A
     /// no-op when the chunk group is already ready.
@@ -184,7 +184,7 @@ pub trait BlobCache: Send + Sync {
     /// Returns the uncompressed bytes of the blob the cache file holds, by
     /// the shared chunk group map, and the blob's total; `None` for a cache
     /// without a file of its own, a raw device, a diskless cache or a
-    /// redirect blob, whose chunk groups land in their source blobs.
+    /// ondemand blob, whose chunk groups land in their source blobs.
     fn cached_bytes(&self) -> Option<(u64, u64)> {
         None
     }
@@ -238,8 +238,8 @@ struct BlobSlot {
     /// set.
     decoded_chunk_groups: Arc<DecodedChunkGroupCache>,
 
-    /// The access trace of the image, `None` when accesses are not traced.
-    trace_recorder: Option<Arc<TraceRecorder>>,
+    /// The ondemand record of the image, `None` when accesses are not traced.
+    ondemand_recorder: Option<Arc<OndemandRecorder>>,
 
     /// The `storage` section of the image: the directory, `None` selecting
     /// the diskless [`DisklessBlobCache`], the fetch size and the checksum
@@ -323,7 +323,7 @@ impl BlobSlot {
                 blob_metadata,
                 self.backend.clone(),
                 &self.storage,
-                self.trace_recorder.clone(),
+                self.ondemand_recorder.clone(),
             )?)
         } else {
             Arc::new(DisklessBlobCache::new(
@@ -448,7 +448,7 @@ impl Default for BlobCaches {
 impl BlobCaches {
     /// Creates the set from the `(blob_index, blob_id)` pairs of `entries`,
     /// served by `backend` under the `storage` section and recording
-    /// on-demand accesses into `trace_recorder` when set. Without a
+    /// on-demand accesses into `ondemand_recorder` when set. Without a
     /// `storage.dir` the blobs run diskless: reads fetch from the backend
     /// directly, nothing is written to disk, and the recently decoded chunk
     /// groups are kept in one bounded in-memory cache shared by the whole
@@ -457,7 +457,7 @@ impl BlobCaches {
         entries: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
         backend: Arc<dyn Backend>,
         storage: &StorageConfig,
-        trace_recorder: Option<Arc<TraceRecorder>>,
+        ondemand_recorder: Option<Arc<OndemandRecorder>>,
     ) -> io::Result<Self> {
         let decoded_chunk_groups = Arc::new(DecodedChunkGroupCache::default());
         let metrics = backend.metrics().clone();
@@ -472,7 +472,7 @@ impl BlobCaches {
                             blob_index,
                             backend: backend.clone(),
                             decoded_chunk_groups: decoded_chunk_groups.clone(),
-                            trace_recorder: trace_recorder.clone(),
+                            ondemand_recorder: ondemand_recorder.clone(),
                             storage: storage.clone(),
                             cache: RwLock::new(None),
                         },
@@ -539,10 +539,10 @@ impl BlobCaches {
     }
 
     /// Returns whether the blob `blob_index` is an ondemand blob, the
-    /// redirect blob `nydus optimize` produces. Opens the blob's cache,
+    /// ondemand blob `nydus optimize` produces. Opens the blob's cache,
     /// which reads the blob meta but prefetches no data.
-    pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
-        Ok(self.prefetch_cache(blob_index)?.is_redirect())
+    pub fn is_ondemand(&self, blob_index: u16) -> io::Result<bool> {
+        Ok(self.prefetch_cache(blob_index)?.is_ondemand())
     }
 
     /// Prefetches every chunk group of the blob `blob_index`, up to `workers`
@@ -566,14 +566,14 @@ impl BlobCaches {
         let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
         let cache = self.prefetch_cache(blob_index)?;
         let _prefetch_lock = cache.prefetch_lock();
-        if !cache.is_redirect() {
+        if !cache.is_ondemand() {
             return cache.prefetch_all(workers, deadline);
         }
 
         let start = Instant::now();
         let filled = AtomicU64::new(0);
         let skipped = AtomicU64::new(0);
-        let result = self.prefetch_redirect_blob(
+        let result = self.prefetch_ondemand_blob(
             blob_index,
             cache.as_ref(),
             workers,
@@ -597,7 +597,7 @@ impl BlobCaches {
         result.map(|_| ())
     }
 
-    /// Streams the redirect blob `blob_index` in its packed, first-access
+    /// Streams the ondemand blob `blob_index` in its packed, first-access
     /// order and writes every decoded chunk group into its source blob's
     /// cache, so the workload's early reads hit the cache. Chunk groups
     /// whose source is already cached, by the source's chunk group map
@@ -605,8 +605,8 @@ impl BlobCaches {
     /// logged and skipped so it can neither poison a source cache nor abort
     /// the warmup; `filled` and `skipped` count the chunk groups written and
     /// the ones that could not be. Returns what the stream fetched, see
-    /// [`BlobCache::for_each_redirect_chunk_group`].
-    fn prefetch_redirect_blob(
+    /// [`BlobCache::for_each_ondemand_blob_chunk_group`].
+    fn prefetch_ondemand_blob(
         &self,
         blob_index: u16,
         cache: &dyn BlobCache,
@@ -637,7 +637,7 @@ impl BlobCaches {
             }
         };
 
-        cache.for_each_redirect_chunk_group(workers, deadline, &skip, &|group, payload| {
+        cache.for_each_ondemand_blob_chunk_group(workers, deadline, &skip, &|group, payload| {
             let (Some(redirect), Some(source)) = (group.redirect(), source_of(group)) else {
                 skipped.fetch_add(1, Ordering::Relaxed);
                 self.metrics.cache.collect_write_failure_metrics(

@@ -106,7 +106,7 @@ func TestErofsKernelCompatibility(t *testing.T) {
 	util.MergeBootstrap(t, nydusBin, mergedBootstrap, blobs...)
 	t.Run("merge", func(t *testing.T) { verifyNativeErofsTree(t, mergedBootstrap, decodedDir, expectedDir) })
 
-	// Optimize the merge with a one-group trace and back the ondemand blob it
+	// Optimize the merge with a one-group ondemand record and back the ondemand blob it
 	// adds as the third device with the first layer's decoded data.
 	configPath := filepath.Join(workDir, "config.yaml")
 	util.WriteLocalBackendConfig(t, configPath, blobDir, filepath.Join(workDir, "cache"), "none")

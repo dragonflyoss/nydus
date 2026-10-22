@@ -44,7 +44,7 @@ type MountOption struct {
 	// TargetPlainHTTP uses plain HTTP to talk to the target registry.
 	TargetPlainHTTP bool
 	// Prefetch enables background blob prefetch after mounting. Off by
-	// default so a traced mount records the pure on-demand access pattern.
+	// default so the mount's ondemand record holds the pure on-demand access pattern.
 	Prefetch bool
 	// LogLevel is the log level forwarded to the `nydus` subprocess. Defaults
 	// to "info" when empty.

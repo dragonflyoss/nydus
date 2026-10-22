@@ -133,8 +133,8 @@ impl BlobPrefetcher {
         let ondemand: Vec<bool> = self
             .priority
             .iter()
-            .map(|&blob_index| match self.caches.is_redirect(blob_index) {
-                Ok(redirect) => redirect,
+            .map(|&blob_index| match self.caches.is_ondemand(blob_index) {
+                Ok(ondemand) => ondemand,
                 Err(err) => {
                     warn!("failed to inspect priority blob {}: {}", blob_index, err);
                     false
@@ -164,13 +164,13 @@ impl BlobPrefetcher {
         // `all` the other priority blobs follow in declared order.
         let priority_with_flag = || self.priority.iter().copied().zip(ondemand.iter().copied());
         let mut priority: Vec<u16> = priority_with_flag()
-            .filter(|&(_, redirect)| redirect)
+            .filter(|&(_, ondemand)| ondemand)
             .map(|(index, _)| index)
             .collect();
         if scope == PrefetchScope::All {
             priority.extend(
                 priority_with_flag()
-                    .filter(|&(_, redirect)| !redirect)
+                    .filter(|&(_, ondemand)| !ondemand)
                     .map(|(index, _)| index),
             );
         }
@@ -299,7 +299,7 @@ mod tests {
     use nydus_format::utils::SHA256_DIGEST_SIZE;
     use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::FullBlob;
-    use nydus_test_utils::metadata::{single_chunk_group, single_chunk_group_redirect};
+    use nydus_test_utils::metadata::{single_chunk_group, single_chunk_group_ondemand};
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use tempfile::tempdir;
@@ -428,7 +428,7 @@ mod tests {
         )
     }
 
-    fn plain_and_redirect_blobs(
+    fn plain_and_ondemand_blobs(
         backend_dir: &Path,
         cache_dir: &Path,
     ) -> (
@@ -441,10 +441,10 @@ mod tests {
             .with_blob_metadata(&plain_blob_metadata)
             .with_blob_metadata_file()
             .save_in(backend_dir);
-        let redirect_blob_metadata = single_chunk_group_redirect(&payload, 1);
-        assert!(redirect_blob_metadata.is_redirect());
-        let redirect_id = FullBlob::new(&payload)
-            .with_blob_metadata(&redirect_blob_metadata)
+        let ondemand_blob_metadata = single_chunk_group_ondemand(&payload, 1);
+        assert!(ondemand_blob_metadata.is_ondemand());
+        let ondemand_id = FullBlob::new(&payload)
+            .with_blob_metadata(&ondemand_blob_metadata)
             .with_blob_metadata_file()
             .save_in(backend_dir);
         let backend = Arc::new(RecordingBackend {
@@ -453,7 +453,7 @@ mod tests {
         });
         let caches = Arc::new(
             BlobCaches::new(
-                [(1u16, plain_id), (2u16, redirect_id)],
+                [(1u16, plain_id), (2u16, ondemand_id)],
                 backend.clone(),
                 &StorageConfig {
                     dir: Some(cache_dir.to_path_buf()),
@@ -463,13 +463,13 @@ mod tests {
             )
             .unwrap(),
         );
-        (backend, caches, [plain_id, redirect_id])
+        (backend, caches, [plain_id, ondemand_id])
     }
 
     fn blobs_read(scope: PrefetchScope, plan: PrefetchPlan) -> Vec<u16> {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
-        let (backend, caches, ids) = plain_and_redirect_blobs(backend_dir.path(), cache_dir.path());
+        let (backend, caches, ids) = plain_and_ondemand_blobs(backend_dir.path(), cache_dir.path());
         BlobPrefetcher::new(caches, plan, &prefetch_config(scope, 2)).run();
         let mut order = Vec::new();
         for read in backend.reads.lock().unwrap().iter() {

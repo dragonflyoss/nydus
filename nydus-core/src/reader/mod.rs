@@ -17,8 +17,8 @@ use nydus_format::erofs::{
     ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
-use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::BlobCaches;
+use nydus_storage::ondemand::OndemandRecorder;
 use nydus_storage::prefetch::PrefetchPlan;
 use nydus_telemetry::metrics::Metrics;
 
@@ -103,12 +103,12 @@ impl ErofsReader {
     /// backend is involved, and reads record into `metrics`. The caches
     /// follow the `storage` section; its `dir`, when set, caches the decoded
     /// chunk groups so repeat reads skip re-decoding from the blob.
-    /// `trace_recorder`, when given, records on-demand chunk group accesses
+    /// `ondemand_recorder`, when given, records on-demand chunk group accesses
     /// for `nydus optimize`.
     pub fn open_blob(
         blob_path: &Path,
         storage: &StorageConfig,
-        trace_recorder: Option<Arc<TraceRecorder>>,
+        ondemand_recorder: Option<Arc<OndemandRecorder>>,
         metrics: Arc<Metrics>,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(blob_path, false)?;
@@ -141,7 +141,7 @@ impl ErofsReader {
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             storage,
-            trace_recorder,
+            ondemand_recorder,
         )?;
 
         Ok(Self {
@@ -156,13 +156,13 @@ impl ErofsReader {
 
     /// Open a standalone bootstrap whose blob data is served by `backend`
     /// through per-blob caches following the `storage` section, diskless
-    /// without a `storage.dir`. `trace_recorder`, when given, records
+    /// without a `storage.dir`. `ondemand_recorder`, when given, records
     /// on-demand chunk group accesses for `nydus optimize`.
     pub fn open_bootstrap(
         bootstrap_path: &Path,
         backend: Arc<dyn Backend>,
         storage: &StorageConfig,
-        trace_recorder: Option<Arc<TraceRecorder>>,
+        ondemand_recorder: Option<Arc<OndemandRecorder>>,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(bootstrap_path, true)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
@@ -177,7 +177,7 @@ impl ErofsReader {
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             storage,
-            trace_recorder,
+            ondemand_recorder,
         )?;
 
         Ok(Self {
@@ -247,7 +247,7 @@ impl ErofsReader {
             if redirect {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "redirect blob is not mountable as a standalone image; use the rewritten bootstrap with source blobs",
+                    "ondemand blob is not mountable as a standalone image; use the rewritten bootstrap with source blobs",
                 ));
             }
         }
@@ -406,10 +406,10 @@ impl ErofsReader {
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
-    /// blob (a REDIRECT blob produced by `nydus optimize`). Opens the blob
+    /// blob (an ondemand blob produced by `nydus optimize`). Opens the blob
     /// cache, which reads the local blob meta but performs no data prefetch.
-    pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
-        self.blobs.is_redirect(blob_index)
+    pub fn is_ondemand(&self, blob_index: u16) -> io::Result<bool> {
+        self.blobs.is_ondemand(blob_index)
     }
 
     /// Prefetch every chunk group of the blob identified by `blob_index`

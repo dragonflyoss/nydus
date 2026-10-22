@@ -1,5 +1,5 @@
 //! Local data plane for nydus images: sparse blob caches, chunk group-level
-//! fill tracking, background prefetch and on-demand access tracing.
+//! fill tracking, background prefetch and on-demand access recording.
 //!
 //! Every API here returns `io::Result` so the OS errno survives to the
 //! service edges; this crate never depends on the control-plane error type.
@@ -9,6 +9,6 @@
 //! that wires configs, bootstraps and caches together lives above, in
 //! `nydus-core`.
 
-pub mod access_trace;
 pub mod cache;
+pub mod ondemand;
 pub mod prefetch;

@@ -2,7 +2,7 @@
 
 Local data plane for [Nydus](https://github.com/dragonflyoss/nydus) images:
 sparse blob caches, chunk group-level fill tracking, background prefetch and
-on-demand access tracing.
+on-demand access recording.
 
 - `cache`: the blob caches, one `BlobCache` per blob behind one
   `BlobCaches` set per image, over the dense decoded block address space.
@@ -12,8 +12,8 @@ on-demand access tracing.
   native `erofs-*` layer as-is from the backend; `decode` turns a fetched
   window into a verified chunk group.
 - `prefetch`: the blob-level prefetch after a mount.
-- `access_trace`: the on-demand access trace `nydus optimize` builds an
-  ondemand blob from.
+- `ondemand`: the record of on-demand chunk group accesses `nydus optimize`
+  builds an ondemand blob from.
 
 Every API here returns `io::Result` so the OS errno survives to the service
 edges; this crate does not depend on the control-plane error type. The

@@ -21,13 +21,13 @@ import (
 //  2. Mount the nydus image WITHOUT prefetch, replay a read workload, and
 //     verify the baseline metrics show on-demand backend reads. Save the
 //     recorded /trace pattern to a file and run `nydusify optimize
-//     --pattern` to repack the traced chunks into the ondemand blob and push
+//     --trace-file` to repack the recorded chunks into the ondemand blob and push
 //     the optimized image.
 //  3. Mount the optimized image WITH prefetch on a cold cache, wait for
 //     prefetch to quiesce, replay the same workload, and verify:
-//     - every traced chunk group was filled into its source blob's cache
+//     - every recorded chunk group was filled into its source blob's cache
 //     through the redirect path (nydus_cache_write_total{type="redirect"}
-//     == trace size, no failures),
+//     == ondemand record size, no failures),
 //     - the workload triggered zero on-demand backend reads
 //     (nydus_backend_read_total{type="ondemand"} == 0), proving the
 //     optimization works,
@@ -40,7 +40,7 @@ func TestNydusifyOptimize(t *testing.T) {
 	assert := assert.New(t)
 
 	// Corpus: four ~2.06-2.25 MiB pseudo-random files so each spans more than
-	// one 2 MiB chunk and the trace covers multiple chunks.
+	// one 2 MiB chunk and the ondemand record covers multiple chunks.
 	workDir := t.TempDir()
 	corpusDir := filepath.Join(workDir, "corpus")
 	assert.NoError(os.MkdirAll(corpusDir, 0o755))
@@ -87,7 +87,7 @@ func TestNydusifyOptimize(t *testing.T) {
 	t.Log("Mounting baseline (no prefetch) and tracing the workload...")
 	baselineWorkDir := filepath.Join(workDir, "mount-baseline")
 	baselineMountpoint := filepath.Join(workDir, "mnt-baseline")
-	var traceCount int
+	var ondemandCount int
 	func() {
 		unmount := util.MountNydusify(t, nydusifyBin, nydusBin, nydusRef, baselineMountpoint, baselineWorkDir, false)
 		defer unmount()
@@ -102,14 +102,14 @@ func TestNydusifyOptimize(t *testing.T) {
 		assert.Zero(util.SumMetric(metrics, "nydus_backend_read_total", `type="prefetch"`),
 			"baseline mount must not prefetch")
 
-		traceCount = util.SaveTrace(t, socket, filepath.Join(workDir, "pattern.json"))
-		assert.Greater(traceCount, 1, "trace must cover multiple groups")
-		t.Logf("baseline: ondemand_reads=%v trace_chunk_groups=%d",
-			util.SumMetric(metrics, "nydus_backend_read_total", `type="ondemand"`), traceCount)
+		ondemandCount = util.SaveOndemandRecord(t, socket, filepath.Join(workDir, "trace.json"))
+		assert.Greater(ondemandCount, 1, "ondemand record must cover multiple groups")
+		t.Logf("baseline: ondemand_reads=%v ondemand_chunk_groups=%d",
+			util.SumMetric(metrics, "nydus_backend_read_total", `type="ondemand"`), ondemandCount)
 
-		t.Log("Optimizing with the saved trace pattern...")
+		t.Log("Optimizing with the saved ondemand record...")
 		util.RunNydusify(t, nydusifyBin, nydusBin, "optimize",
-			"--pattern", filepath.Join(workDir, "pattern.json"),
+			"--trace-file", filepath.Join(workDir, "trace.json"),
 			"--source", nydusRef,
 			"--target", optimizedRef,
 			"--work-dir", filepath.Join(workDir, "optimize"))
@@ -122,15 +122,15 @@ func TestNydusifyOptimize(t *testing.T) {
 		unmount := util.MountNydusify(t, nydusifyBin, nydusBin, optimizedRef, optimizedMountpoint, optimizedWorkDir, true)
 		defer unmount()
 
-		// Prefetch must pull the ondemand blob and fill every traced group
+		// Prefetch must pull the ondemand blob and fill every recorded group
 		// through the redirect path without an on-demand read.
 		socket := filepath.Join(optimizedWorkDir, "apiserver.sock")
 		util.WaitMetricSettled(t, socket, "nydus_backend_read_total", `type="prefetch"`)
 		metrics := util.FetchMetrics(t, socket)
 		assert.Greater(util.SumMetric(metrics, "nydus_backend_read_total", `type="prefetch"`), 0.0,
-			"prefetch must fetch the ondemand (redirect) blob from the backend")
-		assert.Equal(float64(traceCount), util.SumMetric(metrics, "nydus_cache_write_total", `type="redirect"`),
-			"every traced group must be filled into its source cache via redirect")
+			"prefetch must fetch the ondemand blob from the backend")
+		assert.Equal(float64(ondemandCount), util.SumMetric(metrics, "nydus_cache_write_total", `type="redirect"`),
+			"every recorded group must be filled into its source cache via redirect")
 		assert.Zero(util.SumMetric(metrics, "nydus_cache_write_failure_total", `type="redirect"`),
 			"no redirect chunk group may be skipped on a cold cache")
 		assert.Zero(util.SumMetric(metrics, "nydus_backend_read_total", `type="ondemand"`),
@@ -146,11 +146,11 @@ func TestNydusifyOptimize(t *testing.T) {
 			cachedBytes,
 			util.SumMetric(metrics, "nydus_cache_bytes"))
 
-		// The traced workload is then served entirely from the warmed cache.
+		// The recorded workload is then served entirely from the warmed cache.
 		workload(optimizedMountpoint)
 		metrics = util.FetchMetrics(t, socket)
 		assert.Zero(util.SumMetric(metrics, "nydus_backend_read_total", `type="ondemand"`),
-			"the traced workload must be served entirely from the warmed cache")
+			"the recorded workload must be served entirely from the warmed cache")
 		assert.Greater(util.SumMetric(metrics, "nydus_cache_read_total"), 0.0)
 
 		// Full content verification against the corpus.

@@ -149,7 +149,7 @@ mod tests {
         cache.read_at(0, &mut []).unwrap();
         assert!(cache.read_at(8192 - 50, &mut buf).is_err());
         cache.prefetch_all(1, None).unwrap();
-        assert!(!cache.is_redirect());
+        assert!(!cache.is_ondemand());
 
         assert!(cache.is_all_ready());
         assert_eq!(

@@ -126,9 +126,9 @@ pub fn single_chunk_group_upper(payload: &[u8]) -> BlobMetadata {
 }
 
 /// [`single_chunk_group`] with a ChunkGroupRedirectTable: the blob meta of a
-/// redirect blob, whose one group copies group 0 of the blob in device slot
+/// ondemand blob, whose one group copies group 0 of the blob in device slot
 /// `source_blob_index`.
-pub fn single_chunk_group_redirect(payload: &[u8], source_blob_index: u16) -> BlobMetadata {
+pub fn single_chunk_group_ondemand(payload: &[u8], source_blob_index: u16) -> BlobMetadata {
     let length = payload.len() as u32;
     let chunk_groups = vec![
         BlobMetadataChunkGroup::new(0, 0, 0, length, crc32c::crc32c(payload)),
@@ -194,9 +194,9 @@ mod tests {
         let payload = vec![0xab; 4096];
         let plain = single_chunk_group(&payload);
         let upper = single_chunk_group_upper(&payload);
-        let redirect = single_chunk_group_redirect(&payload, 1);
+        let ondemand = single_chunk_group_ondemand(&payload, 1);
 
-        for blob_metadata in [&plain, &upper, &redirect] {
+        for blob_metadata in [&plain, &upper, &ondemand] {
             assert_eq!(blob_metadata.chunk_group_count(), 1);
             assert_eq!(blob_metadata.chunk_count(), 1);
             assert_eq!(
@@ -204,8 +204,8 @@ mod tests {
                 4096
             );
         }
-        assert!(!plain.is_incremental() && !plain.is_redirect());
+        assert!(!plain.is_incremental() && !plain.is_ondemand());
         assert!(upper.is_incremental());
-        assert!(redirect.is_redirect());
+        assert!(ondemand.is_ondemand());
     }
 }

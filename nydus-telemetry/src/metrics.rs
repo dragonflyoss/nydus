@@ -44,7 +44,7 @@
 //! Dragonfly seed peers and `fallback` for a read Dragonfly could not serve
 //! that went back to the origin. `type` is `redirect` only on the cache
 //! writes, for a chunk group filled into its source blob from the ondemand
-//! (redirect) blob. `reason` tells a corrupted chunk group (`checksum`, the
+//! blob. `reason` tells a corrupted chunk group (`checksum`, the
 //! crc32c mismatched; `decode`, it did not decompress to its declared
 //! size, or a redirect points past its source blob's chunk groups) from a
 //! cache that cannot be written (`io`) and, on the redirect fills, from a
@@ -570,7 +570,7 @@ pub enum WriteKind {
     /// The prefetch of a regular blob.
     Prefetch,
 
-    /// The fill of a source blob's chunk group from the ondemand (redirect)
+    /// The fill of a source blob's chunk group from the ondemand
     /// blob.
     Redirect,
 }
@@ -581,7 +581,7 @@ impl From<ReadKind> for WriteKind {
     /// Converts the read kind into the write kind.
     fn from(kind: ReadKind) -> Self {
         match kind {
-            ReadKind::OnDemand => WriteKind::Ondemand,
+            ReadKind::Ondemand => WriteKind::Ondemand,
             ReadKind::Prefetch => WriteKind::Prefetch,
         }
     }
@@ -703,13 +703,13 @@ mod tests {
     #[test]
     fn backend_reads_are_counted_by_type_and_source_with_their_failures() {
         let test_cases = vec![
-            (ReadKind::OnDemand, Source::Local),
+            (ReadKind::Ondemand, Source::Local),
             (ReadKind::Prefetch, Source::Local),
-            (ReadKind::OnDemand, Source::Origin),
-            (ReadKind::OnDemand, Source::Proxy),
+            (ReadKind::Ondemand, Source::Origin),
+            (ReadKind::Ondemand, Source::Proxy),
             (ReadKind::Prefetch, Source::Proxy),
-            (ReadKind::OnDemand, Source::Dragonfly),
-            (ReadKind::OnDemand, Source::Fallback),
+            (ReadKind::Ondemand, Source::Dragonfly),
+            (ReadKind::Ondemand, Source::Fallback),
         ];
 
         for (kind, source) in test_cases {
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn labels_are_the_display_of_their_enums() {
         let test_cases: Vec<(&str, String)> = vec![
-            ("ondemand", ReadKind::OnDemand.to_string()),
+            ("ondemand", ReadKind::Ondemand.to_string()),
             ("prefetch", ReadKind::Prefetch.to_string()),
             ("local", Source::Local.to_string()),
             ("origin", Source::Origin.to_string()),
@@ -772,7 +772,7 @@ mod tests {
             ("ondemand", WriteKind::Ondemand.to_string()),
             ("prefetch", WriteKind::Prefetch.to_string()),
             ("redirect", WriteKind::Redirect.to_string()),
-            ("ondemand", WriteKind::from(ReadKind::OnDemand).to_string()),
+            ("ondemand", WriteKind::from(ReadKind::Ondemand).to_string()),
             ("prefetch", WriteKind::from(ReadKind::Prefetch).to_string()),
             ("readdirplus", FsOp::Readdirplus.to_string()),
         ];
@@ -883,7 +883,7 @@ mod tests {
     fn registry_gathers_every_metric_under_the_nydus_namespace() {
         let metrics = Metrics::new();
         metrics.backend.collect_read_finished_metrics(
-            ReadKind::OnDemand,
+            ReadKind::Ondemand,
             Source::Origin,
             10,
             Duration::from_millis(1),

@@ -29,7 +29,7 @@ use super::decode::{
     decode_chunk_group, verify_chunk_group, write_failure_reason, ChunkGroupBuffers,
 };
 use super::{write_data_via_scratch, BlobCache};
-use crate::access_trace::TraceRecorder;
+use crate::ondemand::OndemandRecorder;
 
 use self::chunk_group_map::ChunkGroupMap;
 use self::scatter::ScatterBatch;
@@ -172,7 +172,7 @@ pub struct LocalBlobCache {
     blob_id: [u8; SHA256_DIGEST_SIZE],
 
     /// The blob's device index in the merged image, attributing its
-    /// on-demand chunk group accesses in the access trace.
+    /// on-demand chunk group accesses in the ondemand record.
     blob_index: u16,
 
     /// The ready bit of every chunk group and the claims of their fetches,
@@ -183,8 +183,8 @@ pub struct LocalBlobCache {
     blob_metadata: BlobMetadata,
 
     /// One flag per chunk group, set once the chunk group is in the access
-    /// trace, so the hot path takes the trace lock once per chunk group.
-    traced_chunk_groups: Box<[AtomicBool]>,
+    /// trace, so the hot path takes the record lock once per chunk group.
+    recorded_chunk_groups: Box<[AtomicBool]>,
 
     /// The path of the cache file.
     cache_data_path: PathBuf,
@@ -200,8 +200,8 @@ pub struct LocalBlobCache {
     /// The backend serving the blob.
     backend: Arc<dyn Backend>,
 
-    /// The access trace of the image, `None` when accesses are not traced.
-    trace_recorder: Option<Arc<TraceRecorder>>,
+    /// The ondemand record of the image, `None` when accesses are not traced.
+    ondemand_recorder: Option<Arc<OndemandRecorder>>,
 
     /// The in-process fills by chunk group index; one flight covers every
     /// chunk group of its fetch window.
@@ -302,7 +302,7 @@ impl LocalBlobCache {
     /// Opens the cache of the blob `blob_id` described by `blob_metadata`
     /// under the storage directory, served by `backend` and following the
     /// `storage` section, recording its on-demand accesses as blob
-    /// `blob_index` into `trace_recorder` when set.
+    /// `blob_index` into `ondemand_recorder` when set.
     ///
     /// The cache file is created sparse and sized to the padded address
     /// space, and the chunk group map opened against it. A map left behind
@@ -314,7 +314,7 @@ impl LocalBlobCache {
         blob_metadata: BlobMetadata,
         backend: Arc<dyn Backend>,
         storage: &StorageConfig,
-        trace_recorder: Option<Arc<TraceRecorder>>,
+        ondemand_recorder: Option<Arc<OndemandRecorder>>,
     ) -> io::Result<Self> {
         let cache_dir = Self::cache_dir(storage)?;
         fs::create_dir_all(cache_dir)?;
@@ -349,7 +349,7 @@ impl LocalBlobCache {
             );
         }
 
-        let traced_chunk_groups = (0..blob_metadata.chunk_group_count())
+        let recorded_chunk_groups = (0..blob_metadata.chunk_group_count())
             .map(|_| AtomicBool::new(false))
             .collect();
 
@@ -358,12 +358,12 @@ impl LocalBlobCache {
             blob_index,
             chunk_group_map,
             blob_metadata,
-            traced_chunk_groups,
+            recorded_chunk_groups,
             cache_data_path,
             prefetch_lock_path: cache_dir.join(format!("{hex}.prefetch.lock")),
             cache_file: RwLock::new(None),
             backend,
-            trace_recorder,
+            ondemand_recorder,
             inflight: Mutex::new(HashMap::new()),
             cache_mmap: OnceLock::new(),
             skip_verify_checksums: storage.skip_verify_checksums,
@@ -458,15 +458,15 @@ impl LocalBlobCache {
     }
 
     /// Records every chunk group overlapping `[offset, offset + len)` in the
-    /// access trace, once each, hit or miss: the trace names what the
+    /// ondemand record, once each, hit or miss: the record names what the
     /// workload read, not what a fetch pulled or what was already cached.
     /// Runs ahead of the all-ready fast paths; a range an invalid read would
     /// reject is left to the read itself.
-    fn trace_range(&self, offset: u64, len: usize) {
-        let Some(trace_recorder) = &self.trace_recorder else {
+    fn record_ondemand_range(&self, offset: u64, len: usize) {
+        let Some(ondemand_recorder) = &self.ondemand_recorder else {
             return;
         };
-        if self.traced_chunk_groups.is_empty() || len == 0 {
+        if self.recorded_chunk_groups.is_empty() || len == 0 {
             return;
         }
         let Some(end) = offset.checked_add(len as u64) else {
@@ -477,8 +477,8 @@ impl LocalBlobCache {
         };
 
         for index in span {
-            if !self.traced_chunk_groups[index].swap(true, Ordering::Relaxed) {
-                trace_recorder.record_chunk_group_access(self.blob_index, index as u32);
+            if !self.recorded_chunk_groups[index].swap(true, Ordering::Relaxed) {
+                ondemand_recorder.record_chunk_group_access(self.blob_index, index as u32);
             }
         }
     }
@@ -709,12 +709,12 @@ impl LocalBlobCache {
         Ok(())
     }
 
-    /// Fetches one redirect blob batch, trimmed at the chunk groups `skip`
+    /// Fetches one ondemand blob batch, trimmed at the chunk groups `skip`
     /// accepts, and hands every decoded chunk group to `f`. A chunk group
     /// that fails to decode or verify is logged and skipped; an error of `f`
     /// aborts the stream. Returns the bytes read from the backend and the
     /// chunk groups that failed.
-    fn stream_redirect_batch(
+    fn stream_ondemand_blob_batch(
         &self,
         batch: Range<usize>,
         buffers: &mut ChunkGroupBuffers,
@@ -903,13 +903,13 @@ impl BlobCache for LocalBlobCache {
     }
 
     /// Fills `buf` from the cache file, the chunk groups it covers filled
-    /// first, and records the access in the trace.
+    /// first, and records the access in the record.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         if buf.is_empty() {
             return Ok(());
         }
 
-        self.trace_range(offset, buf.len());
+        self.record_ondemand_range(offset, buf.len());
         if let Some(mapped) = self.all_ready_slice(offset, buf.len())? {
             buf.copy_from_slice(mapped);
             return Ok(());
@@ -931,7 +931,7 @@ impl BlobCache for LocalBlobCache {
         }
 
         if let Some(mapped) = self.all_ready_slice(offset, len)? {
-            self.trace_range(offset, len);
+            self.record_ondemand_range(offset, len);
             return writer.write_all(mapped);
         }
 
@@ -971,13 +971,13 @@ impl BlobCache for LocalBlobCache {
     }
 
     /// Fills the chunk groups overlapping the range into the cache file and
-    /// records the access in the trace.
+    /// records the access in the record.
     fn ensure_range(&self, offset: u64, len: u64) -> io::Result<()> {
         if len == 0 {
             return Ok(());
         }
 
-        self.trace_range(offset, usize::try_from(len).unwrap_or(usize::MAX));
+        self.record_ondemand_range(offset, usize::try_from(len).unwrap_or(usize::MAX));
         let cache_file = self.cache_file()?;
         self.ensure_byte_range(offset, len, cache_file.as_ref())
     }
@@ -1016,8 +1016,8 @@ impl BlobCache for LocalBlobCache {
     }
 
     /// Returns whether the blob meta is a redirect table.
-    fn is_redirect(&self) -> bool {
-        self.blob_metadata.is_redirect()
+    fn is_ondemand(&self) -> bool {
+        self.blob_metadata.is_ondemand()
     }
 
     /// Returns the chunk group's ready bit of the shared chunk group map.
@@ -1027,22 +1027,22 @@ impl BlobCache for LocalBlobCache {
             .unwrap_or(false)
     }
 
-    /// Streams the redirect blob with the batching of a blob's own prefetch:
+    /// Streams the ondemand blob with the batching of a blob's own prefetch:
     /// fetch-size batches with a single-chunk-group ramp at the head, so the
     /// workload's first reads land in the first round trip, the batches made
     /// of chunk groups the sources already hold trimmed away before any
     /// backend read.
-    fn for_each_redirect_chunk_group(
+    fn for_each_ondemand_blob_chunk_group(
         &self,
         workers: usize,
         deadline: Option<Instant>,
         skip: &(dyn Fn(&BlobMetadataChunkGroupExtent) -> bool + Sync),
         f: &(dyn Fn(&BlobMetadataChunkGroupExtent, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<(u64, u64)> {
-        if !self.blob_metadata.is_redirect() {
+        if !self.blob_metadata.is_ondemand() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "blob is not a redirect blob",
+                "blob is not an ondemand blob",
             ));
         }
         if self.blob_metadata.chunk_group_count() == 0 {
@@ -1056,7 +1056,7 @@ impl BlobCache for LocalBlobCache {
         let failed = AtomicU64::new(0);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
             let (batch_bytes, batch_failed) =
-                self.stream_redirect_batch(batch.clone(), buffers, skip, f)?;
+                self.stream_ondemand_blob_batch(batch.clone(), buffers, skip, f)?;
             bytes.fetch_add(batch_bytes, Ordering::Relaxed);
             failed.fetch_add(batch_failed, Ordering::Relaxed);
             Ok(())
@@ -1165,9 +1165,9 @@ impl BlobCache for LocalBlobCache {
     }
 
     /// Sums the uncompressed size of the ready chunk groups, `None` for a
-    /// redirect blob whose chunk groups land in their source blobs.
+    /// ondemand blob whose chunk groups land in their source blobs.
     fn cached_bytes(&self) -> Option<(u64, u64)> {
-        if self.blob_metadata.is_redirect() {
+        if self.blob_metadata.is_ondemand() {
             return None;
         }
 
@@ -1566,7 +1566,7 @@ mod tests {
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = local_backend(backend_dir.path());
-        let recorder = Arc::new(TraceRecorder::default());
+        let recorder = Arc::new(OndemandRecorder::default());
         let storage = storage(cache_dir.path(), 1 << 20);
         let cached = LocalBlobCache::open(
             full_blob_id,
@@ -1616,7 +1616,7 @@ mod tests {
 
         assert_eq!(buf, payload[512..1536]);
         assert!(cached.is_chunk_group_ready(0));
-        assert!(!cached.is_redirect());
+        assert!(!cached.is_ondemand());
         assert!(cached.read_at(4096, &mut buf).is_err());
     }
 

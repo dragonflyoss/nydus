@@ -609,7 +609,7 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
 
 fn blob_type(blob: &BlobSummary) -> String {
     match &blob.blob_metadata {
-        Some(meta) if meta.is_redirect => "redirect".to_string(),
+        Some(meta) if meta.is_ondemand => "ondemand".to_string(),
         Some(meta) if meta.is_incremental => "incremental".to_string(),
         Some(_) => "full".to_string(),
         None => "<unresolved>".to_string(),
