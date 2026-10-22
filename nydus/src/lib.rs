@@ -10,6 +10,8 @@ use std::path::PathBuf;
 pub mod api_server;
 pub mod build;
 pub mod check;
+#[cfg(feature = "continuity")]
+pub mod continuity;
 pub mod export;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
