@@ -145,13 +145,17 @@ impl Tree {
         Ok(())
     }
 
-    /// Insert a new child node into the tree.
-    pub fn insert_child(&mut self, child: Tree) {
-        if let Err(idx) = self
+    /// Insert a child if its name is absent and return the new or existing child's index.
+    pub fn insert_child(&mut self, child: Tree) -> usize {
+        match self
             .children
             .binary_search_by_key(&&child.name, |n| &n.name)
         {
-            self.children.insert(idx, child);
+            Ok(idx) => idx,
+            Err(idx) => {
+                self.children.insert(idx, child);
+                idx
+            }
         }
     }
 
@@ -415,6 +419,35 @@ mod tests {
     use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
     use vmm_sys_util::tempdir::TempDir;
     use vmm_sys_util::tempfile::TempFile;
+
+    #[test]
+    fn test_insert_child_returns_index() {
+        for version in [RafsVersion::V5, RafsVersion::V6] {
+            let mut builder = crate::TarBuilder::new(true, 0, version);
+            let root = builder.create_directory(&[OsString::from("/")]).unwrap();
+            let mut tree = Tree::new(root);
+
+            for (path, expected_idx) in [("/m", 0), ("/z", 1), ("/a", 0), ("/n", 2)] {
+                let node = builder
+                    .create_directory(&Node::generate_target_vec(Path::new(path)))
+                    .unwrap();
+                let idx = tree.insert_child(Tree::new(node));
+                assert_eq!(idx, expected_idx);
+                assert_eq!(
+                    tree.children[idx].borrow_mut_node().target(),
+                    Path::new(path)
+                );
+            }
+
+            let original = tree.children[1].node.clone();
+            let duplicate = builder
+                .create_directory(&Node::generate_target_vec(Path::new("/m")))
+                .unwrap();
+            assert_eq!(tree.insert_child(Tree::new(duplicate)), 1);
+            assert_eq!(tree.children.len(), 4);
+            assert!(Rc::ptr_eq(&tree.children[1].node, &original));
+        }
+    }
 
     #[test]
     fn test_set_lock_node() {
