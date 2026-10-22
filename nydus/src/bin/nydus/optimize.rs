@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use nydus::build::save_blob_metadata_sidecar;
 use nydus::error::{Context, Error, Result};
 use nydus::optimize::{
@@ -16,9 +16,26 @@ use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
 use tracing::{info, Level};
 
+/// The artifact optimize builds.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum OptimizeType {
+    /// An ondemand blob: the recorded chunk groups copied out of their source
+    /// blobs in first-access order, with the bootstrap rewritten to prefetch it.
+    Ondemand,
+}
+
 /// The subcommand of optimize.
 #[derive(Debug, Clone, Parser)]
 pub struct OptimizeCommand {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OptimizeType::Ondemand,
+        env = "NYDUS_OPTIMIZE_TYPE",
+        help = "Specify the artifact to build: ondemand copies the recorded chunk groups into an ondemand blob and rewrites the bootstrap to prefetch it"
+    )]
+    r#type: OptimizeType,
+
     #[arg(
         long,
         required_unless_present = "trace_file",
@@ -98,8 +115,11 @@ impl OptimizeCommand {
         // cache options from the raw CLI flags.
         let (patterns, backend, storage) = self.prepare()?;
 
-        // Runs the optimize pipeline, persisting its artifacts and printing the summary.
-        self.run(&patterns, backend, &storage)
+        // Runs the pipeline of the requested artifact, persisting its
+        // artifacts and printing the summary.
+        match self.r#type {
+            OptimizeType::Ondemand => self.run_ondemand_blob(&patterns, backend, &storage),
+        }
     }
 
     /// Validates the flag combination before any expensive work: the
@@ -115,7 +135,7 @@ impl OptimizeCommand {
     }
 
     /// Lowers the raw CLI flags into the optimize inputs: the access patterns
-    /// from the trace source, the blob backend, and the storage section the
+    /// from the ondemand record (file or apiserver), the blob backend, and the storage section the
     /// source blobs' caches are opened with.
     fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
@@ -125,7 +145,7 @@ impl OptimizeCommand {
         };
         if patterns.is_empty() {
             return Err(Error::InvalidParameter(
-                "no chunk group accesses found in the access trace (exercise the workload before optimizing)"
+                "no chunk group accesses found in the ondemand record (exercise the workload before optimizing)"
                     .to_string(),
             ));
         }
@@ -143,9 +163,9 @@ impl OptimizeCommand {
         Ok((patterns, backend, storage_config.storage))
     }
 
-    /// Runs the optimize pipeline: builds the ondemand blob, persists the
+    /// Runs the ondemand blob pipeline: builds the ondemand blob, persists the
     /// blob, its metadata, and the rewritten bootstrap, and prints the summary.
-    fn run(
+    fn run_ondemand_blob(
         &self,
         patterns: &[ChunkGroupRef],
         backend: Arc<dyn Backend>,
@@ -232,5 +252,76 @@ impl OptimizeCommand {
         table.with(Style::blank());
         println!("{table}");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn optimize_parses_the_type_default_and_explicit_value() {
+        let test_cases = vec![
+            (
+                vec!["--trace-file", "/tmp/trace.json"],
+                OptimizeType::Ondemand,
+            ),
+            (
+                vec!["--trace-file", "/tmp/trace.json", "--type", "ondemand"],
+                OptimizeType::Ondemand,
+            ),
+        ];
+
+        for (flags, expected_type) in test_cases {
+            let mut args = vec![
+                "optimize",
+                "--parent-bootstrap",
+                "/tmp/parent",
+                "--bootstrap",
+                "/tmp/bootstrap",
+                "--blob-dir",
+                "/tmp/blobs",
+                "--config",
+                "/tmp/config.yaml",
+            ];
+            args.extend(flags);
+            let cmd = OptimizeCommand::try_parse_from(args).unwrap();
+            assert_eq!(cmd.r#type, expected_type);
+            assert_eq!(
+                cmd.trace_file.as_deref(),
+                Some(Path::new("/tmp/trace.json"))
+            );
+        }
+    }
+
+    #[test]
+    fn optimize_rejects_an_unknown_type_and_a_trace_file_with_an_apiserver() {
+        let base = [
+            "optimize",
+            "--parent-bootstrap",
+            "/tmp/parent",
+            "--bootstrap",
+            "/tmp/bootstrap",
+            "--blob-dir",
+            "/tmp/blobs",
+            "--config",
+            "/tmp/config.yaml",
+        ];
+        let test_cases = vec![
+            vec!["--trace-file", "/tmp/trace.json", "--type", "redirect"],
+            vec![
+                "--trace-file",
+                "/tmp/trace.json",
+                "--apiserver",
+                "unix:///tmp/api.sock",
+            ],
+            vec![],
+        ];
+
+        for flags in test_cases {
+            let args = base.iter().copied().chain(flags).collect::<Vec<_>>();
+            assert!(OptimizeCommand::try_parse_from(args).is_err());
+        }
     }
 }

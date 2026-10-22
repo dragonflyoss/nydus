@@ -7,8 +7,8 @@
 //! assembly that wires configs, bootstraps and caches together lives above,
 //! in `nydus-core`.
 
-pub mod access_trace;
 pub mod cache;
 pub mod chunk_group_map;
 pub mod io;
+pub mod ondemand;
 pub mod prefetch;

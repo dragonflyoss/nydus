@@ -129,10 +129,10 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
-    /// True when this blob is an `optimize` output: a REDIRECT blob whose
+    /// True when this blob is an `optimize` output: an ondemand blob whose
     /// chunk groups copy other blobs' groups, which `prefetch.scope:
     /// ondemand` streams into those source blobs' caches first.
-    fn is_redirect(&self) -> bool {
+    fn is_ondemand(&self) -> bool {
         false
     }
 
@@ -143,7 +143,7 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
-    /// Stream a REDIRECT blob's chunk groups: fetch them in batches of the
+    /// Stream an ondemand blob's chunk groups: fetch them in batches of the
     /// fetch size through up to `workers` threads, decode and validate each
     /// against this blob's metadata, and hand the payload to `cb` in blob
     /// order. Groups `skip` accepts are not fetched (a batch made entirely
@@ -151,7 +151,7 @@ pub trait BlobCache: Send + Sync {
     /// logged and skipped, while an error from `cb` aborts the stream.
     /// Returns the bytes fetched from the backend and the groups that failed
     /// to decode.
-    fn for_each_redirect_chunk_group(
+    fn for_each_ondemand_blob_chunk_group(
         &self,
         _workers: usize,
         _deadline: Option<Instant>,
@@ -160,12 +160,12 @@ pub trait BlobCache: Send + Sync {
     ) -> io::Result<(u64, u64)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "for_each_redirect_chunk_group is not supported by this blob cache",
+            "for_each_ondemand_blob_chunk_group is not supported by this blob cache",
         ))
     }
 
     /// Write the decoded payload of this blob's chunk group
-    /// `chunk_group_index`, obtained from a REDIRECT blob, into the local
+    /// `chunk_group_index`, obtained from an ondemand blob, into the local
     /// cache and mark the group ready. The payload is validated against this
     /// blob's own metadata first, so a stale or corrupt redirect copy never
     /// reaches the cache. A no-op when the group is already ready.
@@ -203,7 +203,7 @@ pub trait BlobCache: Send + Sync {
 
     /// The uncompressed bytes of the blob the cache file holds, by the shared
     /// chunk group map, and the blob's total; `None` for a cache without a
-    /// file of its own, a raw device, a diskless cache or a redirect blob,
+    /// file of its own, a raw device, a diskless cache or an ondemand blob,
     /// whose chunk groups land in their source blobs.
     fn cached_bytes(&self) -> Option<(u64, u64)> {
         None

@@ -1,13 +1,13 @@
-//! The `optimize` pipeline: turning a recorded chunk group access trace into
+//! The `optimize` pipeline: turning a chunk group ondemand record into
 //! an "ondemand" blob plus a rewritten bootstrap that prefetches it first.
 //!
 //! This is a top-level pipeline composing the read stack ([`nydus_core::reader`],
 //! `nydus-storage`) with the builder ([`crate::build`]): access patterns
 //! come from the apiserver `/trace` endpoint of a running `nydus fuse` mount
-//! ([`load_patterns_from_apiserver`]) or from a saved JSON trace document
+//! ([`load_patterns_from_apiserver`]) or from a saved JSON ondemand document
 //! ([`load_patterns_from_file`]); [`build_ondemand_blob`] then copies the
 //! accessed chunk groups out of the source blobs, byte for byte, into a
-//! REDIRECT blob in access order, and assembles the ondemand artifact and
+//! ondemand blob in access order, and assembles the ondemand artifact and
 //! bootstrap in memory.
 
 use std::collections::{BTreeSet, HashMap};
@@ -29,8 +29,8 @@ use nydus_format::blob::{
     BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
-use nydus_storage::access_trace::{TraceDocument, TraceEntry, TRACE_DOCUMENT_VERSION};
 use nydus_storage::cache::{decode_chunk_group_from_window, CacheOptions, LocalBlobCache};
+use nydus_storage::ondemand::{OndemandDocument, OndemandEntry, ONDEMAND_DOCUMENT_VERSION};
 use sha2::{Digest, Sha256};
 
 /// Longest contiguous run of source chunk groups fetched in one backend
@@ -78,7 +78,7 @@ pub struct OndemandBlob {
     pub source_blob_count: usize,
 }
 
-/// One validated chunk group reference from the trace: a [`TraceEntry`]
+/// One validated chunk group reference from the ondemand record: an [`OndemandEntry`]
 /// narrowed to the device-table index width, deduplicated and
 /// order-preserving.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -88,12 +88,12 @@ pub struct ChunkGroupRef {
     pub chunk_group_index: u32,
 }
 
-/// Build an "ondemand" REDIRECT blob from a `/trace` access pattern and
+/// Build an ondemand blob from a `/trace` access pattern and
 /// rewrite the bootstrap so the runtime prefetches it first, landing the
 /// access-ordered hot set in the source blobs' caches before on-demand reads
 /// arrive.
 ///
-/// Every traced chunk group's encoded payload is read from its source blob
+/// Every recorded chunk group's encoded payload is read from its source blob
 /// (and decoded once to validate it), then appended verbatim to the new
 /// blob in access order together with its chunk lengths and digests; the
 /// redirect table names the source of every copy. The bootstrap keeps every
@@ -144,7 +144,7 @@ pub fn build_ondemand_blob(
                 options,
             )
             .with_context(|| format!("failed to open source blob: {blob_index}"))?;
-            if cache.blob_metadata().is_redirect() {
+            if cache.blob_metadata().is_ondemand() {
                 return Err(Error::InvalidImage(format!(
                     "source blob {blob_index} is already an ondemand blob; refusing to optimize"
                 )));
@@ -176,7 +176,7 @@ pub fn build_ondemand_blob(
             (BlobMetadataCompressor::None, source) => compressor = source,
             (current, source) if current != source => {
                 return Err(Error::InvalidImage(format!(
-                    "source blob {blob_index} is compressed with {source}, the other traced blobs with {current}"
+                    "source blob {blob_index} is compressed with {source}, the other source blobs with {current}"
                 )));
             }
             _ => {}
@@ -187,7 +187,7 @@ pub fn build_ondemand_blob(
     }
     if max_blocks_per_chunk_group == 0 {
         return Err(Error::InvalidParameter(
-            "the trace names no chunk groups".to_string(),
+            "the ondemand record names no chunk groups".to_string(),
         ));
     }
 
@@ -345,28 +345,28 @@ pub fn build_ondemand_blob(
 /// Fetch the `/trace` JSON from a running mount's apiserver and return the
 /// deduplicated [`ChunkGroupRef`] list in first-access order.
 pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<ChunkGroupRef>> {
-    let raw = fetch_trace(apiserver)
+    let raw = fetch_ondemand_record(apiserver)
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
-    parse_trace_document(&raw)
+    parse_ondemand_document(&raw)
         .with_context(|| format!("failed to parse /trace response from {apiserver}"))
 }
 
-/// Load access patterns from a versioned JSON trace document
+/// Load access patterns from a versioned JSON ondemand document
 /// (`{"version":1,"patterns":[...]}`), exactly as produced by the
 /// apiserver `/trace` endpoint.
 pub fn load_patterns_from_file(path: &Path) -> Result<Vec<ChunkGroupRef>> {
     let raw =
         fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
-    parse_trace_document(&raw)
+    parse_ondemand_document(&raw)
         .with_context(|| format!("failed to parse trace file: {}", path.display()))
 }
 
-/// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
-fn parse_trace_document(raw: &[u8]) -> Result<Vec<ChunkGroupRef>> {
-    let envelope: TraceDocument = serde_json::from_slice(raw)?;
-    if envelope.version != TRACE_DOCUMENT_VERSION {
+/// Parse the versioned ondemand document `{"version":1,"patterns":[...]}`.
+fn parse_ondemand_document(raw: &[u8]) -> Result<Vec<ChunkGroupRef>> {
+    let envelope: OndemandDocument = serde_json::from_slice(raw)?;
+    if envelope.version != ONDEMAND_DOCUMENT_VERSION {
         return Err(Error::Unsupported(format!(
-            "unsupported trace document version: {}",
+            "unsupported ondemand document version: {}",
             envelope.version
         )));
     }
@@ -376,7 +376,7 @@ fn parse_trace_document(raw: &[u8]) -> Result<Vec<ChunkGroupRef>> {
 /// Deduplicate `(blob_index, chunk_group_index)` pairs while preserving
 /// first-access order, validating that every blob index fits in a non-zero
 /// `u16`.
-fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<ChunkGroupRef>> {
+fn dedup_patterns(patterns: Vec<OndemandEntry>) -> Result<Vec<ChunkGroupRef>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for pattern in patterns {
@@ -406,7 +406,7 @@ fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<ChunkGroupRef>> {
 /// response body. A minimal HTTP/1.0 exchange is enough here: the server
 /// replies with a complete body and closes the connection, so the body is
 /// everything after the header terminator.
-fn fetch_trace(apiserver: &str) -> Result<Vec<u8>> {
+fn fetch_ondemand_record(apiserver: &str) -> Result<Vec<u8>> {
     let socket_path = parse_unix_address(apiserver)?;
     let mut stream = UnixStream::connect(&socket_path).with_context(|| {
         format!(
@@ -444,12 +444,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_trace_document_accepts_versioned_envelope_only() {
+    fn parse_ondemand_document_accepts_versioned_envelope_only() {
         let doc = br#"{"version":1,"patterns":[
             {"blob_index":1,"chunk_group_index":4},
             {"blob_index":1,"chunk_group_index":4},
             {"blob_index":2,"chunk_group_index":7}]}"#;
-        let patterns = parse_trace_document(doc).unwrap();
+        let patterns = parse_ondemand_document(doc).unwrap();
         assert_eq!(
             patterns,
             vec![
@@ -465,10 +465,10 @@ mod tests {
         );
 
         // Wrong version is rejected.
-        let err = parse_trace_document(br#"{"version":2,"patterns":[]}"#).unwrap_err();
+        let err = parse_ondemand_document(br#"{"version":2,"patterns":[]}"#).unwrap_err();
         assert!(err.to_string().contains("version"), "{err}");
 
         // The legacy unversioned document is no longer accepted.
-        assert!(parse_trace_document(br#"{"patterns":[]}"#).is_err());
+        assert!(parse_ondemand_document(br#"{"patterns":[]}"#).is_err());
     }
 }

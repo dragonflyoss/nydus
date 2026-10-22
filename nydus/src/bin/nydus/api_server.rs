@@ -1,9 +1,9 @@
-//! The HTTP server behind `--apiserver`: an image's metrics and access trace
+//! The HTTP server behind `--apiserver`: an image's metrics and ondemand record
 //! over a Unix socket.
 //!
 //! It serves `GET /metrics`, the Prometheus text exposition of the
-//! [`Metrics`] it was started with, and `GET /trace`, the on-demand chunk
-//! group access trace `nydus optimize` reads, and answers `404` to everything
+//! [`Metrics`] it was started with, and `GET /trace`, the chunk group
+//! ondemand record `nydus optimize` reads, and answers `404` to everything
 //! else. It runs on a current-thread Tokio runtime of its own in a background
 //! thread, so it stays independent of the backend's runtime and of any cargo
 //! feature, and is torn down with its socket on [`ApiServer::stop`].
@@ -26,9 +26,9 @@ use tracing::{error, info, warn};
 
 use nydus::error::{Context, Result};
 use nydus::parse_unix_address;
-use nydus_core::{Metrics, TraceRecorder};
+use nydus_core::{Metrics, OndemandRecorder};
 
-/// A running HTTP server of one image's metrics and access trace, bound to a
+/// A running HTTP server of one image's metrics and ondemand record, bound to a
 /// Unix socket until stopped.
 pub struct ApiServer {
     /// The socket the server listens on, unlinked on stop.
@@ -43,10 +43,14 @@ pub struct ApiServer {
 
 /// Implements the API server.
 impl ApiServer {
-    /// Starts serving `metrics` and `trace` at `address`, which must be
+    /// Starts serving `metrics` and the ondemand record at `address`, which must be
     /// `unix:///path/to.sock`, creating the socket's directory and replacing
     /// a stale socket a previous run left behind.
-    pub fn start(address: &str, metrics: Arc<Metrics>, trace: Arc<TraceRecorder>) -> Result<Self> {
+    pub fn start(
+        address: &str,
+        metrics: Arc<Metrics>,
+        ondemand: Arc<OndemandRecorder>,
+    ) -> Result<Self> {
         let socket_path = parse_unix_address(address)?;
 
         if let Some(parent) = socket_path.parent() {
@@ -82,7 +86,7 @@ impl ApiServer {
         let handle = std::thread::Builder::new()
             .name("nydus_apiserver".to_string())
             .spawn(move || {
-                runtime.block_on(serve(listener, shutdown_for_thread, metrics, trace));
+                runtime.block_on(serve(listener, shutdown_for_thread, metrics, ondemand));
             })
             .context("failed to spawn apiserver thread")?;
 
@@ -113,7 +117,7 @@ async fn serve(
     listener: UnixListener,
     shutdown: Arc<Notify>,
     metrics: Arc<Metrics>,
-    trace: Arc<TraceRecorder>,
+    ondemand: Arc<OndemandRecorder>,
 ) {
     loop {
         tokio::select! {
@@ -122,13 +126,13 @@ async fn serve(
                 Ok((stream, _addr)) => {
                     let io = TokioIo::new(stream);
                     let metrics = metrics.clone();
-                    let trace = trace.clone();
+                    let ondemand = ondemand.clone();
                     tokio::task::spawn(async move {
                         if let Err(err) = http1::Builder::new()
                             .serve_connection(
                                 io,
                                 service_fn(move |req| {
-                                    handle_request(req, metrics.clone(), trace.clone())
+                                    handle_request(req, metrics.clone(), ondemand.clone())
                                 }),
                             )
                             .await
@@ -143,11 +147,11 @@ async fn serve(
     }
 }
 
-/// Answers one request: the metrics, the trace, or `404`.
+/// Answers one request: the metrics, the ondemand record, or `404`.
 async fn handle_request(
     req: Request<Incoming>,
     metrics: Arc<Metrics>,
-    trace: Arc<TraceRecorder>,
+    ondemand: Arc<OndemandRecorder>,
 ) -> std::result::Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
         let mut body = Vec::new();
@@ -163,8 +167,8 @@ async fn handle_request(
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(trace.encode_json())))
-            .expect("valid trace response")
+            .body(Full::new(Bytes::from(ondemand.encode_json())))
+            .expect("valid ondemand response")
     } else {
         Response::builder()
             .status(StatusCode::NOT_FOUND)
@@ -193,15 +197,19 @@ mod tests {
     }
 
     #[test]
-    fn serves_the_metrics_and_trace_it_was_started_with() {
+    fn serves_the_metrics_and_ondemand_record_it_was_started_with() {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("run").join("api.sock");
         let metrics = Arc::new(Metrics::new());
-        let trace = Arc::new(TraceRecorder::default());
+        let ondemand = Arc::new(OndemandRecorder::default());
         metrics.storage.collect_prefetch_task_finished_metrics();
-        trace.record_chunk_group_access(1, 4);
-        let server =
-            ApiServer::start(&format!("unix://{}", socket_path.display()), metrics, trace).unwrap();
+        ondemand.record_chunk_group_access(1, 4);
+        let server = ApiServer::start(
+            &format!("unix://{}", socket_path.display()),
+            metrics,
+            ondemand,
+        )
+        .unwrap();
 
         let test_cases = vec![
             ("/metrics", " 200 ", "nydus_storage_prefetch_task_total 1"),
@@ -231,7 +239,7 @@ mod tests {
         let server = ApiServer::start(
             &format!("unix://{}", socket_path.display()),
             Arc::new(Metrics::new()),
-            Arc::new(TraceRecorder::default()),
+            Arc::new(OndemandRecorder::default()),
         )
         .unwrap();
         assert!(get(&socket_path, "/metrics").contains(" 200 "));

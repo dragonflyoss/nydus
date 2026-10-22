@@ -40,9 +40,13 @@ type OptimizeOption struct {
 	Source string
 	// Target is the optimized nydus image reference to push. Required.
 	Target string
-	// Pattern is the path to a JSON access-pattern file (the same document
-	// served by the `/trace` endpoint). Required.
-	Pattern string
+	// TraceFile is the path to the JSON saved from a mount's apiserver
+	// `/trace` endpoint: the chunk groups the workload read on demand, which
+	// the ondemand blob is built from. Required.
+	TraceFile string
+	// Type is the artifact `nydus optimize --type` builds. Defaults to
+	// "ondemand".
+	Type string
 	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
 	BuilderPath string
 	// WorkDir is the scratch directory backing the content store and the
@@ -80,8 +84,8 @@ func NewOptimizer(opt OptimizeOption) (*Optimizer, error) {
 	if opt.Target == "" {
 		return nil, errors.New("target must be provided")
 	}
-	if opt.Pattern == "" {
-		return nil, errors.New("pattern must be provided")
+	if opt.TraceFile == "" {
+		return nil, errors.New("trace file must be provided")
 	}
 	if opt.PlatformMC == nil {
 		opt.PlatformMC = platforms.Default()
@@ -221,7 +225,8 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 		"--blob-dir", blobDir,
 		"--config", configPath,
 		"--log-level", cmp.Or(o.opt.LogLevel, nydus.DefaultLogLevel),
-		"--trace-file", o.opt.Pattern,
+		"--trace-file", o.opt.TraceFile,
+		"--type", cmp.Or(o.opt.Type, nydus.DefaultOptimizeType),
 	}
 	cmd := exec.CommandContext(ctx, cmp.Or(o.opt.BuilderPath, nydus.DefaultBuilder), args...)
 	var output bytes.Buffer

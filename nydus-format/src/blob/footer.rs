@@ -30,7 +30,7 @@ use std::path::Path;
 ///     32     8  compressed_data_size    bytes
 ///     40     8  bootstrap_offset        bytes, 4KiB aligned
 ///     48     8  bootstrap_size          bytes, 4KiB multiple, zero for an
-///                                       ondemand redirect blob
+///                                       ondemand blob
 ///     56     8  bootstrap_compressed_size  exact zstd frame bytes with
 ///                                       BOOTSTRAP_ZSTD, else zero
 ///     64     8  blob_metadata_offset    bytes, 4KiB aligned
@@ -246,7 +246,7 @@ impl BlobFooter {
     ///
     /// The reserved tail is deliberately not checked, since a newer writer
     /// may use it, and `bootstrap_size` may be zero, since an ondemand
-    /// redirect blob embeds no bootstrap image.
+    /// ondemand blob embeds no bootstrap image.
     fn validate_fields(&self) -> Result<()> {
         self.feature_incompat
             .validate_incompat(Self::SUPPORTED_INCOMPAT)?;
@@ -430,7 +430,7 @@ impl BlobFooter {
     }
 
     /// Size of the bootstrap region in 4KiB blocks, zero for an ondemand
-    /// redirect blob.
+    /// ondemand blob.
     pub fn bootstrap_block_count(&self) -> u64 {
         self.bootstrap_size / EROFS_BLOCK_SIZE as u64
     }

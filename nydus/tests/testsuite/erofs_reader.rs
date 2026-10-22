@@ -843,7 +843,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
             dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        // Trace every chunk group, last one first.
+        // Record every chunk group, last one first.
         let patterns: Vec<ChunkGroupRef> = image
             .blob_metadata
             .as_ref()

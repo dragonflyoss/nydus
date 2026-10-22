@@ -139,10 +139,10 @@ func WaitSettled(t *testing.T, name string, sample func() (float64, error)) floa
 	return last
 }
 
-// SaveTrace GETs the /trace endpoint from the mount's apiserver socket, saves
+// SaveOndemandRecord GETs the /trace endpoint from the mount's apiserver socket, saves
 // the raw JSON access-pattern document to path, and returns the number of
 // recorded (blob, chunk) access patterns.
-func SaveTrace(t *testing.T, socket, path string) int {
+func SaveOndemandRecord(t *testing.T, socket, path string) int {
 	t.Helper()
 	resp, err := apiserverClient(socket).Get("http://localhost/trace")
 	if !assert.NoError(t, err, "fetch /trace from %s", socket) {
@@ -163,7 +163,7 @@ func SaveTrace(t *testing.T, socket, path string) int {
 		} `json:"patterns"`
 	}
 	assert.NoError(t, json.Unmarshal(raw, &doc))
-	assert.EqualValues(t, 1, doc.Version, "unexpected trace document version")
+	assert.EqualValues(t, 1, doc.Version, "unexpected ondemand document version")
 	return len(doc.Patterns)
 }
 

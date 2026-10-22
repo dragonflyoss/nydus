@@ -8,7 +8,7 @@ on-demand access tracing.
   space.
 - `chunk_group_map`: group-level fill tracking for cached blobs.
 - `prefetch`: background prefetch scheduling.
-- `access_trace`: on-demand access tracing.
+- `ondemand`: on-demand access recording and the ondemand document.
 
 Every API here returns `io::Result` so the OS errno survives to the service
 edges; this crate does not depend on the control-plane error type. Remote

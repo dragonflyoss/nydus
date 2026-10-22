@@ -131,7 +131,7 @@ impl RemoteBlobCache {
         skip_verify_checksums: bool,
     ) -> io::Result<Self> {
         let blob_metadata = match kind {
-            ReadKind::OnDemand => backend.read_blob_metadata(&blob_id)?,
+            ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
             ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
         };
         Ok(Self {
@@ -259,8 +259,8 @@ impl BlobCache for RemoteBlobCache {
         ))
     }
 
-    fn is_redirect(&self) -> bool {
-        self.blob_metadata.is_redirect()
+    fn is_ondemand(&self) -> bool {
+        self.blob_metadata.is_ondemand()
     }
 }
 
@@ -351,7 +351,7 @@ mod tests {
             blob_id,
             backend.clone(),
             decoded_groups,
-            ReadKind::OnDemand,
+            ReadKind::Ondemand,
             false,
         )
         .unwrap();
@@ -381,7 +381,7 @@ mod tests {
             full_blob_id,
             backend,
             Arc::default(),
-            ReadKind::OnDemand,
+            ReadKind::Ondemand,
             false,
         )
         .unwrap();
@@ -430,7 +430,7 @@ mod tests {
             full_blob_id,
             backend,
             Arc::default(),
-            ReadKind::OnDemand,
+            ReadKind::Ondemand,
             false,
         )
         .unwrap();
@@ -464,7 +464,7 @@ mod tests {
             full_blob_id,
             backend,
             Arc::default(),
-            ReadKind::OnDemand,
+            ReadKind::Ondemand,
             false,
         )
         .unwrap();
@@ -481,7 +481,7 @@ mod tests {
             remote.prefetch_all(1, None).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
-        assert!(!remote.is_redirect());
+        assert!(!remote.is_ondemand());
     }
 
     #[test]
