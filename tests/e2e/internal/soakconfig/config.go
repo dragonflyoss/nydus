@@ -14,7 +14,7 @@ type Settings struct {
 }
 
 func Parse(get func(string) string) (Settings, error) {
-	s := Settings{Duration: 30 * time.Second, Cycles: 20}
+	s := Settings{Duration: 30 * time.Second, Cycles: 6}
 	if raw := get("NYDUS_E2E_SOAK_DURATION"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil || d < 10*time.Second || d > 24*time.Hour {

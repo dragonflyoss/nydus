@@ -71,8 +71,7 @@ jobs:
       - name: Run tests
         # ublk is built and tested independently so it cannot block other features.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq iproute2
+          bash tests/scripts/install_ci_packages.sh iproute2
           cargo llvm-cov --workspace --no-fail-fast \
             --features 'nydus/cli,nydus/fileio,nydus/dragonfly,nydus/nbd,nydus/fanotify,nydus/uffd,nydus-test-utils/fault-backend' \
             --lcov --output-path lcov.info
@@ -152,19 +151,77 @@ jobs:
     needs: build
     # Missing kernel capabilities fail inside the suite, never queue forever.
     runs-on: ${{ fromJSON(vars.E2E_FILEIO_RUNNER || '["ubuntu-24.04"]') }}
-    timeout-minutes: 15
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: build
             pkgs: ./internal/... ./build/... ./export/... ./nydusify/... ./golden/... ./kernel/...
-          - suite: contract
-            pkgs: ./contract/... ./api/... ./fault/... ./registry/...
+            parallel: 8
+            package_parallel: 2
+            run: ""
+            test_timeout: 4m
+          - suite: contract-fuse-semantics
+            pkgs: ./contract/...
+            run: ^TestFUSE$$/^(Semantic|C[0-9]+_.*)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fuse-zstd
+            pkgs: ./contract/...
+            run: ^TestFUSE$$/^Data$$/^zstd-4k$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fuse-other
+            pkgs: ./contract/...
+            run: ^TestFUSE$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fileio-semantics
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^(Semantic|C[0-9]+_.*)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fileio-zstd
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^Data$$/^zstd-4k$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: contract-fileio-other
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: api-registry
+            pkgs: ./api/... ./registry/...
+            parallel: 4
+            package_parallel: 2
+            run: ""
+            test_timeout: 4m
+          - suite: fault
+            pkgs: ./fault/...
+            parallel: 4
+            package_parallel: 1
+            run: ""
+            test_timeout: 4m
           - suite: cache
             pkgs: ./cache/... ./soak/...
+            parallel: 2
+            package_parallel: 1
+            run: ""
+            test_timeout: 4m
           - suite: tar
             pkgs: ./tar/...
+            parallel: 8
+            package_parallel: 2
+            run: ""
+            test_timeout: 4m
     steps:
       - uses: actions/checkout@v6
 
@@ -180,17 +237,15 @@ jobs:
       - name: Install test dependencies
         run: |
           chmod +x target/ci/nydus target/ci/examples/writer-fixture nydusify/nydusify
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq acl attr erofs-utils fuse3
+          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
           sudo modprobe fuse
 
-      # E2E_TIMEOUT stays below the job timeout, so a hang ends in a
-      # goroutine dump; -v records per-test times for the 5-minute budget.
+      # Keep the mount-heavy suites bounded on shared runners:
+      # Go's -parallel is per package, while -p controls concurrent packages.
+      # Split repeated full-tree reads by adapter and image group. Each shard
+      # retains its complete case/mode matrix; conventions tests check coverage.
       - name: Run suites
-        env:
-          NYDUS_E2E_GOLDEN_REQUIRED: "1"
-          NYDUS_E2E_GOLDEN_VERSIONS: ${{ vars.E2E_GOLDEN_VERSIONS }}
-        run: make e2e-run PKG="${{ matrix.pkgs }}" E2E_REQUIRE=1 E2E_TIMEOUT=10m E2E_GO_TEST_ARGS=-v
+        run: make e2e-run PKG="${{ matrix.pkgs }}" E2E_RUN='${{ matrix.run }}' E2E_REQUIRE=1 E2E_PARALLEL=${{ matrix.parallel }} E2E_TIMEOUT=${{ matrix.test_timeout }} E2E_GO_TEST_ARGS='-p=${{ matrix.package_parallel }} -v'
 
   feature-compat:
     name: Feature-disabled CLI (${{ matrix.variant }})
@@ -234,7 +289,6 @@ jobs:
       NYDUS_TEST_REQUIRE_PTRACE: "1"
       # Compile as the runner user; elevate only the test executables.
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
-      TMPDIR: ${{ github.workspace }}/target/test-tmp
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -245,14 +299,13 @@ jobs:
           shared-key: rust-privileged
       - name: Prepare namespace tooling
         run: |
-          mkdir -p "$TMPDIR"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq iproute2
+          mkdir -p "$RUNNER_TEMP/nydus-test-tmp"
+          bash tests/scripts/install_ci_packages.sh iproute2
       - name: Process-shared publication and owner death
-        run: cargo test -p nydus-storage --test group_map_process
+        run: TMPDIR="$RUNNER_TEMP/nydus-test-tmp" cargo test -p nydus-storage --test group_map_process
       - name: Real HTTP reads in configured network namespaces
         if: ${{ !cancelled() }}
-        run: cargo test -p nydus-backend --features registry --test netns_registry
+        run: TMPDIR="$RUNNER_TEMP/nydus-test-tmp" cargo test -p nydus-backend --features registry --test netns_registry
 
   extended:
     name: Experimental transports and fuzz
@@ -307,8 +360,7 @@ jobs:
       - name: Install test dependencies
         run: |
           chmod +x target/ci/nydus nydusify/nydusify
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq fuse3
+          bash tests/scripts/install_ci_packages.sh fuse3
           sudo modprobe fuse
 
       - name: Wait for the cluster

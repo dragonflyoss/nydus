@@ -24,8 +24,8 @@ const GROUP_MAP_FEATURE_INCOMPAT_OFFSET: usize = 12;
 const GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET: usize = 16;
 const GROUP_MAP_READY_COUNT_OFFSET: usize = 20;
 const GROUP_MAP_STATE_OFFSET: usize = 24;
-/// `state` bit: every group of this blob is ready. Sticky — ready bits are
-/// never cleared, so once set it stays set for the lifetime of the file.
+/// `state` bit: every group of this blob is ready. This is only a hint; reset
+/// may clear the bitmap while a concurrent writer still updates the header.
 const GROUP_MAP_STATE_ALL_READY: u32 = 1;
 
 /// Holds `flock(LOCK_EX)` on a file for the guard's lifetime.
@@ -35,8 +35,23 @@ struct FileLock<'a> {
 
 impl<'a> FileLock<'a> {
     fn exclusive(file: &'a File) -> io::Result<Self> {
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(io::Error::last_os_error());
+        let start = std::time::Instant::now();
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(err);
+            }
+            if start.elapsed() >= std::time::Duration::from_secs(2) {
+                tracing::warn!("timed out waiting for chunk group map reset lock");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "group map reset lock timeout",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         Ok(Self { file })
     }
@@ -74,11 +89,9 @@ impl Drop for FileLock<'_> {
 /// warmed cache. Persistence across reboots is provided by regular kernel
 /// writeback of the dirty pages.
 ///
-/// The header additionally carries an `ALL_READY` state bit: the moment the last
-/// group turns ready, the flag is set (also visible cross-process), and
-/// `is_all_ready` becomes a single atomic load. On-demand services (uffd,
-/// fanotify, FUSE) use it as a fast path to skip per-group readiness
-/// bookkeeping entirely once a blob is fully cached.
+/// The header additionally carries an `ALL_READY` state hint for the common
+/// fully cached case. Since reset may race with a writer's header update,
+/// readers confirm the bitmap before using the hint.
 pub struct ChunkGroupMap {
     map: MmapRaw,
     chunk_group_count: usize,
@@ -308,7 +321,7 @@ impl ChunkGroupMap {
         if previous & mask == 0 {
             // This call made the 0→1 transition (exactly one process does,
             // per group), so it owns bumping the shared ready count. When the
-            // count reaches the total, latch the sticky ALL_READY flag.
+            // count reaches the total, latch the ALL_READY hint.
             let count = self
                 .header_u32(GROUP_MAP_READY_COUNT_OFFSET)
                 .fetch_add(1, Ordering::AcqRel)
@@ -320,20 +333,19 @@ impl ChunkGroupMap {
         Ok(())
     }
 
-    /// O(1) fast-path check: true when the sticky ALL_READY header state bit is
-    /// set, i.e. every group of this blob has been decoded into the cache.
-    /// A single atomic load on the shared mapping — no bitmap scan — so
-    /// per-fault handlers (uffd, fanotify, FUSE reads) can consult it on
-    /// every event at effectively zero cost.
+    /// The header is advisory: a writer can publish its counter update after
+    /// a concurrent reset cleared the bitmap. Confirm the bits before using
+    /// the whole-blob fast path.
     pub fn is_all_ready(&self) -> bool {
         self.header_u32(GROUP_MAP_STATE_OFFSET)
             .load(Ordering::Acquire)
             & GROUP_MAP_STATE_ALL_READY
             != 0
+            && self.scan_all_ready()
     }
 
-    /// True when every group is marked ready. Checks the sticky ALL_READY
-    /// state bit first; otherwise scans the shared bitmap and latches the bit when the
+    /// True when every group is marked ready. Checks the ALL_READY hint first;
+    /// otherwise scans the shared bitmap and latches the hint when the
     /// scan proves completion (also healing any ready-count skew left by a
     /// crashed writer). The answer reflects updates from other processes.
     pub fn latch_all_ready(&self) -> bool {
@@ -375,8 +387,8 @@ impl ChunkGroupMap {
             .fetch_or(GROUP_MAP_STATE_ALL_READY, Ordering::AcqRel);
     }
 
-    /// Number of groups currently marked ready (advisory shared counter,
-    /// exact once ALL_READY is latched).
+    /// Advisory shared count of groups marked ready. It may be temporarily
+    /// skewed by a concurrent reset.
     #[cfg(test)]
     fn ready_count(&self) -> usize {
         self.header_u32(GROUP_MAP_READY_COUNT_OFFSET)
@@ -561,8 +573,7 @@ mod tests {
         }
         writer.set_ready(8).unwrap();
 
-        // The sticky flag is a single shared header field: both the setter and
-        // a concurrent observer see it without any bitmap scan or reopen.
+        // Both the setter and a concurrent observer see the shared hint.
         assert!(writer.is_all_ready());
         assert!(observer.is_all_ready());
         assert!(observer.latch_all_ready());

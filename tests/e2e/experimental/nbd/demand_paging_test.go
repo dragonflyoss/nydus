@@ -2,6 +2,7 @@ package nbd
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -23,6 +24,10 @@ func TestDemandPaging(t *testing.T) {
 	cache := filepath.Join(env.WorkDir(t), "cache")
 	m := s.mount(t, cache)
 	src, mnt := s.img.Source, m.Root
+	// udev's asynchronous blkid probes read device data after mount returns.
+	// Include them in Startup, not in the metadata-only measurement.
+	out, err := exec.Command(env.RequireTool(t, "udevadm"), "settle", "--timeout=10").CombinedOutput()
+	require.NoError(t, err, "wait for device probes: %s", out)
 
 	t.Run("Startup", func(t *testing.T) {
 		log := m.Daemon.Log()

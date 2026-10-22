@@ -142,7 +142,7 @@ impl BlobPrefetcher {
     /// the remaining blobs through a worker pool. Per-blob failures are
     /// logged and skipped.
     pub fn run(mut self) {
-        if self.scope == PrefetchScope::None {
+        if self.scope == PrefetchScope::None || self.stopped() {
             return;
         }
 
@@ -167,11 +167,16 @@ impl BlobPrefetcher {
         let ondemand: Vec<bool> = self
             .priority
             .iter()
-            .map(|&blob_index| match self.caches.is_ondemand(blob_index) {
-                Ok(ondemand) => ondemand,
-                Err(err) => {
-                    warn!("failed to inspect priority blob {}: {}", blob_index, err);
-                    false
+            .map(|&blob_index| {
+                if self.stopped() {
+                    return false;
+                }
+                match self.caches.is_ondemand(blob_index) {
+                    Ok(ondemand) => ondemand,
+                    Err(err) => {
+                        warn!("failed to inspect priority blob {}: {}", blob_index, err);
+                        false
+                    }
                 }
             })
             .collect();
@@ -187,9 +192,6 @@ impl BlobPrefetcher {
             }
             scope => scope,
         };
-        if self.stopped() {
-            return;
-        }
 
         // Phase 1: priority blobs, sequential. Ondemand blobs go first (they
         // stream the recorded working set into the source blobs' caches, so
@@ -210,7 +212,7 @@ impl BlobPrefetcher {
         }
         for blob_index in phase1 {
             if self.stopped() {
-                return;
+                break;
             }
             let metrics = &self.caches.metrics().storage;
             match self
@@ -234,7 +236,7 @@ impl BlobPrefetcher {
 
         // Phase 2: remaining blobs, concurrent worker pool. Skipped unless the
         // scope resolved to "all".
-        if scope == PrefetchScope::All && !self.rest.is_empty() {
+        if !self.stopped() && scope == PrefetchScope::All && !self.rest.is_empty() {
             let worker_count = self.threads.min(self.rest.len());
             let queue = Arc::new(Mutex::new(std::mem::take(&mut self.rest)));
             let timeout = self.timeout;

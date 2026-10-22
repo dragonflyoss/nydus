@@ -8,6 +8,10 @@ seedPeer:
   enable: true
   type: super
 
+scheduler:
+  # Re-register after scheduler outages within the cluster readiness budget.
+  announceInterval: 5s
+
 upload:
   server:
     port: 4000

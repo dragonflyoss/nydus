@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"bytes"
+	"encoding/binary"
 	"slices"
 	"sort"
 	"unsafe"
@@ -56,17 +57,24 @@ func DrainDirents(t env.TB, fd int, bufSize int) []Dirent {
 			return out
 		}
 		for offset := 0; offset < n; {
-			// SAFETY: the kernel wrote whole linux_dirent64 records into
-			// buf[:n], and offset always lands on a record boundary.
-			raw := (*unix.Dirent)(unsafe.Pointer(&buf[offset]))
-			reclen := int(raw.Reclen)
-			require.Greater(t, reclen, 0, "malformed dirent record length")
-
-			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&raw.Name[0])), reclen-int(unsafe.Offsetof(raw.Name)))
+			// Kernel records are variable-sized, often shorter than unix.Dirent.
+			var raw unix.Dirent
+			nameOffset := int(unsafe.Offsetof(raw.Name))
+			require.GreaterOrEqual(t, n-offset, nameOffset, "truncated dirent header")
+			record := buf[offset:n]
+			reclen := int(binary.NativeEndian.Uint16(record[unsafe.Offsetof(raw.Reclen):]))
+			require.Greater(t, reclen, nameOffset, "malformed dirent record length")
+			require.LessOrEqual(t, reclen, len(record), "truncated dirent record")
+			nameBytes := record[nameOffset:reclen]
 			if i := bytes.IndexByte(nameBytes, 0); i >= 0 {
 				nameBytes = nameBytes[:i]
 			}
-			out = append(out, Dirent{Name: string(nameBytes), Ino: raw.Ino, Type: raw.Type, Off: raw.Off})
+			out = append(out, Dirent{
+				Name: string(nameBytes),
+				Ino:  binary.NativeEndian.Uint64(record[unsafe.Offsetof(raw.Ino):]),
+				Type: record[unsafe.Offsetof(raw.Type)],
+				Off:  int64(binary.NativeEndian.Uint64(record[unsafe.Offsetof(raw.Off):])),
+			})
 			offset += reclen
 		}
 	}

@@ -50,17 +50,14 @@ func assertNoDirectOrigin(t *testing.T, m *mount.Mounted) {
 
 func waitPrefetch(t *testing.T, m *mount.Mounted) {
 	t.Helper()
-	var previous float64
-	stable := 0
 	require.Eventually(t, func() bool {
-		count := m.API.Metrics(t).Sum("nydus_backend_read_total", `type="prefetch"`, `source="dragonfly"`)
-		if count > 0 && count == previous {
-			stable++
-		} else {
-			stable = 0
-		}
-		previous = count
-		return stable >= 5
-	}, recoveryBound+imageBound, 300*time.Millisecond)
+		metrics := m.API.Metrics(t)
+		finished := metrics.Sum("nydus_storage_prefetch_task_total") -
+			metrics.Sum("nydus_storage_prefetch_task_failure_total")
+		return finished >= float64(len(m.Image.Blobs)) &&
+			metrics.Sum("nydus_backend_read_total", `type="prefetch"`, `source="dragonfly"`) > 0 &&
+			metrics.Sum("nydus_cache_bytes", `status="cached"`) > 0 &&
+			metrics.Sum("nydus_cache_bytes", `status="uncached"`) == 0
+	}, recoveryBound+imageBound, 300*time.Millisecond, "all blobs must finish prefetching successfully")
 	assertNoDirectOrigin(t, m)
 }

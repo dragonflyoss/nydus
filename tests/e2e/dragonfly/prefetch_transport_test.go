@@ -22,14 +22,22 @@ func TestPrefetchTransport(t *testing.T) {
 		Prefetch: &mount.Prefetch{Scope: "all", RetryInterval: "1s"},
 	})
 	require.Eventually(t, func() bool {
-		return strings.Contains(m.Daemon.FileLog(), "dragonfly request failed, retrying in")
-	}, policyBound, 100*time.Millisecond)
+		return strings.Contains(m.Daemon.FileLog(), "failed to prefetch priority blob")
+	}, policyBound, 100*time.Millisecond, "prefetch must report the unavailable seed peer")
 	assertNoDirectOrigin(t, m)
 	for _, request := range origin.Faults.Requests() {
 		require.False(t, request.Method == "GET" && strings.Contains(request.Path, "/blobs/"),
 			"prefetch must not contact origin directly while seed peer is unavailable")
 	}
+	require.Positive(t, m.API.Metrics(t).Sum("nydus_storage_prefetch_task_failure_total"))
+	require.Zero(t, m.API.Metrics(t).Sum("nydus_backend_read_total", `type="ondemand"`))
+	m.Unmount()
 	c.restore(t)
+	// Transport errors terminate the prefetch task; unlike transient HTTP
+	// statuses, they are not retried. A new mount starts a new prefetch.
+	m = mountDragonfly(t, c, img, origin.URL, options{
+		Prefetch: &mount.Prefetch{Scope: "all", RetryInterval: "1s"},
+	})
 	waitPrefetch(t, m)
 	within(t, m, imageBound, "reading prefetched data after transport recovery", func() {
 		require.NoError(t, readData(t, m))

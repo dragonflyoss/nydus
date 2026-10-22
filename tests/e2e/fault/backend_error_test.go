@@ -1,14 +1,18 @@
 package fault
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/registry"
+	"golang.org/x/sys/unix"
 )
 
 // TestBackendError makes the registry fail blob reads the ways registries
@@ -126,21 +130,30 @@ func backendTimeout(t *testing.T, a mount.Adapter, img fixture.Image) {
 	prime(t, m)
 	big := lookup(t, img, bigFile)
 
+	// Bound the demanded I/O, not EROFS's synchronous readahead of many
+	// independently timing-out pages. RANDOM still reads ahead the requested
+	// window, so also limit each ReadAt to one page.
 	reg.Faults.Set(registry.Fault{Delay: time.Minute})
-	check := func(t env.TB) {
-		// Two 1s timeouts and a backoff fail one backend read in about
-		// 3s; the read(2) has to fail well before the hang detector.
-		r := readWithin(t, m.Root, big, 20*time.Second)
-		expectFailed(t, r)
-		expectNotWrong(t, r)
-		if hits := reg.Faults.Hits(); hits < 2 {
-			t.Errorf("a timeout should be retried, saw %d faulted requests", hits)
+	r := judge(t, big, 20*time.Second, func() (string, error) {
+		f, err := os.Open(m.Path(big.Rel))
+		if err != nil {
+			return "", err
 		}
-	}
-	if _, ok := a.(mount.Fileio); ok {
-		env.KnownIssue(t, "KI-12", check)
-	} else {
-		check(t)
+		defer func() { _ = f.Close() }()
+		if err := unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_RANDOM); err != nil {
+			return "", err
+		}
+		if err := unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED); err != nil {
+			return "", err
+		}
+		h := sha256.New()
+		_, err = io.CopyBuffer(h, io.NewSectionReader(f, 0, big.Size), make([]byte, os.Getpagesize()))
+		return hex.EncodeToString(h.Sum(nil)), err
+	})
+	expectFailed(t, r)
+	expectNotWrong(t, r)
+	if hits := reg.Faults.Hits(); hits < 2 {
+		t.Errorf("a timeout should be retried, saw %d faulted requests", hits)
 	}
 
 	reg.Faults.Clear()

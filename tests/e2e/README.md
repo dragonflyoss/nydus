@@ -87,16 +87,24 @@ nydusify builder-backed integration entry points remain in its own Go module.
 ### Execution tiers
 
 - PR: GA suites, harness checks, real feature-disabled binaries, Rust
-  integration tests, all four experimental transports, and ten-minute tar/
-  structured footer-meta fuzzing. CI calls the experimental and ublk
-  workflows and includes them in its gate. ublk's independent build cannot
-  prevent the other transports from running.
+  integration tests, all four experimental transports, and ten aggregate
+  minutes of tar/structured footer-meta fuzzing per target (four independent
+  150-second shards). CI calls the experimental and ublk
+  workflows and includes them in its gate. FUSE and fileio contract matrices
+  run as separate jobs by adapter and image group (semantics/lifecycle,
+  zstd, other layouts), retaining every case and mount mode. Workflow
+  convention tests enforce that each contract branch is selected exactly
+  once. Backend faults and API/registry tests run separately.
+  ublk's build/Rust tests and E2E run in separate jobs; its independent
+  build cannot prevent the other transports from running.
 - PR and release: the separate Release workflow runs the shipped amd64
   **and** arm64 binaries, generates golden
   images with each artifact and read/export those exact images before
   publication. Required historical versions cannot silently disappear;
   generating today's images does not fabricate a historical baseline.
   An empty historical corpus now fails CI. PR runs never publish a release.
+  Shipped-binary contracts use the same image-group partitions; golden
+  verification and generation have their own jobs on each architecture.
 - Nightly: experimental transports and fuzzing also run on schedule.
 - Manual: dispatch Nightly for the one-hour local/remote shared-cache soak;
   dispatch Manual for benchmarks or hugetar, and the top-images workflow
@@ -105,6 +113,21 @@ nydusify builder-backed integration entry points remain in its own Go module.
 - Manual performance: cold large-directory lookups and existing I/O/metadata
   workloads can gate against an explicitly accepted, host/workload-matched
   baseline. No uncalibrated universal performance or RSS threshold is used.
+
+Sharded GA E2E, release verification, fuzz and short-soak jobs have a five-minute
+execution budget, including setup (not queue/dependency wait time). Test
+deadlines leave time for timeout diagnostics. Cold compiler caches and
+runner provisioning still affect build checks; their runtime must be
+measured rather than inferred from the warm-cache test timings.
+CI package installation uses Ubuntu's canonical archive on hosted x86
+runners and bounded network retries; self-hosted package sources are retained.
+Only benchmarks install `fio`. Release pins the default Rust toolchain
+before restoring its cache, avoiding cache invalidation by runner image updates.
+Rust and Go release binaries build in parallel; a separate packaging job
+checks both downloaded binaries for static linking and executable startup.
+The NBD demand-paging test requires `udevadm` to finish asynchronous device
+probes before measuring metadata-only cache growth. ublk waits for its control
+device after module loading and reports module-loading errors explicitly.
 
 Runners default to GitHub-hosted Ubuntu (arm64 for arm64 release validation).
 `E2E_*_RUNNER` variables can override them, but no unregistered self-hosted
@@ -175,6 +198,15 @@ And by agreement:
   use `http.request_timeout`; Dragonfly uses `request_timeout`,
   `max_retries` and `fallback_rate_limit`. Prefetch retries use
   `prefetch.retry_interval`, not the old min/max delay pair.
+- Dragonfly prefetch retries transient HTTP statuses once, but transport
+  errors terminate the task without origin fallback. Recovery after a
+  terminal failure starts a new mount/prefetch. Completion requires a
+  successful task for every blob and no uncached bytes, not a quiet request
+  counter (failed requests also increment that counter).
+- Run registry and soak regressions with a small CPU affinity as well as
+  on large hosts. FUSE polling must return `ENOSYS` so the kernel handles
+  subsequent polls without waiting behind reads; otherwise a Go process
+  reading the mount and serving its registry can deadlock its network loop.
 - Metrics use `nydus_*` names and labels. `Metrics.Sum` selects labels
   independently of their ordering. Successful backend reads identify
   `source="dragonfly"` or `source="fallback"`; failed reads identify the

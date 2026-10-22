@@ -204,6 +204,9 @@ impl NbdCommand {
             match mounted {
                 Ok(()) => {
                     info!("mounted {device} at {}", mp.display());
+                    let watched_service = service.clone();
+                    let watcher =
+                        nydus::mount::MountWatcher::start(&mp, move || watched_service.stop())?;
                     // Block until the session ends (clean disconnect or `stop()`
                     // from the signal thread).
                     let joined = doit_handle
@@ -212,8 +215,10 @@ impl NbdCommand {
                     // The signal path already unmounted on a signal-driven
                     // shutdown; if the session self-exited the mount is still up
                     // over a dead device, so try a final best-effort umount.
-                    if let Err(err) = umount2(&mp) {
-                        debug!("post-join unmount of {}: {}", mp.display(), err.report());
+                    if !watcher.detached() {
+                        if let Err(err) = umount2(&mp) {
+                            debug!("post-join unmount of {}: {}", mp.display(), err.report());
+                        }
                     }
                     joined
                 }

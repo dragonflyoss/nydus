@@ -3,15 +3,12 @@ package cache
 import (
 	"testing"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
 )
 
 // TestCorrupt damages a shared cache while no daemon runs and checks that a
 // fresh daemon never returns wrong bytes from it: it must notice and refetch,
-// or fail the read. Cache hits are read straight from the data file and are
-// not verified even with checksum verification on, so every case currently
-// reproduces KI-2.
+// or fail the read.
 func TestCorrupt(t *testing.T) {
 	t.Parallel()
 	w := setup(t)
@@ -52,9 +49,7 @@ func TestCorrupt(t *testing.T) {
 				cacheDir := newCache(t)
 				d.damage(t, cacheDir)
 				fresh := mountOn(t, w.image1, cacheDir, edits...)
-				env.KnownIssue(t, "KI-2", func(t env.TB) {
-					checkRead(t, fresh.Path("shared.bin"), w.want["shared.bin"])
-				})
+				checkRead(t, fresh.Path("shared.bin"), w.want["shared.bin"])
 			})
 		}
 	}

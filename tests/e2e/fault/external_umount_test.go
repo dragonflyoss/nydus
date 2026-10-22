@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/proc"
@@ -81,11 +80,9 @@ func TestExternalUmount(t *testing.T) {
 			m.Unmount()
 			expectNoMounts(t, dir, points...)
 
-			env.KnownIssue(t, "KI-8", func(t env.TB) {
-				if !exited {
-					t.Errorf("fileio still running 5s after its EROFS mount was unmounted")
-				}
-			})
+			if !exited {
+				t.Errorf("fileio still running 5s after its EROFS mount was unmounted")
+			}
 		})
 	}
 }

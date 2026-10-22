@@ -5,7 +5,6 @@ package dragonfly
 import (
 	"testing"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/oracle"
 )
@@ -23,17 +22,13 @@ func TestD4SchedulerUnreachableAtStart(t *testing.T) {
 	mountDragonfly(t, c, img, origin.URL, options{}).Unmount()
 	c.stop(t, "scheduler")
 
-	// The SDK client is built, scheduler included, when the backend is
-	// created, and its failure fails the daemon.
-	env.KnownIssue(t, "KI-9", func(t env.TB) {
-		m := mountDragonfly(t, c, img, origin.URL, options{})
-		d := measure(t, m, func() {
-			within(t, m, imageBound, "reading the image with the scheduler down", func() {
-				oracle.VerifyMount(t, m.Root, img.Want, img.Compare())
-			})
+	m := mountDragonfly(t, c, img, origin.URL, options{})
+	d := measure(t, m, func() {
+		within(t, m, imageBound, "reading the image with the scheduler down", func() {
+			oracle.VerifyMount(t, m.Root, img.Want, img.Compare())
 		})
-		if d.of(fallbackReads) == 0 || d.of(proxyReads) != 0 {
-			t.Errorf("want every backend read served by the origin; %v", d)
-		}
 	})
+	if d.of(fallbackReads) == 0 || d.of(proxyReads) != 0 {
+		t.Errorf("want every backend read served by the origin; %v", d)
+	}
 }

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/registry"
@@ -81,9 +80,7 @@ func bitflipForged(t *testing.T, a mount.Adapter, img fixture.Image, verify bool
 	}})
 	r := readOnce(t, m.Root, lookup(t, img, forgedFile))
 	t.Logf("%s", r)
-	env.KnownIssue(t, "KI-2", func(t env.TB) {
-		expectNotWrong(t, r)
-	})
+	expectNotWrong(t, r)
 }
 
 // forgeCRC returns a copy of img whose blob has forgedFile corrupted at

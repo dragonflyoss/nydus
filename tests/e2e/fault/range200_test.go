@@ -3,7 +3,6 @@ package fault
 import (
 	"testing"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/registry"
@@ -19,14 +18,9 @@ const (
 var range200Files = []string{"data/content/text", "data/dedup/orig", "data/size/00065537", bigFile}
 
 // TestRange200 answers every ranged blob GET with 200 and the whole blob,
-// as some registries and proxies do. The registry backend takes the head
-// of the body for the requested range (KI-1). The chunk group CRC32C,
-// checked by default, then rejects the misplaced
-// bytes, so the bug surfaces as failed reads rather than wrong bytes: on
-// none-4k the misplaced slice always reaches the CRC check, on zstd-4k it
-// mostly fails decompression first. Either way the backend must reject the
-// response itself (or use the right slice), which the known-issue body
-// tells apart through the backend and CRC error counters.
+// as some registries and proxies do. The backend must reject these responses
+// before attempting to decode bytes at the wrong offset. Restoring valid
+// range responses must recover without leaving corrupted cache entries.
 func TestRange200(t *testing.T) {
 	t.Parallel()
 	for _, layout := range []string{"zstd-4k", "none-4k"} {
@@ -77,15 +71,13 @@ func range200(t *testing.T, a mount.Adapter, img fixture.Image) {
 		expectCorrect(t, readOnce(t, m.Root, lookup(t, img, rel)))
 	}
 
-	env.KnownIssue(t, "KI-1", func(t env.TB) {
-		for _, r := range results {
-			expectNotWrong(t, r)
-		}
-		if crc > 0 {
-			t.Errorf("%v chunk groups were decoded from bytes at the wrong offset (CRC32C mismatch)", crc)
-		}
-		if failed > 0 && backendErrs == 0 {
-			t.Errorf("%d reads failed but the backend reported no error: it took the 200 body for the range", failed)
-		}
-	})
+	for _, r := range results {
+		expectNotWrong(t, r)
+	}
+	if crc > 0 {
+		t.Errorf("%v chunk groups were decoded from bytes at the wrong offset (CRC32C mismatch)", crc)
+	}
+	if failed == 0 || backendErrs == 0 {
+		t.Errorf("whole-blob responses must be rejected by the backend: %d failed reads, %v backend errors", failed, backendErrs)
+	}
 }

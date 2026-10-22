@@ -101,7 +101,7 @@ func (m *Mounter) Mount(ctx context.Context) error {
 		return errors.Wrap(err, "create provider")
 	}
 
-	img, err := nydusfs.LoadImage(ctx, provider, m.opt.Target, m.opt.PlatformMC, remote.PullAll, remote.Target)
+	img, err := nydusfs.LoadImage(ctx, provider, m.opt.Target, m.opt.PlatformMC, remote.PullOption{PullOCILayers: true}, remote.Target)
 	if err != nil {
 		return errors.Wrapf(err, "load target %q", m.opt.Target)
 	}

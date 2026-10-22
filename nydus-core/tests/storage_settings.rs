@@ -10,7 +10,6 @@ use std::os::unix::fs::FileExt;
 
 use common::{read_flat, Image};
 use nydus_core::NydusCore;
-use nydus_test_utils::known_issue::assert_known_issue;
 use tempfile::tempdir;
 
 const VERIFY: &str = "skip_verify_checksums: false";
@@ -113,7 +112,7 @@ fn a_second_core_preserves_the_first_cores_fetch_size() {
 /// group corrupted in the cache file after it was filled reads back
 /// corrupted instead of failing.
 #[test]
-fn ki2_cache_hits_are_served_unverified() {
+fn corrupted_cache_hits_are_rejected() {
     let image = Image::build();
     let cache_dir = tempdir().unwrap();
     let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
@@ -134,8 +133,8 @@ fn ki2_cache_hits_are_served_unverified() {
     let node = core.fs.open(common::FILE_NAME).unwrap();
     let mut buf = vec![0u8; 16];
     let result = node.read_at(at, &mut buf).map(|_| buf.clone());
-    let wrong_bytes = result
-        .as_ref()
-        .is_ok_and(|bytes| bytes[..] != image.dense[at as usize..at as usize + 16]);
-    assert_known_issue("KI-2", &result, result.is_err(), wrong_bytes);
+    assert!(
+        result.is_err(),
+        "corrupted cache bytes were returned: {result:?}"
+    );
 }

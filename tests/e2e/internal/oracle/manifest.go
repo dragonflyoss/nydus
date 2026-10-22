@@ -156,7 +156,7 @@ func scanPath(path, rel string) (Entry, error) {
 		return Entry{}, fmt.Errorf("%s: unsupported file type %o", rel, st.Mode&unix.S_IFMT)
 	}
 	if entry.Type != "dir" {
-		entry.Nlink = st.Nlink
+		entry.Nlink = uint64(st.Nlink) //nolint:unconvert // Nlink is uint32 on arm64, uint64 on amd64.
 		entry.inode = fmt.Sprintf("%d:%d", st.Dev, st.Ino)
 	}
 	xattrs, err := listXattrs(path)

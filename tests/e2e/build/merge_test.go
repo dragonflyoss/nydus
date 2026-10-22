@@ -61,9 +61,7 @@ func TestMerge(t *testing.T) {
 				requireCacheArtifacts(t, m.CacheDir, blobs)
 			}
 
-			env.KnownIssue(t, "KI-6", func(t env.TB) {
-				oracle.CompareTree(t, withMergedNlink(img.Want), oracle.ScanTree(t, m.Root), oracle.CompareOptions{Nlink: true})
-			})
+			oracle.CompareTree(t, withMergedNlink(img.Want), oracle.ScanTree(t, m.Root), oracle.CompareOptions{Nlink: true})
 		})
 	}
 }

@@ -258,8 +258,8 @@ func ScanTar(r io.Reader, want []Entry) ([]Entry, error) {
 // verifySparseStream checks a large file's content as it streams: the
 // extents of want hash as recorded and everything else is zeros.
 func verifySparseStream(r io.Reader, want Entry) error {
-	if want.Size == 0 || len(want.Extents) == 0 {
-		return errors.New("no extents recorded for a large file")
+	if want.Size <= 0 || want.Type != "reg" {
+		return errors.New("no regular-file oracle recorded for a large file")
 	}
 	buf := make([]byte, 1<<20)
 	zero := make([]byte, len(buf))

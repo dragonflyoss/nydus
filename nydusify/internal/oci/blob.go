@@ -56,13 +56,27 @@ func CommitBlob(ctx context.Context, cs content.Store, ref string, expected dige
 
 	dgst := cw.Digest()
 	var opts []content.Opt
+	var labels map[string]string
 	if labelsFn != nil {
-		if labels := labelsFn(dgst); len(labels) > 0 {
+		labels = labelsFn(dgst)
+		if len(labels) > 0 {
 			opts = append(opts, content.WithLabels(labels))
 		}
 	}
-	if err := cw.Commit(ctx, 0, expected, opts...); err != nil && !errdefs.IsAlreadyExists(err) {
-		return "", 0, errors.Wrap(err, "commit blob")
+	commitErr := cw.Commit(ctx, 0, expected, opts...)
+	if commitErr != nil && !errdefs.IsAlreadyExists(commitErr) {
+		return "", 0, errors.Wrap(commitErr, "commit blob")
+	}
+	// Commit does not apply labels to existing content. A reopened store
+	// still needs its diff-id labels before the converter can reuse blobs.
+	if errdefs.IsAlreadyExists(commitErr) && len(labels) > 0 {
+		fields := make([]string, 0, len(labels))
+		for key := range labels {
+			fields = append(fields, "labels."+key)
+		}
+		if _, err := cs.Update(ctx, content.Info{Digest: dgst, Labels: labels}, fields...); err != nil {
+			return "", 0, errors.Wrap(err, "restore existing blob labels")
+		}
 	}
 
 	info, err := cs.Info(ctx, dgst)

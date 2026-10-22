@@ -4,6 +4,7 @@
 package ublk
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,7 +32,8 @@ func (Ublk) Require(t env.TB) {
 	env.RequireRoot(t)
 	env.RequireKernel(t, 6, 4, "EROFS flatdev mounts of a flattened image")
 	env.RequireFilesystem(t, "erofs")
-	env.Require(t, loadDriver(), "ublk driver unavailable: no /dev/ublk-control after modprobe ublk_drv")
+	err := loadDriver()
+	env.Require(t, err == nil, "ublk driver unavailable: %v", err)
 	requireSubcommand(t, "ublk")
 }
 
@@ -93,13 +95,27 @@ func devicePath(log string) string {
 }
 
 // loadDriver loads ublk_drv unless its control device already exists.
-func loadDriver() bool {
+func loadDriver() error {
 	if _, err := os.Stat("/dev/ublk-control"); err == nil {
-		return true
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	_ = exec.Command("modprobe", "ublk_drv").Run()
-	_, err := os.Stat("/dev/ublk-control")
-	return err == nil
+	if out, err := exec.Command("modprobe", "ublk_drv").CombinedOutput(); err != nil {
+		return fmt.Errorf("modprobe ublk_drv: %w\n%s", err, out)
+	}
+	// Module initialization can finish before userspace creates the device.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat("/dev/ublk-control")
+		if err == nil {
+			return nil
+		}
+		if !os.IsNotExist(err) || time.Now().After(deadline) {
+			return fmt.Errorf("control device after modprobe ublk_drv: %w", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 var subcommands sync.Map

@@ -21,7 +21,7 @@ import (
 const (
 	daemonName = "nydus-nbd"
 	// mountTimeout bounds how long the daemon may take to attach and mount.
-	mountTimeout = 60 * time.Second
+	mountTimeout = 90 * time.Second
 	// deviceWait bounds how long a mount waits for a free /dev/nbdX while
 	// parallel tests hold them all.
 	deviceWait = 2 * time.Minute

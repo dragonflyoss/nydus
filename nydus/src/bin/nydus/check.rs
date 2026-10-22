@@ -115,7 +115,7 @@ impl CheckCommand {
     }
 
     /// Runs the inspection: checks the image, prints the report, and fails
-    /// on inline data crossing a metadata block.
+    /// on structural errors or a blob that fails requested verification.
     fn run(&self, kind: ImageKind, path: &Path, blob_dir: Option<&Path>) -> Result<()> {
         let report = check_image(kind, path, blob_dir)?;
 
@@ -133,6 +133,22 @@ impl CheckCommand {
             return Err(Error::InvalidImage(format!(
                 "{} inode(s) have inline data crossing a metadata block (the kernel cannot read them)",
                 report.stats.inline_overflows.len()
+            )));
+        }
+        if report.stats.z_pclusters_out_of_range != 0 {
+            return Err(Error::InvalidImage(format!(
+                "{} compressed cluster(s) reference blocks outside the image devices",
+                report.stats.z_pclusters_out_of_range
+            )));
+        }
+        let unverified = report
+            .blobs
+            .values()
+            .filter(|blob| (kind == ImageKind::Blob || blob_dir.is_some()) && !blob.verified)
+            .count();
+        if unverified != 0 {
+            return Err(Error::InvalidImage(format!(
+                "{unverified} blob(s) failed verification"
             )));
         }
 

@@ -98,14 +98,15 @@ e2e-experimental: FEATURES=$(E2E_EXPERIMENTAL_FEATURES)
 e2e-experimental: ci-build nydusify
 	$(MAKE) e2e-run PKG='$(E2E_EXPERIMENTAL_PKGS)'
 
-# Overnight settings are explicit; ordinary e2e-ga keeps the 30-second smoke.
+# Soak tiers are explicit; ordinary e2e-ga keeps the 30-second smoke.
 SOAK_DURATION ?= 1h
 SOAK_CYCLES ?= 120
 SOAK_RSS_MIB ?=
+SOAK_TIMEOUT ?= 80m
 e2e-soak:
 	NYDUS_E2E_SOAK_DURATION="$(SOAK_DURATION)" NYDUS_E2E_SOAK_CYCLES="$(SOAK_CYCLES)" \
 	NYDUS_E2E_SOAK_RSS_MIB="$(SOAK_RSS_MIB)" \
-	$(MAKE) e2e-run PKG=./soak/... E2E_TIMEOUT=80m E2E_GO_TEST_ARGS='-v $(E2E_GO_TEST_ARGS)'
+	$(MAKE) e2e-run PKG=./soak/... E2E_TIMEOUT=$(SOAK_TIMEOUT) E2E_GO_TEST_ARGS='-v $(E2E_GO_TEST_ARGS)'
 
 # Cold-start benchmark across every mount mode (tests/e2e/manual/bench).
 # Needs root and fio; nbd/ublk/fanotify columns need their kernel support.

@@ -37,7 +37,7 @@ jobs:
   run:
     name: ${{ inputs.suite }}
     runs-on: ${{ fromJSON(inputs.suite == 'ublk' && (vars.E2E_UBLK_RUNNER || '["ubuntu-24.04"]') || inputs.suite == 'bench' && (vars.E2E_BENCH_RUNNER || '["ubuntu-24.04"]') || (vars.E2E_FILEIO_RUNNER || '["ubuntu-24.04"]')) }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ inputs.suite == 'ublk' && 5 || 90 }}
     steps:
       - uses: actions/checkout@v6
 
@@ -58,11 +58,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
 
       - name: Install test dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq erofs-utils fuse3 fio
+          packages=(erofs-utils fuse3)
+          if [ "${{ inputs.suite }}" = bench ]; then packages+=(fio); fi
+          bash tests/scripts/install_ci_packages.sh "${packages[@]}"
           sudo modprobe fuse
 
       - name: Install erofsfuse (optional bench column)
@@ -100,10 +102,41 @@ jobs:
         run: |
           cargo test -p nydus --features cli,ublk --no-fail-fast
 
-      - name: Run ublk E2E
+      - name: Upload ublk binaries
         if: ${{ !cancelled() && inputs.suite == 'ublk' && steps.build.outcome == 'success' }}
-        run: make e2e-run PKG=./experimental/ublk/... E2E_REQUIRE=1 E2E_TIMEOUT=30m
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-ublk-binaries
+          path: |
+            target/ci/nydus
+            nydusify/nydusify
+          if-no-files-found: error
 
       - name: Run hugetar
         if: inputs.suite == 'hugetar'
         run: make e2e-run PKG=./manual/hugetar/ E2E_TAGS=manual E2E_REQUIRE=1 E2E_TIMEOUT=80m
+
+  ublk-e2e:
+    name: ublk E2E
+    needs: run
+    if: ${{ !cancelled() && inputs.suite == 'ublk' }}
+    runs-on: ${{ fromJSON(vars.E2E_UBLK_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+      - uses: actions/download-artifact@v7
+        with:
+          name: e2e-ublk-binaries
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh erofs-utils
+          uname -r
+          sudo modprobe ublk_drv
+      - name: Run ublk E2E
+        # Bound device/worker pressure without serializing independent mounts.
+        run: make e2e-run PKG=./experimental/ublk/... E2E_REQUIRE=1 E2E_PARALLEL=2 E2E_TIMEOUT=4m

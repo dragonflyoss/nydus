@@ -1,8 +1,11 @@
 # Stability tiers
 
 `TestLeak` and `TestRemote` run in the PR cache shard. Defaults remain 30s,
-20 mount cycles spread across the duration and 16 verified random-read workers
-**per transport**. Both
+6 mount cycles spread across the duration and 16 verified random-read workers
+**per transport**. PR Nightly runs each workload in its own job for 2m with
+6 cycles and two in-package tests, so FUSE and fileio run concurrently
+instead of putting four two-minute workloads through two slots. Each job
+has a five-minute budget including setup. Both
 FUSE and fileio run, so the host needs file-backed EROFS (Linux >=6.12,
 CONFIG_EROFS_FS_BACKED_BY_FILE) as well as FUSE.
 
@@ -14,11 +17,12 @@ Prefetch and reads overlap during startup; the remote baseline is sampled
 only after prefetch completion and the warmup period, avoiding false FD/RSS
 growth from a late-initializing HTTP pool.
 
-Manually dispatching Nightly runs `make e2e-soak`: default 1h and 120 cycles,
-in parallel for
-local/remote and FUSE/fileio. Configure repository variables
+Manually dispatching Nightly runs the full `make e2e-soak`: default 1h and
+120 cycles for local/remote and FUSE/fileio, in separate local/remote jobs.
+The PR soak is deliberately
+bounded; scheduled Nightly does not run the soak. Configure repository variables
 `E2E_SOAK_DURATION`, `E2E_SOAK_CYCLES`, `E2E_SOAK_RSS_MIB`, or locally.
-The hour-scale job does not run on PRs or scheduled Nightly runs:
+The manual run is:
 
 ```sh
 make e2e-soak SOAK_DURATION=1h SOAK_CYCLES=120 SOAK_RSS_MIB=64 E2E_REQUIRE=1

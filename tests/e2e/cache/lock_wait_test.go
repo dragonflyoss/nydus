@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/oracle"
 )
@@ -93,11 +92,9 @@ func TestLockWait(t *testing.T) {
 		}
 		oracle.VerifyMount(t, m.Root, w.image1.Want, w.image1.Compare())
 
-		env.KnownIssue(t, "KI-4", func(t env.TB) {
-			if !bounded {
-				t.Errorf("prefetch still waiting on another process's lock after %s", lockBound)
-			}
-		})
+		if !bounded {
+			t.Errorf("prefetch still waiting on another process's lock after %s", lockBound)
+		}
 	})
 }
 
@@ -137,14 +134,12 @@ func judgeLockWait(t *testing.T, m *mount.Mounted, rel, want string, release fun
 	}
 	mustRead(t, m.Path(rel), want)
 
-	env.KnownIssue(t, "KI-4", func(t env.TB) {
-		if blocked {
-			t.Errorf("read of %s blocked over %s on a lock another process holds", rel, lockBound)
-		}
-		if !lockWord.MatchString(log) {
-			t.Errorf("daemon did not log the lock it waited on")
-		}
-	})
+	if blocked {
+		t.Errorf("read of %s blocked over %s on a lock another process holds", rel, lockBound)
+	}
+	if !lockWord.MatchString(log) {
+		t.Errorf("daemon did not log the lock it waited on")
+	}
 }
 
 // daemonLog is everything m's daemon logged, console and file sinks.

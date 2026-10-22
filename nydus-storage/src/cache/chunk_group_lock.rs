@@ -19,6 +19,7 @@ use std::io;
 use std::ops::Range;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use tracing::warn;
@@ -35,6 +36,7 @@ pub struct ChunkGroupLocks {
     /// needs the descriptor. `None` means locking is unavailable here and
     /// callers fall back to fetching without coordination.
     file: OnceLock<Option<File>>,
+    unavailable: AtomicBool,
 }
 
 impl ChunkGroupLocks {
@@ -42,6 +44,7 @@ impl ChunkGroupLocks {
         Self {
             path,
             file: OnceLock::new(),
+            unavailable: AtomicBool::new(false),
         }
     }
 
@@ -94,15 +97,31 @@ impl ChunkGroupLocks {
     /// groups just before releasing, so the usual outcome of waiting is that
     /// no backend request is needed at all.
     pub fn acquire(&self, groups: Range<usize>) -> Option<GroupLockGuard<'_>> {
+        if self.unavailable.load(Ordering::Relaxed) {
+            return None;
+        }
         let file = self.file()?;
-        match set_lock(
-            file,
-            &groups,
-            libc::F_WRLCK as libc::c_short,
-            libc::F_OFD_SETLKW,
-        ) {
+        let start = std::time::Instant::now();
+        let result = loop {
+            match set_lock(
+                file,
+                &groups,
+                libc::F_WRLCK as libc::c_short,
+                libc::F_OFD_SETLK,
+            ) {
+                Err(err)
+                    if matches!(err.raw_os_error(), Some(libc::EAGAIN | libc::EACCES))
+                        && start.elapsed() < std::time::Duration::from_secs(2) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result,
+            }
+        };
+        match result {
             Ok(()) => Some(GroupLockGuard { file, groups }),
             Err(err) => {
+                self.unavailable.store(true, Ordering::Relaxed);
                 warn!(
                     "failed to lock groups {groups:?} in {}: {err}; \
                      fetching without cross-process coordination",

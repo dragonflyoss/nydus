@@ -151,8 +151,8 @@ func inodeIdentity(t *testing.T, f *Fixture) {
 		require.NoError(t, unix.Stat(f.At("inode/many_links"), &many))
 		var src unix.Stat_t
 		require.NoError(t, unix.Stat(f.Src("inode/many_links"), &src))
-		require.Greater(t, src.Nlink, uint64(255))
-		require.Equal(t, src.Nlink, many.Nlink, "inode/many_links: st_nlink")
+		require.True(t, src.Nlink > 255, "source nlink must exceed 255: %d", src.Nlink)
+		require.EqualValues(t, src.Nlink, many.Nlink, "inode/many_links: st_nlink")
 	})
 
 	t.Run("DistinctFilesHaveDistinctInodes", func(t *testing.T) {

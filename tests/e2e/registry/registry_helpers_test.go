@@ -59,7 +59,7 @@ func readWindow(path string, offset int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data := make([]byte, 4096)
 	_, err = f.ReadAt(data, offset)
 	return data, err

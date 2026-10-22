@@ -22,7 +22,6 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use nydus_storage::chunk_group_map::ChunkGroupMap;
-    use nydus_test_utils::known_issue::assert_known_issue;
 
     const CHILD_MAP: &str = "NYDUS_TEST_GROUP_MAP_CHILD";
 
@@ -138,11 +137,10 @@ mod linux {
         assert_eq!(libc::WEXITSTATUS(status), 0);
         let cold = !map.is_ready(0).unwrap();
         let published = map.is_range_ready(0..1).unwrap();
-        assert_known_issue(
-            "KI-3",
-            (cold, published),
+        assert!(
             cold && !published,
-            cold && published,
+            "reset group advertised as ready: {:?}",
+            (cold, published)
         );
     }
 }

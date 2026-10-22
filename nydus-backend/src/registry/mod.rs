@@ -281,7 +281,7 @@ impl Client {
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.get(&redirect, headers.clone()).await?;
             match response.status {
-                status if status.is_success() => return Ok(response),
+                status if status.is_success() => return response.require_partial(range),
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -292,7 +292,7 @@ impl Client {
             .execute(headers.clone(), |headers| transport.get(&url, headers))
             .await?;
         if response.status.is_success() {
-            return Ok(response);
+            return response.require_partial(range);
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -303,6 +303,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
+        let redirected = redirected.require_partial(range)?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -326,7 +327,7 @@ impl Client {
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.prefetch(&redirect, headers.clone()).await?;
             match response.status {
-                status if status.is_success() => return Ok(response),
+                status if status.is_success() => return response.require_partial(range),
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -337,7 +338,7 @@ impl Client {
             .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
             .await?;
         if response.status.is_success() {
-            return Ok(response);
+            return response.require_partial(range);
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -348,6 +349,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
+        let redirected = redirected.require_partial(range)?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -549,6 +551,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use nydus_config::HttpConfig;
+    use reqwest::header::LOCATION;
     use std::collections::VecDeque;
     use std::net::{SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -570,7 +573,7 @@ mod tests {
     }
 
     enum Scripted {
-        Body(Vec<u8>),
+        Body(StatusCode, Vec<u8>),
         Status(StatusCode, HeaderMap),
     }
 
@@ -600,8 +603,8 @@ mod tests {
                 .pop_front()
                 .expect("transport called more times than scripted");
             match scripted {
-                Scripted::Body(body) => Ok(Response {
-                    status: StatusCode::OK,
+                Scripted::Body(status, body) => Ok(Response {
+                    status,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(body.into()),
                     source: Source::Dragonfly,
@@ -652,7 +655,7 @@ mod tests {
             }
             if headers.contains_key(AUTHORIZATION) {
                 return Ok(Response {
-                    status: StatusCode::OK,
+                    status: StatusCode::PARTIAL_CONTENT,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(Bytes::from_static(b"ok")),
                     source: Source::Dragonfly,
@@ -772,14 +775,13 @@ mod tests {
     }
 
     #[test]
-    fn ki1_whole_blob_answers_do_not_respect_the_requested_offset() {
-        use nydus_test_utils::known_issue::assert_known_issue;
-
+    fn whole_blob_answers_are_rejected_for_range_reads() {
         let body: Vec<u8> = (0..64).collect();
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             for dragonfly in [false, true] {
                 let origin = OriginStub::serve("200 OK", body.clone());
-                let transport = ScriptedTransport::new([Scripted::Body(body.clone())]);
+                let transport =
+                    ScriptedTransport::new([Scripted::Body(StatusCode::OK, body.clone())]);
                 let mut registry = scripted_registry(origin.addr, None, transport.clone());
                 if !dragonfly {
                     Arc::get_mut(&mut registry.client).unwrap().dragonfly = None;
@@ -791,23 +793,62 @@ mod tests {
                         registry.prefetch_range_into(&TEST_BLOB_ID, 16, &mut bytes)
                     }
                 };
-                assert_known_issue(
-                    "KI-1",
-                    &(result.as_ref().map_err(ToString::to_string), bytes),
-                    result.is_err() || bytes == body[16..20],
-                    result.is_ok() && bytes == body[..4],
+                let err = result.expect_err("a whole-blob answer must not satisfy a range");
+                assert!(
+                    err.to_string().contains("expected 206 Partial Content"),
+                    "{err}"
                 );
+                assert_eq!(bytes, [0; 4]);
                 assert_eq!(transport.calls(), u32::from(dragonfly));
                 assert_eq!(origin.hits(), u32::from(!dragonfly));
             }
         }
     }
 
+    #[test]
+    fn whole_blob_redirects_are_rejected_for_range_reads() {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            for cached in [false, true] {
+                let origin = OriginStub::serve("500 Internal Server Error", Vec::new());
+                let location = format!("http://{}/redirect", origin.addr);
+                let mut script = Vec::new();
+                if !cached {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(LOCATION, location.parse().unwrap());
+                    script.push(Scripted::Status(StatusCode::TEMPORARY_REDIRECT, headers));
+                }
+                script.push(Scripted::Body(StatusCode::OK, (0..64).collect()));
+                let transport = ScriptedTransport::new(script);
+                let registry = scripted_registry(origin.addr, None, transport.clone());
+                let hex = hex::encode(TEST_BLOB_ID);
+                if cached {
+                    registry.client.redirects.insert(&hex, location);
+                }
+                let mut bytes = [0; 4];
+                let result = match kind {
+                    ReadKind::Ondemand => registry.read_range_into(&TEST_BLOB_ID, 16, &mut bytes),
+                    ReadKind::Prefetch => {
+                        registry.prefetch_range_into(&TEST_BLOB_ID, 16, &mut bytes)
+                    }
+                };
+                let err = result.expect_err("a redirect must not bypass range validation");
+                assert!(
+                    err.to_string().contains("expected 206 Partial Content"),
+                    "{err}"
+                );
+                assert_eq!(bytes, [0; 4]);
+                assert_eq!(transport.calls(), if cached { 1 } else { 2 });
+                assert_eq!(origin.hits(), 0);
+                if !cached {
+                    assert!(registry.client.redirects.get(&hex).is_none());
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "dragonfly")]
     #[test]
-    fn ki9_unreachable_scheduler_fails_backend_construction() {
-        use nydus_test_utils::known_issue::assert_known_issue;
-
+    fn unreachable_scheduler_does_not_fail_backend_construction() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -822,7 +863,7 @@ mod tests {
         )
         .map(|_| ())
         .map_err(|err| err.to_string());
-        assert_known_issue("KI-9", &result, result.is_ok(), result.is_err());
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
@@ -945,7 +986,7 @@ auth: YWxpY2U6c2VjcmV0
             );
             let transport = ScriptedTransport::new(vec![
                 Scripted::Status(StatusCode::UNAUTHORIZED, challenge),
-                Scripted::Body(body.clone()),
+                Scripted::Body(StatusCode::PARTIAL_CONTENT, body.clone()),
             ]);
             let registry =
                 scripted_registry(origin.addr, Some("YWxpY2U6c2VjcmV0"), transport.clone());
@@ -1020,7 +1061,10 @@ auth: YWxpY2U6c2VjcmV0
     fn cached_redirect_reads_ride_dragonfly() {
         let body = b"redirected".to_vec();
         let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
-        let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
+        let transport = ScriptedTransport::new(vec![Scripted::Body(
+            StatusCode::PARTIAL_CONTENT,
+            body.clone(),
+        )]);
         let registry = scripted_registry(origin.addr, None, transport.clone());
         let hex = hex::encode(TEST_BLOB_ID);
         registry
@@ -1043,7 +1087,7 @@ auth: YWxpY2U6c2VjcmV0
         let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
         let transport = ScriptedTransport::new(vec![
             Scripted::Status(StatusCode::FORBIDDEN, HeaderMap::new()),
-            Scripted::Body(body.clone()),
+            Scripted::Body(StatusCode::PARTIAL_CONTENT, body.clone()),
         ]);
         let registry = scripted_registry(origin.addr, None, transport.clone());
         let hex = hex::encode(TEST_BLOB_ID);

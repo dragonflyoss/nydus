@@ -114,12 +114,6 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 			waitExit(t, m.Daemon)
 			require.Zero(t, m.Daemon.ExitCode(), "exit code after an external unmount")
 		}
-		// FUSE learns of the unmount from the kernel; the daemons that mount
-		// kernel EROFS themselves wait for a signal only.
-		if a.Name() != (mount.FUSE{}).Name() {
-			env.KnownIssue(t, "KI-8", exits)
-			return
-		}
 		exits(t)
 	})
 }

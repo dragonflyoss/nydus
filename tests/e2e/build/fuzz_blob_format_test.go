@@ -51,6 +51,6 @@ func FuzzBlobFormat(f *testing.F) {
 		if err == nil {
 			require.Equal(t, expected, out, "accepted footer mutation changed exported content")
 		}
-		formatCommand(t, "check", "--blob", path)
+		_, _ = formatCommand(t, "check", "--blob", path)
 	})
 }

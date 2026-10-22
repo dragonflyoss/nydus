@@ -38,6 +38,57 @@ pub(crate) enum Body {
 
 /// Implements the response.
 impl Response {
+    /// Rejects a successful whole-blob answer before its bytes can be used
+    /// at the requested range's offset.
+    pub(crate) fn require_partial(self, range: &str) -> io::Result<Self> {
+        // Dragonfly 1.3 returns 200 for a partial download but supplies the
+        // exact Content-Range. Do not extend this exception to origin servers.
+        if self.status == StatusCode::OK && self.source == Source::Dragonfly {
+            if let Some((start, end, total)) = self
+                .headers
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("bytes "))
+                .and_then(|value| {
+                    let (span, total) = value.split_once('/')?;
+                    let (start, end) = span.split_once('-')?;
+                    Some((
+                        start.parse::<u64>().ok()?,
+                        end.parse::<u64>().ok()?,
+                        total.parse::<u64>().ok()?,
+                    ))
+                })
+            {
+                let requested = range.strip_prefix("bytes=").and_then(|value| {
+                    let (first, last) = value.split_once('-')?;
+                    if first.is_empty() {
+                        let length = last.parse::<u64>().ok()?;
+                        Some((total.saturating_sub(length), total.checked_sub(1)?))
+                    } else {
+                        Some((first.parse().ok()?, last.parse().ok()?))
+                    }
+                });
+                if start <= end
+                    && end < total
+                    && requested == Some((start, end))
+                    && matches!(&self.body, Body::Bytes(bytes) if bytes.len() as u64 == end - start + 1)
+                {
+                    return Ok(self);
+                }
+            }
+        }
+        if self.status != StatusCode::PARTIAL_CONTENT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "registry range request returned {}, expected 206 Partial Content",
+                    self.status
+                ),
+            ));
+        }
+        Ok(self)
+    }
+
     /// Reads exactly `length` bytes of the body, a shorter body being an
     /// [`io::ErrorKind::UnexpectedEof`]. A body already in memory is handed
     /// over without a copy.

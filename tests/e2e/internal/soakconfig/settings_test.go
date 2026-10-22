@@ -12,7 +12,7 @@ func TestSettings(t *testing.T) {
 	s, err := Parse(func(string) string { return "" })
 	require.NoError(t, err)
 	require.Equal(t, 30*time.Second, s.Duration)
-	require.Equal(t, 20, s.Cycles)
+	require.Equal(t, 6, s.Cycles)
 	for key, values := range map[string][]string{
 		"NYDUS_E2E_SOAK_DURATION": {"garbage", "-1s", "9s", "25h"},
 		"NYDUS_E2E_SOAK_CYCLES":   {"0", "-1", "bad", "100001"},

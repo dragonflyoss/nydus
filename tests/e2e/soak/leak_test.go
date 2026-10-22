@@ -41,8 +41,8 @@ const (
 )
 
 // TestLeak soaks each adapter: 16 goroutines issue random reads for 30s,
-// each checked against the source, while 20 more daemons of the same
-// adapter mount, serve a read and unmount one after another. Afterwards the
+// each checked against the source, while daemons of the same adapter mount,
+// serve a read and unmount one after another. Afterwards the
 // soaked daemon holds no more fds or threads than it did once warmed up,
 // within a small slack; nothing is left mounted under the test's
 // directories; no daemon or child process is left. RSS growth over 10% is

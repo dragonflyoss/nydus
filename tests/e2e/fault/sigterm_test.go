@@ -64,11 +64,7 @@ func TestSigterm(t *testing.T) {
 				}
 				expectNoMounts(t, dir, points...)
 			}
-			if c.busy {
-				env.KnownIssue(t, "KI-10", clean)
-			} else {
-				clean(t)
-			}
+			clean(t)
 		})
 	}
 }

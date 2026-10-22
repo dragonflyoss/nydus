@@ -771,6 +771,11 @@ Current implementation notes:
 - `--config` supplies the blob directory through the storage config's
 	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
+- After printing the report (table or JSON), the command exits non-zero for
+	structural errors. With `--blob`, `--blob-dir`, or a configured blob directory,
+	it also fails if any blob is unresolved or unverified, including a caller-named
+	`--blob-id` whose digest cannot be verified. Metadata-only `--bootstrap`
+	inspection does not require blob verification.
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
 	`max_bytes_per_chunk_group`, `bytes_per_chunk_group_index`, `chunk_group_count`,
 	`chunk_compressor`, the chunk, digest

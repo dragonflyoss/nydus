@@ -3,8 +3,6 @@ package cache
 import (
 	"os"
 	"testing"
-
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 )
 
 // TestDeletedDatafile deletes a cache data file while a daemon has it open.
@@ -34,11 +32,9 @@ func TestDeletedDatafile(t *testing.T) {
 		t.Fatalf("new daemon reopened the deleted data file inode %d", got)
 	}
 
-	// The old daemon refills what the reset cleared; its own reads come
-	// back from the deleted inode, so they stay right.
-	mustRead(t, old.Path("shared.bin"), want)
+	// The old daemon may reject the unlinked cache inode, but must never
+	// publish its bytes as ready in the replacement file.
+	checkRead(t, old.Path("shared.bin"), want)
 
-	env.KnownIssue(t, "KI-4", func(t env.TB) {
-		checkRead(t, newer.Path("shared.bin"), want)
-	})
+	mustRead(t, newer.Path("shared.bin"), want)
 }

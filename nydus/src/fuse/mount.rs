@@ -99,7 +99,21 @@ pub(crate) fn finish_session(
 
     if session_alive && same_dev {
         info!("unmounting {}", mountpoint.display());
-        return session.umount_and_join();
+        return match session.umount_and_join() {
+            Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {
+                // A busy session can retain open files after detaching. The
+                // process is exiting; never leave its dead mount on the path.
+                if mount_dev_of(mountpoint)? != our_dev {
+                    return Ok(());
+                }
+                let path = std::ffi::CString::new(mountpoint.as_os_str().as_encoded_bytes())?;
+                if unsafe { libc::umount2(path.as_ptr(), libc::MNT_DETACH) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            }
+            result => result,
+        };
     }
 
     for _ in 0..100 {

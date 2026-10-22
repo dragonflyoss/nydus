@@ -14,7 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func response(t *testing.T, socket, method, path string) *http.Response {
+type responseInfo struct {
+	StatusCode int
+	Header     http.Header
+}
+
+func response(t *testing.T, socket, method, path string) responseInfo {
 	t.Helper()
 	c, err := net.DialTimeout("unix", socket, time.Second)
 	require.NoError(t, err)
@@ -24,10 +29,10 @@ func response(t *testing.T, socket, method, path string) *http.Response {
 	require.NoError(t, err)
 	r, err := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: method})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = r.Body.Close() })
+	defer func() { require.NoError(t, r.Body.Close()) }()
 	_, err = io.ReadAll(r.Body)
 	require.NoError(t, err)
-	return r
+	return responseInfo{StatusCode: r.StatusCode, Header: r.Header}
 }
 
 func trace(t *testing.T, api *mount.API) []json.RawMessage {
