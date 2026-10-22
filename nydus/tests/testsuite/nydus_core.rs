@@ -305,14 +305,17 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
 
     // The fetched range touched chunk groups of blob 1 in address order,
     // each recorded once.
-    let trace = core.trace_snapshot();
-    assert!(!trace.entries.is_empty());
-    assert!(trace.entries.iter().all(|entry| entry.blob_index == 1));
-    assert!(trace
+    let ondemand = core.ondemand_snapshot();
+    assert!(!ondemand.entries.is_empty());
+    assert!(ondemand.entries.iter().all(|entry| entry.blob_index == 1));
+    assert!(ondemand
         .entries
         .windows(2)
         .all(|pair| pair[0].chunk_group_index < pair[1].chunk_group_index));
-    assert_eq!(core.trace_json(), serde_json::to_string(&trace).unwrap());
+    assert_eq!(
+        core.ondemand_json(),
+        serde_json::to_string(&ondemand).unwrap()
+    );
 
     // Unaligned ranges and unknown blobs are rejected.
     assert!(core.blobs.fetch(&blob_id, 1, block).is_err());

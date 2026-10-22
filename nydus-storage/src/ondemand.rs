@@ -1,15 +1,15 @@
-//! Chunk-group-level on-demand access tracing.
+//! Chunk-group-level on-demand access recording.
 //!
 //! Records, in first-access order, every chunk group touched by an
 //! on-demand (FUSE) read as a `(blob_index, chunk_group_index)` pair into
-//! the [`TraceRecorder`] the image's caches were opened with. The resulting
+//! the [`OndemandRecorder`] the image's caches were opened with. The resulting
 //! ordered list is exposed as JSON by the apiserver's `/trace` endpoint and
 //! feeds `nydus optimize`, which copies exactly those groups into an
 //! ondemand blob the runtime prefetches first. Prefetch reads are not
 //! recorded.
 //!
 //! Each group is recorded once, at the position of its first on-demand
-//! access, so the trace stays bounded and reflects the access pattern rather
+//! access, so the record stays bounded and reflects the access pattern rather
 //! than raw repeat counts.
 
 use std::collections::HashSet;
@@ -17,12 +17,12 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-/// Version of the serialized trace document, bumped on incompatible changes.
-pub const TRACE_DOCUMENT_VERSION: u32 = 1;
+/// Version of the serialized ondemand document, bumped on incompatible changes.
+pub const ONDEMAND_DOCUMENT_VERSION: u32 = 1;
 
-/// A single chunk group access in the on-demand trace.
+/// A single chunk group access in the ondemand record.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct TraceEntry {
+pub struct OndemandEntry {
     /// Device/blob index in the merged image (external blobs are 1-based;
     /// device 0 is the primary bootstrap image and never produces chunk
     /// reads).
@@ -31,44 +31,44 @@ pub struct TraceEntry {
     pub chunk_group_index: u32,
 }
 
-/// The serialized trace document: `{"version":1,"patterns":[...]}`. The
+/// The serialized ondemand document: `{"version":1,"patterns":[...]}`. The
 /// explicit format version lets future fields be added (or the pattern shape
 /// change) without breaking consumers, and keeps the document self-describing
 /// wherever it travels (files, HTTP bodies, embedding hosts).
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TraceDocument {
+pub struct OndemandDocument {
     pub version: u32,
     /// Serialized as `patterns`.
     #[serde(rename = "patterns")]
-    pub entries: Vec<TraceEntry>,
+    pub entries: Vec<OndemandEntry>,
 }
 
-impl Default for TraceDocument {
+impl Default for OndemandDocument {
     fn default() -> Self {
         Self {
-            version: TRACE_DOCUMENT_VERSION,
+            version: ONDEMAND_DOCUMENT_VERSION,
             entries: Vec::new(),
         }
     }
 }
 
 #[derive(Default)]
-struct TraceState {
-    entries: Vec<TraceEntry>,
-    seen: HashSet<TraceEntry>,
+struct OndemandState {
+    entries: Vec<OndemandEntry>,
+    seen: HashSet<OndemandEntry>,
 }
 
 #[derive(Default)]
-pub struct TraceRecorder {
-    state: Mutex<TraceState>,
+pub struct OndemandRecorder {
+    state: Mutex<OndemandState>,
 }
 
-impl TraceRecorder {
+impl OndemandRecorder {
     /// Record an on-demand access to chunk group `chunk_group_index` of
     /// `blob_index`. The first access to a given group is appended in
     /// order; later accesses are ignored.
     pub fn record_chunk_group_access(&self, blob_index: u32, chunk_group_index: u32) {
-        let entry = TraceEntry {
+        let entry = OndemandEntry {
             blob_index,
             chunk_group_index,
         };
@@ -78,16 +78,16 @@ impl TraceRecorder {
         }
     }
 
-    /// Return a stable snapshot of the trace collected so far.
-    pub fn snapshot(&self) -> TraceDocument {
+    /// Return a stable snapshot of the record collected so far.
+    pub fn snapshot(&self) -> OndemandDocument {
         let state = self.state.lock().unwrap();
-        TraceDocument {
-            version: TRACE_DOCUMENT_VERSION,
+        OndemandDocument {
+            version: ONDEMAND_DOCUMENT_VERSION,
             entries: state.entries.clone(),
         }
     }
 
-    /// Serialize the current on-demand chunk group access trace as JSON,
+    /// Serialize the current ondemand record as JSON,
     /// e.g. `{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4}]}`.
     pub fn encode_json(&self) -> String {
         serde_json::to_string(&self.snapshot())
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn encode_json_records_first_access_order_and_dedups() {
-        let recorder = TraceRecorder::default();
+        let recorder = OndemandRecorder::default();
         recorder.record_chunk_group_access(9001, 7);
         recorder.record_chunk_group_access(9002, 4);
         recorder.record_chunk_group_access(9001, 7);
@@ -132,22 +132,22 @@ mod tests {
     }
 
     #[test]
-    fn recorder_snapshots_and_clears_instance_trace() {
-        let recorder = TraceRecorder::default();
+    fn recorder_snapshots_and_clears_instance_record() {
+        let recorder = OndemandRecorder::default();
         recorder.record_chunk_group_access(1, 4);
         recorder.record_chunk_group_access(1, 4);
         recorder.record_chunk_group_access(2, 7);
 
         let snapshot = recorder.snapshot();
-        assert_eq!(snapshot.version, TRACE_DOCUMENT_VERSION);
+        assert_eq!(snapshot.version, ONDEMAND_DOCUMENT_VERSION);
         assert_eq!(
             snapshot.entries,
             vec![
-                TraceEntry {
+                OndemandEntry {
                     blob_index: 1,
                     chunk_group_index: 4,
                 },
-                TraceEntry {
+                OndemandEntry {
                     blob_index: 2,
                     chunk_group_index: 7,
                 },

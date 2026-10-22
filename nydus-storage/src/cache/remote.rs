@@ -259,8 +259,8 @@ impl BlobCache for RemoteBlobCache {
         ))
     }
 
-    fn is_redirect(&self) -> bool {
-        self.blob_metadata.is_redirect()
+    fn is_ondemand(&self) -> bool {
+        self.blob_metadata.is_ondemand()
     }
 }
 
@@ -481,7 +481,7 @@ mod tests {
             remote.prefetch_all(1, None).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
-        assert!(!remote.is_redirect());
+        assert!(!remote.is_ondemand());
     }
 
     #[test]

@@ -44,10 +44,10 @@ impl BlobMetadataTableType {
     /// [`BlobMetadataChunkGroupDigest`].
     pub const CHUNK_GROUP_DIGEST: Self = Self(4);
 
-    /// ChunkGroupRedirectTable, the chunk group of another blob that every
-    /// chunk group copies, present in redirect blobs only. Entries are
-    /// [`BlobMetadataChunkGroupRedirect`].
-    pub const CHUNK_GROUP_REDIRECT: Self = Self(5);
+    /// ChunkGroupOndemandSourceTable, the chunk group of another blob that every
+    /// chunk group copies, present in ondemand blobs only. Entries are
+    /// [`BlobMetadataChunkGroupOndemandSource`].
+    pub const CHUNK_GROUP_ONDEMAND_SOURCE: Self = Self(5);
 
     /// The raw on-disk value.
     pub fn get(self) -> u16 {
@@ -64,7 +64,7 @@ impl fmt::Display for BlobMetadataTableType {
             Self::CHUNK_LENGTH => f.write_str("ChunkLengthTable"),
             Self::CHUNK_GROUP_INDEX => f.write_str("ChunkGroupIndexTable"),
             Self::CHUNK_GROUP_DIGEST => f.write_str("ChunkGroupDigestTable"),
-            Self::CHUNK_GROUP_REDIRECT => f.write_str("ChunkGroupRedirectTable"),
+            Self::CHUNK_GROUP_ONDEMAND_SOURCE => f.write_str("ChunkGroupOndemandSourceTable"),
             Self(other) => write!(f, "{other:#x}"),
         }
     }
@@ -523,7 +523,7 @@ impl BlobMetadataChunkGroup {
 
 /// One chunk group with its extent in every layer, joined from its
 /// ChunkGroupTable entry and the next. A group of one or more chunks is the
-/// compression, decode, cache fill, readiness and trace unit.
+/// compression, decode, cache fill, readiness and record unit.
 ///
 /// ```text
 /// logical       the address space the cache mirrors, groups back to back,
@@ -551,7 +551,7 @@ pub struct BlobMetadataChunkGroupExtent {
     index: u32,
     start: BlobMetadataChunkGroup,
     end: BlobMetadataChunkGroup,
-    redirect: Option<BlobMetadataChunkGroupRedirect>,
+    ondemand_source: Option<BlobMetadataChunkGroupOndemandSource>,
 }
 
 /// Joins two entries into a group, validates it, then answers where the
@@ -567,7 +567,7 @@ impl BlobMetadataChunkGroupExtent {
             end: blob_metadata
                 .chunk_groups
                 .get(&blob_metadata.bytes, index + 1),
-            redirect: blob_metadata.chunk_group_redirect(index),
+            ondemand_source: blob_metadata.chunk_group_ondemand_source(index),
         }
     }
 
@@ -718,9 +718,9 @@ impl BlobMetadataChunkGroupExtent {
         self.start.uncompressed_crc32
     }
 
-    /// The source this group copies, in a redirect blob.
-    pub fn redirect(&self) -> Option<BlobMetadataChunkGroupRedirect> {
-        self.redirect
+    /// The source this group copies, in an ondemand blob.
+    pub fn ondemand_source(&self) -> Option<BlobMetadataChunkGroupOndemandSource> {
+        self.ondemand_source
     }
 
     /// First 4KiB block of the group in the logical address space.
@@ -1080,9 +1080,9 @@ impl BlobMetadataChunkGroupDigest {
     }
 }
 
-/// One ChunkGroupRedirectTable entry, the chunk group of another blob of
+/// One ChunkGroupOndemandSourceTable entry, the chunk group of another blob of
 /// the image that the chunk group at the same index copies. Present only
-/// in a redirect blob (an `optimize` output), one entry per chunk group.
+/// in an ondemand blob (an `optimize` output), one entry per chunk group.
 ///
 /// ```text
 /// offset  size  field
@@ -1094,16 +1094,16 @@ impl BlobMetadataChunkGroupDigest {
 ///      4     4  source_chunk_group_index  the copied group within it
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BlobMetadataChunkGroupRedirect {
+pub struct BlobMetadataChunkGroupOndemandSource {
     source_blob_index: u16,
     reserved: [u8; 2],
     source_chunk_group_index: u32,
 }
 
-/// On-disk encoding of a ChunkGroupRedirectTable entry, its fields
+/// On-disk encoding of a ChunkGroupOndemandSourceTable entry, its fields
 /// little-endian in struct order.
-impl BlobMetadataEntry for BlobMetadataChunkGroupRedirect {
-    /// One ChunkGroupRedirectTable entry's fixed on-disk size, 8 bytes holding
+impl BlobMetadataEntry for BlobMetadataChunkGroupOndemandSource {
+    /// One ChunkGroupOndemandSourceTable entry's fixed on-disk size, 8 bytes holding
     /// the source blob slot, two reserved bytes and the source group.
     const SIZE: usize = 8;
 
@@ -1129,18 +1129,18 @@ impl BlobMetadataEntry for BlobMetadataChunkGroupRedirect {
 }
 
 /// Names a source for a writer, and reads it back for a reader.
-impl BlobMetadataChunkGroupRedirect {
+impl BlobMetadataChunkGroupOndemandSource {
     /// Names chunk group `source_chunk_group_index` of the blob in EROFS
     /// device slot `source_blob_index` (never zero) as the source.
     pub fn new(source_blob_index: u16, source_chunk_group_index: u32) -> Result<Self> {
-        let redirect = Self {
+        let ondemand = Self {
             source_blob_index,
             reserved: [0; 2],
             source_chunk_group_index,
         };
 
-        redirect.validate_fields()?;
-        Ok(redirect)
+        ondemand.validate_fields()?;
+        Ok(ondemand)
     }
 
     /// Validates that the source blob index is a device slot, since slot zero
@@ -1148,7 +1148,7 @@ impl BlobMetadataChunkGroupRedirect {
     fn validate_fields(&self) -> Result<()> {
         if self.source_blob_index == 0 {
             return Err(Error::InvalidImage(
-                "blob meta redirect source blob index must be non-zero".to_string(),
+                "blob meta ondemand source blob index must be non-zero".to_string(),
             ));
         }
 
@@ -1409,27 +1409,27 @@ impl BlobMetadataHeader {
 /// 8-byte boundary, zero padded to a 4 KiB multiple.
 ///
 /// ```text
-/// ┌────────┬─────────────────┬──────────────────┬──────────────────────┬──────────────────────────────────┬────────────────────────────────────┬─────┐
-/// │ header │ ChunkGroupTable │ ChunkLengthTable │ ChunkGroupIndexTable │ ChunkGroupDigestTable (optional) │ ChunkGroupRedirectTable (optional) │ pad │
-/// └────────┴─────────────────┴──────────────────┴──────────────────────┴──────────────────────────────────┴────────────────────────────────────┴─────┘
+/// ┌────────┬─────────────────┬──────────────────┬──────────────────────┬──────────────────────────────────┬──────────────────────────────────────────┬─────┐
+/// │ header │ ChunkGroupTable │ ChunkLengthTable │ ChunkGroupIndexTable │ ChunkGroupDigestTable (optional) │ ChunkGroupOndemandSourceTable (optional) │ pad │
+/// └────────┴─────────────────┴──────────────────┴──────────────────────┴──────────────────────────────────┴──────────────────────────────────────────┴─────┘
 /// 0        24
 ///
-/// table                    type  presence                        header extension                                  entries
-/// ChunkGroupTable             1  required                        BlobMetadataChunkGroupTableHeaderExtension        (groups + 1) * 24 B,
-///                                                                                                                  the last one only ends
-/// ChunkLengthTable            2  required                        none                                              chunks * 4 B
-/// ChunkGroupIndexTable        3  required                        BlobMetadataChunkGroupIndexTableHeaderExtension   ceil(blocks / stride) * 4 B
-/// ChunkGroupDigestTable       4  optional, with a digester       BlobMetadataChunkGroupDigestTableHeaderExtension  groups * 32 B
-/// ChunkGroupRedirectTable     5  optional, in redirect blobs     none                                              groups * 8 B
+/// table                          type  presence                     header extension                                  entries
+/// ChunkGroupTable                   1  required                     BlobMetadataChunkGroupTableHeaderExtension        (groups + 1) * 24 B,
+///                                                                                                                     the last one only ends
+/// ChunkLengthTable                  2  required                     none                                              chunks * 4 B
+/// ChunkGroupIndexTable              3  required                     BlobMetadataChunkGroupIndexTableHeaderExtension   ceil(blocks / stride) * 4 B
+/// ChunkGroupDigestTable             4  optional, with a digester    BlobMetadataChunkGroupDigestTableHeaderExtension  groups * 32 B
+/// ChunkGroupOndemandSourceTable     5  optional, in ondemand blobs  none                                              groups * 8 B
 /// ```
 ///
 /// The table headers are the compatibility contract. A reader rejects
 /// unknown incompat bits of any table, skips a table of unknown type
 /// otherwise, reads known tables through their
 /// declared sizes, and keeps every byte so [`Self::write_to`] preserves what
-/// it does not know. A redirect blob (an `optimize` output) copies chunk
+/// it does not know. An ondemand blob (an `optimize` output) copies chunk
 /// groups of other blobs byte for byte and names their sources in
-/// ChunkGroupRedirectTable.
+/// ChunkGroupOndemandSourceTable.
 #[derive(Debug)]
 pub struct BlobMetadata {
     header: BlobMetadataHeader,
@@ -1439,7 +1439,7 @@ pub struct BlobMetadata {
     chunk_lengths: BlobMetadataEntries<BlobMetadataChunkLength>,
     chunk_group_indexes: BlobMetadataEntries<BlobMetadataChunkGroupIndex>,
     chunk_group_digests: Option<BlobMetadataEntries<BlobMetadataChunkGroupDigest>>,
-    chunk_group_redirects: Option<BlobMetadataEntries<BlobMetadataChunkGroupRedirect>>,
+    chunk_group_ondemand_sources: Option<BlobMetadataEntries<BlobMetadataChunkGroupOndemandSource>>,
     chunk_group_count: u32,
     max_blocks_per_chunk_group: u32,
     blocks_per_chunk_group_index: u32,
@@ -1468,7 +1468,7 @@ impl BlobMetadata {
     /// `blocks_per_chunk_group_index` is the stride of one index entry, both
     /// stored as their log2. `chunk_groups` ends in its last entry.
     /// `chunk_group_digests` holds one entry per group made by `digester`,
-    /// or none without one, and `chunk_group_redirects` one entry per group
+    /// or none without one, and `chunk_group_ondemand_sources` one entry per group
     /// or none.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1479,7 +1479,7 @@ impl BlobMetadata {
         chunk_groups: Vec<BlobMetadataChunkGroup>,
         chunk_lengths: Vec<BlobMetadataChunkLength>,
         chunk_group_digests: Vec<BlobMetadataChunkGroupDigest>,
-        chunk_group_redirects: Vec<BlobMetadataChunkGroupRedirect>,
+        chunk_group_ondemand_sources: Vec<BlobMetadataChunkGroupOndemandSource>,
     ) -> Result<Self> {
         let mut writer = BlobMetadataWriter::new();
 
@@ -1531,15 +1531,15 @@ impl BlobMetadata {
             })
             .transpose()?;
 
-        // ChunkGroupRedirectTable takes one source group per group and is
-        // written only for a redirect blob. It has no header extension.
-        let chunk_group_redirect_table = if chunk_group_redirects.is_empty() {
+        // ChunkGroupOndemandSourceTable takes one source group per group and is
+        // written only for an ondemand blob. It has no header extension.
+        let chunk_group_ondemand_source_table = if chunk_group_ondemand_sources.is_empty() {
             None
         } else {
             Some(writer.push_table(
-                BlobMetadataTableType::CHUNK_GROUP_REDIRECT,
+                BlobMetadataTableType::CHUNK_GROUP_ONDEMAND_SOURCE,
                 None,
-                &chunk_group_redirects,
+                &chunk_group_ondemand_sources,
             )?)
         };
         let (header, tables, bytes) = writer.finish()?;
@@ -1556,7 +1556,7 @@ impl BlobMetadata {
             chunk_lengths: chunk_length_table,
             chunk_group_indexes: chunk_group_index_table,
             chunk_group_digests: chunk_group_digest_table,
-            chunk_group_redirects: chunk_group_redirect_table,
+            chunk_group_ondemand_sources: chunk_group_ondemand_source_table,
             chunk_group_count: chunk_group_count as u32,
             max_blocks_per_chunk_group,
             blocks_per_chunk_group_index,
@@ -1608,24 +1608,24 @@ impl BlobMetadata {
     }
 
     /// Inspect data-only artifact features without allocating or decoding
-    /// metadata tables. Returns `(incremental, redirect)`.
+    /// metadata tables. Returns `(incremental, ondemand)`.
     pub fn artifact_features_from_bytes(bytes: &[u8]) -> Result<(bool, bool)> {
         let header = BlobMetadataHeader::from_bytes(bytes)?;
         let mut end = BlobMetadataHeader::SIZE;
-        let mut redirect = false;
+        let mut ondemand = false;
         for _ in 0..header.table_count {
             let table = BlobMetadataTable::from_bytes(bytes, end)?;
-            redirect |= table.table_type() == BlobMetadataTableType::CHUNK_GROUP_REDIRECT;
+            ondemand |= table.table_type() == BlobMetadataTableType::CHUNK_GROUP_ONDEMAND_SOURCE;
             end = table.range().end;
         }
         let incremental = header.feature_incompat & NYDUS_BLOB_METADATA_INCOMPAT_INCREMENTAL != 0;
-        if incremental && redirect {
+        if incremental && ondemand {
             return Err(Error::InvalidImage(
-                "blob metadata cannot be both redirect and incremental".to_string(),
+                "blob metadata cannot be both ondemand and incremental".to_string(),
             ));
         }
 
-        Ok((incremental, redirect))
+        Ok((incremental, ondemand))
     }
 
     /// Parses a blob meta from its bytes, which it keeps. The header, the table
@@ -1707,13 +1707,13 @@ impl BlobMetadata {
                 }
             };
 
-        // ChunkGroupRedirectTable is optional, present in a redirect blob only.
+        // ChunkGroupOndemandSourceTable is optional, present in an ondemand blob only.
         // It holds the group of another blob that every group copies, one
         // entry per group in ChunkGroupTable order. It has no header
         // extension.
-        let chunk_group_redirects =
-            BlobMetadataTable::find(&tables, BlobMetadataTableType::CHUNK_GROUP_REDIRECT)
-                .map(BlobMetadataTable::entries_of::<BlobMetadataChunkGroupRedirect>)
+        let chunk_group_ondemand_sources =
+            BlobMetadataTable::find(&tables, BlobMetadataTableType::CHUNK_GROUP_ONDEMAND_SOURCE)
+                .map(BlobMetadataTable::entries_of::<BlobMetadataChunkGroupOndemandSource>)
                 .transpose()?;
 
         let blob_metadata = Self {
@@ -1724,7 +1724,7 @@ impl BlobMetadata {
             chunk_lengths,
             chunk_group_indexes,
             chunk_group_digests,
-            chunk_group_redirects,
+            chunk_group_ondemand_sources,
             chunk_group_count: chunk_group_count as u32,
             max_blocks_per_chunk_group,
             blocks_per_chunk_group_index,
@@ -1749,9 +1749,9 @@ impl BlobMetadata {
     /// call for. Runs on both sides, so a constructed blob meta is valid by
     /// definition.
     fn validate_fields(&self) -> Result<()> {
-        if self.is_incremental() && self.is_redirect() {
+        if self.is_incremental() && self.is_ondemand() {
             return Err(Error::InvalidImage(
-                "blob metadata cannot be both redirect and incremental".to_string(),
+                "blob metadata cannot be both ondemand and incremental".to_string(),
             ));
         }
 
@@ -1823,11 +1823,11 @@ impl BlobMetadata {
         }
 
         if self
-            .chunk_group_redirects
+            .chunk_group_ondemand_sources
             .is_some_and(|entries| entries.len() != self.chunk_group_count())
         {
             return Err(Error::InvalidImage(
-                "blob meta ChunkGroupRedirectTable does not hold one entry per chunk group"
+                "blob meta ChunkGroupOndemandSourceTable does not hold one entry per chunk group"
                     .to_string(),
             ));
         }
@@ -2006,10 +2006,13 @@ impl BlobMetadata {
         (0..self.chunk_group_count()).filter_map(|index| self.chunk_group_digest(index))
     }
 
-    /// The redirect of chunk group `index`, `None` past the table or in a
-    /// blob that is not a redirect blob.
-    pub fn chunk_group_redirect(&self, index: usize) -> Option<BlobMetadataChunkGroupRedirect> {
-        let entries = self.chunk_group_redirects?;
+    /// The ondemand source of chunk group `index`, `None` past the table or in a
+    /// blob that is not an ondemand blob.
+    pub fn chunk_group_ondemand_source(
+        &self,
+        index: usize,
+    ) -> Option<BlobMetadataChunkGroupOndemandSource> {
+        let entries = self.chunk_group_ondemand_sources?;
         if index >= entries.len() {
             return None;
         }
@@ -2017,10 +2020,10 @@ impl BlobMetadata {
         Some(entries.get(&self.bytes, index))
     }
 
-    /// Whether the blob is a redirect blob, its chunk groups copied from other
-    /// blobs named in ChunkGroupRedirectTable.
-    pub fn is_redirect(&self) -> bool {
-        self.chunk_group_redirects.is_some()
+    /// Whether the blob is an ondemand blob, its chunk groups copied from other
+    /// blobs named in ChunkGroupOndemandSourceTable.
+    pub fn is_ondemand(&self) -> bool {
+        self.chunk_group_ondemand_sources.is_some()
     }
 
     /// Whether this metadata belongs to an incremental upper data blob that
@@ -2181,7 +2184,7 @@ mod tests {
             blob_metadata.digester().unwrap(),
             Some(BlobMetadataDigester::Blake3)
         );
-        assert!(!blob_metadata.is_redirect());
+        assert!(!blob_metadata.is_ondemand());
         assert_eq!(blob_metadata.max_blocks_per_chunk_group(), 16);
         assert_eq!(blob_metadata.max_bytes_per_chunk_group(), 65536);
         assert_eq!(blob_metadata.blocks_per_chunk_group_index(), 1);
@@ -2251,7 +2254,7 @@ mod tests {
                 chunk_range.end - chunk_range.start
             );
             assert!(chunk_group.is_uncompressed(&blob_metadata));
-            assert!(chunk_group.redirect().is_none());
+            assert!(chunk_group.ondemand_source().is_none());
         }
     }
 
@@ -2793,7 +2796,7 @@ mod tests {
     #[test]
     fn new_rejects_inconsistent_tables() {
         let (chunk_groups, chunk_lengths, chunk_group_digests) = entries(&chunks());
-        let redirect = BlobMetadataChunkGroupRedirect::new(1, 0).unwrap();
+        let ondemand = BlobMetadataChunkGroupOndemandSource::new(1, 0).unwrap();
         let mut extra_chunk_length = chunk_lengths.clone();
         extra_chunk_length.push(BlobMetadataChunkLength::new(5));
         let mut extra_chunk_named = chunk_groups.clone();
@@ -2865,8 +2868,8 @@ mod tests {
                 chunk_groups.clone(),
                 chunk_lengths.clone(),
                 vec![],
-                vec![redirect],
-                "blob meta ChunkGroupRedirectTable does not hold one entry per chunk group",
+                vec![ondemand],
+                "blob meta ChunkGroupOndemandSourceTable does not hold one entry per chunk group",
             ),
             (
                 0,
@@ -2947,7 +2950,7 @@ mod tests {
             chunk_groups,
             chunk_lengths,
             chunk_group_digests,
-            chunk_group_redirects,
+            chunk_group_ondemand_sources,
             expected,
         ) in test_cases
         {
@@ -2959,7 +2962,7 @@ mod tests {
                 chunk_groups,
                 chunk_lengths,
                 chunk_group_digests,
-                chunk_group_redirects,
+                chunk_group_ondemand_sources,
             )
             .unwrap_err();
             assert_eq!(err.to_string(), expected);
@@ -3057,17 +3060,20 @@ mod tests {
     }
 
     #[test]
-    fn new_writes_one_redirect_per_chunk_group() {
+    fn new_writes_one_ondemand_source_per_chunk_group() {
         let source = blob_metadata();
         let chunks = chunks();
         let (chunk_groups, chunk_lengths, chunk_group_digests) =
             entries(&[chunks[4].clone(), chunks[0].clone()]);
-        let chunk_group_redirects = vec![
-            BlobMetadataChunkGroupRedirect::new(3, 4).unwrap(),
-            BlobMetadataChunkGroupRedirect::new(3, 0).unwrap(),
+        let chunk_group_ondemand_sources = vec![
+            BlobMetadataChunkGroupOndemandSource::new(3, 4).unwrap(),
+            BlobMetadataChunkGroupOndemandSource::new(3, 0).unwrap(),
         ];
-        assert_eq!(chunk_group_redirects[0].source_blob_index(), 3);
-        assert_eq!(chunk_group_redirects[0].source_chunk_group_index(), 4);
+        assert_eq!(chunk_group_ondemand_sources[0].source_blob_index(), 3);
+        assert_eq!(
+            chunk_group_ondemand_sources[0].source_chunk_group_index(),
+            4
+        );
         let blob_metadata = BlobMetadata::new(
             16,
             1,
@@ -3076,26 +3082,35 @@ mod tests {
             chunk_groups,
             chunk_lengths,
             chunk_group_digests,
-            chunk_group_redirects.clone(),
+            chunk_group_ondemand_sources.clone(),
         )
         .unwrap();
-        assert!(blob_metadata.is_redirect());
+        assert!(blob_metadata.is_ondemand());
         assert_eq!(blob_metadata.chunk_group_count(), 2);
         assert_eq!(blob_metadata.chunk_count(), 4);
         assert_eq!(blob_metadata.logical_block_count(), 5);
         assert_eq!(blob_metadata.tables().len(), 5);
         assert_eq!(
             blob_metadata.tables()[4].table_type(),
-            BlobMetadataTableType::CHUNK_GROUP_REDIRECT
+            BlobMetadataTableType::CHUNK_GROUP_ONDEMAND_SOURCE
         );
 
-        let redirect_table = blob_metadata.tables()[4].range().start;
-        assert_eq!(read_u16_at(&blob_metadata.bytes, redirect_table + 16), 3);
-        assert_eq!(read_u16_at(&blob_metadata.bytes, redirect_table + 18), 0);
-        assert_eq!(read_u32_at(&blob_metadata.bytes, redirect_table + 20), 4);
+        let ondemand_source_table = blob_metadata.tables()[4].range().start;
+        assert_eq!(
+            read_u16_at(&blob_metadata.bytes, ondemand_source_table + 16),
+            3
+        );
+        assert_eq!(
+            read_u16_at(&blob_metadata.bytes, ondemand_source_table + 18),
+            0
+        );
+        assert_eq!(
+            read_u32_at(&blob_metadata.bytes, ondemand_source_table + 20),
+            4
+        );
 
         let temp_dir = tempdir().unwrap();
-        let path = temp_dir.path().join("redirect.blob.meta");
+        let path = temp_dir.path().join("ondemand.blob.meta");
         blob_metadata.save(&path).unwrap();
 
         let test_cases = vec![
@@ -3104,19 +3119,19 @@ mod tests {
         ];
 
         for loaded in test_cases {
-            assert!(loaded.is_redirect());
+            assert!(loaded.is_ondemand());
             assert_eq!(
-                loaded.chunk_group_redirect(0),
-                Some(chunk_group_redirects[0])
+                loaded.chunk_group_ondemand_source(0),
+                Some(chunk_group_ondemand_sources[0])
             );
             assert_eq!(
-                loaded.chunk_group_redirect(1),
-                Some(chunk_group_redirects[1])
+                loaded.chunk_group_ondemand_source(1),
+                Some(chunk_group_ondemand_sources[1])
             );
-            assert_eq!(loaded.chunk_group_redirect(2), None);
+            assert_eq!(loaded.chunk_group_ondemand_source(2), None);
             assert_eq!(
-                loaded.chunk_group(0).unwrap().redirect(),
-                Some(chunk_group_redirects[0])
+                loaded.chunk_group(0).unwrap().ondemand_source(),
+                Some(chunk_group_ondemand_sources[0])
             );
             assert_eq!(loaded.chunk_group(0).unwrap().logical_range(), 0..2 * 4096);
             assert_eq!(
@@ -3132,7 +3147,8 @@ mod tests {
     }
 
     #[test]
-    fn from_bytes_ignores_reserved_redirect_bytes_and_requires_one_redirect_per_chunk_group() {
+    fn from_bytes_ignores_reserved_ondemand_source_bytes_and_requires_one_ondemand_source_per_chunk_group(
+    ) {
         let chunks = chunks();
         let (chunk_groups, chunk_lengths, chunk_group_digests) =
             entries(&[chunks[4].clone(), chunks[0].clone()]);
@@ -3145,19 +3161,19 @@ mod tests {
             chunk_lengths,
             chunk_group_digests,
             vec![
-                BlobMetadataChunkGroupRedirect::new(3, 4).unwrap(),
-                BlobMetadataChunkGroupRedirect::new(3, 0).unwrap(),
+                BlobMetadataChunkGroupOndemandSource::new(3, 4).unwrap(),
+                BlobMetadataChunkGroupOndemandSource::new(3, 0).unwrap(),
             ],
         )
         .unwrap();
-        let redirect_table = blob_metadata.tables()[4].range().start;
+        let ondemand_source_table = blob_metadata.tables()[4].range().start;
 
         let test_cases = vec![
-            (redirect_table + 18, 0xffff, Ok(())),
+            (ondemand_source_table + 18, 0xffff, Ok(())),
             (
-                redirect_table + 12,
+                ondemand_source_table + 12,
                 1,
-                Err("blob meta ChunkGroupRedirectTable does not hold one entry per chunk group"),
+                Err("blob meta ChunkGroupOndemandSourceTable does not hold one entry per chunk group"),
             ),
         ];
 
@@ -3176,13 +3192,13 @@ mod tests {
     }
 
     #[test]
-    fn redirect_new_rejects_a_zero_source_blob_index() {
+    fn ondemand_source_new_rejects_a_zero_source_blob_index() {
         assert_eq!(
-            BlobMetadataChunkGroupRedirect::new(0, 1)
+            BlobMetadataChunkGroupOndemandSource::new(0, 1)
                 .unwrap_err()
                 .to_string(),
-            "blob meta redirect source blob index must be non-zero"
+            "blob meta ondemand source blob index must be non-zero"
         );
-        assert!(BlobMetadataChunkGroupRedirect::new(1, 0).is_ok());
+        assert!(BlobMetadataChunkGroupOndemandSource::new(1, 0).is_ok());
     }
 }

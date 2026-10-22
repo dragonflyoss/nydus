@@ -16,8 +16,8 @@ use nydus_format::erofs::{
     ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
 };
-use nydus_storage::access_trace::TraceRecorder;
 use nydus_storage::cache::{BlobCaches, CacheOptions};
+use nydus_storage::ondemand::OndemandRecorder;
 use nydus_storage::prefetch::PrefetchPlan;
 use nydus_telemetry::metrics::Metrics;
 
@@ -101,13 +101,13 @@ impl ErofsReader {
     /// footer`): everything is served from the file itself, no remote
     /// backend is involved, and reads record into `metrics`. `cache_dir`,
     /// when given, caches the decoded chunk groups so repeat reads skip
-    /// re-decoding from the blob; `trace_recorder`, when given, records
+    /// re-decoding from the blob; `ondemand_recorder`, when given, records
     /// on-demand chunk group accesses for `nydus optimize`; `options` is the
     /// `storage` section the caches follow.
     pub fn open_blob(
         blob_path: &Path,
         cache_dir: Option<&Path>,
-        trace_recorder: Option<Arc<TraceRecorder>>,
+        ondemand_recorder: Option<Arc<OndemandRecorder>>,
         metrics: Arc<Metrics>,
         options: CacheOptions,
     ) -> io::Result<Self> {
@@ -141,7 +141,7 @@ impl ErofsReader {
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             cache_dir,
-            trace_recorder,
+            ondemand_recorder,
             options,
         )?;
 
@@ -157,13 +157,13 @@ impl ErofsReader {
 
     /// Open a standalone bootstrap whose blob data is served by `backend`
     /// through per-blob caches under `cache_dir` (a temporary directory when
-    /// `None`) following `options`. `trace_recorder`, when given, records
+    /// `None`) following `options`. `ondemand_recorder`, when given, records
     /// on-demand chunk group accesses for `nydus optimize`.
     pub fn open_bootstrap(
         bootstrap_path: &Path,
         backend: Arc<dyn Backend>,
         cache_dir: Option<&Path>,
-        trace_recorder: Option<Arc<TraceRecorder>>,
+        ondemand_recorder: Option<Arc<OndemandRecorder>>,
         options: CacheOptions,
     ) -> io::Result<Self> {
         let mmap = Self::mmap_file(bootstrap_path, true)?;
@@ -179,7 +179,7 @@ impl ErofsReader {
                 .map(|info| (info.blob_index, info.blob_id)),
             backend,
             cache_dir,
-            trace_recorder,
+            ondemand_recorder,
             options,
         )?;
 
@@ -239,7 +239,7 @@ impl ErofsReader {
                     "blob metadata beyond blob end",
                 )
             })?;
-            let (incremental, redirect) =
+            let (incremental, ondemand) =
                 BlobMetadata::artifact_features_from_bytes(metadata).map_err(io::Error::other)?;
             if incremental {
                 return Err(io::Error::new(
@@ -247,10 +247,10 @@ impl ErofsReader {
                     "incremental blob is not mountable as a standalone image; use a bootstrap with parent blobs",
                 ));
             }
-            if redirect {
+            if ondemand {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "redirect blob is not mountable as a standalone image; use the rewritten bootstrap with source blobs",
+                    "ondemand blob is not mountable as a standalone image; use the rewritten bootstrap with source blobs",
                 ));
             }
         }
@@ -409,10 +409,10 @@ impl ErofsReader {
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
-    /// blob (a REDIRECT blob produced by `nydus optimize`). Opens the blob
+    /// blob (an ondemand blob produced by `nydus optimize`). Opens the blob
     /// cache, which reads the local blob meta but performs no data prefetch.
-    pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
-        self.blobs.is_redirect(blob_index)
+    pub fn is_ondemand(&self, blob_index: u16) -> io::Result<bool> {
+        self.blobs.is_ondemand(blob_index)
     }
 
     /// Prefetch every chunk group of the blob identified by `blob_index`

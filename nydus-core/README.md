@@ -21,9 +21,9 @@ needed to wire up pmem devices backed by the host-side cache data files, and
 a `Blobs::fetch` entry point that guarantees a block-aligned range is decoded
 and resident before the guest touches it. A core reaches a registry from the
 network namespace it is given (`NydusCore::new(bootstrap, config, netns)`)
-and records into `Metrics` and a `TraceRecorder` of its own (`core.metrics()`,
-`core.trace_recorder()`), so one process can serve several sandboxes without
-mixing their namespaces, counters or traces; an embedder gathers the values
+and records into `Metrics` and an `OndemandRecorder` of its own (`core.metrics()`,
+`core.ondemand_recorder()`), so one process can serve several sandboxes without
+mixing their namespaces, counters or ondemand records; an embedder gathers the values
 from `core.metrics().registry()`.
 
 The low-level `build` modules are shared with the `nydus` crate so the regular

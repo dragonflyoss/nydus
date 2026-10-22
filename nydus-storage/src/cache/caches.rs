@@ -17,7 +17,7 @@ use prometheus::proto::MetricFamily;
 use prometheus::{IntGaugeVec, Opts};
 use tracing::{info, warn};
 
-use crate::access_trace::TraceRecorder;
+use crate::ondemand::OndemandRecorder;
 use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::BlobMetadataChunkGroupExtent;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -47,7 +47,7 @@ struct BlobSlot {
     backend: Arc<dyn Backend>,
     /// Decoded chunk groups of the diskless caches, one budget for the set.
     decoded_groups: Arc<DecodedGroupCache>,
-    trace_recorder: Option<Arc<TraceRecorder>>,
+    ondemand_recorder: Option<Arc<OndemandRecorder>>,
     /// The options of the image's caches.
     options: CacheOptions,
     /// Double-checked lazy init: reads take the read lock (hot path), a cold
@@ -73,12 +73,12 @@ impl BlobSlot {
             Arc::new(RawDeviceBlobCache::new(self.blob_id, self.backend.clone()))
         } else {
             match &self.cache_dir {
-                Some(cache_dir) => Arc::new(LocalBlobCache::open_with_trace(
+                Some(cache_dir) => Arc::new(LocalBlobCache::open_with_ondemand_recorder(
                     self.blob_id,
                     self.blob_index as u32,
                     cache_dir,
                     self.backend.clone(),
-                    self.trace_recorder.clone(),
+                    self.ondemand_recorder.clone(),
                     kind,
                     self.options,
                 )?),
@@ -206,7 +206,7 @@ impl BlobCaches {
         entries: impl IntoIterator<Item = (u16, [u8; SHA256_DIGEST_SIZE])>,
         backend: Arc<dyn Backend>,
         cache_dir: Option<&Path>,
-        trace_recorder: Option<Arc<TraceRecorder>>,
+        ondemand_recorder: Option<Arc<OndemandRecorder>>,
         options: CacheOptions,
     ) -> io::Result<Self> {
         let decoded_groups = Arc::new(DecodedGroupCache::default());
@@ -223,7 +223,7 @@ impl BlobCaches {
                             cache_dir: cache_dir.map(Path::to_path_buf),
                             backend: backend.clone(),
                             decoded_groups: decoded_groups.clone(),
-                            trace_recorder: trace_recorder.clone(),
+                            ondemand_recorder: ondemand_recorder.clone(),
                             options,
                             cache: RwLock::new(None),
                         },
@@ -289,14 +289,14 @@ impl BlobCaches {
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
-    /// blob (a REDIRECT blob produced by `nydus optimize`). Opens the blob
+    /// blob (an ondemand blob produced by `nydus optimize`). Opens the blob
     /// cache, which reads the local blob meta but performs no data prefetch.
-    pub fn is_redirect(&self, blob_index: u16) -> io::Result<bool> {
-        Ok(self.cache(blob_index, ReadKind::Prefetch)?.is_redirect())
+    pub fn is_ondemand(&self, blob_index: u16) -> io::Result<bool> {
+        Ok(self.cache(blob_index, ReadKind::Prefetch)?.is_ondemand())
     }
 
     /// Prefetch every chunk group of the blob identified by `blob_index`.
-    /// An "ondemand" (REDIRECT) blob is streamed group by group into the
+    /// An ondemand blob is streamed group by group into the
     /// source blobs' caches instead of filling its own. Up to `workers`
     /// batches are fetched concurrently. A non-zero `timeout` bounds the
     /// whole blob's prefetch; on expiry the prefetch aborts with
@@ -317,7 +317,7 @@ impl BlobCaches {
         // never delayed by the lock. Held (via the guard's file descriptor)
         // until this function returns.
         let _prefetch_lock = cache.prefetch_lock();
-        if !cache.is_redirect() {
+        if !cache.is_ondemand() {
             return cache.prefetch_all(workers, deadline);
         }
         // Time the ondemand blob prefetch and report how many source groups
@@ -326,7 +326,7 @@ impl BlobCaches {
         let start = Instant::now();
         let filled = AtomicU64::new(0);
         let skipped = AtomicU64::new(0);
-        let result = self.prefetch_redirect_blob(
+        let result = self.prefetch_ondemand_blob(
             blob_index,
             cache.as_ref(),
             workers,
@@ -350,7 +350,7 @@ impl BlobCaches {
         result.map(|_| ())
     }
 
-    /// Stream a REDIRECT blob in its packed (first-access) order and write
+    /// Stream an ondemand blob in its packed (first-access) order and write
     /// every decoded group into its source blob's cache, so the workload's
     /// early reads hit cache. Groups whose source is already cached (shared
     /// across processes through the source's chunk group map) are not
@@ -358,8 +358,8 @@ impl BlobCaches {
     /// neither poison a source cache nor abort the warmup; `filled` and
     /// `skipped` count the groups written and the ones that could not be.
     /// Returns what the stream fetched, see
-    /// [`BlobCache::for_each_redirect_chunk_group`].
-    fn prefetch_redirect_blob(
+    /// [`BlobCache::for_each_ondemand_chunk_group`].
+    fn prefetch_ondemand_blob(
         &self,
         blob_index: u16,
         cache: &dyn BlobCache,
@@ -369,53 +369,53 @@ impl BlobCaches {
         skipped: &AtomicU64,
     ) -> io::Result<(u64, u64)> {
         let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
-            let redirect = group.redirect()?;
-            match self.try_cache(redirect.source_blob_index(), ReadKind::Prefetch) {
+            let ondemand_source = group.ondemand_source()?;
+            match self.try_cache(ondemand_source.source_blob_index(), ReadKind::Prefetch) {
                 Some(Ok(source)) => Some(source),
                 Some(Err(err)) => {
                     warn!(
                         "failed to open source blob {} of ondemand blob {blob_index}: {err}",
-                        redirect.source_blob_index()
+                        ondemand_source.source_blob_index()
                     );
                     None
                 }
                 None => {
                     warn!(
-                        "ondemand blob {blob_index} redirects to unknown blob {}",
-                        redirect.source_blob_index()
+                        "ondemand blob {blob_index} names unknown source blob {}",
+                        ondemand_source.source_blob_index()
                     );
                     None
                 }
             }
         };
         let skip = |group: &BlobMetadataChunkGroupExtent| -> bool {
-            match (group.redirect(), source_of(group)) {
-                (Some(redirect), Some(source)) => {
-                    source.is_chunk_group_ready(redirect.source_chunk_group_index() as usize)
+            match (group.ondemand_source(), source_of(group)) {
+                (Some(ondemand_source), Some(source)) => {
+                    source.is_chunk_group_ready(ondemand_source.source_chunk_group_index() as usize)
                 }
                 _ => false,
             }
         };
-        cache.for_each_redirect_chunk_group(workers, deadline, &skip, &|group, payload| {
-            let (Some(redirect), Some(source)) = (group.redirect(), source_of(group)) else {
+        cache.for_each_ondemand_chunk_group(workers, deadline, &skip, &|group, payload| {
+            let (Some(ondemand_source), Some(source)) = (group.ondemand_source(), source_of(group)) else {
                 skipped.fetch_add(1, Ordering::Relaxed);
                 self.metrics.cache.collect_write_failure_metrics(
-                    WriteKind::Redirect,
+                    WriteKind::OndemandBlob,
                     WriteFailureReason::UnknownSource,
                 );
                 return Ok(());
             };
-            let source_index = redirect.source_chunk_group_index() as usize;
-            match source.fill_chunk_group_from_redirect(source_index, payload) {
+            let source_index = ondemand_source.source_chunk_group_index() as usize;
+            match source.fill_chunk_group_from_ondemand(source_index, payload) {
                 Ok(()) => filled.fetch_add(1, Ordering::Relaxed),
                 Err(err) => {
                     self.metrics.cache.collect_write_failure_metrics(
-                        WriteKind::Redirect,
+                        WriteKind::OndemandBlob,
                         write_failure_reason(&err),
                     );
                     warn!(
                         "failed to fill chunk group {source_index} of blob {} from ondemand blob {blob_index}: {err}",
-                        redirect.source_blob_index()
+                        ondemand_source.source_blob_index()
                     );
                     skipped.fetch_add(1, Ordering::Relaxed)
                 }

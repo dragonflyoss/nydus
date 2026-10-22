@@ -843,7 +843,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
             dir.path().to_path_buf(),
             Arc::new(Metrics::new()),
         ));
-        // Trace every chunk group, last one first.
+        // Record every chunk group, last one first.
         let patterns: Vec<ChunkGroupRef> = image
             .blob_metadata
             .as_ref()
@@ -1030,7 +1030,10 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
                 group.chunk_count(),
                 source_meta.chunk_group(0).unwrap().chunk_count()
             );
-            assert_eq!(group.redirect().unwrap().source_blob_index(), source_index);
+            assert_eq!(
+                group.ondemand_source().unwrap().source_blob_index(),
+                source_index
+            );
             for offset in group.logical_range().step_by(4096) {
                 assert_eq!(meta.chunk_group_index(offset), Some(index));
             }

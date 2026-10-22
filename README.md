@@ -43,13 +43,13 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
   are fetched, validated, decoded, and cached.
 - **Extensible blob metadata** — a 24-byte header followed by ChunkGroupTable,
   ChunkLengthTable, ChunkGroupIndexTable, and optional ChunkGroupDigestTable and
-  ChunkGroupRedirectTable, each with its own header; compat and incompat feature bits
+  ChunkGroupOndemandSourceTable, each with its own header; compat and incompat feature bits
   replace a version field, so newer tables and fields stay readable by older
   readers. Every chunk has a four-byte length; a mapped direct lookup table
   needs no auxiliary runtime index. Images from older experimental layouts
   must be rebuilt.
-- **Trace-driven prefetching** — `nydus optimize` turns a workload access
-  trace into a compact hot-data "ondemand" blob of byte-exact chunk group
+- **Ondemand blob prefetching** — `nydus optimize` turns a workload's ondemand
+  record into a compact hot-data "ondemand" blob of byte-exact chunk group
   copies, converting scattered cold-start range reads into one streaming
   prefetch that lands in the source blobs' caches. Concurrent instances on
   one node share the warmup through a shared cache readiness bitmap and a
@@ -68,7 +68,7 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
   scenarios.
 - **Build and FUSE performance** — targets over 3× overall improvement in
   layer build time, memory efficiency, and FUSE performance compared with v2.
-- **Observability** — Prometheus metrics and the on-demand access trace are
+- **Observability** — Prometheus metrics and the ondemand record are
   exposed over a Unix-socket apiserver (`/metrics`, `/trace`).
 - **Ecosystem improvements** — simplified snapshotter capabilities,
   addressing containerd-related issues, and strengthened integration with
@@ -96,7 +96,7 @@ is loaded on demand at runtime (that cost shows up inside Ready).
 - `runc` is the standard host container runtime; `rund` is a Kata-style
   microVM runtime mounting the image as EROFS over virtio-pmem.
 - "Nydus v3 optimized" is the same image after `nydus optimize` rewrote it
-  with an access-trace-ordered ondemand blob (see
+  with an access-ordered ondemand blob (see
   [docs/nydus.md](docs/nydus.md#optimize)).
 - Row 7 keeps the image and the decoded chunk cache on the node, so no pull
   is needed.
@@ -167,7 +167,7 @@ the mean of 2 runs; run-to-run spread is < 5%.
   is the same rootfs as a RAFS v6 zstd image served by the v2 `nydusd`
   from the same registry. All rows are 2-run means from one session.
 - The "+ optimize" rows mount the same image after `nydus optimize` rewrote
-  it from a recorded boot trace: mounts stream the 56 MiB hot-data
+  it from a boot's ondemand record: mounts stream the 56 MiB hot-data
   "ondemand" blob over ONE connection (prefetch scope `ondemand`) instead
   of paying a round trip per cache miss, which makes ready time nearly
   RTT-independent. The stored image grows by that ondemand blob; the rest

@@ -763,9 +763,15 @@ func optimizeCommand() *cli.Command {
 		Usage: "Build an ondemand blob from a /trace access pattern and push an optimized nydus image",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "pattern",
-				Usage:    "path to a JSON access-pattern file (same format as the /trace endpoint)",
+				Name:     "trace-file",
+				Aliases:  []string{"pattern"},
+				Usage:    "path to the JSON saved from a mount's apiserver /trace endpoint: the chunk groups the workload read on demand, which the ondemand blob is built from",
 				Required: true,
+			},
+			&cli.StringFlag{
+				Name:  "type",
+				Usage: "artifact to build, passed through to nydus optimize --type: ondemand-blob",
+				Value: nydus.DefaultOptimizeType,
 			},
 			&cli.StringFlag{
 				Name:     "source",
@@ -840,7 +846,8 @@ func runOptimize(c *cli.Context) error {
 	opt, err := optimizer.NewOptimizer(optimizer.OptimizeOption{
 		Source:          c.String("source"),
 		Target:          c.String("target"),
-		Pattern:         c.String("pattern"),
+		TraceFile:       c.String("trace-file"),
+		Type:            c.String("type"),
 		BuilderPath:     c.String("builder"),
 		WorkDir:         workDir,
 		SourceInsecure:  c.Bool("source-insecure"),

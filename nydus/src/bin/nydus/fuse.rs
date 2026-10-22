@@ -6,7 +6,7 @@ use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, Config, PrefetchScope,
 };
-use nydus_core::{CacheOptions, ErofsReader, TraceRecorder};
+use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
 use nydus_telemetry::metrics::Metrics;
@@ -222,10 +222,10 @@ impl FuseCommand {
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
         // explicit `--blob-dir` (local backend) or the backend from `--config`.
-        // The mount serves one image, so one `Metrics` and one access trace
+        // The mount serves one image, so one `Metrics` and one ondemand record
         // cover it all.
         let metrics = Arc::new(Metrics::new());
-        let trace_recorder = Arc::new(TraceRecorder::default());
+        let ondemand_recorder = Arc::new(OndemandRecorder::default());
         let backend: Option<Arc<dyn Backend>> = if self.blob.is_some() {
             None
         } else if let Some(dir) = self.blob_dir.as_ref() {
@@ -264,7 +264,7 @@ impl FuseCommand {
             (Some(blob), None, _) => ErofsReader::open_blob(
                 blob,
                 cache_dir.as_deref(),
-                Some(trace_recorder.clone()),
+                Some(ondemand_recorder.clone()),
                 metrics,
                 cache_options,
             ),
@@ -272,7 +272,7 @@ impl FuseCommand {
                 bootstrap,
                 backend,
                 cache_dir.as_deref(),
-                Some(trace_recorder.clone()),
+                Some(ondemand_recorder.clone()),
                 cache_options,
             ),
             _ => {
@@ -336,7 +336,7 @@ impl FuseCommand {
             Some(address) => match api_server::ApiServer::start(
                 address,
                 reader.metrics().clone(),
-                trace_recorder,
+                ondemand_recorder,
             ) {
                 Ok(server) => Some(server),
                 Err(err) => {

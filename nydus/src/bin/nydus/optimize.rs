@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use nydus::build::save_blob_metadata_sidecar;
 use nydus::error::{Context, Error, Result};
 use nydus::optimize::{
@@ -16,9 +16,26 @@ use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
 use tracing::{info, Level};
 
+/// The artifact optimize builds.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum OptimizeType {
+    /// An ondemand blob: the recorded chunk groups copied out of their source
+    /// blobs in first-access order, with the bootstrap rewritten to prefetch it.
+    OndemandBlob,
+}
+
 /// The subcommand of optimize.
 #[derive(Debug, Clone, Parser)]
 pub struct OptimizeCommand {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OptimizeType::OndemandBlob,
+        env = "NYDUS_OPTIMIZE_TYPE",
+        help = "Specify the artifact to build: ondemand-blob copies the recorded chunk groups into an ondemand blob and rewrites the bootstrap to prefetch it"
+    )]
+    r#type: OptimizeType,
+
     #[arg(
         long,
         required_unless_present = "trace_file",
@@ -29,6 +46,7 @@ pub struct OptimizeCommand {
 
     #[arg(
         long,
+        visible_alias = "pattern",
         conflicts_with = "apiserver",
         env = "NYDUS_OPTIMIZE_TRACE_FILE",
         help = "Specify the path to a JSON trace file containing access patterns: the versioned `{\"version\":1,\"patterns\":[{\"blob_index\":..,\"chunk_group_index\":..}]}` document, exactly as produced by the apiserver `/trace` endpoint. Mutually exclusive with `--apiserver`"
@@ -98,8 +116,11 @@ impl OptimizeCommand {
         // cache options from the raw CLI flags.
         let (patterns, backend, storage) = self.prepare()?;
 
-        // Runs the optimize pipeline, persisting its artifacts and printing the summary.
-        self.run(&patterns, backend, &storage)
+        // Runs the pipeline of the requested artifact, persisting its
+        // artifacts and printing the summary.
+        match self.r#type {
+            OptimizeType::OndemandBlob => self.run_ondemand_blob(&patterns, backend, &storage),
+        }
     }
 
     /// Validates the flag combination before any expensive work: the
@@ -115,7 +136,7 @@ impl OptimizeCommand {
     }
 
     /// Lowers the raw CLI flags into the optimize inputs: the access patterns
-    /// from the trace source, the blob backend, and the storage section the
+    /// from the ondemand record (file or apiserver), the blob backend, and the storage section the
     /// source blobs' caches are opened with.
     fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
@@ -125,7 +146,7 @@ impl OptimizeCommand {
         };
         if patterns.is_empty() {
             return Err(Error::InvalidParameter(
-                "no chunk group accesses found in the access trace (exercise the workload before optimizing)"
+                "no chunk group accesses found in the ondemand record (exercise the workload before optimizing)"
                     .to_string(),
             ));
         }
@@ -143,9 +164,9 @@ impl OptimizeCommand {
         Ok((patterns, backend, storage_config.storage))
     }
 
-    /// Runs the optimize pipeline: builds the ondemand blob, persists the
+    /// Runs the ondemand blob pipeline: builds the ondemand blob, persists the
     /// blob, its metadata, and the rewritten bootstrap, and prints the summary.
-    fn run(
+    fn run_ondemand_blob(
         &self,
         patterns: &[ChunkGroupRef],
         backend: Arc<dyn Backend>,
