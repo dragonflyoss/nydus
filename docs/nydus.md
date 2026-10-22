@@ -813,12 +813,18 @@ blob under `--blob-dir` and then serves chunk data from that blob.
 
 Current implementation notes:
 
-- `SIGINT`/`SIGTERM`/`SIGQUIT` trigger a best-effort unmount before process exit,
-	so interactive `Ctrl+C` tears down the mountpoint instead of leaving it behind.
+- A termination signal requests startup cancellation or teardown of an owned
+	mount while serving. A second signal forces exit without waiting for cleanup.
 - After mounting, runtime starts background blob prefetch unless it is disabled
 	through the storage config. See [Blob prefetch](#blob-prefetch).
-- Pass `--apiserver unix:///path/to/api.sock` to expose Prometheus metrics over a
-	Unix socket. See [Metrics](#metrics).
+- Optionally pass `--apiserver unix:///path/to/api.sock` for `/metrics`, `/trace`,
+	and direct hot upgrade over one Unix HTTP listener. Without it no HTTP socket
+	is created. See [Metrics](#metrics) and [FUSE continuity](upgrade.md).
+- The control plane constructs the launch command and supplies the session's
+	resources, without selecting a startup mode. Nydus first attempts direct hot
+	upgrade when an API address is configured, then validates lifetime ownership
+	before considering a fresh mount. An existing mount requires handoff from
+	its serving daemon.
 
 Current CLI help:
 
@@ -844,7 +850,7 @@ Options:
 	--mountpoint <MOUNTPOINT>
 		Specify the directory path to mount nydus filesystem [env: NYDUS_FUSE_MOUNTPOINT=]
 	--apiserver <APISERVER>
-		Specify the address to serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics` [env: NYDUS_FUSE_APISERVER=]
+		Optionally serve metrics and live FUSE upgrade control on this Unix socket, e.g. `unix:///run/nydus/api.sock`. Without it no API listener or direct hot upgrade is enabled [env: NYDUS_FUSE_APISERVER=]
 	-l, --log-level <LOG_LEVEL>
 		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_FUSE_LOG_LEVEL=] [default: info]
 	--log-dir <LOG_DIR>
@@ -859,7 +865,16 @@ Supported forms:
 - `nydus fuse --bootstrap <bootstrap> --blob-dir <blob-dir> --mountpoint <mountpoint>`
 - `nydus fuse --bootstrap <bootstrap> --config <config.yaml> --mountpoint <mountpoint>`
 
-The fuse command rejects mixed or partial combinations outside these forms.
+The fuse command rejects mixed or partial image input combinations outside
+these forms. No startup-mode argument is needed. The API socket path must be
+absolute, outside the mountpoint, and contain neither `..` nor symlink
+components. All launches share
+[mount-scoped ownership state](upgrade.md#mount-scoped-ownership-state);
+never delete or replace those lock files to force startup.
+
+See [FUSE hot upgrade](upgrade.md) for readiness, handoff, and
+[cleanup](upgrade.md#cleanup).
+
 `--cache-dir` is optional; without it (and without a cache directory from
 `--config`), runtime fetches and validates requested blob_meta chunk groups using a
 temporary cache directory that is removed on exit. When `--config` is provided,
@@ -1163,7 +1178,8 @@ Unknown `backend.type` values and unknown fields are rejected at load time.
 Example invocations:
 
 ```bash
-nydus fuse --bootstrap layer.bootstrap --config storage.yaml --mountpoint /mnt/nydus
+nydus fuse --bootstrap layer.bootstrap --config storage.yaml \
+  --mountpoint /mnt/nydus
 nydus uffd --bootstrap layer.bootstrap --config storage.yaml --socket /run/nydus/uffd.sock
 nydus check --bootstrap layer.bootstrap --config storage.yaml
 ```
@@ -1284,8 +1300,11 @@ Fields under `backend.config`:
 When `nydus fuse`, `nydus fileio`, or `nydus ublk` is started with
 `--apiserver unix:///path/to/api.sock`, a small HTTP server is bound to that
 Unix socket and serves the Prometheus text exposition at `GET /metrics` and
-the recorded chunk access order at `GET /trace` (any other path returns
-`404`). Each service owns one image and serves that image's `Metrics`, so the
+the recorded chunk access order at `GET /trace`. For `nydus fuse` the same
+listener also serves the [control upgrade](upgrade.md#optional-unified-api-endpoint)
+at `GET /fuse/handoff` and the socket is `0600`, so monitoring may need the
+daemon's user; metrics may briefly reconnect during hot upgrade. Any other path
+returns `404`. Each service owns one image and serves that image's `Metrics`, so the
 endpoint reports only that image. The server is torn down and the socket
 unlinked when the service exits. Scrape it with, e.g.:
 
