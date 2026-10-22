@@ -2189,6 +2189,7 @@ dependencies = [
  "fuser",
  "hex",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
  "libc",
