@@ -132,6 +132,10 @@ mod tests {
         let netns = match unshared {
             Ok(netns) => netns,
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                assert!(
+                    std::env::var_os("NYDUS_TEST_REQUIRE_NETNS").is_none(),
+                    "cannot create a required netns: {err}"
+                );
                 eprintln!("skipped: cannot create a netns ({err})");
                 return;
             }

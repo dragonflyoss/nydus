@@ -1,0 +1,31 @@
+server:
+  port: 8002
+  logDir: /tmp/dragonfly/logs/scheduler
+  cacheDir: /tmp/dragonfly/cache/scheduler
+  logLevel: info
+
+scheduler:
+  algorithm: default
+  retryBackToSourceLimit: 3
+  retryLimit: 5
+  # The cluster has a single host, so a later peer of a task never finds a
+  # parent and goes back to source once the retries run out. Keep that
+  # well under the clients' request timeouts.
+  retryInterval: 100ms
+
+database:
+  redis:
+    addrs:
+      - 127.0.0.1:6379
+    brokerDB: 1
+    backendDB: 2
+
+manager:
+  addr: 127.0.0.1:65003
+  schedulerClusterID: 1
+  keepAlive:
+    interval: 5s
+
+seedPeer: {}
+
+console: true

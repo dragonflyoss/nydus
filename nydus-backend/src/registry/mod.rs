@@ -772,6 +772,60 @@ mod tests {
     }
 
     #[test]
+    fn ki1_whole_blob_answers_do_not_respect_the_requested_offset() {
+        use nydus_test_utils::known_issue::assert_known_issue;
+
+        let body: Vec<u8> = (0..64).collect();
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            for dragonfly in [false, true] {
+                let origin = OriginStub::serve("200 OK", body.clone());
+                let transport = ScriptedTransport::new([Scripted::Body(body.clone())]);
+                let mut registry = scripted_registry(origin.addr, None, transport.clone());
+                if !dragonfly {
+                    Arc::get_mut(&mut registry.client).unwrap().dragonfly = None;
+                }
+                let mut bytes = [0u8; 4];
+                let result = match kind {
+                    ReadKind::Ondemand => registry.read_range_into(&TEST_BLOB_ID, 16, &mut bytes),
+                    ReadKind::Prefetch => {
+                        registry.prefetch_range_into(&TEST_BLOB_ID, 16, &mut bytes)
+                    }
+                };
+                assert_known_issue(
+                    "KI-1",
+                    &(result.as_ref().map_err(ToString::to_string), bytes),
+                    result.is_err() || bytes == body[16..20],
+                    result.is_ok() && bytes == body[..4],
+                );
+                assert_eq!(transport.calls(), u32::from(dragonfly));
+                assert_eq!(origin.hits(), u32::from(!dragonfly));
+            }
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn ki9_unreachable_scheduler_fails_backend_construction() {
+        use nydus_test_utils::known_issue::assert_known_issue;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let config: RegistryConfig = serde_yaml::from_str(&format!(
+            "addr: http://127.0.0.1:1\nrepository: test\ndragonfly:\n  scheduler_endpoint: http://{addr}\n"
+        )).unwrap();
+        let result = Registry::new(
+            config,
+            &PrefetchConfig::default(),
+            None,
+            Arc::new(Metrics::new()),
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string());
+        assert_known_issue("KI-9", &result, result.is_ok(), result.is_err());
+    }
+
+    #[test]
     fn blob_url_appends_the_api_path_to_the_registry_addr() {
         let test_cases = vec![
             (

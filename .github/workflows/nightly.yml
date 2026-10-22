@@ -1,0 +1,176 @@
+name: Nightly
+
+# Experimental transports (their contract cases plus transport specifics)
+# and fuzzing. Called by CI as mandatory PR checks; also runnable on demand.
+# ublk is isolated in manual.yml so its build cannot block other transports.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
+  GO_VERSION: "1.25.5"
+  # ublk belongs only to its dedicated manual job (libublk/kernel coupling).
+  FEATURES: cli,fuse,fileio,nbd,fanotify,uffd
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
+
+jobs:
+  build:
+    name: Build e2e binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-nightly
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
+
+      - run: make ci-build nydusify FEATURES="$FEATURES"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-extended-binaries
+          path: |
+            target/ci/nydus
+            target/ci/examples/writer-fixture
+            nydusify/nydusify
+          if-no-files-found: error
+          retention-days: 3
+
+  experimental:
+    name: Experimental (${{ matrix.transport }})
+    needs: build
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - transport: nbd
+            runner: ${{ vars.E2E_NBD_RUNNER || '["ubuntu-24.04"]' }}
+          - transport: fanotify
+            runner: ${{ vars.E2E_FANOTIFY_RUNNER || '["ubuntu-24.04"]' }}
+          - transport: uffd
+            runner: ${{ vars.E2E_UFFD_RUNNER || '["ubuntu-24.04"]' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-extended-binaries
+
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq erofs-utils fuse3 strace
+          sudo modprobe fuse
+          if [ "${{ matrix.transport }}" = nbd ]; then sudo modprobe nbd; fi
+
+      - name: Run suite
+        run: make e2e-run PKG=./experimental/${{ matrix.transport }}/... E2E_REQUIRE=1 E2E_TIMEOUT=25m
+
+  soak:
+    name: Hour-scale stability
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ${{ fromJSON(vars.E2E_FILEIO_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-extended-binaries
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq acl attr erofs-utils fuse3
+          sudo modprobe fuse
+          sudo modprobe erofs
+      - name: Soak local and remote shared-cache prefetch workloads
+        env:
+          SOAK_DURATION: ${{ vars.E2E_SOAK_DURATION || '1h' }}
+          SOAK_CYCLES: ${{ vars.E2E_SOAK_CYCLES || '120' }}
+          SOAK_RSS_MIB: ${{ vars.E2E_SOAK_RSS_MIB }}
+        run: make e2e-soak E2E_REQUIRE=1
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: FuzzTarConversion
+            pkg: ./tar/
+          - target: FuzzBlobFormat
+            pkg: ./build/
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-extended-binaries
+
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fuse3
+          sudo modprobe fuse
+
+      # `$$` reaches go test as `$`: make expands variables given on its
+      # command line.
+      - name: Fuzz for 10 minutes
+        run: |
+          make e2e-run PKG=${{ matrix.pkg }} E2E_REQUIRE=1 E2E_RUN='^$$' E2E_TIMEOUT=15m \
+            E2E_GO_TEST_ARGS='-fuzz ^${{ matrix.target }}$$ -fuzztime 10m'
+
+      # A crasher is written under testdata/fuzz; keep it for a regression seed.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: tests/e2e/**/testdata/fuzz/
+          if-no-files-found: ignore

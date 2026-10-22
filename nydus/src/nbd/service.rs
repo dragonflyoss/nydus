@@ -202,14 +202,12 @@ impl NbdService {
             sock_kern.as_raw_fd() as u64,
         )
         .context("failed to set nbd socket (NBD_SET_SOCK)")?;
-        Ok(NbdWorker {
-            core: self.core.clone(),
-            active: self.active.clone(),
-            // Keep the kernel end open until NBD_DO_IT returns.
-            _sock_kern: sock_kern,
+        Ok(NbdWorker::new(
+            self.core.clone(),
+            self.active.clone(),
+            sock_kern,
             sock_user,
-            buf: Vec::new(),
-        })
+        ))
     }
 
     /// Block on `NBD_DO_IT` until the session ends; both `stop()` and a clean
@@ -279,6 +277,24 @@ pub struct NbdWorker {
 }
 
 impl NbdWorker {
+    /// Serve an already connected NBD socket pair. The peer end is retained
+    /// until the worker exits, as required by the kernel's NBD_DO_IT lifetime.
+    /// Stopping a blocked worker also requires shutting down the peer socket.
+    pub fn new(
+        core: Arc<NbdCore>,
+        active: Arc<AtomicBool>,
+        sock_kern: UnixStream,
+        sock_user: UnixStream,
+    ) -> Self {
+        Self {
+            core,
+            active,
+            _sock_kern: sock_kern,
+            sock_user,
+            buf: Vec::new(),
+        }
+    }
+
     /// Read request headers and write replies until the session ends: on
     /// `NbdService::stop` the kernel shuts the socket pair down, which
     /// unblocks the `read_exact` here.

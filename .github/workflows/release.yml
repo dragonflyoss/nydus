@@ -1,17 +1,25 @@
 name: Release
 
 on:
+  pull_request:
+    branches: [main, release-*, v3]
   push:
     tags:
       - v[0-9]+.[0-9]+.[0-9]+*
   workflow_dispatch:
 
 env:
+  CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  NYDUS_FEATURES: cli,uffd,fanotify,dragonfly
+  NYDUS_FEATURES: cli,uffd,fanotify,fileio,dragonfly
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -43,11 +51,13 @@ jobs:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
-          repo-token: ${{ secrets.GH_TOKEN }}
+          repo-token: ${{ github.token }}
 
       - name: Install musl toolchain
         run: |
           sudo apt-get update
+          # perl/make are needed by openssl-src, which builds OpenSSL from
+          # source for the musl target (dragonfly-client-util vendors it).
           sudo apt-get install -y --no-install-recommends \
             musl-tools musl-dev pkg-config perl make file
 
@@ -64,10 +74,10 @@ jobs:
             --target ${{ matrix.target }} \
             --features "${NYDUS_FEATURES}"
 
-      - name: Install Go
+      - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: nydusify/go.mod
+          go-version: "1.25.5"
           cache-dependency-path: nydusify/go.sum
 
       - name: Build nydusify
@@ -92,6 +102,8 @@ jobs:
           for bin in nydus-static/nydus nydus-static/nydusify; do
             echo "== ${bin}"
             file "${bin}"
+            # musl release builds come out as `static-pie linked`, while the
+            # CGO-free Go binary is plain `statically linked`.
             file "${bin}" | grep -Eq 'statically linked|static-pie linked'
           done
           ./nydus-static/nydus --help > /dev/null
@@ -118,9 +130,85 @@ jobs:
             ${{ env.tarball }}.sha256sum
           if-no-files-found: error
 
+  # The shipped binary must pass the FUSE and fileio contracts and read
+  # every golden version; it then builds this release's golden images,
+  # which a maintainer commits to tests/e2e/golden/testdata (see its
+  # README).
+  verify:
+    name: Verify shipped ${{ matrix.arch }} binary and golden images
+    needs: [build]
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ${{ vars.E2E_RELEASE_AMD64_RUNNER || '["ubuntu-24.04"]' }}
+          - arch: arm64
+            runner: ${{ vars.E2E_RELEASE_ARM64_RUNNER || '["ubuntu-24.04-arm"]' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: nydus-release-tarball-linux-${{ matrix.arch }}
+          path: nydus-tarball
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.5"
+          cache-dependency-path: tests/e2e/go.sum
+
+      - name: Install test dependencies
+        run: |
+          tar -xzf nydus-tarball/*.tgz
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq acl attr erofs-utils fuse3
+          sudo modprobe fuse
+
+      - name: Run the contract and golden suites
+        env:
+          NYDUS_E2E_GOLDEN_REQUIRED: "1"
+          NYDUS_E2E_GOLDEN_VERSIONS: ${{ vars.E2E_GOLDEN_VERSIONS }}
+        run: |
+          make e2e-run PKG='./contract/... ./golden/...' E2E_RUN='^(TestFUSE|TestFileio|TestRead)$$' E2E_REQUIRE=1 \
+            NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus" NYDUSIFY_BIN="$GITHUB_WORKSPACE/nydus-static/nydusify"
+
+      - name: Build golden images
+        if: ${{ !cancelled() }}
+        run: |
+          cd tests/e2e
+          mkdir -p "$GITHUB_WORKSPACE/.test-tmp/generated-golden"
+          go build -o "$GITHUB_WORKSPACE/.test-tmp/golden-gen" ./cmd/golden-gen
+          sudo env TMPDIR="$GITHUB_WORKSPACE/.test-tmp" "$GITHUB_WORKSPACE/.test-tmp/golden-gen" \
+            -nydus "$GITHUB_WORKSPACE/nydus-static/nydus" -out "$GITHUB_WORKSPACE/.test-tmp/generated-golden"
+
+      - name: Read back generated golden images with the shipped binary
+        if: ${{ !cancelled() }}
+        env:
+          NYDUS_E2E_GOLDEN_REQUIRED: "1"
+          NYDUS_E2E_GOLDEN_DIR: ${{ github.workspace }}/.test-tmp/generated-golden
+        run: |
+          make e2e-run PKG=./golden/... E2E_REQUIRE=1 \
+            NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus" NYDUSIFY_BIN="$GITHUB_WORKSPACE/nydus-static/nydusify"
+          tar -czf "$GITHUB_WORKSPACE/golden-testdata.tgz" -C .test-tmp/generated-golden .
+
+      - name: Upload golden images
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: golden-testdata-${{ matrix.arch }}
+          path: golden-testdata.tgz
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: [build]
+    needs: [build, verify]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
