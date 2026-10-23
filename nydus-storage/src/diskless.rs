@@ -19,28 +19,11 @@ use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
 use crate::buffer::ChunkGroupBuffer;
-use crate::decode::verify_chunk_group;
+use crate::decoder::ChunkGroupDecoder;
 use crate::BlobCache;
 
 /// A blob's chunk group: the blob id and the chunk group's table index.
 type ChunkGroupKey = ([u8; SHA256_DIGEST_SIZE], u32);
-
-/// A chunk group's uncompressed bytes, verified against their crc32c.
-struct DecodedChunkGroup {
-    /// The buffer holding the bytes.
-    buffer: ChunkGroupBuffer,
-
-    /// The number of bytes.
-    len: usize,
-}
-
-/// Implements the decoded chunk group.
-impl DecodedChunkGroup {
-    /// Returns the bytes.
-    fn bytes(&self) -> &[u8] {
-        self.buffer.bytes(self.len)
-    }
-}
 
 /// The bounded LRU of verified decoded chunk groups, shared by the diskless
 /// caches of one blob set so the memory bound holds however many layers the
@@ -63,8 +46,9 @@ pub(crate) struct DecodedChunkGroupCache {
 /// The entries of the LRU and their size.
 #[derive(Default)]
 struct DecodedChunkGroupState {
-    /// The entries, least recently used first.
-    entries: VecDeque<(ChunkGroupKey, Arc<DecodedChunkGroup>)>,
+    /// The entries, the verified uncompressed bytes of a chunk group each,
+    /// least recently used first.
+    entries: VecDeque<(ChunkGroupKey, Arc<ChunkGroupBuffer>)>,
 
     /// The decoded bytes of the entries.
     bytes: usize,
@@ -96,16 +80,8 @@ impl DecodedChunkGroupCache {
         }
     }
 
-    /// Returns whether a chunk group of `len` decoded bytes is kept: at most
-    /// a quarter of the budget, which admits the largest chunk group of the
-    /// default layout, four times the 2 MiB minimum, without flushing
-    /// everything else.
-    fn admits(&self, len: usize) -> bool {
-        len <= self.max_bytes / 4
-    }
-
     /// Returns the chunk group of `key`, now the most recently used.
-    fn get(&self, key: &ChunkGroupKey) -> Option<Arc<DecodedChunkGroup>> {
+    fn get(&self, key: &ChunkGroupKey) -> Option<Arc<ChunkGroupBuffer>> {
         let mut state = self.state.lock().unwrap();
         let index = state.entries.iter().position(|(entry, _)| entry == key)?;
         let entry = state.entries.remove(index)?;
@@ -115,10 +91,12 @@ impl DecodedChunkGroupCache {
     }
 
     /// Puts the chunk group of `key` into the cache, evicting the least
-    /// recently used ones until it fits; a chunk group too large to admit or
-    /// already present is dropped.
-    fn put(&self, key: ChunkGroupKey, group: DecodedChunkGroup) {
-        if !self.admits(group.len) {
+    /// recently used ones until it fits. A chunk group already present is
+    /// dropped, and so is one over a quarter of the budget, which still
+    /// admits the largest chunk group of the default layout, four times the
+    /// 2 MiB minimum, without flushing everything else.
+    fn put(&self, key: ChunkGroupKey, group: ChunkGroupBuffer) {
+        if group.len() > self.max_bytes / 4 {
             return;
         }
 
@@ -127,14 +105,15 @@ impl DecodedChunkGroupCache {
             return;
         }
 
-        while state.bytes + group.len > self.max_bytes || state.entries.len() >= self.max_entries {
+        while state.bytes + group.len() > self.max_bytes || state.entries.len() >= self.max_entries
+        {
             match state.entries.pop_front() {
-                Some((_, evicted)) => state.bytes -= evicted.len,
+                Some((_, evicted)) => state.bytes -= evicted.len(),
                 None => break,
             }
         }
 
-        state.bytes += group.len;
+        state.bytes += group.len();
         state.entries.push_back((key, Arc::new(group)));
     }
 }
@@ -179,36 +158,36 @@ impl DisklessBlobCache {
             skip_verify_checksums,
         }
     }
-}
 
-/// Copies the part of `group`'s chunks, cut out of its uncompressed
-/// `payload`, that overlaps `[offset, offset + buf.len())` into `buf`.
-fn copy_chunk_group_chunks(
-    blob_metadata: &BlobMetadata,
-    group: &BlobMetadataChunkGroupExtent,
-    payload: &[u8],
-    offset: u64,
-    buf: &mut [u8],
-) -> io::Result<()> {
-    let end = offset + buf.len() as u64;
-    for (chunk_offset, bytes) in group
-        .chunks(blob_metadata, payload)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
-    {
-        let copy_start = offset.max(chunk_offset);
-        let copy_end = end.min(chunk_offset + bytes.len() as u64);
-        if copy_start >= copy_end {
-            continue;
+    /// Copies the part of `group`'s chunks, cut out of its uncompressed
+    /// `payload`, that overlaps `[offset, offset + buf.len())` into `buf`.
+    fn copy_chunks(
+        &self,
+        group: &BlobMetadataChunkGroupExtent,
+        payload: &[u8],
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
+        let end = offset + buf.len() as u64;
+        for (chunk_offset, bytes) in group
+            .chunks(&self.blob_metadata, payload)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        {
+            let copy_start = offset.max(chunk_offset);
+            let copy_end = end.min(chunk_offset + bytes.len() as u64);
+            if copy_start >= copy_end {
+                continue;
+            }
+
+            let source_start = (copy_start - chunk_offset) as usize;
+            let target_start = (copy_start - offset) as usize;
+            let length = (copy_end - copy_start) as usize;
+            buf[target_start..target_start + length]
+                .copy_from_slice(&bytes[source_start..source_start + length]);
         }
 
-        let source_start = (copy_start - chunk_offset) as usize;
-        let target_start = (copy_start - offset) as usize;
-        let length = (copy_end - copy_start) as usize;
-        buf[target_start..target_start + length]
-            .copy_from_slice(&bytes[source_start..source_start + length]);
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Implements the blob cache over the backend alone: the dense read path,
@@ -246,9 +225,7 @@ impl BlobCache for DisklessBlobCache {
                 .decoded_chunk_groups
                 .get(&(self.blob_id, group.index()))
             {
-                Some(cached) => {
-                    copy_chunk_group_chunks(blob_metadata, &group, cached.bytes(), offset, buf)?
-                }
+                Some(cached) => self.copy_chunks(&group, cached.bytes(), offset, buf)?,
                 None => missed.push(group),
             }
         }
@@ -273,33 +250,14 @@ impl BlobCache for DisklessBlobCache {
         self.backend
             .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?;
 
+        let decoder = ChunkGroupDecoder::new(blob_metadata, self.skip_verify_checksums);
         for group in &missed {
-            let start = (group.compressed_offset() - head.compressed_offset()) as usize;
-            let stop = start + group.compressed_size() as usize;
-            let len = group.uncompressed_size() as usize;
             let mut decoded = ChunkGroupBuffer::default();
-            let payload = decoded.resize(len)?;
-            if group.is_uncompressed(blob_metadata) {
-                payload.copy_from_slice(&encoded[start..stop]);
-            } else {
-                blob_metadata
-                    .compressor()
-                    .decompress_into(&encoded[start..stop], payload)
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-            }
-            verify_chunk_group(group, payload, self.skip_verify_checksums)?;
-            copy_chunk_group_chunks(blob_metadata, group, payload, offset, buf)?;
-            if !self.decoded_chunk_groups.admits(len) {
-                continue;
-            }
-
-            self.decoded_chunk_groups.put(
-                (self.blob_id, group.index()),
-                DecodedChunkGroup {
-                    buffer: decoded,
-                    len,
-                },
-            );
+            let payload = decoded.resize(group.uncompressed_size() as usize)?;
+            decoder.decode_into(group, head.compressed_offset(), encoded, payload)?;
+            self.copy_chunks(group, payload, offset, buf)?;
+            self.decoded_chunk_groups
+                .put((self.blob_id, group.index()), decoded);
         }
 
         Ok(())

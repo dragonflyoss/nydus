@@ -20,7 +20,7 @@ pub(crate) struct ChunkGroupBuffers {
 impl ChunkGroupBuffers {
     /// Returns both buffers sized to `encoded_len` and `decoded_len`,
     /// borrowed together so a caller decodes from one into the other.
-    pub(crate) fn resize_pair(
+    pub(crate) fn resize(
         &mut self,
         encoded_len: usize,
         decoded_len: usize,
@@ -40,6 +40,9 @@ pub(crate) struct ChunkGroupBuffer {
 
     /// The anonymous mapping of a large size.
     mapping: Option<memmap2::MmapMut>,
+
+    /// The size of the last [`resize`](Self::resize).
+    len: usize,
 }
 
 /// Implements the chunk group buffer.
@@ -54,6 +57,7 @@ impl ChunkGroupBuffer {
     /// Returns the buffer resized to `len`, a mapping reused when it is
     /// large enough.
     pub(crate) fn resize(&mut self, len: usize) -> io::Result<&mut [u8]> {
+        self.len = len;
         if len < Self::MAPPING_MIN_SIZE {
             self.mapping = None;
             self.heap.resize(len, 0);
@@ -79,12 +83,16 @@ impl ChunkGroupBuffer {
         Ok(&mut self.mapping.as_mut().expect("mapping allocated above")[..len])
     }
 
-    /// Returns the first `len` bytes, `len` at most the size of the last
-    /// [`resize`](Self::resize).
-    pub(crate) fn bytes(&self, len: usize) -> &[u8] {
+    /// Returns the size of the last [`resize`](Self::resize).
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the bytes, as many as the last [`resize`](Self::resize).
+    pub(crate) fn bytes(&self) -> &[u8] {
         match &self.mapping {
-            Some(mapping) => &mapping[..len],
-            None => &self.heap[..len],
+            Some(mapping) => &mapping[..self.len],
+            None => &self.heap,
         }
     }
 }
@@ -113,6 +121,8 @@ mod tests {
         );
         assert_eq!(buffer.resize(4096).unwrap(), &[0; 4096]);
         assert!(buffer.mapping.is_none());
+        assert_eq!(buffer.len(), 4096);
+        assert_eq!(buffer.bytes(), &[0; 4096]);
     }
 
     #[test]

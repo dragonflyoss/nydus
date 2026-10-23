@@ -48,7 +48,7 @@ impl RawDeviceBlobCache {
 
     /// Returns the backend's local file, failing with
     /// [`io::ErrorKind::Unsupported`] for a streamed raw device.
-    fn mapped(&self) -> io::Result<&RawDeviceFile> {
+    fn local_file(&self) -> io::Result<&RawDeviceFile> {
         self.file.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -76,7 +76,7 @@ impl BlobCache for RawDeviceBlobCache {
 
     /// Checks the range against the data region: the file is always ready.
     fn ensure_range(&self, offset: u64, len: u64) -> io::Result<()> {
-        let file = self.mapped()?;
+        let file = self.local_file()?;
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
         })?;
@@ -93,19 +93,19 @@ impl BlobCache for RawDeviceBlobCache {
     /// Returns the range clipped to the data region: the file is always
     /// ready.
     fn ready_ranges(&self, offset: u64, len: u64) -> io::Result<Vec<Range<u64>>> {
-        let file = self.mapped()?;
+        let file = self.local_file()?;
         let end = offset.saturating_add(len).min(file.data_size);
         Ok((offset < end).then_some(offset..end).into_iter().collect())
     }
 
     /// Returns the path of the backend's local file, which exists already.
     fn create_cache_file(&self) -> io::Result<PathBuf> {
-        Ok(self.mapped()?.path.clone())
+        Ok(self.local_file()?.path.clone())
     }
 
     /// Returns the backend's local file.
     fn cache_file(&self) -> io::Result<Arc<File>> {
-        Ok(self.mapped()?.file.clone())
+        Ok(self.local_file()?.file.clone())
     }
 
     /// Returns whether the backend's local file is mappable.

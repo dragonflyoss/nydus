@@ -30,7 +30,7 @@ use nydus_format::blob::{
     BlobMetadataChunkLength, BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
-use nydus_storage::{decode_chunk_group, LocalBlobCache, OndemandEntry, OndemandRecord};
+use nydus_storage::{ChunkGroupDecoder, LocalBlobCache, OndemandEntry, OndemandRecord};
 use sha2::{Digest, Sha256};
 
 /// Longest contiguous run of source chunk groups fetched in one backend
@@ -191,6 +191,7 @@ pub fn build_ondemand_blob(
         let blob_id = infos_by_index[blob_index].blob_id;
         let indexes: Vec<u32> = indexes.iter().copied().collect();
         let mut scratch = vec![0u8; meta.max_bytes_per_chunk_group() as usize];
+        let decoder = ChunkGroupDecoder::new(meta, storage.skip_verify_checksums);
         let mut start = 0;
         while start < indexes.len() {
             let first = meta.chunk_group(indexes[start] as usize).unwrap();
@@ -217,17 +218,11 @@ pub fn build_ondemand_blob(
                 })?;
             for &index in &indexes[start..end] {
                 let group = meta.chunk_group(index as usize).unwrap();
-                decode_chunk_group(
-                    meta,
-                    &group,
-                    first.compressed_offset(),
-                    &window,
-                    &mut scratch,
-                    storage.skip_verify_checksums,
-                )
-                .with_context(|| {
-                    format!("chunk group {index} of blob {blob_index} failed validation")
-                })?;
+                decoder
+                    .decode(&group, first.compressed_offset(), &window, &mut scratch)
+                    .with_context(|| {
+                        format!("chunk group {index} of blob {blob_index} failed validation")
+                    })?;
                 let range = group.compressed_range();
                 let at = (range.start - first.compressed_offset()) as usize;
                 encoded.insert(

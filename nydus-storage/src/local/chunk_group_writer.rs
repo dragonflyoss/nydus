@@ -1,6 +1,6 @@
-//! The gather of a decoded chunk group's chunks into the cache file: the
-//! chunks sit on their blocks with zero padding between them, and one
-//! `pwritev` writes a run of them at once.
+//! The writer of a chunk group into the cache file: the chunks sit on their
+//! blocks with zero padding between them, and one `pwritev` writes a run of
+//! them at once.
 
 use std::fs::File;
 use std::io;
@@ -15,38 +15,38 @@ const MAX_WRITE_IOVECS: usize = 1024;
 /// A block of zeros, the gap filler between the chunks of a `pwritev` run.
 static ZERO_BLOCK: [u8; EROFS_BLOCK_SIZE as usize] = [0u8; EROFS_BLOCK_SIZE as usize];
 
-/// The gather of the scattered chunks of a chunk group into contiguous
-/// `pwritev` runs.
-pub(super) struct ScatterBatch<'a> {
+/// The writer of a chunk group's chunks into the cache file, gathering the
+/// consecutive ones into one `pwritev` each.
+pub(super) struct ChunkGroupWriter<'a> {
     /// The cache file.
     file: &'a File,
 
-    /// The gathered buffers of the current run.
+    /// The gathered buffers of the pending run.
     iov: Vec<libc::iovec>,
 
-    /// The borrow of every pushed payload, which the iovecs point into.
-    payload: PhantomData<&'a [u8]>,
+    /// The borrow of every queued chunk, which the iovecs point into.
+    chunks: PhantomData<&'a [u8]>,
 
-    /// The offset the current run starts at.
+    /// The offset the pending run starts at.
     run_start: u64,
 
-    /// The offset the current run ends at.
+    /// The offset the pending run ends at.
     run_end: u64,
 
     /// The most buffers one `pwritev` gathers.
     max_iov: usize,
 }
 
-/// Implements the scatter batch.
-impl<'a> ScatterBatch<'a> {
-    /// Creates an empty batch writing into `file`.
+/// Implements the chunk group writer.
+impl<'a> ChunkGroupWriter<'a> {
+    /// Creates a writer into `file` with nothing pending.
     pub(super) fn new(file: &'a File) -> Self {
         // SAFETY: sysconf has no preconditions; a failure returns -1.
         let iov_max = unsafe { libc::sysconf(libc::_SC_IOV_MAX) };
         Self {
             file,
             iov: Vec::new(),
-            payload: PhantomData,
+            chunks: PhantomData,
             run_start: 0,
             run_end: 0,
             max_iov: usize::try_from(iov_max)
@@ -55,11 +55,12 @@ impl<'a> ScatterBatch<'a> {
         }
     }
 
-    /// Appends the chunk `bytes` at `offset`, starting a new run when it is
-    /// the first chunk, lies before the run's end, which never happens for a
-    /// valid layout, follows a gap of a whole block, or the batch is full,
-    /// leaving room for the gap and the chunk.
-    pub(super) fn push(&mut self, offset: u64, bytes: &'a [u8]) -> io::Result<()> {
+    /// Queues the chunk `bytes` at `offset` for the pending run, flushing
+    /// the run first when the chunk does not extend it: it is the first
+    /// chunk, lies before the run's end, which never happens for a valid
+    /// layout, follows a gap of a whole block, or the run has no room left
+    /// for the gap and the chunk.
+    pub(super) fn write_at(&mut self, offset: u64, bytes: &'a [u8]) -> io::Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -88,13 +89,13 @@ impl<'a> ScatterBatch<'a> {
         Ok(())
     }
 
-    /// Writes the current run, retrying a short write from where it stopped.
+    /// Writes the pending run, retrying a short write from where it stopped.
     pub(super) fn flush(&mut self) -> io::Result<()> {
         let mut offset = self.run_start;
         let mut iov = std::mem::take(&mut self.iov);
         let mut first = 0usize;
         while first < iov.len() {
-            // SAFETY: `push` borrows every payload for 'a, so every pointer
+            // SAFETY: `write_at` borrows every chunk for 'a, so every pointer
             // stays valid until the flush completes.
             let written = unsafe {
                 libc::pwritev(
@@ -148,7 +149,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn scatter_batch_gathers_chunks_into_contiguous_runs() {
+    fn write_at_gathers_chunks_into_contiguous_runs() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("cache");
         let file = OpenOptions::new()
@@ -174,24 +175,24 @@ mod tests {
 
         for max_iov in [2usize, 3, 1024] {
             file.set_len(0).unwrap();
-            let mut batch = ScatterBatch::new(&file);
-            batch.max_iov = max_iov;
+            let mut writer = ChunkGroupWriter::new(&file);
+            writer.max_iov = max_iov;
             for ((offset, _, _), bytes) in chunks.iter().zip(&data) {
-                batch.push(*offset, bytes).unwrap();
+                writer.write_at(*offset, bytes).unwrap();
             }
-            batch.flush().unwrap();
+            writer.flush().unwrap();
             let written = fs::read(&path).unwrap();
             assert_eq!(written, expected, "max_iov {max_iov}");
         }
 
-        let mut batch = ScatterBatch::new(&file);
-        batch.push(3 * block, &data[2]).unwrap();
-        assert_eq!(batch.iov.len(), 1);
-        batch.push(6 * block, &data[3]).unwrap();
-        assert_eq!(batch.iov.len(), 1);
-        assert_eq!(batch.run_start, 6 * block);
-        batch.push(7 * block, &data[4]).unwrap();
-        assert_eq!(batch.iov.len(), 2);
-        batch.flush().unwrap();
+        let mut writer = ChunkGroupWriter::new(&file);
+        writer.write_at(3 * block, &data[2]).unwrap();
+        assert_eq!(writer.iov.len(), 1);
+        writer.write_at(6 * block, &data[3]).unwrap();
+        assert_eq!(writer.iov.len(), 1);
+        assert_eq!(writer.run_start, 6 * block);
+        writer.write_at(7 * block, &data[4]).unwrap();
+        assert_eq!(writer.iov.len(), 2);
+        writer.flush().unwrap();
     }
 }

@@ -14,7 +14,7 @@
 //! configs, bootstraps and caches together live above, in `nydus-core`.
 
 mod buffer;
-mod decode;
+mod decoder;
 mod diskless;
 mod local;
 mod ondemand_record;
@@ -41,11 +41,10 @@ use nydus_telemetry::prometheus::core::{Collector, Desc};
 use nydus_telemetry::prometheus::proto::MetricFamily;
 use nydus_telemetry::prometheus::{IntGaugeVec, Opts};
 
-pub use decode::decode_chunk_group;
+pub use decoder::ChunkGroupDecoder;
 pub use local::LocalBlobCache;
 pub use ondemand_record::{OndemandEntry, OndemandRecord};
 
-use decode::write_failure_reason;
 use diskless::{DecodedChunkGroupCache, DisklessBlobCache};
 use raw_device::RawDeviceBlobCache;
 
@@ -70,11 +69,39 @@ pub trait BlobCache: Send + Sync {
     /// the chunk groups it misses.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
 
-    /// Streams `len` bytes at `offset` into `writer`. The default bounces
-    /// through a per-thread buffer; a cache that serves reads from a mapping
-    /// overrides it to skip the copy.
-    fn write_data_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
-        write_data_via_scratch(self, offset, len, writer)
+    /// Returns the `[offset, offset + len)` bytes of the address space when
+    /// the cache holds them in a mapping, `None` when they have to be read;
+    /// the default holds nothing.
+    fn mapped(&self, _offset: u64, _len: usize) -> io::Result<Option<&[u8]>> {
+        Ok(None)
+    }
+
+    /// Copies `len` bytes at `offset` into `writer`: straight from the
+    /// mapping when [`mapped`](Self::mapped) holds the bytes, through a
+    /// per-thread scratch buffer filled by `read_at` otherwise.
+    fn copy_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        if let Some(bytes) = self.mapped(offset, len)? {
+            return writer.write_all(bytes);
+        }
+
+        thread_local! {
+            static SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        }
+
+        SCRATCH.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            if buf.len() < len {
+                buf.resize(len, 0);
+            }
+
+            let buf = &mut buf[..len];
+            self.read_at(offset, buf)?;
+            writer.write_all(buf)
+        })
     }
 
     /// Returns the cache file, shared with the cache, for the kernel-facing
@@ -202,37 +229,6 @@ pub trait BlobCache: Send + Sync {
     }
 }
 
-/// Reads `[offset, offset + len)` through `cache.read_at` into a per-thread
-/// scratch buffer and copies it into `writer`, the fallback of the caches
-/// that cannot serve reads from a mapping.
-fn write_data_via_scratch<C: BlobCache + ?Sized>(
-    cache: &C,
-    offset: u64,
-    len: usize,
-    writer: &mut dyn io::Write,
-) -> io::Result<()> {
-    thread_local! {
-        static SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    }
-
-    SCRATCH.with(|cell| {
-        let mut buf = cell.borrow_mut();
-        if buf.len() < len {
-            buf.resize(len, 0);
-        }
-
-        let buf = &mut buf[..len];
-        cache.read_at(offset, buf)?;
-        writer.write_all(buf)
-    })
-}
-
-/// The `status` label value of the image bytes the cache holds.
-const CACHED: &str = "cached";
-
-/// The `status` label value of the image bytes the cache does not hold yet.
-const UNCACHED: &str = "uncached";
-
 /// A blob of the bootstrap device table, its cache opened on the first read
 /// or prefetch so mounting does not pay a blob meta download per blob up
 /// front.
@@ -269,32 +265,37 @@ impl BlobSlot {
     /// Returns the blob's cache, a cold slot opened with the blob metadata
     /// read as an on-demand read.
     fn cache(&self) -> io::Result<Arc<dyn BlobCache>> {
-        if let Some(cache) = self.cache.read().unwrap().as_ref() {
-            return Ok(cache.clone());
-        }
-
-        let mut guard = self.cache.write().unwrap();
-        if let Some(cache) = guard.as_ref() {
-            return Ok(cache.clone());
-        }
-
-        let cache = if self.backend.is_raw_device(&self.blob_id)? {
-            self.open_raw_device()
-        } else {
-            let blob_metadata = if self.storage.dir.is_some() {
-                LocalBlobCache::read_blob_metadata(self.blob_id, &self.backend, &self.storage)?
+        self.open_cache(|| {
+            if self.storage.dir.is_some() {
+                LocalBlobCache::read_blob_metadata(self.blob_id, &self.backend, &self.storage)
             } else {
-                self.backend.read_blob_metadata(&self.blob_id)?
-            };
-            self.open(blob_metadata)?
-        };
-        *guard = Some(cache.clone());
-        Ok(cache)
+                self.backend.read_blob_metadata(&self.blob_id)
+            }
+        })
     }
 
     /// Returns the blob's cache, a cold slot opened with the blob metadata
     /// read as a prefetch read.
     fn prefetch_cache(&self) -> io::Result<Arc<dyn BlobCache>> {
+        self.open_cache(|| {
+            if self.storage.dir.is_some() {
+                LocalBlobCache::prefetch_blob_metadata(self.blob_id, &self.backend, &self.storage)
+            } else {
+                self.backend.prefetch_blob_metadata(&self.blob_id)
+            }
+        })
+    }
+
+    /// Returns the blob's cache, a cold slot opened under its write lock so
+    /// one reader fetches the blob metadata: a native layer as the
+    /// pass-through cache, read as-is from the backend since it carries no
+    /// blob meta to decode with; any other blob, with the blob metadata
+    /// `read_blob_metadata` returns, as the sparse file cache under the
+    /// storage directory, or the diskless cache without one.
+    fn open_cache(
+        &self,
+        read_blob_metadata: impl FnOnce() -> io::Result<BlobMetadata>,
+    ) -> io::Result<Arc<dyn BlobCache>> {
         if let Some(cache) = self.cache.read().unwrap().as_ref() {
             return Ok(cache.clone());
         }
@@ -304,35 +305,13 @@ impl BlobSlot {
             return Ok(cache.clone());
         }
 
-        let cache = if self.backend.is_raw_device(&self.blob_id)? {
-            self.open_raw_device()
-        } else {
-            let blob_metadata = if self.storage.dir.is_some() {
-                LocalBlobCache::prefetch_blob_metadata(self.blob_id, &self.backend, &self.storage)?
-            } else {
-                self.backend.prefetch_blob_metadata(&self.blob_id)?
-            };
-            self.open(blob_metadata)?
-        };
-        *guard = Some(cache.clone());
-        Ok(cache)
-    }
-
-    /// Opens the pass-through cache of a native layer, read as-is from the
-    /// backend since it carries no blob meta to decode with.
-    fn open_raw_device(&self) -> Arc<dyn BlobCache> {
-        Arc::new(RawDeviceBlobCache::new(self.blob_id, self.backend.clone()))
-    }
-
-    /// Opens the cache of a layered blob described by `blob_metadata`: the
-    /// sparse file cache under the storage directory, the diskless cache
-    /// without one.
-    fn open(&self, blob_metadata: BlobMetadata) -> io::Result<Arc<dyn BlobCache>> {
-        Ok(if self.storage.dir.is_some() {
+        let cache: Arc<dyn BlobCache> = if self.backend.is_raw_device(&self.blob_id)? {
+            Arc::new(RawDeviceBlobCache::new(self.blob_id, self.backend.clone()))
+        } else if self.storage.dir.is_some() {
             Arc::new(LocalBlobCache::open(
                 self.blob_id,
                 self.blob_index,
-                blob_metadata,
+                read_blob_metadata()?,
                 self.backend.clone(),
                 &self.storage,
                 self.ondemand_record.clone(),
@@ -340,12 +319,14 @@ impl BlobSlot {
         } else {
             Arc::new(DisklessBlobCache::new(
                 self.blob_id,
-                blob_metadata,
+                read_blob_metadata()?,
                 self.backend.clone(),
                 self.decoded_chunk_groups.clone(),
                 self.storage.skip_verify_checksums,
             ))
-        })
+        };
+        *guard = Some(cache.clone());
+        Ok(cache)
     }
 }
 
@@ -366,6 +347,13 @@ struct CacheBytesCollector {
 
 /// Implements the cache bytes collector.
 impl CacheBytesCollector {
+    /// The `status` label value of the image bytes the cache holds.
+    const CACHED: &str = "cached";
+
+    /// The `status` label value of the image bytes the cache does not hold
+    /// yet.
+    const UNCACHED: &str = "uncached";
+
     /// Creates the collector over `slots`.
     fn new(slots: Arc<HashMap<u16, BlobSlot>>) -> Self {
         Self {
@@ -408,10 +396,10 @@ impl Collector for CacheBytesCollector {
                 },
             );
         self.bytes
-            .with_label_values(&[CACHED])
+            .with_label_values(&[Self::CACHED])
             .set(i64::try_from(cached).unwrap_or(i64::MAX));
         self.bytes
-            .with_label_values(&[UNCACHED])
+            .with_label_values(&[Self::UNCACHED])
             .set(i64::try_from(total.saturating_sub(cached)).unwrap_or(i64::MAX));
         self.bytes.collect()
     }
@@ -665,7 +653,7 @@ impl BlobCaches {
                 Err(err) => {
                     self.metrics.cache.collect_write_failure_metrics(
                         WriteKind::Redirect,
-                        write_failure_reason(&err),
+                        ChunkGroupDecoder::write_failure_reason(&err),
                     );
                     warn!(
                         "failed to fill chunk group {} of blob {} from ondemand blob {}: {}",

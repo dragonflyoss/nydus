@@ -26,33 +26,6 @@ use tracing::warn;
 
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 
-/// The on-disk magic, 8 raw ASCII bytes (`NDGRPMAP`, Nydus GRouP MAP)
-/// written as-is so a hexdump of the file starts with the readable string.
-const CHUNK_GROUP_MAP_MAGIC: [u8; 8] = *b"NDGRPMAP";
-
-/// The header size, one block-sized page so the bitmap starts on a page
-/// boundary; the unused tail of the header is reserved for future fields.
-const CHUNK_GROUP_MAP_HEADER_SIZE: usize = EROFS_BLOCK_SIZE as usize;
-
-/// The byte offset of the `feature_incompat` word in the header.
-const CHUNK_GROUP_MAP_FEATURE_INCOMPAT_OFFSET: usize = 12;
-
-/// The byte offset of the `chunk_group_count` field in the header.
-const CHUNK_GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET: usize = 16;
-
-/// The byte offset of the `ready_count` field in the header, updated
-/// atomically through the shared mapping.
-const CHUNK_GROUP_MAP_READY_COUNT_OFFSET: usize = 20;
-
-/// The byte offset of the `state` field in the header, updated atomically
-/// through the shared mapping.
-const CHUNK_GROUP_MAP_STATE_OFFSET: usize = 24;
-
-/// The `state` bit saying every chunk group of the blob is ready. Sticky:
-/// ready bits are never cleared, so once set it stays set for the lifetime
-/// of the file.
-const CHUNK_GROUP_MAP_STATE_ALL_READY: u32 = 1;
-
 /// The guard holding `flock(LOCK_EX)` on a file, which serializes the
 /// resets of a map across processes; independent of the byte range claims,
 /// which are `fcntl` locks.
@@ -121,7 +94,7 @@ impl Drop for FileLock<'_> {
 /// bookkeeping once a blob is fully cached.
 ///
 /// The file doubles as the lock file of the fetch claims,
-/// [`acquire`](Self::acquire): the bytes locked and the bytes the map stores
+/// [`claim`](Self::claim): the bytes locked and the bytes the map stores
 /// are unrelated, so no second sidecar is needed.
 pub(super) struct ChunkGroupMap {
     /// The shared mapping of the whole file.
@@ -137,6 +110,33 @@ pub(super) struct ChunkGroupMap {
 
 /// Implements the chunk group map.
 impl ChunkGroupMap {
+    /// The on-disk magic, 8 raw ASCII bytes (`NDGRPMAP`, Nydus GRouP MAP)
+    /// written as-is so a hexdump of the file starts with the readable string.
+    const MAGIC: [u8; 8] = *b"NDGRPMAP";
+
+    /// The header size, one block-sized page so the bitmap starts on a page
+    /// boundary; the unused tail of the header is reserved for future fields.
+    const HEADER_SIZE: usize = EROFS_BLOCK_SIZE as usize;
+
+    /// The byte offset of the `feature_incompat` word in the header.
+    const FEATURE_INCOMPAT_OFFSET: usize = 12;
+
+    /// The byte offset of the `chunk_group_count` field in the header.
+    const CHUNK_GROUP_COUNT_OFFSET: usize = 16;
+
+    /// The byte offset of the `ready_count` field in the header, updated
+    /// atomically through the shared mapping.
+    const READY_COUNT_OFFSET: usize = 20;
+
+    /// The byte offset of the `state` field in the header, updated atomically
+    /// through the shared mapping.
+    const STATE_OFFSET: usize = 24;
+
+    /// The `state` bit saying every chunk group of the blob is ready. Sticky:
+    /// ready bits are never cleared, so once set it stays set for the lifetime
+    /// of the file.
+    const STATE_ALL_READY: u32 = 1;
+
     /// Opens the map at `path` for `chunk_group_count` chunk groups,
     /// creating it when absent.
     ///
@@ -147,7 +147,7 @@ impl ChunkGroupMap {
     /// updates them before a successful open. Anything else that fails the
     /// magic is a corrupt or foreign file.
     pub(super) fn open(path: &Path, chunk_group_count: usize) -> io::Result<Self> {
-        let expected_len = (CHUNK_GROUP_MAP_HEADER_SIZE + chunk_group_count.div_ceil(8)) as u64;
+        let expected_len = (Self::HEADER_SIZE + chunk_group_count.div_ceil(8)) as u64;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -158,7 +158,6 @@ impl ChunkGroupMap {
         let file_len = file.metadata()?.len();
         if file_len == 0 {
             file.set_len(expected_len)?;
-            file.write_all_at(&header_bytes(chunk_group_count), 0)?;
         } else if file_len < expected_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -179,11 +178,17 @@ impl ChunkGroupMap {
             ));
         }
 
+        let chunk_group_map = Self {
+            map,
+            chunk_group_count,
+            file,
+        };
+
         // SAFETY: the mapping is at least `expected_len` bytes long, which
         // includes the whole header, and stays mapped while `map` lives.
         let header =
-            unsafe { std::slice::from_raw_parts(map.as_ptr(), CHUNK_GROUP_MAP_HEADER_SIZE) };
-        if header[..CHUNK_GROUP_MAP_MAGIC.len()] != CHUNK_GROUP_MAP_MAGIC {
+            unsafe { std::slice::from_raw_parts(chunk_group_map.map.as_ptr(), Self::HEADER_SIZE) };
+        if header[..Self::MAGIC.len()] != Self::MAGIC {
             if !header.iter().all(|byte| *byte == 0) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -191,9 +196,11 @@ impl ChunkGroupMap {
                 ));
             }
 
-            file.write_all_at(&header_bytes(chunk_group_count), 0)?;
+            chunk_group_map.write_header()?;
         } else {
-            let incompat = header_field(header, CHUNK_GROUP_MAP_FEATURE_INCOMPAT_OFFSET);
+            let incompat = chunk_group_map
+                .header_u32(Self::FEATURE_INCOMPAT_OFFSET)
+                .load(Ordering::Relaxed);
             if incompat != 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -204,7 +211,9 @@ impl ChunkGroupMap {
                 ));
             }
 
-            let existing = header_field(header, CHUNK_GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET) as usize;
+            let existing = chunk_group_map
+                .header_u32(Self::CHUNK_GROUP_COUNT_OFFSET)
+                .load(Ordering::Relaxed) as usize;
             if existing != chunk_group_count {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -217,12 +226,6 @@ impl ChunkGroupMap {
                 ));
             }
         }
-
-        let chunk_group_map = Self {
-            map,
-            chunk_group_count,
-            file,
-        };
 
         // Reconcile the ALL_READY flag from the authoritative bitmap: this
         // heals the counter skew left by a process that died between setting
@@ -239,20 +242,30 @@ impl ChunkGroupMap {
     /// Returns the atomic view of the bitmap byte holding the ready bit of
     /// `index`.
     fn bit_byte(&self, index: usize) -> &AtomicU8 {
-        let offset = CHUNK_GROUP_MAP_HEADER_SIZE + index / 8;
+        let offset = Self::HEADER_SIZE + index / 8;
         // SAFETY: `offset` is within the mapping, whose length `open`
         // checked against `chunk_group_count`, and `AtomicU8` has the layout
         // and alignment of `u8`.
         unsafe { &*(self.map.as_ptr().add(offset) as *const AtomicU8) }
     }
 
-    /// Returns the atomic view of the mutable `u32` header field at `offset`.
+    /// Returns the atomic view of the `u32` header field at `offset`.
     fn header_u32(&self, offset: usize) -> &AtomicU32 {
-        debug_assert!(offset % 4 == 0 && offset + 4 <= CHUNK_GROUP_MAP_HEADER_SIZE);
+        debug_assert!(offset % 4 == 0 && offset + 4 <= Self::HEADER_SIZE);
         // SAFETY: the mapping is page aligned and at least one header page
         // long, and `offset` is a 4-byte aligned position inside the header,
         // satisfying the alignment and size of `AtomicU32`.
         unsafe { &*(self.map.as_ptr().add(offset) as *const AtomicU32) }
+    }
+
+    /// Writes the header of a fresh map: the magic and the chunk group
+    /// count, every other field zero.
+    fn write_header(&self) -> io::Result<()> {
+        let mut header = [0u8; Self::HEADER_SIZE];
+        header[..Self::MAGIC.len()].copy_from_slice(&Self::MAGIC);
+        header[Self::CHUNK_GROUP_COUNT_OFFSET..Self::CHUNK_GROUP_COUNT_OFFSET + 4]
+            .copy_from_slice(&(self.chunk_group_count as u32).to_le_bytes());
+        self.file.write_all_at(&header, 0)
     }
 
     /// Clears every ready bit and the counters derived from them, in place.
@@ -269,10 +282,10 @@ impl ChunkGroupMap {
             self.bit_byte(index).store(0, Ordering::Release);
         }
 
-        self.header_u32(CHUNK_GROUP_MAP_READY_COUNT_OFFSET)
+        self.header_u32(Self::READY_COUNT_OFFSET)
             .store(0, Ordering::Release);
-        self.header_u32(CHUNK_GROUP_MAP_STATE_OFFSET)
-            .fetch_and(!CHUNK_GROUP_MAP_STATE_ALL_READY, Ordering::AcqRel);
+        self.header_u32(Self::STATE_OFFSET)
+            .fetch_and(!Self::STATE_ALL_READY, Ordering::AcqRel);
         Ok(())
     }
 
@@ -296,7 +309,7 @@ impl ChunkGroupMap {
         // This call made the 0 to 1 transition, which exactly one process
         // does per chunk group, so it owns bumping the shared ready count.
         let count = self
-            .header_u32(CHUNK_GROUP_MAP_READY_COUNT_OFFSET)
+            .header_u32(Self::READY_COUNT_OFFSET)
             .fetch_add(1, Ordering::AcqRel)
             + 1;
         if count as usize >= self.chunk_group_count {
@@ -309,10 +322,7 @@ impl ChunkGroupMap {
     /// Returns whether every chunk group of the blob is ready, one atomic
     /// load of the sticky `ALL_READY` flag.
     pub(super) fn is_all_ready(&self) -> bool {
-        self.header_u32(CHUNK_GROUP_MAP_STATE_OFFSET)
-            .load(Ordering::Acquire)
-            & CHUNK_GROUP_MAP_STATE_ALL_READY
-            != 0
+        self.header_u32(Self::STATE_OFFSET).load(Ordering::Acquire) & Self::STATE_ALL_READY != 0
     }
 
     /// Returns whether every chunk group of the blob is ready, scanning the
@@ -358,17 +368,9 @@ impl ChunkGroupMap {
     /// fail a read. Callers re-check readiness afterwards: the holder
     /// publishes the chunk groups just before releasing, so the usual
     /// outcome of waiting is that no backend request is needed at all.
-    pub(super) fn acquire(&self, chunk_groups: Range<usize>) -> Option<ChunkGroupClaim<'_>> {
-        match set_lock(
-            &self.file,
-            &chunk_groups,
-            libc::F_WRLCK as libc::c_short,
-            libc::F_OFD_SETLKW,
-        ) {
-            Ok(()) => Some(ChunkGroupClaim {
-                file: &self.file,
-                chunk_groups,
-            }),
+    pub(super) fn claim(&self, chunk_groups: Range<usize>) -> Option<ChunkGroupClaim<'_>> {
+        match ChunkGroupClaim::acquire(&self.file, chunk_groups.clone()) {
+            Ok(claim) => Some(claim),
             Err(err) => {
                 warn!(
                     "failed to claim chunk groups {:?}: {}; fetching without cross-process coordination",
@@ -404,17 +406,17 @@ impl ChunkGroupMap {
     /// race with the store; the store corrects a count a crashed writer left
     /// short.
     fn mark_all_ready(&self) {
-        self.header_u32(CHUNK_GROUP_MAP_READY_COUNT_OFFSET)
+        self.header_u32(Self::READY_COUNT_OFFSET)
             .store(self.chunk_group_count as u32, Ordering::Release);
-        self.header_u32(CHUNK_GROUP_MAP_STATE_OFFSET)
-            .fetch_or(CHUNK_GROUP_MAP_STATE_ALL_READY, Ordering::AcqRel);
+        self.header_u32(Self::STATE_OFFSET)
+            .fetch_or(Self::STATE_ALL_READY, Ordering::AcqRel);
     }
 
     /// Returns the number of chunk groups marked ready, the advisory shared
     /// counter, exact once `ALL_READY` is latched.
     #[cfg(test)]
     fn ready_count(&self) -> usize {
-        self.header_u32(CHUNK_GROUP_MAP_READY_COUNT_OFFSET)
+        self.header_u32(Self::READY_COUNT_OFFSET)
             .load(Ordering::Acquire) as usize
     }
 
@@ -444,10 +446,51 @@ pub(super) struct ChunkGroupClaim<'a> {
     chunk_groups: Range<usize>,
 }
 
+/// Implements the claim.
+impl<'a> ChunkGroupClaim<'a> {
+    /// Takes the write lock on the bytes of `file` standing for
+    /// `chunk_groups`, waiting for their holder.
+    fn acquire(file: &'a File, chunk_groups: Range<usize>) -> io::Result<Self> {
+        Self::set_lock(
+            file,
+            &chunk_groups,
+            libc::F_WRLCK as libc::c_short,
+            libc::F_OFD_SETLKW,
+        )?;
+        Ok(Self { file, chunk_groups })
+    }
+
+    /// Applies the lock type `l_type` with `cmd` to the bytes of `file`
+    /// standing for `chunk_groups`.
+    fn set_lock(
+        file: &File,
+        chunk_groups: &Range<usize>,
+        l_type: libc::c_short,
+        cmd: libc::c_int,
+    ) -> io::Result<()> {
+        // SAFETY: `flock` is a plain C struct for which all zeros is a valid
+        // value, and OFD locks require the zero `l_pid` it provides.
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = l_type;
+        lock.l_whence = libc::SEEK_SET as libc::c_short;
+        lock.l_start = chunk_groups.start as libc::off_t;
+        lock.l_len = chunk_groups.len().max(1) as libc::off_t;
+
+        // SAFETY: `lock` is a fully initialized struct that outlives the
+        // call, and the descriptor is open for the lifetime of the borrowed
+        // file.
+        if unsafe { libc::fcntl(file.as_raw_fd(), cmd, &lock) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
+    }
+}
+
 /// Implements the release of the claim.
 impl Drop for ChunkGroupClaim<'_> {
     fn drop(&mut self) {
-        if let Err(err) = set_lock(
+        if let Err(err) = Self::set_lock(
             self.file,
             &self.chunk_groups,
             libc::F_UNLCK as libc::c_short,
@@ -459,46 +502,6 @@ impl Drop for ChunkGroupClaim<'_> {
             );
         }
     }
-}
-
-/// Applies the lock type `l_type` with `cmd` to the bytes of `file`
-/// standing for `chunk_groups`.
-fn set_lock(
-    file: &File,
-    chunk_groups: &Range<usize>,
-    l_type: libc::c_short,
-    cmd: libc::c_int,
-) -> io::Result<()> {
-    // SAFETY: `flock` is a plain C struct for which all zeros is a valid
-    // value, and OFD locks require the zero `l_pid` it provides.
-    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = l_type;
-    lock.l_whence = libc::SEEK_SET as libc::c_short;
-    lock.l_start = chunk_groups.start as libc::off_t;
-    lock.l_len = chunk_groups.len().max(1) as libc::off_t;
-
-    // SAFETY: `lock` is a fully initialized struct that outlives the call,
-    // and the descriptor is open for the lifetime of the borrowed file.
-    if unsafe { libc::fcntl(file.as_raw_fd(), cmd, &lock) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-
-/// Returns the header of a fresh map for `chunk_group_count` chunk groups:
-/// the magic and the count, every other field zero.
-fn header_bytes(chunk_group_count: usize) -> [u8; CHUNK_GROUP_MAP_HEADER_SIZE] {
-    let mut header = [0u8; CHUNK_GROUP_MAP_HEADER_SIZE];
-    header[..CHUNK_GROUP_MAP_MAGIC.len()].copy_from_slice(&CHUNK_GROUP_MAP_MAGIC);
-    header[CHUNK_GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET..CHUNK_GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET + 4]
-        .copy_from_slice(&(chunk_group_count as u32).to_le_bytes());
-    header
-}
-
-/// Returns the little-endian `u32` header field at `offset`.
-fn header_field(header: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(header[offset..offset + 4].try_into().unwrap())
 }
 
 #[cfg(test)]
@@ -558,7 +561,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.group.map");
         let chunk_group_count = 10usize;
-        let expected_len = (CHUNK_GROUP_MAP_HEADER_SIZE + chunk_group_count.div_ceil(8)) as u64;
+        let expected_len = (ChunkGroupMap::HEADER_SIZE + chunk_group_count.div_ceil(8)) as u64;
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -579,7 +582,7 @@ mod tests {
     #[test]
     fn open_rejects_a_corrupt_magic_and_a_truncated_file() {
         let dir = tempdir().unwrap();
-        let expected_len = CHUNK_GROUP_MAP_HEADER_SIZE + 10usize.div_ceil(8);
+        let expected_len = ChunkGroupMap::HEADER_SIZE + 10usize.div_ceil(8);
 
         let garbage = dir.path().join("garbage.group.map");
         std::fs::write(&garbage, vec![0xABu8; expected_len]).unwrap();
@@ -637,7 +640,7 @@ mod tests {
         let chunk_group_count = 10usize;
         drop(ChunkGroupMap::open(&path, chunk_group_count).unwrap());
         let file = OpenOptions::new().write(true).open(&path).unwrap();
-        file.write_all_at(&[0xFF, 0x03], CHUNK_GROUP_MAP_HEADER_SIZE as u64)
+        file.write_all_at(&[0xFF, 0x03], ChunkGroupMap::HEADER_SIZE as u64)
             .unwrap();
         drop(file);
 
@@ -785,8 +788,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let map = ChunkGroupMap::open(&dir.path().join("blob.group.map"), 8).unwrap();
 
-        let first = map.acquire(0..1).unwrap();
-        let second = map.acquire(1..2).unwrap();
+        let first = map.claim(0..1).unwrap();
+        let second = map.claim(1..2).unwrap();
         drop(first);
         drop(second);
     }
@@ -796,8 +799,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let map = ChunkGroupMap::open(&dir.path().join("blob.group.map"), 8).unwrap();
 
-        drop(map.acquire(7..8).unwrap());
-        drop(map.acquire(7..8).unwrap());
+        drop(map.claim(7..8).unwrap());
+        drop(map.claim(7..8).unwrap());
     }
 
     #[test]
@@ -806,12 +809,12 @@ mod tests {
         let path = dir.path().join("blob.group.map");
 
         let peer = ChunkGroupMap::open(&path, 8).unwrap();
-        let claim = peer.acquire(2..4).unwrap();
+        let claim = peer.claim(2..4).unwrap();
 
         let (claimed_tx, claimed_rx) = mpsc::channel();
         let waiter = std::thread::spawn(move || {
             let map = ChunkGroupMap::open(&path, 8).unwrap();
-            drop(map.acquire(3..4).unwrap());
+            drop(map.claim(3..4).unwrap());
             claimed_tx.send(()).unwrap();
         });
 
@@ -827,14 +830,14 @@ mod tests {
         let path = dir.path().join("blob.group.map");
 
         let peer = ChunkGroupMap::open(&path, 8).unwrap();
-        let claim = peer.acquire(3..4).unwrap();
+        let claim = peer.claim(3..4).unwrap();
 
         let (waiting_tx, waiting_rx) = mpsc::channel();
         let (claimed_tx, claimed_rx) = mpsc::channel();
         let waiter = std::thread::spawn(move || {
             let map = ChunkGroupMap::open(&path, 8).unwrap();
             waiting_tx.send(()).unwrap();
-            let claim = map.acquire(3..4).unwrap();
+            let claim = map.claim(3..4).unwrap();
             claimed_tx.send(()).unwrap();
             drop(claim);
         });
@@ -857,8 +860,8 @@ mod tests {
         let map = ChunkGroupMap::open(&path, 8).unwrap();
         {
             let peer = ChunkGroupMap::open(&path, 8).unwrap();
-            std::mem::forget(peer.acquire(5..6).unwrap());
+            std::mem::forget(peer.claim(5..6).unwrap());
         }
-        drop(map.acquire(5..6).unwrap());
+        drop(map.claim(5..6).unwrap());
     }
 }

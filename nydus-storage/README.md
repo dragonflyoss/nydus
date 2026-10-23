@@ -7,14 +7,17 @@ recording.
 - `lib.rs`: the `BlobCache` trait, one per blob over the dense decoded
   block address space, and the `BlobCaches` set of an image.
 - `local/`: the sparse cache file in the storage directory shared across
-  processes, with its `.group.map` sidecar, in-process fill coordination and
-  `pwritev` gather; `BlobCaches::prefetch_blob` streams one blob into it,
+  processes, with its `.group.map` sidecar (`ChunkGroupMap`), the notifier
+  the readers of one in-flight fill wait on (`ChunkGroupNotifier`) and the
+  `pwritev` writer of a chunk group (`ChunkGroupWriter`);
+  `BlobCaches::prefetch_blob` streams one blob into it,
   deduplicated across processes, while which blobs and when is decided
   above, by `nydus-core`'s prefetcher.
 - `diskless`: decodes in memory alone without a storage directory.
 - `raw_device`: reads a native `erofs-*` layer as-is from the backend.
-- `buffer`, `decode`: the fetch buffers and the decode and verification of
-  one chunk group, shared by the caches.
+- `buffer`, `decoder`: the fetch buffers and the `ChunkGroupDecoder` that
+  decodes and verifies a blob's chunk groups, shared by the caches and by
+  `nydus optimize`.
 - `ondemand_record`: the chunk groups a workload's on-demand reads touched,
   which `nydus optimize` turns into an ondemand blob.
 

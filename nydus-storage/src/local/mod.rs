@@ -3,8 +3,8 @@
 //! using the directory.
 
 mod chunk_group_map;
-mod flight;
-mod scatter;
+mod chunk_group_notifier;
+mod chunk_group_writer;
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -27,15 +27,12 @@ use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::WriteKind;
 
 use crate::buffer::ChunkGroupBuffers;
-use crate::decode::{decode_chunk_group, verify_chunk_group, write_failure_reason};
-use crate::{write_data_via_scratch, BlobCache, OndemandEntry, OndemandRecord};
+use crate::decoder::ChunkGroupDecoder;
+use crate::{BlobCache, OndemandEntry, OndemandRecord};
 
 use self::chunk_group_map::ChunkGroupMap;
-use self::flight::{Flight, LeaderGuard};
-use self::scatter::ScatterBatch;
-
-/// The interval between two attempts at the cross-process prefetch lock.
-const PREFETCH_LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+use self::chunk_group_notifier::{ChunkGroupNotifier, OwnerGuard};
+use self::chunk_group_writer::ChunkGroupWriter;
 
 /// The plaintext blob cache: a sparse file mirroring the blob's padded
 /// address space, filled chunk group by chunk group from the backend, with
@@ -62,8 +59,8 @@ const PREFETCH_LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 ///   ├─ every chunk group ready ───────────────▶ memcpy from the cache file mapping
 ///   └─ per chunk group of the range
 ///        ├─ ready in the shared map ──────────────────────────────────────────┐
-///        ├─ in flight in this process ─▶ wait for the leader ─────────────────┤
-///        └─ missing ─▶ lead the fill of its fetch-size window: claim it across│
+///        ├─ in flight in this process ─▶ wait for its owner ──────────────────┤
+///        └─ missing ─▶ own the fill of its fetch-size window: claim it across │
 ///                      processes, read the backend, decode, verify, pwritev,  │
 ///                      set ready ──────────────────────────────────────────────┤
 ///                                                                             ▼
@@ -105,9 +102,9 @@ pub struct LocalBlobCache {
     /// The ondemand record of the image, `None` when accesses are not recorded.
     ondemand_record: Option<Arc<OndemandRecord>>,
 
-    /// The in-process fills by chunk group index; one flight covers every
-    /// chunk group of its fetch window.
-    inflight: Mutex<HashMap<usize, Arc<Flight>>>,
+    /// The notifiers of the in-flight fills, keyed by chunk group index; one
+    /// notifier covers every chunk group of its fetch window.
+    notifiers: Mutex<HashMap<usize, Arc<ChunkGroupNotifier>>>,
 
     /// The read-only mapping of the cache file, created once every chunk
     /// group is ready. It serves reads by memcpy from the page cache,
@@ -124,6 +121,9 @@ pub struct LocalBlobCache {
 
 /// Implements the local blob cache.
 impl LocalBlobCache {
+    /// The interval between two attempts at the cross-process prefetch lock.
+    const PREFETCH_LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
     /// Reads the blob's metadata for an on-demand read: from the `.blob.meta`
     /// file in the storage directory when present, otherwise from `backend`,
     /// saving it there for the processes sharing the directory.
@@ -266,7 +266,7 @@ impl LocalBlobCache {
             cache_file: RwLock::new(None),
             backend,
             ondemand_record,
-            inflight: Mutex::new(HashMap::new()),
+            notifiers: Mutex::new(HashMap::new()),
             cache_mmap: OnceLock::new(),
             skip_verify_checksums: storage.skip_verify_checksums,
             fetch_size: storage.fetch_size,
@@ -280,9 +280,14 @@ impl LocalBlobCache {
             .expect("chunk group index within the blob meta")
     }
 
-    /// Counts the chunk groups of `span` an on-demand read found in the
-    /// cache, with their uncompressed bytes.
-    fn count_chunk_groups(&self, span: Range<usize>) {
+    /// Returns the decoder of the blob's chunk groups.
+    fn decoder(&self) -> ChunkGroupDecoder<'_> {
+        ChunkGroupDecoder::new(&self.blob_metadata, self.skip_verify_checksums)
+    }
+
+    /// Collects the cache read metrics of the chunk groups of `span` an
+    /// on-demand read found in the cache, with their uncompressed bytes.
+    fn collect_read_metrics(&self, span: Range<usize>) {
         let metrics = &self.backend.metrics().cache;
         for index in span {
             metrics.collect_read_metrics(u64::from(self.chunk_group(index).uncompressed_size()));
@@ -355,7 +360,7 @@ impl LocalBlobCache {
             ));
         }
 
-        self.count_chunk_groups(self.chunk_group_span(offset, end)?);
+        self.collect_read_metrics(self.chunk_group_span(offset, end)?);
         Ok(Some(&mmap[offset as usize..end as usize]))
     }
 
@@ -388,34 +393,19 @@ impl LocalBlobCache {
         }
     }
 
-    /// Ensures every chunk group overlapping `[offset, end)` is decoded into
-    /// the cache file, a missed one fetched together with the chunk groups
-    /// of its fetch-size cell.
-    fn ensure_chunk_groups(&self, offset: u64, end: u64, cache_file: &File) -> io::Result<()> {
-        for index in self.chunk_group_span(offset, end)? {
-            if self.chunk_group_map.is_ready(index)? {
-                self.count_chunk_groups(index..index + 1);
-            } else {
-                self.ensure_chunk_group_window(index, cache_file)?;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Returns the window a miss on chunk group `first` fetches: the chunk
     /// groups whose encoded payloads overlap the fetch-size cell of the data
     /// region holding `first`'s payload start, trimmed at the ones ready or
     /// already in flight, so a cell is fetched whole but never re-fetched.
     /// Cells are aligned, so concurrent misses in one cell plan the same
-    /// window and the later ones join the first flight instead of starting
+    /// window and the later ones wait for the first fill instead of starting
     /// an overlapping read. A zero fetch size is the missed chunk group
-    /// alone. Called with the in-flight map locked so the plan and its
+    /// alone. Called with the notifiers locked so the plan and its
     /// registration are one step.
     fn plan_chunk_group_window(
         &self,
         first: usize,
-        inflight: &HashMap<usize, Arc<Flight>>,
+        notifiers: &HashMap<usize, Arc<ChunkGroupNotifier>>,
     ) -> io::Result<Range<usize>> {
         let budget = self.fetch_size;
         if budget == 0 {
@@ -425,7 +415,7 @@ impl LocalBlobCache {
         let cell_start = self.chunk_group(first).compressed_offset() / budget * budget;
         let cell_end = cell_start + budget;
         let blocked = |index: usize| -> io::Result<bool> {
-            Ok(inflight.contains_key(&index) || self.chunk_group_map.is_ready(index)?)
+            Ok(notifiers.contains_key(&index) || self.chunk_group_map.is_ready(index)?)
         };
 
         let mut start = first;
@@ -448,65 +438,59 @@ impl LocalBlobCache {
     }
 
     /// Fills chunk group `first`, and its window, into the cache file,
-    /// joining an in-flight fill that already covers it.
-    fn ensure_chunk_group_window(&self, first: usize, cache_file: &File) -> io::Result<()> {
-        let (flight, window) = {
-            let mut inflight = self.inflight.lock().unwrap();
-            if let Some(flight) = inflight.get(&first) {
-                let flight = flight.clone();
-                drop(inflight);
-                return flight.wait();
+    /// waiting for an in-flight fill that already covers it.
+    fn ensure_chunk_group_window(&self, first: usize) -> io::Result<()> {
+        let (notifier, window) = {
+            let mut notifiers = self.notifiers.lock().unwrap();
+            if let Some(notifier) = notifiers.get(&first) {
+                let notifier = notifier.clone();
+                drop(notifiers);
+                return notifier.wait();
             }
 
-            let window = self.plan_chunk_group_window(first, &inflight)?;
-            let flight = Arc::new(Flight::new());
-            for key in window.clone() {
-                inflight.insert(key, flight.clone());
+            let window = self.plan_chunk_group_window(first, &notifiers)?;
+            let notifier = Arc::new(ChunkGroupNotifier::new());
+            for index in window.clone() {
+                notifiers.insert(index, notifier.clone());
             }
-            (flight, window)
+            (notifier, window)
         };
 
-        let _guard = LeaderGuard {
-            flight: flight.clone(),
-            keys: window.clone(),
-            inflight: &self.inflight,
+        let _guard = OwnerGuard {
+            notifier: notifier.clone(),
+            chunk_groups: window.clone(),
+            notifiers: &self.notifiers,
         };
         let result = (|| {
             if self.chunk_group_map.is_ready(first)? {
-                self.count_chunk_groups(first..first + 1);
+                self.collect_read_metrics(first..first + 1);
                 return Ok(());
             }
 
             // Claim the window across the processes sharing the cache. The
-            // in-process flight above left a single leader per chunk group,
-            // which is what makes the descriptor-owned lock meaningful. The
+            // notifier above left a single owner per chunk group in this
+            // process, which is what makes the descriptor-owned lock
+            // meaningful. The
             // claim spans the whole window rather than `first` alone: a peer
             // missing a neighbouring chunk group of the same cell plans the
             // same window, and would otherwise fetch it too. Whoever waited
             // usually finds the chunk groups published on the way out, so
             // the trim below is what removes the duplicate backend traffic.
-            let _claim = self.chunk_group_map.acquire(window.clone());
+            let _claim = self.chunk_group_map.claim(window.clone());
             let window = self.trim_ready(window)?;
             if window.is_empty() {
-                self.count_chunk_groups(first..first + 1);
+                self.collect_read_metrics(first..first + 1);
                 return Ok(());
             }
 
             let mut buffers = ChunkGroupBuffers::default();
             let (encoded, decoded, base) = self.window_buffers(&window, &mut buffers)?;
             self.backend.read_range_into(&self.blob_id, base, encoded)?;
-            self.fill_chunk_group_window(
-                window,
-                WriteKind::Ondemand,
-                base,
-                encoded,
-                decoded,
-                cache_file,
-            )
+            self.fill_chunk_group_window(window, WriteKind::Ondemand, base, encoded, decoded)
         })();
 
         // The guard's drop then finds the result published and does nothing.
-        flight.complete(&result);
+        notifier.notify(&result);
         result
     }
 
@@ -533,7 +517,6 @@ impl LocalBlobCache {
         &self,
         batch: Range<usize>,
         buffers: &mut ChunkGroupBuffers,
-        cache_file: &File,
     ) -> io::Result<()> {
         let batch = self.trim_ready(batch)?;
         if batch.is_empty() {
@@ -543,14 +526,7 @@ impl LocalBlobCache {
         let (encoded, decoded, base) = self.window_buffers(&batch, buffers)?;
         self.backend
             .prefetch_range_into(&self.blob_id, base, encoded)?;
-        self.fill_chunk_group_window(
-            batch,
-            WriteKind::Prefetch,
-            base,
-            encoded,
-            decoded,
-            cache_file,
-        )
+        self.fill_chunk_group_window(batch, WriteKind::Prefetch, base, encoded, decoded)
     }
 
     /// Returns `buffers` sized for the chunk groups of `window`: the encoded
@@ -568,7 +544,7 @@ impl LocalBlobCache {
             io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize")
         })?;
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
-        let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
+        let (encoded, decoded) = buffers.resize(encoded_len, decoded_len)?;
         Ok((encoded, decoded, head.compressed_offset()))
     }
 
@@ -582,33 +558,30 @@ impl LocalBlobCache {
         base: u64,
         encoded: &[u8],
         decoded: &mut [u8],
-        cache_file: &File,
     ) -> io::Result<()> {
         let metrics = &self.backend.metrics().cache;
         for index in window {
             // Another process may have filled a chunk group of the window
-            // since it was planned; the leader's own chunk group was
+            // since it was planned; the owner's own chunk group was
             // re-checked under the claim, so this only costs a bit test.
             if self.chunk_group_map.is_ready(index)? {
                 continue;
             }
 
             let group = self.chunk_group(index);
-            decode_chunk_group(
-                &self.blob_metadata,
-                &group,
-                base,
-                encoded,
-                decoded,
-                self.skip_verify_checksums,
-            )
-            .and_then(|payload| self.write_chunk_group(&group, payload, cache_file))
-            .inspect(|()| {
-                metrics.collect_write_finished_metrics(kind, u64::from(group.uncompressed_size()))
-            })
-            .inspect_err(|err| {
-                metrics.collect_write_failure_metrics(kind, write_failure_reason(err))
-            })?;
+            self.decoder()
+                .decode(&group, base, encoded, decoded)
+                .and_then(|payload| self.write_chunk_group(&group, payload))
+                .inspect(|()| {
+                    metrics
+                        .collect_write_finished_metrics(kind, u64::from(group.uncompressed_size()))
+                })
+                .inspect_err(|err| {
+                    metrics.collect_write_failure_metrics(
+                        kind,
+                        ChunkGroupDecoder::write_failure_reason(err),
+                    )
+                })?;
         }
 
         Ok(())
@@ -648,20 +621,13 @@ impl LocalBlobCache {
                 continue;
             }
 
-            match decode_chunk_group(
-                &self.blob_metadata,
-                &group,
-                base,
-                encoded,
-                decoded,
-                self.skip_verify_checksums,
-            ) {
+            match self.decoder().decode(&group, base, encoded, decoded) {
                 Ok(payload) => f(&group, payload)?,
                 Err(err) => {
                     failed += 1;
                     self.backend.metrics().cache.collect_write_failure_metrics(
                         WriteKind::Redirect,
-                        write_failure_reason(&err),
+                        ChunkGroupDecoder::write_failure_reason(&err),
                     );
                     warn!(
                         "skipping redirect chunk group {} of blob {}: {}",
@@ -672,6 +638,36 @@ impl LocalBlobCache {
         }
 
         Ok((encoded.len() as u64, failed))
+    }
+
+    /// Plans the prefetch of the blob for `workers`: batches of consecutive
+    /// chunk groups whose compressed bytes reach `storage.fetch_size`, one
+    /// contiguous backend read each. Every batch holds at least one chunk
+    /// group; a zero fetch size yields one chunk group per batch. With more
+    /// than one worker the first `workers` chunk groups are one batch each,
+    /// so the pool lands the blob's head, the first-accessed data of an
+    /// ondemand blob, within one round trip before the full-size batches
+    /// stream the rest.
+    fn plan_prefetch_batches(&self, workers: usize) -> Vec<Range<usize>> {
+        let ramp = if workers > 1 { workers } else { 0 };
+        let mut batches: Vec<Range<usize>> = Vec::new();
+        let mut base = 0u64;
+        for (index, group) in self.blob_metadata.chunk_groups().enumerate() {
+            match batches.last_mut() {
+                Some(batch)
+                    if batch.start >= ramp
+                        && group.compressed_range().end - base <= self.fetch_size =>
+                {
+                    batch.end = index + 1;
+                }
+                _ => {
+                    base = group.compressed_offset();
+                    batches.push(index..index + 1);
+                }
+            }
+        }
+
+        batches
     }
 
     /// Runs `job` over `batches` in blob order, sequentially or through a
@@ -685,10 +681,21 @@ impl LocalBlobCache {
         deadline: Option<Instant>,
         job: &(dyn Fn(&Range<usize>, &mut ChunkGroupBuffers) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
+        // Checked between batches, so the overshoot past the deadline is
+        // bounded by one backend request, itself bounded by the request
+        // timeout.
+        let check_deadline = || match deadline {
+            Some(deadline) if Instant::now() >= deadline => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "blob prefetch timed out",
+            )),
+            _ => Ok(()),
+        };
+
         if workers <= 1 || batches.len() == 1 {
             let mut buffers = ChunkGroupBuffers::default();
             for batch in batches {
-                check_prefetch_deadline(deadline)?;
+                check_deadline()?;
                 job(batch, &mut buffers)?;
             }
             return Ok(());
@@ -706,8 +713,8 @@ impl LocalBlobCache {
                             break;
                         }
 
-                        let result = check_prefetch_deadline(deadline)
-                            .and_then(|()| job(&batches[index], &mut buffers));
+                        let result =
+                            check_deadline().and_then(|()| job(&batches[index], &mut buffers));
                         if let Err(err) = result {
                             let mut slot = failure.lock().unwrap();
                             if slot.is_none() {
@@ -727,29 +734,30 @@ impl LocalBlobCache {
         }
     }
 
-    /// Scatters a verified decoded chunk group into the cache file and
+    /// Writes a verified decoded chunk group into the cache file and
     /// publishes it.
     fn write_chunk_group(
         &self,
         group: &BlobMetadataChunkGroupExtent,
         payload: &[u8],
-        cache_file: &File,
     ) -> io::Result<()> {
-        let mut batch = ScatterBatch::new(cache_file);
+        let cache_file = self.cache_file()?;
+        let mut writer = ChunkGroupWriter::new(&cache_file);
         for (offset, bytes) in group
             .chunks(&self.blob_metadata, payload)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
         {
-            batch.push(offset, bytes)?;
+            writer.write_at(offset, bytes)?;
         }
-        batch.flush()?;
+        writer.flush()?;
         self.chunk_group_map.set_ready(group.index() as usize)
     }
 
     /// Ensures every chunk group overlapping `[offset, offset + len)` is
-    /// decoded and written to the cache file, shared by `read_at` and
+    /// decoded and written to the cache file, a missed one fetched together
+    /// with the chunk groups of its fetch-size cell; shared by `read_at` and
     /// `ensure_range`.
-    fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
+    fn ensure_byte_range(&self, offset: u64, len: u64) -> io::Result<()> {
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
@@ -762,12 +770,21 @@ impl LocalBlobCache {
 
         // The sticky all-ready flag says every chunk group is decoded into
         // the cache file, so skip the per-chunk-group walk entirely.
+        let span = self.chunk_group_span(offset, end)?;
         if self.chunk_group_map.is_all_ready() {
-            self.count_chunk_groups(self.chunk_group_span(offset, end)?);
+            self.collect_read_metrics(span);
             return Ok(());
         }
 
-        self.ensure_chunk_groups(offset, end, cache_file)
+        for index in span {
+            if self.chunk_group_map.is_ready(index)? {
+                self.collect_read_metrics(index..index + 1);
+            } else {
+                self.ensure_chunk_group_window(index)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -792,10 +809,9 @@ impl BlobCache for LocalBlobCache {
         self.ensure_cache_file_linked(&cache_file)?;
 
         let workers = workers.max(1);
-        let ramp = if workers > 1 { workers } else { 0 };
-        let batches = plan_prefetch_batches(&self.blob_metadata, self.fetch_size, ramp);
+        let batches = self.plan_prefetch_batches(workers);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
-            self.prefetch_batch(batch.clone(), buffers, cache_file.as_ref())
+            self.prefetch_batch(batch.clone(), buffers)
         })?;
 
         // Every chunk group is now ready, decoded here or observed ready
@@ -823,24 +839,20 @@ impl BlobCache for LocalBlobCache {
         // The cache file mirrors the padded address space, so once the
         // covering chunk groups are decoded the absolute offset indexes
         // straight into it for one contiguous read.
-        let cache_file = self.cache_file()?;
-        self.ensure_byte_range(offset, buf.len() as u64, cache_file.as_ref())?;
-        cache_file.as_ref().read_exact_at(buf, offset)
+        self.ensure_byte_range(offset, buf.len() as u64)?;
+        self.cache_file()?.read_exact_at(buf, offset)
     }
 
-    /// Streams the bytes straight from the cache file mapping once every
-    /// chunk group is ready, through the scratch buffer otherwise.
-    fn write_data_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
-        if len == 0 {
-            return Ok(());
-        }
-
-        if let Some(mapped) = self.all_ready_slice(offset, len)? {
+    /// Returns the bytes straight from the cache file mapping once every
+    /// chunk group is ready, recording the access in the record; `None`
+    /// while the blob is still filling.
+    fn mapped(&self, offset: u64, len: usize) -> io::Result<Option<&[u8]>> {
+        let mapped = self.all_ready_slice(offset, len)?;
+        if mapped.is_some() {
             self.record_ondemand_range(offset, len);
-            return writer.write_all(mapped);
         }
 
-        write_data_via_scratch(self, offset, len, writer)
+        Ok(mapped)
     }
 
     /// Creates the sparse cache file sized to the padded address space and
@@ -883,8 +895,7 @@ impl BlobCache for LocalBlobCache {
         }
 
         self.record_ondemand_range(offset, usize::try_from(len).unwrap_or(usize::MAX));
-        let cache_file = self.cache_file()?;
-        self.ensure_byte_range(offset, len, cache_file.as_ref())
+        self.ensure_byte_range(offset, len)
     }
 
     /// Returns the ready chunk groups overlapping the range as merged byte
@@ -955,8 +966,7 @@ impl BlobCache for LocalBlobCache {
         }
 
         let workers = workers.max(1);
-        let ramp = if workers > 1 { workers } else { 0 };
-        let batches = plan_prefetch_batches(&self.blob_metadata, self.fetch_size, ramp);
+        let batches = self.plan_prefetch_batches(workers);
         let bytes = AtomicU64::new(0);
         let failed = AtomicU64::new(0);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
@@ -992,9 +1002,8 @@ impl BlobCache for LocalBlobCache {
             return Ok(());
         }
 
-        verify_chunk_group(&group, payload, self.skip_verify_checksums)?;
-        let cache_file = self.cache_file()?;
-        self.write_chunk_group(&group, payload, cache_file.as_ref())?;
+        self.decoder().verify(&group, payload)?;
+        self.write_chunk_group(&group, payload)?;
         self.backend.metrics().cache.collect_write_finished_metrics(
             WriteKind::Redirect,
             u64::from(group.uncompressed_size()),
@@ -1060,7 +1069,7 @@ impl BlobCache for LocalBlobCache {
                 );
                 contention_logged = true;
             }
-            thread::sleep(PREFETCH_LOCK_RETRY_INTERVAL);
+            thread::sleep(Self::PREFETCH_LOCK_RETRY_INTERVAL);
         }
     }
 
@@ -1084,62 +1093,16 @@ impl BlobCache for LocalBlobCache {
     }
 }
 
-/// Batches the consecutive chunk groups of `blob_metadata` so each batch's
-/// compressed bytes reach `target_compressed`, one contiguous backend read
-/// each. Every batch holds at least one chunk group; a zero target yields
-/// one chunk group per batch. The first `ramp` chunk groups are one batch
-/// each, so a worker pool lands the blob's head, the first-accessed data of
-/// an ondemand blob, within one round trip before the full-size batches
-/// stream the rest.
-fn plan_prefetch_batches(
-    blob_metadata: &BlobMetadata,
-    target_compressed: u64,
-    ramp: usize,
-) -> Vec<Range<usize>> {
-    let mut batches: Vec<Range<usize>> = Vec::new();
-    let mut base = 0u64;
-    for (index, group) in blob_metadata.chunk_groups().enumerate() {
-        match batches.last_mut() {
-            Some(batch)
-                if batch.start >= ramp
-                    && group.compressed_range().end - base <= target_compressed =>
-            {
-                batch.end = index + 1;
-            }
-            _ => {
-                base = group.compressed_offset();
-                batches.push(index..index + 1);
-            }
-        }
-    }
-
-    batches
-}
-
-/// Fails with [`io::ErrorKind::TimedOut`] once the blob-level prefetch
-/// `deadline` has passed. Checked between batches, so the overshoot is
-/// bounded by one backend request, itself bounded by the request timeout.
-fn check_prefetch_deadline(deadline: Option<Instant>) -> io::Result<()> {
-    match deadline {
-        Some(deadline) if Instant::now() >= deadline => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "blob prefetch timed out",
-        )),
-        _ => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode::is_chunk_group_crc_mismatch;
     use crate::BlobCaches;
     use nydus_backend::Local;
     use nydus_format::blob::{
         BlobMetadataChunkGroup, BlobMetadataChunkLength, BlobMetadataCompressor,
         BlobMetadataDigester,
     };
-    use nydus_telemetry::metrics::Metrics;
+    use nydus_telemetry::metrics::{Metrics, WriteFailureReason};
     use nydus_test_utils::blob::{uncompressed_data, FullBlob};
     use nydus_test_utils::metadata::{from_chunk_groups, single_chunk_group};
     use sha2::{Digest, Sha256};
@@ -1232,29 +1195,36 @@ mod tests {
     }
 
     #[test]
-    fn plan_prefetch_batches_follows_the_compressed_target_and_the_ramp() {
+    fn plan_prefetch_batches_follows_the_fetch_size_and_the_workers() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
         let groups: Groups = (0..5u8).map(|i| vec![vec![i; 4096]]).collect();
-        let (_, blob_metadata) =
+        let (data, blob_metadata) =
             from_chunk_groups(BlobMetadataCompressor::None, 4096, &groups, None);
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&blob_metadata)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let backend = local_backend(backend_dir.path());
         let test_cases: Vec<(u64, usize, Vec<Range<usize>>)> = vec![
-            (0, 0, vec![0..1, 1..2, 2..3, 3..4, 4..5]),
-            (4096, 0, vec![0..1, 1..2, 2..3, 3..4, 4..5]),
-            (8192, 0, vec![0..2, 2..4, 4..5]),
-            (u64::MAX, 0, std::iter::once(0..5).collect()),
+            (0, 1, vec![0..1, 1..2, 2..3, 3..4, 4..5]),
+            (4096, 1, vec![0..1, 1..2, 2..3, 3..4, 4..5]),
+            (8192, 1, vec![0..2, 2..4, 4..5]),
+            (u64::MAX, 1, std::iter::once(0..5).collect()),
             (u64::MAX, 2, vec![0..1, 1..2, 2..5]),
             (8192, 3, vec![0..1, 1..2, 2..3, 3..5]),
             (u64::MAX, 9, vec![0..1, 1..2, 2..3, 3..4, 4..5]),
         ];
 
-        for (target_compressed, ramp, expected) in test_cases {
-            assert_eq!(
-                plan_prefetch_batches(&blob_metadata, target_compressed, ramp),
-                expected
-            );
+        for (fetch_size, workers, expected) in test_cases {
+            let cached = open(
+                full_blob_id,
+                backend.clone(),
+                &storage(cache_dir.path(), fetch_size),
+            )
+            .unwrap();
+            assert_eq!(cached.plan_prefetch_batches(workers), expected);
         }
-
-        let (_, empty) = from_chunk_groups(BlobMetadataCompressor::None, 4096, &[], None);
-        assert!(plan_prefetch_batches(&empty, 4096, 4).is_empty());
     }
 
     #[test]
@@ -1392,7 +1362,10 @@ mod tests {
         cached.read_at(16384, &mut buf).unwrap();
         assert_eq!(buf, groups[1][0][..100]);
         let err = cached.read_at(2 * 16384, &mut buf).unwrap_err();
-        assert!(is_chunk_group_crc_mismatch(&err));
+        assert_eq!(
+            ChunkGroupDecoder::write_failure_reason(&err),
+            WriteFailureReason::Checksum
+        );
         assert!(!cached.is_chunk_group_ready(2));
         cached.read_at(0, &mut buf).unwrap();
         assert_eq!(buf, groups[0][0][..100]);
