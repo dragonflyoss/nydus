@@ -55,7 +55,7 @@ pub use chunk_info_v2::BlobChunkInfoV2Ondisk;
 pub mod toc;
 
 mod zran;
-pub use zran::{ZranContextGenerator, ZranInflateContext};
+pub use zran::{ZranBlobMeta, ZranContextGenerator, ZranInflateContext};
 
 mod batch;
 pub use batch::{BatchContextGenerator, BatchInflateContext};
