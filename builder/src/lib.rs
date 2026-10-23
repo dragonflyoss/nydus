@@ -414,10 +414,9 @@ mod tests {
 
                 for path in *paths {
                     let target = Path::new(path);
-                    let entry = tree
-                        .get_node(target)
-                        .unwrap_or_else(|| panic!("missing file {path} for {version:?}"));
-                    let node = entry.borrow_mut_node();
+                    let entry = tree.get_node(target);
+                    assert!(entry.is_some(), "missing file {path} for {version:?}");
+                    let node = entry.unwrap().borrow_mut_node();
                     assert!(node.is_reg());
                     assert_eq!(node.target(), target);
 
