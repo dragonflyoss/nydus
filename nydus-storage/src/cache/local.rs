@@ -443,7 +443,11 @@ impl LocalBlobCache {
         };
 
         let result = (|| {
-            if self.chunk_group_ready(first)? {
+            // Followers of this flight wait for every group of the window,
+            // not only `first`: prefetch or a peer process may have
+            // published `first` alone since the miss, so the fill is only
+            // skipped once the whole window is ready.
+            if self.chunk_group_map.is_range_ready(window.clone())? {
                 self.count_chunk_groups(first..first + 1);
                 return Ok(());
             }
@@ -1448,6 +1452,58 @@ mod tests {
         assert_eq!(backend.reads(), 3, "2 ramp reads + 1 window of 2 groups");
         assert!(cached.is_all_ready());
         assert_eq!(fs::read(&cached.cache_data_path).unwrap(), image);
+    }
+
+    /// Readers that join an in-flight window fill must only see `Ok` once
+    /// their own group is in the cache file. A prefetch, by the same
+    /// instance or by a second handle on the cache dir standing in for a
+    /// peer process, publishes groups underneath 16 on-demand readers. The
+    /// interleaving is not scripted, so the round is repeated to hit it.
+    fn reads_racing_a_prefetch(peer: bool) -> usize {
+        let n = 64usize;
+        let groups: Groups = (0..n).map(|i| vec![vec![i as u8 + 1; 4096]]).collect();
+        let (data, meta) = from_chunk_groups(BlobMetadataCompressor::None, 4096, &groups, None);
+        let image = uncompressed_data(&groups);
+        let backend_dir = tempdir().unwrap();
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+
+        let wrong = AtomicUsize::new(0);
+        for round in 0..500usize {
+            let cache_dir = tempdir().unwrap();
+            // Eight one-block groups per fetch window.
+            let options = fetch(8 * 4096);
+            let backend = CountingBackend::new(backend_dir.path());
+            let reader = open(full_blob_id, cache_dir.path(), backend.clone(), options);
+            let other = open(full_blob_id, cache_dir.path(), backend, options);
+            thread::scope(|scope| {
+                let prefetcher = if peer { &other } else { &reader };
+                scope.spawn(move || prefetcher.prefetch_all(1, None).unwrap());
+                for t in 0..16usize {
+                    let (reader, image, wrong) = (&reader, &image, &wrong);
+                    scope.spawn(move || {
+                        for k in 0..n {
+                            let group = (k * 7 + t * 13 + round) % n;
+                            let offset = group * 4096 + 17;
+                            let mut byte = [0u8; 1];
+                            reader.read_at(offset as u64, &mut byte).unwrap();
+                            if byte[0] != image[offset] {
+                                wrong.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        wrong.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn reads_joining_a_window_fill_never_see_unfilled_groups() {
+        assert_eq!(reads_racing_a_prefetch(false), 0, "same-instance prefetch");
+        assert_eq!(reads_racing_a_prefetch(true), 0, "peer prefetch");
     }
 
     /// Every chunk group a read touches lands in the ondemand record once, hit or miss.
