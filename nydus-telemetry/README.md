@@ -11,7 +11,8 @@ observability pillars:
 
 This crate depends on no nydus crate but `nydus-config`, for the metric
 namespace, so every layer (data plane and control plane alike) can record
-metrics.
+metrics. It re-exports `prometheus`, so a crate that registers a collector
+of its own or encodes a registry reaches it through this one.
 
 ## Features
 

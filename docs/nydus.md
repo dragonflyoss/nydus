@@ -717,7 +717,7 @@ Current implementation notes:
 	optimize so the ondemand record is populated.
 - `--trace-file` is the offline alternative to `--apiserver` (the two are
 	mutually exclusive; one of them is required). It accepts the same versioned
-	ondemand document as produced by the `/trace` endpoint, so a record captured
+	ondemand record as produced by the `/trace` endpoint, so a record captured
 	from a pmem/core mount can be replayed without a live apiserver.
 - `--parent-bootstrap` is the merged bootstrap to optimize; it is read-only, so
 	optimize can be re-run against the same parent with new patterns.
@@ -1308,17 +1308,17 @@ status and headers (or an error), and the wall-clock duration.
 
 For library embedders (no apiserver socket), every `NydusCore` owns a
 `nydus_core::Metrics` of its own, `core.metrics()`, and a
-`nydus_core::OndemandRecorder` of its own, `core.ondemand_recorder()`. The metrics
+`nydus_core::OndemandRecord` of its own, `core.ondemand_record()`. The metrics
 move only through the `collect_*_metrics` methods the data path calls; their
 values are read from `core.metrics().registry()`, a `prometheus::Registry`:
 `gather()` returns the metric families by name, label and value, and a
 `prometheus::TextEncoder` turns them into the same text exposition the daemon
 serves, which a hypervisor's stats endpoint can serve as is or parse with the
 Prometheus client libraries (`expfmt` in Go, `prometheus-parse` in Rust); the
-ondemand record is `core.ondemand_json()`.
+ondemand record is `core.ondemand_record().to_json()`.
 Two cores never share a counter or an ondemand record, so a sandbox's endpoint reports
 its image alone; `nydus fuse`, which builds its reader directly, creates the
-one `Metrics` and `OndemandRecorder` of its mount the same way. A non-zero
+one `Metrics` and `OndemandRecord` of its mount the same way. A non-zero
 `nydus_backend_read_total{type="ondemand"}` means the prefetch did not
 cover the access pattern and the workload fell back to the network.
 
@@ -2654,7 +2654,7 @@ through `ublk_drv` over `io_uring`; see
 	(ondemand blob first, then the rest only under `prefetch.scope: all`, or
 	under the default `auto` when the image has no ondemand blob).
 - The ondemand record holds every chunk the guest reads, hit or miss, in the
-	core's own `core.ondemand_recorder()`, and `core.metrics()` exposes the core's
+	core's own `core.ondemand_record()`, and `core.metrics()` exposes the core's
 	own `nydus_core::Metrics`, gathered from its registry into a hypervisor's
 	stats endpoint, one registry per core so sandboxes never mix;
 	a saved trace JSON can be replayed offline via `nydus optimize
@@ -2670,7 +2670,7 @@ through `ublk_drv` over `io_uring`; see
 	validated, and resident in the cache data file. It maps the range to chunk
 	groups through ChunkGroupIndexTable and reuses the regular cache chain
 	(the fetch-size fill), so it is idempotent, concurrency-safe, and shares
-	ondemand record and metrics recording with the FUSE path.
+	ondemand recording and metrics recording with the FUSE path.
 - `fs.open(path)` resolves a path once and returns a `Node`; use
 	`node.metadata()`, `node.read_dir()`, `node.read()`,
 	`node.read_at(...)`, `node.read_link()`, and `node.xattrs()` for

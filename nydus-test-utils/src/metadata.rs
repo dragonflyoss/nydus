@@ -28,12 +28,10 @@ pub fn from_chunk_groups(
     let mut logical_block_offset = 0u32;
     for chunk_group in chunk_groups {
         let payload = chunk_group.concat();
-        let encoded = match compressor {
-            BlobMetadataCompressor::None => None,
-            BlobMetadataCompressor::Zstd => Some(zstd::bulk::compress(&payload, 0).unwrap()),
-            BlobMetadataCompressor::Lz4Block => Some(lz4_flex::block::compress(&payload)),
-        }
-        .filter(|encoded| encoded.len() < payload.len());
+        let encoded = compressor
+            .compress(&payload)
+            .unwrap()
+            .filter(|encoded| encoded.len() < payload.len());
 
         chunk_group_entries.push(BlobMetadataChunkGroup::new(
             data.len() as u64,

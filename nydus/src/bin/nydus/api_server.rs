@@ -2,8 +2,8 @@
 //! over a Unix socket.
 //!
 //! It serves `GET /metrics`, the Prometheus text exposition of the
-//! [`Metrics`] it was started with, and `GET /trace`, the chunk group
-//! ondemand record `nydus optimize` reads, and answers `404` to everything
+//! [`Metrics`] it was started with, and `GET /trace`, the ondemand
+//! record `nydus optimize` reads, and answers `404` to everything
 //! else. It runs on a current-thread Tokio runtime of its own in a background
 //! thread, so it stays independent of the backend's runtime and of any cargo
 //! feature, and is torn down with its socket on [`ApiServer::stop`].
@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 
 use nydus::error::{Context, Result};
 use nydus::parse_unix_address;
-use nydus_core::{Metrics, OndemandRecorder};
+use nydus_core::{Metrics, OndemandRecord};
 
 /// A running HTTP server of one image's metrics and ondemand record, bound to a
 /// Unix socket until stopped.
@@ -43,13 +43,13 @@ pub struct ApiServer {
 
 /// Implements the API server.
 impl ApiServer {
-    /// Starts serving `metrics` and the ondemand record at `address`, which must be
+    /// Starts serving `metrics` and `ondemand_record` at `address`, which must be
     /// `unix:///path/to.sock`, creating the socket's directory and replacing
     /// a stale socket a previous run left behind.
     pub fn start(
         address: &str,
         metrics: Arc<Metrics>,
-        ondemand: Arc<OndemandRecorder>,
+        ondemand_record: Arc<OndemandRecord>,
     ) -> Result<Self> {
         let socket_path = parse_unix_address(address)?;
 
@@ -86,7 +86,12 @@ impl ApiServer {
         let handle = std::thread::Builder::new()
             .name("nydus_apiserver".to_string())
             .spawn(move || {
-                runtime.block_on(serve(listener, shutdown_for_thread, metrics, ondemand));
+                runtime.block_on(serve(
+                    listener,
+                    shutdown_for_thread,
+                    metrics,
+                    ondemand_record,
+                ));
             })
             .context("failed to spawn apiserver thread")?;
 
@@ -117,7 +122,7 @@ async fn serve(
     listener: UnixListener,
     shutdown: Arc<Notify>,
     metrics: Arc<Metrics>,
-    ondemand: Arc<OndemandRecorder>,
+    ondemand_record: Arc<OndemandRecord>,
 ) {
     loop {
         tokio::select! {
@@ -126,13 +131,13 @@ async fn serve(
                 Ok((stream, _addr)) => {
                     let io = TokioIo::new(stream);
                     let metrics = metrics.clone();
-                    let ondemand = ondemand.clone();
+                    let ondemand_record = ondemand_record.clone();
                     tokio::task::spawn(async move {
                         if let Err(err) = http1::Builder::new()
                             .serve_connection(
                                 io,
                                 service_fn(move |req| {
-                                    handle_request(req, metrics.clone(), ondemand.clone())
+                                    handle_request(req, metrics.clone(), ondemand_record.clone())
                                 }),
                             )
                             .await
@@ -151,7 +156,7 @@ async fn serve(
 async fn handle_request(
     req: Request<Incoming>,
     metrics: Arc<Metrics>,
-    ondemand: Arc<OndemandRecorder>,
+    ondemand_record: Arc<OndemandRecord>,
 ) -> std::result::Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
         let mut body = Vec::new();
@@ -164,11 +169,20 @@ async fn handle_request(
             .body(Full::new(Bytes::from(body)))
             .expect("valid metrics response")
     } else if req.method() == Method::GET && req.uri().path() == "/trace" {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(ondemand.encode_json())))
-            .expect("valid ondemand response")
+        match ondemand_record.to_json() {
+            Ok(json) => Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(json)))
+                .expect("valid ondemand record response"),
+            Err(err) => {
+                error!("failed to encode the ondemand record: {err}");
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Full::new(Bytes::from_static(b"internal error\n")))
+                    .expect("valid 500 response")
+            }
+        }
     } else {
         Response::builder()
             .status(StatusCode::NOT_FOUND)
@@ -181,6 +195,7 @@ async fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nydus_storage::OndemandEntry;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::path::Path;
@@ -201,13 +216,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("run").join("api.sock");
         let metrics = Arc::new(Metrics::new());
-        let ondemand = Arc::new(OndemandRecorder::default());
+        let ondemand_record = Arc::new(OndemandRecord::default());
         metrics.storage.collect_prefetch_task_finished_metrics();
-        ondemand.record_chunk_group_access(1, 4);
+        ondemand_record.push(OndemandEntry {
+            blob_index: 1,
+            chunk_group_index: 4,
+        });
         let server = ApiServer::start(
             &format!("unix://{}", socket_path.display()),
             metrics,
-            ondemand,
+            ondemand_record,
         )
         .unwrap();
 
@@ -239,7 +257,7 @@ mod tests {
         let server = ApiServer::start(
             &format!("unix://{}", socket_path.display()),
             Arc::new(Metrics::new()),
-            Arc::new(OndemandRecorder::default()),
+            Arc::new(OndemandRecord::default()),
         )
         .unwrap();
         assert!(get(&socket_path, "/metrics").contains(" 200 "));

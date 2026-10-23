@@ -5,12 +5,11 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::RwLock;
 
 use crate::reader::ErofsReader;
 use nydus_error::{Context, Error, Result};
-use nydus_storage::io::pread_exact;
 
 /// One resolved extent: maps `[source_offset, source_offset + len)` of the
 /// source view to its mmap-ready backing location `(fd, offset)`, in the
@@ -81,6 +80,41 @@ pub(crate) fn clamped_range_end(offset: u64, len: u64, limit: u64) -> Result<Opt
     Ok(Some(end))
 }
 
+/// Reads exactly `buf.len()` bytes at `offset` from `fd`, the descriptor of
+/// an [`Extent`], without moving the file position, so the shared descriptor
+/// stays safe. Retries on `EINTR` and zero-fills the remainder past EOF,
+/// since a block device reply must be full length.
+pub fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        // SAFETY: the pointer and length name the unfilled tail of `buf`,
+        // which stays exclusively borrowed for the duration of the call.
+        let ret = unsafe {
+            libc::pread(
+                fd,
+                buf[filled..].as_mut_ptr() as *mut libc::c_void,
+                buf.len() - filled,
+                (offset + filled as u64) as libc::off_t,
+            )
+        };
+        match ret {
+            0 => {
+                buf[filled..].fill(0);
+                return Ok(());
+            }
+            n if n > 0 => filled += n as usize,
+            _ => {
+                let err = io::Error::last_os_error();
+                if err.kind() != io::ErrorKind::Interrupted {
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Accumulates the [`Extent`]s of one resolution pass.
 ///
 /// Owns the state the resolution loops share — the output vector, the
@@ -131,8 +165,9 @@ impl<'a> ExtentResolver<'a> {
             .blob_cache(spec.index)
             .with_context(|| format!("failed to open blob {}", spec.index))?;
         let fd = cache
-            .cache_fd()
-            .with_context(|| format!("failed to get cache fd for blob {}", spec.index))?;
+            .cache_file()
+            .with_context(|| format!("failed to open cache file for blob {}", spec.index))?
+            .as_raw_fd();
 
         match mode {
             ResolveMode::Fetch => {
@@ -364,9 +399,39 @@ impl Drop for Mapping {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::os::fd::AsRawFd;
 
     const ZERO_FD: RawFd = -1;
+
+    #[test]
+    fn pread_exact_reads_at_the_offset_and_zero_fills_past_eof() {
+        let mut file = tempfile::tempfile().unwrap();
+        let content: Vec<u8> = (0u8..100).collect();
+        file.write_all(&content).unwrap();
+
+        let test_cases = vec![
+            (0, 0, Vec::new()),
+            (0, 8, content[..8].to_vec()),
+            (40, 10, content[40..50].to_vec()),
+            (80, 64, [&content[80..], &[0u8; 44][..]].concat()),
+            (100, 4, vec![0u8; 4]),
+            (200, 4, vec![0u8; 4]),
+        ];
+
+        for (offset, len, expected) in test_cases {
+            let mut buf = vec![0xaau8; len];
+            pread_exact(file.as_raw_fd(), &mut buf, offset).unwrap();
+            assert_eq!(buf, expected);
+        }
+    }
+
+    #[test]
+    fn pread_exact_fails_on_a_bad_descriptor() {
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            pread_exact(-1, &mut buf, 0).unwrap_err().raw_os_error(),
+            Some(libc::EBADF)
+        );
+    }
 
     /// A temp file holding `data`, kept alive for the fd's lifetime.
     fn temp_file(data: &[u8]) -> std::fs::File {

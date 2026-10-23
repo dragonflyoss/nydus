@@ -1,10 +1,19 @@
 //! Byte-level helpers for the on-disk formats: little-endian integer
-//! fields and the alignment of byte offsets and sizes.
+//! fields, the alignment of byte offsets and sizes, and zero padding.
 //!
 //! The integer helpers come in two shapes for two call patterns:
 //! fixed-size byte-array struct fields (`read_u32`) and offset-addressed
 //! buffers (`read_u32_at`). The `_at` helpers panic when `data` is too
 //! short, callers validate region sizes up front.
+
+use std::io::{self, Read, Write};
+
+/// Writes `count` zero bytes to `writer`, the padding between the regions
+/// of a blob and the blocks of a bootstrap.
+pub fn write_zeros(writer: &mut dyn Write, count: u64) -> io::Result<()> {
+    io::copy(&mut io::repeat(0).take(count), writer)?;
+    Ok(())
+}
 
 /// Reads a little-endian `u16` from a byte array.
 #[inline]
@@ -119,6 +128,17 @@ pub fn align_up_usize(value: usize, align: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_zeros_writes_count_zero_bytes() {
+        let test_cases = vec![0, 1, 4096, 10_000];
+
+        for count in test_cases {
+            let mut written = Vec::new();
+            write_zeros(&mut written, count).unwrap();
+            assert_eq!(written, vec![0u8; count as usize]);
+        }
+    }
 
     #[test]
     fn write_then_read_round_trips_little_endian_arrays() {

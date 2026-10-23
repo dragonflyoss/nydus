@@ -11,8 +11,8 @@
 
 use crate::erofs::EROFS_BLOCK_SIZE;
 use crate::error::{Error, Result};
-use crate::utils::align_up_u64;
-use std::io::{self, Read, Write};
+use crate::utils::{align_up_u64, write_zeros};
+use std::io::Write;
 
 pub mod compressor;
 pub mod digester;
@@ -79,16 +79,10 @@ pub fn finish_full_blob(
         }
     };
 
-    io::copy(
-        &mut io::repeat(0).take(bootstrap_offset - compressed_data_size),
-        writer,
-    )?;
+    write_zeros(writer, bootstrap_offset - compressed_data_size)?;
     if let Some(compressed_bootstrap) = &compressed_bootstrap {
         writer.write_all(compressed_bootstrap)?;
-        io::copy(
-            &mut io::repeat(0).take(bootstrap_size - compressed_bootstrap.len() as u64),
-            writer,
-        )?;
+        write_zeros(writer, bootstrap_size - compressed_bootstrap.len() as u64)?;
     }
 
     if let Some(blob_metadata) = blob_metadata {

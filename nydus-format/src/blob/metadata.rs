@@ -748,6 +748,19 @@ impl BlobMetadataChunkGroupExtent {
         self.logical_offset()..self.logical_offset() + self.logical_size()
     }
 
+    /// Verifies `payload`, the group's uncompressed bytes, against the
+    /// group's crc32c.
+    pub fn verify_crc32(&self, payload: &[u8]) -> Result<()> {
+        if crc32c(payload) != self.uncompressed_crc32() {
+            return Err(Error::InvalidImage(format!(
+                "blob meta chunk group {} crc32 mismatch",
+                self.index
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Whether the group is stored uncompressed in `blob_metadata`'s blob.
     /// The builder skips compression that would not shrink a group, so
     /// equal compressed and uncompressed sizes mean it is.
@@ -2387,6 +2400,22 @@ mod tests {
         for (index, expected) in test_cases {
             assert_eq!(blob_metadata.chunk_group_digest(index), expected);
         }
+    }
+
+    #[test]
+    fn verify_crc32_accepts_the_payload_and_rejects_a_corrupted_one() {
+        let blob_metadata = blob_metadata();
+        let payload = chunks()[0].concat();
+        let group = blob_metadata.chunk_group(0).unwrap();
+        group.verify_crc32(&payload).unwrap();
+
+        let mut corrupted = payload.clone();
+        corrupted[0] ^= 0xff;
+        let err = group.verify_crc32(&corrupted).unwrap_err();
+        assert!(
+            err.to_string().contains("chunk group 0 crc32 mismatch"),
+            "{err}"
+        );
     }
 
     #[test]

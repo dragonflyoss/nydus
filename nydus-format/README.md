@@ -4,7 +4,8 @@ On-disk format layer for [Nydus](https://github.com/dragonflyoss/nydus)
 images: blob layout (footer, blob meta), EROFS metadata structures, and the
 byte-level utilities they share.
 
-- `blob`: the blob-level layout — footer, blob metadata, feature flags.
+- `blob`: the blob-level layout — footer, blob metadata, feature flags —
+  and the codec of the chunk group payloads the blob metadata declares.
 - `erofs`: zero-copy views of EROFS on-disk metadata (superblock, inodes,
   dirents).
 - `utils`: digests, alignment and other byte-level helpers.

@@ -8,7 +8,7 @@ use nydus_format::erofs::{
     ErofsChunkAddr, ZErofsComprCfgs, ZErofsCompressor, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_NULL_ADDR, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
 };
-use nydus_storage::io::write_zeros;
+use nydus_format::utils::write_zeros;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
@@ -776,16 +776,6 @@ struct EncodedChunkGroup {
     compressed: Option<Vec<u8>>,
 }
 
-/// Encode one group payload with `compressor`; `None` for the plain
-/// compressor or when encoding fails.
-fn encode_payload(compressor: BlobMetadataCompressor, data: &[u8]) -> Option<Vec<u8>> {
-    match compressor {
-        BlobMetadataCompressor::None => None,
-        BlobMetadataCompressor::Zstd => zstd::bulk::compress(data, 0).ok(),
-        BlobMetadataCompressor::Lz4Block => Some(lz4_flex::block::compress(data)),
-    }
-}
-
 /// Offloads per-chunk-group crc32 + zstd to background threads while the
 /// caller keeps producing. Results are drained strictly in submission order
 /// so the written stream and metadata tables stay deterministic; input
@@ -815,7 +805,10 @@ impl ChunkGroupEncoder {
                         Err(_) => break,
                     };
                     let crc32 = crc32c(&job.data);
-                    let compressed = encode_payload(compressor, &job.data)
+                    let compressed = compressor
+                        .compress(&job.data)
+                        .ok()
+                        .flatten()
                         .filter(|c| compression_is_worthwhile(c.len(), job.data.len()));
                     let encoded = EncodedChunkGroup {
                         data: job.data,

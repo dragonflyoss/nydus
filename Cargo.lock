@@ -2195,7 +2195,6 @@ dependencies = [
  "libc",
  "libublk",
  "lz4-sys",
- "lz4_flex",
  "memmap2",
  "nydus-backend",
  "nydus-config",
@@ -2287,6 +2286,7 @@ dependencies = [
  "nydus-format",
  "nydus-storage",
  "nydus-telemetry",
+ "nydus-test-utils",
  "sha2 0.10.9",
  "tempfile",
  "tracing",
@@ -2313,6 +2313,7 @@ dependencies = [
  "crc32c",
  "hex",
  "libc",
+ "lz4_flex",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -2324,24 +2325,19 @@ dependencies = [
 name = "nydus-storage"
 version = "3.0.0-beta.3"
 dependencies = [
- "crc32c",
  "hex",
  "libc",
- "lz4_flex",
  "memmap2",
  "nydus-backend",
  "nydus-config",
  "nydus-format",
  "nydus-telemetry",
  "nydus-test-utils",
- "prometheus",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tracing",
- "xattr",
- "zstd",
 ]
 
 [[package]]
@@ -2364,11 +2360,9 @@ version = "3.0.0-beta.3"
 dependencies = [
  "crc32c",
  "hex",
- "lz4_flex",
  "nydus-format",
  "sha2 0.10.9",
  "tempfile",
- "zstd",
 ]
 
 [[package]]

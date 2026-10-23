@@ -799,10 +799,9 @@ mod tests {
             let blob_path = dir.path().join(hex::encode(full_blob_digest));
             let err = ErofsReader::open_blob(
                 &blob_path,
-                None,
+                &nydus_config::StorageConfig::default(),
                 None,
                 Arc::new(Metrics::new()),
-                nydus_core::CacheOptions::default(),
             )
             .err()
             .expect("data-only blob must be rejected");

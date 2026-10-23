@@ -206,7 +206,7 @@ impl FileioCommand {
             Some(address) => match crate::api_server::ApiServer::start(
                 address,
                 flat.core().metrics().clone(),
-                flat.core().ondemand_recorder().clone(),
+                flat.core().ondemand_record().clone(),
             ) {
                 Ok(server) => Some(server),
                 Err(err) => {

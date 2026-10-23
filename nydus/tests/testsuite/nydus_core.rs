@@ -14,7 +14,7 @@ use nydus_core::build::bootstrap::{
 };
 use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, set_root_prefetch_blobs_xattr};
 use nydus_core::ErofsReader;
-use nydus_core::{BlobId, FileType, NydusCore};
+use nydus_core::{BlobId, FileType, NydusCore, OndemandRecord};
 use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::ErofsDeviceSlot;
 use nydus_format::erofs::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
@@ -305,16 +305,18 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
 
     // The fetched range touched chunk groups of blob 1 in address order,
     // each recorded once.
-    let ondemand = core.ondemand_snapshot();
-    assert!(!ondemand.entries.is_empty());
-    assert!(ondemand.entries.iter().all(|entry| entry.blob_index == 1));
-    assert!(ondemand
-        .entries
+    let entries = core.ondemand_record().entries();
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry.blob_index == 1));
+    assert!(entries
         .windows(2)
         .all(|pair| pair[0].chunk_group_index < pair[1].chunk_group_index));
+    let json = core.ondemand_record().to_json().unwrap();
     assert_eq!(
-        core.ondemand_json(),
-        serde_json::to_string(&ondemand).unwrap()
+        OndemandRecord::from_json(json.as_bytes())
+            .unwrap()
+            .entries(),
+        entries
     );
 
     // Unaligned ranges and unknown blobs are rejected.
@@ -462,7 +464,7 @@ fn core_maps_local_native_layers_without_a_cache() {
         assert_eq!(extents[0].len, blob.cache_size);
         assert_eq!(extents[0].source_offset, blob.mapped_offset);
         let mut mapped = vec![0u8; blob.cache_size as usize];
-        nydus_storage::io::pread_exact(extents[0].fd, &mut mapped, 0).unwrap();
+        nydus_core::extent::pread_exact(extents[0].fd, &mut mapped, 0).unwrap();
         assert_eq!(
             mapped,
             fs::read(source).unwrap()[..blob.cache_size as usize]
