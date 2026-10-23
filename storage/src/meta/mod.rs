@@ -55,7 +55,7 @@ pub use chunk_info_v2::BlobChunkInfoV2Ondisk;
 pub mod toc;
 
 mod zran;
-pub use zran::{ZranContextGenerator, ZranInflateContext};
+pub use zran::{ZranBlobMeta, ZranContextGenerator, ZranInflateContext};
 
 mod batch;
 pub use batch::{BatchContextGenerator, BatchInflateContext};
@@ -934,9 +934,8 @@ impl BlobCompressionContextInfo {
             }
             let zran_count = header.s_ci_zran_count as u64;
             let size = zran_count * size_of::<ZranInflateContext>() as u64;
-            if zran_count > chunk_count as u64 {
-                return Ok(false);
-            }
+            // Contexts are generated before chunk deduplication, so unused contexts may
+            // remain and the context count can exceed the number of unique chunks.
             if size > header.s_ci_zran_size {
                 return Ok(false);
             }
@@ -2123,6 +2122,45 @@ pub(crate) mod tests {
         assert_eq!(round_up_4k(0x1000), 0x1000u32);
         assert_eq!(round_up_4k(0x1001), 0x2000u32);
         assert_eq!(round_up_4k(0x1fff), 0x2000u64);
+    }
+
+    #[test]
+    fn test_zran_header_after_chunk_deduplication() {
+        let chunk_size = size_of::<BlobChunkInfoV2Ondisk>() as u64;
+        let zran_size = 2 * size_of::<ZranInflateContext>() as u64;
+        let ci_size = chunk_size + zran_size;
+        let mut blob_info = BlobInfo::new(
+            0,
+            "deduplicated-zran".to_owned(),
+            4096,
+            4096,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::CHUNK_INFO_V2 | BlobFeatures::ZRAN,
+        );
+        blob_info.set_blob_meta_info(0, ci_size, ci_size, compress::Algorithm::None as u32);
+        let mut header = BlobCompressionContextHeader::default();
+        header.set_chunk_info_v2(true);
+        header.set_ci_zran(true);
+        header.set_ci_entries(1);
+        header.set_ci_compressor(compress::Algorithm::None);
+        header.set_ci_compressed_size(ci_size);
+        header.set_ci_uncompressed_size(ci_size);
+        header.set_ci_zran_offset(chunk_size);
+        header.set_ci_zran_size(zran_size);
+        header.set_ci_zran_count(2);
+
+        assert!(BlobCompressionContextInfo::validate_header(&blob_info, &header).unwrap());
+
+        // More contexts are legal only when the complete table fits in the metadata area.
+        header.set_ci_zran_count(3);
+        assert!(!BlobCompressionContextInfo::validate_header(&blob_info, &header).unwrap());
+        header.set_ci_zran_count(2);
+        header.set_ci_zran_size(zran_size + 1);
+        assert!(!BlobCompressionContextInfo::validate_header(&blob_info, &header).unwrap());
+        header.set_ci_zran_size(zran_size);
+        header.set_ci_zran_offset(chunk_size + 1);
+        assert!(!BlobCompressionContextInfo::validate_header(&blob_info, &header).unwrap());
     }
 
     #[test]

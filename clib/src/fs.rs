@@ -242,10 +242,9 @@ mod tests {
         let bootstrap = bootstrap.to_str().unwrap();
         let bootstrap = CString::new(bootstrap).unwrap();
         let blob_dir = PathBuf::from(root_dir).join("../tests/texture/repeatable/blobs");
-        let blob_dir = blob_dir.to_str().unwrap();
-        let fs = unsafe {
-            nydus_open_rafs_default(bootstrap.as_ptr(), blob_dir.as_ptr() as *const c_char)
-        };
+        let blob_dir = CString::new(blob_dir.to_str().unwrap()).unwrap();
+        let fs = unsafe { nydus_open_rafs_default(bootstrap.as_ptr(), blob_dir.as_ptr()) };
+        assert_ne!(fs, NYDUS_INVALID_FS_HANDLE);
         unsafe { nydus_close_rafs(fs) };
     }
 }

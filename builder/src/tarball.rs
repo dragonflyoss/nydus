@@ -1142,6 +1142,225 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn test_zran_metadata_after_chunk_deduplication() {
+        check_zran_metadata_after_chunk_deduplication(false);
+    }
+
+    #[test]
+    fn test_compact_zran_metadata_after_chunk_deduplication() {
+        check_zran_metadata_after_chunk_deduplication(true);
+    }
+
+    fn check_zran_metadata_after_chunk_deduplication(compact: bool) {
+        use std::io::Write;
+
+        use crate::BlobCacheGenerator;
+        use nydus_storage::backend::{localfs::LocalFs, BlobBackend};
+        use nydus_storage::meta::toc::{TocEntryList, TocLocation, TOC_ENTRY_BLOB_META};
+        use nydus_storage::meta::{
+            BlobCompressionContextInfo, BlobMetaChunkArray, BlobMetaChunkInfo,
+        };
+        use nydus_utils::compress::zlib_random::ZranDecoder;
+
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let tar_path = tmp_dir.as_path().join("source.tar");
+        let source_path = tmp_dir.as_path().join("source.tar.gz");
+        let bootstrap_path = tmp_dir.as_path().join("bootstrap");
+        let meta_blob_path = tmp_dir.as_path().join("meta-blob");
+        let cache_path = tmp_dir.as_path().join("cached-blob");
+
+        // Keep the compressed file large enough to start a new inflate context for each
+        // entry, while allowing the builder to deduplicate three identical file chunks.
+        let mut random = 0x1234_5678_u32;
+        let repeated: Vec<u8> = (0..nydus_storage::RAFS_DEFAULT_CHUNK_SIZE)
+            .map(|_| {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                (random & 0x7f) as u8
+            })
+            .collect();
+        let tail = b"a distinct file after the deduplicated chunks";
+        let mut tar = tar::Builder::new(File::create(&tar_path).unwrap());
+        for name in ["first", "duplicate-one", "duplicate-two"] {
+            append_entry(&mut tar, name, EntryType::Regular, None, &repeated);
+        }
+        append_entry(&mut tar, "tail", EntryType::Regular, None, tail);
+        tar.finish().unwrap();
+        drop(tar);
+        let tar_data = std::fs::read(tar_path).unwrap();
+        let (compressed, is_compressed) =
+            compress::compress(&tar_data, compress::Algorithm::GZip).unwrap();
+        assert!(is_compressed);
+        std::fs::write(&source_path, &compressed).unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        ctx.blob_id.clear();
+        ctx.conversion_type = ConversionType::TargzToRef;
+        ctx.compressor = compress::Algorithm::GZip;
+        ctx.blob_features
+            .insert(BlobFeatures::ALIGNED | BlobFeatures::CHUNK_INFO_V2 | BlobFeatures::SEPARATE);
+        ctx.blob_storage = Some(ArtifactStorage::SingleFile(meta_blob_path.clone()));
+        let builder_cache_dir = tmp_dir.as_path().join("builder-cache");
+        if compact {
+            ctx.features = Features::try_from("blob-toc").unwrap();
+            ctx.blob_features
+                .insert(BlobFeatures::HAS_TOC | BlobFeatures::HAS_TAR_HEADER);
+            std::fs::create_dir(&builder_cache_dir).unwrap();
+            ctx.blob_cache_generator = Some(
+                BlobCacheGenerator::new(ArtifactStorage::FileDir((
+                    builder_cache_dir.clone(),
+                    String::new(),
+                )))
+                .unwrap(),
+            );
+        }
+        let mut bootstrap_mgr = BootstrapManager::new(
+            Some(ArtifactStorage::SingleFile(bootstrap_path.clone())),
+            None,
+        );
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
+        TarballBuilder::new(ConversionType::TargzToRef)
+            .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
+            .unwrap();
+        let blob = blob_mgr.get_blob(0).unwrap();
+        assert_eq!(blob.chunk_count, 2);
+        assert_eq!(blob.blob_meta_header.ci_zran_count(), 2);
+        // Compact only the serialized output. The generator and the builder's chunk
+        // table must retain their original indices for subsequent serializations.
+        let generator = ctx.blob_zran_generator.as_ref().unwrap().lock().unwrap();
+        assert_eq!(generator.len(), 4);
+        let (inflate_data, inflate_count) = generator.to_vec().unwrap();
+        assert_eq!(inflate_count, 4);
+        assert!(blob.blob_meta_header.ci_zran_size() < inflate_data.len() as u64);
+        match &blob.blob_meta_info {
+            BlobMetaChunkArray::V2(chunks) => assert_eq!(chunks[1].get_zran_index().unwrap(), 3),
+            BlobMetaChunkArray::V1(_) => panic!("ZRAN requires v2 chunk information"),
+        }
+
+        let sb = nydus_rafs::metadata::RafsSuper::load_from_file(
+            &bootstrap_path,
+            Arc::new(nydus_api::ConfigV2::default()),
+            false,
+        )
+        .unwrap()
+        .0;
+        let blobs = sb.superblock.get_blob_infos();
+        assert_eq!(blobs.len(), 1);
+        let mut blob_info = blobs[0].as_ref().clone();
+        let mut metadata_path = meta_blob_path.clone();
+        if !compact {
+            // Preserve the layout emitted before context compaction: two retained
+            // chunks still refer to contexts 0 and 3 in the full four-entry table.
+            // Construct it explicitly so future writer changes cannot remove this
+            // runtime compatibility regression.
+            let ci_data = [blob.blob_meta_info.as_byte_slice(), &inflate_data].concat();
+            let mut header = blob.blob_meta_header;
+            header.set_ci_compressor(compress::Algorithm::None);
+            header.set_ci_compressed_offset(0);
+            header.set_ci_compressed_size(ci_data.len() as u64);
+            header.set_ci_uncompressed_size(ci_data.len() as u64);
+            header.set_ci_zran_count(inflate_count);
+            header.set_ci_zran_size(inflate_data.len() as u64);
+            assert_eq!(header.ci_zran_count(), 4);
+            metadata_path = tmp_dir.as_path().join("legacy-meta-blob");
+            let mut file = File::create(&metadata_path).unwrap();
+            file.write_all(&ci_data).unwrap();
+            file.write_all(header.as_bytes()).unwrap();
+            blob_info.set_blob_meta_info(
+                0,
+                ci_data.len() as u64,
+                ci_data.len() as u64,
+                compress::Algorithm::None as u32,
+            );
+        }
+        let backend = LocalFs::new(
+            &nydus_api::LocalFsConfig {
+                blob_file: metadata_path.display().to_string(),
+                ..Default::default()
+            },
+            Some(if compact {
+                "compacted-zran"
+            } else {
+                "legacy-zran"
+            }),
+        )
+        .unwrap();
+        let reader = backend.get_reader(&blob_info.blob_id()).unwrap();
+
+        if compact {
+            // Read the actual ToC and use its digest to verify the exact metadata
+            // bytes written to the blob, including the remapped chunk table.
+            let location = TocLocation::with_digest(
+                blob.blob_meta_size - u64::from(blob.blob_toc_size),
+                u64::from(blob.blob_toc_size),
+                RafsDigest {
+                    data: blob.blob_toc_digest,
+                },
+            );
+            let toc =
+                TocEntryList::read_from_blob::<File>(reader.as_ref(), None, &location).unwrap();
+            let mut ci_data = Vec::new();
+            toc.get_entry(TOC_ENTRY_BLOB_META)
+                .unwrap()
+                .extract_from_reader(reader.clone(), &mut ci_data)
+                .unwrap();
+            let compact_meta = generator.to_blob_meta(&blob.blob_meta_info).unwrap();
+            let expected = [
+                compact_meta.chunks.as_byte_slice(),
+                &compact_meta.inflate_data,
+            ]
+            .concat();
+            assert_eq!(ci_data, expected);
+
+            // The pre-generated cache must contain the same compacted metadata as
+            // the remote blob and must reopen without contacting the backend.
+            let builder_cache_path = builder_cache_dir.join(blob_info.blob_id());
+            let cache = std::fs::read(builder_cache_path.with_extension("blob.meta")).unwrap();
+            assert_eq!(&cache[..ci_data.len()], ci_data.as_slice());
+            let meta = BlobCompressionContextInfo::new(
+                builder_cache_path.to_str().unwrap(),
+                &blob_info,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(meta.get_zran_index(1).unwrap(), 1);
+        }
+        drop(generator);
+
+        // Start without a .blob.meta cache so the runtime has to download and validate the
+        // builder's metadata, then check that the cached metadata can also be reopened.
+        assert!(!cache_path.with_extension("blob.meta").exists());
+        for reader in [Some(&reader), None] {
+            let meta = BlobCompressionContextInfo::new(
+                cache_path.to_str().unwrap(),
+                &blob_info,
+                reader,
+                false,
+            )
+            .unwrap();
+            assert_eq!(meta.get_chunk_count(), 2);
+            // The legacy layout retains context 3; new output must remap it to 1
+            // rather than merely truncating the original context table.
+            assert_eq!(meta.get_zran_index(1).unwrap(), if compact { 1 } else { 3 });
+            for (index, expected) in [repeated.as_slice(), tail.as_slice()].iter().enumerate() {
+                let zran_index = meta.get_zran_index(index as u32).unwrap();
+                let (context, dict) = meta.get_zran_context(zran_index).unwrap();
+                let start = context.in_offset as usize;
+                let end = start + context.in_len as usize;
+                let mut decoded = vec![0; context.out_len as usize];
+                ZranDecoder::new()
+                    .unwrap()
+                    .uncompress(&context, Some(dict), &compressed[start..end], &mut decoded)
+                    .unwrap();
+                let offset = meta.get_zran_offset(index as u32).unwrap() as usize;
+                assert_eq!(&decoded[offset..offset + expected.len()], *expected);
+            }
+        }
+    }
+
     // Build a tar holding a regular file, a hardlink to it and two more entries stored after the
     // hardlink, so that an inode written at a wrong offset is observable. `xattr_on` selects
     // which of the two names records an xattr in its own PAX header.
