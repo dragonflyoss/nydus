@@ -763,17 +763,17 @@ dependencies = [
 
 [[package]]
 name = "dragonfly-client-request"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ce97978e45c4bac9253f5930120a5b3e68f0853aa7159f5c0a40f8bb8440811"
+checksum = "7bcd9be7807a355bd6c4bfbb9739927dec47eb44f41a4000b9c59832679c7f16"
 dependencies = [
  "async-trait",
  "backon",
  "bytes",
  "dashmap",
  "dragonfly-api",
+ "dragonfly-hashring",
  "futures",
- "hashring",
  "hex",
  "hostname",
  "local-ip-address",
@@ -794,6 +794,15 @@ dependencies = [
  "tonic-health",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dragonfly-hashring"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50b412c4c2fd0a3d98a8af1a6bc6fcf9268a4c015144b368ae9d82fd0ad3b427"
+dependencies = [
+ "siphasher",
 ]
 
 [[package]]
@@ -1316,15 +1325,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8094feaf31ff591f651a2664fb9cfd92bba7a60ce3197265e9482ebe753c8f7"
 dependencies = [
  "hashbrown 0.14.5",
-]
-
-[[package]]
-name = "hashring"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43bfd649ac5e0f82ae98d547450f1d31af49742be255b5380c61fc8513b9df11"
-dependencies = [
- "siphasher",
 ]
 
 [[package]]
@@ -3394,9 +3394,9 @@ dependencies = [
 
 [[package]]
 name = "siphasher"
-version = "0.3.11"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "slab"
