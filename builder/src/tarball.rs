@@ -1142,6 +1142,113 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn test_zran_metadata_after_chunk_deduplication() {
+        use nydus_storage::backend::{localfs::LocalFs, BlobBackend};
+        use nydus_storage::meta::BlobCompressionContextInfo;
+        use nydus_utils::compress::zlib_random::ZranDecoder;
+
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let tar_path = tmp_dir.as_path().join("source.tar");
+        let source_path = tmp_dir.as_path().join("source.tar.gz");
+        let bootstrap_path = tmp_dir.as_path().join("bootstrap");
+        let meta_blob_path = tmp_dir.as_path().join("meta-blob");
+        let cache_path = tmp_dir.as_path().join("cached-blob");
+
+        // Keep the compressed file large enough to start a new inflate context for each
+        // entry, while allowing the builder to deduplicate three identical file chunks.
+        let mut random = 0x1234_5678_u32;
+        let repeated: Vec<u8> = (0..nydus_storage::RAFS_DEFAULT_CHUNK_SIZE)
+            .map(|_| {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                (random & 0x7f) as u8
+            })
+            .collect();
+        let tail = b"a distinct file after the deduplicated chunks";
+        let mut tar = tar::Builder::new(File::create(&tar_path).unwrap());
+        for name in ["first", "duplicate-one", "duplicate-two"] {
+            append_entry(&mut tar, name, EntryType::Regular, None, &repeated);
+        }
+        append_entry(&mut tar, "tail", EntryType::Regular, None, tail);
+        tar.finish().unwrap();
+        drop(tar);
+        let tar_data = std::fs::read(tar_path).unwrap();
+        let (compressed, is_compressed) =
+            compress::compress(&tar_data, compress::Algorithm::GZip).unwrap();
+        assert!(is_compressed);
+        std::fs::write(&source_path, &compressed).unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        ctx.blob_id.clear();
+        ctx.conversion_type = ConversionType::TargzToRef;
+        ctx.compressor = compress::Algorithm::GZip;
+        ctx.blob_features
+            .insert(BlobFeatures::ALIGNED | BlobFeatures::CHUNK_INFO_V2);
+        ctx.blob_storage = Some(ArtifactStorage::SingleFile(meta_blob_path.clone()));
+        let mut bootstrap_mgr = BootstrapManager::new(
+            Some(ArtifactStorage::SingleFile(bootstrap_path.clone())),
+            None,
+        );
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
+        TarballBuilder::new(ConversionType::TargzToRef)
+            .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
+            .unwrap();
+        let blob = blob_mgr.get_blob(0).unwrap();
+        assert_eq!(blob.chunk_count, 2);
+        assert_eq!(blob.blob_meta_header.ci_zran_count(), 4);
+
+        let sb = nydus_rafs::metadata::RafsSuper::load_from_file(
+            &bootstrap_path,
+            Arc::new(nydus_api::ConfigV2::default()),
+            false,
+        )
+        .unwrap()
+        .0;
+        let blobs = sb.superblock.get_blob_infos();
+        assert_eq!(blobs.len(), 1);
+        let backend = LocalFs::new(
+            &nydus_api::LocalFsConfig {
+                blob_file: meta_blob_path.display().to_string(),
+                ..Default::default()
+            },
+            Some("deduplicated-zran"),
+        )
+        .unwrap();
+        let reader = backend.get_reader(&blobs[0].blob_id()).unwrap();
+
+        // Start without a .blob.meta cache so the runtime has to download and validate the
+        // builder's metadata, then check that the cached metadata can also be reopened.
+        assert!(!cache_path.with_extension("blob.meta").exists());
+        for reader in [Some(&reader), None] {
+            let meta = BlobCompressionContextInfo::new(
+                cache_path.to_str().unwrap(),
+                &blobs[0],
+                reader,
+                false,
+            )
+            .unwrap();
+            assert_eq!(meta.get_chunk_count(), 2);
+            // The unique tail must still reference the later context, so truncating the
+            // context table to the number of deduplicated chunks is not a valid fix.
+            assert_eq!(meta.get_zran_index(1).unwrap(), 3);
+            for (index, expected) in [repeated.as_slice(), tail.as_slice()].iter().enumerate() {
+                let zran_index = meta.get_zran_index(index as u32).unwrap();
+                let (context, dict) = meta.get_zran_context(zran_index).unwrap();
+                let start = context.in_offset as usize;
+                let end = start + context.in_len as usize;
+                let mut decoded = vec![0; context.out_len as usize];
+                ZranDecoder::new()
+                    .unwrap()
+                    .uncompress(&context, Some(dict), &compressed[start..end], &mut decoded)
+                    .unwrap();
+                let offset = meta.get_zran_offset(index as u32).unwrap() as usize;
+                assert_eq!(&decoded[offset..offset + expected.len()], *expected);
+            }
+        }
+    }
+
     // Build a tar holding a regular file, a hardlink to it and two more entries stored after the
     // hardlink, so that an inode written at a wrong offset is observable. `xattr_on` selects
     // which of the two names records an xattr in its own PAX header.
