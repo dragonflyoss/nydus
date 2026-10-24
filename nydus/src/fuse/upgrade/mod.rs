@@ -1,4 +1,4 @@
-//! FUSE hot upgrade without replacing the kernel mount.
+//! FUSE session continuity: hot upgrade and crash failover.
 
 mod identity;
 mod lifecycle;
@@ -21,6 +21,7 @@ fn check_json_version(version: u32) -> nydus_error::Result<()> {
 
 pub use startup::{RunningSession, Startup};
 
+pub(crate) use crate::continuity::HANDOFF_TIMEOUT;
 pub(crate) use lifecycle::SessionRuntimeHandle;
 pub(crate) use ownership::SessionOwner;
-pub(crate) use transfer::{validate_fuse_connection, FuseInitState, SessionTransfer};
+pub(crate) use transfer::{FuseInitState, SessionProtection, SessionTransfer};
