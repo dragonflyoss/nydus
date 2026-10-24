@@ -322,14 +322,15 @@ nydus fuse --bootstrap image.boot --config config/registry.example.yaml \
 ```
 
 Optional `--apiserver unix:///run/nydus/api.sock` enables metrics, tracing, and
-hot upgrade without remounting. See [FUSE hot upgrade](docs/upgrade.md).
+hot upgrade; independent `--supervisor-socket unix:///run/nydus/supervisor/image.sock` enables
+crash failover. See [FUSE hot upgrade and crash failover](docs/upgrade.md).
 
 ## Documentation
 
 | Document                       | Contents                                                                                                                                          |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`    |
-| [docs/upgrade.md](docs/upgrade.md) | FUSE hot upgrade: usage, startup selection, ownership, and the handoff protocol |
+| [docs/upgrade.md](docs/upgrade.md) | FUSE hot upgrade and crash failover: usage, startup selection, ownership, and the holder protocol |
 | [docs/uffd.md](docs/uffd.md)   | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem |
 | [docs/ublk.md](docs/ublk.md)   | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths |
 | [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                   |
@@ -392,7 +393,7 @@ make test-compat COMPAT_READER=/abs/path/to/released/nydus
 make test-compat-build COMPAT_BUILDER=/abs/path/to/released/nydus COMPAT_IMAGES=/abs/path/to/images
 make test-compat-read COMPAT_IMAGES=/abs/path/to/images
 
-# FUSE hot-upgrade, rollback, and no-API tests (requires root and FUSE).
+# FUSE hot-upgrade, crash-failover, and no-API tests (requires root and FUSE).
 make test-fuse-continuity
 
 # UFFD service smoke test.

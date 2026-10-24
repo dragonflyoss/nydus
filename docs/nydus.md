@@ -823,8 +823,11 @@ Current implementation notes:
 - The control plane constructs the launch command and supplies the session's
 	resources, without selecting a startup mode. Nydus first attempts direct hot
 	upgrade when an API address is configured, then validates lifetime ownership
-	before considering a fresh mount. An existing mount requires handoff from
-	its serving daemon.
+	before considering holder recovery or a fresh mount.
+- `--supervisor-socket unix:///path/to/holder.sock` enables automatic recovery
+	of an existing protected session and protection of a fresh one, independently
+	of the API.
+	See [FUSE hot upgrade and crash failover](upgrade.md) for startup, ownership, and recovery.
 
 Current CLI help:
 
@@ -851,6 +854,8 @@ Options:
 		Specify the directory path to mount nydus filesystem [env: NYDUS_FUSE_MOUNTPOINT=]
 	--apiserver <APISERVER>
 		Optionally serve metrics and live FUSE upgrade control on this Unix socket, e.g. `unix:///run/nydus/api.sock`. Without it no API listener or direct hot upgrade is enabled [env: NYDUS_FUSE_APISERVER=]
+	--supervisor-socket <SUPERVISOR_SOCKET>
+		Specify the Recovery Holder Unix socket for automatic crash recovery and fresh-session protection, e.g. `unix:///run/nydus/supervisor.sock`, independently of --apiserver. When an API is configured, live hot upgrade is attempted first [env: NYDUS_FUSE_SUPERVISOR_SOCKET=]
 	-l, --log-level <LOG_LEVEL>
 		Specify the logging level [trace, debug, info, warn, error] [env: NYDUS_FUSE_LOG_LEVEL=] [default: info]
 	--log-dir <LOG_DIR>
@@ -866,13 +871,13 @@ Supported forms:
 - `nydus fuse --bootstrap <bootstrap> --config <config.yaml> --mountpoint <mountpoint>`
 
 The fuse command rejects mixed or partial image input combinations outside
-these forms. No startup-mode argument is needed. The API socket path must be
-absolute, outside the mountpoint, and contain neither `..` nor symlink
-components. All launches share
+these forms. No startup-mode argument is needed. API and holder socket paths
+must be absolute, distinct, outside the mountpoint, and contain neither `..`
+nor symlink components. All launches share
 [mount-scoped ownership state](upgrade.md#mount-scoped-ownership-state);
 never delete or replace those lock files to force startup.
 
-See [FUSE hot upgrade](upgrade.md) for readiness, handoff, and
+See [FUSE hot upgrade and crash failover](upgrade.md) for readiness, recovery, and
 [cleanup](upgrade.md#cleanup).
 
 `--cache-dir` is optional; without it (and without a cache directory from
