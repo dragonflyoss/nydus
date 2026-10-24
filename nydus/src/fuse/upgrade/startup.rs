@@ -13,6 +13,7 @@ use super::identity::InstanceInfo;
 use super::lifecycle::SessionRuntimeHandle;
 use super::ownership::{OwnerRecord, SessionOwner};
 use super::transfer::SessionTransfer;
+use crate::continuity::handoff::SessionControl;
 use crate::continuity::startup::{self, Frontend, Open};
 use crate::fuse::mount::{is_fuse_fstype, mount_entry_of};
 use crate::fuse::{ErofsFs, FuseService};
@@ -29,11 +30,12 @@ pub struct Startup {
 impl Startup {
     /// Resolves mountpoint aliases and validates paths for startup coordination.
     ///
-    /// An API endpoint requires an image digest for handoff.
+    /// An API endpoint or a Recovery Holder requires an image digest to adopt a session.
     pub fn new(
         mountpoint: &Path,
         api_socket: Option<PathBuf>,
         image_digest: Option<&[u8]>,
+        supervisor_socket: Option<PathBuf>,
         metrics: Arc<Metrics>,
         ondemand: Arc<OndemandRecorder>,
     ) -> Result<Self> {
@@ -44,9 +46,13 @@ impl Startup {
             )
         })?;
         let state_base = ownership_state_base(&mountpoint)?;
-        startup::validate_socket_paths(api_socket.as_deref(), None, Some(&mountpoint))?;
+        startup::validate_socket_paths(
+            api_socket.as_deref(),
+            supervisor_socket.as_deref(),
+            Some(&mountpoint),
+        )?;
         let info = InstanceInfo::new(mountpoint_id, image_digest);
-        if api_socket.is_some() {
+        if api_socket.is_some() || supervisor_socket.is_some() {
             info.require_image_digest()?;
         }
         Ok(Self {
@@ -54,7 +60,7 @@ impl Startup {
             coordinator: startup::Startup {
                 info,
                 state_base,
-                holder: None,
+                holder: supervisor_socket.map(|path| path.components().collect()),
                 api_socket: api_socket.map(|path| path.components().collect()),
                 metrics,
                 ondemand,
@@ -74,6 +80,7 @@ impl Startup {
             info: self.coordinator.info.clone(),
             fs: Some(fs),
             config: config.clone(),
+            protected: self.coordinator.holder.is_some(),
             shutdown: shutdown.clone(),
         };
         let session = self.coordinator.start(frontend)?;
@@ -86,6 +93,8 @@ struct FuseFrontend {
     info: InstanceInfo,
     fs: Option<ErofsFs>,
     config: Config,
+    /// Whether a fresh mount is retained by the Recovery Holder.
+    protected: bool,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -124,11 +133,13 @@ impl Frontend for FuseFrontend {
         record: &OwnerRecord,
         device: &String,
     ) -> Result<Option<Uuid>> {
-        record.validate(info, device)?;
-        Ok(None)
+        record.validate(info, device)
     }
 
-    fn validate_fresh(&self, _previous: Option<&OwnerRecord>) -> Result<()> {
+    fn validate_fresh(&self, previous: Option<&OwnerRecord>) -> Result<()> {
+        if let Some(record) = previous {
+            record.ensure_standalone_fresh()?;
+        }
         let metadata = std::fs::metadata(&self.mountpoint).with_context(|| {
             format!(
                 "failed to inspect fresh mountpoint {}",
@@ -150,13 +161,17 @@ impl Frontend for FuseFrontend {
             .take()
             .ok_or_else(|| Error::Runtime("FUSE resources were already opened".into()))?;
         match how {
+            Open::Fresh if self.protected => {
+                FuseService::mount_failover(fs, &self.mountpoint, &self.config)
+            }
             Open::Fresh => FuseService::mount(fs, &self.mountpoint, &self.config),
             Open::Adopt {
                 transfer: Some(transfer),
+                session_id,
                 timeout,
                 ..
             } => {
-                let transfer = SessionTransfer::from_opaque(transfer, &self.info)?;
+                let transfer = SessionTransfer::from_opaque(transfer, session_id, &self.info)?;
                 FuseService::adopt(fs, &self.mountpoint, &self.config, transfer, timeout)
             }
             Open::Adopt { transfer: None, .. } => Err(Error::InvalidParameter(
@@ -165,8 +180,8 @@ impl Frontend for FuseFrontend {
         }
     }
 
-    fn record(&self, info: &InstanceInfo, device: &String, _session: &FuseService) -> OwnerRecord {
-        OwnerRecord::new(info, device)
+    fn record(&self, info: &InstanceInfo, device: &String, session: &FuseService) -> OwnerRecord {
+        OwnerRecord::new(info, device, session.runtime_handle().session_id())
     }
 
     fn control(session: &FuseService) -> SessionRuntimeHandle {
@@ -177,10 +192,8 @@ impl Frontend for FuseFrontend {
         session.set_owner(owner)
     }
 
-    fn recover(_session: &FuseService) -> Result<()> {
-        Err(Error::Runtime(
-            "FUSE adoption requires a live session transfer".into(),
-        ))
+    fn recover(session: &FuseService) -> Result<()> {
+        session.recover_inflight()
     }
 
     fn activate(session: &FuseService) -> Result<()> {
@@ -292,25 +305,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent");
         assert_eq!(
-            Startup::new(&absent, None, None, metrics(), ondemand())
+            Startup::new(&absent, None, None, None, metrics(), ondemand())
                 .unwrap()
                 .mountpoint,
             absent
         );
         assert!(normalize_mountpoint(&dir.path().join("../other")).is_err());
         for mountpoint in ["/", "/run", "/run/nydus", "/run/nydus/fuse"] {
-            assert!(
-                Startup::new(Path::new(mountpoint), None, None, metrics(), ondemand()).is_err()
-            );
+            assert!(Startup::new(
+                Path::new(mountpoint),
+                None,
+                None,
+                None,
+                metrics(),
+                ondemand()
+            )
+            .is_err());
         }
         assert!(Startup::new(
             dir.path(),
             Some(dir.path().join("api.sock")),
             Some(&[0; 32]),
+            None,
             metrics(),
             ondemand()
         )
         .is_err());
+        for (api, holder) in [
+            (Some(dir.path().join("api.sock")), None),
+            (None, Some(dir.path().join("holder.sock"))),
+        ] {
+            assert!(Startup::new(&absent, api, None, holder, metrics(), ondemand()).is_err());
+        }
     }
 
     #[test]
@@ -326,6 +352,7 @@ mod tests {
                 &dir.path().join("absent"),
                 api,
                 Some(&[0; 32]),
+                Some(dir.path().join("missing-holder.sock")),
                 metrics(),
                 ondemand(),
             )
