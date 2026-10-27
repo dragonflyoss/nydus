@@ -250,11 +250,10 @@ Options:
 
 ## Verification
 
-`make test-nbd` runs the end-to-end suite (`tests/e2e/nbd_test.go`,
-cases C0-C10) against a local backend: readiness, metadata off-path, byte
-exactness for tiny/partial/full reads, demand-paging cache-growth bounds,
-daemon health, warm fast path, concurrency, cache persistence across
-restarts, and graceful shutdown. It requires root, the `nbd` module, and
-EROFS support; it skips loudly when unmet. Protocol framing and ioctl
+`make e2e-experimental` runs the end-to-end suite
+(`tests/e2e/experimental/nbd`): the filesystem contract shared by every
+mount mode, plus demand-paging cache-growth bounds, concurrency and cache
+persistence across restarts, against an in-process registry. It requires
+root, the `nbd` module, and EROFS support. Protocol framing and ioctl
 encodings are covered by unit tests (`cargo test -p nydus --features cli,nbd
 --lib nbd`).

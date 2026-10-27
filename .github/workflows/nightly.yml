@@ -1,0 +1,274 @@
+name: Extended E2E
+
+# GA fuzzing and stability soak, plus the four experimental transports.
+# Sharing a build and schedule does not make GA tests experimental.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
+  GO_VERSION: "1.25.5"
+  FEATURES: cli,fuse,fileio,nbd,ublk,fanotify,uffd
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
+  CI_COVERAGE: "1"
+  COVERAGE_DIR: ${{ github.workspace }}/coverage
+
+jobs:
+  build:
+    name: binaries / build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-nightly
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
+
+      - run: |
+          make ci-build nydusify FEATURES="$FEATURES"
+          bash tests/scripts/e2e_coverage.sh bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-extended-binaries
+          path: |
+            target/ci/nydus
+            target/ci/examples/writer-fixture
+            nydusify/nydusify
+            coverage-tools/
+          if-no-files-found: error
+          retention-days: 3
+
+  experimental:
+    name: ${{ matrix.transport }} / experimental
+    needs: build
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - transport: nbd
+            runner: ${{ vars.E2E_NBD_RUNNER || '["ubuntu-24.04"]' }}
+          - transport: fanotify
+            runner: ${{ vars.E2E_FANOTIFY_RUNNER || '["ubuntu-24.04"]' }}
+          - transport: uffd
+            runner: ${{ vars.E2E_UFFD_RUNNER || '["ubuntu-24.04"]' }}
+          - transport: ublk
+            runner: ${{ vars.E2E_UBLK_RUNNER || '["ubuntu-24.04"]' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-extended-binaries
+
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          packages=(erofs-utils fuse3 strace udev)
+          if [ "${{ matrix.transport }}" = ublk ] && ! modinfo ublk_drv >/dev/null 2>&1; then
+            packages+=("linux-modules-extra-$(uname -r)")
+          fi
+          bash tests/scripts/install_ci_packages.sh "${packages[@]}"
+          sudo modprobe fuse
+          if [ "${{ matrix.transport }}" = nbd ]; then sudo modprobe nbd; fi
+          if [ "${{ matrix.transport }}" = ublk ]; then sudo modprobe ublk_drv; fi
+
+      - name: Run suite
+        id: suites
+        run: make e2e-run PKG=./experimental/${{ matrix.transport }}/... E2E_REQUIRE=1 E2E_TIMEOUT=4m E2E_PARALLEL=${{ matrix.transport == 'ublk' && 2 || 8 }}
+
+      - name: Repeat real UFFD faults for stability
+        id: uffd-stability
+        if: ${{ matrix.transport == 'uffd' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: |
+          make e2e-run PKG=./experimental/uffd/... E2E_REQUIRE=1 E2E_TIMEOUT=3m \
+            E2E_RUN='^TestRealFault(Copy|Zeropage|Zerocopy)$$' E2E_COUNT=34 E2E_GO_TEST_ARGS=-v
+
+      - name: Export product coverage
+        if: always()
+        env:
+          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
+        run: bash tests/scripts/e2e_coverage.sh export
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-experimental-${{ matrix.transport }}
+          path: coverage/
+          if-no-files-found: error
+      - uses: codecov/codecov-action@v5
+        if: ${{ github.event_name != 'pull_request' && !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          files: coverage/rust-e2e.lcov
+          flags: rust_e2e_experimental
+          name: rust-${{ matrix.transport }}
+          disable_search: true
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  soak:
+    name: storage / soak
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    needs: build
+    runs-on: ${{ fromJSON(vars.E2E_FILEIO_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 5 || 90 }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-extended-binaries
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo modprobe fuse
+          sudo modprobe erofs
+      - name: Soak local and remote shared-cache prefetch workloads
+        id: suites
+        env:
+          SOAK_DURATION: ${{ github.event_name == 'pull_request' && '2m' || vars.E2E_SOAK_DURATION || '1h' }}
+          SOAK_CYCLES: ${{ github.event_name == 'pull_request' && '6' || vars.E2E_SOAK_CYCLES || '120' }}
+          SOAK_RSS_MIB: ${{ vars.E2E_SOAK_RSS_MIB }}
+          SOAK_TIMEOUT: ${{ github.event_name == 'pull_request' && '4m' || '80m' }}
+        # Four leaves: local/remote x FUSE/Fileio. Two workers would run
+        # two consecutive 2-minute waves, leaving no setup/cleanup margin.
+        run: make e2e-soak E2E_RUN='^Test(Leak|Remote)$$' E2E_REQUIRE=1 E2E_PARALLEL=${{ github.event_name == 'pull_request' && 4 || 8 }} SOAK_TIMEOUT="$SOAK_TIMEOUT"
+
+      - name: Export product coverage
+        if: always()
+        env:
+          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
+        run: bash tests/scripts/e2e_coverage.sh export
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-soak
+          path: coverage/
+          if-no-files-found: error
+      - uses: codecov/codecov-action@v5
+        if: ${{ github.event_name != 'pull_request' && !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          files: coverage/rust-e2e.lcov
+          flags: rust_e2e
+          name: rust-soak
+          disable_search: true
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  fuzz:
+    name: image / fuzz-tar-blob
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 5 || 15 }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-extended-binaries
+
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh fuse3
+          sudo modprobe fuse
+
+      # `$$` reaches go test as `$`: make expands variables given on its
+      # command line.
+      # PRs exercise each target once for 150s. Scheduled/manual runs retain
+      # a continuous ten-minute search; more workers do not shorten wall time.
+      - name: Fuzz
+        id: suites
+        env:
+          FUZZ_TIME: ${{ github.event_name == 'pull_request' && '150s' || '10m' }}
+          TEST_TIMEOUT: ${{ github.event_name == 'pull_request' && '4m' || '12m' }}
+        run: |
+          make e2e-run PKG=./tar/ E2E_REQUIRE=1 E2E_RUN='^$$' E2E_PARALLEL=4 \
+            E2E_TIMEOUT="$TEST_TIMEOUT" E2E_GO_TEST_ARGS="-fuzz ^FuzzTarConversion -fuzztime $FUZZ_TIME" &
+          tar_pid=$!
+          make e2e-run PKG=./build/ E2E_REQUIRE=1 E2E_RUN='^$$' E2E_PARALLEL=4 \
+            E2E_TIMEOUT="$TEST_TIMEOUT" E2E_GO_TEST_ARGS="-fuzz ^FuzzBlobFormat -fuzztime $FUZZ_TIME" &
+          blob_pid=$!
+          status=0
+          wait "$tar_pid" || status=1
+          wait "$blob_pid" || status=1
+          exit "$status"
+
+      - name: Export product coverage
+        if: always()
+        env:
+          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
+        run: bash tests/scripts/e2e_coverage.sh export
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-fuzz
+          path: coverage/
+          if-no-files-found: error
+      - uses: codecov/codecov-action@v5
+        if: ${{ github.event_name != 'pull_request' && !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          files: coverage/rust-e2e.lcov
+          flags: rust_e2e
+          name: rust-fuzz
+          disable_search: true
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      # A crasher is written under testdata/fuzz; keep it for a regression seed.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: tests/e2e/**/testdata/fuzz/
+          if-no-files-found: ignore

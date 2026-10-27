@@ -151,9 +151,88 @@ pub fn single_chunk_group_ondemand(payload: &[u8], source_blob_index: u16) -> Bl
     .unwrap()
 }
 
+/// A copy claiming a wrong CRC32C for `group`, with the other entries kept.
+pub fn with_wrong_chunk_group_checksum(blob_metadata: &BlobMetadata, group: usize) -> BlobMetadata {
+    assert!(
+        !blob_metadata.is_ondemand() && !blob_metadata.is_incremental(),
+        "only a plain blob meta can be rebuilt"
+    );
+    assert!(group < blob_metadata.chunk_group_count());
+    let digester = blob_metadata.digester().unwrap();
+    let digests = blob_metadata.chunk_group_digests().collect();
+
+    let mut chunk_groups: Vec<_> = blob_metadata
+        .chunk_groups()
+        .enumerate()
+        .map(|(index, chunk_group)| {
+            BlobMetadataChunkGroup::new(
+                chunk_group.compressed_offset(),
+                chunk_group.logical_block_offset() as u32,
+                chunk_group.first_chunk_index(),
+                chunk_group.uncompressed_size(),
+                chunk_group.uncompressed_crc32() ^ u32::from(index == group),
+            )
+        })
+        .collect();
+    chunk_groups.push(BlobMetadataChunkGroup::new(
+        blob_metadata.compressed_size(),
+        blob_metadata.logical_block_count() as u32,
+        blob_metadata.chunk_count() as u32,
+        0,
+        0,
+    ));
+    let chunk_lengths = (0..blob_metadata.chunk_count())
+        .map(|index| BlobMetadataChunkLength::new(blob_metadata.chunk_length(index).unwrap()))
+        .collect();
+
+    BlobMetadata::new(
+        blob_metadata.max_blocks_per_chunk_group(),
+        blob_metadata.blocks_per_chunk_group_index(),
+        blob_metadata.compressor(),
+        digester,
+        chunk_groups,
+        chunk_lengths,
+        digests,
+        Vec::new(),
+    )
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrong_chunk_group_checksum_changes_only_that_checksum() {
+        let chunk_groups = vec![vec![vec![0x11; 4096]], vec![vec![0x22; 4096]]];
+        let (_, blob_metadata) = from_chunk_groups(
+            BlobMetadataCompressor::Zstd,
+            4096,
+            &chunk_groups,
+            Some(BlobMetadataDigester::Blake3),
+        );
+        let tampered = with_wrong_chunk_group_checksum(&blob_metadata, 1);
+        assert_eq!(
+            tampered.chunk_group_digest(0),
+            blob_metadata.chunk_group_digest(0)
+        );
+        assert_eq!(
+            tampered.chunk_group_digest(1),
+            blob_metadata.chunk_group_digest(1)
+        );
+        for (index, (left, right)) in tampered
+            .chunk_groups()
+            .zip(blob_metadata.chunk_groups())
+            .enumerate()
+        {
+            assert_eq!(left.compressed_range(), right.compressed_range());
+            assert_eq!(
+                left.uncompressed_crc32(),
+                right.uncompressed_crc32() ^ u32::from(index == 1)
+            );
+            assert_eq!(left.logical_range(), right.logical_range());
+        }
+    }
 
     #[test]
     fn from_chunk_groups_describes_the_data_region_it_lays_out() {

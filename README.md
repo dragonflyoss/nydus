@@ -20,7 +20,7 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
   reduced: one `nydus` binary (`build` / `merge` / `check` / `optimize` /
   `fuse` / `ublk` / `uffd` / `fanotify`) plus the `nydusify` image orchestrator. Each layer is one
   self-contained blob artifact (`data + zstd-compressed bootstrap + blob
-  meta + footer`) named by its SHA256, with an optional standalone
+meta + footer`) named by its SHA256, with an optional standalone
   metadata-only bootstrap.
 - **Native EROFS format** — a fully standard EROFS layout compatible with
   erofs-utils and kernel mounting; filesystem and chunk metadata are fetched
@@ -83,15 +83,15 @@ reaching its ready log line. For OCI the pull downloads and unpacks every
 layer up front; for Nydus it fetches only the metadata bootstrap and file data
 is loaded on demand at runtime (that cost shows up inside Ready).
 
-| # | Image format                    | Runtime | Pull size | Pull   | Create | Ready  | E2E       |
+| #   | Image format                    | Runtime | Pull size | Pull   | Create | Ready  | E2E       |
 | --- | ------------------------------- | ------- | --------- | ------ | ------ | ------ | --------- |
-| 1 | OCI                             | runc    | 4.04 GB   | 14.76s | 0.19s  | 5.45s  | 20.40s    |
-| 2 | OCI                             | rund    | 4.04 GB   | 14.76s | 1.37s  | 6.49s  | 22.62s    |
-| 3 | Nydus v2 (RAFS)                 | runc    | 11.36 MiB | 2.09s  | 0.16s  | 13.46s | 15.71s    |
-| 4 | Nydus v2 (RAFS)                 | rund    | 11.36 MiB | 2.09s  | 1.38s  | 14.28s | 17.75s    |
-| 5 | Nydus v3                        | rund    | 6.44 MiB  | 1.75s  | 1.53s  | 7.50s  | 10.78s    |
-| 6 | Nydus v3 optimized              | rund    | 6.44 MiB  | 1.75s  | 1.47s  | 5.72s  | **8.94s** |
-| 7 | Nydus v3 optimized (warm cache) | rund    | —         | —      | 0.79s  | 5.42s  | **6.21s** |
+| 1   | OCI                             | runc    | 4.04 GB   | 14.76s | 0.19s  | 5.45s  | 20.40s    |
+| 2   | OCI                             | rund    | 4.04 GB   | 14.76s | 1.37s  | 6.49s  | 22.62s    |
+| 3   | Nydus v2 (RAFS)                 | runc    | 11.36 MiB | 2.09s  | 0.16s  | 13.46s | 15.71s    |
+| 4   | Nydus v2 (RAFS)                 | rund    | 11.36 MiB | 2.09s  | 1.38s  | 14.28s | 17.75s    |
+| 5   | Nydus v3                        | rund    | 6.44 MiB  | 1.75s  | 1.53s  | 7.50s  | 10.78s    |
+| 6   | Nydus v3 optimized              | rund    | 6.44 MiB  | 1.75s  | 1.47s  | 5.72s  | **8.94s** |
+| 7   | Nydus v3 optimized (warm cache) | rund    | —         | —      | 0.79s  | 5.42s  | **6.21s** |
 
 - `runc` is the standard host container runtime; `rund` is a Kata-style
   microVM runtime mounting the image as EROFS over virtio-pmem.
@@ -144,19 +144,19 @@ the mean of 2 runs; run-to-run spread is < 5%.
      docs: local registry:2 + tc netem on port 5000; v2 column needs the
      v2 nydusd/nydus-image binaries. -->
 
-| Serving mode | Image size | RTT ≈ 0 | RTT +30 ms | RTT +50 ms | Data fetched |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| v2 FUSE | 500 MiB | 1.72 s | 5.51 s | 8.64 s | 197 MiB |
-| FUSE | 465 MiB | 1.44 s | 3.48 s | 4.90 s | 230 MiB |
-| NBD | 465 MiB | 1.15 s | 3.28 s | 4.77 s | 231 MiB |
-| ublk | 465 MiB | 1.04 s | 3.09 s | 4.62 s | 231 MiB |
-| fileio | 465 MiB | 1.17 s | 3.21 s | 4.83 s | 230 MiB |
-| fanotify | 465 MiB | 1.10 s | 3.20 s | 4.60 s | 230 MiB |
-| FUSE + optimize | 521 MiB | 0.92 s | 1.56 s | 1.75 s | 230 MiB |
-| NBD + optimize | 521 MiB | 0.72 s | 1.25 s | 1.67 s | 230 MiB |
-| ublk + optimize | 521 MiB | 0.86 s | 1.14 s | 1.45 s | 230 MiB |
-| fileio + optimize | 521 MiB | 0.72 s | 1.18 s | 1.51 s | 230 MiB |
-| fanotify + optimize | 521 MiB | **0.59 s** | **1.08 s** | **1.38 s** | 230 MiB |
+| Serving mode        | Image size |    RTT ≈ 0 | RTT +30 ms | RTT +50 ms | Data fetched |
+| ------------------- | ---------: | ---------: | ---------: | ---------: | -----------: |
+| v2 FUSE             |    500 MiB |     1.72 s |     5.51 s |     8.64 s |      197 MiB |
+| FUSE                |    465 MiB |     1.44 s |     3.48 s |     4.90 s |      230 MiB |
+| NBD                 |    465 MiB |     1.15 s |     3.28 s |     4.77 s |      231 MiB |
+| ublk                |    465 MiB |     1.04 s |     3.09 s |     4.62 s |      231 MiB |
+| fileio              |    465 MiB |     1.17 s |     3.21 s |     4.83 s |      230 MiB |
+| fanotify            |    465 MiB |     1.10 s |     3.20 s |     4.60 s |      230 MiB |
+| FUSE + optimize     |    521 MiB |     0.92 s |     1.56 s |     1.75 s |      230 MiB |
+| NBD + optimize      |    521 MiB |     0.72 s |     1.25 s |     1.67 s |      230 MiB |
+| ublk + optimize     |    521 MiB |     0.86 s |     1.14 s |     1.45 s |      230 MiB |
+| fileio + optimize   |    521 MiB |     0.72 s |     1.18 s |     1.51 s |      230 MiB |
+| fanotify + optimize |    521 MiB | **0.59 s** | **1.08 s** | **1.38 s** |      230 MiB |
 
 - Measured on Ubuntu 24.04 (arm64), Linux 7.0.0, with an earlier v3 build
   (1 MiB chunks in 4 MiB chunk groups, zstd; the current builder emits
@@ -202,10 +202,10 @@ the mean of 2 runs; run-to-run spread is < 5%.
 Building the Linux kernel source tree (1.8 GiB, ~95.8k files, warm page
 cache) into an image, measured with `/usr/bin/time -v`, 3 runs each:
 
-| Builder | Wall time | Peak RSS | Data blob | Bootstrap (gzip) | Total transfer |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| v2 `nydus-image create` (RAFS v6, zstd) | 5.6–6.1 s | 170 MiB | 298 MiB | 7.5 MiB | 306 MiB |
-| v3 `nydus build` (zstd) | **1.7–1.8 s** | **82 MiB** | **236 MiB** | **1.9 MiB** | **238 MiB** |
+| Builder                                 |     Wall time |   Peak RSS |   Data blob | Bootstrap (gzip) | Total transfer |
+| --------------------------------------- | ------------: | ---------: | ----------: | ---------------: | -------------: |
+| v2 `nydus-image create` (RAFS v6, zstd) |     5.6–6.1 s |    170 MiB |     298 MiB |          7.5 MiB |        306 MiB |
+| v3 `nydus build` (zstd)                 | **1.7–1.8 s** | **82 MiB** | **236 MiB** |      **1.9 MiB** |    **238 MiB** |
 
 - v3 builds 3.3× faster than v2: source reads stay on the produce thread
   while per-chunk-group crc32 + zstd run on a small background pipeline
@@ -228,10 +228,10 @@ files) between two local registries (pull from one, push to the other,
 the push registry recreated before every run), cold page cache. Memory is
 the peak of the summed RSS of the whole process tree:
 
-| Converter | Wall time | Peak memory (tree) | Output image |
-| --- | ---: | ---: | ---: |
-| v2 nydusify (RAFS v6, zstd) | 34.1–34.3 s | ~330 MiB | 1319 MiB |
-| v3 nydusify (zstd) | **29.7–34.6 s** | **~130 MiB** | **1275 MiB** |
+| Converter                   |       Wall time | Peak memory (tree) | Output image |
+| --------------------------- | --------------: | -----------------: | -----------: |
+| v2 nydusify (RAFS v6, zstd) |     34.1–34.3 s |           ~330 MiB |     1319 MiB |
+| v3 nydusify (zstd)          | **29.7–34.6 s** |       **~130 MiB** | **1275 MiB** |
 
 - The source OCI image is 1333 MiB of gzip layers; v3's output is 4%
   smaller than the source and 3% smaller than v2's. Each layer is a
@@ -252,10 +252,10 @@ the peak of the summed RSS of the whole process tree:
 
 Output image size across payload shapes (manifest layer totals):
 
-| Image | Source (OCI gzip) | v2 output | v3 output |
-| --- | ---: | ---: | ---: |
-| `continuumio/anaconda3` (2 layers, Python distro) | 1067 MiB | 1123 MiB | **965 MiB** (-10% / -14%) |
-| `n8nio/n8n` (12 layers, node_modules-dense) | 359 MiB | 419 MiB | **320 MiB** (-11% / -24%) |
+| Image                                             | Source (OCI gzip) | v2 output |                 v3 output |
+| ------------------------------------------------- | ----------------: | --------: | ------------------------: |
+| `continuumio/anaconda3` (2 layers, Python distro) |          1067 MiB |  1123 MiB | **965 MiB** (-10% / -14%) |
+| `n8nio/n8n` (12 layers, node_modules-dense)       |           359 MiB |   419 MiB | **320 MiB** (-11% / -24%) |
 
 - The gap widens on small-file-heavy payloads: v3 packs small files
   densely into shared chunk groups, which compress far better than v2's
@@ -268,17 +268,17 @@ Output image size across payload shapes (manifest layer totals):
 
 ## Components
 
-| Component         | Path               | Description                                                                                               |
-| ----------------- | ------------------ | --------------------------------------------------------------------------------------------------------- |
-| `nydus`           | `nydus/`           | Mount services (`fuse`, `fanotify`, `nbd`, `ublk`, `uffd`), the build/merge/check/optimize pipelines, and the CLI binary |
+| Component         | Path               | Description                                                                                                                      |
+| ----------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `nydus`           | `nydus/`           | Mount services (`fuse`, `fanotify`, `nbd`, `ublk`, `uffd`), the build/merge/check/optimize pipelines, and the CLI binary         |
 | `nydus-core`      | `nydus-core/`      | Image runtime library (`NydusCore`, `ErofsReader`) for embedding the read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
-| `nydus-config`    | `nydus-config/`    | YAML config loading                                                                                        |
-| `nydus-storage`   | `nydus-storage/`   | Local blob cache, prefetch, and access tracing (data plane, `io::Result` only)                             |
-| `nydus-backend`   | `nydus-backend/`   | Blob sources: OCI registry, local directory, Dragonfly P2P (data plane, `io::Result` only)                 |
-| `nydus-format`    | `nydus-format/`    | On-disk format definitions: EROFS structures and the nydus blob format                                     |
-| `nydus-error`     | `nydus-error/`     | Control-plane error contract (`Error`, `report()`, `Context`)                                              |
-| `nydus-telemetry` | `nydus-telemetry/` | Metrics and logging setup                                                                                  |
-| `nydusify`        | `nydusify/`        | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                   |
+| `nydus-config`    | `nydus-config/`    | YAML config loading                                                                                                              |
+| `nydus-storage`   | `nydus-storage/`   | Local blob cache, prefetch, and access tracing (data plane, `io::Result` only)                                                   |
+| `nydus-backend`   | `nydus-backend/`   | Blob sources: OCI registry, local directory, Dragonfly P2P (data plane, `io::Result` only)                                       |
+| `nydus-format`    | `nydus-format/`    | On-disk format definitions: EROFS structures and the nydus blob format                                                           |
+| `nydus-error`     | `nydus-error/`     | Control-plane error contract (`Error`, `report()`, `Context`)                                                                    |
+| `nydus-telemetry` | `nydus-telemetry/` | Metrics and logging setup                                                                                                        |
+| `nydusify`        | `nydusify/`        | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                                         |
 
 See [docs/nydus.md](docs/nydus.md#crate-architecture) for the dependency
 graph and the data-plane/control-plane split the crate boundaries enforce.
@@ -317,24 +317,20 @@ Mount a converted image lazily from the registry with a YAML storage config
 [`config/registry.example.yaml`](config/registry.example.yaml)):
 
 ```bash
-nydus fuse --bootstrap image.boot --config config/registry.example.yaml \
-  --mountpoint /mnt/nydus
+nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountpoint /mnt/nydus
 ```
-
-Optional `--apiserver unix:///run/nydus/api.sock` enables metrics, tracing, and
-hot upgrade without remounting. See [FUSE hot upgrade](docs/upgrade.md).
 
 ## Documentation
 
-| Document                       | Contents                                                                                                                                          |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`    |
+| Document                             | Contents                                                                                                                                                   |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [docs/nydus.md](docs/nydus.md)       | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`                 |
 | [docs/upgrade.md](docs/upgrade.md) | FUSE hot upgrade: usage, startup selection, ownership, and the handoff protocol |
-| [docs/uffd.md](docs/uffd.md)   | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem |
-| [docs/ublk.md](docs/ublk.md)   | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths |
-| [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                   |
+| [docs/uffd.md](docs/uffd.md)         | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem          |
+| [docs/ublk.md](docs/ublk.md)         | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths         |
+| [docs/erofs.md](docs/erofs.md)       | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                            |
 | [docs/fanotify.md](docs/fanotify.md) | Fanotify pre-content service: multi-device EROFS model, event ABI, event processing, response protocol, service lifecycle, and fail-open behavior on crash |
-| [docs/nbd.md](docs/nbd.md)     | NBD service: flattened block device, kernel socket protocol framing, ioctl session setup, request validation, and mount lifecycle                 |
+| [docs/nbd.md](docs/nbd.md)           | NBD service: flattened block device, kernel socket protocol framing, ioctl session setup, request validation, and mount lifecycle                          |
 
 ## Building from Source
 
@@ -376,44 +372,23 @@ make crate
 # Rust unit tests.
 make test
 
-# End-to-end integration tests (requires root and FUSE).
-make test-e2e
+# End-to-end suites (root via sudo, FUSE; see tests/e2e/README.md). Each
+# directory under tests/e2e is a suite; NYDUS_E2E_REQUIRE=1 (E2E_REQUIRE=1)
+# turns missing preconditions into failures, as CI does.
+make e2e PKG=./contract/...
+make e2e-ga                      # every GA suite but dragonfly
+make e2e-dragonfly               # needs upstream Kind/Helm setup; see tests/e2e/README.md
+make e2e-experimental            # nbd, fanotify, ublk, uffd
 
-# Cross-version on-disk compatibility (requires root and FUSE): build images
-# of a corpus of data, hole and metadata edge cases in every layout with
-# COMPAT_BUILDER, then check, mount and export them with COMPAT_READER.
-# Both default to the in-tree build; CI runs both directions against the
-# v3.0.0-beta.1 release on pull requests to v3.
-make test-compat COMPAT_BUILDER=/abs/path/to/released/nydus
-make test-compat COMPAT_READER=/abs/path/to/released/nydus
-# The same in two runs, keeping the images in COMPAT_IMAGES (CI caches the
-# images the release builds; pushes to v3 fill the cache that pull requests
-# into v3 share).
-make test-compat-build COMPAT_BUILDER=/abs/path/to/released/nydus COMPAT_IMAGES=/abs/path/to/images
-make test-compat-read COMPAT_IMAGES=/abs/path/to/images
-
-# FUSE hot-upgrade, rollback, and no-API tests (requires root and FUSE).
+# FUSE hot upgrade, rollback, no-API operation and live-owner exclusion.
 make test-fuse-continuity
+# Optional separate, hot-upgrade-capable predecessor binary:
+make test-fuse-continuity FUSE_CONTINUITY_PREDECESSOR=/abs/path/to/nydus
 
-# UFFD service smoke test.
-make test-uffd
-
-# ublk block device test (requires root and Linux 6.0+ with ublk_drv).
-make test-ublk
-
-# Fanotify service smoke test.
-make test-fanotify
-
-# NBD service E2E (requires root and the nbd module);
-make test-nbd
-
-# Unified cold-start performance benchmark: FUSE / NBD / ublk / fanotify
-# (requires root and fio; unavailable modes are skipped individually).
+# Unified cold-start performance benchmark: FUSE / fileio / NBD / ublk /
+# fanotify (requires root and fio; unavailable modes are left out).
 make test-bench
-
-# Filesystem behavior tests (requires root and FUSE).
-make test-fs
 ```
 
-End-to-end tests live under `tests/e2e/`. See the `Makefile` for per-target
-knobs such as `E2E_TEST=<regex>` and `FUSE_CONTINUITY_COUNT=<count>`.
+End-to-end suites live under `tests/e2e/`. See the `Makefile` for
+per-target knobs such as `E2E_RUN=<regex>` to select tests.

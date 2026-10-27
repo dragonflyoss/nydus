@@ -7,17 +7,217 @@
 package pipeline
 
 import (
+	"archive/tar"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/sys/unix"
 )
+
+func TestExportChild(t *testing.T) {
+	control := os.Getenv("NYDUS_EXPORT_CONTROL")
+	if control == "" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || len(os.Args) <= separator+2 || os.Args[separator+1] != "export" {
+		t.Fatalf("unexpected export arguments: %q", os.Args)
+	}
+	blob := os.Args[separator+2]
+	// The fixture must reach the exporter as an intact, digest-named blob.
+	data, err := os.ReadFile(blob)
+	if err != nil || digest.FromBytes(data).Encoded() != filepath.Base(blob) {
+		t.Fatalf("materialized blob %q: %v", blob, err)
+	}
+	if _, err := os.Stdout.Write(bytes.Repeat([]byte("partial tar stream"), 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(control, filepath.Base(blob)), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if filepath.Base(blob) == os.Getenv("NYDUS_EXPORT_FAIL") {
+			if _, err := os.Stat(filepath.Join(control, "release")); err == nil {
+				_, _ = fmt.Fprintln(os.Stderr, "injected export failure")
+				os.Exit(29)
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestConvertToOCIParallelFailure(t *testing.T) {
+	builder := os.Getenv("NYDUS_TEST_BUILDER")
+	if builder == "" {
+		t.Skip("set NYDUS_TEST_BUILDER to run parallel export failure tests")
+	}
+	oldProcs := runtime.GOMAXPROCS(max(2, runtime.GOMAXPROCS(0)))
+	defer runtime.GOMAXPROCS(oldProcs)
+	for _, mode := range []string{"layer_failure", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			work := t.TempDir()
+			store, err := local.NewStore(filepath.Join(work, "content"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			scratch, control := filepath.Join(work, "scratch"), filepath.Join(work, "control")
+			for _, path := range []string{scratch, control} {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var blobs []ocispec.Descriptor
+			for _, name := range []string{"lower", "upper"} {
+				var source bytes.Buffer
+				writer := tar.NewWriter(&source)
+				data := []byte(name + " layer payload")
+				if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := writer.Write(data); err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				dgst, size, err := oci.CommitBlob(ctx, store, name, "", nil, func(w io.Writer) error {
+					_, err := w.Write(source.Bytes())
+					return err
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				converted, err := convertLayer(ctx, store, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageLayer, Digest: dgst, Size: size},
+					nydus.PackOption{BuilderPath: builder, WorkDir: work})
+				if err != nil {
+					t.Fatal(err)
+				}
+				blobs = append(blobs, *converted)
+			}
+			config, err := oci.WriteJSON(ctx, store, ocispec.Image{RootFS: ocispec.RootFS{Type: "layers"}},
+				ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bootstrap, err := oci.WriteBootstrapLayer(ctx, store, []byte("unused by per-layer export"), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := oci.WriteJSON(ctx, store, ocispec.Manifest{Config: *config, Layers: append(slices.Clone(blobs), *bootstrap)},
+				ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := make(map[digest.Digest]bool)
+			if err := store.Walk(ctx, func(info content.Info) error { before[info.Digest] = true; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			exporter := filepath.Join(work, "exporter")
+			if err := os.WriteFile(exporter, []byte(fmt.Sprintf("#!/bin/sh\nexec %q -test.run=^TestExportChild$ -- \"$@\"\n", executable)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("NYDUS_EXPORT_CONTROL", control)
+			t.Setenv("NYDUS_EXPORT_FAIL", blobs[0].Digest.Encoded())
+			type result struct {
+				desc *ocispec.Descriptor
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				desc, err := ConvertToOCI(ctx, store, *source, ToOCIOption{BuilderPath: exporter, WorkDir: scratch, Compressor: "oci-tar"})
+				done <- result{desc, err}
+				close(done)
+			}()
+			var pids []int
+			t.Cleanup(func() {
+				cancel()
+				for _, pid := range pids {
+					_ = unix.Kill(pid, unix.SIGKILL)
+				}
+				<-done
+			})
+			deadline := time.Now().Add(5 * time.Second)
+			for _, blob := range blobs {
+				pid := 0
+				for pid == 0 && time.Now().Before(deadline) {
+					data, _ := os.ReadFile(filepath.Join(control, blob.Digest.Encoded()))
+					pid, _ = strconv.Atoi(string(data))
+					if pid == 0 {
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+				if pid == 0 {
+					t.Fatal("export peers did not both start and stream output")
+				}
+				pids = append(pids, pid)
+			}
+			if mode == "cancel" {
+				cancel()
+			} else if err := os.WriteFile(filepath.Join(control, "release"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case result := <-done:
+				if result.desc != nil || result.err == nil || !strings.Contains(result.err.Error(), "unpack nydus layer") {
+					t.Fatalf("conversion published a result or lost error context: %+v", result)
+				}
+				if mode == "layer_failure" && (!strings.Contains(result.err.Error(), "injected export failure") ||
+					!strings.Contains(result.err.Error(), blobs[0].Digest.String()) || ctx.Err() != nil) {
+					t.Fatalf("initiating failure was lost or cancellation hung: %v", result.err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("export failed to cancel and reap peers within 5s")
+			}
+			for _, pid := range pids {
+				if err := unix.Kill(pid, 0); err != unix.ESRCH {
+					t.Errorf("export child %d not reaped: %v", pid, err)
+				}
+			}
+			entries, err := os.ReadDir(scratch)
+			if err != nil || len(entries) != 0 {
+				t.Errorf("materialized blobs leaked: %v, %v", entries, err)
+			}
+			if err := store.Walk(context.Background(), func(info content.Info) error {
+				if !before[info.Digest] {
+					t.Errorf("failed conversion committed partial content: %s", info.Digest)
+				}
+				delete(before, info.Digest)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(before) != 0 {
+				t.Errorf("failed conversion removed source content: %v", before)
+			}
+		})
+	}
+}
 
 // TestRewriteOCIConfigResetsDiffIDsAndTrimsHistory verifies that the reverse
 // conversion restores an ordinary OCI config: the rebuilt layers get fresh

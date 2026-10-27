@@ -34,6 +34,100 @@ struct CountingBackend {
     fail_next: AtomicBool,
 }
 
+#[test]
+fn flat_inline_streaming_crosses_the_block_tail_boundary_and_propagates_write_errors() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    fs::create_dir(&source).unwrap();
+    // The builder emits flat-inline data for directories, including a block-backed prefix.
+    for index in 0..300 {
+        fs::write(source.join(format!("entry-{index:04}")), []).unwrap();
+    }
+    xattr::set(&source, "user.inline-test", b"header padding").unwrap();
+    let image = build_image(
+        &BuildImageOptions::new(
+            source,
+            EROFS_BLOCK_SIZE,
+            BlobMetadataCompressor::None,
+            HashSet::new(),
+            true,
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let bootstrap = dir.path().join("image.boot");
+    fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let nid = reader.superblock().root_nid();
+    let inode = reader.inode(nid).unwrap();
+    assert_eq!(
+        inode.data_layout(),
+        nydus_format::erofs::EROFS_INODE_FLAT_INLINE
+    );
+    let size = inode.size() as usize;
+    let boundary = size / EROFS_BLOCK_SIZE as usize * EROFS_BLOCK_SIZE as usize;
+    assert!(boundary > 0 && size > boundary + 32);
+    let expected = reader.read_file_data(nid, &inode, 0, size as u32).unwrap();
+    for (offset, requested) in [
+        (0, size),
+        (boundary - 23, 55),
+        (boundary - 23, 23),
+        (boundary, 32),
+        (boundary + 7, size),
+        (size, 1),
+        (0, 0),
+    ] {
+        let mut output = Vec::new();
+        let written = reader
+            .write_file_data_to(nid, &inode, offset as u64, requested as u32, &mut output)
+            .unwrap();
+        let end = (offset + requested).min(size);
+        assert_eq!(
+            output,
+            expected[offset..end],
+            "offset={offset} size={requested}"
+        );
+        assert_eq!(written, output.len());
+    }
+
+    struct FailWriter {
+        writes_left: usize,
+        output: Vec<u8>,
+    }
+    impl Write for FailWriter {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            if self.writes_left == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "injected sink failure",
+                ));
+            }
+            self.writes_left -= 1;
+            self.output.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for writes_left in [0, 1] {
+        let mut sink = FailWriter {
+            writes_left,
+            output: Vec::new(),
+        };
+        let error = reader
+            .write_file_data_to(nid, &inode, (boundary - 23) as u64, 55, &mut sink)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), "injected sink failure");
+        assert_eq!(
+            sink.output,
+            expected[boundary - 23..boundary - 23 + writes_left * 23]
+        );
+    }
+}
+
 fn build_z_reader_fixture(algorithm: ZErofsCompressor) -> (TempDir, Vec<u8>) {
     let dir = tempdir().unwrap();
     let source = dir.path().join("src");

@@ -243,10 +243,10 @@ of routing every block read through a userspace queue thread.
 # Rust unit tests for range assembly and zero-filling.
 cargo test --features cli,ublk -p nydus ublk
 
-# End-to-end: build an image, serve it, mount it with the kernel EROFS driver,
-# and compare the tree against a FUSE mount of the same image.
+# End-to-end: the filesystem contract over a kernel EROFS mount of the
+# device, plus graceful shutdown (tests/e2e/experimental/ublk).
 # Requires root, ublk_drv, and an EROFS kernel with flatdev support.
-make test-ublk
+make e2e-experimental
 ```
 
 ## Constraints

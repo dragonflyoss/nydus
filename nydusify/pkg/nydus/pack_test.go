@@ -22,6 +22,24 @@ func fakeBuilder(t *testing.T, body string) string {
 	return path
 }
 
+func TestPackSetupFailures(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	writer, err := Pack(ctx, io.Discard, PackOption{})
+	if !errors.Is(err, context.Canceled) || writer != nil {
+		t.Fatalf("canceled pack returned writer=%v, err=%v", writer, err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := BuildBlob(context.Background(), io.Discard, t.TempDir(), PackOption{WorkDir: missing}); err == nil ||
+		!strings.Contains(err.Error(), "create fifo dir") {
+		t.Fatalf("invalid workspace returned %v", err)
+	}
+	file, err := openFifoRead(missing)
+	if !errors.Is(err, os.ErrNotExist) || file != nil {
+		t.Fatalf("missing FIFO returned file=%v, err=%v", file, err)
+	}
+}
+
 func TestPackStreamsTarWithoutExtraction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -31,6 +49,7 @@ func TestPackStreamsTarWithoutExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	payload := bytes.Repeat([]byte("tar-bytes"), 20000)
 	if _, err := writer.Write(payload); err != nil {
 		t.Fatal(err)
@@ -101,5 +120,24 @@ func TestPackCancellationUnblocksInput(t *testing.T) {
 	}
 	if err := writer.Close(); err == nil {
 		t.Fatal("expected canceled build")
+	}
+}
+
+func TestBuildBlobStopsOnDestinationFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	scratch := t.TempDir()
+	expected := errors.New("destination failed")
+	builder := fakeBuilder(t, "test \"$type\" = dir\nexec cat /dev/zero > \"$blob\"\n")
+	err := BuildBlob(ctx, failedDestination{expected}, t.TempDir(), PackOption{BuilderPath: builder, WorkDir: scratch})
+	if !errors.Is(err, expected) {
+		t.Fatalf("expected destination error: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("failed output did not stop the builder")
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("FIFO scratch leaked: %v %v", entries, err)
 	}
 }

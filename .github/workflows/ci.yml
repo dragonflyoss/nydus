@@ -1,81 +1,290 @@
 name: CI
 
+# Pull request gate: Rust and nydusify unit tests, and every GA e2e suite
+# (tests/e2e) against one nydus binary built once with the ci profile.
+# Reusable workflows also run experimental transports and fuzzing on PRs.
+# Release separately verifies shipped binaries. Heavy workloads stay manual.
+
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
-  schedule:
-    - cron: '0 4 * * *'
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
+  GO_VERSION: "1.25.5"
+  # The GA binary: GA mount modes plus the Dragonfly backend.
+  E2E_FEATURES: cli,fuse,fileio,dragonfly
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
+  CI_COVERAGE: "1"
+  COVERAGE_DIR: ${{ github.workspace }}/coverage
+
 jobs:
-  check:
-    name: Cargo check
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
+  rust-test:
+    name: test / rust / unit-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      NYDUS_TEST_REQUIRE_NETNS: "1"
+      NYDUS_TEST_REQUIRE_PTRACE: "1"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GH_TOKEN }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run cargo check
-        run: |
-          cargo check --all --all-targets --all-features
-
-  test:
-    name: Run tests
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GH_TOKEN }}
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+      # After the toolchain, so the cache key covers it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
 
       - name: Run tests
+        id: rust-tests
         run: |
-          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+          bash tests/scripts/install_ci_packages.sh iproute2
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --no-fail-fast \
+            --features 'nydus/cli,nydus/fileio,nydus/dragonfly,nydus/nbd,nydus/ublk,nydus/fanotify,nydus/uffd,nydus-test-utils/fault-backend' \
+            --no-report
 
-      - name: Install Go
-        uses: actions/setup-go@v5
+      - name: Export Rust coverage
+        if: always()
+        run: |
+          mkdir -p coverage/raw/rust
+          echo 'test_outcome=${{ steps.rust-tests.outcome }}' > coverage/status.txt
+          echo 'scope=rust-unit-integration' >> coverage/status.txt
+          if [ '${{ steps.rust-tests.outcome }}' = skipped ] || [ '${{ steps.rust-tests.outcome }}' = cancelled ]; then
+            echo 'collection=not-run-or-cancelled' >> coverage/status.txt
+            exit 0
+          fi
+          find target/llvm-cov-target -name '*.profraw' -exec cp '{}' coverage/raw/rust/ \;
+          cargo llvm-cov report --lcov --output-path coverage/rust-unit-integration.lcov
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          go-version-file: nydusify/go.mod
+          name: coverage-rust-unit-integration
+          path: coverage/
+          if-no-files-found: error
 
-      - name: Run nydusify tests
+  build:
+    name: build / binaries / ga
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-ci
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
+
+      - name: Build nydus (ci profile) and nydusify
         run: |
-          make test-nydusify
+          make ci-build nydusify FEATURES="$E2E_FEATURES"
+          bash tests/scripts/e2e_coverage.sh bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-binaries
+          path: |
+            target/ci/nydus
+            target/ci/examples/writer-fixture
+            nydusify/nydusify
+            coverage-tools/
+          if-no-files-found: error
+          retention-days: 3
+
+  e2e:
+    name: test / ${{ matrix.check }}
+    needs: build
+    # Missing kernel capabilities fail inside the suite, never queue forever.
+    runs-on: ${{ fromJSON(vars.E2E_FILEIO_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: image-tools
+            check: image / tools-services
+            pkgs: ./build/... ./export/... ./nydusify/... ./kernel/... ./tar/... ./api/... ./registry/... ./continuity/...
+            parallel: 8
+            package_parallel: 2
+            run: ""
+            test_timeout: 4m
+          - suite: fuse
+            check: fuse / contract
+            pkgs: ./contract/...
+            run: ^TestFUSE$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: fileio-semantics
+            check: fileio / semantics
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^(Semantic|C[0-9]+_.*)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: fileio-data-zstd
+            check: fileio / data-zstd
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^Data$$/^zstd-4k$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: fileio-data-other
+            check: fileio / data-other
+            pkgs: ./contract/...
+            run: ^TestFileio$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
+            parallel: 4
+            package_parallel: 1
+            test_timeout: 4m
+          - suite: storage-recovery
+            check: storage / fault-recovery
+            pkgs: ./fault/...
+            parallel: 4
+            package_parallel: 1
+            run: ""
+            test_timeout: 4m
+          - suite: storage-cache
+            check: storage / cache
+            pkgs: ./cache/... ./soak/...
+            parallel: 2
+            package_parallel: 1
+            run: ""
+            test_timeout: 4m
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-binaries
+
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus target/ci/examples/writer-fixture nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo modprobe fuse
+
+      # Keep the mount-heavy suites bounded on shared runners:
+      # Go's -parallel is per package, while -p controls concurrent packages.
+      # Fileio data retains two layout groups; fault recovery is isolated
+      # from cache pressure. Conventions tests check complete coverage.
+      - name: Run suites
+        id: suites
+        run: make e2e-run PKG="${{ matrix.pkgs }}" E2E_RUN='${{ matrix.run }}' E2E_REQUIRE=1 E2E_PARALLEL=${{ matrix.parallel }} E2E_TIMEOUT=${{ matrix.test_timeout }} E2E_GO_TEST_ARGS='-p=${{ matrix.package_parallel }} -v'
+
+      - name: Run nydusify unit and integration tests
+        if: ${{ matrix.suite == 'image-tools' }}
+        run: make test-nydusify NYDUS_TEST_BUILDER="$GITHUB_WORKSPACE/target/ci/nydus"
+
+      - name: Export product coverage
+        if: always()
+        env:
+          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
+          COVERAGE_REQUIRE_GO: ${{ matrix.suite == 'image-tools' && '1' || '0' }}
+        run: |
+          bash tests/scripts/e2e_coverage.sh export
+          if [ -f coverage/go-unit-integration.out ]; then
+            bash tests/scripts/e2e_coverage.sh merge-go coverage/go-unit-integration.out coverage/go-e2e.out
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-e2e-${{ matrix.suite }}
+          path: coverage/
+          if-no-files-found: error
+
+  extended:
+    name: extended
+    uses: ./.github/workflows/nightly.yml
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  e2e-dragonfly:
+    name: distribution
+    needs: build
+    uses: ./.github/workflows/e2e-dragonfly.yml
+    with:
+      binaries-artifact: e2e-binaries
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # Aggregate GA fuzz/stability and experimental transport jobs as well.
+  # The Release workflow independently checks both shipped architectures on PRs.
+  gate:
+    name: gate / ci / required
+    if: always()
+    needs: [rust-test, e2e, e2e-dragonfly, extended]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = success ] || exit 1
+          done
+      - uses: actions/checkout@v6
+      - name: Require Rust and Go coverage >= 90%
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COVERAGE_RUN_ID: ${{ github.run_id }}
+        run: python3 tests/scripts/coverage_comment.py --check-run
