@@ -21,8 +21,8 @@ use nydus_telemetry::metrics::WriteKind;
 
 use super::chunk_group_lock::ChunkGroupLocks;
 use super::{
-    plan_prefetch_batches, validate_decoded_chunk_group, write_failure_reason, BlobCache,
-    CacheOptions, ChunkGroupBuffers,
+    plan_prefetch_batches, validate_group_payload, write_failure_reason, BlobCache, CacheOptions,
+    ChunkGroupBuffers,
 };
 
 #[derive(Clone)]
@@ -160,17 +160,28 @@ impl LocalBlobCache {
         let cache_data_path = cache_dir.join(format!("{hex}.blob.data"));
 
         let group_map_path = cache_dir.join(format!("{hex}.group.map"));
-        // The group map is only meaningful together with the cache data file
-        // it describes: a leftover map whose data file has been removed would
-        // claim groups are ready while reads hit sparse zeros. Note this
-        // before creating the data file below, which would otherwise mask it.
-        // (Removing the map while keeping the data is the safe direction and
-        // needs no handling.)
-        let stale_group_map = group_map_path.exists() && !cache_data_path.exists();
+        let group_map_existed = group_map_path.exists();
+        let chunk_group_map =
+            ChunkGroupMap::open(&group_map_path, blob_metadata.chunk_group_count())?;
+        let reset_guard = if !cache_data_path.exists() {
+            let guard = chunk_group_map.lock_for_reset()?;
+            // A peer may have recreated and filled the data while we waited.
+            if !cache_data_path.exists() {
+                guard.reset();
+                if group_map_existed {
+                    warn!(
+                        "stale group map without cache data file, reset: {}",
+                        group_map_path.display()
+                    );
+                }
+            }
+            Some(guard)
+        } else {
+            None
+        };
 
-        // Create the cache data file eagerly, before the group map, so that
-        // "map file exists => data file exists" holds and the check above
-        // can only fire for a genuinely orphaned map.
+        // Only publish a replacement after reset succeeds, and keep the lock
+        // until creation finishes so another opener cannot reset it afterwards.
         let data_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -179,19 +190,7 @@ impl LocalBlobCache {
             .open(&cache_data_path)?;
         data_file.set_len(blob_metadata.logical_size())?;
         drop(data_file);
-
-        let chunk_group_map =
-            ChunkGroupMap::open(&group_map_path, blob_metadata.chunk_group_count())?;
-        if stale_group_map {
-            // Reset in place rather than unlinking: handles already mapping
-            // this file observe the reset, whereas a replacement inode would
-            // split them off with their readiness invisible to each other.
-            chunk_group_map.reset()?;
-            warn!(
-                "stale group map without cache data file, reset: {}",
-                group_map_path.display()
-            );
-        }
+        drop(reset_guard);
 
         let prefetch_lock_path = cache_dir.join(format!("{hex}.prefetch.lock"));
         // Byte `i` of the group map file stands for group `i` in the
@@ -306,7 +305,7 @@ impl LocalBlobCache {
     /// group is ready, `None` when the blob is still filling (callers then
     /// take the ensure + pread path).
     fn all_ready_slice(&self, offset: u64, len: usize) -> io::Result<Option<&[u8]>> {
-        if !self.chunk_group_map.is_all_ready() {
+        if !self.options.skip_verify_checksums || !self.chunk_group_map.is_all_ready() {
             return Ok(None);
         }
         let mmap = if let Some(mmap) = self.cache_mmap.get() {
@@ -567,7 +566,12 @@ impl LocalBlobCache {
             )?;
             out
         };
-        validate_decoded_chunk_group(group, payload, self.options.skip_verify_checksums)?;
+        validate_group_payload(
+            &self.blob_metadata,
+            group,
+            payload,
+            self.options.skip_verify_checksums,
+        )?;
         Ok(payload)
     }
 
@@ -709,6 +713,7 @@ impl LocalBlobCache {
         payload: &[u8],
         cache_file: &File,
     ) -> io::Result<()> {
+        self.ensure_data_file_linked(cache_file)?;
         let mut batch = ScatterBatch::new(cache_file);
         for (offset, bytes) in group
             .chunks(&self.blob_metadata, payload)
@@ -717,12 +722,14 @@ impl LocalBlobCache {
             batch.push(offset, bytes)?;
         }
         batch.flush()?;
+        self.ensure_data_file_linked(cache_file)?;
         self.chunk_group_map.set_ready(group.index() as usize)
     }
 
     /// Ensure every group overlapping `[offset, offset + len)` is decoded and
     /// written to the cache file. Shared by `read_at` and `ensure_range`.
     fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
+        self.ensure_data_file_linked(cache_file)?;
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
@@ -741,6 +748,23 @@ impl LocalBlobCache {
         }
 
         self.ensure_chunk_groups(offset, end, cache_file)
+    }
+
+    fn read_verified_group(&self, index: usize, file: &File) -> io::Result<Vec<u8>> {
+        let group = self.chunk_group(index);
+        let mut padded = vec![0; group.logical_size() as usize];
+        file.read_exact_at(&mut padded, group.logical_offset())?;
+        let layout = vec![0; u64::from(group.uncompressed_size()) as usize];
+        let mut payload = Vec::with_capacity(layout.len());
+        for (offset, bytes) in group
+            .chunks(&self.blob_metadata, &layout)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        {
+            let start = (offset - group.logical_offset()) as usize;
+            payload.extend_from_slice(&padded[start..start + bytes.len()]);
+        }
+        validate_group_payload(&self.blob_metadata, &group, &payload, false)?;
+        Ok(padded)
     }
 }
 
@@ -801,6 +825,21 @@ impl BlobCache for LocalBlobCache {
         let cache_file = self.cache_file()?;
         self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref())?;
 
+        if !self.options.skip_verify_checksums {
+            let end = offset + dst.len() as u64;
+            for index in self.chunk_group_span(offset, end)? {
+                let group = self.chunk_group(index);
+                let padded = self.read_verified_group(index, &cache_file)?;
+                let first = offset.max(group.logical_offset());
+                let last = end.min(group.logical_range().end);
+                dst[(first - offset) as usize..(last - offset) as usize].copy_from_slice(
+                    &padded[(first - group.logical_offset()) as usize
+                        ..(last - group.logical_offset()) as usize],
+                );
+            }
+            return Ok(());
+        }
+
         // The cache file mirrors the padded address space, so once the
         // covering groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
@@ -835,7 +874,13 @@ impl BlobCache for LocalBlobCache {
         }
         self.record_ondemand_range(offset, usize::try_from(len).unwrap_or(usize::MAX));
         let cache_file = self.cache_file()?;
-        self.ensure_byte_range(offset, len, cache_file.as_ref())
+        self.ensure_byte_range(offset, len, cache_file.as_ref())?;
+        if !self.options.skip_verify_checksums {
+            for index in self.chunk_group_span(offset, offset + len)? {
+                self.read_verified_group(index, &cache_file)?;
+            }
+        }
+        Ok(())
     }
 
     fn ready_ranges(&self, offset: u64, len: u64) -> io::Result<Vec<Range<u64>>> {
@@ -931,7 +976,12 @@ impl BlobCache for LocalBlobCache {
         // crc32 and chunk lengths were copied from this group at optimize
         // time, so any divergence (stale optimize artifact, corrupted
         // transfer) is caught here before it can poison the cache.
-        validate_decoded_chunk_group(&group, payload, self.options.skip_verify_checksums)?;
+        validate_group_payload(
+            &self.blob_metadata,
+            &group,
+            payload,
+            self.options.skip_verify_checksums,
+        )?;
         let cache_file = self.cache_file()?;
         self.write_chunk_group(&group, payload, cache_file.as_ref())?;
         self.backend.metrics().cache.collect_write_finished_metrics(
@@ -966,6 +1016,7 @@ impl BlobCache for LocalBlobCache {
         };
 
         let mut contention_logged = false;
+        let start = Instant::now();
         loop {
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if rc == 0 {
@@ -987,6 +1038,10 @@ impl BlobCache for LocalBlobCache {
             // stop waiting; the caller's prefetch then reduces to a cheap
             // all-ready scan.
             if self.chunk_group_map.latch_all_ready() {
+                return None;
+            }
+            if start.elapsed() >= Duration::from_secs(2) {
+                warn!("prefetch lock timeout; prefetching without cross-process lock");
                 return None;
             }
             if !contention_logged {
@@ -1801,6 +1856,133 @@ mod tests {
         let mut buf = vec![0u8; 1024];
         reopened.read_at(512, &mut buf).unwrap();
         assert_eq!(buf, payload[512..1536]);
+    }
+
+    #[test]
+    fn stale_group_map_reset_timeout_is_retryable() {
+        for skip_verify_checksums in [true, false] {
+            let backend_dir = tempdir().unwrap();
+            let cache_dir = tempdir().unwrap();
+            let payload = vec![0x3du8; 4096];
+            let meta = single_chunk_group(&payload);
+            let full_blob_id = FullBlob::new(&payload)
+                .with_blob_metadata(&meta)
+                .with_blob_metadata_file()
+                .save_in(backend_dir.path());
+            let backend = CountingBackend::new(backend_dir.path());
+            let options = CacheOptions {
+                skip_verify_checksums,
+                ..CacheOptions::default()
+            };
+            let cached = open(full_blob_id, cache_dir.path(), backend.clone(), options);
+            let mut buf = [0u8; 32];
+            cached.read_at(0, &mut buf).unwrap();
+            assert_eq!(buf, payload[..32]);
+            assert!(cached.is_chunk_group_ready(0));
+            assert!(cached.chunk_group_map.is_all_ready());
+            let data_path = cached.cache_data_path.clone();
+            drop(cached);
+            fs::remove_file(&data_path).unwrap();
+
+            let map_path = cache_dir
+                .path()
+                .join(format!("{}.group.map", hex::encode(full_blob_id)));
+            let map_inode = fs::metadata(&map_path).unwrap().ino();
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&map_path)
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+            let started = Instant::now();
+            let err =
+                LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone(), options)
+                    .err()
+                    .expect("the held reset lock must fail the first open");
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+            assert!(started.elapsed() >= Duration::from_secs(2));
+            let data_missing_after_timeout = !data_path.exists();
+            drop(lock);
+
+            let retry = open(full_blob_id, cache_dir.path(), backend.clone(), options);
+            let cold = !retry.is_chunk_group_ready(0) && !retry.chunk_group_map.is_all_ready();
+            buf.fill(0);
+            retry.read_at(0, &mut buf).unwrap();
+            assert_eq!(buf, payload[..32], "retry must not read sparse zeros");
+            assert!(cold, "retry must reset the orphaned ready bits");
+            assert!(
+                data_missing_after_timeout,
+                "failed reset must not create data"
+            );
+            assert_eq!(backend.reads(), 2, "retry must refill from the backend");
+            assert_eq!(fs::metadata(map_path).unwrap().ino(), map_inode);
+        }
+    }
+
+    #[test]
+    fn stale_group_map_waiter_preserves_a_peers_replacement() {
+        use std::sync::mpsc;
+
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x5au8; 4096];
+        let meta = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let backend = CountingBackend::new(backend_dir.path());
+        let options = CacheOptions {
+            skip_verify_checksums: true,
+            ..CacheOptions::default()
+        };
+        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), options);
+        let mut buf = [0u8; 32];
+        cached.read_at(0, &mut buf).unwrap();
+        assert!(cached.is_chunk_group_ready(0));
+        let data_path = cached.cache_data_path.clone();
+        drop(cached);
+        fs::remove_file(&data_path).unwrap();
+        let map_path = cache_dir
+            .path()
+            .join(format!("{}.group.map", hex::encode(full_blob_id)));
+        let peer_map = ChunkGroupMap::open(&map_path, 1).unwrap();
+        let guard = peer_map.lock_for_reset().unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                tx.send(LocalBlobCache::open(
+                    full_blob_id,
+                    1,
+                    cache_dir.path(),
+                    backend.clone(),
+                    options,
+                ))
+                .unwrap();
+            });
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+
+            guard.reset();
+            fs::write(&data_path, &payload).unwrap();
+            peer_map.set_ready(0).unwrap();
+            let data_inode = fs::metadata(&data_path).unwrap().ino();
+            drop(guard);
+
+            let reopened = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+            assert!(reopened.is_chunk_group_ready(0), "peer's fill must survive");
+            assert!(reopened.chunk_group_map.is_all_ready());
+            reopened.read_at(0, &mut buf).unwrap();
+            assert_eq!(buf, payload[..32]);
+            assert_eq!(backend.reads(), 1, "peer's fill must not be fetched again");
+            assert_eq!(fs::metadata(&data_path).unwrap().ino(), data_inode);
+        });
     }
 
     #[test]

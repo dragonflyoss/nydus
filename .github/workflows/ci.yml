@@ -77,12 +77,20 @@ jobs:
             --features 'nydus/cli,nydus/fileio,nydus/dragonfly,nydus/nbd,nydus/ublk,nydus/fanotify,nydus/uffd,nydus-test-utils/fault-backend' \
             --no-report
 
+      - name: Test dual TLS with coverage
+        id: dual-tls
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
+        run: |
+          cargo llvm-cov --no-report -p nydus-backend --features registry,reqwest/default-tls --lib -- \
+            registry::http::tests::tls_verification_and_custom_ca_are_preserved
+
       - name: Export Rust coverage
         if: always()
         run: |
           mkdir -p coverage/raw/rust
           echo 'test_outcome=${{ steps.rust-tests.outcome }}' > coverage/status.txt
-          echo 'scope=rust-unit-integration' >> coverage/status.txt
+          echo 'dual_tls_outcome=${{ steps.dual-tls.outcome }}' >> coverage/status.txt
+          echo 'scope=rust-unit-integration-including-dual-tls' >> coverage/status.txt
           if [ '${{ steps.rust-tests.outcome }}' = skipped ] || [ '${{ steps.rust-tests.outcome }}' = cancelled ]; then
             echo 'collection=not-run-or-cancelled' >> coverage/status.txt
             exit 0

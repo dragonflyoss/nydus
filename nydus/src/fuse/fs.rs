@@ -599,14 +599,14 @@ impl Filesystem for ErofsFs {
         _ino: INodeNo,
         _fh: FileHandle,
         _ph: PollNotifier,
-        events: PollEvents,
+        _events: PollEvents,
         _flags: PollFlags,
         reply: ReplyPoll,
     ) {
-        // Regular files are always ready for the events requested by the
-        // kernel. Returning readiness avoids fuser's default ENOSYS warning
-        // while preserving normal poll/select behavior for read handles.
-        reply.poll(events);
+        // Let the kernel cache unsupported polling and use DEFAULT_POLLMASK.
+        // Forwarding every poll can block a reader's network event loop behind
+        // reads that occupy all FUSE workers and need that loop to make progress.
+        reply.error(Errno::ENOSYS);
     }
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {

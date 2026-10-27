@@ -4,7 +4,9 @@
 
 mod common;
 
+use std::fs;
 use std::ops::Range;
+use std::os::unix::fs::FileExt;
 
 use common::{read_flat, Image};
 use nydus_core::NydusCore;
@@ -104,4 +106,35 @@ fn a_second_core_preserves_the_first_cores_fetch_size() {
     fetch_group(&narrow, &image, 0).unwrap();
 
     assert_eq!(ready(&narrow), [image.logical(0)]);
+}
+
+/// KI-2: cache hits are never verified, not even with verification on: a
+/// group corrupted in the cache file after it was filled reads back
+/// corrupted instead of failing.
+#[test]
+fn corrupted_cache_hits_are_rejected() {
+    let image = Image::build();
+    let cache_dir = tempdir().unwrap();
+    let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
+    let blob = core.blobs.prepare_all().unwrap().remove(0);
+    let group = image.logical(1);
+    let good = image.dense[group.start as usize..group.end as usize].to_vec();
+    assert_eq!(fetch_group(&core, &image, 1).unwrap(), good);
+
+    let cache = fs::OpenOptions::new()
+        .write(true)
+        .open(&blob.cache_path)
+        .unwrap();
+    let at = group.start + 100;
+    cache
+        .write_all_at(&[image.dense[at as usize] ^ 0xff], at)
+        .unwrap();
+
+    let node = core.fs.open(common::FILE_NAME).unwrap();
+    let mut buf = vec![0u8; 16];
+    let result = node.read_at(at, &mut buf).map(|_| buf.clone());
+    assert!(
+        result.is_err(),
+        "corrupted cache bytes were returned: {result:?}"
+    );
 }

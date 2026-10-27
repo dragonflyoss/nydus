@@ -60,6 +60,8 @@ func TestMerge(t *testing.T) {
 				// Every layer has a visible file, all of which were just read.
 				requireCacheArtifacts(t, m.CacheDir, blobs)
 			}
+
+			oracle.CompareTree(t, withMergedNlink(img.Want), oracle.ScanTree(t, m.Root), oracle.CompareOptions{Nlink: true})
 		})
 	}
 }

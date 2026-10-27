@@ -16,7 +16,7 @@ import (
 )
 
 // TestWorkflowShards prevents a new layout, mode or own-mount case from
-// silently falling outside the CI contract partitions.
+// silently falling outside the CI and shipped-binary contract partitions.
 func TestWorkflowShards(t *testing.T) {
 	t.Parallel()
 	root, err := env.RepoRoot()
@@ -47,6 +47,7 @@ func TestWorkflowShards(t *testing.T) {
 	}
 	for _, target := range []struct{ file, job string }{
 		{"ci.yml", "e2e"},
+		{"release.yml", "verify-contract"},
 	} {
 		t.Run(target.file, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", target.file))

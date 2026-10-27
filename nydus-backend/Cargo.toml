@@ -76,7 +76,9 @@ url = { version = "2", optional = true }
 
 [dev-dependencies]
 nydus-test-utils = { path = "../nydus-test-utils" }
+rcgen = "0.13"
 serde_yaml = "0.9"
 sha2 = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

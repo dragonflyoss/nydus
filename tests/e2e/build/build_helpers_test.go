@@ -21,6 +21,7 @@ import (
 
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
+	"github.com/dragonflyoss/nydus/tests/e2e/internal/oracle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -169,6 +170,30 @@ func fsckDecodes(t env.TB, layout fixture.Layout) bool {
 	}
 	t.Logf("fsck.erofs %d.%d cannot decode %s images; left to the kernel suite", fsckVersion.major, fsckVersion.minor, layout.Name)
 	return false
+}
+
+// withMergedNlink returns entries with the link count of the tree they form:
+// the members of each hardlink group, or 1. An overlay keeps each layer's
+// count, which a group broken by an upper layer no longer matches.
+func withMergedNlink(entries []oracle.Entry) []oracle.Entry {
+	members := map[oracle.Bytes]uint64{}
+	for _, entry := range entries {
+		if entry.Link != "" {
+			members[entry.Link]++
+		}
+	}
+	out := make([]oracle.Entry, len(entries))
+	copy(out, entries)
+	for i := range out {
+		if out[i].Type == "dir" {
+			continue
+		}
+		out[i].Nlink = 1
+		if out[i].Link != "" {
+			out[i].Nlink = members[out[i].Link]
+		}
+	}
+	return out
 }
 
 // requireCacheArtifacts asserts the persistent cache holds the data, chunk

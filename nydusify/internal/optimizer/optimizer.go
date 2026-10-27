@@ -98,7 +98,7 @@ func NewOptimizer(opt OptimizeOption) (*Optimizer, error) {
 
 // ondemandDigestPattern matches the `ONDEMAND BLOB DIGEST  <hex>` table row
 // printed by `nydus optimize`.
-var ondemandDigestPattern = regexp.MustCompile(`ONDEMAND BLOB DIGEST\s+([0-9a-f]{64})`)
+var ondemandDigestPattern = regexp.MustCompile(`(?m)^[ \t]*ONDEMAND BLOB DIGEST[ \t]+([0-9a-f]{64})[ \t]*\r?$`)
 
 // Optimize pulls the source nydus image, runs `nydus optimize` against its
 // bootstrap with the recorded access patterns, and pushes the optimized image

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/plugins/content/local"
@@ -25,6 +26,7 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/sys/unix"
 )
 
 func TestNewOptimizerTraceFileValidation(t *testing.T) {
@@ -45,6 +47,95 @@ func TestNewOptimizerTraceFileValidation(t *testing.T) {
 	}
 	if o.opt.TraceFile != "/tmp/trace.json" {
 		t.Fatalf("unexpected opt normalization: %+v", o.opt)
+	}
+}
+
+func TestRunNydusOptimize(t *testing.T) {
+	hex := digest.FromString("ondemand").Encoded()
+	for _, tc := range []struct {
+		name, script, wantError string
+		cancel                  bool
+	}{
+		{"success", "printf 'ONDEMAND BLOB DIGEST  " + hex + "\\n'", "", false},
+		{"exit_failure", "exit 7", "run nydus optimize: exit status 7", false},
+		{"cancel", "exec sleep 60", "run nydus optimize", true},
+		{"missing_digest", "echo completed", "did not report an ondemand blob digest", false},
+		{"short_digest", "echo 'ONDEMAND BLOB DIGEST " + hex[:63] + "'", "did not report an ondemand blob digest", false},
+		{"long_digest", "echo 'ONDEMAND BLOB DIGEST " + hex + "a'", "did not report an ondemand blob digest", false},
+		{"prefixed_row", "echo 'NOT ONDEMAND BLOB DIGEST " + hex + "'", "did not report an ondemand blob digest", false},
+		{"suffixed_row", "echo 'ONDEMAND BLOB DIGEST " + hex + " trailing text'", "did not report an ondemand blob digest", false},
+		{"invalid_digest", "echo 'ONDEMAND BLOB DIGEST " + strings.Repeat("g", 64) + "'", "did not report an ondemand blob digest", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			builder := filepath.Join(dir, "builder")
+			pidPath := filepath.Join(dir, "pid")
+			argsPath := filepath.Join(dir, "args")
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\necho $$ > %q\n%s\n", argsPath, pidPath, tc.script)
+			if err := os.WriteFile(builder, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type result struct {
+				digest string
+				err    error
+			}
+			done := make(chan result, 1)
+			go func() {
+				got, err := (&Optimizer{opt: OptimizeOption{BuilderPath: builder, TraceFile: "trace.json"}}).
+					runNydusOptimize(ctx, "parent.boot", "out.boot", dir, "config.yaml")
+				done <- result{got, err}
+				close(done)
+			}()
+			var pid int
+			t.Cleanup(func() {
+				cancel()
+				if pid != 0 {
+					_ = unix.Kill(pid, unix.SIGKILL)
+				}
+				<-done
+			})
+			deadline := time.Now().Add(5 * time.Second)
+			for pid == 0 && time.Now().Before(deadline) {
+				data, _ := os.ReadFile(pidPath)
+				pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+				if pid == 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			if pid == 0 {
+				t.Fatal("child did not start")
+			}
+			if tc.cancel {
+				cancel()
+			}
+			select {
+			case got := <-done:
+				if tc.wantError == "" {
+					if got.err != nil || got.digest != hex {
+						t.Fatalf("result = %+v", got)
+					}
+				} else if got.err == nil || !strings.Contains(got.err.Error(), tc.wantError) || got.digest != "" {
+					t.Fatalf("result = %+v, want error %q and no digest", got, tc.wantError)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("optimizer failed to return or cancel within 5s")
+			}
+			if err := unix.Kill(pid, 0); err != unix.ESRCH {
+				t.Fatalf("child %d not reaped: %v", pid, err)
+			}
+			args, err := os.ReadFile(argsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantArgs := []string{"optimize", "--parent-bootstrap", "parent.boot", "--bootstrap", "out.boot",
+				"--blob-dir", dir, "--config", "config.yaml", "--log-level", nydus.DefaultLogLevel,
+				"--trace-file", "trace.json", "--type", nydus.DefaultOptimizeType}
+			if !reflect.DeepEqual(strings.Split(strings.TrimSpace(string(args)), "\n"), wantArgs) {
+				t.Fatalf("arguments: %s", args)
+			}
+		})
 	}
 }
 

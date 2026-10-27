@@ -148,3 +148,92 @@ func TestLinkBlobMetaFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkBlobMetaRejectsInvalidDestination(t *testing.T) {
+	for _, kind := range []string{"directory", "dangling symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			src := filepath.Join(t.TempDir(), "blob.blob.meta")
+			require.NoError(t, os.WriteFile(src, []byte("metadata"), 0o600))
+			cache := t.TempDir()
+			dst := filepath.Join(cache, filepath.Base(src))
+			if kind == "directory" {
+				require.NoError(t, os.Mkdir(dst, 0o700))
+			} else {
+				require.NoError(t, os.Symlink("missing", dst))
+			}
+			require.Error(t, LinkBlobMetaFiles(context.Background(), []string{src}, cache))
+			entries, err := os.ReadDir(cache)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "invalid destination must not create temporary artifacts")
+			info, err := os.Lstat(dst)
+			require.NoError(t, err)
+			if kind == "directory" {
+				require.True(t, info.IsDir())
+			} else {
+				require.Equal(t, os.ModeSymlink, info.Mode().Type())
+			}
+		})
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{"replace", ""},
+		{"missing source", "open source"},
+		{"source directory", "copy data"},
+		{"destination directory", "rename temp file"},
+		{"missing destination directory", "create temp file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(t.TempDir(), "source")
+			dst := filepath.Join(dir, "blob.blob.meta")
+			original := []byte("original destination")
+			replacement := bytes.Repeat([]byte("replacement metadata"), 4096)
+			switch tc.name {
+			case "missing source":
+			case "source directory":
+				require.NoError(t, os.Mkdir(src, 0o700))
+			default:
+				require.NoError(t, os.WriteFile(src, replacement, 0o600))
+			}
+			switch tc.name {
+			case "destination directory":
+				require.NoError(t, os.Mkdir(dst, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(dst, "original"), original, 0o600))
+			case "missing destination directory":
+				dst = filepath.Join(dir, "missing", "blob.blob.meta")
+			default:
+				require.NoError(t, os.WriteFile(dst, original, 0o600))
+			}
+
+			err := copyFile(src, dst)
+			if tc.want == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.want)
+			}
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			if tc.name == "missing destination directory" {
+				require.Empty(t, entries)
+				return
+			}
+			require.Len(t, entries, 1, "no temporary file may survive success or failure")
+			require.Equal(t, "blob.blob.meta", entries[0].Name())
+			if tc.name == "destination directory" {
+				dst = filepath.Join(dst, "original")
+			}
+			got, err := os.ReadFile(dst)
+			require.NoError(t, err)
+			if tc.want == "" {
+				require.Equal(t, replacement, got)
+			} else {
+				require.Equal(t, original, got, "a failed copy must preserve the destination")
+			}
+		})
+	}
+}

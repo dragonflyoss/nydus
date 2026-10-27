@@ -617,6 +617,144 @@ fn incremental_writer_failed_commit_cleans_temporary_blob() {
 }
 
 #[test]
+fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let parent_data = vec![b'P'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
+    let replacement = vec![b'U'; parent_data.len()];
+    let (parent_bootstrap, parent_digest) = build_parent_blob(&temp, &parent_data);
+    let parent_blob = temp.path().join(hex::encode(parent_digest));
+    let parent_before = (
+        fs::read(&parent_bootstrap).unwrap(),
+        fs::read(&parent_blob).unwrap(),
+    );
+    let stage = |output: &Path| {
+        let mut writer = IncrementalWriter::open_metadata_only(
+            &parent_bootstrap,
+            writer_options(output.to_path_buf()),
+        )
+        .unwrap();
+        writer
+            .write_at(Path::new("memory.bin"), 0, &replacement)
+            .unwrap();
+        writer
+    };
+    let reference = temp.path().join("reference");
+    let image = commit_upper_blob(&reference, stage(&reference));
+    let blob = image.blob_path.unwrap();
+    let sidecar = image.blob_metadata_path.unwrap();
+
+    for (name, obstruction, context, has_blob, has_sidecar, errno) in [
+        (
+            "rename",
+            blob.file_name().unwrap(),
+            "failed to rename blob",
+            false,
+            false,
+            libc::EISDIR,
+        ),
+        (
+            "sidecar",
+            sidecar.file_name().unwrap(),
+            "",
+            true,
+            false,
+            libc::EISDIR,
+        ),
+        (
+            "bootstrap",
+            std::ffi::OsStr::new("image.boot"),
+            "failed to write incremental bootstrap",
+            true,
+            true,
+            libc::EISDIR,
+        ),
+        (
+            "sidecar-full",
+            sidecar.file_name().unwrap(),
+            "",
+            true,
+            false,
+            libc::ENOSPC,
+        ),
+        (
+            "bootstrap-full",
+            std::ffi::OsStr::new("image.boot"),
+            "failed to write incremental bootstrap",
+            true,
+            true,
+            libc::ENOSPC,
+        ),
+    ] {
+        let output = temp.path().join(name);
+        fs::create_dir(&output).unwrap();
+        let obstruction = output.join(obstruction);
+        if errno == libc::EISDIR {
+            fs::create_dir(&obstruction).unwrap();
+        } else {
+            std::os::unix::fs::symlink("/dev/full", &obstruction).unwrap();
+        }
+        let error = stage(&output).commit().unwrap_err();
+        if !context.is_empty() {
+            assert!(error.to_string().contains(context), "{name}: {error}");
+        }
+        assert_eq!(
+            error.io_error().unwrap().raw_os_error(),
+            Some(errno),
+            "{name}"
+        );
+        assert_no_temporary_blob(&output);
+        assert!(!output.join("image.boot").is_file(), "{name}");
+        assert_eq!(output.join(blob.file_name().unwrap()).is_file(), has_blob);
+        assert_eq!(
+            output.join(sidecar.file_name().unwrap()).is_file(),
+            has_sidecar
+        );
+        if has_blob {
+            assert_eq!(
+                fs::read(output.join(blob.file_name().unwrap())).unwrap(),
+                fs::read(&blob).unwrap()
+            );
+        }
+        if has_sidecar {
+            assert_eq!(
+                fs::read(output.join(sidecar.file_name().unwrap())).unwrap(),
+                fs::read(&sidecar).unwrap()
+            );
+        }
+        assert_eq!(fs::read(&parent_bootstrap).unwrap(), parent_before.0);
+        assert_eq!(fs::read(&parent_blob).unwrap(), parent_before.1);
+        if errno == libc::EISDIR {
+            fs::remove_dir(obstruction).unwrap();
+        } else {
+            fs::remove_file(obstruction).unwrap();
+        }
+        stage(&output).commit().unwrap();
+        assert_no_temporary_blob(&output);
+        fs::copy(&parent_blob, output.join(parent_blob.file_name().unwrap())).unwrap();
+        let core = NydusCore::new(
+            &output.join("image.boot"),
+            local_config(&output, &output.join("cache")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            core.fs.open("memory.bin").unwrap().read().unwrap(),
+            replacement
+        );
+    }
+    let parent = NydusCore::new(
+        &parent_bootstrap,
+        local_config(temp.path(), &temp.path().join("parent-cache")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        parent.fs.open("memory.bin").unwrap().read().unwrap(),
+        parent_data
+    );
+}
+
+#[test]
 fn incremental_writer_replaces_one_chunk_with_upper_blob_data() {
     let temp = tempfile::tempdir().unwrap();
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;

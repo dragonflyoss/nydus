@@ -11,7 +11,8 @@ import (
 )
 
 // TestCheck damages copies of built images and runs `nydus check` on them.
-// Damage it cannot parse past fails the command.
+// Damage it cannot parse past fails the command. Damage to blob data is
+// reported as an unverified blob and fails the command as well.
 func TestCheck(t *testing.T) {
 	t.Parallel()
 
@@ -20,6 +21,15 @@ func TestCheck(t *testing.T) {
 		img := fixture.Get(t, "zstd-4k")
 		report, err := nydusCheck(t, "--bootstrap", img.Bootstrap)
 		require.NoError(t, err, "metadata-only inspection does not verify unavailable blobs")
+		require.Len(t, report.Blobs, 1)
+		require.False(t, report.Blobs[0].Verified)
+	})
+
+	t.Run("MissingBlob", func(t *testing.T) {
+		t.Parallel()
+		img := fixture.Get(t, "zstd-4k")
+		report, err := nydusCheck(t, "--bootstrap", img.Bootstrap, "--blob-dir", t.TempDir())
+		require.Error(t, err, "explicit blob verification must reject missing blobs")
 		require.Len(t, report.Blobs, 1)
 		require.False(t, report.Blobs[0].Verified)
 	})
@@ -107,4 +117,33 @@ func TestCheck(t *testing.T) {
 		require.Error(t, err, "a blob without a footer must fail the check")
 	})
 
+	for _, tc := range []struct {
+		name   string
+		image  string
+		blobOf bool // check the blob alone rather than bootstrap and store
+	}{
+		{name: "BlobData/Bootstrap", image: "zstd-4k"},
+		{name: "BlobData/Blob", image: "zstd-4k", blobOf: true},
+		{name: "NativeDevice/Bootstrap", image: "erofs-lz4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			img := fixture.Copy(t, fixture.Get(t, tc.image))
+			blob := img.Blob()
+			f := readFooter(t, blob)
+			flipByte(t, blob, int64(f.DataOffset+f.DataSize/2))
+			args := []string{"--bootstrap", img.Bootstrap, "--blob-dir", img.BlobDir}
+			if tc.blobOf {
+				args = []string{"--blob", blob}
+			}
+
+			report, err := nydusCheck(t, args...)
+			require.Len(t, report.Blobs, 1, "check report (exit: %v)", err)
+			require.False(t, report.Blobs[0].Verified, "%s was damaged but verifies", filepath.Base(blob))
+			require.Error(t, err, "nydus check reported an unverified blob and exited 0")
+			out, err := formatCommand(t, append([]string{"check"}, args...)...)
+			require.Error(t, err, "%s", out)
+			require.Contains(t, string(out), "failed verification")
+		})
+	}
 }

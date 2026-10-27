@@ -21,6 +21,22 @@ default, before it fails.
 All features are disabled by default, keeping the dependency footprint
 minimal (local backend only).
 
+## Registry TLS
+
+The registry HTTP client explicitly selects Rustls, as declared by this crate's
+features. Another workspace dependency enabling reqwest's `default-tls` must not
+silently switch it to native TLS or add native TLS initialization to each image.
+Certificate verification remains enabled by default; private CA certificates
+are supplied through `tls.ca_cert`.
+
+The HTTPS regression test covers rejection without a trusted CA, acceptance with
+the configured CA, and rejection with a different CA. Run it with both TLS
+implementations enabled to exercise Cargo feature unification:
+
+```sh
+cargo test -p nydus-backend --features registry,reqwest/default-tls --lib
+```
+
 ## License
 
 Apache-2.0. This crate is part of the

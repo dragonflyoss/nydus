@@ -107,13 +107,25 @@ func LinkBlobMetaFiles(ctx context.Context, blobMetaPaths []string, cacheDir str
 // fails (e.g. cross-device). An existing dst is treated as success because blob
 // meta files are content-addressed by their full-blob digest.
 func linkOrCopyFile(src, dst string) error {
-	if _, err := os.Stat(dst); err == nil {
+	checkDestination := func() error {
+		info, err := os.Stat(dst)
+		if err != nil {
+			return errors.Wrapf(err, "stat blob meta %q", dst)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.Errorf("blob meta destination %q is not a regular file", dst)
+		}
 		return nil
+	}
+	if err := checkDestination(); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	if err := os.Link(src, dst); err == nil {
 		return nil
 	} else if errors.Is(err, fs.ErrExist) {
-		return nil
+		return checkDestination()
 	}
 	return copyFile(src, dst)
 }
@@ -145,7 +157,7 @@ func copyFile(src, dst string) error {
 	if err := tmp.Close(); err != nil {
 		return errors.Wrap(err, "close temp file")
 	}
-	if err := os.Rename(tmpPath, dst); err != nil && !errors.Is(err, fs.ErrExist) {
+	if err := os.Rename(tmpPath, dst); err != nil {
 		return errors.Wrap(err, "rename temp file")
 	}
 	committed = true
