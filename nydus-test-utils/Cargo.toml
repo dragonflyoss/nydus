@@ -7,10 +7,18 @@ license = "Apache-2.0"
 publish = false
 description = "Test utilities for the nydus crates."
 
+[features]
+default = []
+# The fault-injecting blob backend (`fault` module). Off by default because
+# nydus-backend dev-depends on this crate.
+fault-backend = ["dep:nydus-backend", "dep:nydus-telemetry"]
+
 [dependencies]
 crc32c = "0.6"
 hex = { workspace = true }
 lz4_flex = "0.11"
+nydus-backend = { path = "../nydus-backend", optional = true }
+nydus-telemetry = { path = "../nydus-telemetry", optional = true }
 nydus-format = { path = "../nydus-format" }
 sha2 = { workspace = true }
 zstd = "0.13"

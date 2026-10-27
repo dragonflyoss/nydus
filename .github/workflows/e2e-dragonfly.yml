@@ -1,152 +1,150 @@
-name: E2E Test With Dragonfly
+name: Dragonfly E2E
 
 on:
-  push:
-    branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
-  pull_request:
-    branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   schedule:
-    - cron: '0 4 * * *'
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+    inputs:
+      binaries-artifact:
+        description: Existing GA binaries in the caller workflow run
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 env:
-  RUST_BACKTRACE: 1
+  RUST_TOOLCHAIN: 1.88.0
+  GO_VERSION: "1.25.5"
   KIND_VERSION: v0.32.0
   KIND_CONFIG_PATH: tests/testdata/kind/config.yaml
   DRAGONFLY_CHART_VERSION: "1.8.2"
   DRAGONFLY_CHARTS_CONFIG_PATH: tests/testdata/charts/config.yaml
   DRAGONFLY_SCHEDULER_NODEPORT_SERVICE_PATH: tests/testdata/k8s/scheduler-nodeport-svc.yaml
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
+  CI_COVERAGE: "1"
+  COVERAGE_DIR: ${{ github.workspace }}/coverage
 
 jobs:
   build:
-    name: Build nydus and nydusify
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: binaries / build
+    if: inputs.binaries-artifact == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          cache-on-failure: true
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
         with:
-          repo-token: ${{ secrets.GH_TOKEN }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build nydus
-        run: cargo build -p nydus --release --features "cli,dragonfly"
-
-      - name: Install Go
-        uses: actions/setup-go@v5
+          shared-key: e2e-ci
+      - uses: arduino/setup-protoc@v3
         with:
-          go-version-file: nydusify/go.mod
-
-      - name: Build nydusify
-        run: |
-          cd nydusify
-          go build -o ../target/release/nydusify .
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
+          repo-token: ${{ github.token }}
+      - uses: actions/setup-go@v5
         with:
-          name: nydus-artifact
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: nydusify/go.sum
+      - run: |
+          make ci-build nydusify FEATURES=cli,fuse,fileio,dragonfly
+          bash tests/scripts/e2e_coverage.sh bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dragonfly-binaries
           path: |
-            target/release/nydus
-            target/release/nydusify
+            target/ci/nydus
+            target/ci/examples/writer-fixture
+            nydusify/nydusify
+            coverage-tools/
+          if-no-files-found: error
 
-  e2e_tests:
-    name: E2E (${{ matrix.mode }})
-    runs-on: ubuntu-latest
+  test:
+    name: dragonfly / read-recovery
     needs: build
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: ['seed-peer', 'origin']
-        include:
-          - mode: seed-peer
-            run: '^TestDragonfly_(ReadThroughSeedPeer|ServedFromSeedPeerCache|Prefetch|PrefetchRetry|ProxyError)$'
-          - mode: origin
-            run: '^TestDragonfly_(FallbackToOrigin|FallbackRateLimit|OriginErrorWithoutSeedPeers)$'
-
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Download binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: nydus-artifact
-          path: /tmp/nydus-bin
-
-      - name: Install binaries
-        run: |
-          sudo install -m 0755 /tmp/nydus-bin/nydus /usr/local/bin/nydus
-          sudo install -m 0755 /tmp/nydus-bin/nydusify /usr/local/bin/nydusify
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq fuse3
-          mkdir -p /tmp/artifact
-
-      - name: Install Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: tests/e2e/go.mod
-
+      - uses: actions/checkout@v6
       - name: Create kind network
         run: docker network create kind --subnet 172.30.0.0/16 --gateway 172.30.0.1
-
       - name: Setup Kind
         uses: helm/kind-action@v1
         with:
           version: ${{ env.KIND_VERSION }}
           config: ${{ env.KIND_CONFIG_PATH }}
           cluster_name: kind
-
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
-      - name: Setup dragonfly
+      - uses: azure/setup-helm@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/e2e/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.binaries-artifact || 'dragonfly-binaries' }}
+      - name: Install test dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify
+          bash tests/scripts/install_ci_packages.sh fuse3
+          sudo modprobe fuse
+      - name: Setup Dragonfly
         run: |
           helm repo add dragonfly https://dragonflyoss.github.io/helm-charts/
-          helm install --wait --timeout 10m --create-namespace --namespace dragonfly-system \
-            --version ${{ env.DRAGONFLY_CHART_VERSION }} -f ${{ env.DRAGONFLY_CHARTS_CONFIG_PATH }} \
+          helm install --wait --timeout 3m --create-namespace --namespace dragonfly-system \
+            --version "${DRAGONFLY_CHART_VERSION}" -f "${DRAGONFLY_CHARTS_CONFIG_PATH}" \
             dragonfly dragonfly/dragonfly
-          kubectl apply -f ${{ env.DRAGONFLY_SCHEDULER_NODEPORT_SERVICE_PATH }}
+          kubectl apply -f "${DRAGONFLY_SCHEDULER_NODEPORT_SERVICE_PATH}"
           timeout 120 bash -c 'until (echo > /dev/tcp/127.0.0.1/8002) 2>/dev/null; do sleep 1; done'
-
       - name: Setup registry
         run: |
           docker run -d --name registry -p 5000:5000 registry:2
           timeout 30 bash -c 'until curl -sf http://127.0.0.1:5000/v2/ >/dev/null; do sleep 1; done'
-
-      - name: Run E2E test
+      - name: Run suite
+        id: suites
+        env:
+          NYDUS_E2E_DRAGONFLY_SCHEDULER: http://127.0.0.1:8002
         run: |
-          cd tests/e2e
-          sudo -E env "PATH=$PATH" KUBECONFIG="$HOME/.kube/config" NYDUS_E2E_ARTIFACT_DIR=/tmp/artifact \
-            go test -v -count=1 -timeout 30m -run '${{ matrix.run }}' .
-
-      - name: Export logs
+          export KUBECONFIG="$HOME/.kube/config"
+          make e2e-run PKG=./dragonfly/... E2E_REQUIRE=1 E2E_TIMEOUT=4m E2E_GO_TEST_ARGS=-v
+      - name: Export product coverage
         if: always()
-        run: |
-          kubectl --namespace dragonfly-system get pods -o wide > /tmp/artifact/pods.log 2>&1 || true
-          kubectl --namespace dragonfly-system get services > /tmp/artifact/services.log 2>&1 || true
-          kubectl --namespace dragonfly-system logs statefulset/dragonfly-scheduler --tail=-1 > /tmp/artifact/scheduler.log 2>&1 || true
-          kubectl --namespace dragonfly-system logs statefulset/dragonfly-seed-client --tail=-1 > /tmp/artifact/seed-client.log 2>&1 || true
-          sudo chown -R $USER:$USER /tmp/artifact
-
-      - name: Upload Logs
-        uses: actions/upload-artifact@v4
+        env:
+          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
+        run: bash tests/scripts/e2e_coverage.sh export
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dragonfly-${{ matrix.mode }}-e2e-tests-logs
-          path: /tmp/artifact/**
+          name: coverage-dragonfly
+          path: coverage/
+          if-no-files-found: error
+      - uses: codecov/codecov-action@v5
+        if: ${{ github.event_name != 'pull_request' && !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          files: coverage/rust-e2e.lcov
+          flags: rust_e2e
+          name: rust-dragonfly
+          disable_search: true
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Collect cluster logs
+        if: always()
+        run: |
+          mkdir -p /tmp/dragonfly-logs
+          kubectl --namespace dragonfly-system get pods -o wide > /tmp/dragonfly-logs/pods.log 2>&1 || true
+          kubectl --namespace dragonfly-system get services > /tmp/dragonfly-logs/services.log 2>&1 || true
+          kubectl --namespace dragonfly-system logs statefulset/dragonfly-scheduler --tail=-1 > /tmp/dragonfly-logs/scheduler.log 2>&1 || true
+          kubectl --namespace dragonfly-system logs statefulset/dragonfly-seed-client --tail=-1 > /tmp/dragonfly-logs/seed-client.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dragonfly-logs
+          path: /tmp/dragonfly-logs
+          if-no-files-found: ignore

@@ -3,19 +3,32 @@ name: Lint
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  rustfmt:
-    name: Rustfmt
+  workspace:
+    name: lint / workspace / rust-go
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -23,20 +36,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: clippy,rustfmt
           toolchain: 1.88.0
-
-      - name: Run cargo fmt
-        run: |
-          cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -48,30 +49,38 @@ jobs:
         with:
           repo-token: ${{ secrets.GH_TOKEN }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          toolchain: 1.88.0
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
 
       - name: Run cargo clippy
         run: |
           cargo clippy --all --all-targets --all-features -- -D warnings
 
-  golangci-lint:
-    name: Golangci lint (${{ matrix.module }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        module: [nydusify, tests/e2e]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
 
-      - name: Golangci lint
+      - name: Lint nydusify
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7
-          working-directory: ${{ matrix.module }}
+          working-directory: nydusify
+
+      - name: Lint E2E
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.7
+          working-directory: tests/e2e
+
+      # Layout rules (one test per file, t.Parallel, no t.Skip), the
+      # harness's own unprivileged tests, and the build-tagged manual
+      # suites, which golangci-lint does not compile.
+      - name: Check
+        working-directory: tests/e2e
+        run: |
+          go test -count=1 ./internal/...
+          go vet -tags manual ./manual/...
+          go build -o /dev/null ./cmd/golden-gen

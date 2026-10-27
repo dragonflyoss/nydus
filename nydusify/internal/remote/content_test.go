@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
@@ -20,8 +22,10 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
 	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
+	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
@@ -386,11 +390,25 @@ func assertContentTestClosed(t *testing.T, pusher *contentTestPusher, store *con
 
 type contentTestResolver struct {
 	remotes.Resolver
-	pusher remotes.Pusher
+	pusher     remotes.Pusher
+	resolveErr error
+	fetcherErr error
+	pusherErr  error
+	desc       ocispec.Descriptor
 }
 
 func (resolver contentTestResolver) Pusher(context.Context, string) (remotes.Pusher, error) {
-	return resolver.pusher, nil
+	return resolver.pusher, resolver.pusherErr
+}
+
+func (resolver contentTestResolver) Resolve(_ context.Context, ref string) (string, ocispec.Descriptor, error) {
+	return ref, resolver.desc, resolver.resolveErr
+}
+
+func (resolver contentTestResolver) Fetcher(context.Context, string) (remotes.Fetcher, error) {
+	return remotes.FetcherFunc(func(context.Context, ocispec.Descriptor) (io.ReadCloser, error) {
+		return nil, errdefs.ErrNotFound
+	}), resolver.fetcherErr
 }
 
 type contentTestStore struct {
@@ -559,4 +577,140 @@ func (writer *contentTestWriter) Commit(context.Context, int64, digest.Digest, .
 func (writer *contentTestWriter) Truncate(size int64) error {
 	writer.Buffer.Truncate(int(size))
 	return nil
+}
+
+func TestRetryWriterTerminalStates(t *testing.T) {
+	desc := contentTestDescriptor(ocispec.MediaTypeImageLayer, []byte("data"))
+	for _, state := range []string{"closed", "cancelled", "commit-cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pusher := &contentTestPusher{}
+			w, err := (&retryPusher{pusher: pusher}).Push(ctx, desc)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, w.Close()) }()
+			want := context.Canceled
+			switch state {
+			case "closed":
+				require.NoError(t, w.Close())
+				want = io.ErrClosedPipe
+			case "cancelled":
+				cancel()
+			case "commit-cancelled":
+				commitCtx, stop := context.WithCancel(ctx)
+				stop()
+				require.ErrorIs(t, w.Commit(commitCtx, desc.Size, desc.Digest), context.Canceled)
+				require.NoError(t, w.Commit(ctx, desc.Size, desc.Digest))
+				return
+			}
+			_, err = w.Write([]byte("data"))
+			require.ErrorIs(t, err, want)
+			_, err = w.Status()
+			require.ErrorIs(t, err, want)
+			require.ErrorIs(t, w.Commit(context.Background(), desc.Size, desc.Digest), want)
+			require.Empty(t, pusher.writers[0].Bytes())
+		})
+	}
+	t.Run("published-during-retry", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			pusher := &contentTestPusher{writeErr: syscall.ECONNRESET}
+			calls := 0
+			pusher.onPush = func(context.Context) error {
+				calls++
+				if calls == 2 {
+					return errdefs.ErrAlreadyExists
+				}
+				return nil
+			}
+			w, err := (&retryPusher{pusher: pusher}).Push(context.Background(), desc)
+			require.NoError(t, err)
+			_, err = w.Write([]byte("data"))
+			require.ErrorIs(t, err, content.ErrReset)
+			status, err := w.Status()
+			require.NoError(t, err)
+			require.Equal(t, desc.Size, status.Offset)
+			n, err := w.Write([]byte("data"))
+			require.NoError(t, err)
+			require.Equal(t, 4, n)
+			require.NoError(t, w.Commit(context.Background(), desc.Size, desc.Digest))
+			require.NoError(t, w.Close())
+			require.Equal(t, 1, pusher.writers[0].closes)
+		})
+	})
+}
+
+func TestRemoteSetupFailures(t *testing.T) {
+	ctx := context.Background()
+	injected := errors.New("injected resolver error")
+	for _, phase := range []string{"resolve", "fetcher", "schema1", "reference", "fetch"} {
+		t.Run(phase, func(t *testing.T) {
+			resolver := contentTestResolver{desc: contentTestDescriptor(ocispec.MediaTypeImageLayer, []byte("data"))}
+			ref := "example.test/image:tag"
+			want := injected
+			switch phase {
+			case "resolve":
+				resolver.resolveErr = injected
+			case "fetcher":
+				resolver.fetcherErr = injected
+			case "schema1":
+				resolver.desc.MediaType = images.MediaTypeDockerSchema1Manifest
+				want = errdefs.ErrNotImplemented
+			case "reference":
+				ref = "://invalid"
+				want = nil
+			case "fetch":
+				want = errdefs.ErrNotFound
+			}
+			store, err := local.NewStore(t.TempDir())
+			require.NoError(t, err)
+			_, err = fetch(ctx, store, resolver, ref, platforms.All, PullAll)
+			require.Error(t, err)
+			if want != nil {
+				require.ErrorIs(t, err, want)
+			}
+		})
+	}
+	require.ErrorContains(t, push(ctx, nil, contentTestResolver{}, ocispec.Descriptor{}, "", platforms.All, nil), "empty push")
+	require.ErrorIs(t, push(ctx, nil, contentTestResolver{pusherErr: injected}, ocispec.Descriptor{}, "image", platforms.All, nil), injected)
+}
+
+func TestPushBlobFileFailures(t *testing.T) {
+	for _, phase := range []string{"stat", "size", "pusher", "writer", "open", "upload", "exists"} {
+		t.Run(phase, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "blob")
+			require.NoError(t, os.WriteFile(path, []byte("data"), 0o600))
+			desc := contentTestDescriptor(nydus.MediaTypeNydusBlob, []byte("data"))
+			injected := errors.New("remote refused upload")
+			pusher := &contentTestPusher{}
+			resolver := contentTestResolver{pusher: pusher}
+			switch phase {
+			case "stat":
+				require.NoError(t, os.Remove(path))
+			case "size":
+				desc.Size++
+			case "pusher":
+				resolver.pusherErr = injected
+			case "writer":
+				pusher.pushErr = injected
+			case "upload":
+				pusher.writeErr = injected
+			case "exists":
+				pusher.pushErr = errdefs.ErrAlreadyExists
+			case "open":
+				pusher.onPush = func(context.Context) error { return os.Remove(path) }
+			}
+			err := pushBlobFile(context.Background(), resolver, desc, "example.test/image:tag", path)
+			if phase == "exists" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				if phase == "pusher" || phase == "writer" || phase == "upload" {
+					require.ErrorIs(t, err, injected)
+				}
+			}
+			for _, writer := range pusher.writers {
+				require.Equal(t, 1, writer.closes)
+			}
+		})
+	}
 }

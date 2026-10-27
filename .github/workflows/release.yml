@@ -1,23 +1,32 @@
 name: Release
 
 on:
+  pull_request:
+    branches: [main, release-*, v3]
   push:
     tags:
       - v[0-9]+.[0-9]+.[0-9]+*
   workflow_dispatch:
 
 env:
+  CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUST_TOOLCHAIN: 1.88.0
   NYDUS_FEATURES: cli,uffd,fanotify,dragonfly
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: Build ${{ matrix.arch }} static binaries
+    name: build / static / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 5 || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,8 +40,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      # Set the default toolchain before caching: rust-cache hashes it as well
+      # as rust-toolchain.toml, so runner image updates must not change the key.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          fetch-depth: 0
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -43,16 +58,14 @@ jobs:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
-          repo-token: ${{ secrets.GH_TOKEN }}
+          repo-token: ${{ github.token }}
 
       - name: Install musl toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # perl/make are needed by openssl-src, which builds OpenSSL from
+          # source for the musl target (dragonfly-client-util vendors it).
+          bash tests/scripts/install_ci_packages.sh \
             musl-tools musl-dev pkg-config perl make file
-
-      - name: Add Rust musl target
-        run: rustup target add ${{ matrix.target }}
 
       - name: Build nydus
         env:
@@ -64,10 +77,17 @@ jobs:
             --target ${{ matrix.target }} \
             --features "${NYDUS_FEATURES}"
 
-      - name: Install Go
+      - name: Upload binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: nydus-static-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/nydus
+          if-no-files-found: error
+
+      - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: nydusify/go.mod
+          go-version: "1.25.5"
           cache-dependency-path: nydusify/go.sum
 
       - name: Build nydusify
@@ -79,11 +99,43 @@ jobs:
           cd nydusify
           go build -ldflags "-s -w" -o nydusify .
 
+      - name: Upload binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: nydusify-static-${{ matrix.arch }}
+          path: nydusify/nydusify
+          if-no-files-found: error
+
+  verify:
+    name: release / verify / ${{ matrix.arch }}
+    needs: [build]
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 5
+    env:
+      BASELINE_VERSION: v3.0.0-beta.3
+      NYDUS_E2E_GOLDEN_REQUIRED: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ${{ vars.E2E_RELEASE_AMD64_RUNNER || '["ubuntu-24.04"]' }}
+          - arch: arm64
+            runner: ${{ vars.E2E_RELEASE_ARM64_RUNNER || '["ubuntu-24.04-arm"]' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v7
+        with:
+          name: nydus-static-${{ matrix.arch }}
+          path: nydus-static
+      - uses: actions/download-artifact@v7
+        with:
+          name: nydusify-static-${{ matrix.arch }}
+          path: nydus-static
       - name: Assemble release directory
         run: |
-          mkdir -p nydus-static
-          cp target/${{ matrix.target }}/release/nydus nydus-static/
-          cp nydusify/nydusify nydus-static/
           cp config/registry.example.yaml nydus-static/
           chmod +x nydus-static/nydus nydus-static/nydusify
 
@@ -92,6 +144,8 @@ jobs:
           for bin in nydus-static/nydus nydus-static/nydusify; do
             echo "== ${bin}"
             file "${bin}"
+            # musl release builds come out as `static-pie linked`, while the
+            # CGO-free Go binary is plain `statically linked`.
             file "${bin}" | grep -Eq 'statically linked|static-pie linked'
           done
           ./nydus-static/nydus --help > /dev/null
@@ -118,9 +172,124 @@ jobs:
             ${{ env.tarball }}.sha256sum
           if-no-files-found: error
 
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.5"
+          cache-dependency-path: tests/e2e/go.sum
+
+      - name: Install test dependencies
+        run: |
+          tar -xzf "$tarball"
+          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo modprobe fuse
+          go -C tests/e2e build -o "$RUNNER_TEMP/golden-gen" ./cmd/golden-gen
+
+      - name: Download released compatibility baseline
+        run: |
+          dir="$RUNNER_TEMP/compatibility-baseline"
+          mkdir -p "$dir"
+          cd "$dir"
+          archive="nydus-static-${BASELINE_VERSION}-linux-${{ matrix.arch }}.tgz"
+          base="https://github.com/dragonflyoss/nydus/releases/download/${BASELINE_VERSION}"
+          curl -fL --retry 2 --connect-timeout 10 --max-time 60 -O "$base/$archive"
+          curl -fL --retry 2 --connect-timeout 10 --max-time 60 -O "$base/$archive.sha256sum"
+          sha256sum -c "$archive.sha256sum"
+          tar -xzf "$archive"
+          "$dir/nydus-static/nydus" --version
+          echo "BASELINE_NYDUS=$dir/nydus-static/nydus" >> "$GITHUB_ENV"
+
+      - name: Generate historical images with the released builder
+        id: generate-historical
+        run: |
+          sudo "$RUNNER_TEMP/golden-gen" -nydus "$BASELINE_NYDUS" \
+            -out "$RUNNER_TEMP/historical-golden"
+
+      - name: Read historical images with the shipped binary
+        id: read-historical
+        env:
+          NYDUS_E2E_GOLDEN_VERSIONS: ${{ env.BASELINE_VERSION }}
+        run: |
+          NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/historical-golden" \
+            make e2e-run PKG=./golden/... \
+            E2E_RUN='^TestRead$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$' E2E_REQUIRE=1 E2E_TIMEOUT=2m \
+            NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus"
+
+      - name: Generate current images with the shipped builder
+        id: generate-current
+        run: |
+          sudo "$RUNNER_TEMP/golden-gen" -nydus "$GITHUB_WORKSPACE/nydus-static/nydus" \
+            -out "$RUNNER_TEMP/generated-golden"
+
+      - name: Read current images with the shipped binary
+        id: read-current
+        run: |
+          NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/generated-golden" \
+            make e2e-run PKG=./golden/... E2E_RUN='^TestRead$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$' \
+            E2E_REQUIRE=1 E2E_TIMEOUT=2m NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus"
+
+      # beta.3's published CLI has FUSE/check/export but no fileio command.
+      - name: Read current images with the released baseline
+        id: read-with-baseline
+        run: |
+          NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/generated-golden" \
+            make e2e-run PKG=./golden/... \
+            E2E_RUN='^TestRead$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$' \
+            E2E_REQUIRE=1 E2E_TIMEOUT=2m NYDUS_BIN="$BASELINE_NYDUS"
+
+      - name: Upload golden images
+        uses: actions/upload-artifact@v6
+        with:
+          name: golden-testdata-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/historical-golden
+            ${{ runner.temp }}/generated-golden
+          if-no-files-found: error
+
+  verify-contract:
+    name: release / contract / ${{ matrix.arch }}-${{ matrix.suite }}
+    needs: [verify]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        suite: [semantics, zstd, other]
+        include:
+          - arch: amd64
+            runner: ${{ vars.E2E_RELEASE_AMD64_RUNNER || '["ubuntu-24.04"]' }}
+          - arch: arm64
+            runner: ${{ vars.E2E_RELEASE_ARM64_RUNNER || '["ubuntu-24.04-arm"]' }}
+          - suite: semantics
+            run: ^TestFUSE$$/^(Semantic|C[0-9]+_.*)$$
+          - suite: zstd
+            run: ^TestFUSE$$/^Data$$/^zstd-4k$$
+          - suite: other
+            run: ^TestFUSE$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: nydus-release-tarball-linux-${{ matrix.arch }}
+          path: nydus-tarball
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.5"
+          cache-dependency-path: tests/e2e/go.sum
+      - name: Install test dependencies
+        run: |
+          tar -xzf nydus-tarball/*.tgz
+          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo modprobe fuse
+      - name: Run shipped binary contracts
+        run: |
+          make e2e-run PKG=./contract/... E2E_RUN='${{ matrix.run }}' E2E_REQUIRE=1 E2E_TIMEOUT=4m E2E_GO_TEST_ARGS=-v \
+            NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus" NYDUSIFY_BIN="$GITHUB_WORKSPACE/nydus-static/nydusify"
+
   release:
-    name: Publish GitHub release
-    needs: [build]
+    name: release / github / publish
+    needs: [verify-contract, verify]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 30

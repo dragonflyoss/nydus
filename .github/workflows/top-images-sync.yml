@@ -13,6 +13,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   list:
     name: Build image list
@@ -34,7 +38,7 @@ jobs:
           else
             images=$(sed -e 's/#.*$//' -e 's/[[:space:]]//g' -e '/^$/d' \
                          -e "s|^ghcr\.io/[^/]*/[^/]*/||" -e 's/:[^:]*$//' \
-                         tests/e2e/corpus/top-images.txt)
+                         tests/e2e/internal/corpus/top-images.txt)
           fi
           echo "images=$(printf '%s\n' $images | jq -cRn '[inputs | select(length > 0)]')" >> "$GITHUB_OUTPUT"
 
