@@ -11,10 +11,13 @@ package mounter
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/log"
@@ -80,8 +83,10 @@ func NewMounter(opt MountOption) (*Mounter, error) {
 // Mount pulls the target image and mounts it at the configured mountpoint. For a
 // nydus image it runs `nydus fuse` in the foreground and blocks until the
 // mount is torn down (by ctx cancellation or SIGINT/SIGTERM), unmounting on
-// exit. For an OCI image it extracts the root filesystem to the mountpoint and
-// returns immediately.
+// exit. Cancellation allows five seconds for graceful shutdown before killing
+// the daemon and detaching its dead mount; a forced kill is returned as an
+// error. For an OCI image it extracts the root filesystem to the mountpoint
+// and returns immediately.
 func (m *Mounter) Mount(ctx context.Context) error {
 	contentDir := filepath.Join(m.opt.WorkDir, "content")
 	scratchDir := filepath.Join(m.opt.WorkDir, "scratch")
@@ -101,7 +106,7 @@ func (m *Mounter) Mount(ctx context.Context) error {
 		return errors.Wrap(err, "create provider")
 	}
 
-	img, err := nydusfs.LoadImage(ctx, provider, m.opt.Target, m.opt.PlatformMC, remote.PullAll, remote.Target)
+	img, err := nydusfs.LoadImage(ctx, provider, m.opt.Target, m.opt.PlatformMC, remote.PullOption{PullOCILayers: true}, remote.Target)
 	if err != nil {
 		return errors.Wrapf(err, "load target %q", m.opt.Target)
 	}
@@ -131,6 +136,10 @@ func (m *Mounter) extractOCI(ctx context.Context, cs content.Store, img *nydusfs
 func (m *Mounter) mountNydus(ctx context.Context, provider *remote.Provider, cs content.Store, img *nydusfs.Image, scratchDir string) error {
 	if img.Bootstrap == nil {
 		return errors.New("nydus image is missing its bootstrap layer")
+	}
+	mountpoint, err := prepareMountpoint(m.opt.Mountpoint)
+	if err != nil {
+		return err
 	}
 
 	cacheDir := filepath.Join(scratchDir, "cache")
@@ -171,17 +180,24 @@ func (m *Mounter) mountNydus(ctx context.Context, provider *remote.Provider, cs 
 	}
 	apiSocket := filepath.Join(apiDir, "apiserver.sock")
 
+	fsname := "nydusify-" + rand.Text()
 	args := []string{
 		"fuse",
+		"--fsname", fsname,
 		"--bootstrap", bootstrapPath,
 		"--config", configPath,
-		"--mountpoint", m.opt.Mountpoint,
+		"--mountpoint", mountpoint,
 		"--apiserver", "unix://" + apiSocket,
 		"--log-level", cmp.Or(m.opt.LogLevel, nydus.DefaultLogLevel),
 		"--log-dir", logDir,
 		"--console",
 	}
-	cmd := exec.Command(cmp.Or(m.opt.BuilderPath, nydus.DefaultBuilder), args...)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cmp.Or(m.opt.BuilderPath, nydus.DefaultBuilder), args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(unix.SIGTERM) }
+	// Allow graceful unmounting, but do not wait forever for a stuck daemon.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -199,17 +215,25 @@ func (m *Mounter) mountNydus(ctx context.Context, provider *remote.Provider, cs 
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
 
+	var exitErr error
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Signal(unix.SIGTERM)
-		<-waitErr
+		exitErr = <-waitErr
 	case <-sigCh:
-		_ = cmd.Process.Signal(unix.SIGTERM)
-		<-waitErr
+		cancel()
+		exitErr = <-waitErr
 	case err := <-waitErr:
-		if err != nil {
-			return errors.Wrap(err, "nydus fuse exited")
-		}
+		exitErr = err
+	}
+	if err := unmountExitedFuse(mountpoint, fsname); err != nil {
+		return errors.Wrapf(err, "clean up nydus fuse mount (exit: %v)", exitErr)
+	}
+	// Cancellation is normally successful, but a forced kill did not let the
+	// daemon finish its shutdown and must not be reported as a graceful exit.
+	var processErr *exec.ExitError
+	killed := errors.As(exitErr, &processErr) && processErr.Sys().(syscall.WaitStatus).Signal() == unix.SIGKILL
+	if exitErr != nil && (ctx.Err() == nil || killed) {
+		return errors.Wrap(exitErr, "nydus fuse exited")
 	}
 	log.G(ctx).Infof("unmounted nydus image at %s", m.opt.Mountpoint)
 	return nil

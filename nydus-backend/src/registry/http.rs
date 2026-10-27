@@ -68,7 +68,11 @@ impl Http {
         rate_limit: Option<RateLimit>,
         source: Source,
     ) -> io::Result<Self> {
-        let mut builder = Client::builder().redirect(Policy::none()).hickory_dns(true);
+        // Other workspace dependencies may also enable reqwest's native TLS.
+        let mut builder = Client::builder()
+            .use_rustls_tls()
+            .redirect(Policy::none())
+            .hickory_dns(true);
 
         builder = match proxy {
             Some(proxy) => builder.proxy(reqwest::Proxy::all(&proxy.addr).map_err(|err| {
@@ -309,5 +313,85 @@ mod tests {
         assert_eq!(limit.limiter.balance(), 10);
         assert_eq!(limit.limiter.interval(), Duration::from_millis(100));
         assert!(limit.limiter.is_fair());
+    }
+
+    #[tokio::test]
+    async fn tls_verification_and_custom_ca_are_preserved() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_rustls::rustls::{self, pki_types::PrivatePkcs8KeyDer};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let server_config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.cert.der().clone()], key.into())
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for trusted in [false, true, false] {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let accepted = acceptor.accept(tcp).await;
+                if !trusted {
+                    assert!(accepted.is_err());
+                    continue;
+                }
+                let mut stream = accepted.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert!(n > 0 && request.len() < 16384);
+                    request.extend_from_slice(&buf[..n]);
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let trusted_path = dir.path().join("trusted.pem");
+        std::fs::write(&trusted_path, cert.cert.pem()).unwrap();
+        let other = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let wrong_path = dir.path().join("wrong.pem");
+        std::fs::write(&wrong_path, other.cert.pem()).unwrap();
+        for (ca_cert, trusted) in [
+            (None, false),
+            (Some(trusted_path), true),
+            (Some(wrong_path), false),
+        ] {
+            let http = Http::new(
+                Duration::from_secs(5),
+                0,
+                None,
+                &TlsConfig {
+                    skip_verify: false,
+                    ca_cert,
+                },
+                Duration::from_secs(1),
+                None,
+                Source::Origin,
+            )
+            .unwrap();
+            let result = http.client.get(&url).send().await;
+            if trusted {
+                assert_eq!(result.unwrap().text().await.unwrap(), "ok");
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

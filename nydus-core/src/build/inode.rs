@@ -513,6 +513,12 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
     let link_key = node.link_key()?;
     if let Some(key) = link_key {
         if let Some(existing_index) = hardlink_map.get(&key) {
+            let inode = &mut inodes[*existing_index];
+            inode.nlink = inode.nlink.checked_add(1).ok_or_else(|| {
+                Error::InvalidImage("too many hardlinks in the output tree".to_string())
+            })?;
+            inode.is_extended |=
+                ErofsInodeExtended::is_needed(inode.size, inode.uid, inode.gid, inode.nlink as u64);
             node.mapped_index(ctx, *existing_index)?;
             return Ok(*existing_index);
         }
@@ -609,7 +615,7 @@ fn flatten_tree_node<C, N: TreeNode<C>>(
                 unreachable!("leaf_data is only called for non-directories")
             }
         };
-        let nlink = attrs.nlink.max(1);
+        let nlink = 1;
         inodes.push(InodeInfo {
             mode: attrs.mode,
             uid: attrs.uid,

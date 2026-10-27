@@ -188,27 +188,31 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 	if err := cmd.Start(); err != nil {
 		return "", nil, errors.Wrap(err, "start nydus fuse")
 	}
+	done := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(done)
+	}()
 
 	// unmount terminates the daemon and reaps it with cmd.Wait, which also
 	// joins exec's copier goroutine feeding fuseLog — so the buffer must only
 	// be read after unmount has returned.
 	unmount := func() {
 		_ = cmd.Process.Signal(unix.SIGTERM)
-		done := make(chan struct{})
-		go func() {
-			_ = cmd.Wait()
-			close(done)
-		}()
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
-			_ = unmountFuse(mountpoint)
+			// Helpers may issue FUSE requests, so disconnect an unresponsive daemon first.
 			_ = cmd.Process.Kill()
 			<-done
+			if err := unmountFuse(mountpoint); err != nil {
+				log.G(ctx).WithError(err).Warnf("unmount nydus fuse at %q", mountpoint)
+			}
 		}
 	}
 
-	if err := waitForMount(ctx, mountpoint, 30*time.Second); err != nil {
+	if err := waitForMount(ctx, mountpoint, 30*time.Second, done); err != nil {
 		// Reap the daemon first, then surface whatever it printed (e.g. a
 		// permission error opening /dev/fuse) instead of letting it look like
 		// a bare timeout.
@@ -217,14 +221,14 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 		if output == "" {
 			output = "<no output; the FUSE mount may require root or access to /dev/fuse>"
 		}
-		return "", nil, errors.Wrapf(err, "nydus fuse did not mount %q (nydus output: %s)", mountpoint, output)
+		return "", nil, errors.Wrapf(err, "nydus fuse did not mount %q (nydus exit: %v; output: %s)", mountpoint, waitErr, output)
 	}
 	return mountpoint, unmount, nil
 }
 
 // waitForMount polls until mountpoint is backed by a different device than its
 // parent (i.e. a filesystem has been mounted) or the timeout elapses.
-func waitForMount(ctx context.Context, mountpoint string, timeout time.Duration) error {
+func waitForMount(ctx context.Context, mountpoint string, timeout time.Duration, exited <-chan struct{}) error {
 	parent := filepath.Dir(mountpoint)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -241,6 +245,8 @@ func waitForMount(ctx context.Context, mountpoint string, timeout time.Duration)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-exited:
+			return errors.New("nydus fuse exited before the mount became ready")
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

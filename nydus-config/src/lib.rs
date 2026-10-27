@@ -256,8 +256,8 @@ pub struct TlsConfig {
     pub skip_verify: bool,
 
     /// The CA certificate path with PEM format to trust in addition to the
-    /// system roots; the file may bundle multiple certificates. Useful for
-    /// registries fronted by a private CA.
+    /// TLS backend's default roots; the file may bundle multiple certificates.
+    /// Useful for registries fronted by a private CA.
     #[serde(default)]
     pub ca_cert: Option<PathBuf>,
 }

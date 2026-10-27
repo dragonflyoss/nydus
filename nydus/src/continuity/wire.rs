@@ -264,13 +264,15 @@ fn send_fds_until(
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_bytes;
+    // These libc fields are u32 on musl and usize on glibc. CMSG_SPACE
+    // returns u32, so the allocation length fits either representation.
+    message.msg_controllen = control_bytes as _;
     // SAFETY: control is aligned and sized for this SCM_RIGHTS header and descriptor array.
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&message);
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(rights_bytes) as usize;
+        (*header).cmsg_len = libc::CMSG_LEN(rights_bytes) as _;
         std::ptr::copy_nonoverlapping(
             raw_fds.as_ptr(),
             libc::CMSG_DATA(header).cast::<RawFd>(),
@@ -316,7 +318,7 @@ fn recv_fds_until(
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_bytes;
+    message.msg_controllen = control_bytes as _;
     let received = loop {
         stream.set_read_timeout(Some(deadline.remaining()?))?;
         // SAFETY: all writable message buffers are live and sized for their declared lengths.
@@ -337,20 +339,23 @@ fn recv_fds_until(
     // received descriptor once so every validation failure closes the accumulated descriptors.
     unsafe {
         let control_start = message.msg_control as usize;
-        let control_end = control_start.saturating_add(message.msg_controllen);
+        #[allow(clippy::unnecessary_cast)] // musl uses u32; glibc uses usize.
+        let control_end = control_start.saturating_add(message.msg_controllen as usize);
         let mut header = libc::CMSG_FIRSTHDR(&message);
         while !header.is_null() {
             let base_len = libc::CMSG_LEN(0) as usize;
             let header_start = header as usize;
-            if header_start < control_start
-                || header_start.saturating_add(base_len) > control_end
-                || (*header).cmsg_len < base_len
-                || (*header).cmsg_len > control_end.saturating_sub(header_start)
-            {
+            if header_start < control_start || header_start.saturating_add(base_len) > control_end {
                 invalid_control = true;
                 break;
             }
-            let data_len = (*header).cmsg_len - base_len;
+            #[allow(clippy::unnecessary_cast)] // musl uses u32; glibc uses usize.
+            let header_len = (*header).cmsg_len as usize;
+            if header_len < base_len || header_len > control_end.saturating_sub(header_start) {
+                invalid_control = true;
+                break;
+            }
+            let data_len = header_len - base_len;
             if (*header).cmsg_level != libc::SOL_SOCKET
                 || (*header).cmsg_type != libc::SCM_RIGHTS
                 || data_len % mem::size_of::<RawFd>() != 0

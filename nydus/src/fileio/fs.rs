@@ -190,7 +190,10 @@ impl Filesystem for FlatImageFs {
         }
         match self.read_image(offset, size) {
             Ok(data) => reply.data(&data),
-            Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
+            Err(err) => {
+                tracing::warn!(offset, size, "export read failed: {err}");
+                reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+            }
         }
     }
 

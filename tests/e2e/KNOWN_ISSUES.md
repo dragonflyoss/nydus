@@ -16,3 +16,11 @@ after the configured request timeout and retry, rather than one backend
 request hanging. Synchronous EROFS readahead accumulated those independent
 timeouts before returning to the application. The test retains its 20-second
 bound, retry assertion, and normal whole-file read after recovery.
+
+KI-3's deterministic cross-process regression test is in
+[`group_map_process.rs`](../../nydus-storage/tests/group_map_process.rs):
+an x86-64 hardware watchpoint pauses `set_ready` after its bitmap write while
+another process resets the map, then checks that the stale counter update
+cannot publish the cleared group as ready.
+It needs Linux x86-64 and ptrace permission; the privileged CI lane sets
+`NYDUS_TEST_REQUIRE_PTRACE=1` so an unavailable prerequisite fails.

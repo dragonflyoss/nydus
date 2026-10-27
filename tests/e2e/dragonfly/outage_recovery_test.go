@@ -35,6 +35,10 @@ func TestOutageRecovery(t *testing.T) {
 
 	prefetchImage := uniqueImage(t)
 	prefetchOrigin := startOrigin(t, prefetchImage)
+	// A healthy startup control uses the same image and options as the
+	// later mount started while the scheduler is unavailable.
+	mountDragonfly(t, c, prefetchImage, prefetchOrigin.URL, options{}).Unmount()
+
 	c.stop(t, "dfdaemon")
 	require.True(t, t.Run("SeedPeerFallback", func(t *testing.T) {
 		d, err := p.readBackend(t)
@@ -91,6 +95,15 @@ func TestOutageRecovery(t *testing.T) {
 	c.stop(t, "scheduler")
 	require.True(t, t.Run("WholeClusterFallback", func(t *testing.T) {
 		expectFallback(t, concurrentBatch(t, p), "concurrent readers with the cluster down")
+	}))
+	require.True(t, t.Run("SchedulerUnavailableAtStartup", func(t *testing.T) {
+		started := mountDragonfly(t, c, prefetchImage, prefetchOrigin.URL, options{})
+		d := measure(t, started, func() {
+			within(t, started, imageBound, "reading the image with the scheduler down", func() {
+				require.NoError(t, readData(t, started))
+			})
+		})
+		expectFallback(t, d, "a mount started with the scheduler down")
 	}))
 	require.True(t, t.Run("OriginUnavailable", func(t *testing.T) {
 		defer origin.Faults.Clear()

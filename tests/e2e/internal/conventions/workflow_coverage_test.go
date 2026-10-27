@@ -198,6 +198,8 @@ func TestWorkflowCoverage(t *testing.T) {
 			rust += s.Run
 		}
 		require.Contains(t, rust, "cargo llvm-cov clean --workspace")
+		require.Contains(t, rust, "cargo llvm-cov --no-report -p nydus-backend")
+		require.Contains(t, rust, "--lib --")
 		require.NotContains(t, rust, "--no-clean --no-report", "cargo-llvm-cov rejects this combination")
 		require.Contains(t, rust, "cargo llvm-cov report --lcov")
 		require.Contains(t, rust, "coverage/raw/rust")

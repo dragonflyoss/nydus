@@ -801,6 +801,10 @@ impl IncrementalWriter {
     /// Commit consumes the writer. It fails if no changes were staged, which
     /// avoids creating an upper image that is indistinguishable from the parent
     /// except for empty output artifacts.
+    ///
+    /// On failure, temporary blobs are removed. Complete digest-named blobs
+    /// may remain if writing the sidecar or bootstrap failed; a fresh writer
+    /// can reuse them when retrying the same changes.
     pub fn commit(mut self) -> Result<()> {
         let result = self.commit_inner();
         if result.is_err() {
@@ -890,10 +894,11 @@ impl IncrementalWriter {
         let finished = finish_upper_blob(blob_writer)?;
         let temp_path = self
             .upper_blob_temp_path
-            .take()
+            .as_ref()
             .ok_or_else(|| Error::InvalidImage("upper blob temp path is missing".to_string()))?;
         let final_blob_path =
-            finalize_digest_named_blob(&temp_path, &self.output_dir, &finished.full_blob_digest)?;
+            finalize_digest_named_blob(temp_path, &self.output_dir, &finished.full_blob_digest)?;
+        self.upper_blob_temp_path.take();
         save_blob_metadata_sidecar(&finished.blob_metadata, &final_blob_path)?;
         self.device_slots.push(ErofsDeviceSlot::with_blob_id(
             finished.blob_blocks,
@@ -1458,7 +1463,7 @@ fn finalize_digest_named_blob(
     full_blob_digest: &[u8; EROFS_BLOB_ID_SIZE],
 ) -> Result<PathBuf> {
     let full_blob_path = digest_named_blob_path(blob_dir, full_blob_digest);
-    if full_blob_path.exists() {
+    if full_blob_path.is_file() {
         fs::remove_file(temp_blob_path).with_context(|| {
             format!(
                 "failed to remove temporary blob after dedup hit: {}",

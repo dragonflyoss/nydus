@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use rand::Rng;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use reqwest::StatusCode;
+use tokio::sync::OnceCell;
 use tracing::{debug, warn};
 
 use dragonfly_api::common::v2::Priority;
@@ -38,11 +39,13 @@ pub(crate) struct Dragonfly {
     /// The seed peer client of on-demand reads, retrying on the next seed
     /// peer after an exponential backoff, a `429` included since another seed
     /// peer may not be rate limited.
-    ondemand_client: Proxy,
+    ondemand_client: OnceCell<Proxy>,
 
     /// The seed peer client of prefetch reads, never retrying at once: a
     /// failed prefetch is sent once more after the retry interval instead.
-    prefetch_client: Proxy,
+    prefetch_client: OnceCell<Proxy>,
+    scheduler_endpoint: String,
+    max_retries: u8,
 
     /// The rate-limited client an on-demand read falls back to the origin
     /// through when the seed peers cannot serve it, the registry's `http`
@@ -71,15 +74,13 @@ impl Dragonfly {
         config: DragonflyConfig,
         http: &HttpConfig,
         prefetch_retry_interval: Duration,
-        runtime: &Runtime,
+        _runtime: &Runtime,
     ) -> io::Result<Self> {
         Ok(Self {
-            ondemand_client: Self::client(
-                runtime,
-                config.scheduler_endpoint.clone(),
-                config.max_retries as u8,
-            )?,
-            prefetch_client: Self::client(runtime, config.scheduler_endpoint, 0)?,
+            ondemand_client: OnceCell::new(),
+            prefetch_client: OnceCell::new(),
+            scheduler_endpoint: config.scheduler_endpoint,
+            max_retries: config.max_retries as u8,
             fallback_http_client: Http::new(
                 http.request_timeout,
                 http.max_retries,
@@ -101,16 +102,24 @@ impl Dragonfly {
     /// Creates a seed peer client on the runtime, so the scheduler is reached
     /// from the runtime's netns, retrying `max_retries` times across seed
     /// peers with a jittered exponential backoff.
-    fn client(runtime: &Runtime, scheduler_endpoint: String, max_retries: u8) -> io::Result<Proxy> {
-        runtime.block_on_worker(async move {
-            Proxy::builder()
-                .scheduler_endpoint(scheduler_endpoint)
-                .max_retries(max_retries)
-                .backoff(ExponentialBuilder::default().with_jitter())
-                .build()
-                .await
-                .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
+    async fn client<'a>(
+        &self,
+        cell: &'a OnceCell<Proxy>,
+        max_retries: u8,
+    ) -> Result<&'a Proxy, Error> {
+        cell.get_or_try_init(|| async {
+            tokio::time::timeout(
+                self.request_timeout,
+                Proxy::builder()
+                    .scheduler_endpoint(self.scheduler_endpoint.clone())
+                    .max_retries(max_retries)
+                    .backoff(ExponentialBuilder::default().with_jitter())
+                    .build(),
+            )
+            .await
+            .map_err(|_| Error::RequestTimeout("connecting to the scheduler".into()))?
         })
+        .await
     }
 }
 
@@ -133,7 +142,11 @@ impl Transport for Dragonfly {
 
         let start = Instant::now();
         let mut body = BytesMut::new();
-        let result = match self.ondemand_client.get_into(&request, &mut body).await {
+        let fetched = match self.client(&self.ondemand_client, self.max_retries).await {
+            Ok(client) => client.get_into(&request, &mut body).await,
+            Err(err) => Err(err),
+        };
+        let result = match fetched {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
@@ -173,6 +186,17 @@ impl Transport for Dragonfly {
                 format!("dragonfly request timed out: {message}"),
             )),
             Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
+        };
+
+        let result = match result {
+            Ok(response) if response.status.is_success() && headers.contains_key(RANGE) => {
+                let range = headers
+                    .get(RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .expect("range header was checked above");
+                response.require_partial(range)
+            }
+            other => other,
         };
 
         match &result {
@@ -217,7 +241,11 @@ impl Transport for Dragonfly {
         loop {
             let start = Instant::now();
             let mut body = BytesMut::new();
-            let result = match self.prefetch_client.get_into(&request, &mut body).await {
+            let fetched = match self.client(&self.prefetch_client, 0).await {
+                Ok(client) => client.get_into(&request, &mut body).await,
+                Err(err) => Err(err),
+            };
+            let result = match fetched {
                 Ok(response) => Ok(Response {
                     status: response.status_code.unwrap_or(StatusCode::OK),
                     headers: response.header,

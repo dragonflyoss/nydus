@@ -61,9 +61,9 @@ Group cases by their observable contract, not merely by the injected status:
   Subtests express input variants of one contract instead of multiplying
   packages or duplicating whole test bodies.
 
-This refactor has **104 product entry points** (`Test` and `Fuzz`, excluding
-`TestMain` and `internal`): 82 GA including the separately provisioned
-Dragonfly lane, 19 experimental and three manual.
+This refactor has **111 product entry points** (`Test` and `Fuzz`, excluding
+`TestMain` and `internal`): 88 GA including the separately provisioned
+Dragonfly lane, 20 experimental and three manual.
 These are not counts of expanded subtests: the filesystem contract expands
 C01-C15 over adapters/layouts/modes, and table-driven cases add more variants.
 
@@ -71,16 +71,16 @@ C01-C15 over adapters/layouts/modes, and table-driven cases add more variants.
 | --- | ---: |
 | Filesystem: `contract`, `kernel`, `api` | 2 + 2 + 2 |
 | FUSE process continuity: `continuity` | 5 |
-| Image CLI: `build`, `tar`, `export` | 9 + 7 + 3 |
-| Image distribution: `nydusify`, `registry`, `dragonfly` | 9 + 16 + 6 |
-| Storage/lifecycle: `cache`, `fault`, `soak` | 10 + 8 + 2 |
+| Image CLI: `build`, `tar`, `export` | 10 + 7 + 3 |
+| Image distribution: `nydusify`, `registry`, `dragonfly` | 10 + 16 + 6 |
+| Storage/lifecycle: `cache`, `fault`, `soak` | 13 + 9 + 2 |
 | Historical images: `golden` | 1 |
-| Experimental: fanotify, NBD, ublk, UFFD | 5 + 4 + 1 + 9 |
+| Experimental: fanotify, NBD, ublk, UFFD | 5 + 4 + 2 + 9 |
 | Manual: bench, hugetar, topimages | 1 + 1 + 1 |
 
-Rust external integration targets add **85 `#[test]` cases** (66 in
-`nydus`, 2 backend, 9 core, 8 storage).
-They exercise in-process APIs and deterministic lifetime/
+Rust external integration targets add **92 `#[test]` cases** (68 in
+`nydus`, 2 backend, 10 core, 12 storage), plus the harnessless cross-process
+KI-3 reproducer. They exercise in-process APIs and deterministic lifetime/
 state-machine boundaries; they do not replace mounted CLI E2E. The
 nydusify builder-backed integrations remain in its own Go module.
 
@@ -98,6 +98,9 @@ failure cleanup. Multi-platform reverse conversion checks both architectures'
 payloads, DiffIDs, platform markers and GC references, passes through ordinary
 and attestation manifests, and rejects unreadable index children. These reuse
 `make test-nydusify`; set `NYDUS_TEST_BUILDER` locally to exercise the real builder.
+`TestCheck/ForcedUnmount` stops a real FUSE daemon, waits the unchanged 10-second
+cleanup deadline, and forces both FUSE helpers to fail before real `umount`.
+It verifies child reaping and absence of mounts/scratch before harness cleanup.
 
 ### Execution tiers
 
@@ -213,7 +216,10 @@ Go products use `go build -cover -covermode=atomic -coverpkg=./...`.
 Its Linux cross-filesystem link tests require writable `/dev/shm` on a different
 filesystem from the test work directory and assert `EXDEV`; unavailable
 prerequisites fail instead of skipping the case.
-The Rust unit/integration check exports the workspace run as one report.
+Checker tests cover cleanup when target mounting fails after the source is
+mounted, filesystem walking fails, or source/target contents mismatch.
+The Rust unit/integration check accumulates both the workspace and dual-TLS
+runs before exporting one report.
 
 Each existing E2E job exports and uploads `coverage/`, including on test failure:
 

@@ -12,7 +12,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: 1.88.0
-  NYDUS_FEATURES: cli,uffd,fanotify,dragonfly
+  NYDUS_FEATURES: cli,uffd,fanotify,fileio,dragonfly
   NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
 
 permissions:
@@ -210,8 +210,7 @@ jobs:
           NYDUS_E2E_GOLDEN_VERSIONS: ${{ env.BASELINE_VERSION }}
         run: |
           NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/historical-golden" \
-            make e2e-run PKG=./golden/... \
-            E2E_RUN='^TestRead$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$' E2E_REQUIRE=1 E2E_TIMEOUT=2m \
+            make e2e-run PKG=./golden/... E2E_REQUIRE=1 E2E_TIMEOUT=2m \
             NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus"
 
       - name: Generate current images with the shipped builder
@@ -224,10 +223,12 @@ jobs:
         id: read-current
         run: |
           NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/generated-golden" \
-            make e2e-run PKG=./golden/... E2E_RUN='^TestRead$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$' \
+            make e2e-run PKG='./golden/... ./build/...' E2E_RUN='^(TestRead|TestGAFeatures)$$' \
             E2E_REQUIRE=1 E2E_TIMEOUT=2m NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus"
 
       # beta.3's published CLI has FUSE/check/export but no fileio command.
+      # The current reader above still exercises Fileio in both directions
+      # of image generation; do not silently probe-and-skip old-reader paths.
       - name: Read current images with the released baseline
         id: read-with-baseline
         run: |
@@ -262,11 +263,11 @@ jobs:
           - arch: arm64
             runner: ${{ vars.E2E_RELEASE_ARM64_RUNNER || '["ubuntu-24.04-arm"]' }}
           - suite: semantics
-            run: ^TestFUSE$$/^(Semantic|C[0-9]+_.*)$$
+            run: ^(TestFUSE|TestFileio)$$/^(Semantic|C[0-9]+_.*)$$
           - suite: zstd
-            run: ^TestFUSE$$/^Data$$/^zstd-4k$$
+            run: ^(TestFUSE|TestFileio)$$/^Data$$/^zstd-4k$$
           - suite: other
-            run: ^TestFUSE$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
+            run: ^(TestFUSE|TestFileio)$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7

@@ -19,6 +19,7 @@ use std::io;
 use std::ops::Range;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use tracing::warn;
@@ -35,6 +36,7 @@ pub struct ChunkGroupLocks {
     /// needs the descriptor. `None` means locking is unavailable here and
     /// callers fall back to fetching without coordination.
     file: OnceLock<Option<File>>,
+    unavailable: AtomicBool,
 }
 
 impl ChunkGroupLocks {
@@ -42,6 +44,7 @@ impl ChunkGroupLocks {
         Self {
             path,
             file: OnceLock::new(),
+            unavailable: AtomicBool::new(false),
         }
     }
 
@@ -73,20 +76,11 @@ impl ChunkGroupLocks {
     /// processes missing different groups of one cell plan the same window,
     /// and a claim on their own group alone would let both fetch it.
     ///
-    /// The wait blocks in the kernel, which hands the groups over the moment
-    /// the holder releases them — no polling, no wasted wakeups, and no
-    /// interval to oversleep. What bounds the wait is the holder rather than
-    /// the waiter: every backend read carries a timeout so a claim is always
-    /// released, and a claim whose process dies is released by the kernel.
-    /// Waiters therefore block for as long as the fetch they are waiting for,
-    /// which is what they would have spent fetching it themselves anyway.
+    /// Contention is polled for at most two seconds before this call falls
+    /// back to an uncoordinated fetch. Later calls still try to acquire the
+    /// lock; only unsupported locking permanently disables coordination.
     ///
-    /// **A claim must not be held across an operation that cannot time out**,
-    /// because what queues up behind it are reader threads.
-    ///
-    /// The wait is interruptible, so a shutdown signal still breaks it.
-    ///
-    /// Returns `None` when the filesystem cannot provide the lock; callers
+    /// Returns `None` on timeout or when the filesystem cannot provide the lock; callers
     /// then fetch uncoordinated, exactly as they did before this existed,
     /// because a missing optimisation must never fail a read.
     ///
@@ -94,15 +88,36 @@ impl ChunkGroupLocks {
     /// groups just before releasing, so the usual outcome of waiting is that
     /// no backend request is needed at all.
     pub fn acquire(&self, groups: Range<usize>) -> Option<GroupLockGuard<'_>> {
+        if self.unavailable.load(Ordering::Relaxed) {
+            return None;
+        }
         let file = self.file()?;
-        match set_lock(
-            file,
-            &groups,
-            libc::F_WRLCK as libc::c_short,
-            libc::F_OFD_SETLKW,
-        ) {
+        let start = std::time::Instant::now();
+        let result = loop {
+            match set_lock(
+                file,
+                &groups,
+                libc::F_WRLCK as libc::c_short,
+                libc::F_OFD_SETLK,
+            ) {
+                Err(err)
+                    if matches!(err.raw_os_error(), Some(libc::EAGAIN | libc::EACCES))
+                        && start.elapsed() < std::time::Duration::from_secs(2) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result,
+            }
+        };
+        match result {
             Ok(()) => Some(GroupLockGuard { file, groups }),
             Err(err) => {
+                if matches!(
+                    err.raw_os_error(),
+                    Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+                ) {
+                    self.unavailable.store(true, Ordering::Relaxed);
+                }
                 warn!(
                     "failed to lock groups {groups:?} in {}: {err}; \
                      fetching without cross-process coordination",
@@ -176,6 +191,43 @@ mod tests {
 
         drop(locks.acquire(7..8).expect("first claim"));
         drop(locks.acquire(7..8).expect("second claim after release"));
+    }
+
+    #[test]
+    fn contention_timeout_does_not_disable_later_acquisitions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob.flight.lock");
+        let peer = ChunkGroupLocks::new(path.clone());
+        let locks = ChunkGroupLocks::new(path);
+        let claim = peer.acquire(3..4).expect("peer claims group 3");
+
+        let started = Instant::now();
+        assert!(locks.acquire(3..4).is_none());
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(locks.acquire(4..5).expect("uncontended groups still lock"));
+
+        drop(claim);
+        let reclaimed = locks.acquire(3..4).expect("claim after contention clears");
+        assert!(
+            matches!(
+                set_lock(
+                    peer.file().unwrap(),
+                    &(3..4),
+                    libc::F_WRLCK as libc::c_short,
+                    libc::F_OFD_SETLK,
+                )
+                .unwrap_err()
+                .raw_os_error(),
+                Some(libc::EAGAIN | libc::EACCES)
+            ),
+            "the recovered claim must exclude a peer"
+        );
+        drop(reclaimed);
+        drop(
+            peer.acquire(3..4)
+                .expect("recovered claim releases normally"),
+        );
     }
 
     #[test]
