@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,8 +27,10 @@ import (
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
+	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	"github.com/distribution/reference"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -145,6 +148,66 @@ func push(ctx context.Context, store content.Store, resolver remotes.Resolver, d
 		return errors.Wrapf(err, "create pusher for %q", pushRef)
 	}
 	return remotes.PushContent(ctx, &retryPusher{pusher: pusher}, desc, store, nil, platformMC, wrapper)
+}
+
+func ensureParentBlob(ctx context.Context, store content.Store, resolver remotes.Resolver, desc ocispec.Descriptor, parent, target string) error {
+	parentNamed, err := reference.ParseNormalizedNamed(parent)
+	if err != nil {
+		return errors.Wrapf(err, "parse parent image %q", parent)
+	}
+	targetNamed, err := reference.ParseNormalizedNamed(target)
+	if err != nil {
+		return errors.Wrapf(err, "parse target image %q", target)
+	}
+	if reference.Domain(parentNamed) != reference.Domain(targetNamed) {
+		return errors.Errorf("parent image %q and target %q must use the same registry", parent, target)
+	}
+	if reference.Path(parentNamed) == reference.Path(targetNamed) {
+		return nil
+	}
+
+	mountDesc := desc
+	mountDesc.Annotations = maps.Clone(desc.Annotations)
+	if mountDesc.Annotations == nil {
+		mountDesc.Annotations = make(map[string]string, 1)
+	}
+	host := (&url.URL{Host: reference.Domain(parentNamed)}).Hostname()
+	mountDesc.Annotations[labels.LabelDistributionSource+"."+host] = reference.Path(parentNamed)
+	pusher, err := resolver.Pusher(ctx, target)
+	if err != nil {
+		return errors.Wrapf(err, "create pusher for %q", target)
+	}
+	writer, err := (&retryPusher{pusher: pusher}).Push(ctx, mountDesc)
+	if errdefs.IsAlreadyExists(err) {
+		return nil
+	}
+	if err != nil {
+		return errors.Wrapf(err, "mount parent blob %s", desc.Digest)
+	}
+	if writer == nil {
+		return errors.Errorf("mount parent blob %s returned no upload writer", desc.Digest)
+	}
+	defer func() { _ = writer.Close() }()
+
+	logrus.Warnf("registry did not mount parent blob %s; downloading and uploading it instead", desc.Digest)
+	fetcher, err := resolver.Fetcher(ctx, parent)
+	if err != nil {
+		return errors.Wrapf(err, "get fetcher for parent %q", parent)
+	}
+	if err := remotes.Fetch(ctx, store, fetcher, desc); err != nil && !errdefs.IsAlreadyExists(err) {
+		return errors.Wrapf(err, "download parent blob %s", desc.Digest)
+	}
+	reader, err := store.ReaderAt(ctx, desc)
+	if err != nil {
+		return errors.Wrapf(err, "open downloaded parent blob %s", desc.Digest)
+	}
+	defer func() { _ = reader.Close() }()
+	if err := content.Copy(ctx, writer, io.NewSectionReader(reader, 0, desc.Size), desc.Size, desc.Digest); errdefs.IsAlreadyExists(err) {
+		return nil
+	} else if err != nil {
+		return errors.Wrapf(err, "upload parent blob %s", desc.Digest)
+	}
+	return writer.Close()
 }
 
 func pushBlobFile(ctx context.Context, resolver remotes.Resolver, desc ocispec.Descriptor, ref, path string) error {

@@ -38,7 +38,6 @@ func TestCommandFailures(t *testing.T) {
 		{"oci-directory", []string{"convert", "--source", dir, "--compressor", "oci-tar"}, "exactly one nydus image"},
 		{"oci-pull", []string{"convert", "--source", "://bad", "--compressor", "oci-tar"}, "pull"},
 		{"parent-reference", []string{"convert", "--bootstrap", blocked, "--parent-image", "://bad"}, "reference"},
-		{"parent-repository", []string{"convert", "--bootstrap", blocked, "--parent-image", "example.test/other:tag"}, "same repository"},
 		{"artifact-inspect", []string{"convert", "--bootstrap", blocked, "--blob", blocked, "--builder", missing}, "inspect bootstrap"},
 		{"directory-build", []string{"convert", "--source", dir, "--builder", missing}, "convert"},
 		{"image-pull", []string{"convert", "--source", "://bad"}, "pull"},
