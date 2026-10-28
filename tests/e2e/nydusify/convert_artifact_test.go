@@ -73,10 +73,22 @@ func TestConvertArtifact(t *testing.T) {
 		require.Equal(t, want, string(data), "%s", name)
 	}
 	t.Run("CrossRepositoryParent", func(t *testing.T) {
-		out, err := tryNydusify(t, "convert", "--bootstrap", childBoot, "--blob-dir", childDir,
-			"--parent-image", parentRef, "--target", reg.Ref("other-artifact", "child"))
-		require.Error(t, err, "%s", out)
-		require.Contains(t, out, "same repository")
+		crossRef := reg.Ref("other-artifact", "child")
+		nydusify(t, "convert", "--bootstrap", childBoot, "--blob-dir", childDir,
+			"--parent-image", parentRef, "--target", crossRef)
+		cross, err := remoteImage(t, crossRef).Manifest()
+		require.NoError(t, err)
+		require.Len(t, cross.Layers, 3)
+		require.Equal(t, parent.Layers[0], cross.Layers[0])
+		crossImage := pullNydus(t, crossRef, nil)
+		crossMount := mount.Mount(t, mount.FUSE{}, crossImage, mount.Options{})
+		for name, want := range map[string]string{
+			"changed": "child changed\n", "created": "child created\n", "unchanged": unchanged,
+		} {
+			data, err := os.ReadFile(filepath.Join(crossMount.Root, name))
+			require.NoError(t, err)
+			require.Equal(t, want, string(data), "%s", name)
+		}
 	})
 	t.Run("MissingParentBlob", func(t *testing.T) {
 		out, err := tryNydusify(t, "convert", "--bootstrap", childBoot, "--blob-dir", childDir,

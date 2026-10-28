@@ -89,7 +89,7 @@ func convertCommand() *cli.Command {
 			},
 			&cli.StringSliceFlag{
 				Name:  "parent-image",
-				Usage: "existing nydus image whose blob descriptors and blob.meta files are reused without downloading data blobs",
+				Usage: "existing nydus image whose blobs are reused; cross-repository blobs are mounted or copied into the target repository",
 			},
 			&cli.GenericFlag{
 				Name:  "manifest-annotation",
@@ -302,6 +302,7 @@ func runConvert(c *cli.Context) error {
 	var newDesc *ocispec.Descriptor
 	var externalBlobs []ocispec.Descriptor
 	var localBlobs []pipeline.LocalBlob
+	var crossRepoParent string
 
 	if toOCI {
 		if artifactMode {
@@ -345,7 +346,7 @@ func runConvert(c *cli.Context) error {
 				return err
 			}
 			if !sameRepo {
-				return errors.Errorf("--parent-image %q must be in the same repository as target %q", parent, target)
+				crossRepoParent = parent
 			}
 
 			logrus.Infof("pulling parent nydus metadata %s", parent)
@@ -471,6 +472,12 @@ func runConvert(c *cli.Context) error {
 		} else {
 			logrus.Infof("image size: oci %s -> nydus %s",
 				humanize.IBytes(srcSize), humanize.IBytes(dstSize))
+		}
+	}
+
+	if crossRepoParent != "" {
+		if err := provider.EnsureParentBlobs(ctx, externalBlobs, crossRepoParent, target); err != nil {
+			return err
 		}
 	}
 

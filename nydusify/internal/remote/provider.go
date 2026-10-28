@@ -181,6 +181,26 @@ func (p *Provider) PushSkipping(ctx context.Context, desc ocispec.Descriptor, re
 	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC, wrapper)
 }
 
+// EnsureParentBlobs makes parent blobs available in a different repository on
+// the target registry before the child manifest is pushed.
+func (p *Provider) EnsureParentBlobs(ctx context.Context, descs []ocispec.Descriptor, parent, target string) error {
+	normalizedParent, err := normalizeRef(parent)
+	if err != nil {
+		return err
+	}
+	normalizedTarget, err := normalizeRef(target)
+	if err != nil {
+		return err
+	}
+	resolver := p.resolver(Target)
+	for _, desc := range descs {
+		if err := ensureParentBlob(ctx, p.store, resolver, desc, normalizedParent, normalizedTarget); err != nil {
+			return errors.Wrapf(err, "make parent blob %s available in target repository", desc.Digest)
+		}
+	}
+	return nil
+}
+
 // SameRepository reports whether two image references resolve to the same
 // registry repository after normalizing tags and Docker Hub shorthands.
 func SameRepository(a, b string) (bool, error) {

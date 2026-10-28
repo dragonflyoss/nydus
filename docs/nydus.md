@@ -2828,12 +2828,13 @@ view.
 
 Writer output can be packaged without rebuilding file data:
 
-    nydusify convert --bootstrap ./snapshot/image.boot --blob ./snapshot/<upper-blob-sha256> --parent-image registry.example.com/vm/snapshot:v1 --target registry.example.com/vm/snapshot:v2
+    nydusify convert --bootstrap ./snapshot/image.boot --blob ./snapshot/<upper-blob-sha256> --parent-image registry.example.com/vm/base:v1 --target registry.example.com/vm/snapshot:v2
 
-The parent and target must name the same registry repository. nydusify
-downloads only parent manifest/config/bootstrap metadata, reuses parent data
-blob descriptors, uploads local upper blobs directly, and writes a new
-bootstrap layer, config and manifest.
+The parent and target must use the same registry. nydusify downloads the
+parent manifest/config/bootstrap metadata and reuses its data blob descriptors.
+For a different target repository, it first tries a registry-side blob mount;
+if that is unavailable, it downloads and uploads the parent blob. It then
+uploads local upper blobs and writes a new bootstrap layer, config and manifest.
 
 ## Merge Design
 
@@ -3092,7 +3093,7 @@ Flags:
 | `--bootstrap` | empty | Existing nydus bootstrap to package in artifact mode. Mutually exclusive with `--source`. |
 | `--blob` | empty | Local nydus blob artifact to include in artifact mode. Repeatable. |
 | `--blob-dir` | empty | Directory containing local nydus blob artifacts named by full blob SHA256 for artifact mode. |
-| `--parent-image` | empty | Existing nydus image whose data blob descriptors, blob meta files and manifest annotations are reused in artifact mode without downloading parent data blobs. Explicit `--manifest-annotation` values override inherited keys. Only one parent image is currently supported. |
+| `--parent-image` | empty | Existing nydus image whose data blob descriptors, blob meta files and manifest annotations are reused in artifact mode. When parent and target use different repositories on the same registry, parent blobs are mounted into the target repository; registries without cross-repository mount support fall back to downloading and uploading them. Explicit `--manifest-annotation` values override inherited keys. Only one parent image is currently supported. |
 | `--manifest-annotation` | empty | OCI manifest annotation in `key=value` form. Repeatable; values may contain `=`, and the last value wins for a repeated key. Supported when converting to nydus. |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
 | `--chunk-size` | `0` (automatic) | Chunk size, 2MiB by default; explicit values are bytes (a power of two, at least 4KiB). The largest file chunk (chunk groups follow the builder's defaults). Not used by `erofs-lz4`/`erofs-zstd` and ignored when converting back to OCI. |
@@ -3142,9 +3143,10 @@ nydusify convert \
 	--target localhost:5000/app-nydus \
 	--source-plain-http --target-plain-http
 
-# Package writer output while reusing parent blobs in the same repository.
+# Package writer output while reusing parent blobs. Cross-repository blobs are
+# mounted into the target repository when the registry supports it.
 nydusify convert --bootstrap ./snapshot/image.boot --blob ./snapshot/<upper-blob-sha256> \
-  --parent-image registry.example.com/vm/snapshot:v1 --target registry.example.com/vm/snapshot:v2
+  --parent-image registry.example.com/vm/base:v1 --target registry.example.com/vm/snapshot:v2
 
 # Package writer output and attach VM rootfs metadata to the OCI manifest.
 nydusify convert \
