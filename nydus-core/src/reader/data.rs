@@ -205,9 +205,17 @@ impl ErofsReader {
         let chunk_size = self.chunk_size(inode);
         let index_bytes = self.chunk_index_bytes(nid, inode)?;
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
+        let device_count = self.superblock().extra_devices();
         let mut result = Vec::with_capacity(nchunks);
         for index in 0..nchunks {
-            result.push(Self::chunk_index_entry_at(index_bytes, index)?.addr());
+            let addr = Self::chunk_index_entry_at(index_bytes, index)?.addr();
+            if !addr.is_hole() && addr.device_id > device_count {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("chunk refers to missing device {}", addr.device_id),
+                ));
+            }
+            result.push(addr);
         }
         Ok(result)
     }

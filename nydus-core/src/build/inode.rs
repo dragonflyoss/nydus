@@ -748,6 +748,14 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
 
 /// Serialize an inode (header, xattrs, chunk indexes and inline tail) to bytes.
 pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> {
+    serialize_inode_remapped(inode, epoch, None)
+}
+
+pub(crate) fn serialize_inode_remapped(
+    inode: &InodeInfo,
+    epoch: u64,
+    device_ids: Option<&[u16]>,
+) -> Result<Vec<u8>> {
     if !inode.is_extended && (inode.mtime != epoch || inode.mtime_nsec != 0) {
         return Err(Error::InvalidImage(format!(
             "compact inode {} time {}.{} differs from shared time {epoch}.0",
@@ -810,7 +818,22 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Result<Vec<u8>> 
             let extent_offset = align_up_usize(base + xattr_size, EROFS_CHUNK_INDEX_SIZE)
                 .expect("alignment overflowed");
             for (i, entry) in chunk_index_entries.iter().enumerate() {
-                let index = ErofsChunkIndex::new(*entry)?;
+                let mut addr = *entry;
+                if !addr.is_hole() && addr.device_id != 0 {
+                    if let Some(device_ids) = device_ids {
+                        addr.device_id = device_ids
+                            .get(usize::from(addr.device_id) - 1)
+                            .copied()
+                            .filter(|id| *id != 0)
+                            .ok_or_else(|| {
+                                Error::InvalidImage(format!(
+                                    "chunk refers to missing device {}",
+                                    addr.device_id
+                                ))
+                            })?;
+                    }
+                }
+                let index = ErofsChunkIndex::new(addr)?;
                 let off = extent_offset + i * EROFS_CHUNK_INDEX_SIZE;
                 buf[off..off + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(index.as_bytes());
             }

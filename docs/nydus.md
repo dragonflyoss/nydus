@@ -2791,6 +2791,16 @@ building an upper filesystem and running a separate merge:
 - **commit** materializes all dirty chunks into at most one upper blob, renders
   image.boot, and preserves parent device mappings used by flattened chunk
   addresses.
+  It removes parent blobs with no remaining chunk references from the child
+  device table and renumbers retained device IDs. This only reads in-memory
+  chunk metadata; blob data is neither read nor rewritten. Packaging the child
+  bootstrap consequently omits those unused parent layers.
+  Device IDs are remapped during serialization without rewriting the in-memory
+  chunk table. Reference tracking uses memory proportional to the blob count.
+  When no blobs remain, the bootstrap alone is a valid image. NydusCore can
+  read its zero-filled files and create a subsequent writer with or without a
+  data cache. Packaging requires no blob or parent inputs in this case;
+  nonempty bootstrap references still require every referenced blob.
 
 Aligned complete chunks remain source-backed until materialization. Owned
 buffers can move into the blob writer, file ranges retain an Arc<File>, and

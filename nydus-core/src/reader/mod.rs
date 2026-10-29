@@ -40,7 +40,7 @@ pub struct RawBlobInfo {
 
 /// Parse a `trusted.nydus.prefetch.blobs` xattr value such as `"2,5,1"` into an
 /// ordered list of blob indexes, skipping empty, zero, or non-numeric tokens.
-fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
+pub(crate) fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
     let text = match std::str::from_utf8(value) {
         Ok(text) => text,
         Err(_) => return Vec::new(),
