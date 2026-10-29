@@ -2,8 +2,10 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+use uuid::Uuid;
+
 use super::lifecycle::SessionRuntimeHandle;
-use super::transfer::FuseInitState;
+use super::transfer::{FuseInitState, SessionProtection};
 
 pub(super) fn empty_filesystem() -> crate::fuse::ErofsFs {
     use nydus_core::build::bootstrap::render_bootstrap;
@@ -62,15 +64,32 @@ pub(in crate::fuse) fn fuse_init_state() -> FuseInitState {
     }
 }
 
-pub(super) fn parked_runtime_handle() -> (SessionRuntimeHandle, fuser::BackgroundSession, UnixStream)
-{
-    let (session, kernel) = empty_session(fuser::InitFlags::empty());
-    let fuse_fd = session.as_fd().try_clone_to_owned().unwrap();
+/// Returns the runtime handle of a parked session, protected with a journal when
+/// `session_id` is set.
+pub(super) fn parked_runtime_handle(
+    session_id: Option<Uuid>,
+) -> (SessionRuntimeHandle, fuser::BackgroundSession, UnixStream) {
+    let (mut session, kernel) = empty_session(fuser::InitFlags::empty());
+    let (devices, protection) = match session_id {
+        None => (
+            vec![session.as_fd().try_clone_to_owned().unwrap()],
+            SessionProtection::Standalone,
+        ),
+        Some(session_id) => {
+            let journal = session.create_inflight_journal().unwrap();
+            let protection = SessionProtection::Failover {
+                session_id,
+                journal: journal.map(std::sync::Arc::new),
+            };
+            (session.try_clone_fds().unwrap(), protection)
+        }
+    };
     let background = session.spawn_paused(Duration::from_secs(5)).unwrap();
     let handle = SessionRuntimeHandle::new(
         background.pauser(),
-        fuse_fd,
+        devices,
         fuse_init_state(),
+        protection,
         std::sync::Arc::new(std::sync::Mutex::new(None)),
     );
     (handle, background, kernel)

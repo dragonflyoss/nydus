@@ -16,8 +16,9 @@ const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// The one-byte payload that carries an `SCM_RIGHTS` record.
 const FD_TAG: u8 = b'F';
 
-/// The most descriptors one transfer may carry; frontends validate the exact layout.
-const MAX_TRANSFER_FDS: usize = 16;
+/// The most descriptors one `SCM_RIGHTS` record can carry, the kernel's `SCM_MAX_FD`;
+/// frontends validate the exact layout.
+const MAX_TRANSFER_FDS: usize = 253;
 
 /// The absolute expiry shared by every step of one protocol transaction.
 #[derive(Clone, Copy)]
@@ -294,14 +295,15 @@ fn send_fds_until(
     }
 }
 
-/// Receives one to [`MAX_TRANSFER_FDS`] descriptors from one tagged `SCM_RIGHTS` record,
-/// closing every received descriptor when the record is rejected.
+/// Receives one to `max` descriptors from one tagged `SCM_RIGHTS` record, closing
+/// every received descriptor when the record is rejected.
 fn recv_fds_until(
     stream: &UnixStream,
+    max: usize,
     deadline: ProtocolDeadline,
 ) -> std::io::Result<Vec<OwnedFd>> {
     // One extra slot distinguishes an oversized record from a full one.
-    let rights_bytes = ((MAX_TRANSFER_FDS + 1) * mem::size_of::<RawFd>()) as u32;
+    let rights_bytes = ((max + 1) * mem::size_of::<RawFd>()) as u32;
     let mut payload = [0u8; 1];
     let mut iov = libc::iovec {
         iov_base: payload.as_mut_ptr().cast(),
@@ -384,7 +386,7 @@ fn recv_fds_until(
         Some("descriptor transfer contains an invalid ancillary record")
     } else if rights_messages != 1 {
         Some("descriptor transfer must contain exactly one SCM_RIGHTS record")
-    } else if received_fds.is_empty() || received_fds.len() > MAX_TRANSFER_FDS {
+    } else if received_fds.is_empty() || received_fds.len() > max {
         Some("descriptor transfer has an invalid descriptor count")
     } else {
         None
@@ -393,7 +395,7 @@ fn recv_fds_until(
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "{reason}: received {} descriptors, at most {MAX_TRANSFER_FDS} allowed",
+                "{reason}: received {} descriptors, at most {max} allowed",
                 received_fds.len()
             ),
         ));
@@ -409,6 +411,12 @@ pub struct Transfer {
 
 impl Transfer {
     pub(crate) fn send(&self, stream: &mut UnixStream, deadline: ProtocolDeadline) -> Result<()> {
+        if self.fds.len() > MAX_TRANSFER_FDS {
+            return Err(Error::InvalidParameter(format!(
+                "session transfer has {} descriptors, but one SCM_RIGHTS record carries at most {MAX_TRANSFER_FDS}",
+                self.fds.len()
+            )));
+        }
         write_raw_frame_until(stream, deadline, &self.metadata)
             .context("failed to send session transfer metadata")?;
         let fds: Vec<_> = self.fds.iter().map(AsFd::as_fd).collect();
@@ -423,7 +431,7 @@ impl Transfer {
                 "session transfer closed before metadata",
             )
         })?;
-        let fds = recv_fds_until(stream, deadline)
+        let fds = recv_fds_until(stream, MAX_TRANSFER_FDS, deadline)
             .context("failed to receive session transfer descriptors")?;
         Ok(Self { metadata, fds })
     }
@@ -569,7 +577,7 @@ mod tests {
         drop(sentinel);
         drop(other);
 
-        let error = recv_fds_until(&right, test_deadline()).unwrap_err();
+        let error = recv_fds_until(&right, MAX_TRANSFER_FDS, test_deadline()).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_peer_closed(peer);
     }
@@ -578,10 +586,11 @@ mod tests {
     fn invalid_fd_counts_and_truncation_close_received_descriptors() {
         let (mut left, right) = UnixStream::pair().unwrap();
         left.write_all(&[FD_TAG]).unwrap();
-        let error = recv_fds_until(&right, test_deadline()).unwrap_err();
+        let error = recv_fds_until(&right, MAX_TRANSFER_FDS, test_deadline()).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 
-        for sent_count in [MAX_TRANSFER_FDS + 1, 64] {
+        const MAX: usize = 4;
+        for sent_count in [MAX + 1, 64] {
             let (left, right) = UnixStream::pair().unwrap();
             let (sentinel, peer) = UnixStream::pair().unwrap();
             let files: Vec<_> = (1..sent_count)
@@ -595,7 +604,7 @@ mod tests {
             drop(files);
             drop(sentinel);
 
-            let error = recv_fds_until(&right, test_deadline()).unwrap_err();
+            let error = recv_fds_until(&right, MAX, test_deadline()).unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
             assert_peer_closed(peer);
         }

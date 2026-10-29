@@ -48,7 +48,7 @@
 //! |---|---|---|
 //! | Handoff | opaque [`wire::Transfer`] over the control socket | predecessor releases at `HANDOFF_BEGIN` |
 //! | Rollback | until READY | none |
-//! | Crash protection | a Recovery Holder retains the transfer; needs a session ID | the kernel keeps the resource; always |
+//! | Crash protection | a Recovery Holder retains the transfer until serving ends the session; needs a session ID | the kernel keeps the resource; always |
 //! | Example | FUSE | NBD |
 //!
 //! # Reading order
