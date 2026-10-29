@@ -24,10 +24,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: ['fuse', 'nbd', 'ublk', 'uffd', 'fanotify', 'bench']
+        module: ['fuse', 'fuse-continuity', 'nbd', 'ublk', 'uffd', 'fanotify', 'bench']
         include:
           - module: fuse
             target: test-e2e test-tooci test-fs test-tar-corpus
+          - module: fuse-continuity
+            target: test-fuse-continuity
           - module: nbd
             target: test-nbd
           - module: ublk

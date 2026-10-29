@@ -6,8 +6,12 @@
 
 use std::path::PathBuf;
 
+#[cfg(feature = "api-server")]
+pub mod api_server;
 pub mod build;
 pub mod check;
+#[cfg(feature = "continuity")]
+pub mod continuity;
 pub mod export;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
@@ -15,7 +19,12 @@ pub mod fanotify;
 pub mod fileio;
 #[cfg(feature = "fuse")]
 pub mod fuse;
-#[cfg(any(feature = "fanotify", feature = "fileio", feature = "nbd"))]
+#[cfg(any(
+    feature = "fanotify",
+    feature = "fileio",
+    feature = "fuse",
+    feature = "nbd"
+))]
 pub mod mount;
 #[cfg(feature = "nbd")]
 pub mod nbd;
@@ -23,6 +32,7 @@ pub mod optimize;
 #[cfg(any(
     feature = "fanotify",
     feature = "fileio",
+    feature = "fuse",
     feature = "nbd",
     feature = "ublk",
     feature = "uffd"

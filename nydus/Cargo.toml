@@ -15,7 +15,15 @@ required-features = ["cli"]
 [features]
 default = ["registry"]
 # FUSE mount support (ErofsFs over fuser).
-fuse = ["dep:fuser", "dep:signal-hook"]
+fuse = ["continuity", "dep:fuser", "dep:signal-hook"]
+continuity = ["api-server", "dep:httparse", "dep:uuid"]
+api-server = [
+  "dep:http-body-util",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:prometheus",
+  "dep:tokio",
+]
 # The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
 cli = [
   "fuse",
@@ -23,10 +31,6 @@ cli = [
   "dep:anstyle",
   "dep:bytesize",
   "dep:clap",
-  "dep:http-body-util",
-  "dep:hyper",
-  "dep:hyper-util",
-  "dep:prometheus",
   "dep:signal-hook",
   "dep:tabled",
   "dep:tokio",
@@ -62,9 +66,10 @@ blake3 = "1"
 bytesize = { version = "1", optional = true }
 clap = { workspace = true, optional = true }
 crc32c = "0.6"
-fuser = { version = "0.17", optional = true }
+fuser = { version = "0.18.0", optional = true }
 hex = { workspace = true }
 http-body-util = { version = "0.1", optional = true }
+httparse = { version = "1", optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = { workspace = true }
@@ -100,9 +105,10 @@ tokio = { workspace = true, features = [
   "rt",
   "rt-multi-thread",
   "sync",
+  "time",
 ], optional = true }
 tracing = { workspace = true }
-uuid = { version = "1", features = ["v4"], optional = true }
+uuid = { version = "1", features = ["serde", "v4"], optional = true }
 xattr = { workspace = true }
 
 [dev-dependencies]

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use nydus::error::Result;
 use nydus_config::{default_log_dir, VersionValueParser, NAME};
 
-pub mod api_server;
+pub use nydus::api_server;
 pub mod build;
 pub mod check;
 pub mod export;
