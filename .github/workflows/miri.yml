@@ -40,8 +40,11 @@ jobs:
       run: bash misc/install-protoc.sh
     - name: Unit Test with Miri
       run: |
+        set -o pipefail
         CARGO_HOME=${HOME}/.cargo
         CARGO_BIN=$(which cargo)
         RUSTUP_BIN=$(which rustup)
-        sudo -E RUSTUP=${RUSTUP_BIN} make miri-ut-nextest 2>&1 | tee miri-ut.log
-        grep -C 2 'Undefined Behavior' miri-ut.log
+        miri_status=0
+        bash misc/ci-run-with-log.sh miri-ut.log sudo -E RUSTUP=${RUSTUP_BIN} make miri-ut-nextest || miri_status=$?
+        grep -C 2 'Undefined Behavior' miri-ut.log || true
+        exit "$miri_status"
