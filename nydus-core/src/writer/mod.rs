@@ -11,12 +11,12 @@ use crate::build::blob_chunk::{
     is_zero, validate_chunk_group_min_size, validate_chunk_size, BlobLayout, BlobWriter,
     DEFAULT_CHUNK_GROUP_MIN_SIZE,
 };
-use crate::build::bootstrap::render_bootstrap;
+use crate::build::bootstrap::render_bootstrap_remapped;
 use crate::build::inode::{
     flatten_tree, ChildRef, InodeData, InodeInfo, NamedChildren, NodeAttrs, TreeNode,
 };
 use crate::build::{save_blob_metadata_sidecar, HashingWriter};
-use crate::reader::RawDirEntry;
+use crate::reader::{parse_prefetch_blobs_value, RawDirEntry};
 use crate::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{self, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
@@ -828,15 +828,22 @@ impl IncrementalWriter {
         if !self.overlay.is_empty() {
             self.materialize_overlay()?;
         }
+        let parent_device_count = self.device_slots.len();
         let keep_empty_blob = self.device_slots.is_empty();
         if keep_empty_blob {
             self.ensure_blob_writer()?;
         }
         self.finish_current_blob(keep_empty_blob)?;
+        let device_ids = self.prune_parent_devices(parent_device_count)?;
 
         self.sort_directory_children();
-        let final_bootstrap =
-            render_bootstrap(&mut self.inodes, self.epoch, &self.device_slots, &self.uuid)?;
+        let final_bootstrap = render_bootstrap_remapped(
+            &mut self.inodes,
+            self.epoch,
+            &self.device_slots,
+            &self.uuid,
+            device_ids.as_deref(),
+        )?;
         let bootstrap_path = self.output_dir.join("image.boot");
         fs::write(&bootstrap_path, final_bootstrap).with_context(|| {
             format!(
@@ -846,6 +853,113 @@ impl IncrementalWriter {
         })?;
 
         Ok(())
+    }
+
+    /// Analyze final chunk metadata; new blob data is already known to be live.
+    /// Return a device ID map only when pruning changes the device table.
+    fn prune_parent_devices(&mut self, parent_device_count: usize) -> Result<Option<Vec<u16>>> {
+        if parent_device_count == 0 {
+            return Ok(None);
+        }
+        // Reuse the liveness markers as the eventual old-to-new ID map.
+        let mut device_ids = vec![0u16; self.device_slots.len()];
+        device_ids[parent_device_count..].fill(1);
+        let mut remaining = parent_device_count;
+        let mut mapped = None;
+        'inodes: for inode in &self.inodes {
+            let InodeData::RegularFile {
+                chunk_index_entries,
+                ..
+            } = &inode.data
+            else {
+                continue;
+            };
+            for entry in chunk_index_entries.iter().filter(|entry| !entry.is_hole()) {
+                if usize::from(entry.device_id) == parent_device_count + 1
+                    && self.device_slots.len() > parent_device_count
+                {
+                    continue;
+                }
+                let index = if entry.device_id == 0 {
+                    // Only flattened chunks need a sorted address lookup.
+                    let ranges = mapped.get_or_insert_with(|| {
+                        let mut ranges: Vec<_> = self.device_slots[..parent_device_count]
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, slot)| slot.mapped_blkaddr() != 0)
+                            .map(|(index, slot)| (slot.mapped_blkaddr(), slot.blocks(), index))
+                            .collect();
+                        ranges.sort_unstable_by_key(|range| range.0);
+                        ranges
+                    });
+                    let end = ranges.partition_point(|range| range.0 <= entry.blkaddr);
+                    let range = end
+                        .checked_sub(1)
+                        .and_then(|index| ranges.get(index))
+                        .filter(|range| entry.blkaddr - range.0 < range.1)
+                        .ok_or_else(|| {
+                            Error::InvalidImage(
+                                "flattened chunk is outside parent device mappings".to_string(),
+                            )
+                        })?;
+                    range.2
+                } else {
+                    usize::from(entry.device_id) - 1
+                };
+                let live = device_ids.get_mut(index).ok_or_else(|| {
+                    Error::InvalidImage(format!(
+                        "chunk refers to missing device {}",
+                        entry.device_id
+                    ))
+                })?;
+                if *live == 0 {
+                    *live = 1;
+                    remaining -= 1;
+                    if remaining == 0 {
+                        break 'inodes;
+                    }
+                }
+            }
+        }
+        if remaining == 0 {
+            return Ok(None);
+        }
+
+        let mut next_id = 0u16;
+        for id in &mut device_ids {
+            if *id != 0 {
+                next_id += 1;
+                *id = next_id;
+            }
+        }
+        // Chunk IDs are remapped while serializing, without rewriting the
+        // in-memory chunk table or scanning it a second time.
+        let root = &mut self.inodes[0];
+        root.xattrs.retain_mut(|entry| {
+            if !entry.is_nydus_prefetch_blobs() {
+                return true;
+            }
+            use std::fmt::Write as _;
+            let mut value = String::with_capacity(entry.value.len());
+            for id in parse_prefetch_blobs_value(&entry.value) {
+                let Some(&id) = device_ids.get(usize::from(id) - 1).filter(|id| **id != 0) else {
+                    continue;
+                };
+                if !value.is_empty() {
+                    value.push(',');
+                }
+                write!(&mut value, "{id}").expect("writing to String cannot fail");
+            }
+            entry.value = value.into_bytes();
+            !entry.value.is_empty()
+        });
+        let mut index = 0;
+        self.device_slots.retain(|_| {
+            let keep = device_ids[index] != 0;
+            index += 1;
+            keep
+        });
+        Ok(Some(device_ids))
     }
 
     fn discard_current_blob(&mut self) {
@@ -1679,4 +1793,65 @@ fn normalize_relative_path(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(normalized)
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn prune_remaps_prefetch_and_chunk_ids_only_when_serializing() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut writer =
+            IncrementalWriter::create(IncrementalWriterOptions::new(temp.path().to_path_buf()))
+                .unwrap();
+        writer
+            .create_file(Path::new("a"), 1, CreateFileOptions::default())
+            .unwrap();
+        writer.device_slots = (1..=3)
+            .map(|value| ErofsDeviceSlot::with_blob_id(1, &[value; EROFS_BLOB_ID_SIZE]).unwrap())
+            .collect();
+        let index = *writer.path_index.get(Path::new("a")).unwrap();
+        let InodeData::RegularFile {
+            chunk_index_entries,
+            ..
+        } = &mut writer.inodes[index].data
+        else {
+            unreachable!()
+        };
+        chunk_index_entries[0] = ErofsChunkAddr {
+            device_id: 2,
+            blkaddr: 0,
+        };
+        crate::build::inode::set_root_prefetch_blobs_xattr(&mut writer.inodes[0], &[2, 1]).unwrap();
+        let ids = writer.prune_parent_devices(2).unwrap().unwrap();
+        assert_eq!(ids, vec![0, 1, 2]);
+        assert_eq!(writer.device_slots.len(), 2);
+        let InodeData::RegularFile {
+            chunk_index_entries,
+            ..
+        } = &writer.inodes[index].data
+        else {
+            unreachable!()
+        };
+        assert_eq!(chunk_index_entries[0].device_id, 2);
+        let bootstrap = render_bootstrap_remapped(
+            &mut writer.inodes,
+            writer.epoch,
+            &writer.device_slots,
+            &writer.uuid,
+            Some(&ids),
+        )
+        .unwrap();
+        let path = temp.path().join("pruned.boot");
+        fs::write(&path, bootstrap).unwrap();
+        let reader = ErofsReader::open_metadata_only(&path).unwrap();
+        assert_eq!(reader.read_prefetch_order(), vec![1]);
+        let nid = writer.inodes[index].nid;
+        let inode = reader.inode(nid).unwrap();
+        assert_eq!(
+            reader.read_chunk_index_entries(nid, &inode).unwrap()[0].device_id,
+            1
+        );
+    }
 }

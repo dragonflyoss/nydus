@@ -142,19 +142,24 @@ fn blob_metadata_path(blob_path: &Path) -> PathBuf {
 }
 
 fn commit_upper_blob(output_dir: &Path, writer: IncrementalWriter) -> CommittedImage {
+    let existing: HashSet<_> = if output_dir.exists() {
+        fs::read_dir(output_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     writer.commit().unwrap();
     let bootstrap_path = output_dir.join("image.boot");
     assert!(bootstrap_path.exists());
 
     let reader = ErofsReader::open_metadata_only(&bootstrap_path).unwrap();
     let blob_infos = reader.blob_infos().unwrap();
-    let blob_path = if blob_infos.len() > 1 {
-        let path = output_dir.join(hex::encode(blob_infos.last().unwrap().blob_id));
-        assert!(path.exists());
-        Some(path)
-    } else {
-        None
-    };
+    let blob_path = blob_infos
+        .last()
+        .map(|info| output_dir.join(hex::encode(info.blob_id)))
+        .filter(|path| path.exists() && !existing.contains(path));
     let blob_metadata_path = blob_path.as_ref().map(|path| {
         let path = blob_metadata_path(path);
         assert!(path.exists());
@@ -803,6 +808,173 @@ fn incremental_writer_replaces_one_chunk_with_upper_blob_data() {
 }
 
 #[test]
+fn incremental_writer_prunes_superseded_blobs_across_generations() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let parent_data = vec![b'A'; chunk_size * 2];
+    let (parent, parent_digest) = build_parent_blob(&temp, &parent_data);
+    let mut bootstrap = parent;
+    for value in [b'B', b'C', b'D'] {
+        let (mut writer, output_dir) = open_metadata_writer(&temp, &bootstrap);
+        writer
+            .write_at(
+                Path::new("memory.bin"),
+                chunk_size as u64,
+                &vec![value; chunk_size],
+            )
+            .unwrap();
+        let image = commit_upper_blob(&output_dir, writer);
+        let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+        let blobs = reader.blob_infos().unwrap();
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(blobs[0].blob_id, parent_digest);
+        let nid = find_path(&reader, "memory.bin");
+        let inode = reader.inode(nid).unwrap();
+        let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+        assert_eq!(chunks[0].device_id, 1);
+        assert_eq!(chunks[1].device_id, 2);
+        let config = local_config(temp.path(), &temp.path().join(format!("cache-{value}")));
+        let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+        let mut expected = vec![b'A'; chunk_size];
+        expected.extend(vec![value; chunk_size]);
+        assert_eq!(
+            core.fs.open("memory.bin").unwrap().read().unwrap(),
+            expected
+        );
+        bootstrap = image.bootstrap_path;
+    }
+
+    // Keep a flattened reference to the second device while removing the first.
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let mapping = 1 << 20;
+    let mut slots: Vec<_> = reader
+        .blob_infos()
+        .unwrap()
+        .iter()
+        .map(|info| {
+            nydus_format::erofs::ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(
+                info.blocks,
+                &info.blob_id,
+                info.mapped_blkaddr,
+            )
+            .unwrap()
+        })
+        .collect();
+    slots[1].set_mapped_blkaddr(mapping).unwrap();
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+    let inode_offset = reader.superblock().meta_blkaddr() as usize * EROFS_BLOCK_SIZE as usize
+        + nid as usize * EROFS_SLOTSIZE as usize;
+    let index_offset = inode_offset
+        + (inode.header_size() + inode.xattr_size()).next_multiple_of(EROFS_CHUNK_INDEX_SIZE)
+        + EROFS_CHUNK_INDEX_SIZE;
+    let flattened = ErofsChunkIndex::new(ErofsChunkAddr {
+        blkaddr: mapping + chunks[1].blkaddr,
+        device_id: 0,
+    })
+    .unwrap();
+    let mut data = fs::read(&bootstrap).unwrap();
+    nydus_core::build::bootstrap::patch_device_slots(&mut data, &slots).unwrap();
+    data[index_offset..index_offset + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(flattened.as_bytes());
+    fs::write(&bootstrap, data).unwrap();
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &bootstrap);
+    writer
+        .write_at(Path::new("memory.bin"), 0, &vec![b'X'; chunk_size])
+        .unwrap();
+    let image = commit_upper_blob(&output_dir, writer);
+    let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+    assert_eq!(reader.blob_infos().unwrap().len(), 2);
+    assert_eq!(reader.blob_infos().unwrap()[0].mapped_blkaddr, mapping);
+    assert!(reader.read_prefetch_order().is_empty());
+    let config = local_config(temp.path(), &temp.path().join("cache-flattened"));
+    let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+    let mut expected = vec![b'X'; chunk_size];
+    expected.extend(vec![b'D'; chunk_size]);
+    assert_eq!(
+        core.fs.open("memory.bin").unwrap().read().unwrap(),
+        expected
+    );
+    bootstrap = image.bootstrap_path;
+
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &bootstrap);
+    writer
+        .replace_file(Path::new("memory.bin"), vec![b'Z'; chunk_size])
+        .unwrap();
+    let image = commit_upper_blob(&output_dir, writer);
+    let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+    assert_eq!(reader.blob_infos().unwrap().len(), 1);
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    assert_eq!(
+        reader.read_chunk_index_entries(nid, &inode).unwrap()[0].device_id,
+        1
+    );
+    let config = local_config(temp.path(), &temp.path().join("cache-replaced"));
+    let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+    assert_eq!(
+        core.fs.open("memory.bin").unwrap().read().unwrap(),
+        vec![b'Z'; chunk_size]
+    );
+
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &image.bootstrap_path);
+    writer
+        .replace_file(Path::new("memory.bin"), vec![0; chunk_size])
+        .unwrap();
+    let image = commit_upper_blob(&output_dir, writer);
+    let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+    assert!(reader.blob_infos().unwrap().is_empty());
+    assert!(image.blob_path.is_none());
+    let empty_blobs = temp.path().join("empty-blobs");
+    fs::create_dir(&empty_blobs).unwrap();
+    for cached in [false, true] {
+        let mut config = local_config(&empty_blobs, &temp.path().join("cache-null-only"));
+        if !cached {
+            config.storage.dir = None;
+        }
+        let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+        let file = core.fs.open("memory.bin").unwrap();
+        assert_eq!(file.read().unwrap(), vec![0; chunk_size]);
+        file.fetch(0, chunk_size as u64).unwrap();
+        for ranges in [
+            file.probe_ranges(0, chunk_size as u64).unwrap(),
+            file.fetch_ranges(0, chunk_size as u64).unwrap(),
+        ] {
+            assert_eq!(
+                ranges.iter().map(|range| range.len).sum::<u64>(),
+                chunk_size as u64
+            );
+            assert!(ranges
+                .iter()
+                .all(|range| range.fd == core.zero_fd() && range.offset == 0));
+        }
+
+        // A partial write must patch the parent's logical zeros without blobs.
+        let next_dir = temp.path().join(format!("after-null-{cached}"));
+        let mut writer = core.writer(writer_options(next_dir.clone())).unwrap();
+        writer
+            .write_at(Path::new("memory.bin"), 7, b"next")
+            .unwrap();
+        writer.commit().unwrap();
+        let next = NydusCore::new(
+            &next_dir.join("image.boot"),
+            local_config(
+                &next_dir,
+                &temp.path().join(format!("cache-after-null-{cached}")),
+            ),
+            None,
+        )
+        .unwrap();
+        let mut expected = vec![0; chunk_size];
+        expected[7..11].copy_from_slice(b"next");
+        assert_eq!(
+            next.fs.open("memory.bin").unwrap().read().unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn incremental_writer_replace_file_does_not_require_parent_data() {
     let temp = tempfile::tempdir().unwrap();
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
@@ -821,7 +993,8 @@ fn incremental_writer_replace_file_does_not_require_parent_data() {
     let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
     assert_eq!(inode.size(), chunk_size as u64);
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].device_id, 2);
+    assert_eq!(chunks[0].device_id, 1);
+    assert!(reader.read_prefetch_order().is_empty());
     assert!(commit.blob_path.as_ref().unwrap().exists());
     assert!(commit.blob_metadata_path.as_ref().unwrap().exists());
 }
@@ -1413,8 +1586,8 @@ fn incremental_writer_write_at_crosses_chunk_boundary() {
     assert_eq!(data, expected);
 
     let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
-    assert_eq!(chunks[0].device_id, 2);
-    assert_eq!(chunks[1].device_id, 2);
+    assert_eq!(chunks[0].device_id, 1);
+    assert_eq!(chunks[1].device_id, 1);
 }
 
 #[test]
@@ -1662,4 +1835,41 @@ fn incremental_writer_write_at_truncates_at_eof() {
     let mut expected = parent_data;
     expected[chunk_size - 2..chunk_size].copy_from_slice(b"AB");
     assert_eq!(data, expected);
+}
+
+#[test]
+fn incremental_writer_rejects_invalid_parent_device_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let (bootstrap, _) = build_parent_blob(&temp, &vec![b'A'; chunk_size * 2]);
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+    let inode_offset = reader.superblock().meta_blkaddr() as usize * EROFS_BLOCK_SIZE as usize
+        + nid as usize * EROFS_SLOTSIZE as usize;
+    let index_offset = inode_offset
+        + (inode.header_size() + inode.xattr_size()).next_multiple_of(EROFS_CHUNK_INDEX_SIZE)
+        + EROFS_CHUNK_INDEX_SIZE;
+    let original = fs::read(&bootstrap).unwrap();
+    // The first chunk keeps device 1 live; the later invalid ID must still
+    // be rejected even though liveness analysis can finish after that first chunk.
+    for device_id in [2, u16::MAX] {
+        let mut data = original.clone();
+        let entry = ErofsChunkIndex::new(ErofsChunkAddr {
+            blkaddr: chunks[1].blkaddr,
+            device_id,
+        })
+        .unwrap();
+        data[index_offset..index_offset + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(entry.as_bytes());
+        fs::write(&bootstrap, data).unwrap();
+        let result = IncrementalWriter::open_metadata_only(
+            &bootstrap,
+            writer_options(temp.path().join(format!("invalid-{device_id}"))),
+        );
+        assert!(
+            result.is_err(),
+            "accepted missing parent device {device_id}"
+        );
+    }
 }

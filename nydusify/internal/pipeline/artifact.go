@@ -108,9 +108,6 @@ func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOp
 	if err != nil {
 		return nil, err
 	}
-	if len(blobPaths) == 0 && len(opt.ParentImages) == 0 {
-		return nil, errors.New("at least one --blob/--blob-dir or --parent-image is required")
-	}
 	if len(opt.ParentImages) > 1 {
 		return nil, errors.New("only one --parent-image is supported")
 	}
@@ -209,6 +206,9 @@ func LoadParentNydusArtifact(ctx context.Context, cs content.Store, rootDesc oci
 	if err != nil {
 		return ParentImageMetadata{}, err
 	}
+	if err := validateArtifactBlobMetas(blobs, metas); err != nil {
+		return ParentImageMetadata{}, err
+	}
 	var config json.RawMessage
 	if err := oci.ReadJSON(ctx, cs, manifest.Config, &config); err != nil {
 		return ParentImageMetadata{}, errors.Wrap(err, "read parent config")
@@ -301,9 +301,6 @@ func readBootstrapBlobMetas(ctx context.Context, cs content.Store, desc ocispec.
 	if err != nil {
 		return nil, err
 	}
-	if len(metas) == 0 {
-		return nil, errors.New("parent bootstrap layer has no blob meta files")
-	}
 	return metas, nil
 }
 
@@ -345,10 +342,6 @@ func filterArtifactBlobsByReferences(
 	externalBlobs []ocispec.Descriptor,
 	localBlobs []LocalBlob,
 ) ([]ocispec.Descriptor, []nydus.BlobMetaFile, []ocispec.Descriptor, []LocalBlob, error) {
-	if len(referenced) == 0 {
-		return blobDescs, blobMetas, externalBlobs, localBlobs, nil
-	}
-
 	provided := make(map[digest.Digest]struct{}, len(blobDescs))
 	for _, desc := range blobDescs {
 		provided[desc.Digest] = struct{}{}
@@ -485,7 +478,7 @@ func collectArtifactBlobPaths(paths []string, dir string) ([]string, error) {
 
 func filterArtifactBlobPaths(paths []string, referenced map[digest.Digest]struct{}) []string {
 	if len(referenced) == 0 {
-		return paths
+		return nil
 	}
 	filtered := paths[:0]
 	for _, path := range paths {

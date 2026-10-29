@@ -48,9 +48,9 @@ func TestValidateConvertInputs(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name:      "bootstrap without artifact payload",
-			input:     ConvertInput{BootstrapPath: "/tmp/image.boot"},
-			wantError: true,
+			name:         "bootstrap only defers payload validation",
+			input:        ConvertInput{BootstrapPath: "/tmp/image.boot"},
+			wantArtifact: true,
 		},
 		{
 			name: "multiple parent images",

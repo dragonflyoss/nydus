@@ -163,11 +163,6 @@ impl NydusCore {
             .blob_infos()
             .context("failed to read blob table")?
             .to_vec();
-        if raw_blob_infos.is_empty() {
-            return Err(Error::InvalidImage(
-                "bootstrap contains no blobs".to_string(),
-            ));
-        }
         if cache_dir.is_none() {
             for info in &raw_blob_infos {
                 let mapped = backend
