@@ -52,6 +52,13 @@ pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
 
+/// The `d_type` of a readdir entry for an inode of `mode`: the `S_IFMT` bits shifted down, which
+/// is how Linux numbers `DT_*`. Readers that trust `d_type` without an lstat fallback, such as
+/// bun, would otherwise see every entry as `DT_UNKNOWN`.
+fn dirent_type(mode: u32) -> u32 {
+    crate::metadata::file_type_bits(mode) >> 12
+}
+
 /// Struct to glue fuse, storage backend and filesystem metadata together.
 ///
 /// The [Rafs](struct.Rafs.html) structure implements the `fuse_backend_rs::FileSystem` trait,
@@ -293,11 +300,19 @@ impl Rafs {
             return Err(enotdir!());
         }
 
-        let mut handler = |_inode, name: OsString, ino, offset| {
+        let mut handler = |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
+            let mode = match inode {
+                Some(inode) => Some(inode.get_attr().mode),
+                None => self
+                    .sb
+                    .get_inode(ino, self.digest_validate)
+                    .ok()
+                    .map(|inode| inode.get_attr().mode),
+            };
             match add_entry(DirEntry {
                 ino,
                 offset,
-                type_: 0,
+                type_: mode.map_or(0, dirent_type),
                 name: name.as_os_str().as_bytes(),
             }) {
                 Ok(0) => {
@@ -1106,6 +1121,53 @@ mod tests {
     use nydus_utils::metrics::FsIoStats;
 
     use super::*;
+
+    #[test]
+    fn test_dirent_type() {
+        for (mode, dt) in [
+            (libc::S_IFREG | 0o644, libc::DT_REG),
+            (libc::S_IFDIR | 0o755, libc::DT_DIR),
+            (libc::S_IFLNK | 0o777, libc::DT_LNK),
+            (libc::S_IFCHR, libc::DT_CHR),
+            (libc::S_IFBLK, libc::DT_BLK),
+            (libc::S_IFIFO, libc::DT_FIFO),
+            (libc::S_IFSOCK, libc::DT_SOCK),
+        ] {
+            assert_eq!(dirent_type(crate::metadata::mode_bits(mode)), u32::from(dt));
+        }
+        assert_eq!(dirent_type(0o644), u32::from(libc::DT_UNKNOWN));
+    }
+
+    #[test]
+    fn test_readdir_reports_entry_types() {
+        // v6 walks hand the handler each entry's inode; v5 walks hand none.
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        for boot in ["rafs-v5.boot", "rafs-v6-2.2.boot"] {
+            let bootstrap = PathBuf::from(root_dir)
+                .join("../tests/texture/bootstrap")
+                .join(boot);
+            let (sb, _) =
+                RafsSuper::load_from_file(bootstrap, Arc::new(ConfigV2::default()), false).unwrap();
+            let mut rafs = make_test_rafs();
+            rafs.sb = Arc::new(sb);
+            let root = rafs.sb.superblock.root_ino();
+
+            let mut entries = Vec::new();
+            rafs.do_readdir(root, u32::MAX, 0, &mut |entry| {
+                entries.push((entry.ino, entry.type_));
+                Ok(1)
+            })
+            .unwrap();
+
+            assert!(entries.len() > 2, "{boot}");
+            for (ino, type_) in entries {
+                let mode = rafs.sb.get_inode(ino, false).unwrap().get_attr().mode;
+                assert_ne!(type_, u32::from(libc::DT_UNKNOWN), "{boot}: inode {ino}");
+                assert_eq!(type_, dirent_type(mode), "{boot}: inode {ino}");
+            }
+        }
+    }
+
     #[test]
     fn test_rafs() {
         let rafs = Rafs {
