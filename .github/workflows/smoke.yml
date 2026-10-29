@@ -251,10 +251,12 @@ jobs:
       run: sudo bash misc/fscache/setup.sh
     - name: Unit Test
       run: |
-        CARGO_HOME=${HOME}/.cargo
-        CARGO_BIN=$(which cargo)
+        CARGO_HOME=${CARGO_HOME:-${HOME}/.cargo}
         RUSTUP_BIN=$(which rustup)
-        bash misc/ci-run-with-log.sh unit-test.log sudo -E RUSTUP=${RUSTUP_BIN} make ut-nextest
+        RUSTUP_HOME=$("${RUSTUP_BIN}" show home)
+        bash misc/ci-run-with-log.sh unit-test.log sudo env \
+          CARGO_HOME="${CARGO_HOME}" RUSTUP_HOME="${RUSTUP_HOME}" \
+          PATH="${PATH}" RUSTUP="${RUSTUP_BIN}" make ut-nextest
 
   contrib-unit-test-coverage:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
@@ -299,10 +301,12 @@ jobs:
         run: sudo bash misc/fscache/setup.sh
       - name: Generate code coverage
         run: |
-          CARGO_HOME=${HOME}/.cargo
-          CARGO_BIN=$(which cargo)
+          CARGO_HOME=${CARGO_HOME:-${HOME}/.cargo}
           RUSTUP_BIN=$(which rustup)
-          bash misc/ci-run-with-log.sh unit-coverage.log sudo -E RUSTUP=${RUSTUP_BIN} make coverage-codecov
+          RUSTUP_HOME=$("${RUSTUP_BIN}" show home)
+          bash misc/ci-run-with-log.sh unit-coverage.log sudo env \
+            CARGO_HOME="${CARGO_HOME}" RUSTUP_HOME="${RUSTUP_HOME}" \
+            PATH="${PATH}" RUSTUP="${RUSTUP_BIN}" make coverage-codecov
       - name: Upload nydus coverage file
         uses: actions/upload-artifact@v6
         with:
@@ -442,24 +446,36 @@ jobs:
 
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v2.1.6
         export GOCOVERDIR="${GO_BINARY_COVERDIR}"
+        smoke_env=(
+          "PATH=${PATH}"
+          "LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE}"
+          "GOCOVERDIR=${GOCOVERDIR}"
+          "GO_TEST_BUILD_FLAGS=${GO_TEST_BUILD_FLAGS}"
+          "NYDUS_STABLE_VERSION=${NYDUS_STABLE_VERSION}"
+          "NYDUS_STABLE_VERSION_EXPORT=${NYDUS_STABLE_VERSION_EXPORT}"
+        )
+        for version_export in "${version_exports[@]}"; do
+          for binary in NYDUS_BUILDER NYDUS_NYDUSD NYDUS_NYDUSIFY; do
+            variable="${binary}_${version_export}"
+            smoke_env+=("${variable}=${!variable}")
+          done
+        done
         echo "Smoke binary environment:"
         env | grep '^NYDUS_' | sort
         echo "GOCOVERDIR=${GOCOVERDIR}"
         echo "GO_TEST_BUILD_FLAGS=${GO_TEST_BUILD_FLAGS}"
         echo "LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE}"
-        sudo -E env | grep '^LLVM_PROFILE_FILE='
-        sudo -E env | grep '^GOCOVERDIR='
-        sudo -E env | grep '^GO_TEST_BUILD_FLAGS='
-        sudo -E env | grep '^NYDUS_' | sort
+        sudo env "${smoke_env[@]}" printenv LLVM_PROFILE_FILE GOCOVERDIR GO_TEST_BUILD_FLAGS \
+          NYDUS_BUILDER_latest NYDUS_NYDUSD_latest NYDUS_NYDUSIFY_latest
 
         echo "Rust binary coverage probe before smoke:"
-        sudo -E /usr/bin/nydus-latest/nydus-image --version || true
+        sudo env "${smoke_env[@]}" /usr/bin/nydus-latest/nydus-image --version || true
         mapfile -t probe_profraw_files < <(find "${CARGO_LLVM_COV_TARGET_DIR}" -maxdepth 1 -name '*.profraw' -print | sort)
         echo "Generated ${#probe_profraw_files[@]} probe profraw files"
         printf '%s\n' "${probe_profraw_files[@]}"
         cargo llvm-cov clean --workspace --profraw-only
 
-        sudo -E make smoke-only
+        sudo env "${smoke_env[@]}" make smoke-only
 
         mapfile -t profraw_files < <(find "${CARGO_LLVM_COV_TARGET_DIR}" -maxdepth 1 -name '*.profraw' -print | sort)
         echo "Generated ${#profraw_files[@]} smoke profraw files"
@@ -773,7 +789,7 @@ jobs:
     - name: Performance Test
       run: |
         export PERFORMANCE_TEST_MODE=${{ matrix.mode }}
-        sudo -E make smoke-performance
+        sudo env "PATH=${PATH}" "PERFORMANCE_TEST_MODE=${PERFORMANCE_TEST_MODE}" make smoke-performance
 
   takeover-test:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
@@ -797,4 +813,4 @@ jobs:
     - name: Takeover Test
       run: |
         export NEW_NYDUSD_BINARY_PATH=target/release/nydusd
-        sudo -E make smoke-takeover
+        sudo env "PATH=${PATH}" "NEW_NYDUSD_BINARY_PATH=${NEW_NYDUSD_BINARY_PATH}" make smoke-takeover
