@@ -44,6 +44,9 @@ pub use indexed_chunk_map::IndexedChunkMap;
 pub use noop_chunk_map::NoopChunkMap;
 pub use range_map::BlobRangeMap;
 
+#[cfg(test)]
+pub(crate) use blob_state_map::tests::pending_slot_references;
+
 mod blob_state_map;
 mod digested_chunk_map;
 mod indexed_chunk_map;
@@ -102,6 +105,58 @@ pub trait ChunkMap: Any + Send + Sync {
     }
 }
 
+/// Pending entries claimed by a range producer.
+///
+/// Keep this guard until the producer publishes its data. Dropping it releases any entries that
+/// remain pending, allowing another producer to retry them.
+#[must_use]
+pub struct PendingRange<'a, I> {
+    indices: Vec<I>,
+    release: Option<Box<dyn FnOnce() + Send + 'a>>,
+}
+
+impl<'a, I> PendingRange<'a, I> {
+    /// Create a range of missing entries without in-flight state to release.
+    pub fn new(indices: Vec<I>) -> Self {
+        Self {
+            indices,
+            release: None,
+        }
+    }
+
+    /// Create a claim whose pending entries are released when the guard is dropped.
+    ///
+    /// The cleanup must release only this producer's entries, without affecting later producers.
+    pub fn with_cleanup(indices: Vec<I>, release: impl FnOnce() + Send + 'a) -> Self {
+        Self {
+            indices,
+            release: Some(Box::new(release)),
+        }
+    }
+}
+
+impl<I> std::ops::Deref for PendingRange<'_, I> {
+    type Target = [I];
+
+    fn deref(&self) -> &[I] {
+        &self.indices
+    }
+}
+
+impl<I: std::fmt::Debug> std::fmt::Debug for PendingRange<'_, I> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.indices.fmt(formatter)
+    }
+}
+
+impl<I> Drop for PendingRange<'_, I> {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
 /// Trait to track chunk or data readiness state.
 ///
 /// A `RangeMap` object tracks readiness state of a chunk or data range, indexed by chunk index or
@@ -130,11 +185,16 @@ pub trait RangeMap: Send + Sync {
     /// - clear_range_pending() to clear the pending state without marking data or chunks as ready.
     /// - wait_for_range_ready() to wait for all data or chunks to clear pending state, including
     ///   data or chunks marked as pending by other threads.
+    ///
+    /// Returns `None` if all entries are ready. An empty guard means other producers own all
+    /// missing entries; the caller must still wait for those producers.
+    ///
+    /// Keep the returned guard until the producer finishes; dropping it releases its pending entries.
     fn check_range_ready_and_mark_pending(
         &self,
         _start: Self::I,
         _count: Self::I,
-    ) -> Result<Option<Vec<Self::I>>> {
+    ) -> Result<Option<PendingRange<'_, Self::I>>> {
         Err(enosys!())
     }
 
@@ -146,7 +206,7 @@ pub trait RangeMap: Send + Sync {
     /// Clear the pending state for all chunks or data in the range.
     fn clear_range_pending(&self, _start: Self::I, _count: Self::I) {}
 
-    /// Wait for all chunks or data in the range to be ready until timeout.
+    /// Wait for pending producers to finish and check whether the whole range is ready.
     fn wait_for_range_ready(&self, _start: Self::I, _count: Self::I) -> Result<bool> {
         Err(enosys!())
     }
