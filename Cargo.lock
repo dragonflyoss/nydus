@@ -2251,7 +2251,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "assert_matches",
- "bitflags 1.3.2",
+ "bitflags 2.13.2",
  "fuse-backend-rs",
  "lazy_static",
  "libc",
@@ -2352,7 +2352,7 @@ version = "0.7.2"
 dependencies = [
  "arc-swap",
  "base64 0.21.7",
- "bitflags 1.3.2",
+ "bitflags 2.13.2",
  "dragonfly-client-request",
  "fuse-backend-rs",
  "futures",
