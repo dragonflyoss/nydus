@@ -43,6 +43,16 @@ func newHTTPClient(skipTLSVerify bool) *http.Client {
 	}
 }
 
+// newRegistryClient builds the client of registry requests, routing manifest
+// and blob GETs through Dragonfly when it is enabled.
+func newRegistryClient(skipTLSVerify bool) *http.Client {
+	client := newHTTPClient(skipTLSVerify)
+	if dragonflyProxy != nil {
+		client.Transport = &dragonflyTransport{base: client.Transport, getter: dragonflyProxy}
+	}
+	return client
+}
+
 // NewDockerConfigCredFunc reads the docker auth config file
 // (`$DOCKER_CONFIG/config.json`, defaulting to `~/.docker`) to resolve
 // credentials for a registry host.
@@ -64,7 +74,7 @@ func NewDockerConfigCredFunc() CredentialFunc {
 // NewResolver builds a docker registry resolver that handles authentication,
 // optional TLS verification skipping, and optional plain HTTP.
 func NewResolver(insecure, plainHTTP bool, credFunc CredentialFunc) remotes.Resolver {
-	return newResolver(insecure, plainHTTP, credFunc, newHTTPClient(insecure))
+	return newResolver(insecure, plainHTTP, credFunc, newRegistryClient(insecure))
 }
 
 func newResolver(insecure, plainHTTP bool, credFunc CredentialFunc, client *http.Client) remotes.Resolver {
