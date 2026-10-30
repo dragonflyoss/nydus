@@ -925,6 +925,14 @@ pub struct ProxyConfig {
     /// Dragonfly scheduler endpoint URL for SDK-based proxy.
     #[serde(default)]
     pub dragonfly_scheduler_endpoint: String,
+    /// Timeout of one Dragonfly SDK request, in seconds. Raise it when the proxy may queue
+    /// requests, for example behind a rate limit to the source.
+    #[serde(default = "default_dragonfly_sdk_timeout")]
+    pub dragonfly_sdk_timeout: u64,
+}
+
+fn default_dragonfly_sdk_timeout() -> u64 {
+    5
 }
 
 impl Default for ProxyConfig {
@@ -937,6 +945,7 @@ impl Default for ProxyConfig {
             use_http: false,
             check_pause_elapsed: 300,
             dragonfly_scheduler_endpoint: String::new(),
+            dragonfly_sdk_timeout: default_dragonfly_sdk_timeout(),
         }
     }
 }
@@ -1711,6 +1720,16 @@ mod tests {
         assert_eq!(config.ping_url, "ping.foo.com");
         assert!(config.fallback);
         assert_eq!(config.check_interval, 5);
+        assert_eq!(config.dragonfly_sdk_timeout, 5);
+        assert_eq!(ProxyConfig::default().dragonfly_sdk_timeout, 5);
+
+        let content = r#"{
+            "url": "foo.com",
+            "dragonfly_scheduler_endpoint": "http://127.0.0.1:8002",
+            "dragonfly_sdk_timeout": 60
+        }"#;
+        let config: ProxyConfig = serde_json::from_str(content).unwrap();
+        assert_eq!(config.dragonfly_sdk_timeout, 60);
     }
 
     #[test]

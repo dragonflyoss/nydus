@@ -98,6 +98,7 @@ impl ProxySDKClient {
         headers: HeaderMap,
         priority: Option<i32>,
         catch_status: bool,
+        timeout: Duration,
     ) -> Result<GetResponse<Body>, ProxyError> {
         let request = GetRequest {
             url: url.to_string(),
@@ -109,7 +110,7 @@ impl ProxySDKClient {
             content_for_calculating_task_id: None,
             enable_task_id_based_blob_digest: true,
             priority,
-            timeout: Duration::from_secs(5),
+            timeout,
             client_cert: None,
             ..GetRequest::default()
         };
