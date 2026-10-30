@@ -29,6 +29,8 @@ use crate::backend::proxy;
 use crate::backend::proxy::ProxySDKClients;
 #[cfg(feature = "backend-dragonfly-proxy")]
 use crate::backend::RequestSource;
+#[cfg(feature = "backend-dragonfly-proxy")]
+use std::time::Duration;
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use dragonfly_client_request::GetResponse;
@@ -287,8 +289,14 @@ impl Request {
                     )))
                 })?;
 
-                return match proxy_sdk_client.request(url, headers.clone(), priority, catch_status)
-                {
+                let timeout = Duration::from_secs(self.proxy_config.dragonfly_sdk_timeout);
+                return match proxy_sdk_client.request(
+                    url,
+                    headers.clone(),
+                    priority,
+                    catch_status,
+                    timeout,
+                ) {
                     Ok(get_resp) => {
                         let status = get_resp.status_code.unwrap_or(StatusCode::BAD_GATEWAY);
                         if status >= StatusCode::INTERNAL_SERVER_ERROR {

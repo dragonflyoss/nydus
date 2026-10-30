@@ -101,6 +101,7 @@ configuration JSON:
 | `use_http` | bool | `false` | Replace HTTPS with HTTP for proxy requests. |
 | `check_pause_elapsed` | u64 | `300` | Pause health checks after this many seconds of inactivity. |
 | `dragonfly_scheduler_endpoint` | string | `""` | Dragonfly scheduler URL. Non-empty enables SDK mode. |
+| `dragonfly_sdk_timeout` | u64 | `5` | Timeout of one SDK request, in seconds. Raise it when the proxy may queue requests. |
 
 ### Mode Selection
 
