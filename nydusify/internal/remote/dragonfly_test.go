@@ -77,7 +77,7 @@ func TestDragonflyTransport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			if string(body) != tt.want || g.calls != tt.wantCalls {
 				t.Fatalf("body=%q calls=%d, want %q / %d", body, g.calls, tt.want, tt.wantCalls)
@@ -121,7 +121,7 @@ func TestDragonflyTransportHeadByDigest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if g.calls != tt.wantCalls || resp.Header.Get("Docker-Content-Digest") != tt.wantDigest || resp.ContentLength != tt.wantSize {
 				t.Fatalf("calls=%d digest=%q size=%d, want %d / %q / %d",
 					g.calls, resp.Header.Get("Docker-Content-Digest"), resp.ContentLength, tt.wantCalls, tt.wantDigest, tt.wantSize)
