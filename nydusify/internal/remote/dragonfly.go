@@ -41,7 +41,7 @@ func EnableDragonfly(ctx context.Context, endpoint string) (func(), error) {
 	dragonflyEndpoint, dragonflyProxy = endpoint, proxy
 	return func() {
 		dragonflyEndpoint, dragonflyProxy = "", nil
-		proxy.Close()
+		_ = proxy.Close()
 	}, nil
 }
 
@@ -82,7 +82,7 @@ func (t *dragonflyTransport) headViaGet(req *http.Request) *http.Response {
 		return nil
 	}
 	if resp.Body != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	size, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
 	if err != nil || size < 0 || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") == "" {
