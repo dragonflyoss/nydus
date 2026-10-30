@@ -61,8 +61,8 @@ Group cases by their observable contract, not merely by the injected status:
   Subtests express input variants of one contract instead of multiplying
   packages or duplicating whole test bodies.
 
-This refactor has **111 product entry points** (`Test` and `Fuzz`, excluding
-`TestMain` and `internal`): 88 GA including the separately provisioned
+This refactor has **112 product entry points** (`Test` and `Fuzz`, excluding
+`TestMain` and `internal`): 89 GA including the separately provisioned
 Dragonfly lane, 20 experimental and three manual.
 These are not counts of expanded subtests: the filesystem contract expands
 C01-C15 over adapters/layouts/modes, and table-driven cases add more variants.
@@ -72,7 +72,7 @@ C01-C15 over adapters/layouts/modes, and table-driven cases add more variants.
 | Filesystem: `contract`, `kernel`, `api` | 2 + 2 + 2 |
 | FUSE process continuity: `continuity` | 5 |
 | Image CLI: `build`, `tar`, `export` | 10 + 7 + 3 |
-| Image distribution: `nydusify`, `registry`, `dragonfly` | 10 + 16 + 6 |
+| Image distribution: `nydusify`, `registry`, `dragonfly` | 10 + 16 + 7 |
 | Storage/lifecycle: `cache`, `fault`, `soak` | 13 + 9 + 2 |
 | Historical images: `golden` | 1 |
 | Experimental: fanotify, NBD, ublk, UFFD | 5 + 4 + 2 + 9 |
@@ -163,7 +163,7 @@ a build and schedule, without changing their classification.
 | `test / image / tools-services` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
 | `test / fuse / contract`, `test / fileio / *` | One complete FUSE contract; Fileio semantics and two data-layout groups |
 | `test / storage / *` | Isolated fault recovery and cache/resource-leak smoke |
-| `distribution / dragonfly / read-recovery` | Real Dragonfly services, seed-cache reads and origin fallback in one cluster |
+| `distribution / dragonfly / read-recovery` | Real Dragonfly services, seed-cache reads, origin fallback and `nydusify --dragonfly-scheduler` in one cluster |
 | `extended / * / *` | One shared build, four experimental transports, one two-target fuzz job, one stability job |
 | `build / static / *`, `release / verify / *` | Static Rust/Go build and packaged-binary compatibility, each on amd64 and arm64 |
 

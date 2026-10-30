@@ -33,10 +33,31 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
+// dragonflyStop releases the Dragonfly SDK proxy opened by the app Before hook.
+var dragonflyStop func()
+
 func main() {
 	app := &cli.App{
 		Name:  "nydusify",
 		Usage: "Convert OCI images to nydus images",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "dragonfly-scheduler",
+				Usage:   "Dragonfly scheduler endpoint (e.g. http://127.0.0.1:8002); pulls and nydus FUSE reads go through Dragonfly P2P",
+				EnvVars: []string{"NYDUSIFY_DRAGONFLY_SCHEDULER"},
+			},
+		},
+		Before: func(c *cli.Context) error {
+			stop, err := remote.EnableDragonfly(context.Background(), c.String("dragonfly-scheduler"))
+			dragonflyStop = stop
+			return err
+		},
+		After: func(*cli.Context) error {
+			if dragonflyStop != nil {
+				dragonflyStop()
+			}
+			return nil
+		},
 		Commands: []*cli.Command{
 			convertCommand(),
 			checkCommand(),
