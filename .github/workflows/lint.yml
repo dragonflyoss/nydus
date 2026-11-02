@@ -3,31 +3,22 @@ name: Lint
 on:
   push:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   pull_request:
     branches: [main, release-*, v3]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE*"
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
 
 jobs:
-  workspace:
-    name: lint / workspace / rust-go
-    runs-on: ubuntu-latest
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout code
@@ -36,8 +27,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy,rustfmt
-          toolchain: 1.88.0
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -47,40 +38,38 @@ jobs:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
-          repo-token: ${{ secrets.GH_TOKEN }}
+          repo-token: ${{ github.token }}
 
       - name: Run cargo fmt
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
 
       - name: Run cargo clippy
         run: |
           cargo clippy --all --all-targets --all-features -- -D warnings
 
-      - uses: actions/setup-go@v5
+      - name: Setup Go
+        uses: actions/setup-go@v6
         with:
-          go-version: "1.25.5"
+          go-version-file: tests/e2e/go.mod
           cache-dependency-path: |
             nydusify/go.sum
             tests/e2e/go.sum
 
-      - name: Lint nydusify
+      - name: Golangci lint nydusify
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7
           working-directory: nydusify
 
-      - name: Lint E2E
+      - name: Golangci lint e2e
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7
           working-directory: tests/e2e
 
-      # Layout rules (one test per file, t.Parallel, no t.Skip), the
-      # harness's own unprivileged tests, and the build-tagged manual
-      # suites, which golangci-lint does not compile.
-      - name: Check
+      - name: Run go vet
         working-directory: tests/e2e
         run: |
-          go test -count=1 ./internal/...
           go vet -tags manual ./manual/...
           go build -o /dev/null ./cmd/golden-gen

@@ -2,10 +2,10 @@
 
 `TestLeak` and `TestRemote` run in the PR cache shard. Defaults remain 30s,
 6 mount cycles spread across the duration and 16 verified random-read workers
-**per transport**. PR Nightly runs each workload in its own job for 2m with
+**per transport**. The `e2e.yml` matrix's `soak` row runs each workload for 2m with
 6 cycles and two in-package tests, so FUSE and fileio run concurrently
-instead of putting four two-minute workloads through two slots. Each job
-has a five-minute budget including setup. Both
+instead of putting four two-minute workloads through two slots, under a
+four-minute Go timeout. Both
 FUSE and fileio run, so the host needs file-backed EROFS (Linux >=6.12,
 CONFIG_EROFS_FS_BACKED_BY_FILE) as well as FUSE.
 
@@ -17,11 +17,10 @@ Prefetch and reads overlap during startup; the remote baseline is sampled
 only after prefetch completion and the warmup period, avoiding false FD/RSS
 growth from a late-initializing HTTP pool.
 
-Manually dispatching Nightly runs the full `make e2e-soak`: default 1h and
-120 cycles for local/remote and FUSE/fileio, in separate local/remote jobs.
-The PR soak is deliberately
-bounded; scheduled Nightly does not run the soak. Configure repository variables
-`E2E_SOAK_DURATION`, `E2E_SOAK_CYCLES`, `E2E_SOAK_RSS_MIB`, or locally.
+Nightly E2E Test runs the full `make e2e-soak` on schedule or by dispatch:
+default 1h and 120 cycles for local/remote and FUSE/fileio. The PR soak is
+deliberately bounded. Change the `SOAK_*` Makefile variables to run other
+settings locally.
 The manual run is:
 
 ```sh
@@ -37,23 +36,18 @@ The underlying `NYDUS_E2E_SOAK_DURATION` accepts Go durations from 10s to
 24h, `NYDUS_E2E_SOAK_CYCLES` integers 1–100000, and
 `NYDUS_E2E_SOAK_RSS_MIB` positive integer MiB up to 1048576. Invalid
 configuration fails, never silently falls back. Longer-than-default runs
-also require increasing the Go/job timeout (the nightly job is 90 minutes).
+also require increasing the Go/job timeout (the nightly soak job is 90 minutes).
 No hour-scale run is needed for unit validation: `go test ./internal/soakconfig -run
 TestSettings` validates the parser; a capability-matched host can run a
 10s/one-cycle smoke with the same workload.
 
 ## Runner contract
 
-Workflows default to GitHub-hosted Ubuntu, so no unregistered self-hosted
-label leaves a job queued indefinitely. The suite checks actual capabilities;
-an inadequate kernel is an explicit failure, not a skip. JSON runner-label
-arrays can override those defaults:
-`E2E_FILEIO_RUNNER`, `E2E_RELEASE_AMD64_RUNNER`,
-`E2E_RELEASE_ARM64_RUNNER`, `E2E_FANOTIFY_RUNNER`,
-`E2E_UFFD_RUNNER`, `E2E_NBD_RUNNER`, `E2E_UBLK_RUNNER`,
-`E2E_BENCH_RUNNER` and `E2E_TOP_IMAGES_RUNNER`.
-For example `["self-hosted","linux","x64","nydus-fileio-6.12"]`.
-Release architecture labels must actually match the downloaded artifact.
+Workflows run on GitHub-hosted `ubuntu-24.04` (and `ubuntu-24.04-arm` for
+release arm64), written directly into `runs-on`. The suite checks actual
+capabilities; an inadequate kernel is an explicit failure, not a skip. To move
+a job to a self-hosted runner, edit its `runs-on` label; release architecture
+labels must actually match the downloaded artifact.
 Fanotify requires Linux >=6.15 with FAN_PRE_ACCESS and ext4 cache storage;
 UFFD needs permitted userfaultfd; ublk/NBD need their devices/modules.
 All mandatory lanes set `E2E_REQUIRE=1`; capability labels do not replace

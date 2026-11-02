@@ -106,14 +106,20 @@ It verifies child reaping and absence of mounts/scratch before harness cleanup.
 
 Only fanotify, NBD, ublk and UFFD are experimental. Fuzzing and stability
 soaks validate GA behavior; they are execution modes, not experimental
-features. The neutral `Extended E2E` workflow groups these checks to share
-a build and schedule, without changing their classification.
+features. Fuzzing has its own `fuzz.yml` on the GA binaries. The soak
+package is a GA E2E suite: a two-minute row of the `e2e.yml` matrix on PRs, and
+the one-hour run in `e2e-nightly.yml` next to the huge sparse tar corpus.
+`e2e-experimental.yml` runs only the experimental transports with its own build.
+
+Workflows are split by test type, as in dragonfly: `ci.yml` runs the Rust and
+nydusify unit/integration tests, `e2e.yml` the GA E2E matrix, `e2e-<variant>.yml`
+one variant each, `fuzz.yml` the fuzz targets. Each triggers on push and pull
+requests by itself; nothing is called from `ci.yml`.
 
 - PR: GA suites, harness checks, Rust integration tests, all four experimental
   transports, and one 150-second fuzz run per target with four Go workers.
   This is a smaller PR search budget than four independent 150-second shards,
-  not an equivalent amount of exploration. CI calls the extended E2E
-  workflow and includes it in its gate. FUSE runs its complete contract in
+  not an equivalent amount of exploration. FUSE runs its complete contract in
   one job; Fileio keeps semantics/lifecycle, zstd data and other-layout data separate,
   retaining every case and mount mode. Workflow
   convention tests enforce that each contract branch is selected exactly
@@ -125,7 +131,7 @@ a build and schedule, without changing their classification.
   commands; registry/Dragonfly E2E exercise their compiled backends. Arbitrary
   reduced-feature binaries are no longer a PR matrix. The main Rust job
   includes ublk, the ptrace cross-process test and real netns HTTP tests once;
-  ublk E2E shares the extended build. If the runner lacks `ublk_drv`,
+  ublk E2E shares the experimental build. If the runner lacks `ublk_drv`,
   its job installs `linux-modules-extra-$(uname -r)` before loading the driver;
   an unavailable package or driver remains a failure, never a skipped suite.
 - PR and release: static amd64 **and** arm64 binaries are packaged and tested
@@ -141,14 +147,16 @@ a build and schedule, without changing their classification.
   old digest representation is not part of the supported compatibility window.
   Full shipped-binary contract shards run on tags/manual releases, not again
   on PRs. PR runs never publish a release.
-- Nightly: all experimental transports and continuous ten-minute fuzz runs
+- Scheduled: the experimental transports and continuous ten-minute fuzz runs
   per target run on schedule. UFFD additionally repeats each real-fault
-  copy/zeropage/zerocopy case 34 times, also on manual Nightly runs.
+  copy/zeropage/zerocopy case 34 times, also on manual experimental runs.
   Dragonfly has its own daily schedule and shares the same reusable workflow
   with PR CI; it runs real services, not a Kind/Helm deployment test.
-- Manual: dispatch Nightly for the one-hour local/remote shared-cache soak;
-  dispatch Manual for benchmarks or hugetar, and the top-images workflow
-  for the large image sweep. These heavy workloads do not run on PRs.
+- Nightly E2E: the one-hour local/remote shared-cache soak and the huge
+  sparse tar corpus run on schedule or by dispatch.
+- Manual: dispatch Benchmark for benchmarks and E2E Test With Image
+  Conversion for the nydusify convert/check sweep over popular images. These
+  heavy workloads do not run on PRs.
   Ordinary GA soak defaults remain a 30-second smoke.
 - Manual performance: cold large-directory lookups and existing I/O/metadata
   workloads can gate against an explicitly accepted, host/workload-matched
@@ -156,21 +164,22 @@ a build and schedule, without changing their classification.
 
 ### PR check groups
 
-| Prefix/group | Coverage |
+| Check | Coverage |
 | --- | --- |
-| `lint / workspace / rust-go` | Formatting/Clippy; both Go modules, harness tests and manual-suite compilation |
-| `build / binaries / ga`, `test / rust / unit-integration` | Shared GA binaries; workspace unit/integration tests and coverage |
-| `test / image / tools-services` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
-| `test / fuse / contract`, `test / fileio / *` | One complete FUSE contract; Fileio semantics and two data-layout groups |
-| `test / storage / *` | Isolated fault recovery and cache/resource-leak smoke |
-| `distribution / dragonfly / read-recovery` | Real Dragonfly services, seed-cache reads and origin fallback in one cluster |
-| `extended / * / *` | One shared build, four experimental transports, one two-target fuzz job, one stability job |
-| `build / static / *`, `release / verify / *` | Static Rust/Go build and packaged-binary compatibility, each on amd64 and arm64 |
+| `Lint / Lint` | Formatting/Clippy; both Go modules and manual-suite compilation |
+| `CI / Test`, `CI / Test Nydusify`, `CI / Test Harness` | Workspace unit/integration tests; nydusify unit/integration tests against the real builder; the E2E harness's own unit and convention tests |
+| `E2E Test / Build` | Shared GA binaries and coverage tools |
+| `E2E Test / e2e (image-tools)` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
+| `E2E Test / e2e (fuse)`, `e2e (fileio-*)` | One complete FUSE contract; Fileio semantics and two data-layout groups |
+| `E2E Test / e2e (storage-*)`, `e2e (soak)` | Isolated fault recovery, cache smoke and the two-minute stability soak |
+| `E2E Test With Dragonfly / Test` | Real Dragonfly services, seed-cache reads and origin fallback in one cluster |
+| `E2E Test With Experimental Transports / test (*)` | One shared experimental-feature build and four transports |
+| `Fuzz / Fuzz` | One two-target fuzz job |
+| `Release / build (*)`, `verify (*)` | Static Rust/Go build and packaged-binary compatibility, each on amd64 and arm64 |
+| `codecov/project/rust`, `codecov/project/go` | Codecov's union of every flag for the commit; each fails below 90% |
 
-PR checks use `category / module / scenario`. Reusable workflows supply the
-module/scenario name, while their caller supplies `extended` or `distribution`;
-GitHub inserts the slash. Their standalone scheduled/manual runs display the
-module/scenario name without the caller prefix. Matrix display labels do not
+Checks follow the dragonfly workflows: single-word job names, and matrix jobs
+display the job id with the matrix value in parentheses. Display labels do not
 change suite selectors or artifact names. `Classify PR` retains its name because
 upstream branch protection requires it; external DCO and Codecov names are unchanged.
 
@@ -179,14 +188,16 @@ Both fuzz targets run concurrently, each retaining four workers and its full
 150-second PR (ten-minute scheduled/manual) duration. The job waits for both
 and fails if either fails. Sharing a runner reduces checks, not the configured
 time budget; CPU contention can still reduce executions per target.
-The stability job runs all four local/remote x FUSE/Fileio leaves together,
+The soak row runs all four local/remote x FUSE/Fileio leaves together,
 preserving two minutes per leaf on PRs instead of serializing two waves.
 No test cases or fuzz duration are removed by grouping checks.
 Fileio data and storage recovery retain their original isolation: trial
 consolidation exceeded the data-test budget and caused recovery-read timeouts.
 
-Grouped GA E2E, release verification, PR fuzz and short-soak jobs have a five-minute
-execution budget, including setup (not queue/dependency wait time). Test
+Grouped GA E2E and release verification jobs have a five-minute execution
+budget, including setup (not queue/dependency wait time). On push and pull
+requests the fuzz workflow uses a four-minute Go timeout with the 150-second
+fuzz duration; scheduled and manual runs fuzz for ten minutes. Test
 deadlines leave time for timeout diagnostics. Cold compiler caches and
 runner provisioning still affect build checks; their runtime must be
 measured rather than inferred from the warm-cache test timings.
@@ -221,64 +232,30 @@ mounted, filesystem walking fails, or source/target contents mismatch.
 The Rust unit/integration check accumulates both the workspace and dual-TLS
 runs before exporting one report.
 
-Each existing E2E job exports and uploads `coverage/`, including on test failure:
+Each E2E job exports `coverage/` and uploads it to Codecov, including on test failure:
 
 | File | Contents |
 | --- | --- |
 | `raw/rust/*.profraw`, `rust-e2e.profdata` | Raw pooled subprocess counters and their merge |
 | `raw/go/covmeta.*`, `raw/go/covcounters.*` | Go product subprocess metadata and counters |
 | `rust-e2e.lcov`, `go-e2e.out` | Product-subprocess Rust LCOV (also Go builder-backed integrations) and Go E2E coverage, not Go harness coverage |
-| `go-unit-integration.out` | nydusify unit/integration coverage in the image/tools job |
-| `go-combined.out` | Deduplicated Go unit/integration + product E2E statement coverage in that same job |
 | `status.txt` | Test outcome, profile counts and collection limitations |
 
-The Rust test artifact instead contains `raw/rust/` and
-`rust-unit-integration.lcov`. The post-CI
-[coverage reporter](../../.github/workflows/coverage-comment.yml) merges hits
-across the 15 expected artifacts and updates one bot comment on the current PR
-head. Rust lines and Go statements stay separate; missing/failed shards are
-listed explicitly, not counted as zero. No baseline delta is claimed without a
-comparable base-commit report. Rust includes test code and does not
-represent production-only or branch coverage.
+Coverage reporting follows dragonfly: every test job uploads its own report to
+Codecov with a flag (`unittests` from `ci.yml`, `e2etests` from the E2E
+workflows, `fuzz` from `fuzz.yml`), and Codecov merges the flags per commit,
+posts the PR comment and sets the status checks. There is no coverage workflow
+or merge script in this repository. `codecov.yml` gates **Rust (`nydus/`,
+`nydus-*/`) and Go (`nydusify/`) separately at 90%** and ignores the test
+harness and examples. Rust includes test code and does not represent
+production-only or branch coverage. Uploads are capped at one minute and never
+fail a test job; a missing upload shows up as a missing flag on Codecov, not
+as zero coverage.
 
-The existing `gate / ci / required` check reads those same artifacts and
-requires **Rust line coverage >= 90% and Go statement coverage >= 90%** separately.
-It unions hits rather than averaging shard percentages and compares exact counts,
-not rounded percentages. Missing/invalid reports or unsuccessful shards also
-fail the gate, even when the available reports exceed 90%. No new test check is
-added, and enforcement does not depend on the default-branch reporter deployment.
-It reuses the reporter's newest-artifact selection so reruns cannot mix old
-failed shards with their successful replacements.
-To run the same gate locally after downloading artifacts into separate
-subdirectories, use
-`python3 tests/scripts/coverage_comment.py --check-dir coverage-input`.
-
-The reporter checks out only the trusted default branch, parses allowlisted
-reports without extracting or executing artifacts, and rechecks the PR head
-before posting. Older runs/rerun attempts cannot replace newer comments.
-Codecov uploads use `rust_combined` and `go_combined` flags in this separate
-reporting job, with one-minute per-upload limits. PR test jobs only export and
-retain artifacts, so upload-service delays cannot exhaust their five-minute
-budgets. Standalone scheduled/manual extended and Dragonfly runs keep their
-bounded Codecov uploads.
-
-**Deployment:** `workflow_run` requires the workflow and its reporter script on
-the repository's default branch (`master` upstream), not just `v3`. Until those
-files are deployed there, CI artifacts remain available, but automatic comments
-and post-CI Codecov uploads are not active. This PR does not modify `master`.
-
-Upload-service failures do not gate tests, but
-missing expected profiles and export failures do. A shard that never runs
-nydusify records `go_report=no-profile`, not synthetic zero coverage;
-image/tools requires Go subprocess profiles. Skipped/cancelled suites are
-explicitly marked when the finalizer runs; a cancelled job may not upload an
-artifact and its absent report must not be interpreted as zero coverage.
-For a local statement-coverage union, run
-`bash tests/scripts/e2e_coverage.sh merge-go UNIT.out E2E.out`.
-It writes `coverage/go-combined.out` (or `$COVERAGE_DIR/go-combined.out`),
-deduplicates source blocks and normalizes counter modes to boolean `set`;
-it rejects incompatible source layouts from different builds instead of
-adding percentages or claiming merged execution frequencies.
+Missing expected profiles and export failures do fail the test job. A shard
+that never runs nydusify records `go_report=no-profile`, not synthetic zero
+coverage; image/tools requires Go subprocess profiles. Skipped/cancelled suites
+are explicitly marked when the finalizer runs.
 
 `LLVM_PROFILE_FILE` uses `%8m`, bounding files to eight per instrumented
 module rather than one per short-lived fuzz process. Normal exits merge

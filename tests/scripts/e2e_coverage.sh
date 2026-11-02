@@ -93,51 +93,8 @@ case "${1:-}" in
         fi
         exit "$status"
         ;;
-    merge-go)
-        mkdir -p "$coverage"
-        python3 - "$coverage/go-combined.out" "${@:2}" <<'PY'
-import pathlib
-import sys
-
-if len(sys.argv) < 4:
-    sys.exit("merge-go requires at least two Go coverage profiles")
-blocks = {}
-layouts = {}
-for name in sys.argv[2:]:
-    lines = pathlib.Path(name).read_text().splitlines()
-    if not lines or lines[0] not in ("mode: set", "mode: count", "mode: atomic"):
-        sys.exit(f"invalid Go coverage header: {name}")
-    current_layout = {}
-    for line in lines[1:]:
-        location, statements, count = line.rsplit(" ", 2)
-        statements, count = int(statements), int(count)
-        if statements < 0 or count < 0:
-            sys.exit(f"negative coverage data: {name}: {line}")
-        previous = blocks.get(location, (statements, False))
-        if previous[0] != statements:
-            sys.exit(f"incompatible statement counts (different builds?): {location}")
-        blocks[location] = (statements, previous[1] or count > 0)
-        current_layout.setdefault(location.rsplit(":", 1)[0], set()).add(location)
-    for source, locations in current_layout.items():
-        if source in layouts and layouts[source] != locations:
-            sys.exit(f"incompatible source blocks; rerun coverage against the same sources: {source}")
-        layouts[source] = locations
-if not blocks:
-    sys.exit("no Go coverage blocks")
-total = sum(statements for statements, _ in blocks.values())
-if not total:
-    sys.exit("no Go statements")
-# Boolean union is valid even when unit and product counter modes differ.
-with pathlib.Path(sys.argv[1]).open("w") as output:
-    output.write("mode: set\n")
-    for location, (statements, hit) in sorted(blocks.items()):
-        output.write(f"{location} {statements} {int(hit)}\n")
-covered = sum(statements for statements, hit in blocks.values() if hit)
-print(f"Go union: {covered}/{total} statements ({100 * covered / total:.2f}%)")
-PY
-        ;;
     *)
-        echo "usage: $0 {bundle|export|merge-go PROFILE PROFILE...}" >&2
+        echo "usage: $0 {bundle|export}" >&2
         exit 2
         ;;
 esac

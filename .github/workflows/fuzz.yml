@@ -1,0 +1,110 @@
+name: Fuzz
+
+on:
+  push:
+    branches: [main, release-*, v3]
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  pull_request:
+    branches: [main, release-*, v3]
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
+  FEATURES: cli,fuse,fileio,dragonfly
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: '1'
+  CI_COVERAGE: '1'
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-ci
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Install dependencies
+        run: |
+          bash tests/scripts/install_ci_packages.sh fuse3
+          sudo modprobe fuse
+
+      - name: Build binaries
+        run: |
+          make ci-build nydusify FEATURES="$FEATURES"
+          bash tests/scripts/e2e_coverage.sh bundle
+
+      - name: Run fuzz test
+        id: suites
+        env:
+          FUZZ_TIME: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '10m' || '150s' }}
+          TEST_TIMEOUT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '12m' || '4m' }}
+        run: |
+          make e2e-run PKG=./tar/ E2E_REQUIRE=1 E2E_RUN='^$$' E2E_PARALLEL=4 \
+            E2E_TIMEOUT="$TEST_TIMEOUT" E2E_GO_TEST_ARGS="-fuzz ^FuzzTarConversion -fuzztime $FUZZ_TIME" &
+          tar_pid=$!
+          make e2e-run PKG=./build/ E2E_REQUIRE=1 E2E_RUN='^$$' E2E_PARALLEL=4 \
+            E2E_TIMEOUT="$TEST_TIMEOUT" E2E_GO_TEST_ARGS="-fuzz ^FuzzBlobFormat -fuzztime $FUZZ_TIME" &
+          blob_pid=$!
+          status=0
+          wait "$tar_pid" || status=1
+          wait "$blob_pid" || status=1
+          exit "$status"
+
+      - name: Export coverage
+        if: always()
+        env:
+          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
+        run: bash tests/scripts/e2e_coverage.sh export
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        if: ${{ !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/rust-e2e.lcov
+          flags: fuzz
+          disable_search: true
+          fail_ci_if_error: false
+
+      - name: Upload fuzz crashers
+        uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: tests/e2e/**/testdata/fuzz/
+          if-no-files-found: ignore

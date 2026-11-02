@@ -46,7 +46,7 @@ func TestWorkflowShards(t *testing.T) {
 		}
 	}
 	for _, target := range []struct{ file, job string }{
-		{"ci.yml", "e2e"},
+		{"e2e.yml", "e2e"},
 		{"release.yml", "verify-contract"},
 	} {
 		t.Run(target.file, func(t *testing.T) {

@@ -1,11 +1,11 @@
-name: Sync Top Images to GHCR
-run-name: "Sync Top Images to GHCR (${{ inputs.images || 'all images' }})"
+name: Sync Images
+run-name: Sync Images (${{ inputs.images || 'all images' }})
 
 on:
   workflow_dispatch:
     inputs:
       images:
-        description: "Space-separated subset of images to copy (default: all images in the list)"
+        description: Space-separated subset of Docker Hub images to mirror to GHCR (default all images in the list)
         required: false
         type: string
 
@@ -13,14 +13,10 @@ permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
 jobs:
   list:
-    name: Build image list
-    runs-on: ubuntu-latest
+    name: List Images
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       images: ${{ steps.list.outputs.images }}
@@ -43,9 +39,8 @@ jobs:
           echo "images=$(printf '%s\n' $images | jq -cRn '[inputs | select(length > 0)]')" >> "$GITHUB_OUTPUT"
 
   sync:
-    name: ${{ matrix.image }}
     needs: list
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -53,7 +48,7 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.list.outputs.images) }}
     steps:
-      - name: Log in to GHCR
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io

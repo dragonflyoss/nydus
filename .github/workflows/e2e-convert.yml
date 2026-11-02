@@ -1,0 +1,86 @@
+name: E2E Test With Image Conversion
+run-name: E2E Test With Image Conversion (concurrency=${{ inputs.concurrency }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: Number of images converted/checked in parallel
+        required: false
+        type: number
+        default: 5
+      registry:
+        description: Target registry/namespace for the converted nydus images (default ghcr.io/<repository>)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.88.0
+  NYDUS_TEST_FAIL_KNOWN_ISSUES: '1'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Share registry credentials with root
+        run: |
+          sudo mkdir -p /root/.docker
+          sudo cp "$HOME/.docker/config.json" /root/.docker/config.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-convert
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Run E2E test
+        env:
+          TOP_IMAGES_CONCURRENCY: ${{ inputs.concurrency }}
+          TOP_IMAGES_REGISTRY: ${{ inputs.registry || format('ghcr.io/{0}', github.repository) }}
+        run: |
+          sudo mkdir -p -m 0777 /mnt/nydusify-top-images
+          make test-top-images E2E_REQUIRE=1 TOP_IMAGES_TIMEOUT=140m \
+            TOP_IMAGES_CONCURRENCY="$TOP_IMAGES_CONCURRENCY" TOP_IMAGES_REGISTRY="$TOP_IMAGES_REGISTRY" \
+            TOP_IMAGES_WORKDIR=/mnt/nydusify-top-images

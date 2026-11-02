@@ -19,9 +19,9 @@ Both settings are required together. Baselines must have identical host,
 architecture, kernel, mode/metric sets and workload environment settings.
 Missing, zero, or nonfinite metrics are errors, not improvements. Latency
 increases and throughput decreases are compared in their correct direction.
-The manual workflow maps `E2E_BENCH_*` repository variables to these knobs
-and uploads `bench-results.json` even on a regression. Keep baseline paths
-on the dedicated runner; do not auto-update a baseline from the candidate.
+The Benchmark workflow runs `fuse,fileio` on a GitHub-hosted runner without
+a baseline and uploads `bench-results.json`. Gate against a baseline on a
+dedicated host; do not auto-update a baseline from the candidate.
 
 The new `big_dir_lookup_ops` metric is a single positive-lookup pass over
 the `small/` directory (10,000 entries by default) on a **fresh mount**,
@@ -34,7 +34,5 @@ and random read metrics also participate in the optional gate.
 `go test ./internal/benchgate -run TestBaseline` validates comparison
 direction, host/workload matching, and invalid budgets without running fio.
 `make test-bench` builds GA features only. Optional experimental columns
-require an explicitly built binary and a capability-matched host. The manual
-workflow's `E2E_BENCH_FEATURES` can opt into those features, paired with
-`E2E_BENCH_MODES` and matching runner labels; ublk is not an incidental
-dependency of a GA performance run.
+require an explicitly built binary and a capability-matched host; ublk is
+not an incidental dependency of a GA performance run.
