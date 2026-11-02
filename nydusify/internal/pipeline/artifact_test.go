@@ -27,10 +27,6 @@ import (
 func TestConvertNydusArtifactsWithAllParentBlobsPruned(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := local.NewStore(filepath.Join(dir, "content"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	bootstrapPath := filepath.Join(dir, "image.boot")
 	if err := os.WriteFile(bootstrapPath, []byte("null-only bootstrap"), 0o600); err != nil {
 		t.Fatal(err)
@@ -62,6 +58,10 @@ func TestConvertNydusArtifactsWithAllParentBlobsPruned(t *testing.T) {
 					refs[dgst] = struct{}{}
 				}
 				return refs, nil
+			}
+			store, err := local.NewStore(filepath.Join(t.TempDir(), "content"))
+			if err != nil {
+				t.Fatal(err)
 			}
 			tc.options.BootstrapPath = bootstrapPath
 			result, err := ConvertNydusArtifacts(ctx, store, tc.options)

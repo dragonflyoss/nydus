@@ -8,6 +8,8 @@ package remote
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -44,6 +46,7 @@ type Provider struct {
 	targetInsecure  bool
 	targetPlainHTTP bool
 	credFunc        CredentialFunc
+	blobFetchers    sync.Map // Reuse resolver authorization across compact range reads.
 }
 
 // Option configures a Provider.
@@ -311,4 +314,45 @@ func copyLabels(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// OpenBlob opens a seekable reader using the resolver's authentication and TLS.
+// Remote reads are deferred until Read; the caller owns the returned handle.
+// As with runtime range reads, this does not verify the whole blob digest.
+func (p *Provider) OpenBlob(ctx context.Context, desc ocispec.Descriptor, ref string, reg Side, requestedRange string) (io.ReadSeekCloser, error) {
+	end, err := rangeEnd(requestedRange, desc.Size)
+	if err != nil {
+		return nil, err
+	}
+	ctx = context.WithValue(ctx, blobRangeKey{}, blobRange{end: end, size: desc.Size})
+	normalized, err := normalizeRef(ref)
+	if err != nil {
+		return nil, err
+	}
+	key := struct {
+		side Side
+		ref  string
+	}{reg, normalized}
+	cached, ok := p.blobFetchers.Load(key)
+	if !ok {
+		client := newHTTPClient(p.Insecure(reg))
+		transport := client.Transport.(*http.Transport)
+		transport.DisableKeepAlives = false
+		client.Transport = boundedRangeTransport{transport}
+		fetcher, err := newResolver(p.Insecure(reg), p.PlainHTTP(reg), p.credFunc, client).Fetcher(ctx, normalized)
+		if err != nil {
+			return nil, err
+		}
+		cached, _ = p.blobFetchers.LoadOrStore(key, fetcher)
+	}
+	source, err := cached.(remotes.Fetcher).Fetch(ctx, desc)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := source.(io.ReadSeekCloser)
+	if !ok {
+		_ = source.Close()
+		return nil, errors.New("registry fetcher does not support seeking")
+	}
+	return reader, nil
 }

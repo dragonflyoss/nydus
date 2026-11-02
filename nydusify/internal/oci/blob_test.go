@@ -7,10 +7,13 @@
 package oci_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -21,7 +24,43 @@ import (
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
+
+func TestBootstrapFileAndBytesHaveIdenticalLayers(t *testing.T) {
+	ctx := context.Background()
+	provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
+	require.NoError(t, err)
+	data := bytes.Repeat([]byte("bootstrap"), 1024)
+	path := filepath.Join(t.TempDir(), "image.boot")
+	require.NoError(t, os.WriteFile(path, data, 0644))
+	meta := []nydus.BlobMetaFile{{Name: "test.blob.meta", Data: []byte("meta")}}
+	extra := []nydus.AppendFile{{Name: "extra.json", Data: []byte("{}")}}
+	original, err := oci.WriteBootstrapLayer(ctx, provider.ContentStore(), data, meta, extra)
+	require.NoError(t, err)
+	streamed, err := oci.WriteBootstrapLayerFromFile(ctx, provider.ContentStore(), path, meta, extra)
+	require.NoError(t, err)
+	require.Equal(t, original, streamed)
+	contents := map[string][]byte{}
+	require.NoError(t, oci.WalkBootstrapLayer(ctx, provider.ContentStore(), *streamed, func(header *tar.Header, reader *tar.Reader) error {
+		if header.Typeflag == tar.TypeReg {
+			var err error
+			contents[header.Name], err = io.ReadAll(reader)
+			return err
+		}
+		return nil
+	}))
+	require.Equal(t, data, contents["image/image.boot"])
+	require.Equal(t, []byte("meta"), contents["image/test.blob.meta"])
+	require.Equal(t, []byte("{}"), contents["image/extra.json"])
+	_, err = oci.WriteBootstrapLayerFromFile(ctx, provider.ContentStore(), path+"-missing", nil, nil)
+	require.Error(t, err)
+	_, err = oci.WriteBootstrapLayerFromFile(ctx, provider.ContentStore(), filepath.Dir(path), nil, nil)
+	require.Error(t, err)
+	statuses, err := provider.ContentStore().ListStatuses(ctx)
+	require.NoError(t, err)
+	require.Empty(t, statuses, "bootstrap failure must abort its partial ingest")
+}
 
 func TestCommitBlobRetriesInterruptedIngest(t *testing.T) {
 	ctx := context.Background()
@@ -91,9 +130,18 @@ func TestCommitBlobValidatesDigestAndRestoresLabels(t *testing.T) {
 
 type failingStore struct {
 	content.Store
-	phase  string
-	err    error
-	writer *failingWriter
+	phase           string
+	err             error
+	writer          *failingWriter
+	abortContextErr error
+	aborted         bool
+	cancel          context.CancelFunc
+}
+
+func (s *failingStore) Abort(ctx context.Context, ref string) error {
+	s.aborted = true
+	s.abortContextErr = ctx.Err()
+	return s.Store.Abort(ctx, ref)
 }
 
 func (s *failingStore) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) {
@@ -138,6 +186,9 @@ func (w *failingWriter) Truncate(size int64) error {
 
 func (w *failingWriter) Write(p []byte) (int, error) {
 	if w.store.phase == "write" {
+		if w.store.cancel != nil {
+			w.store.cancel()
+		}
 		return 0, w.store.err
 	}
 	return w.Writer.Write(p)
@@ -188,6 +239,38 @@ func TestCommitBlobPropagatesStoreErrors(t *testing.T) {
 			if store.writer != nil {
 				require.True(t, store.writer.closed, "failed ingest must release its writer")
 			}
+		})
+	}
+}
+
+func TestBootstrapFileAbortsFailedIngest(t *testing.T) {
+	for _, phase := range []string{"open", "status", "write", "commit", "info"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
+			require.NoError(t, err)
+			path := filepath.Join(t.TempDir(), "image.boot")
+			require.NoError(t, os.WriteFile(path, []byte("bootstrap data"), 0600))
+			failure := errors.New("bootstrap ingest " + phase)
+			store := &failingStore{Store: provider.ContentStore(), phase: phase, err: failure}
+			if phase == "write" {
+				store.cancel = cancel
+			}
+			desc, err := oci.WriteBootstrapLayerFromFile(ctx, store, path, nil, nil)
+			require.ErrorIs(t, err, failure)
+			require.Nil(t, desc)
+			require.True(t, store.aborted)
+			require.NoError(t, store.abortContextErr)
+			if phase == "write" {
+				require.ErrorIs(t, ctx.Err(), context.Canceled)
+			}
+			if store.writer != nil {
+				require.True(t, store.writer.closed)
+			}
+			statuses, err := store.ListStatuses(context.Background())
+			require.NoError(t, err)
+			require.Empty(t, statuses, "failed packaging must not retain a partial ingest")
 		})
 	}
 }

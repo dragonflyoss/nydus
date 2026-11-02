@@ -8,6 +8,8 @@ package nydus
 
 import (
 	"archive/tar"
+	"bytes"
+	"io"
 
 	"github.com/pkg/errors"
 )
@@ -16,6 +18,12 @@ import (
 // one `image/<full_blob_sha256>.blob.meta` entry per layer, and optionally
 // extra appended files into tw. The caller owns tw and must close it.
 func WriteBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []BlobMetaFile, appendFiles []AppendFile) error {
+	return WriteBootstrapTarFromReader(tw, bytes.NewReader(bootstrapData), int64(len(bootstrapData)), blobMetas, appendFiles)
+}
+
+// WriteBootstrapTarFromReader streams exactly size bootstrap bytes into the
+// same archive layout. The caller owns the reader and tar writer.
+func WriteBootstrapTarFromReader(tw *tar.Writer, bootstrap io.Reader, size int64, blobMetas []BlobMetaFile, appendFiles []AppendFile) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "image",
 		Mode:     0o755,
@@ -26,11 +34,11 @@ func WriteBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []BlobMet
 	if err := tw.WriteHeader(&tar.Header{
 		Name: BootstrapFileNameInLayer,
 		Mode: 0o444,
-		Size: int64(len(bootstrapData)),
+		Size: size,
 	}); err != nil {
 		return errors.Wrap(err, "write bootstrap file header")
 	}
-	if _, err := tw.Write(bootstrapData); err != nil {
+	if _, err := io.CopyN(tw, bootstrap, size); err != nil {
 		return errors.Wrap(err, "write bootstrap file")
 	}
 	for _, meta := range blobMetas {

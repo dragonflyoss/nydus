@@ -46,11 +46,11 @@ pub use nydus_storage::cache::CacheOptions;
 pub use nydus_storage::ondemand::OndemandRecorder;
 pub use nydus_telemetry::metrics::Metrics;
 pub use reader::ErofsReader;
-pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
+pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions, RepackResult};
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -77,6 +77,8 @@ pub struct NydusCore {
     /// Static path-based filesystem APIs.
     pub fs: ImageFs,
     reader: Arc<ErofsReader>,
+    backend: Arc<dyn Backend>,
+    cache_dir: Option<PathBuf>,
     bootstrap: Arc<File>,
     zero_file: Arc<File>,
     address_layout: FlatLayout,
@@ -225,6 +227,8 @@ impl NydusCore {
             },
             fs: ImageFs::new(reader.clone(), zero_file.clone()),
             reader,
+            backend,
+            cache_dir,
             bootstrap: bootstrap_file,
             zero_file,
             address_layout,
@@ -243,6 +247,31 @@ impl NydusCore {
     /// read the merged result.
     pub fn writer(&self, options: IncrementalWriterOptions) -> Result<IncrementalWriter> {
         IncrementalWriter::from_parent_reader(self.reader.clone(), options)
+    }
+
+    /// Prune metadata and compact only when the live blob count exceeds the limit.
+    /// A zero limit disables compact; `options.prune` controls prune-only use.
+    /// The callback receives the live source digests before any data is read,
+    /// and may populate the backend. The same loaded inode tree is then used
+    /// to write at most one final bootstrap. A no-op writes nothing.
+    pub fn repack(
+        &self,
+        options: IncrementalWriterOptions,
+        compact_max_layers: usize,
+        prepare: impl FnOnce(&RepackResult) -> Result<()>,
+    ) -> Result<RepackResult> {
+        IncrementalWriter::repack_from_reader(
+            self.reader.clone(),
+            &self.repack_backend(),
+            &self.address_layout,
+            options,
+            compact_max_layers,
+            prepare,
+        )
+    }
+
+    fn repack_backend(&self) -> writer::RepackBackend<'_> {
+        writer::RepackBackend::new(self.backend.as_ref(), self.cache_dir.as_deref())
     }
 
     /// Return the bootstrap file backing this core.

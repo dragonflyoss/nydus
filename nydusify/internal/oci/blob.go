@@ -8,9 +8,10 @@ package oci
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
@@ -163,43 +164,64 @@ func IngestBlobFile(ctx context.Context, cs content.Store, path string, dgst dig
 // content store, returning the bootstrap layer descriptor. If appendFiles is
 // non-empty, each file is placed under "image/" alongside image.boot.
 func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []byte, blobMetas []nydus.BlobMetaFile, appendFiles []nydus.AppendFile) (*ocispec.Descriptor, error) {
-	var compressedBuf bytes.Buffer
-	compressedDigester := digest.SHA256.Digester()
+	return writeBootstrapLayer(ctx, cs, func(tw *tar.Writer) error {
+		return nydus.WriteBootstrapTar(tw, bootstrapData, blobMetas, appendFiles)
+	})
+}
+
+// WriteBootstrapLayerFromFile packages a bootstrap without materializing it in
+// memory. Existing byte-slice callers use the same tar and compression path.
+func WriteBootstrapLayerFromFile(ctx context.Context, cs content.Store, path string, blobMetas []nydus.BlobMetaFile, appendFiles []nydus.AppendFile) (*ocispec.Descriptor, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.Wrap(err, "open bootstrap")
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, errors.Wrap(err, "stat bootstrap")
+	}
+	return writeBootstrapLayer(ctx, cs, func(tw *tar.Writer) error {
+		return nydus.WriteBootstrapTarFromReader(tw, file, info.Size(), blobMetas, appendFiles)
+	})
+}
+
+func writeBootstrapLayer(ctx context.Context, cs content.Store, writeTar func(*tar.Writer) error) (*ocispec.Descriptor, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return nil, errors.Wrap(err, "create bootstrap ingest reference")
+	}
+	ref := "nydus-bootstrap-" + hex.EncodeToString(token[:])
+	// The digest is unknown until compression finishes. Each invocation owns
+	// its ingest reference and aborts any partial data on failure.
+	defer func() { _ = cs.Abort(context.WithoutCancel(ctx), ref) }()
 	uncompressedDigester := digest.SHA256.Digester()
-
-	gw := gzip.NewWriter(io.MultiWriter(&compressedBuf, compressedDigester.Hash()))
-	tw := tar.NewWriter(io.MultiWriter(gw, uncompressedDigester.Hash()))
-
-	if err := nydus.WriteBootstrapTar(tw, bootstrapData, blobMetas, appendFiles); err != nil {
-		return nil, err
-	}
-	if err := tw.Close(); err != nil {
-		return nil, errors.Wrap(err, "close tar writer")
-	}
-	if err := gw.Close(); err != nil {
-		return nil, errors.Wrap(err, "close gzip writer")
-	}
-
-	compressedDigest := compressedDigester.Digest()
-	uncompressedDigest := uncompressedDigester.Digest()
-	layerBytes := compressedBuf.Bytes()
-
-	if _, _, err := CommitBlob(ctx, cs, "nydus-bootstrap-"+compressedDigest.String(), compressedDigest,
+	compressedDigest, size, err := CommitBlob(ctx, cs, ref, "",
 		func(digest.Digest) map[string]string {
-			return map[string]string{nydus.LayerAnnotationUncompressed: uncompressedDigest.String()}
+			return map[string]string{nydus.LayerAnnotationUncompressed: uncompressedDigester.Digest().String()}
 		},
 		func(w io.Writer) error {
-			_, err := w.Write(layerBytes)
-			return err
+			gw := gzip.NewWriter(w)
+			defer func() { _ = gw.Close() }()
+			tw := tar.NewWriter(io.MultiWriter(gw, uncompressedDigester.Hash()))
+			if err := writeTar(tw); err != nil {
+				return err
+			}
+			if err := tw.Close(); err != nil {
+				return errors.Wrap(err, "close tar writer")
+			}
+			return errors.Wrap(gw.Close(), "close gzip writer")
 		},
-	); err != nil {
+	)
+	if err != nil {
 		return nil, errors.Wrap(err, "commit bootstrap layer")
 	}
+	uncompressedDigest := uncompressedDigester.Digest()
 
 	return &ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageLayerGzip,
 		Digest:    compressedDigest,
-		Size:      int64(len(layerBytes)),
+		Size:      size,
 		Annotations: map[string]string{
 			nydus.LayerAnnotationUncompressed:   uncompressedDigest.String(),
 			nydus.LayerAnnotationNydusBootstrap: "true",
