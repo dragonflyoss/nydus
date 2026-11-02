@@ -145,7 +145,7 @@ requests by itself; nothing is called from `ci.yml`.
   old digest representation is not part of the supported compatibility window.
 - Release: static amd64 and arm64 binaries are built, checked for static
   linking and a working `--help`, packaged with checksums, and published on
-  tags. Release runs no test suites; PR runs never publish a release.
+  tags. Release runs only on tags and runs no test suites.
 - Scheduled: the experimental transports and continuous ten-minute fuzz runs
   per target run on schedule. UFFD additionally repeats each real-fault
   copy/zeropage/zerocopy case 34 times, also on manual experimental runs.
@@ -177,7 +177,6 @@ requests by itself; nothing is called from `ci.yml`.
 | `E2E Test With Experimental Transports / test (*)` | One shared experimental-feature build and four transports |
 | `Fuzz / Fuzz` | One two-target fuzz job |
 | `E2E Test With Compatibility / Test` | Historical and current golden images read by the current and the released reader |
-| `Release / build (*)` | Static Rust/Go build and packaging on amd64 and arm64 |
 | `codecov/project/rust`, `codecov/project/go` | Codecov's union of every flag for the commit; each fails below 90% |
 
 Checks follow the dragonfly workflows: single-word job names, and matrix jobs
