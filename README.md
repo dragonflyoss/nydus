@@ -349,7 +349,7 @@ cargo build --release --features cli,uffd
 cargo build --release --features cli,ublk
 
 # The nydusify binary.
-make nydusify
+make build-nydusify
 ```
 
 Library embedders should depend on the `nydus-core` crate
@@ -373,21 +373,21 @@ make crate
 make test
 
 # End-to-end suites (root via sudo, FUSE; see tests/e2e/README.md). Each
-# directory under tests/e2e is a suite; NYDUS_E2E_REQUIRE=1 (E2E_REQUIRE=1)
-# turns missing preconditions into failures, as CI does.
+# directory under tests/e2e is a suite; CI=1 turns missing preconditions
+# into failures, as GitHub Actions does.
 make e2e PKG=./contract/...
 make e2e-ga                      # every GA suite but dragonfly
 make e2e-dragonfly               # needs upstream Kind/Helm setup; see tests/e2e/README.md
 make e2e-experimental            # nbd, fanotify, ublk, uffd
 
 # FUSE hot upgrade, rollback, no-API operation and live-owner exclusion.
-make test-fuse-continuity
+make e2e-continuity
 # Optional separate, hot-upgrade-capable predecessor binary:
-make test-fuse-continuity FUSE_CONTINUITY_PREDECESSOR=/abs/path/to/nydus
+NYDUS_E2E_FUSE_PREDECESSOR=/abs/path/to/nydus make e2e-continuity
 
 # Unified cold-start performance benchmark: FUSE / fileio / NBD / ublk /
 # fanotify (requires root and fio; unavailable modes are left out).
-make test-bench
+make benchmark
 ```
 
 End-to-end suites live under `tests/e2e/`. See the `Makefile` for

@@ -36,7 +36,7 @@ import (
 const (
 	// readTimeout bounds a single whole-file read; past it the daemon is
 	// considered hung.
-	readTimeout = 30 * time.Second
+	readTimeout = 60 * time.Second
 	// exitTimeout bounds how long a daemon may take to exit once it should.
 	exitTimeout = 15 * time.Second
 

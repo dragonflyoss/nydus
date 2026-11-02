@@ -1,0 +1,58 @@
+name: Benchmark
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Install dependencies
+        run: |
+          bash tests/scripts/install_ci_packages.sh erofs-utils fuse3 fio
+          sudo modprobe fuse
+
+      - name: Install erofsfuse
+        run: sudo bash tests/scripts/setup_erofsfuse.sh
+
+      - name: Run benchmark
+        env:
+          NYDUSFS_BENCH_MODES: fuse,fileio
+          NYDUSFS_BENCH_OUTPUT: ${{ github.workspace }}/bench-results.json
+        run: make benchmark
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v6
+        with:
+          name: bench-results
+          path: bench-results.json

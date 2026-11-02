@@ -4,7 +4,7 @@
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn main() {
     assert!(
-        std::env::var_os("NYDUS_TEST_REQUIRE_PTRACE").is_none(),
+        std::env::var_os("CI").is_none(),
         "deterministic hardware watchpoint requires Linux x86-64"
     );
     eprintln!("SKIP KI-3: deterministic hardware watchpoint requires Linux x86-64");
@@ -100,10 +100,10 @@ mod linux {
         let status = wait(pid);
         if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 77 {
             assert!(
-                std::env::var_os("NYDUS_TEST_REQUIRE_PTRACE").is_none(),
+                std::env::var_os("CI").is_none(),
                 "ptrace required but unavailable"
             );
-            eprintln!("SKIP KI-3: ptrace denied; set NYDUS_TEST_REQUIRE_PTRACE=1 to require it");
+            eprintln!("SKIP KI-3: ptrace denied; CI requires it");
             return;
         }
         assert!(libc::WIFSTOPPED(status));

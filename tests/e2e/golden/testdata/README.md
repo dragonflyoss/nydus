@@ -48,11 +48,12 @@ sudo the result is handed back to the invoking user.
 ## First release and required compatibility
 
 The committed directory currently has no historical images. CI does not
-count reading this empty directory as compatibility coverage: Release downloads
-the published `v3.0.0-beta.3` binary and checksum on each architecture and
-generates a nonempty historical corpus with that actual released builder.
-It sets `NYDUS_E2E_GOLDEN_REQUIRED=1` for every read and requires the historical
-version with `NYDUS_E2E_GOLDEN_VERSIONS`. A missing baseline, failed download,
+count reading this empty directory as compatibility coverage: the
+compatibility workflow downloads the published `v3.0.0-beta.3` binary and
+checksum and generates a nonempty historical corpus with that actual
+released builder.
+Under CI every read requires golden versions, and the historical
+version is required with `NYDUS_E2E_GOLDEN_VERSIONS`. A missing baseline, failed download,
 empty corpus or missing supported version fails; there is no current-builder
 fallback. Future immutable release corpora can still be committed using the
 instructions above. Local exploratory runs may leave the required flag unset.

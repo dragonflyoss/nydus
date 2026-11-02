@@ -61,7 +61,7 @@ func TestOutageRecovery(t *testing.T) {
 		require.Zero(t, failed.API.Metrics(t).Sum("nydus_backend_read_total", `type="ondemand"`))
 	}))
 	require.True(t, t.Run("FallbackRateLimit", func(t *testing.T) {
-		rateImage := uniqueImageSize(t, 256<<10, "zstd-4k-group-64k")
+		rateImage := uniqueImageSize(t, 512<<10, "zstd-4k-group-64k")
 		rateOrigin := startOrigin(t, rateImage)
 		limited := mountDragonfly(t, c, rateImage, rateOrigin.URL, options{
 			FallbackRateLimit: 1, FetchSize: mount.Ptr[int64](0),

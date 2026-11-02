@@ -1,0 +1,70 @@
+name: E2E Test With Image Conversion
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Share registry credentials with root
+        run: |
+          sudo mkdir -p /root/.docker
+          sudo cp "$HOME/.docker/config.json" /root/.docker/config.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Run E2E test
+        env:
+          NYDUSFS_TOP_IMAGES_REGISTRY: ghcr.io/${{ github.repository }}
+          NYDUSFS_TOP_IMAGES_WORKDIR: /mnt/nydusify-top-images
+        run: |
+          sudo mkdir -p -m 0777 /mnt/nydusify-top-images
+          make e2e-convert

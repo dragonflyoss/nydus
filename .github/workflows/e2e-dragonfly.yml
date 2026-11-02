@@ -1,98 +1,81 @@
-name: Dragonfly E2E
+name: E2E Test With Dragonfly
 
 on:
+  push:
+    branches: [main, release-*, v3]
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  pull_request:
+    branches: [main, release-*, v3]
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   schedule:
-    - cron: "0 4 * * *"
-  workflow_dispatch:
-  workflow_call:
-    secrets:
-      CODECOV_TOKEN:
-        required: false
-    inputs:
-      binaries-artifact:
-        description: Existing GA binaries in the caller workflow run
-        type: string
-        default: ""
+    - cron: '0 4 * * *'
 
 permissions:
   contents: read
 
 env:
-  RUST_TOOLCHAIN: 1.88.0
-  GO_VERSION: "1.25.5"
+  RUST_BACKTRACE: 1
   KIND_VERSION: v0.32.0
   KIND_CONFIG_PATH: tests/testdata/kind/config.yaml
-  DRAGONFLY_CHART_VERSION: "1.8.2"
+  DRAGONFLY_CHART_VERSION: 1.8.2
   DRAGONFLY_CHARTS_CONFIG_PATH: tests/testdata/charts/config.yaml
   DRAGONFLY_SCHEDULER_NODEPORT_SERVICE_PATH: tests/testdata/k8s/scheduler-nodeport-svc.yaml
-  NYDUS_TEST_FAIL_KNOWN_ISSUES: "1"
-  CI_COVERAGE: "1"
-  COVERAGE_DIR: ${{ github.workspace }}/coverage
 
 jobs:
-  build:
-    name: binaries / build
-    if: inputs.binaries-artifact == ''
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: e2e-ci
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ github.token }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: nydusify/go.sum
-      - run: |
-          make ci-build nydusify FEATURES=cli,fuse,fileio,dragonfly
-          bash tests/scripts/e2e_coverage.sh bundle
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dragonfly-binaries
-          path: |
-            target/ci/nydus
-            target/ci/examples/writer-fixture
-            nydusify/nydusify
-            coverage-tools/
-          if-no-files-found: error
-
   test:
-    name: dragonfly / read-recovery
-    needs: build
-    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    name: Test
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - name: Create kind network
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Create Kind network
         run: docker network create kind --subnet 172.30.0.0/16 --gateway 172.30.0.1
+
       - name: Setup Kind
         uses: helm/kind-action@v1
         with:
           version: ${{ env.KIND_VERSION }}
           config: ${{ env.KIND_CONFIG_PATH }}
           cluster_name: kind
-      - uses: azure/setup-helm@v4
-      - uses: actions/setup-go@v5
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: tests/e2e/go.sum
-      - uses: actions/download-artifact@v4
+          toolchain: 1.88.0
+          components: llvm-tools-preview
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
-          name: ${{ inputs.binaries-artifact || 'dragonfly-binaries' }}
-      - name: Install test dependencies
+          cache-on-failure: true
+          shared-key: e2e-ci
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Install dependencies
         run: |
-          chmod +x target/ci/nydus nydusify/nydusify
           bash tests/scripts/install_ci_packages.sh fuse3
           sudo modprobe fuse
+
+      - name: Build binaries
+        run: make build-coverage
+
       - name: Setup Dragonfly
         run: |
           helm repo add dragonfly https://dragonflyoss.github.io/helm-charts/
@@ -101,50 +84,45 @@ jobs:
             dragonfly dragonfly/dragonfly
           kubectl apply -f "${DRAGONFLY_SCHEDULER_NODEPORT_SERVICE_PATH}"
           timeout 120 bash -c 'until (echo > /dev/tcp/127.0.0.1/8002) 2>/dev/null; do sleep 1; done'
+
       - name: Setup registry
         run: |
           docker run -d --name registry -p 5000:5000 registry:2
           timeout 30 bash -c 'until curl -sf http://127.0.0.1:5000/v2/ >/dev/null; do sleep 1; done'
-      - name: Run suite
-        id: suites
+
+      - name: Run E2E test
         env:
           NYDUS_E2E_DRAGONFLY_SCHEDULER: http://127.0.0.1:8002
         run: |
           export KUBECONFIG="$HOME/.kube/config"
-          make e2e-run PKG=./dragonfly/... E2E_REQUIRE=1 E2E_TIMEOUT=4m E2E_GO_TEST_ARGS=-v
-      - name: Export product coverage
-        if: always()
-        env:
-          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
+          make e2e-run PKG=./dragonfly/... E2E_TIMEOUT=4m
+
+      - name: Export coverage
         run: bash tests/scripts/e2e_coverage.sh export
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-dragonfly
-          path: coverage/
-          if-no-files-found: error
-      - uses: codecov/codecov-action@v5
-        if: ${{ github.event_name != 'pull_request' && !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
         timeout-minutes: 1
         continue-on-error: true
         with:
-          files: coverage/rust-e2e.lcov
-          flags: rust_e2e
-          name: rust-dragonfly
-          disable_search: true
-          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Collect cluster logs
+          files: coverage/rust-e2e.lcov
+          flags: e2etests
+          disable_search: true
+
+      - name: Export logs
         if: always()
         run: |
-          mkdir -p /tmp/dragonfly-logs
-          kubectl --namespace dragonfly-system get pods -o wide > /tmp/dragonfly-logs/pods.log 2>&1 || true
-          kubectl --namespace dragonfly-system get services > /tmp/dragonfly-logs/services.log 2>&1 || true
-          kubectl --namespace dragonfly-system logs statefulset/dragonfly-scheduler --tail=-1 > /tmp/dragonfly-logs/scheduler.log 2>&1 || true
-          kubectl --namespace dragonfly-system logs statefulset/dragonfly-seed-client --tail=-1 > /tmp/dragonfly-logs/seed-client.log 2>&1 || true
-      - uses: actions/upload-artifact@v4
+          mkdir -p /tmp/artifact
+          kubectl --namespace dragonfly-system get pods -o wide > /tmp/artifact/pods.log 2>&1 || true
+          kubectl --namespace dragonfly-system get services > /tmp/artifact/services.log 2>&1 || true
+          kubectl --namespace dragonfly-system logs statefulset/dragonfly-scheduler --tail=-1 > /tmp/artifact/scheduler.log 2>&1 || true
+          kubectl --namespace dragonfly-system logs statefulset/dragonfly-seed-client --tail=-1 > /tmp/artifact/seed-client.log 2>&1 || true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: dragonfly-logs
-          path: /tmp/dragonfly-logs
+          name: dragonfly-e2e-tests-logs
+          path: /tmp/artifact
           if-no-files-found: ignore

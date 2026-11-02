@@ -1,5 +1,5 @@
 //! A real HTTP registry reachable only inside the configured namespace.
-//! Set NYDUS_TEST_REQUIRE_NETNS=1 on privileged runners to forbid skips.
+//! CI forbids the skip.
 #![cfg(all(target_os = "linux", feature = "registry"))]
 
 use std::fs;
@@ -48,7 +48,7 @@ fn metadata_ondemand_and_prefetch_reach_only_the_configured_namespace() {
             ) =>
         {
             assert!(
-                std::env::var_os("NYDUS_TEST_REQUIRE_NETNS").is_none(),
+                std::env::var_os("CI").is_none(),
                 "required netns precondition failed: {error}"
             );
             eprintln!("SKIP: netns needs CAP_SYS_ADMIN/CAP_NET_ADMIN and iproute2: {error}");

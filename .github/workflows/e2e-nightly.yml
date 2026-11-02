@@ -1,0 +1,100 @@
+name: Nightly E2E Test
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  soak:
+    name: Soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: llvm-tools-preview
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-nightly
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Install dependencies
+        run: |
+          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo modprobe fuse
+          sudo modprobe erofs
+
+      - name: Build binaries
+        run: make build-coverage FEATURES=cli,fuse,fileio
+
+      - name: Run E2E test
+        run: make e2e-soak E2E_PARALLEL=4
+
+      - name: Export coverage
+        run: bash tests/scripts/e2e_coverage.sh export
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/rust-e2e.lcov
+          flags: e2etests
+          disable_search: true
+
+  hugetar:
+    name: Huge Tar
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: e2e-nightly
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Install dependencies
+        run: |
+          bash tests/scripts/install_ci_packages.sh erofs-utils fuse3
+          sudo modprobe fuse
+
+      - name: Run E2E test
+        run: make e2e-hugetar

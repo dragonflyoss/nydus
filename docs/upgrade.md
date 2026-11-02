@@ -238,12 +238,12 @@ Real-FUSE E2E covers upgrade, rollback, lifetime-owner exclusion and
 operation without an API. Run it in a root/FUSE-capable environment:
 
 ```sh
-make test-fuse-continuity
+make e2e-continuity
 ```
 
 To exercise hot upgrade from a different predecessor binary that implements the
 same control protocol:
 
 ```sh
-make test-fuse-continuity FUSE_CONTINUITY_PREDECESSOR=/absolute/path/to/nydus-before
+NYDUS_E2E_FUSE_PREDECESSOR=/absolute/path/to/nydus-before make e2e-continuity
 ```

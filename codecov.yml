@@ -1,0 +1,28 @@
+coverage:
+  precision: 2
+  round: down
+  range: '50...100'
+  status:
+    project:
+      rust:
+        target: 90%
+        paths: ['nydus/', 'nydus-*/']
+      go:
+        target: 90%
+        paths: ['nydusify/']
+    patch:
+      default:
+        enabled: no
+
+ignore:
+  - 'tests/'
+  - '**/examples/'
+  - '**/*_test.go'
+
+comment:
+  layout: 'reach, diff, flags, files'
+  behavior: default
+  require_changes: false
+  branches:
+    - main
+    - v3

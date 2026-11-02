@@ -348,7 +348,7 @@ It serves images from an in-process registry and runs the filesystem
 contract shared by every mount mode, plus demand-paged cache growth,
 concurrent readers, restart persistence and — via an `strace` case — that
 the daemon reads pre-content events, writes responses, and pwrites the
-cache, i.e. that it is on the read path. `make test-bench` runs the
+cache, i.e. that it is on the read path. `make benchmark` runs the
 unified cold-start benchmark that compares fanotify against the FUSE,
 fileio, NBD, and ublk transports
 ([`tests/e2e/manual/bench`](../tests/e2e/manual/bench)).
