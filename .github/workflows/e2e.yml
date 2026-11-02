@@ -64,6 +64,7 @@ jobs:
           retention-days: 3
 
   e2e:
+    name: e2e (${{ matrix.suite }})
     needs: [build]
     runs-on: ubuntu-24.04
     timeout-minutes: 6

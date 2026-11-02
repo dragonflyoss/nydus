@@ -286,7 +286,7 @@ func TestWorkflowCoverage(t *testing.T) {
 		require.Equal(t, "Test", ci.Jobs["test"].Name)
 		require.Equal(t, "Test Nydusify", ci.Jobs["test-nydusify"].Name)
 		require.Equal(t, "Build", e2e.Jobs["build"].Name)
-		require.Empty(t, e2e.Jobs["e2e"].Name, "matrix jobs display the job id and suite")
+		require.Equal(t, "e2e (${{ matrix.suite }})", e2e.Jobs["e2e"].Name, "include rows carry pkgs and knobs, so the name is set to the suite alone")
 		require.Equal(t, "Fuzz", read("fuzz.yml").Jobs["fuzz"].Name)
 		require.Equal(t, "Classify PR", read("pr-labels.yml").Jobs["classify"].Name)
 

@@ -178,7 +178,7 @@ requests by itself; nothing is called from `ci.yml`.
 | `codecov/project/rust`, `codecov/project/go` | Codecov's union of every flag for the commit; each fails below 90% |
 
 Checks follow the dragonfly workflows: single-word job names, and matrix jobs
-display the job id with the matrix value in parentheses. Display labels do not
+named `<job> (<matrix key>)`. Display labels do not
 change suite selectors or artifact names. `Classify PR` retains its name because
 upstream branch protection requires it; external DCO and Codecov names are unchanged.
 
