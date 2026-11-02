@@ -11,7 +11,7 @@ import (
 
 const ManifestName = "manifest.json"
 
-func Versions(root, required, supported string, configured bool) ([]string, error) {
+func Versions(root, supported string, required, configured bool) ([]string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -27,10 +27,7 @@ func Versions(root, required, supported string, configured bool) ([]string, erro
 		}
 	}
 	sort.Strings(dirs)
-	if required != "" && required != "0" && required != "1" {
-		return nil, fmt.Errorf("NYDUS_E2E_GOLDEN_REQUIRED must be 0 or 1")
-	}
-	if len(dirs) == 0 && (required == "1" || configured) {
+	if len(dirs) == 0 && (required || configured) {
 		return nil, fmt.Errorf("golden compatibility was required but %s has no versions", root)
 	}
 	for _, version := range strings.Fields(supported) {

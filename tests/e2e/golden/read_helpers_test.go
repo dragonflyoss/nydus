@@ -27,8 +27,8 @@ func versionDirs(t *testing.T) []string {
 	if root == "" {
 		root = testdata
 	}
-	dirs, err := goldenpolicy.Versions(root, os.Getenv("NYDUS_E2E_GOLDEN_REQUIRED"),
-		os.Getenv("NYDUS_E2E_GOLDEN_VERSIONS"), os.Getenv("NYDUS_E2E_GOLDEN_DIR") != "")
+	dirs, err := goldenpolicy.Versions(root, os.Getenv("NYDUS_E2E_GOLDEN_VERSIONS"),
+		env.Strict(), os.Getenv("NYDUS_E2E_GOLDEN_DIR") != "")
 	require.NoError(t, err)
 	return dirs
 }

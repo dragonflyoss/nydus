@@ -19,12 +19,11 @@ growth from a late-initializing HTTP pool.
 
 Nightly E2E Test runs the full `make e2e-soak` on schedule or by dispatch:
 default 1h and 120 cycles for local/remote and FUSE/fileio. The PR soak is
-deliberately bounded. Change the `SOAK_*` Makefile variables to run other
-settings locally.
-The manual run is:
+deliberately bounded. Set the `NYDUS_E2E_SOAK_*` variables to run other
+settings locally:
 
 ```sh
-make e2e-soak SOAK_DURATION=1h SOAK_CYCLES=120 SOAK_RSS_MIB=64 E2E_REQUIRE=1
+CI=1 NYDUS_E2E_SOAK_RSS_MIB=64 make e2e-soak
 ```
 
 The 64MiB above is an example, **not a universal default**. The optional
@@ -50,11 +49,10 @@ a job to a self-hosted runner, edit its `runs-on` label; release architecture
 labels must actually match the downloaded artifact.
 Fanotify requires Linux >=6.15 with FAN_PRE_ACCESS and ext4 cache storage;
 UFFD needs permitted userfaultfd; ublk/NBD need their devices/modules.
-All mandatory lanes set `E2E_REQUIRE=1`; capability labels do not replace
-runtime checks. Use isolated, ephemeral runners for untrusted PRs.
-The main Rust test job needs x86_64 Linux, sudo, permitted ptrace, and
-network namespace creation/setns; it sets `NYDUS_TEST_REQUIRE_NETNS=1`
-and `NYDUS_TEST_REQUIRE_PTRACE=1`, so an EPERM cannot pass as absent coverage.
+Under CI every lane is strict; capability labels do not replace runtime
+checks. Use isolated, ephemeral runners for untrusted PRs. The main Rust test
+job needs x86_64 Linux, sudo, permitted ptrace, and network namespace
+creation/setns, so an EPERM cannot pass as absent coverage.
 
 ublk shares the experimental binary build and has one E2E matrix job.
 Its Rust tests run in the main Rust test job; neither suite is compiled

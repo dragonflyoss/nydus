@@ -47,7 +47,6 @@ func TestWorkflowShards(t *testing.T) {
 	}
 	for _, target := range []struct{ file, job string }{
 		{"e2e.yml", "e2e"},
-		{"release.yml", "verify-contract"},
 	} {
 		t.Run(target.file, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", target.file))

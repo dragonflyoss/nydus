@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,8 +28,8 @@ func TestKnownIssue(t *testing.T) {
 		name, strict, scenario string
 		fails, skips           bool
 	}{
-		{"LocalBug", "0", "bug", false, true},
-		{"LocalFixed", "0", "fixed", true, false},
+		{"LocalBug", "", "bug", false, true},
+		{"LocalFixed", "", "fixed", true, false},
 		{"CIBug", "1", "bug", true, false},
 		{"CIFixed", "1", "fixed", false, false},
 	} {
@@ -36,8 +38,8 @@ func TestKnownIssue(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, bin, "-test.run=^TestKnownIssue$", "-test.v")
-			cmd.Env = append(os.Environ(), "NYDUS_TEST_FAIL_KNOWN_ISSUES="+tc.strict,
-				"NYDUS_TEST_KNOWN_ISSUE_SCENARIO="+tc.scenario)
+			cmd.Env = append(slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "CI=") }),
+				"CI="+tc.strict, "NYDUS_TEST_KNOWN_ISSUE_SCENARIO="+tc.scenario)
 			out, err := cmd.CombinedOutput()
 			require.NoError(t, ctx.Err(), "%s", out)
 			if tc.fails {

@@ -11,10 +11,6 @@ on:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.88.0
-
 jobs:
   lint:
     name: Lint
@@ -27,26 +23,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: 1.88.0
           components: clippy,rustfmt
 
-      - name: Rust cache
+      - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      - name: Install Protoc
+      - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ github.token }}
 
       - name: Run cargo fmt
-        run: |
-          cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Run cargo clippy
-        run: |
-          cargo clippy --all --all-targets --all-features -- -D warnings
+        run: cargo clippy --all --all-targets --all-features -- -D warnings
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -56,13 +50,13 @@ jobs:
             nydusify/go.sum
             tests/e2e/go.sum
 
-      - name: Golangci lint nydusify
+      - name: Run golangci-lint on nydusify
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7
           working-directory: nydusify
 
-      - name: Golangci lint e2e
+      - name: Run golangci-lint on e2e
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7

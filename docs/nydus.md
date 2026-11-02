@@ -125,7 +125,7 @@ The native metadata gate is the kernel e2e suite (`make e2e PKG=./kernel/...`,
 erofs-utils available. It mounts every native layout and merged native
 images with the kernel EROFS driver and compares them with the source tree
 and with the FUSE reader; the build suite runs fsck.erofs on every layout.
-A missing prerequisite skips locally and fails in CI (`E2E_REQUIRE=1`).
+A missing prerequisite skips locally and fails in CI (`CI=true`).
 
 ## Crate Architecture
 

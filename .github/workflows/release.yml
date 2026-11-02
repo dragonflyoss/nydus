@@ -7,17 +7,13 @@ on:
   pull_request:
     branches: [main, release-*, v3]
     paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
   RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.88.0
   FEATURES: cli,uffd,fanotify,fileio,dragonfly
-  NYDUS_TEST_FAIL_KNOWN_ISSUES: '1'
 
 jobs:
   build:
@@ -26,7 +22,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: ['amd64', 'arm64']
         include:
           - arch: amd64
             runner: ubuntu-24.04
@@ -37,23 +32,30 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: 1.88.0
           targets: ${{ matrix.target }}
 
-      - name: Rust cache
+      - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          shared-key: release-${{ matrix.arch }}
 
-      - name: Install Protoc
+      - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ github.token }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: nydusify/go.mod
+          cache-dependency-path: nydusify/go.sum
 
       - name: Install musl toolchain
         run: |
@@ -70,78 +72,23 @@ jobs:
             --target ${{ matrix.target }} \
             --features "${FEATURES}"
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: nydusify/go.mod
-          cache-dependency-path: nydusify/go.sum
-
       - name: Build nydusify
         env:
-          CGO_ENABLED: '0'
+          CGO_ENABLED: 0
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
         run: |
           cd nydusify
           go build -ldflags "-s -w" -o nydusify .
 
-      - name: Upload binaries
-        uses: actions/upload-artifact@v6
-        with:
-          name: nydus-static-${{ matrix.arch }}
-          path: |
-            target/${{ matrix.target }}/release/nydus
-            nydusify/nydusify
-          if-no-files-found: error
-
-  verify:
-    needs: [build]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
-    env:
-      BASELINE_VERSION: v3.0.0-beta.3
-      NYDUS_E2E_GOLDEN_REQUIRED: '1'
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: ['amd64', 'arm64']
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Download binaries
-        uses: actions/download-artifact@v7
-        with:
-          name: nydus-static-${{ matrix.arch }}
-
-      - name: Assemble release directory
+      - name: Package release tarball
         run: |
           mkdir nydus-static
-          mv target/${{ matrix.target }}/release/nydus nydusify/nydusify nydus-static/
-          cp config/registry.example.yaml nydus-static/
-          chmod +x nydus-static/nydus nydus-static/nydusify
-
-      - name: Verify static binaries
-        run: |
+          cp target/${{ matrix.target }}/release/nydus nydusify/nydusify config/registry.example.yaml nydus-static/
           for bin in nydus-static/nydus nydus-static/nydusify; do
-            echo "== ${bin}"
-            file "${bin}"
             file "${bin}" | grep -Eq 'statically linked|static-pie linked'
+            "./${bin}" --help > /dev/null
           done
-          ./nydus-static/nydus --help > /dev/null
-          ./nydus-static/nydusify --help > /dev/null
-
-      - name: Create release tarball
-        run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             tag="${GITHUB_REF_NAME}"
           else
@@ -161,129 +108,9 @@ jobs:
             ${{ env.tarball }}.sha256sum
           if-no-files-found: error
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: tests/e2e/go.mod
-          cache-dependency-path: tests/e2e/go.sum
-
-      - name: Install dependencies
-        run: |
-          tar -xzf "$tarball"
-          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
-          sudo modprobe fuse
-          go -C tests/e2e build -o "$RUNNER_TEMP/golden-gen" ./cmd/golden-gen
-
-      - name: Download compatibility baseline
-        run: |
-          dir="$RUNNER_TEMP/compatibility-baseline"
-          mkdir -p "$dir"
-          cd "$dir"
-          archive="nydus-static-${BASELINE_VERSION}-linux-${{ matrix.arch }}.tgz"
-          base="https://github.com/dragonflyoss/nydus/releases/download/${BASELINE_VERSION}"
-          curl -fL --retry 2 --connect-timeout 10 --max-time 60 -O "$base/$archive"
-          curl -fL --retry 2 --connect-timeout 10 --max-time 60 -O "$base/$archive.sha256sum"
-          sha256sum -c "$archive.sha256sum"
-          tar -xzf "$archive"
-          "$dir/nydus-static/nydus" --version
-          echo "BASELINE_NYDUS=$dir/nydus-static/nydus" >> "$GITHUB_ENV"
-
-      - name: Generate historical images with baseline builder
-        id: generate-historical
-        run: |
-          sudo "$RUNNER_TEMP/golden-gen" -nydus "$BASELINE_NYDUS" \
-            -out "$RUNNER_TEMP/historical-golden"
-
-      - name: Read historical images with shipped binary
-        id: read-historical
-        env:
-          NYDUS_E2E_GOLDEN_VERSIONS: ${{ env.BASELINE_VERSION }}
-        run: |
-          NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/historical-golden" \
-            make e2e-run PKG=./golden/... E2E_REQUIRE=1 E2E_TIMEOUT=2m \
-            NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus"
-
-      - name: Generate current images with shipped builder
-        id: generate-current
-        run: |
-          sudo "$RUNNER_TEMP/golden-gen" -nydus "$GITHUB_WORKSPACE/nydus-static/nydus" \
-            -out "$RUNNER_TEMP/generated-golden"
-
-      - name: Read current images with shipped binary
-        id: read-current
-        run: |
-          NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/generated-golden" \
-            make e2e-run PKG='./golden/... ./build/...' E2E_RUN='^(TestRead|TestGAFeatures)$$' \
-            E2E_REQUIRE=1 E2E_TIMEOUT=2m NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus"
-
-      - name: Read current images with baseline binary
-        id: read-with-baseline
-        run: |
-          NYDUS_E2E_GOLDEN_DIR="$RUNNER_TEMP/generated-golden" \
-            make e2e-run PKG=./golden/... \
-            E2E_RUN='^TestRead$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$' \
-            E2E_REQUIRE=1 E2E_TIMEOUT=2m NYDUS_BIN="$BASELINE_NYDUS"
-
-      - name: Upload golden images
-        uses: actions/upload-artifact@v6
-        with:
-          name: golden-testdata-${{ matrix.arch }}
-          path: |
-            ${{ runner.temp }}/historical-golden
-            ${{ runner.temp }}/generated-golden
-          if-no-files-found: error
-
-  verify-contract:
-    needs: [verify]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: ['amd64', 'arm64']
-        suite: ['semantics', 'zstd', 'other']
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-          - suite: semantics
-            run: ^(TestFUSE|TestFileio)$$/^(Semantic|C[0-9]+_.*)$$
-          - suite: zstd
-            run: ^(TestFUSE|TestFileio)$$/^Data$$/^zstd-4k$$
-          - suite: other
-            run: ^(TestFUSE|TestFileio)$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Download release tarball
-        uses: actions/download-artifact@v7
-        with:
-          name: nydus-release-tarball-linux-${{ matrix.arch }}
-          path: nydus-tarball
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: tests/e2e/go.mod
-          cache-dependency-path: tests/e2e/go.sum
-
-      - name: Install dependencies
-        run: |
-          tar -xzf nydus-tarball/*.tgz
-          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
-          sudo modprobe fuse
-
-      - name: Run contract test
-        run: |
-          make e2e-run PKG=./contract/... E2E_RUN='${{ matrix.run }}' E2E_REQUIRE=1 E2E_TIMEOUT=4m E2E_GO_TEST_ARGS=-v \
-            NYDUS_BIN="$GITHUB_WORKSPACE/nydus-static/nydus" NYDUSIFY_BIN="$GITHUB_WORKSPACE/nydus-static/nydusify"
-
   release:
     name: Release
-    needs: [verify, verify-contract]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 30

@@ -8,7 +8,7 @@
 //! row in `KNOWN_ISSUES.md` and turns the marker into a plain assertion of
 //! the correct behavior. Anything else is a regression and fails as well.
 //!
-//! With `NYDUS_TEST_FAIL_KNOWN_ISSUES=1` (CI), only the correct behavior passes.
+//! Under CI (the `CI` environment variable), only the correct behavior passes.
 //! Known bugs fail instead of being treated as expected failures.
 
 use std::fmt::Debug;
@@ -27,7 +27,7 @@ pub fn assert_known_issue(id: &str, observed: impl Debug, correct: bool, reprodu
         observed,
         correct,
         reproduces,
-        std::env::var("NYDUS_TEST_FAIL_KNOWN_ISSUES").as_deref() == Ok("1"),
+        std::env::var_os("CI").is_some(),
     );
 }
 

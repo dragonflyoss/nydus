@@ -2,7 +2,6 @@ package env
 
 import (
 	"fmt"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -12,7 +11,7 @@ import (
 // KnownIssue runs body, a test of the correct behaviour that currently fails
 // because of a tracked bug.
 //
-// With NYDUS_TEST_FAIL_KNOWN_ISSUES=1 (CI), body runs as an ordinary test:
+// Under CI, body runs as an ordinary test:
 // the bug fails and the correct behavior passes. Otherwise a failing body
 // is reported as a skip whose message starts with
 // "KNOWN ISSUE", so the suite stays green while the bug is open. A passing
@@ -26,7 +25,7 @@ import (
 func KnownIssue(t *testing.T, issue string, body func(t TB)) {
 	t.Helper()
 
-	if os.Getenv("NYDUS_TEST_FAIL_KNOWN_ISSUES") == "1" {
+	if Strict() {
 		t.Logf("KNOWN ISSUE %s: enforcing correct behavior", issue)
 		body(t)
 		return

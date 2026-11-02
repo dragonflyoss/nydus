@@ -13,11 +13,6 @@ permissions:
 
 env:
   RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.88.0
-  FEATURES: cli,fuse,fileio,dragonfly
-  NYDUS_TEST_FAIL_KNOWN_ISSUES: '1'
-  CI_COVERAGE: '1'
 
 jobs:
   build:
@@ -31,16 +26,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: 1.88.0
           components: llvm-tools-preview
 
-      - name: Rust cache
+      - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           shared-key: e2e-ci
 
-      - name: Install Protoc
+      - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ github.token }}
@@ -52,9 +47,7 @@ jobs:
           cache-dependency-path: nydusify/go.sum
 
       - name: Build binaries
-        run: |
-          make ci-build nydusify FEATURES="$FEATURES"
-          bash tests/scripts/e2e_coverage.sh bundle
+        run: make build-coverage
 
       - name: Upload binaries
         uses: actions/upload-artifact@v6
@@ -75,54 +68,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite:
-          - 'image-tools'
-          - 'fuse'
-          - 'fileio-semantics'
-          - 'fileio-data-zstd'
-          - 'fileio-data-other'
-          - 'storage-recovery'
-          - 'storage-cache'
-          - 'soak'
         include:
           - suite: image-tools
-            pkgs: ./build/... ./export/... ./nydusify/... ./kernel/... ./tar/... ./api/... ./registry/... ./continuity/...
+            pkgs: ./internal/... ./build/... ./export/... ./nydusify/... ./kernel/... ./tar/... ./api/... ./registry/... ./continuity/...
             parallel: 8
-            package-parallel: 2
           - suite: fuse
             pkgs: ./contract/...
             run: ^TestFUSE$$
-            parallel: 4
-            package-parallel: 1
           - suite: fileio-semantics
             pkgs: ./contract/...
             run: ^TestFileio$$/^(Semantic|C[0-9]+_.*)$$
-            parallel: 4
-            package-parallel: 1
           - suite: fileio-data-zstd
             pkgs: ./contract/...
             run: ^TestFileio$$/^Data$$/^zstd-4k$$
-            parallel: 4
-            package-parallel: 1
           - suite: fileio-data-other
             pkgs: ./contract/...
             run: ^TestFileio$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
-            parallel: 4
-            package-parallel: 1
           - suite: storage-recovery
             pkgs: ./fault/...
-            parallel: 4
-            package-parallel: 1
           - suite: storage-cache
             pkgs: ./cache/...
             parallel: 2
-            package-parallel: 1
           - suite: soak
             pkgs: ./soak/...
-            parallel: 4
-            package-parallel: 1
             soak-duration: 2m
-            soak-cycles: '6'
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -145,22 +114,15 @@ jobs:
           sudo modprobe fuse
 
       - name: Run E2E test
-        id: suites
         env:
           NYDUS_E2E_SOAK_DURATION: ${{ matrix.soak-duration }}
-          NYDUS_E2E_SOAK_CYCLES: ${{ matrix.soak-cycles }}
-        run: make e2e-run PKG="${{ matrix.pkgs }}" E2E_RUN='${{ matrix.run }}' E2E_REQUIRE=1 E2E_PARALLEL=${{ matrix.parallel }} E2E_TIMEOUT=4m E2E_GO_TEST_ARGS='-p=${{ matrix.package-parallel }} -v'
+        run: make e2e-run PKG="${{ matrix.pkgs }}" E2E_RUN='${{ matrix.run }}' E2E_PARALLEL=${{ matrix.parallel || 4 }} E2E_TIMEOUT=4m E2E_GO_TEST_ARGS=-p=2
 
       - name: Export coverage
-        if: always()
-        env:
-          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
-          COVERAGE_REQUIRE_GO: ${{ matrix.suite == 'image-tools' && '1' || '0' }}
         run: bash tests/scripts/e2e_coverage.sh export
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
-        if: ${{ !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
         timeout-minutes: 1
         continue-on-error: true
         with:
@@ -168,4 +130,3 @@ jobs:
           files: coverage/rust-e2e.lcov,coverage/go-e2e.out
           flags: e2etests
           disable_search: true
-          fail_ci_if_error: false

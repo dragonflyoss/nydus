@@ -2,9 +2,9 @@
 // precondition is reported.
 //
 // Every e2e package resolves binaries, root, kernel features and external
-// tools through this package, so CI can turn each missing precondition into a
-// failure with a single switch (NYDUS_E2E_REQUIRE=1) instead of letting a test
-// skip silently.
+// tools through this package, so CI (the CI environment variable every CI
+// system sets) turns each missing precondition into a failure instead of
+// letting a test skip silently.
 package env
 
 import (
@@ -37,9 +37,9 @@ type TB interface {
 }
 
 // Strict reports whether a missing precondition fails the test rather than
-// skipping it. CI sets NYDUS_E2E_REQUIRE=1.
+// skipping it: under CI it does.
 func Strict() bool {
-	return os.Getenv("NYDUS_E2E_REQUIRE") == "1"
+	return os.Getenv("CI") != ""
 }
 
 // Require reports an unmet precondition: a failure in strict mode, a skip
@@ -60,7 +60,7 @@ func Require(t TB, ok bool, format string, args ...any) {
 		tt.Skipf("%s", msg)
 		return
 	}
-	t.Fatalf("%s (NYDUS_E2E_REQUIRE=1 turns missing preconditions into failures)", msg)
+	t.Fatalf("%s (CI turns missing preconditions into failures)", msg)
 }
 
 // RequireRoot requires the test binary to run as root, which every mount,

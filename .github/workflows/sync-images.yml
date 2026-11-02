@@ -6,8 +6,6 @@ on:
     inputs:
       images:
         description: Space-separated subset of Docker Hub images to mirror to GHCR (default all images in the list)
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -24,7 +22,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Build image list
+      - name: List images
         id: list
         env:
           IMAGES_OVERRIDE: ${{ inputs.images }}

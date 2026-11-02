@@ -33,6 +33,6 @@ and random read metrics also participate in the optional gate.
 
 `go test ./internal/benchgate -run TestBaseline` validates comparison
 direction, host/workload matching, and invalid budgets without running fio.
-`make test-bench` builds GA features only. Optional experimental columns
+`make benchmark` builds GA features only. Optional experimental columns
 require an explicitly built binary and a capability-matched host; ublk is
 not an incidental dependency of a GA performance run.

@@ -6,13 +6,8 @@ on:
     inputs:
       concurrency:
         description: Number of images converted/checked in parallel
-        required: false
         type: number
         default: 5
-      registry:
-        description: Target registry/namespace for the converted nydus images (default ghcr.io/<repository>)
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -20,9 +15,6 @@ permissions:
 
 env:
   RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.88.0
-  NYDUS_TEST_FAIL_KNOWN_ISSUES: '1'
 
 jobs:
   test:
@@ -33,7 +25,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Free Disk Space (Ubuntu)
+      - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6
         with:
           tool-cache: false
@@ -59,13 +51,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: 1.88.0
 
-      - name: Rust cache
+      - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          shared-key: e2e-convert
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -77,10 +68,9 @@ jobs:
 
       - name: Run E2E test
         env:
-          TOP_IMAGES_CONCURRENCY: ${{ inputs.concurrency }}
-          TOP_IMAGES_REGISTRY: ${{ inputs.registry || format('ghcr.io/{0}', github.repository) }}
+          NYDUSFS_TOP_IMAGES_CONCURRENCY: ${{ inputs.concurrency }}
+          NYDUSFS_TOP_IMAGES_REGISTRY: ghcr.io/${{ github.repository }}
+          NYDUSFS_TOP_IMAGES_WORKDIR: /mnt/nydusify-top-images
         run: |
           sudo mkdir -p -m 0777 /mnt/nydusify-top-images
-          make test-top-images E2E_REQUIRE=1 TOP_IMAGES_TIMEOUT=140m \
-            TOP_IMAGES_CONCURRENCY="$TOP_IMAGES_CONCURRENCY" TOP_IMAGES_REGISTRY="$TOP_IMAGES_REGISTRY" \
-            TOP_IMAGES_WORKDIR=/mnt/nydusify-top-images
+          make e2e-convert

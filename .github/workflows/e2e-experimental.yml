@@ -9,18 +9,13 @@ on:
     paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   schedule:
     - cron: '0 4 * * *'
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
   RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.88.0
   FEATURES: cli,fuse,fileio,nbd,ublk,fanotify,uffd
-  NYDUS_TEST_FAIL_KNOWN_ISSUES: '1'
-  CI_COVERAGE: '1'
 
 jobs:
   build:
@@ -34,19 +29,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: 1.88.0
           components: llvm-tools-preview
 
-      - name: Rust cache
+      - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          shared-key: e2e-experimental
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ github.token }}
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -55,9 +44,7 @@ jobs:
           cache-dependency-path: nydusify/go.sum
 
       - name: Build binaries
-        run: |
-          make ci-build nydusify FEATURES="$FEATURES"
-          bash tests/scripts/e2e_coverage.sh bundle
+        run: make build-coverage FEATURES="$FEATURES"
 
       - name: Upload binaries
         uses: actions/upload-artifact@v6
@@ -107,25 +94,19 @@ jobs:
           if [ "${{ matrix.transport }}" = ublk ]; then sudo modprobe ublk_drv; fi
 
       - name: Run E2E test
-        id: suites
-        run: make e2e-run PKG=./experimental/${{ matrix.transport }}/... E2E_REQUIRE=1 E2E_TIMEOUT=4m E2E_PARALLEL=${{ matrix.transport == 'ublk' && 2 || 8 }}
+        run: make e2e-run PKG=./experimental/${{ matrix.transport }}/... E2E_TIMEOUT=4m E2E_PARALLEL=${{ matrix.transport == 'ublk' && 2 || 8 }}
 
       - name: Run UFFD stability test
-        id: uffd-stability
-        if: ${{ matrix.transport == 'uffd' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ matrix.transport == 'uffd' && github.event_name == 'schedule' }}
         run: |
-          make e2e-run PKG=./experimental/uffd/... E2E_REQUIRE=1 E2E_TIMEOUT=3m \
-            E2E_RUN='^TestRealFault(Copy|Zeropage|Zerocopy)$$' E2E_COUNT=34 E2E_GO_TEST_ARGS=-v
+          make e2e-run PKG=./experimental/uffd/... E2E_TIMEOUT=3m \
+            E2E_RUN='^TestRealFault(Copy|Zeropage|Zerocopy)$$' E2E_COUNT=34
 
       - name: Export coverage
-        if: always()
-        env:
-          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
         run: bash tests/scripts/e2e_coverage.sh export
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
-        if: ${{ !cancelled() && hashFiles('coverage/rust-e2e.lcov') != '' }}
         timeout-minutes: 1
         continue-on-error: true
         with:
@@ -133,4 +114,3 @@ jobs:
           files: coverage/rust-e2e.lcov
           flags: e2etests
           disable_search: true
-          fail_ci_if_error: false

@@ -13,10 +13,6 @@ permissions:
 
 env:
   RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.88.0
-  NYDUS_TEST_FAIL_KNOWN_ISSUES: '1'
-  CI_COVERAGE: '1'
 
 jobs:
   test:
@@ -24,8 +20,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 6
     env:
-      NYDUS_TEST_REQUIRE_NETNS: '1'
-      NYDUS_TEST_REQUIRE_PTRACE: '1'
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
     steps:
       - name: Checkout code
@@ -34,15 +28,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: 1.88.0
           components: llvm-tools-preview
 
-      - name: Rust cache
+      - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      - name: Install Protoc
+      - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ github.token }}
@@ -56,7 +50,6 @@ jobs:
         run: bash tests/scripts/install_ci_packages.sh iproute2
 
       - name: Run tests
-        id: rust-tests
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov --workspace --no-fail-fast \
@@ -64,19 +57,15 @@ jobs:
             --no-report
 
       - name: Run dual TLS tests
-        id: dual-tls
-        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
         run: |
           cargo llvm-cov --no-report -p nydus-backend --features registry,reqwest/default-tls --lib -- \
             registry::http::tests::tls_verification_and_custom_ca_are_preserved
 
       - name: Export coverage
-        if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
-        if: ${{ !cancelled() && hashFiles('lcov.info') != '' }}
         timeout-minutes: 1
         continue-on-error: true
         with:
@@ -84,7 +73,6 @@ jobs:
           files: lcov.info
           flags: unittests
           disable_search: true
-          fail_ci_if_error: false
 
   test-nydusify:
     name: Test Nydusify
@@ -97,19 +85,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: 1.88.0
           components: llvm-tools-preview
 
-      - name: Rust cache
+      - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          shared-key: nydusify
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ github.token }}
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -118,23 +100,16 @@ jobs:
           cache-dependency-path: nydusify/go.sum
 
       - name: Build binaries
-        run: |
-          make ci-build nydusify FEATURES=cli
-          bash tests/scripts/e2e_coverage.sh bundle
+        run: make build-coverage FEATURES=cli
 
       - name: Run tests
-        id: suites
-        run: make test-nydusify NYDUS_TEST_BUILDER="$GITHUB_WORKSPACE/target/ci/nydus"
+        run: make test-nydusify
 
       - name: Export coverage
-        if: always()
-        env:
-          COVERAGE_TEST_OUTCOME: ${{ steps.suites.outcome }}
         run: bash tests/scripts/e2e_coverage.sh export
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
-        if: ${{ !cancelled() && hashFiles('coverage/go-unit-integration.out') != '' }}
         timeout-minutes: 1
         continue-on-error: true
         with:
@@ -142,22 +117,3 @@ jobs:
           files: coverage/go-unit-integration.out,coverage/rust-e2e.lcov
           flags: unittests
           disable_search: true
-          fail_ci_if_error: false
-
-  test-harness:
-    name: Test Harness
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: tests/e2e/go.mod
-          cache-dependency-path: tests/e2e/go.sum
-
-      - name: Run tests
-        working-directory: tests/e2e
-        run: go test -count=1 ./internal/...

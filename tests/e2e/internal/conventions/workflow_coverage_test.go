@@ -21,6 +21,7 @@ func TestWorkflowCoverage(t *testing.T) {
 	require.NoError(t, err)
 	type step struct {
 		ID              string
+		Name            string
 		Run             string
 		If              string
 		Uses            string
@@ -45,7 +46,6 @@ func TestWorkflowCoverage(t *testing.T) {
 				Include   []struct {
 					Suite, Pkgs  string
 					SoakDuration string `yaml:"soak-duration"`
-					SoakCycles   string `yaml:"soak-cycles"`
 				}
 			}
 		}
@@ -64,26 +64,33 @@ func TestWorkflowCoverage(t *testing.T) {
 		return w
 	}
 	t.Run("BidirectionalCompatibility", func(t *testing.T) {
-		release := read("release.yml")
-		verify := release.Jobs["verify"]
-		require.Equal(t, "1", verify.Env["NYDUS_E2E_GOLDEN_REQUIRED"])
-		require.Equal(t, "v3.0.0-beta.3", verify.Env["BASELINE_VERSION"])
-		steps := make(map[string]string)
-		for _, s := range verify.Steps {
-			steps[s.ID] = s.Run
+		compatibility := read("e2e-compatibility.yml")
+		for _, event := range []string{"push", "pull_request", "schedule"} {
+			require.Contains(t, compatibility.On, event)
 		}
-		require.Contains(t, steps["generate-historical"], "$BASELINE_NYDUS")
-		require.Contains(t, steps["read-historical"], "historical-golden")
-		require.Contains(t, steps["generate-current"], "nydus-static/nydus")
-		require.Contains(t, steps["read-current"], "generated-golden")
-		require.Contains(t, steps["read-with-baseline"], `NYDUS_BIN="$BASELINE_NYDUS"`)
-		require.Contains(t, steps["read-with-baseline"], "generated-golden")
-		require.Contains(t, release.Jobs["verify-contract"].If, "github.event_name != 'pull_request'")
+		var run string
+		for _, s := range compatibility.Jobs["test"].Steps {
+			run += s.Run
+		}
+		require.Contains(t, run, "make e2e-compatibility", "the compatibility flow lives in the Makefile, the workflow only runs it")
+		makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+		require.NoError(t, err)
+		recipe := string(makefile)[strings.Index(string(makefile), "e2e-compatibility:"):]
+		recipe = recipe[:strings.Index(recipe, ".PHONY: e2e-compatibility")]
+		require.Contains(t, string(makefile), "BASELINE_VERSION ?= v3.0.0-beta.3")
+		require.Contains(t, recipe, "sha256sum -c", "the baseline download is checksum-verified")
+		require.Contains(t, recipe, "-nydus $(BASELINE_NYDUS) -out $(GOLDEN_DIR)/historical")
+		require.Contains(t, recipe, "-nydus $(NYDUS_BIN) -out $(GOLDEN_DIR)/current")
+		require.Contains(t, recipe, "NYDUS_E2E_GOLDEN_DIR=$(GOLDEN_DIR)/historical NYDUS_E2E_GOLDEN_VERSIONS=$(BASELINE_VERSION)")
+		require.Contains(t, recipe, "E2E_RUN='^(TestRead|TestGAFeatures)$$$$'")
+		require.Contains(t, recipe, "E2E_RUN='^TestRead$$$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$$$' E2E_TIMEOUT=2m NYDUS_BIN=$(BASELINE_NYDUS)")
+		release := read("release.yml")
+		require.ElementsMatch(t, []string{"build", "release"}, slices.Collect(maps.Keys(release.Jobs)), "release builds, packages and publishes; tests live in e2e workflows")
 	})
 	t.Run("UFFDStability", func(t *testing.T) {
 		var found bool
 		for _, s := range read("e2e-experimental.yml").Jobs["test"].Steps {
-			if s.ID == "uffd-stability" {
+			if s.Name == "Run UFFD stability test" {
 				found = true
 				require.Contains(t, s.Run, "E2E_COUNT=34")
 				require.Contains(t, s.Run, "TestRealFault")
@@ -140,8 +147,6 @@ func TestWorkflowCoverage(t *testing.T) {
 		require.NotContains(t, ci.Jobs, "feature-compat")
 		require.NotContains(t, ci.Jobs, "ublk")
 		rust := ci.Jobs["test"]
-		require.Equal(t, "1", rust.Env["NYDUS_TEST_REQUIRE_NETNS"])
-		require.Equal(t, "1", rust.Env["NYDUS_TEST_REQUIRE_PTRACE"])
 		var tests string
 		for _, s := range rust.Steps {
 			tests += s.Run
@@ -158,15 +163,16 @@ func TestWorkflowCoverage(t *testing.T) {
 	})
 	t.Run("ProductCoverage", func(t *testing.T) {
 		for file, testJobs := range map[string][]string{
-			"e2e.yml":              {"e2e"},
-			"e2e-experimental.yml": {"test"},
-			"e2e-dragonfly.yml":    {"test"},
-			"fuzz.yml":             {"fuzz"},
+			"e2e.yml":               {"e2e"},
+			"e2e-experimental.yml":  {"test"},
+			"e2e-dragonfly.yml":     {"test"},
+			"e2e-compatibility.yml": {"test"},
+			"fuzz.yml":              {"fuzz"},
 		} {
 			w := read(file)
-			require.Len(t, w.Jobs, map[string]int{"e2e.yml": 2, "e2e-experimental.yml": 2, "e2e-dragonfly.yml": 1, "fuzz.yml": 1}[file],
+			require.Len(t, w.Jobs, map[string]int{"e2e.yml": 2, "e2e-experimental.yml": 2, "e2e-dragonfly.yml": 1, "e2e-compatibility.yml": 1, "fuzz.yml": 1}[file],
 				"coverage must reuse existing jobs")
-			require.Equal(t, "1", w.Env["CI_COVERAGE"], file)
+			require.NotContains(t, w.Env, "COVERAGE", "coverage is the build-coverage target, not an env knob")
 			for _, id := range testJobs {
 				var build, paths string
 				var llvmTools bool
@@ -176,7 +182,7 @@ func TestWorkflowCoverage(t *testing.T) {
 					llvmTools = llvmTools || strings.Contains(s.With["components"], "llvm-tools-preview")
 				}
 				require.True(t, llvmTools, file)
-				require.Contains(t, build, "e2e_coverage.sh bundle", file)
+				require.Contains(t, build, "make build-coverage", file)
 				if _, shared := w.Jobs["build"]; shared {
 					require.Contains(t, paths, "coverage-tools/", file)
 				}
@@ -184,8 +190,7 @@ func TestWorkflowCoverage(t *testing.T) {
 				for _, s := range w.Jobs[id].Steps {
 					if strings.Contains(s.Run, "e2e_coverage.sh export") {
 						export = true
-						require.Equal(t, "always()", s.If)
-						require.Equal(t, "${{ steps.suites.outcome }}", s.Env["COVERAGE_TEST_OUTCOME"])
+						require.Empty(t, s.If, "coverage is exported and uploaded only after the tests pass, as in dragonfly")
 					}
 					if s.Uses == "codecov/codecov-action@v5" {
 						upload = true
@@ -195,7 +200,7 @@ func TestWorkflowCoverage(t *testing.T) {
 						require.Equal(t, "true", s.ContinueOnError, "upload services must not fail tests")
 					}
 				}
-				require.True(t, export && upload, "%s/%s coverage must export and upload after failure too", file, id)
+				require.True(t, export && upload, "%s/%s coverage must export and upload", file, id)
 			}
 		}
 		var rust string
@@ -209,9 +214,17 @@ func TestWorkflowCoverage(t *testing.T) {
 		require.Contains(t, rust, "cargo llvm-cov report --lcov")
 		makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
 		require.NoError(t, err)
-		for _, option := range []string{"CI_COVERAGE ?= 0", "-coverpkg=./...", "-coverprofile=",
+		for _, option := range []string{"build-coverage: COVERAGE = 1", "COVERAGE ?= $(if $(wildcard $(COVERAGE_TOOLS_DIR)/binaries.sha256),1,0)", "-coverpkg=./...", "-coverprofile=",
 			"RUSTC_WORKSPACE_WRAPPER=", "CARGO_PROFILE_CI_STRIP=none", "LLVM_PROFILE_FILE=", "GOCOVERDIR=", "%8m.profraw"} {
 			require.Contains(t, string(makefile), option)
+		}
+		require.NotContains(t, string(makefile), "E2E_REQUIRE", "CI is the only strictness switch")
+		for _, f := range []string{"ci.yml", "e2e.yml", "e2e-dragonfly.yml", "e2e-experimental.yml", "e2e-compatibility.yml", "fuzz.yml", "release.yml"} {
+			data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", f))
+			require.NoError(t, err)
+			for _, knob := range []string{"E2E_REQUIRE", "NYDUS_TEST_FAIL_KNOWN_ISSUES", "NYDUS_TEST_REQUIRE_", "NYDUS_E2E_GOLDEN_REQUIRED"} {
+				require.NotContains(t, string(data), knob, "%s: GitHub Actions sets CI=true", f)
+			}
 		}
 		require.NotContains(t, string(makefile), "%p.profraw", "fuzz subprocesses must use a bounded merge pool")
 		require.NotContains(t, string(makefile), `RUSTFLAGS="$(RUSTFLAGS) -C instrument-coverage"`,
@@ -222,7 +235,7 @@ func TestWorkflowCoverage(t *testing.T) {
 	})
 	t.Run("CoverageGate", func(t *testing.T) {
 		ci := read("ci.yml")
-		require.ElementsMatch(t, []string{"test", "test-nydusify", "test-harness"}, slices.Collect(maps.Keys(ci.Jobs)),
+		require.ElementsMatch(t, []string{"test", "test-nydusify"}, slices.Collect(maps.Keys(ci.Jobs)),
 			"ci.yml runs unit tests only; e2e, fuzz and variants have their own workflows")
 		for id, j := range ci.Jobs {
 			require.Empty(t, j.Uses)
@@ -233,14 +246,13 @@ func TestWorkflowCoverage(t *testing.T) {
 					require.Equal(t, "unittests", s.With["flags"], id)
 				}
 			}
-			require.Equal(t, id != "test-harness", upload, "%s: product tests upload to Codecov, harness tests do not", id)
+			require.True(t, upload, "%s must upload to Codecov, which merges flags and gates the commit", id)
 		}
 		var nydusify string
 		for _, s := range ci.Jobs["test-nydusify"].Steps {
 			nydusify += s.Run
 		}
 		require.Contains(t, nydusify, "make test-nydusify")
-		require.Contains(t, nydusify, "NYDUS_TEST_BUILDER=")
 		entries, err := os.ReadDir(filepath.Join(root, ".github", "workflows"))
 		require.NoError(t, err)
 		for _, entry := range entries {
@@ -273,7 +285,6 @@ func TestWorkflowCoverage(t *testing.T) {
 		ci, e2e := read("ci.yml"), read("e2e.yml")
 		require.Equal(t, "Test", ci.Jobs["test"].Name)
 		require.Equal(t, "Test Nydusify", ci.Jobs["test-nydusify"].Name)
-		require.Equal(t, "Test Harness", ci.Jobs["test-harness"].Name)
 		require.Equal(t, "Build", e2e.Jobs["build"].Name)
 		require.Empty(t, e2e.Jobs["e2e"].Name, "matrix jobs display the job id and suite")
 		require.Equal(t, "Fuzz", read("fuzz.yml").Jobs["fuzz"].Name)
@@ -291,7 +302,7 @@ func TestWorkflowCoverage(t *testing.T) {
 		require.Empty(t, fuzz.Strategy.Matrix.Shard)
 		for _, s := range fuzz.Steps {
 			if strings.Contains(s.Run, "FuzzTarConversion") {
-				require.Contains(t, s.Env["FUZZ_TIME"], "'10m' || '150s'", "PRs fuzz each target for 150 seconds")
+				require.Equal(t, "${{ github.event_name == 'schedule' && '10m' || '150s' }}", s.Env["FUZZ_TIME"], "PRs fuzz each target for 150 seconds")
 				require.Contains(t, s.Run, "PKG=./tar/")
 				require.Contains(t, s.Run, "PKG=./build/")
 				require.Contains(t, s.Run, "FuzzBlobFormat")
@@ -312,7 +323,7 @@ func TestWorkflowCoverage(t *testing.T) {
 			groups[entry.Suite] = strings.Fields(entry.Pkgs)
 		}
 		want := map[string][]string{
-			"image-tools":       {"./build/...", "./export/...", "./nydusify/...", "./kernel/...", "./tar/...", "./api/...", "./registry/...", "./continuity/..."},
+			"image-tools":       {"./internal/...", "./build/...", "./export/...", "./nydusify/...", "./kernel/...", "./tar/...", "./api/...", "./registry/...", "./continuity/..."},
 			"fuse":              {"./contract/..."},
 			"fileio-semantics":  {"./contract/..."},
 			"fileio-data-zstd":  {"./contract/..."},
@@ -329,7 +340,6 @@ func TestWorkflowCoverage(t *testing.T) {
 		for _, entry := range e2e.Jobs["e2e"].Strategy.Matrix.Include {
 			if entry.Suite == "soak" {
 				require.Equal(t, "2m", entry.SoakDuration, "PRs soak each leaf for two minutes")
-				require.Equal(t, "6", entry.SoakCycles)
 			} else {
 				require.Empty(t, entry.SoakDuration)
 			}
@@ -362,19 +372,8 @@ func TestWorkflowCoverage(t *testing.T) {
 			"go vet -tags manual ./manual/...", "go build -o /dev/null ./cmd/golden-gen"} {
 			require.Contains(t, checks, check)
 		}
-		require.NotContains(t, checks, "go test", "harness unit tests are a CI test job, not a lint")
-		var harness string
-		for _, s := range ci.Jobs["test-harness"].Steps {
-			harness += s.Run
-		}
-		require.Contains(t, harness, "go test -count=1 ./internal/...")
+		require.NotContains(t, checks, "go test", "harness unit tests run with the e2e module, not as a lint")
 		release := read("release.yml")
-		require.NotContains(t, release.Jobs, "build-go")
-		require.NotContains(t, release.Jobs, "build-rust")
-		verify := release.Jobs["verify"]
-		var needs []string
-		require.NoError(t, verify.Needs.Decode(&needs))
-		require.Equal(t, []string{"build"}, needs)
 		var build string
 		for _, s := range release.Jobs["build"].Steps {
 			build += s.Run
