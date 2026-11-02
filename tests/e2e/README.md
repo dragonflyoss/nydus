@@ -153,11 +153,9 @@ requests by itself; nothing is called from `ci.yml`.
   with PR CI; it runs real services, not a Kind/Helm deployment test.
 - Nightly E2E: the one-hour local/remote shared-cache soak and the huge
   sparse tar corpus run on schedule or by dispatch.
-- Weekly: Benchmark runs the cold-start benchmark every Monday and keeps
-  `bench-results.json` as an artifact.
-- Manual: dispatch E2E Test With Image Conversion for the nydusify
-  convert/check sweep over popular images. These heavy workloads do not run
-  on PRs.
+- Weekly: Benchmark runs the cold-start benchmark and keeps
+  `bench-results.json` as an artifact; E2E Test With Image Conversion runs
+  the nydusify convert/check sweep over popular images. Neither runs on PRs.
   Ordinary GA soak defaults remain a 30-second smoke.
 - Manual performance: cold large-directory lookups and existing I/O/metadata
   workloads can gate against an explicitly accepted, host/workload-matched

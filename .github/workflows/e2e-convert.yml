@@ -1,13 +1,8 @@
 name: E2E Test With Image Conversion
-run-name: E2E Test With Image Conversion (concurrency=${{ inputs.concurrency }})
 
 on:
-  workflow_dispatch:
-    inputs:
-      concurrency:
-        description: Number of images converted/checked in parallel
-        type: number
-        default: 5
+  schedule:
+    - cron: '0 4 * * 1'
 
 permissions:
   contents: read
@@ -68,7 +63,6 @@ jobs:
 
       - name: Run E2E test
         env:
-          NYDUSFS_TOP_IMAGES_CONCURRENCY: ${{ inputs.concurrency }}
           NYDUSFS_TOP_IMAGES_REGISTRY: ghcr.io/${{ github.repository }}
           NYDUSFS_TOP_IMAGES_WORKDIR: /mnt/nydusify-top-images
         run: |

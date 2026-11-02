@@ -2,10 +2,10 @@ name: E2E Test With Experimental Transports
 
 on:
   push:
-    branches: [main, release-*, v3]
+    branches: [master, release-*, v3]
     paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   pull_request:
-    branches: [main, release-*, v3]
+    branches: [master, release-*, v3]
     paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   schedule:
     - cron: '0 4 * * *'
