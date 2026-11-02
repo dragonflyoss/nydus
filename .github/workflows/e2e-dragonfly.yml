@@ -2,10 +2,10 @@ name: E2E Test With Dragonfly
 
 on:
   push:
-    branches: [master, release-*, v3]
+    branches: [main, release-*, v3]
     paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   pull_request:
-    branches: [master, release-*, v3]
+    branches: [main, release-*, v3]
     paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   schedule:
     - cron: '0 4 * * *'
