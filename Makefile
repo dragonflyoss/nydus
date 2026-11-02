@@ -41,7 +41,7 @@ release:
 .PHONY: release
 
 build-nydusify:
-	cd nydusify && $(GO) build $(COVERAGE_GO_BUILD) -o nydusify .
+	cd nydusify && $(GO) build -buildvcs=false $(COVERAGE_GO_BUILD) -o nydusify .
 .PHONY: build-nydusify
 
 build-ci:
