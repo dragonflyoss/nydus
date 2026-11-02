@@ -219,11 +219,12 @@ func startMount(t env.TB, ref string, prefetch bool) (*mount.Daemon, string, *mo
 	d.WaitFor(t, time.Minute, "mount at "+mnt, func() bool { return mount.IsMountpoint(mnt) })
 	// The daemon binds its apiserver only after mounting.
 	socket := filepath.Join(work, "apiserver.sock")
+	api := mount.NewAPI(socket)
 	d.WaitFor(t, 10*time.Second, "apiserver at "+socket, func() bool {
-		_, err := os.Stat(socket)
+		_, err := api.Get("/metrics")
 		return err == nil
 	})
-	return d, mnt, mount.NewAPI(socket)
+	return d, mnt, api
 }
 
 // extractOCI runs `nydusify mount` of an OCI image, which extracts the root
