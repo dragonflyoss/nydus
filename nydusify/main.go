@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -79,6 +80,10 @@ func convertCommand() *cli.Command {
 				Name:  "bootstrap",
 				Usage: "existing nydus bootstrap path to package as image.boot instead of building from --source",
 			},
+			&cli.StringFlag{
+				Name:  "output-bootstrap",
+				Usage: "save the final artifact bootstrap after a successful push; may replace --bootstrap",
+			},
 			&cli.StringSliceFlag{
 				Name:  "blob",
 				Usage: "existing nydus full blob file to include; can be repeated and may be combined with --blob-dir",
@@ -86,6 +91,14 @@ func convertCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:  "blob-dir",
 				Usage: "directory containing digest-named nydus full blob files referenced by --bootstrap",
+			},
+			&cli.BoolFlag{
+				Name:  "prune",
+				Usage: "remove unreferenced devices when packaging --bootstrap; reads no blob data",
+			},
+			&cli.UintFlag{
+				Name:  "compact-max-layers",
+				Usage: "compact all data blobs into one when artifact packaging exceeds this data-layer count (0 disables; bootstrap excluded)",
 			},
 			&cli.StringSliceFlag{
 				Name:  "parent-image",
@@ -234,6 +247,15 @@ func runConvert(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	if c.Bool("prune") && !artifactMode {
+		return errors.New("--prune requires --bootstrap")
+	}
+	if c.Uint("compact-max-layers") > 0 && !artifactMode {
+		return errors.New("--compact-max-layers requires --bootstrap")
+	}
+	if c.String("output-bootstrap") != "" && !artifactMode {
+		return errors.New("--output-bootstrap requires --bootstrap")
+	}
 	multiSource := len(sources) > 1
 
 	// The compressor picks the conversion direction, so reject unknown values
@@ -302,7 +324,8 @@ func runConvert(c *cli.Context) error {
 	var newDesc *ocispec.Descriptor
 	var externalBlobs []ocispec.Descriptor
 	var localBlobs []pipeline.LocalBlob
-	var crossRepoParent string
+	var outputBootstrap string
+	parentBlobSources := make(map[digest.Digest]string)
 
 	if toOCI {
 		if artifactMode {
@@ -345,10 +368,6 @@ func runConvert(c *cli.Context) error {
 			if err != nil {
 				return err
 			}
-			if !sameRepo {
-				crossRepoParent = parent
-			}
-
 			logrus.Infof("pulling parent nydus metadata %s", parent)
 			desc, err := provider.Pull(ctx, parent, remote.PullOption{PullOCILayers: false, PullNydusBlobs: false}, remote.Target)
 			if err != nil {
@@ -358,12 +377,28 @@ func runConvert(c *cli.Context) error {
 			if err != nil {
 				return errors.Wrapf(err, "load parent metadata %q", parent)
 			}
+			for _, blob := range metadata.Blobs {
+				if _, exists := parentBlobSources[blob.Digest]; !exists || sameRepo {
+					parentBlobSources[blob.Digest] = parent
+				}
+			}
 			parents = append(parents, metadata)
 		}
 
 		logrus.Infof("packaging nydus artifacts from bootstrap %s", bootstrapPath)
 		artifact, err := pipeline.ConvertNydusArtifacts(ctx, provider.ContentStore(), pipeline.ArtifactOption{
 			BuilderPath:       c.String("builder"),
+			CompactMaxLayers:  c.Uint("compact-max-layers"),
+			Prune:             c.Bool("prune"),
+			WorkDir:           scratchDir,
+			CompactCompressor: compressor,
+			OpenCompactBlob: func(ctx context.Context, desc ocispec.Descriptor, requestedRange string) (io.ReadSeekCloser, error) {
+				ref := target
+				if parent := parentBlobSources[desc.Digest]; parent != "" {
+					ref = parent
+				}
+				return provider.OpenBlob(ctx, desc, ref, remote.Target, requestedRange)
+			},
 			BootstrapPath:     bootstrapPath,
 			BlobPaths:         blobPaths,
 			BlobDir:           blobDir,
@@ -378,6 +413,10 @@ func runConvert(c *cli.Context) error {
 		newDesc = artifact.Descriptor
 		externalBlobs = artifact.ExternalBlobs
 		localBlobs = artifact.LocalBlobs
+		// The common no-compaction case already has the final input bootstrap.
+		if path := c.String("output-bootstrap"); path != "" && (artifact.Pruned || artifact.Compacted || path != bootstrapPath) {
+			outputBootstrap = artifact.BootstrapPath
+		}
 	} else if multiSource {
 		srcs := make([]pipeline.Source, 0, len(sources))
 		for _, s := range sources {
@@ -475,9 +514,16 @@ func runConvert(c *cli.Context) error {
 		}
 	}
 
-	if crossRepoParent != "" {
-		if err := provider.EnsureParentBlobs(ctx, externalBlobs, crossRepoParent, target); err != nil {
+	for _, blob := range externalBlobs {
+		parent := parentBlobSources[blob.Digest]
+		sameRepo, err := remote.SameRepository(parent, target)
+		if err != nil {
 			return err
+		}
+		if !sameRepo {
+			if err := provider.EnsureParentBlobs(ctx, []ocispec.Descriptor{blob}, parent, target); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -517,6 +563,11 @@ func runConvert(c *cli.Context) error {
 	}
 
 	sourceLabel := strings.Join(sources, ", ")
+	if path := c.String("output-bootstrap"); path != "" && outputBootstrap != "" {
+		if err := saveBootstrap(path, outputBootstrap); err != nil {
+			return errors.Wrap(err, "save published bootstrap")
+		}
+	}
 	if artifactMode {
 		sourceLabel = bootstrapPath
 	}

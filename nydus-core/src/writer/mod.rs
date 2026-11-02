@@ -1,3 +1,8 @@
+mod compact;
+
+pub(crate) use compact::RepackBackend;
+pub use compact::RepackResult;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
@@ -47,6 +52,8 @@ pub struct IncrementalWriterOptions {
     /// Per-group digest algorithm recorded in the blob metadata. Defaults to
     /// BLAKE3 in [`Self::new`].
     pub digester: Option<BlobMetadataDigester>,
+    /// Remove unreferenced parent devices on commit. Disabled by default.
+    pub prune: bool,
 }
 
 impl IncrementalWriterOptions {
@@ -59,6 +66,7 @@ impl IncrementalWriterOptions {
             chunk_group_min_size: DEFAULT_CHUNK_GROUP_MIN_SIZE,
             compressor: BlobMetadataCompressor::Zstd,
             digester: Some(BlobMetadataDigester::Blake3),
+            prune: false,
         }
     }
 
@@ -199,10 +207,12 @@ pub struct IncrementalWriter {
     pending_blob_chunks: Vec<(usize, usize)>,
     output_dir: PathBuf,
     upper_blob_temp_path: Option<PathBuf>,
+    compact_artifacts: Option<compact::CompactArtifacts>,
     chunk_size: u32,
     chunk_group_min_size: u32,
     compressor: BlobMetadataCompressor,
     digester: Option<BlobMetadataDigester>,
+    prune: bool,
     epoch: u64,
     uuid: [u8; 16],
 }
@@ -311,10 +321,12 @@ impl IncrementalWriter {
             pending_blob_chunks: Vec::new(),
             output_dir: options.output_dir,
             upper_blob_temp_path: None,
+            compact_artifacts: None,
             chunk_size: options.chunk_size,
             chunk_group_min_size: options.chunk_group_min_size,
             compressor: options.compressor,
             digester: options.digester,
+            prune: options.prune,
             epoch: 0,
             uuid: [0; 16],
         })
@@ -336,7 +348,7 @@ impl IncrementalWriter {
                 parent_bootstrap.display()
             )
         })?;
-        Self::from_reader(Arc::new(reader), options, false)
+        Self::from_reader(Arc::new(reader), options, ParentMode::MetadataOnly)
     }
 
     pub(crate) fn from_parent_reader(
@@ -344,13 +356,13 @@ impl IncrementalWriter {
         options: IncrementalWriterOptions,
     ) -> Result<Self> {
         options.validate()?;
-        Self::from_reader(reader, options, true)
+        Self::from_reader(reader, options, ParentMode::Writer)
     }
 
     fn from_reader(
         reader: Arc<ErofsReader>,
         options: IncrementalWriterOptions,
-        keep_parent_reader: bool,
+        mode: ParentMode,
     ) -> Result<Self> {
         let sb = reader.superblock();
         let epoch = sb.epoch();
@@ -369,7 +381,7 @@ impl IncrementalWriter {
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let root_nid = sb.root_nid();
-        let mut parent_tree = ParentTreeContext::new();
+        let mut parent_tree = ParentTreeContext::new(mode);
         let inodes = flatten_tree(
             ParentTreeNode::new(reader.as_ref(), epoch, root_nid, PathBuf::new()),
             &mut parent_tree,
@@ -379,14 +391,14 @@ impl IncrementalWriter {
                 "parent inode map does not match flattened inode table".to_string(),
             ));
         }
-        let path_index = parent_tree.path_index;
+        let path_index = parent_tree.path_index.unwrap_or_default();
         let parent_nids = parent_tree.nids;
 
         Ok(Self {
             inodes,
             path_index,
             parent_nids,
-            parent_reader: keep_parent_reader.then_some(reader),
+            parent_reader: matches!(mode, ParentMode::Writer).then_some(reader),
             overlay: BTreeMap::new(),
             device_slots: parent_device_slots,
             has_changes: false,
@@ -394,10 +406,13 @@ impl IncrementalWriter {
             pending_blob_chunks: Vec::new(),
             output_dir: options.output_dir,
             upper_blob_temp_path: None,
+            compact_artifacts: matches!(mode, ParentMode::Compact)
+                .then(compact::CompactArtifacts::default),
             chunk_size: options.chunk_size,
             chunk_group_min_size: options.chunk_group_min_size,
             compressor: options.compressor,
             digester: options.digester,
+            prune: options.prune,
             epoch,
             uuid,
         })
@@ -806,25 +821,66 @@ impl IncrementalWriter {
     /// may remain if writing the sidecar or bootstrap failed; a fresh writer
     /// can reuse them when retrying the same changes.
     pub fn commit(mut self) -> Result<()> {
-        let result = self.commit_inner();
-        if result.is_err() {
-            self.discard_current_blob();
-        }
-        result
+        self.commit_output()
     }
 
-    fn commit_inner(&mut self) -> Result<()> {
+    fn commit_output(&mut self) -> Result<()> {
         if !self.has_changes {
             return Err(Error::InvalidParameter(
                 "incremental writer has no changes to commit".to_string(),
             ));
         }
-        fs::create_dir_all(&self.output_dir).with_context(|| {
-            format!(
-                "failed to create incremental output directory: {}",
-                self.output_dir.display()
-            )
-        })?;
+        fs::create_dir_all(&self.output_dir)?;
+        let bootstrap = match self.commit_inner() {
+            Ok(bootstrap) => bootstrap,
+            Err(err) => {
+                self.discard_current_blob();
+                return Err(err);
+            }
+        };
+        self.save_bootstrap(&bootstrap)
+    }
+
+    // Publish only after all output bytes are ready. Renaming a new inode keeps
+    // any open source reader's mmap valid during an in-place compact.
+    fn save_bootstrap(&mut self, data: &[u8]) -> Result<()> {
+        let path = self.output_dir.join("image.boot");
+        let (temp_path, mut file) = self.create_temp_file("bootstrap")?;
+        let result = (|| -> Result<()> {
+            match fs::metadata(&path) {
+                Ok(metadata) => file.set_permissions(metadata.permissions())?,
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+            file.write_all(data).context("write temporary bootstrap")?;
+            fs::rename(&temp_path, &path)
+                .with_context(|| format!("failed to publish bootstrap: {}", path.display()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        } else if let Some(artifacts) = &mut self.compact_artifacts {
+            artifacts.keep();
+        }
+        result
+    }
+
+    fn publish_blob_artifact(
+        &mut self,
+        temp: &Path,
+        digest: &[u8; EROFS_BLOB_ID_SIZE],
+        metadata: &BlobMetadata,
+    ) -> Result<()> {
+        if let Some(artifacts) = &mut self.compact_artifacts {
+            artifacts.publish(temp, &self.output_dir, digest, metadata)?;
+        } else {
+            let path = finalize_digest_named_blob(temp, &self.output_dir, digest)?;
+            save_blob_metadata_sidecar(metadata, &path)?;
+        }
+        Ok(())
+    }
+
+    fn commit_inner(&mut self) -> Result<Vec<u8>> {
         if !self.overlay.is_empty() {
             self.materialize_overlay()?;
         }
@@ -834,25 +890,20 @@ impl IncrementalWriter {
             self.ensure_blob_writer()?;
         }
         self.finish_current_blob(keep_empty_blob)?;
-        let device_ids = self.prune_parent_devices(parent_device_count)?;
+        let device_ids = if self.prune {
+            self.prune_parent_devices(parent_device_count)?
+        } else {
+            None
+        };
 
         self.sort_directory_children();
-        let final_bootstrap = render_bootstrap_remapped(
+        render_bootstrap_remapped(
             &mut self.inodes,
             self.epoch,
             &self.device_slots,
             &self.uuid,
             device_ids.as_deref(),
-        )?;
-        let bootstrap_path = self.output_dir.join("image.boot");
-        fs::write(&bootstrap_path, final_bootstrap).with_context(|| {
-            format!(
-                "failed to write incremental bootstrap: {}",
-                bootstrap_path.display()
-            )
-        })?;
-
-        Ok(())
+        )
     }
 
     /// Analyze final chunk metadata; new blob data is already known to be live.
@@ -1010,10 +1061,13 @@ impl IncrementalWriter {
             .upper_blob_temp_path
             .as_ref()
             .ok_or_else(|| Error::InvalidImage("upper blob temp path is missing".to_string()))?;
-        let final_blob_path =
-            finalize_digest_named_blob(temp_path, &self.output_dir, &finished.full_blob_digest)?;
+        let temp_path = temp_path.clone();
+        self.publish_blob_artifact(
+            &temp_path,
+            &finished.full_blob_digest,
+            &finished.blob_metadata,
+        )?;
         self.upper_blob_temp_path.take();
-        save_blob_metadata_sidecar(&finished.blob_metadata, &final_blob_path)?;
         self.device_slots.push(ErofsDeviceSlot::with_blob_id(
             finished.blob_blocks,
             &finished.full_blob_digest,
@@ -1108,7 +1162,7 @@ impl IncrementalWriter {
                 self.output_dir.display()
             )
         })?;
-        let (blob_path, blob_file) = self.create_temp_blob()?;
+        let (blob_path, blob_file) = self.create_temp_file("incremental")?;
         self.blob_writer = Some(BlobWriter::new(
             blob_file,
             self.chunk_size,
@@ -1123,14 +1177,14 @@ impl IncrementalWriter {
         Ok(())
     }
 
-    fn create_temp_blob(&self) -> Result<(PathBuf, File)> {
+    fn create_temp_file(&self, kind: &str) -> Result<(PathBuf, File)> {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|err| Error::InvalidParameter(format!("system time before epoch: {err}")))?
             .as_nanos();
         for attempt in 0..1024u16 {
             let path = self.output_dir.join(format!(
-                ".nydus-incremental-{}-{seed}-{attempt}.tmp",
+                ".nydus-{kind}-{}-{seed}-{attempt}.tmp",
                 std::process::id(),
             ));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -1138,14 +1192,14 @@ impl IncrementalWriter {
                 Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
                 Err(err) => {
                     return Err(err).with_context(|| {
-                        format!("failed to create upper blob: {}", path.display())
+                        format!("failed to create temporary {kind} file: {}", path.display())
                     })
                 }
             }
         }
-        Err(Error::InvalidParameter(
-            "failed to allocate a unique upper blob temp path".to_string(),
-        ))
+        Err(Error::InvalidParameter(format!(
+            "failed to allocate a unique temporary {kind} path"
+        )))
     }
 
     fn write_upper_chunk_addr(&mut self, data: &[u8]) -> Result<ErofsChunkAddr> {
@@ -1623,15 +1677,22 @@ fn finish_upper_blob<W: Write>(blob_writer: BlobWriter<W>) -> Result<FinishedUpp
     })
 }
 
+#[derive(Clone, Copy)]
+enum ParentMode {
+    Writer,
+    MetadataOnly,
+    Compact,
+}
+
 struct ParentTreeContext {
-    path_index: HashMap<PathBuf, usize>,
+    path_index: Option<HashMap<PathBuf, usize>>,
     nids: Vec<u64>,
 }
 
 impl ParentTreeContext {
-    fn new() -> Self {
+    fn new(mode: ParentMode) -> Self {
         Self {
-            path_index: HashMap::new(),
+            path_index: (!matches!(mode, ParentMode::Compact)).then(HashMap::new),
             nids: Vec::new(),
         }
     }
@@ -1689,7 +1750,7 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
         Ok((inode.file_type() != EROFS_FT_DIR && inode.nlink() > 1).then_some(self.nid))
     }
 
-    fn children(&mut self, _ctx: &mut ParentTreeContext) -> Result<Option<NamedChildren<Self>>> {
+    fn children(&mut self, ctx: &mut ParentTreeContext) -> Result<Option<NamedChildren<Self>>> {
         let inode = self
             .reader
             .inode(self.nid)
@@ -1711,7 +1772,11 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
             if name == b"." || name == b".." {
                 continue;
             }
-            let child_path = if self.path.as_os_str().is_empty() {
+            // Compact uses inode IDs, not path lookup. Keep an allocation-free
+            // empty path instead of cloning names and joining every ancestor.
+            let child_path = if ctx.path_index.is_none() {
+                PathBuf::new()
+            } else if self.path.as_os_str().is_empty() {
                 PathBuf::from(std::ffi::OsString::from_vec(name.clone()))
             } else {
                 self.path.join(std::ffi::OsString::from_vec(name.clone()))
@@ -1740,8 +1805,9 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
                 }
                 if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
                     return Err(Error::Unsupported(format!(
-                        "incremental writer only supports chunk-based regular files: {}",
-                        self.path.display()
+                        "incremental writer only supports chunk-based regular files: {} (inode {})",
+                        self.path.display(),
+                        self.nid
                     )));
                 }
                 Ok(InodeData::RegularFile {
@@ -1762,14 +1828,17 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
             EROFS_FT_CHRDEV | EROFS_FT_BLKDEV => Ok(InodeData::Device { rdev: inode.rdev() }),
             EROFS_FT_FIFO | EROFS_FT_SOCK => Ok(InodeData::FifoOrSocket),
             _ => Err(Error::Unsupported(format!(
-                "unsupported inode type for {}",
-                self.path.display()
+                "unsupported inode type for {} (inode {})",
+                self.path.display(),
+                self.nid
             ))),
         }
     }
 
     fn mapped_index(&mut self, ctx: &mut ParentTreeContext, index: usize) -> Result<()> {
-        ctx.path_index.insert(std::mem::take(&mut self.path), index);
+        if let Some(paths) = &mut ctx.path_index {
+            paths.insert(std::mem::take(&mut self.path), index);
+        }
         if ctx.nids.len() <= index {
             ctx.nids.resize(index + 1, 0);
         }
@@ -1798,6 +1867,43 @@ fn normalize_relative_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod prune_tests {
     use super::*;
+
+    #[test]
+    fn parent_paths_are_built_only_for_path_indexed_modes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut writer =
+            IncrementalWriter::create(IncrementalWriterOptions::new(temp.path().to_path_buf()))
+                .unwrap();
+        writer
+            .replace_file(Path::new("data"), b"payload".to_vec())
+            .unwrap();
+        writer.commit().unwrap();
+        let reader = ErofsReader::open_metadata_only(&temp.path().join("image.boot")).unwrap();
+        for mode in [
+            ParentMode::Compact,
+            ParentMode::Writer,
+            ParentMode::MetadataOnly,
+        ] {
+            let mut context = ParentTreeContext::new(mode);
+            let mut root = ParentTreeNode::new(
+                &reader,
+                reader.superblock().epoch(),
+                reader.superblock().root_nid(),
+                PathBuf::from("prefix"),
+            );
+            let children = root.children(&mut context).unwrap().unwrap();
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].0, b"data");
+            assert_eq!(
+                children[0].1.path,
+                if matches!(mode, ParentMode::Compact) {
+                    PathBuf::new()
+                } else {
+                    PathBuf::from("prefix/data")
+                }
+            );
+        }
+    }
 
     #[test]
     fn prune_remaps_prefetch_and_chunk_ids_only_when_serializing() {
