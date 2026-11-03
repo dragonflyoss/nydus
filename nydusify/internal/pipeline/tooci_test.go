@@ -9,6 +9,7 @@ package pipeline
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,7 +31,9 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
 
@@ -397,5 +400,209 @@ func TestPruneLayerGCLabels(t *testing.T) {
 	pruneLayerGCLabels(labels)
 	if len(labels) != 1 {
 		t.Errorf("labels = %v, want only the non-layer label", labels)
+	}
+}
+
+func buildMockBlob(t *testing.T, cs content.Store, builder string) ocispec.Descriptor {
+	t.Helper()
+	source := t.TempDir()
+	if !assert.NoError(t, os.WriteFile(filepath.Join(source, "file"), []byte("nydus layer"), 0o644)) {
+		t.FailNow()
+	}
+
+	var blob bytes.Buffer
+	if !assert.NoError(t, nydus.BuildBlob(context.Background(), &blob, source, nydus.PackOption{BuilderPath: builder, WorkDir: t.TempDir()})) {
+		t.FailNow()
+	}
+
+	path := filepath.Join(t.TempDir(), "blob")
+	if !assert.NoError(t, os.WriteFile(path, blob.Bytes(), 0o600)) {
+		t.FailNow()
+	}
+
+	desc, err := oci.IngestBlobFile(context.Background(), cs, path, "")
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	return desc
+}
+
+func writeMockNydusImage(t *testing.T, cs content.Store, blob ocispec.Descriptor, config string) ocispec.Descriptor {
+	t.Helper()
+	ctx := context.Background()
+	bootstrap, err := oci.WriteBootstrapLayer(ctx, cs, []byte("bootstrap"), nil, nil)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	configDesc, err := oci.WriteJSON(ctx, cs, json.RawMessage(config), ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	desc, err := oci.WriteJSON(ctx, cs, ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    *configDesc,
+		Layers:    []ocispec.Descriptor{blob, *bootstrap},
+	}, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, nil)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	return *desc
+}
+
+func TestConvertToOCI(t *testing.T) {
+	builder := os.Getenv("NYDUS_TEST_BUILDER")
+	tests := []struct {
+		name    string
+		builder bool
+		source  func(t *testing.T, cs content.Store) ocispec.Descriptor
+		opt     ToOCIOption
+		expect  func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error)
+	}{
+		{
+			name: "rejects forward compressor",
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return writeMockNydusImage(t, cs, writeMockBlob(t, cs, "blob"), "{}")
+			},
+			opt: ToOCIOption{Compressor: "zstd"},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `unsupported OCI compressor "zstd"`)
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects layer source",
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return mockGzipLayer
+			},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, fmt.Sprintf("unsupported source media type %q", ocispec.MediaTypeImageLayerGzip))
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects missing manifest",
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Digest: digest.FromString("missing manifest")}
+			},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "stat content")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects invalid manifest",
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				data := []byte("{")
+				desc := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Digest: digest.FromBytes(data), Size: int64(len(data))}
+				if !assert.NoError(t, content.WriteBlob(context.Background(), cs, desc.Digest.String(), bytes.NewReader(data), desc)) {
+					t.FailNow()
+				}
+
+				return desc
+			},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "read manifest json")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects oci manifest",
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return writeMockManifest(t, cs, mockGzipLayer)
+			},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "is neither a nydus blob nor a nydus bootstrap")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects manifest without bootstrap",
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return writeMockManifest(t, cs, writeMockBlob(t, cs, "blob"))
+			},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "source is not a nydus image")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects missing work directory",
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return writeMockNydusImage(t, cs, writeMockBlob(t, cs, "blob"), "{}")
+			},
+			opt: ToOCIOption{WorkDir: "/nonexistent/work"},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "create blob file")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name:    "rejects invalid image config",
+			builder: true,
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return writeMockNydusImage(t, cs, buildMockBlob(t, cs, builder), "[]")
+			},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "rewrite image config")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name:    "omits absent history",
+			builder: true,
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return writeMockNydusImage(t, cs, buildMockBlob(t, cs, builder), `{"os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+			},
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				if !assert.NoError(err) {
+					t.FailNow()
+				}
+
+				var (
+					manifest ocispec.Manifest
+					config   map[string]json.RawMessage
+					rootFS   ocispec.RootFS
+				)
+				if !assert.NoError(oci.ReadJSON(context.Background(), cs, *desc, &manifest)) || !assert.Len(manifest.Layers, 1) {
+					t.FailNow()
+				}
+				assert.Equal(ocispec.MediaTypeImageLayer, manifest.Layers[0].MediaType)
+				if !assert.NoError(oci.ReadJSON(context.Background(), cs, manifest.Config, &config)) {
+					t.FailNow()
+				}
+				assert.NotContains(config, "history")
+				assert.NoError(json.Unmarshal(config["rootfs"], &rootFS))
+				assert.Equal([]digest.Digest{manifest.Layers[0].Digest}, rootFS.DiffIDs)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.builder && builder == "" {
+				t.Skip("set NYDUS_TEST_BUILDER to run reverse conversion tests")
+			}
+			cs := newMockStore(t)
+			opt := tc.opt
+			opt.BuilderPath = builder
+			opt.WorkDir = cmp.Or(opt.WorkDir, t.TempDir())
+			opt.Compressor = cmp.Or(opt.Compressor, "oci-tar")
+			desc, err := ConvertToOCI(context.Background(), cs, tc.source(t, cs), opt)
+			tc.expect(t, cs, desc, err)
+		})
 	}
 }

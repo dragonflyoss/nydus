@@ -76,7 +76,13 @@ func TestPackUnblocksWhenBuilderExitsEarly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writer.Write(make([]byte, 1<<20)); err == nil {
+	var writeErr error
+	for range 64 {
+		if _, writeErr = writer.Write(make([]byte, 1<<20)); writeErr != nil {
+			break
+		}
+	}
+	if writeErr == nil {
 		t.Fatal("expected failed input stream")
 	}
 	if err := writer.Close(); err == nil || !strings.Contains(err.Error(), "rejected") {

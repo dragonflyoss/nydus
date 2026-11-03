@@ -9,11 +9,42 @@ package checker
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
+	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
+
+var (
+	mockPosixACL = []byte{
+		0x02, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x06, 0x00, 0xff, 0xff, 0xff, 0xff,
+		0x02, 0x00, 0x04, 0x00, 0xd2, 0x04, 0x00, 0x00,
+		0x04, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff,
+		0x10, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff,
+		0x20, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	}
+)
+
+func mockXattrFile(t *testing.T, path string, xattrs map[string][]byte) {
+	if !assert.NoError(t, os.WriteFile(path, []byte("hello"), 0o644)) {
+		t.FailNow()
+	}
+
+	for name, value := range xattrs {
+		err := unix.Lsetxattr(path, name, value, 0)
+		if errIsXattrUnsupported(err) {
+			t.Skipf("filesystem does not support xattr %q", name)
+		}
+
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+	}
+}
 
 func TestVerifyRootfs(t *testing.T) {
 	for _, tc := range []struct {
@@ -110,4 +141,217 @@ func TestWalkRootfs(t *testing.T) {
 
 	_, err = walkRootfs(filepath.Join(root, "absent"))
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestReadXattrs(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(t *testing.T, path string)
+		expect func(t *testing.T, xattrs map[string]string, err error)
+	}{
+		{
+			name: "file without xattrs",
+			setup: func(t *testing.T, path string) {
+				mockXattrFile(t, path, nil)
+			},
+			expect: func(t *testing.T, xattrs map[string]string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Nil(xattrs)
+			},
+		},
+		{
+			name: "user xattrs",
+			setup: func(t *testing.T, path string) {
+				mockXattrFile(t, path, map[string][]byte{"user.a": []byte("1"), "user.b": nil})
+			},
+			expect: func(t *testing.T, xattrs map[string]string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(map[string]string{"user.a": "1", "user.b": ""}, xattrs)
+			},
+		},
+		{
+			name: "skip posix acl",
+			setup: func(t *testing.T, path string) {
+				mockXattrFile(t, path, map[string][]byte{"system.posix_acl_access": mockPosixACL})
+			},
+			expect: func(t *testing.T, xattrs map[string]string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Nil(xattrs)
+			},
+		},
+		{
+			name: "keep user xattrs beside posix acl",
+			setup: func(t *testing.T, path string) {
+				mockXattrFile(t, path, map[string][]byte{"system.posix_acl_access": mockPosixACL, "user.a": []byte("1")})
+			},
+			expect: func(t *testing.T, xattrs map[string]string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(map[string]string{"user.a": "1"}, xattrs)
+			},
+		},
+		{
+			name:  "missing file",
+			setup: func(t *testing.T, path string) {},
+			expect: func(t *testing.T, xattrs map[string]string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "list xattr size")
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.Nil(xattrs)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "file")
+			tc.setup(t, path)
+			xattrs, err := readXattrs(path)
+			tc.expect(t, xattrs, err)
+		})
+	}
+}
+
+func TestGetXattr(t *testing.T) {
+	tests := []struct {
+		name   string
+		xattr  string
+		expect func(t *testing.T, value string, err error)
+	}{
+		{
+			name:  "read value",
+			xattr: "user.a",
+			expect: func(t *testing.T, value string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal("1", value)
+			},
+		},
+		{
+			name:  "missing attribute",
+			xattr: "user.absent",
+			expect: func(t *testing.T, value string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, unix.ENODATA)
+				assert.Empty(value)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "file")
+			mockXattrFile(t, path, map[string][]byte{"user.a": []byte("1")})
+			value, err := getXattr(path, tc.xattr)
+			tc.expect(t, value, err)
+		})
+	}
+}
+
+func TestHashFile(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   func(t *testing.T) string
+		expect func(t *testing.T, hash string, err error)
+	}{
+		{
+			name: "regular file",
+			path: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "file")
+				mockXattrFile(t, path, nil)
+				return path
+			},
+			expect: func(t *testing.T, hash string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", hash)
+			},
+		},
+		{
+			name: "missing file",
+			path: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "absent")
+			},
+			expect: func(t *testing.T, hash string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.Empty(hash)
+			},
+		},
+		{
+			name: "directory",
+			path: func(t *testing.T) string {
+				return t.TempDir()
+			},
+			expect: func(t *testing.T, hash string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, syscall.EISDIR)
+				assert.Empty(hash)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hash, err := hashFile(tc.path(t))
+			tc.expect(t, hash, err)
+		})
+	}
+}
+
+func TestErrIsXattrUnsupported(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		expect func(t *testing.T, unsupported bool)
+	}{
+		{
+			name: "not supported",
+			err:  unix.ENOTSUP,
+			expect: func(t *testing.T, unsupported bool) {
+				assert := assert.New(t)
+				assert.True(unsupported)
+			},
+		},
+		{
+			name: "operation not supported",
+			err:  unix.EOPNOTSUPP,
+			expect: func(t *testing.T, unsupported bool) {
+				assert := assert.New(t)
+				assert.True(unsupported)
+			},
+		},
+		{
+			name: "wrapped not supported",
+			err:  errors.Wrap(unix.ENOTSUP, "list xattr"),
+			expect: func(t *testing.T, unsupported bool) {
+				assert := assert.New(t)
+				assert.True(unsupported)
+			},
+		},
+		{
+			name: "missing attribute",
+			err:  unix.ENODATA,
+			expect: func(t *testing.T, unsupported bool) {
+				assert := assert.New(t)
+				assert.False(unsupported)
+			},
+		},
+		{
+			name: "no error",
+			expect: func(t *testing.T, unsupported bool) {
+				assert := assert.New(t)
+				assert.False(unsupported)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.expect(t, errIsXattrUnsupported(tc.err))
+		})
+	}
 }

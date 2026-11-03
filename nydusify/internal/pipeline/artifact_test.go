@@ -9,6 +9,7 @@ package pipeline
 import (
 	"archive/tar"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,12 +17,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/platforms"
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
+)
+
+var (
+	mockReferencedBlobDigest = digest.FromString("referenced blob")
 )
 
 func TestConvertNydusArtifactsWithAllParentBlobsPruned(t *testing.T) {
@@ -560,4 +567,98 @@ func digestSlicesEqual(left, right []digest.Digest) bool {
 		}
 	}
 	return true
+}
+
+func TestLoadParentNydusArtifact(t *testing.T) {
+	tests := []struct {
+		name   string
+		layers func(t *testing.T, cs content.Store) []ocispec.Descriptor
+		expect func(t *testing.T, parent ParentImageMetadata, err error)
+	}{
+		{
+			name: "rejects oci layer",
+			layers: func(t *testing.T, cs content.Store) []ocispec.Descriptor {
+				return []ocispec.Descriptor{mockGzipLayer}
+			},
+			expect: func(t *testing.T, parent ParentImageMetadata, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "is neither a nydus blob nor a nydus bootstrap")
+				assert.Empty(parent)
+			},
+		},
+		{
+			name: "rejects optimized blob",
+			layers: func(t *testing.T, cs content.Store) []ocispec.Descriptor {
+				return []ocispec.Descriptor{
+					writeMockBlob(t, cs, "data blob"),
+					writeMockBlob(t, cs, "ondemand blob", nydus.LayerAnnotationNydusBlobOptimized),
+					mockBootstrapLayer,
+				}
+			},
+			expect: func(t *testing.T, parent ParentImageMetadata, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "--parent-image does not support optimized nydus blob layers")
+				assert.Empty(parent)
+			},
+		},
+		{
+			name: "rejects missing bootstrap",
+			layers: func(t *testing.T, cs content.Store) []ocispec.Descriptor {
+				return []ocispec.Descriptor{writeMockBlob(t, cs, "data blob")}
+			},
+			expect: func(t *testing.T, parent ParentImageMetadata, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "parent image has no nydus bootstrap layer")
+				assert.Empty(parent)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := newMockStore(t)
+			manifest := writeMockManifest(t, cs, tc.layers(t, cs)...)
+			parent, err := LoadParentNydusArtifact(context.Background(), cs, manifest, platforms.All)
+			tc.expect(t, parent, err)
+		})
+	}
+}
+
+func TestBootstrapBlobDigestsFromNydusCheck(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		expect func(t *testing.T, referenced map[digest.Digest]struct{}, err error)
+	}{
+		{
+			name:   "returns referenced blobs",
+			output: fmt.Sprintf(`{"blobs":[{"slot_sha256":%q}]}`, mockReferencedBlobDigest.Encoded()),
+			expect: func(t *testing.T, referenced map[digest.Digest]struct{}, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(map[digest.Digest]struct{}{mockReferencedBlobDigest: {}}, referenced)
+			},
+		},
+		{
+			name:   "rejects invalid blob digest",
+			output: `{"blobs":[{"slot_sha256":"invalid"}]}`,
+			expect: func(t *testing.T, referenced map[digest.Digest]struct{}, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `nydus check blob 1 has invalid sha256 "invalid"`)
+				assert.Nil(referenced)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := filepath.Join(t.TempDir(), "nydus")
+			if !assert.NoError(t, os.WriteFile(builder, []byte("#!/bin/sh\nprintf '%s' '"+tc.output+"'\n"), 0o700)) {
+				t.FailNow()
+			}
+
+			referenced, err := bootstrapBlobDigestsFromNydusCheck(context.Background(), builder, filepath.Join(t.TempDir(), "image.boot"))
+			tc.expect(t, referenced, err)
+		})
+	}
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -675,7 +676,7 @@ func TestRemoteSetupFailures(t *testing.T) {
 }
 
 func TestPushBlobFileFailures(t *testing.T) {
-	for _, phase := range []string{"stat", "size", "pusher", "writer", "open", "upload", "exists"} {
+	for _, phase := range []string{"stat", "size", "pusher", "writer", "open", "upload", "exists", "exists-upload"} {
 		t.Run(phase, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "blob")
 			require.NoError(t, os.WriteFile(path, []byte("data"), 0o600))
@@ -696,11 +697,13 @@ func TestPushBlobFileFailures(t *testing.T) {
 				pusher.writeErr = injected
 			case "exists":
 				pusher.pushErr = errdefs.ErrAlreadyExists
+			case "exists-upload":
+				pusher.writeErr = errdefs.ErrAlreadyExists
 			case "open":
 				pusher.onPush = func(context.Context) error { return os.Remove(path) }
 			}
 			err := pushBlobFile(context.Background(), resolver, desc, "example.test/image:tag", path)
-			if phase == "exists" {
+			if phase == "exists" || phase == "exists-upload" {
 				require.NoError(t, err)
 			} else {
 				require.Error(t, err)
@@ -711,6 +714,58 @@ func TestPushBlobFileFailures(t *testing.T) {
 			for _, writer := range pusher.writers {
 				require.Equal(t, 1, writer.closes)
 			}
+		})
+	}
+}
+
+func TestRetryPushWriter_Write(t *testing.T) {
+	tests := []struct {
+		name   string
+		reopen error
+		expect func(t *testing.T, pusher *contentTestPusher, err error)
+	}{
+		{
+			name:   "reopen failure is returned",
+			reopen: errdefs.ErrPermissionDenied,
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrPermissionDenied)
+				assert.NotErrorIs(err, content.ErrReset)
+				assert.Equal(2, pusher.calls)
+				assert.Equal(1, pusher.writers[0].closes)
+			},
+		},
+		{
+			name: "transient failure resets the upload",
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, content.ErrReset)
+				assert.Equal(2, pusher.calls)
+				assert.Equal(1, pusher.writers[0].closes)
+				assert.Zero(pusher.writers[1].closes)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pusher := &contentTestPusher{writeErr: syscall.ECONNRESET}
+				pusher.onPush = func(context.Context) error {
+					if pusher.calls == 2 {
+						return tc.reopen
+					}
+					return nil
+				}
+				desc := contentTestDescriptor(ocispec.MediaTypeImageLayer, []byte("data"))
+				w, err := (&retryPusher{pusher: pusher}).Push(context.Background(), desc)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				_, err = w.Write([]byte("data"))
+				tc.expect(t, pusher, err)
+				assert.NoError(t, w.Close())
+			})
 		})
 	}
 }

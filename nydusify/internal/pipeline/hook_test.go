@@ -13,11 +13,13 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestConvertHookAnnotatesUnchangedNydusManifest(t *testing.T) {
@@ -187,5 +189,135 @@ func TestRewriteBootstrapConfigKeepsUnknownFields(t *testing.T) {
 	}
 	if _, ok := raw["variant"]; !ok {
 		t.Errorf("variant field was dropped: %s", out)
+	}
+}
+
+func TestConvertHookFunc(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		descs       func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor)
+		expect      func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error)
+	}{
+		{
+			name: "ignores unconverted layer",
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				return mockGzipLayer, nil
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "returns converted layer",
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				blob := writeMockBlob(t, cs, "converted blob")
+				return mockGzipLayer, &blob
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(newDesc, desc)
+			},
+		},
+		{
+			name: "collapses single manifest index",
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				index := writeMockImage(t, cs, mockPlatform)
+				return index, &index
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				if !assert.NoError(err) {
+					t.FailNow()
+				}
+				assert.Equal(ocispec.MediaTypeImageManifest, desc.MediaType)
+				assert.Equal(&mockPlatform, desc.Platform)
+			},
+		},
+		{
+			name: "keeps multi manifest index",
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				index := writeMockImage(t, cs, mockPlatform, mockARM64Platform)
+				return index, &index
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(newDesc, desc)
+			},
+		},
+		{
+			name: "rejects unreadable index",
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				index := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageIndex, Digest: digest.FromString("missing index")}
+				return index, &index
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "read index json")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name:        "keeps attestation manifest unannotated",
+			annotations: mockManifestAnnotations,
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				manifest := writeMockManifest(t, cs, ocispec.Descriptor{MediaType: "application/vnd.in-toto+json", Digest: digest.FromString("attestation")})
+				return manifest, &manifest
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(newDesc, desc)
+			},
+		},
+		{
+			name:        "rejects unreadable manifest to annotate",
+			annotations: mockManifestAnnotations,
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				return ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Digest: digest.FromString("missing manifest")}, nil
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "read manifest json")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects merge of missing blob",
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				manifest := writeMockManifest(t, cs, ocispec.Descriptor{MediaType: nydus.MediaTypeNydusBlob, Digest: digest.FromString("missing blob")})
+				return manifest, &manifest
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "merge nydus layers: open blob")
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "rejects merge of invalid blob",
+			descs: func(t *testing.T, cs content.Store) (ocispec.Descriptor, *ocispec.Descriptor) {
+				manifest := writeMockManifest(t, cs, writeMockBlob(t, cs, "invalid blob"))
+				return manifest, &manifest
+			},
+			expect: func(t *testing.T, newDesc, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "merge nydus layers: stage blob")
+				assert.Nil(desc)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := newMockStore(t)
+			orgDesc, newDesc := tc.descs(t, cs)
+			desc, err := ConvertHookFunc(nydus.MergeOption{WorkDir: t.TempDir()}, tc.annotations)(context.Background(), cs, orgDesc, newDesc)
+			tc.expect(t, newDesc, desc, err)
+		})
 	}
 }

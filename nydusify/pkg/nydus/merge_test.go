@@ -20,6 +20,7 @@ import (
 	"time"
 
 	digest "github.com/opencontainers/go-digest"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -156,5 +157,117 @@ func TestMergeRejectsInvalidInputs(t *testing.T) {
 		entries, err := os.ReadDir(scratch)
 		require.NoError(t, err)
 		require.Empty(t, entries)
+	}
+}
+
+var (
+	mockChunkedBlob = newMockNydusBlob(0, 4)
+
+	mockNativeBlob = newMockNydusBlob(footerFlagRawDevice, 0)
+
+	mockInvalidMetaBlob = newMockNydusBlob(0, 0)
+)
+
+func newMockNydusBlob(incompat uint32, metaSize uint64) []byte {
+	blob := make([]byte, 64+NydusBlobFooterSize)
+	copy(blob[32:], "meta")
+	footer := blob[64:]
+	copy(footer, NydusBlobFooterMagic)
+	binary.LittleEndian.PutUint32(footer[footerIncompatField:], incompat)
+	binary.LittleEndian.PutUint64(footer[bootstrapOffsetField:], 16)
+	binary.LittleEndian.PutUint64(footer[blobMetaOffsetField:], 32)
+	binary.LittleEndian.PutUint64(footer[blobMetaSizeField:], metaSize)
+	return blob
+}
+
+func TestMergeBootstrap(t *testing.T) {
+	tests := []struct {
+		name           string
+		blob           []byte
+		body           string
+		missingWorkDir bool
+		expect         func(t *testing.T, dgst digest.Digest, bootstrap []byte, metas []BlobMetaFile, err error)
+	}{
+		{
+			name: "merges staged blob and returns blob meta",
+			blob: mockChunkedBlob,
+			body: "test \"$(basename \"$source\")\" = " + digest.FromBytes(mockChunkedBlob).Encoded() + "\nprintf merged > \"$(dirname \"$source\")/bootstrap\"\n",
+			expect: func(t *testing.T, dgst digest.Digest, bootstrap []byte, metas []BlobMetaFile, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal("merged", string(bootstrap))
+				assert.Equal([]BlobMetaFile{{Name: dgst.Encoded() + ".blob.meta", Data: []byte("meta")}}, metas)
+			},
+		},
+		{
+			name: "native layer has no blob meta",
+			blob: mockNativeBlob,
+			body: "printf merged > \"$(dirname \"$source\")/bootstrap\"\n",
+			expect: func(t *testing.T, dgst digest.Digest, bootstrap []byte, metas []BlobMetaFile, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal("merged", string(bootstrap))
+				assert.Empty(metas)
+			},
+		},
+		{
+			name:           "missing work dir",
+			blob:           mockChunkedBlob,
+			missingWorkDir: true,
+			expect: func(t *testing.T, dgst digest.Digest, bootstrap []byte, metas []BlobMetaFile, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "create merge scratch dir")
+				assert.Nil(bootstrap)
+			},
+		},
+		{
+			name: "invalid blob meta region",
+			blob: mockInvalidMetaBlob,
+			body: "printf merged > \"$(dirname \"$source\")/bootstrap\"\n",
+			expect: func(t *testing.T, dgst digest.Digest, bootstrap []byte, metas []BlobMetaFile, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "extract blob meta "+dgst.String())
+				assert.ErrorContains(err, "invalid blob meta region")
+				assert.Nil(bootstrap)
+			},
+		},
+		{
+			name: "builder writes no bootstrap",
+			blob: mockChunkedBlob,
+			body: "exit 0\n",
+			expect: func(t *testing.T, dgst digest.Digest, bootstrap []byte, metas []BlobMetaFile, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "read bootstrap")
+				assert.Nil(bootstrap)
+				assert.Nil(metas)
+			},
+		},
+		{
+			name: "builder failure carries stderr",
+			blob: mockChunkedBlob,
+			body: "echo merge rejected >&2\nexit 2\n",
+			expect: func(t *testing.T, dgst digest.Digest, bootstrap []byte, metas []BlobMetaFile, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydus merge: merge rejected")
+				assert.Nil(bootstrap)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch := t.TempDir()
+			workDir := scratch
+			if tc.missingWorkDir {
+				workDir = filepath.Join(scratch, "missing")
+			}
+			dgst := digest.FromBytes(tc.blob)
+			layers := []Layer{{Digest: dgst, ReaderAt: bytes.NewReader(tc.blob)}}
+			bootstrap, metas, err := MergeBootstrap(context.Background(), layers, MergeOption{BuilderPath: fakeBuilder(t, tc.body), WorkDir: workDir})
+			tc.expect(t, dgst, bootstrap, metas, err)
+			entries, err := os.ReadDir(scratch)
+			assert.NoError(t, err)
+			assert.Empty(t, entries)
+		})
 	}
 }

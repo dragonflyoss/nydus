@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/containerd/errdefs"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -138,3 +140,157 @@ func TestEnsureParentBlobsUsesMountWithoutDownloading(t *testing.T) {
 
 var _ remotes.Fetcher = (*parentBlobTestFetcher)(nil)
 var _ remotes.Pusher = (*parentBlobTestPusher)(nil)
+
+func TestEnsureParentBlob(t *testing.T) {
+	mockParentData := []byte("parent blob")
+	mockParentDesc := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageLayer, Digest: digest.FromBytes(mockParentData), Size: int64(len(mockParentData))}
+	mockParentErr := errors.New("registry refused")
+	tests := []struct {
+		name     string
+		parent   string
+		target   string
+		pusher   *contentTestPusher
+		resolver func(pusher *contentTestPusher) remotes.Resolver
+		openErr  error
+		expect   func(t *testing.T, pusher *contentTestPusher, err error)
+	}{
+		{
+			name:   "invalid parent reference",
+			parent: "Parent/Image:v1",
+			pusher: &contentTestPusher{},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return contentTestResolver{pusher: pusher}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `parse parent image "Parent/Image:v1"`)
+				assert.Zero(pusher.calls)
+			},
+		},
+		{
+			name:   "invalid target reference",
+			target: "Child/Image:v1",
+			pusher: &contentTestPusher{},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return contentTestResolver{pusher: pusher}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `parse target image "Child/Image:v1"`)
+				assert.Zero(pusher.calls)
+			},
+		},
+		{
+			name:   "pusher unavailable",
+			pusher: &contentTestPusher{},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return contentTestResolver{pusherErr: mockParentErr}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, mockParentErr)
+				assert.ErrorContains(err, "create pusher for")
+			},
+		},
+		{
+			name:   "mount request fails",
+			pusher: &contentTestPusher{pushErr: mockParentErr},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return contentTestResolver{pusher: pusher}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, mockParentErr)
+				assert.ErrorContains(err, "mount parent blob "+mockParentDesc.Digest.String())
+				assert.Equal(1, pusher.calls)
+			},
+		},
+		{
+			name:   "parent fetcher unavailable",
+			pusher: &contentTestPusher{},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return contentTestResolver{pusher: pusher, fetcherErr: mockParentErr}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, mockParentErr)
+				assert.ErrorContains(err, "get fetcher for parent")
+				assert.Equal(1, pusher.writers[0].closes)
+			},
+		},
+		{
+			name:   "parent download fails",
+			pusher: &contentTestPusher{},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return contentTestResolver{pusher: pusher}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrNotFound)
+				assert.ErrorContains(err, "download parent blob")
+				assert.Empty(pusher.writers[0].Bytes())
+				assert.Equal(1, pusher.writers[0].closes)
+			},
+		},
+		{
+			name:   "downloaded parent cannot be opened",
+			pusher: &contentTestPusher{},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return parentBlobTestResolver{pusher: pusher, fetcher: &parentBlobTestFetcher{data: mockParentData}}
+			},
+			openErr: mockParentErr,
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, mockParentErr)
+				assert.ErrorContains(err, "open downloaded parent blob")
+				assert.Equal(1, pusher.writers[0].closes)
+			},
+		},
+		{
+			name:   "upload fails",
+			pusher: &contentTestPusher{writeErr: mockParentErr},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return parentBlobTestResolver{pusher: pusher, fetcher: &parentBlobTestFetcher{data: mockParentData}}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, mockParentErr)
+				assert.ErrorContains(err, "upload parent blob")
+				assert.Zero(pusher.writers[0].commits)
+				assert.Equal(1, pusher.writers[0].closes)
+			},
+		},
+		{
+			name:   "blob published during upload",
+			pusher: &contentTestPusher{writeErr: errdefs.ErrAlreadyExists},
+			resolver: func(pusher *contentTestPusher) remotes.Resolver {
+				return parentBlobTestResolver{pusher: pusher, fetcher: &parentBlobTestFetcher{data: mockParentData}}
+			},
+			expect: func(t *testing.T, pusher *contentTestPusher, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Zero(pusher.writers[0].commits)
+				assert.Equal(1, pusher.writers[0].closes)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, target := "registry.test/ns/parent:v1", "registry.test/ns/child:v1"
+			if tc.parent != "" {
+				parent = tc.parent
+			}
+			if tc.target != "" {
+				target = tc.target
+			}
+			base, err := local.NewStore(t.TempDir())
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			store := &contentTestStore{Store: base, data: mockParentData, openErr: tc.openErr}
+			err = ensureParentBlob(context.Background(), store, tc.resolver(tc.pusher), mockParentDesc, parent, target)
+			tc.expect(t, tc.pusher, err)
+		})
+	}
+}

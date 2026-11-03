@@ -19,6 +19,7 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestStreamingLayerWithRealBuilder(t *testing.T) {
@@ -230,5 +231,124 @@ func TestStreamingLayerRejectsTruncatedInput(t *testing.T) {
 			t.Fatalf("truncated input was accepted or hung (gzip=%v): %v", gzipInput, err)
 		}
 		cancel()
+	}
+}
+
+func TestLayerConvertFunc(t *testing.T) {
+	tests := []struct {
+		name     string
+		canceled bool
+		desc     ocispec.Descriptor
+		expect   func(t *testing.T, desc *ocispec.Descriptor, err error)
+	}{
+		{
+			name:     "rejects canceled context",
+			canceled: true,
+			desc:     mockGzipLayer,
+			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, context.Canceled)
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "skips image config",
+			desc: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig, Digest: mockGzipLayer.Digest},
+			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "skips nydus blob",
+			desc: ocispec.Descriptor{MediaType: nydus.MediaTypeNydusBlob, Digest: mockGzipLayer.Digest},
+			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "skips nydus bootstrap",
+			desc: mockBootstrapLayer,
+			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Nil(desc)
+			},
+		},
+		{
+			name: "wraps layer conversion error",
+			desc: mockGzipLayer,
+			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "convert layer "+mockGzipLayer.Digest.String())
+				assert.Nil(desc)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+
+			desc, err := LayerConvertFunc(nydus.PackOption{BuilderPath: "/nonexistent/nydus", WorkDir: t.TempDir()})(ctx, newMockStore(t), tc.desc)
+			tc.expect(t, desc, err)
+		})
+	}
+}
+
+func TestLayerConvertConcurrency(t *testing.T) {
+	tests := []struct {
+		name   string
+		env    string
+		expect func(t *testing.T, concurrency int)
+	}{
+		{
+			name: "uses positive override",
+			env:  "3",
+			expect: func(t *testing.T, concurrency int) {
+				assert := assert.New(t)
+				assert.Equal(3, concurrency)
+			},
+		},
+		{
+			name: "defaults without override",
+			expect: func(t *testing.T, concurrency int) {
+				assert := assert.New(t)
+				assert.GreaterOrEqual(concurrency, 2)
+				assert.LessOrEqual(concurrency, 4)
+			},
+		},
+		{
+			name: "ignores zero override",
+			env:  "0",
+			expect: func(t *testing.T, concurrency int) {
+				assert := assert.New(t)
+				assert.GreaterOrEqual(concurrency, 2)
+				assert.LessOrEqual(concurrency, 4)
+			},
+		},
+		{
+			name: "ignores invalid override",
+			env:  "many",
+			expect: func(t *testing.T, concurrency int) {
+				assert := assert.New(t)
+				assert.GreaterOrEqual(concurrency, 2)
+				assert.LessOrEqual(concurrency, 4)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NYDUSIFY_LAYER_CONCURRENCY", tc.env)
+			tc.expect(t, layerConvertConcurrency())
+		})
 	}
 }

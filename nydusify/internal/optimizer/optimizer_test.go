@@ -7,8 +7,12 @@
 package optimizer
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,11 +26,50 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/dragonflyoss/nydus/nydusify/internal/nydusfs"
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
+	"github.com/dragonflyoss/nydus/nydusify/internal/registrytest"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
+	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
+)
+
+type mockFile struct {
+	name string
+	data string
+}
+
+var (
+	mockOndemandHex = digest.FromString("ondemand blob").Encoded()
+
+	mockDataBlob = []byte("data blob")
+
+	mockImageConfig = ocispec.Image{
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		Config:   ocispec.ImageConfig{Env: []string{"PATH=/bin"}},
+		History:  []ocispec.History{{CreatedBy: "source"}},
+	}
+
+	mockOptimizeArgs = "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args\"\n" +
+		"while [ $# -gt 0 ]; do\n" +
+		"\tcase \"$1\" in\n" +
+		"\t--bootstrap) boot=\"$2\" ;;\n" +
+		"\t--blob-dir) dir=\"$2\" ;;\n" +
+		"\tesac\n" +
+		"\tshift\n" +
+		"done\n" +
+		"mkdir -p \"$dir\"\n"
+
+	mockOptimizeBlob = "printf 'ondemand blob' > \"$dir/" + mockOndemandHex + "\"\n"
+
+	mockOptimizeBlobMeta = "printf 'ondemand meta' > \"$dir/" + mockOndemandHex + ".blob.meta\"\n"
+
+	mockOptimizeBootstrap = "printf 'optimized bootstrap' > \"$boot\"\n"
+
+	mockOptimizeReport = "echo 'ONDEMAND BLOB DIGEST  " + mockOndemandHex + "'\n"
 )
 
 func TestNewOptimizerTraceFileValidation(t *testing.T) {
@@ -193,6 +236,7 @@ func TestWriteOptimizedImage(t *testing.T) {
 		{name: "missing_source_diffid", fallback: true, missing: "source", wantError: "cannot determine diff id"},
 		{name: "missing_ondemand_annotation", missing: "ondemand", wantError: "missing uncompressed annotation on appended layer"},
 		{name: "missing_bootstrap_annotation", missing: "bootstrap", wantError: "missing uncompressed annotation on appended layer"},
+		{name: "bootstrap_not_last", missing: "order", wantError: "split source layers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -245,6 +289,9 @@ func TestWriteOptimizedImage(t *testing.T) {
 			if tc.missing == "bootstrap" {
 				delete(bootstrap.Annotations, nydus.LayerAnnotationUncompressed)
 			}
+			if tc.missing == "order" {
+				img.Manifest.Layers[0], img.Manifest.Layers[1] = img.Manifest.Layers[1], img.Manifest.Layers[0]
+			}
 			desc, err := (&Optimizer{}).writeOptimizedImage(ctx, store, img, ondemand, bootstrap)
 			if tc.wantError != "" {
 				if err == nil || desc != nil || !strings.Contains(err.Error(), tc.wantError) {
@@ -289,6 +336,285 @@ func TestWriteOptimizedImage(t *testing.T) {
 			if labels["containerd.io/gc.ref.content.config"] != manifest.Config.Digest.String() {
 				t.Error("config missing GC reference")
 			}
+		})
+	}
+}
+
+func mockTar(t *testing.T, files ...mockFile) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, file := range files {
+		if !assert.NoError(t, tw.WriteHeader(&tar.Header{Name: file.name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(file.data))})) {
+			t.FailNow()
+		}
+
+		if _, err := tw.Write([]byte(file.data)); !assert.NoError(t, err) {
+			t.FailNow()
+		}
+	}
+
+	if !assert.NoError(t, tw.Close()) {
+		t.FailNow()
+	}
+
+	return buf.Bytes()
+}
+
+func mockUntar(t *testing.T, layer []byte) map[string]string {
+	gr, err := gzip.NewReader(bytes.NewReader(layer))
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	files := map[string]string{}
+	tr := tar.NewReader(gr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return files
+		}
+
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+
+		data, err := io.ReadAll(tr)
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+
+		if header.Typeflag == tar.TypeReg {
+			files[header.Name] = string(data)
+		}
+	}
+}
+
+type registry struct {
+	*registrytest.Registry
+}
+
+func newRegistry(t *testing.T) *registry {
+	return &registry{registrytest.New(t)}
+}
+
+func (r *registry) blob(repo string, dgst digest.Digest) string {
+	data, _ := r.Load(repo, dgst.String())
+	return string(data)
+}
+
+func (r *registry) storeImage(t *testing.T, repo string, config ocispec.Image, layers ...ocispec.Descriptor) {
+	r.StoreJSON(t, repo, "latest", ocispec.MediaTypeImageManifest, ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    r.StoreJSON(t, repo, "", ocispec.MediaTypeImageConfig, config),
+		Layers:    layers,
+	})
+}
+
+func (r *registry) storeNydusImage(t *testing.T, repo string, diffIDs bool, files ...mockFile) {
+	data := r.Store(repo, "", nydus.MediaTypeNydusBlob, mockDataBlob)
+	data.Annotations = map[string]string{nydus.LayerAnnotationNydusBlob: "true"}
+	bootstrap := r.Store(repo, "", ocispec.MediaTypeImageLayer, mockTar(t, files...))
+	bootstrap.Annotations = map[string]string{
+		nydus.LayerAnnotationNydusBootstrap: "true",
+		nydus.LayerAnnotationUncompressed:   bootstrap.Digest.String(),
+	}
+	config := mockImageConfig
+	if diffIDs {
+		data.Annotations[nydus.LayerAnnotationUncompressed] = data.Digest.String()
+		config.RootFS.DiffIDs = []digest.Digest{data.Digest, bootstrap.Digest}
+	}
+
+	r.storeImage(t, repo, config, data, bootstrap)
+}
+
+func TestOptimizer_Optimize(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	reg := newRegistry(t)
+	dataMeta := mockFile{name: "image/" + digest.FromBytes(mockDataBlob).Encoded() + ".blob.meta", data: "data meta"}
+	reg.storeNydusImage(t, "nydus", true, mockFile{name: nydus.BootstrapFileNameInLayer, data: "bootstrap"}, dataMeta)
+	reg.storeNydusImage(t, "headless", true, dataMeta)
+	reg.storeNydusImage(t, "nodiff", false, mockFile{name: nydus.BootstrapFileNameInLayer, data: "bootstrap"})
+	layer := reg.Store("oci", "", ocispec.MediaTypeImageLayer, mockTar(t, mockFile{name: "etc/hostname", data: "nydus\n"}))
+	ociConfig := mockImageConfig
+	ociConfig.RootFS.DiffIDs = []digest.Digest{layer.Digest}
+	reg.storeImage(t, "oci", ociConfig, layer)
+
+	tests := []struct {
+		name   string
+		source string
+		script string
+		forbid bool
+		expect func(t *testing.T, dir string, err error)
+	}{
+		{
+			name:   "push optimized image with ondemand blob",
+			source: "nydus",
+			script: mockOptimizeArgs + mockOptimizeBlob + mockOptimizeBlobMeta + mockOptimizeBootstrap + mockOptimizeReport,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				if !assert.NoError(err) {
+					t.FailNow()
+				}
+
+				var manifest ocispec.Manifest
+				reg.LoadJSON(t, "optimized", "latest", &manifest)
+				if !assert.Len(manifest.Layers, 3) {
+					t.FailNow()
+				}
+
+				data, ondemand, bootstrap := manifest.Layers[0], manifest.Layers[1], manifest.Layers[2]
+				assert.Equal(string(mockDataBlob), reg.blob("optimized", data.Digest))
+				assert.Equal(digest.FromString("ondemand blob"), ondemand.Digest)
+				assert.Equal("true", ondemand.Annotations[nydus.LayerAnnotationNydusBlobOptimized])
+				assert.Equal("ondemand blob", reg.blob("optimized", ondemand.Digest))
+				assert.Equal("true", bootstrap.Annotations[nydus.LayerAnnotationNydusBootstrap])
+				assert.Equal(map[string]string{
+					nydus.BootstrapFileNameInLayer:            "optimized bootstrap",
+					dataMeta.name:                             dataMeta.data,
+					"image/" + mockOndemandHex + ".blob.meta": "ondemand meta",
+				}, mockUntar(t, []byte(reg.blob("optimized", bootstrap.Digest))))
+
+				var config ocispec.Image
+				reg.LoadJSON(t, "optimized", manifest.Config.Digest.String(), &config)
+				assert.Equal([]digest.Digest{
+					data.Digest,
+					ondemand.Digest,
+					digest.Digest(bootstrap.Annotations[nydus.LayerAnnotationUncompressed]),
+				}, config.RootFS.DiffIDs)
+				assert.Equal([]ocispec.History{{CreatedBy: "source"}, {CreatedBy: "Nydus Optimizer", Comment: "Nydus Ondemand Blob Layer"}}, config.History)
+				assert.Equal(mockImageConfig.Config, config.Config)
+
+				args, err := os.ReadFile(filepath.Join(dir, "args"))
+				assert.NoError(err)
+				assert.Contains(string(args), "--trace-file\n"+filepath.Join(dir, "trace.json")+"\n--type\nondemand\n")
+				entries, err := os.ReadDir(filepath.Join(dir, "work", "scratch"))
+				assert.NoError(err)
+				assert.Empty(entries)
+			},
+		},
+		{
+			name:   "reject missing source image",
+			source: "absent",
+			script: mockOptimizeArgs,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `load source "`+reg.Ref("absent", "latest")+`"`)
+			},
+		},
+		{
+			name:   "reject oci source image",
+			source: "oci",
+			script: mockOptimizeArgs,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `source "`+reg.Ref("oci", "latest")+`" is not a nydus image`)
+			},
+		},
+		{
+			name:   "reject bootstrap layer without bootstrap file",
+			source: "headless",
+			script: mockOptimizeArgs,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `extract bootstrap: bootstrap entry "image/image.boot" not found in layer`)
+				assert.NoFileExists(filepath.Join(dir, "args"))
+				entries, err := os.ReadDir(filepath.Join(dir, "work", "scratch"))
+				assert.NoError(err)
+				assert.Empty(entries)
+			},
+		},
+		{
+			name:   "report builder failure",
+			source: "nydus",
+			script: mockOptimizeArgs + "exit 1\n",
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "run nydus optimize: exit status 1")
+				entries, err := os.ReadDir(filepath.Join(dir, "work", "scratch"))
+				assert.NoError(err)
+				assert.Empty(entries)
+			},
+		},
+		{
+			name:   "reject ondemand blob not matching reported digest",
+			source: "nydus",
+			script: mockOptimizeArgs + "printf 'tampered' > \"$dir/" + mockOndemandHex + "\"\n" + mockOptimizeBlobMeta + mockOptimizeBootstrap + mockOptimizeReport,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "commit ondemand blob")
+			},
+		},
+		{
+			name:   "reject missing optimized bootstrap",
+			source: "nydus",
+			script: mockOptimizeArgs + mockOptimizeBlob + mockOptimizeBlobMeta + mockOptimizeReport,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "read optimized bootstrap")
+				assert.ErrorIs(err, os.ErrNotExist)
+			},
+		},
+		{
+			name:   "reject missing ondemand blob meta",
+			source: "nydus",
+			script: mockOptimizeArgs + mockOptimizeBlob + mockOptimizeBootstrap + mockOptimizeReport,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "read ondemand blob meta")
+				assert.ErrorIs(err, os.ErrNotExist)
+			},
+		},
+		{
+			name:   "reject data layer without diff id",
+			source: "nodiff",
+			script: mockOptimizeArgs + mockOptimizeBlob + mockOptimizeBlobMeta + mockOptimizeBootstrap + mockOptimizeReport,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "write optimized image: cannot determine diff id for layer "+digest.FromBytes(mockDataBlob).String())
+			},
+		},
+		{
+			name:   "report rejected push",
+			source: "nydus",
+			script: mockOptimizeArgs + mockOptimizeBlob + mockOptimizeBlobMeta + mockOptimizeBootstrap + mockOptimizeReport,
+			forbid: true,
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "push \"")
+				assert.ErrorContains(err, "403 Forbidden")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workDir := filepath.Join(dir, "work")
+			builder := filepath.Join(dir, "nydus")
+			if !assert.NoError(t, os.Mkdir(workDir, 0o755)) || !assert.NoError(t, os.WriteFile(builder, []byte(tc.script), 0o700)) {
+				t.FailNow()
+			}
+
+			target := reg.Ref("optimized", "latest")
+			if tc.forbid {
+				target = registrytest.Forbidding(t) + "/optimized:latest"
+			}
+
+			optimizer, err := NewOptimizer(OptimizeOption{
+				Source:          reg.Ref(tc.source, "latest"),
+				Target:          target,
+				TraceFile:       filepath.Join(dir, "trace.json"),
+				BuilderPath:     builder,
+				WorkDir:         workDir,
+				SourcePlainHTTP: true,
+				TargetPlainHTTP: true,
+			})
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			tc.expect(t, dir, optimizer.Optimize(context.Background()))
 		})
 	}
 }
