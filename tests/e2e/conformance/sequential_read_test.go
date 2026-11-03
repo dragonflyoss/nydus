@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -16,17 +16,16 @@ import (
 
 var seqBufSizes = []int{1, 4095, 4096, 128<<10 + 1, 1 << 20}
 
-func runSequentialRead(t *testing.T, f *Fixture) {
+func testSequentialRead(t *testing.T, m *mounted) {
 	t.Run("BufferSizes", func(t *testing.T) {
 		t.Parallel()
-		for i, e := range hashedFiles(f.Image.Want) {
+		for i, e := range hashedFiles(m.Image.Want) {
 			size := seqBufSizes[i%len(seqBufSizes)]
 			if size == 1 && e.Size > 8<<10 {
-				// A byte at a time costs a syscall per byte; keep it to small files.
 				size = 511
 			}
 
-			sum, n, err := sequentialHash(f.Path(string(e.Path)), size)
+			sum, n, err := sequentialHash(m.Path(string(e.Path)), size)
 			if !assert.NoError(t, err) {
 				t.FailNow()
 			}
@@ -40,18 +39,13 @@ func runSequentialRead(t *testing.T, f *Fixture) {
 
 	t.Run("FaultIn", func(t *testing.T) {
 		t.Parallel()
-		faultIn(t, f)
+		faultIn(t, m)
 	})
 }
 
-// faultIn reads into a destination buffer that is itself a private mapping
-// of a file on the same mount. Servicing the read has to fault that page in,
-// which issues a second request while the first is still in flight; a
-// filesystem that serializes the two deadlocks, so every read runs under a
-// watchdog.
-func faultIn(t *testing.T, f *Fixture) {
-	src, backing := faultInFiles(t, f.Image.Want)
-	srcPath, backingPath := f.Path(string(src.Path)), f.Path(string(backing.Path))
+func faultIn(t *testing.T, m *mounted) {
+	src, backing := faultInFiles(t, m.Image.Want)
+	srcPath, backingPath := m.Path(string(src.Path)), m.Path(string(backing.Path))
 	want, err := os.ReadFile(srcPath)
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -76,8 +70,6 @@ func faultIn(t *testing.T, f *Fixture) {
 
 	t.Run("SameFile", func(t *testing.T) {
 		t.Parallel()
-		// The tightest case: the fault lands on a page of the very file the
-		// read is serving.
 		fd := openRO(t, srcPath)
 		buf := mapFile(t, srcPath, len(want), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
 
@@ -114,14 +106,13 @@ func faultIn(t *testing.T, f *Fixture) {
 		})
 	})
 
-	if !f.directIO(srcPath) {
+	if !m.directIO(srcPath) {
 		return
 	}
 
 	t.Run("Direct", func(t *testing.T) {
 		t.Parallel()
 		fd := openDirect(t, srcPath)
-		// O_DIRECT needs block-aligned lengths; the mapping is page aligned.
 		buf := mapFile(t, backingPath, len(want), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
 		length := len(want) &^ 4095
 
@@ -132,10 +123,6 @@ func faultIn(t *testing.T, f *Fixture) {
 	})
 }
 
-// faultInFiles picks the file to read, preferably the largest block-aligned
-// one up to faultInLimit so O_DIRECT can read all of it, and the smallest
-// other file at least as large to map the destination buffer from; backing
-// is src itself when there is no such file.
 func faultInFiles(t *testing.T, want []fstest.Entry) (src, backing fstest.Entry) {
 	t.Helper()
 	better := func(e, than fstest.Entry) bool {
@@ -168,9 +155,6 @@ func faultInFiles(t *testing.T, want []fstest.Entry) (src, backing fstest.Entry)
 	return src, backing
 }
 
-// within runs fn and fails t unless it returns within d. A deadlock in a
-// read path shows up as a hang, which would otherwise stall CI until the
-// global timeout. fn must not call t: it runs on another goroutine.
 func within(t *testing.T, d time.Duration, what string, fn func() error) {
 	t.Helper()
 	done := make(chan error, 1)

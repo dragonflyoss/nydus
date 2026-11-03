@@ -6,7 +6,7 @@ live with their crates; `util/` holds helpers only and has no tests of its
 own: the suites that use a helper are what exercise it.
 
 ```sh
-make e2e PKG=./contract/...            # one suite
+make e2e PKG=./conformance/...         # one suite
 make e2e PKG='./build/... ./export/...' E2E_RUN=TestMerge
 CI=1 make e2e-ga                       # every GA suite but dragonfly and compatibility
 make e2e-experimental                  # nbd, fanotify, ublk, uffd
@@ -20,7 +20,7 @@ and run through `sudo -E`.
 
 | Package                     | What it proves                                                                                                                          |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `contract/`                 | The filesystem contract: the cases, and their run through FUSE and fileio.                                                     |
+| `conformance/`              | Filesystem conformance, run against every adapter: `TestFUSE`, `TestFileio`, `TestNBD`, `TestUblk`, `TestFanotify`.              |
 | `api/`                      | Per-daemon metrics/trace isolation, HTTP method/path errors, disconnected clients, shutdown and stale Unix socket replacement.         |
 | `continuity/`               | FUSE hot upgrade with open handles, pre-ready rollback, live-owner exclusion, no-API operation and exact FD transfer.                  |
 | `build/`                    | `nydus build/merge/check/optimize` across every GA layout: output contract, fsck.erofs, reproducibility.                                |
@@ -34,8 +34,8 @@ and run through `sudo -E`.
 | `soak/`                     | Long parallel reads and mount cycles leak no fd, thread, mount or process.                                                              |
 | `dragonfly/`                | Reads through Dragonfly P2P, and fallback to the origin when it fails.                                                                  |
 | `registry/`                 | Origin reads, Basic/Bearer auth, redirects, HTTP retries/proxies, TLS trust and prefetch retries. |
-| `experimental/<transport>/` | The contract plus transport specifics for nbd, fanotify and ublk; the uffd page-fault protocol.                                         |
-| `manual/`                   | Benchmarks, the huge tar corpus and the image conversion sweep (`//go:build manual`).                                                                              |
+| `experimental/<transport>/` | The nbd, fanotify and ublk adapters and their transport specifics; the uffd page-fault protocol.                                        |
+| `bench/`                    | Go benchmarks (`BenchmarkMount/<mode>`); they run only with `-bench`, as `make benchmark` does.                                                                    |
 
 ### Case boundaries and inventory
 
@@ -77,7 +77,7 @@ requests by itself; nothing is called from `ci.yml`.
 - PR: GA suites, convention checks, Rust integration tests, all four experimental
   transports, and one 150-second fuzz run per target with four Go workers.
   This is a smaller PR search budget than four independent 150-second shards,
-  not an equivalent amount of exploration. FUSE runs its complete contract in
+  not an equivalent amount of exploration. FUSE runs its complete conformance suite in
   one job; Fileio keeps semantics/lifecycle, zstd data and other-layout data separate,
   retaining every case and mount mode. Backend faults run separately; API, registry and FUSE continuity
   share the image-tools job. `make e2e-continuity` runs it locally;
@@ -115,11 +115,11 @@ requests by itself; nothing is called from `ci.yml`.
 
 | Check | Coverage |
 | --- | --- |
-| `Lint / Lint` | Formatting/Clippy; golangci-lint over both Go modules, manual suites included |
+| `Lint / Lint` | Formatting/Clippy; golangci-lint over both Go modules, `manual`-tagged files included |
 | `CI / Test`, `CI / Test Nydusify` | Workspace unit/integration tests; nydusify unit/integration tests against the real builder |
 | `E2E Test / Build` | Shared GA binaries and coverage tools |
 | `E2E Test / e2e (image-tools)` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
-| `E2E Test / e2e (fuse)`, `e2e (fileio-*)` | One complete FUSE contract; Fileio semantics and two data-layout groups |
+| `E2E Test / e2e (fuse)`, `e2e (fileio-*)` | One complete FUSE conformance run; Fileio semantics and two data-layout groups |
 | `E2E Test / e2e (storage-*)`, `e2e (soak)` | Isolated fault recovery, cache smoke and the two-minute stability soak |
 | `E2E Test With Dragonfly / Test` | Real Dragonfly services, seed-cache reads and origin fallback in one cluster |
 | `E2E Test With Experimental Transports / test (*)` | One shared experimental-feature build and four transports |
@@ -241,12 +241,18 @@ kubernetes' `test/e2e/framework/*`:
 | `registry`    | In-process OCI registry behind a fault-injecting proxy.                   |
 | `proc`        | fd/thread/RSS/mount sampling for leak checks.                             |
 
-`util/` holds helpers only, never test bodies. A suite shared by several
-runners is a package of its own beside them, as kubernetes keeps
-`test/e2e/storage/testsuites` beside its drivers: `contract/` holds the
-filesystem contract cases and runs them through FUSE and fileio, and the
-experimental transports run them too; `experimental/transport` holds the
-checks every experimental transport shares.
+`util/` holds helpers only, never test bodies. `conformance/` is an ordinary
+test package, as `net/conn_test.go` runs the same checks over every network:
+one `TestXxx` per adapter runs the same cases, so the experimental transports
+keep only their adapters and transport-specific tests;
+`experimental/transport` holds the checks the nbd and fanotify suites share.
+
+Test kinds follow Go's conventions rather than directories: fuzz targets
+(`FuzzXxx`) sit beside the tests of what they fuzz (`build/fuzz_test.go`,
+`tar/fuzz_test.go`), benchmarks (`BenchmarkXxx`) run only under `-bench`, and
+opt-in heavy tests carry `//go:build manual` in the package they test:
+`tar/huge_test.go` (`make e2e-hugetar`) and `nydusify/public_images_test.go`
+(`make e2e-convert`).
 
 ## Conventions
 
@@ -301,7 +307,7 @@ checks every experimental transport shares.
 | `NYDUS_E2E_CONVERT_REGISTRY` | Target registry of the conversion sweep (default `localhost:5000`). |
 | `NYDUS_E2E_CONVERT_PLAIN_HTTP` | Push to the target registry over plain HTTP (default for local registries). |
 | `NYDUS_E2E_CONVERT_PLATFORM` | Platform to convert (default `linux/amd64`, `all` for every one). |
-| `NYDUS_E2E_CONVERT_LIST` | Image list file (default `manual/convert/testdata/images.txt`). |
+| `NYDUS_E2E_CONVERT_LIST` | Image list file (default `nydusify/testdata/images.txt`). |
 | `NYDUS_E2E_CONVERT_CONCURRENCY` | Images converted at once (default 5). |
 | `NYDUS_E2E_CONVERT_RETRIES` | Retries of a transient registry failure (default 5). |
 | `NYDUS_E2E_CONVERT_RETRY_INTERVAL` | Base delay between retries (default 30s). |
@@ -420,7 +426,7 @@ again inside the ublk E2E job.
 
 ## Benchmarks
 
-`manual/bench` is a standard Go benchmark: `BenchmarkMount/<mode>` mounts
+`bench` is a standard Go benchmark: `BenchmarkMount/<mode>` mounts
 the corpus three times per iteration (the cold reads, the cold xattr walk
 and the big-directory lookups each start on a fresh mount) and reports
 every measurement with `b.ReportMetric` (`mount-sec`, `cold-walk-sec`,

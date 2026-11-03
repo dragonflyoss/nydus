@@ -1,6 +1,6 @@
 //go:build manual
 
-package convert
+package nydusify
 
 import (
 	"bufio"
@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestConvert(t *testing.T) {
+func TestConvertPublicImages(t *testing.T) {
 	t.Parallel()
 	env.RequireRoot(t)
 	cfg := loadConfig(t)

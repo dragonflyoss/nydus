@@ -16,7 +16,7 @@ func TestBasicAuth(t *testing.T) {
 	t.Parallel()
 	image, proxy, addr := newRegistrySuite(t)
 	credential := base64.StdEncoding.EncodeToString([]byte("nydus:secret"))
-	proxy.requireBasic(credential)
+	proxy.enableBasicAuth(credential)
 
 	tests := []struct {
 		name   string
@@ -63,7 +63,7 @@ func TestBasicAuth(t *testing.T) {
 func TestBearerAuth(t *testing.T) {
 	t.Parallel()
 	image, proxy, addr := newRegistrySuite(t)
-	proxy.requireBearer("e2e-token")
+	proxy.enableBearerAuth("e2e-token")
 	m := image.mount(t, image.config(addr))
 	if !assert.NoError(t, m.read(t, image, "data/size/02097153")) {
 		t.FailNow()
@@ -84,7 +84,7 @@ func TestBearerAuth(t *testing.T) {
 func TestBearerRefresh(t *testing.T) {
 	t.Parallel()
 	image, proxy, addr := newRegistrySuite(t)
-	proxy.requireBearer("expiring-token")
+	proxy.enableBearerAuth("expiring-token")
 
 	proxy.tokenResponse(30, 0, nil, 0)
 	m := image.mount(t, image.config(addr))
@@ -114,7 +114,7 @@ func TestBearerRefresh(t *testing.T) {
 func TestBearerPrefetchRefresh(t *testing.T) {
 	t.Parallel()
 	image, proxy, addr := newRegistrySuite(t)
-	proxy.requireBearer("prefetch-expiring-token")
+	proxy.enableBearerAuth("prefetch-expiring-token")
 	proxy.tokenResponse(30, 0, nil, 0)
 
 	proxy.faults.Set(registry.Fault{Times: 1, Delay: 12 * time.Second, Match: func(r *http.Request) bool {
@@ -169,7 +169,7 @@ func TestTokenServiceError(t *testing.T) {
 			t.Run(tc.name+"/"+scope, func(t *testing.T) {
 				t.Parallel()
 				image, proxy, addr := newRegistrySuite(t)
-				proxy.requireBearer("recovered-token")
+				proxy.enableBearerAuth("recovered-token")
 				proxy.tokenResponse(300, tc.status, tc.body, tc.delay)
 				config := image.config(addr)
 				config.HTTP.MaxRetries = mount.Ptr(0)

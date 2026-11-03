@@ -28,7 +28,7 @@ func TestNativeMount(t *testing.T) {
 			t.Parallel()
 			requireKernelFor(t, layout)
 			img := fixture.Get(t, layout.Name)
-			mnt := mountErofs(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, img.BlobDir, ""))
+			mnt := mountEROFS(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, img.BlobDir, ""))
 			fstest.VerifyMount(t, mnt, img.Want, img.Compare())
 		})
 	}
@@ -43,7 +43,7 @@ func TestNativeMount(t *testing.T) {
 			t.Parallel()
 			requireKernelFor(t, layout)
 			img := fixture.Merged(t, layout)
-			mnt := mountErofs(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, img.BlobDir, ""))
+			mnt := mountEROFS(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, img.BlobDir, ""))
 			fstest.VerifyMount(t, mnt, img.Want, img.Compare())
 		})
 	}
@@ -59,7 +59,7 @@ func TestNativeMount(t *testing.T) {
 			t.FailNow()
 		}
 
-		mnt := mountErofs(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, dir, ""))
+		mnt := mountEROFS(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, dir, ""))
 		fstest.VerifyMount(t, mnt, img.Want, img.Compare())
 	})
 }
@@ -88,7 +88,7 @@ func TestFUSEVsKernel(t *testing.T) {
 				devices = deviceFiles(t, img.Bootstrap, fuse.CacheDir, mount.CacheDataSuffix)
 			}
 
-			kernel := mountErofs(t, img.Bootstrap, devices)
+			kernel := mountEROFS(t, img.Bootstrap, devices)
 
 			fstest.CompareTree(t, fstest.ScanTree(t, kernel), fstest.ScanTree(t, fuse.Root), fstest.CompareOptions{Nlink: true})
 			fstest.VerifyMount(t, kernel, img.Want, img.Compare())
@@ -111,7 +111,7 @@ func requireKernelFor(t testing.TB, layout fixture.Layout) {
 	}
 }
 
-func mountErofs(t testing.TB, bootstrap string, devices []string) string {
+func mountEROFS(t testing.TB, bootstrap string, devices []string) string {
 	t.Helper()
 	env.RequireRoot(t)
 	env.RequireFilesystem(t, "erofs")

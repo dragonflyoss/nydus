@@ -200,7 +200,7 @@ func rangeIgnored(t *testing.T, a mount.Adapter, img image) {
 	before := m.API.Metrics(t)
 
 	reg.Registry.Faults.Set(registry.Fault{IgnoreRange: true})
-	var results []result
+	var results []readResult
 	failed := 0
 
 	for _, rel := range rangeIgnoredFiles {

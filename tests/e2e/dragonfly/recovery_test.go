@@ -67,7 +67,7 @@ func TestOutageRecovery(t *testing.T) {
 
 		failed.Daemon.WaitForLog(t, policyTimeout, "failed to prefetch priority blob")
 
-		failed.assertNoDirectOrigin(t)
+		failed.expectNoDirectOrigin(t)
 
 		assert.Zero(t, prefetchOrigin.Faults.BlobGets())
 
@@ -252,7 +252,7 @@ func TestPrefetchRetry(t *testing.T) {
 			}
 
 			assert.Zero(t, before)
-			m.assertNoDirectOrigin(t)
+			m.expectNoDirectOrigin(t)
 		})
 	}
 }

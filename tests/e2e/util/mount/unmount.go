@@ -50,8 +50,8 @@ func Unmount(mnt string) {
 	_ = unix.Unmount(mnt, unix.MNT_DETACH)
 }
 
-// MountsUnder lists the mountpoints at or below dir.
-func MountsUnder(dir string) ([]string, error) {
+// PointsUnder lists the mountpoints at or below dir.
+func PointsUnder(dir string) ([]string, error) {
 	mounts, err := mountinfo.GetMounts(mountinfo.PrefixFilter(dir))
 	if err != nil {
 		return nil, err
@@ -73,7 +73,7 @@ func MountsUnder(dir string) ([]string, error) {
 // fails stat and only shows up in mountinfo.
 func ExpectNoMounts(t testing.TB, dir string) {
 	t.Helper()
-	left, err := MountsUnder(dir)
+	left, err := PointsUnder(dir)
 	if err != nil {
 		t.Fatalf("list mounts: %v", err)
 	}

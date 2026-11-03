@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/contract"
 	"github.com/dragonflyoss/nydus/tests/e2e/experimental/transport"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
@@ -29,11 +28,6 @@ var (
 	fanotifyInit = regexp.MustCompile(`fanotify_init\([^)]*\)\s*=\s*(\d+)`)
 	cachePwrite  = regexp.MustCompile(`pwrite(?:64|v2?)\(\d+<[^>\n]*\.blob\.data>`)
 )
-
-func TestContract(t *testing.T) {
-	t.Parallel()
-	contract.Run(t, Fanotify{})
-}
 
 func TestConcurrency(t *testing.T) {
 	t.Parallel()

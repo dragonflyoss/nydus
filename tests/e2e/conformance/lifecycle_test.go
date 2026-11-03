@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func runLifecycle(t *testing.T, a mount.Adapter) {
+func testLifecycle(t *testing.T, a mount.Adapter) {
 	img := semanticImage(t)
 	ownsMount := mount.TraitsOf(a).OwnsMount
 
@@ -47,8 +47,6 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 		mount.ReadAll(t, m.Path("files"))
 
 		if !ownsMount {
-			// The daemon serves the device its caller mounted; stopping it
-			// under a live mount is not a supported sequence.
 			mount.Unmount(m.Root)
 		}
 
@@ -60,18 +58,15 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 		if !assert.Zero(t, m.Daemon.ExitCode()) {
 			t.FailNow()
 		}
-		// Nothing the daemon mounted (fileio also mounts its export) is left.
+
 		mount.ExpectNoMounts(t, m.Dir)
 	})
 
 	t.Run("UnmountWithOpenFile", func(t *testing.T) {
 		t.Parallel()
-		m := mount.Mount(t, a, img, mount.Options{})
-		f := &Fixture{Mounted: m, Adapter: a}
+		m := &mounted{Mounted: mount.Mount(t, a, img, mount.Options{}), adapter: a}
 		rel := "files/large_256k"
-		want := f.wantBytes(t, rel)
-		// Not openRO: this test closes the descriptor itself, and a second
-		// close from a cleanup could hit a number a parallel test reused.
+		want := m.wantBytes(t, rel)
 		fd, err := unix.Open(m.Path(rel), unix.O_RDONLY|unix.O_CLOEXEC, 0)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -99,9 +94,6 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 		if !assert.True(t, mount.IsMountpoint(m.Root)) {
 			t.FailNow()
 		}
-
-		// A lazy unmount detaches the mount at once; the open file keeps
-		// reading, from the daemon rather than the page cache.
 		if !assert.NoError(t, unix.Unmount(m.Root, unix.MNT_DETACH)) {
 			t.FailNow()
 		}
@@ -127,8 +119,7 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 		if !ownsMount {
 			assert.True(t, m.Daemon.Alive())
 		}
-		// Detaching the mount does not request shutdown of its backing
-		// service. Explicitly stop it after releasing the last reference.
+
 		m.Daemon.Signal(unix.SIGTERM)
 
 		if !assert.True(t, m.Daemon.WaitExit(exitTimeout)) {
@@ -140,10 +131,9 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 
 	t.Run("LazyUnmountWithClosedFDMmap", func(t *testing.T) {
 		t.Parallel()
-		m := mount.Mount(t, a, img, mount.Options{})
-		f := &Fixture{Mounted: m, Adapter: a}
+		m := &mounted{Mounted: mount.Mount(t, a, img, mount.Options{}), adapter: a}
 		rel := "files/large_256k"
-		want := f.wantBytes(t, rel)
+		want := m.wantBytes(t, rel)
 		fd, err := unix.Open(m.Path(rel), unix.O_RDONLY|unix.O_CLOEXEC, 0)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -156,8 +146,7 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 				assert.NoError(t, unix.Close(fd))
 			}
 		})
-		// Do not fault any pages before detaching: the first read must be
-		// served while only the mapping, not a descriptor, pins the mount.
+
 		data, err := unix.Mmap(fd, 0, len(want), unix.PROT_READ, unix.MAP_PRIVATE)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -192,7 +181,7 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 		if !assert.False(t, mount.IsMountpoint(m.Root)) {
 			t.FailNow()
 		}
-		// Allow asynchronous shutdown detection to run before faulting.
+
 		select {
 		case <-m.Daemon.Exited():
 			t.Fatal("the daemon exited while a mapping still referenced the detached mount")
@@ -220,7 +209,6 @@ func runLifecycle(t *testing.T, a mount.Adapter) {
 	})
 }
 
-// inodeMap maps every path under root to its inode number.
 func inodeMap(t *testing.T, root string) map[string]uint64 {
 	t.Helper()
 	out := map[string]uint64{}

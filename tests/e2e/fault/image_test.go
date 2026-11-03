@@ -74,14 +74,14 @@ func (img image) lookup(t testing.TB, rel string) dataFile {
 	return dataFile{}
 }
 
-type result struct {
+type readResult struct {
 	file    dataFile
 	err     error
 	wrong   bool
 	elapsed time.Duration
 }
 
-func (r result) String() string {
+func (r readResult) String() string {
 	switch {
 	case r.wrong:
 		return fmt.Sprintf("%s: WRONG BYTES after %s", r.file.rel, r.elapsed)
@@ -94,24 +94,24 @@ func (r result) String() string {
 	}
 }
 
-func (f dataFile) readOnce(t testing.TB, root string) result {
+func (f dataFile) readOnce(t testing.TB, root string) readResult {
 	t.Helper()
 	return f.readWithin(t, root, readTimeout)
 }
 
-func (f dataFile) readWithin(t testing.TB, root string, timeout time.Duration) result {
+func (f dataFile) readWithin(t testing.TB, root string, timeout time.Duration) readResult {
 	t.Helper()
 	return f.judge(t, timeout, func() (string, error) { return fstest.HashFileCold(filepath.Join(root, f.rel)) })
 }
 
-func (f dataFile) judge(t testing.TB, timeout time.Duration, read func() (string, error)) result {
+func (f dataFile) judge(t testing.TB, timeout time.Duration, read func() (string, error)) readResult {
 	t.Helper()
-	ch := make(chan result, 1)
+	ch := make(chan readResult, 1)
 	start := time.Now()
 
 	go func() {
 		sum, err := read()
-		ch <- result{file: f, err: err, wrong: err == nil && sum != f.sha256, elapsed: time.Since(start)}
+		ch <- readResult{file: f, err: err, wrong: err == nil && sum != f.sha256, elapsed: time.Since(start)}
 	}()
 
 	select {
@@ -120,22 +120,22 @@ func (f dataFile) judge(t testing.TB, timeout time.Duration, read func() (string
 
 	case <-time.After(timeout):
 		t.Fatalf("read of %s did not return within %s: the daemon hangs", f.rel, timeout)
-		return result{}
+		return readResult{}
 	}
 }
 
-func (r result) expectCorrect(t testing.TB) {
+func (r readResult) expectCorrect(t testing.TB) {
 	t.Helper()
 	assert.NoError(t, r.err)
 	assert.False(t, r.wrong)
 }
 
-func (r result) expectNotWrong(t testing.TB) {
+func (r readResult) expectNotWrong(t testing.TB) {
 	t.Helper()
 	assert.False(t, r.wrong)
 }
 
-func (r result) expectFailed(t testing.TB) {
+func (r readResult) expectFailed(t testing.TB) {
 	t.Helper()
 	assert.Error(t, r.err)
 }
@@ -178,7 +178,7 @@ func (m mounted) prime(t testing.TB) {
 	}
 }
 
-func (m mounted) read(t testing.TB, rel string) result {
+func (m mounted) read(t testing.TB, rel string) readResult {
 	t.Helper()
 	return m.image().lookup(t, rel).readOnce(t, m.Root)
 }

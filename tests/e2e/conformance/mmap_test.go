@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -9,28 +9,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func runMmap(t *testing.T, f *Fixture) {
+func testMmap(t *testing.T, m *mounted) {
 	t.Run("SharedReadMatchesFile", func(t *testing.T) {
 		t.Parallel()
 		for _, rel := range []string{"files/ten_blocks", "files/sparse_hole", "files/large_256k"} {
-			want := f.wantBytes(t, rel)
-			data := mapFile(t, f.Path(rel), len(want), unix.PROT_READ, unix.MAP_SHARED)
+			want := m.wantBytes(t, rel)
+			data := mapFile(t, m.Path(rel), len(want), unix.PROT_READ, unix.MAP_SHARED)
 			assert.True(t, bytes.Equal(want, data))
 		}
 	})
 
 	t.Run("OffsetMapping", func(t *testing.T) {
 		t.Parallel()
-		// A mapping that starts mid-file faults its pages in out of order.
 		rel := "files/large_256k"
-		want := f.wantBytes(t, rel)
+		want := m.wantBytes(t, rel)
 		page := os.Getpagesize()
 		size := len(want) / page * page
 		if !assert.Greater(t, size, page) {
 			t.FailNow()
 		}
 
-		fd := openRO(t, f.Path(rel))
+		fd := openRO(t, m.Path(rel))
 		data, err := unix.Mmap(fd, int64(page), size-page, unix.PROT_READ, unix.MAP_SHARED)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -45,12 +44,11 @@ func runMmap(t *testing.T, f *Fixture) {
 
 	t.Run("TailPageIsZeroPadded", func(t *testing.T) {
 		t.Parallel()
-		// The bytes between EOF and the end of the last page read as zero.
 		rel := "files/one_over_block"
-		want := f.wantBytes(t, rel)
+		want := m.wantBytes(t, rel)
 		page := os.Getpagesize()
 		mapped := (len(want) + page - 1) / page * page
-		data := mapFile(t, f.Path(rel), mapped, unix.PROT_READ, unix.MAP_PRIVATE)
+		data := mapFile(t, m.Path(rel), mapped, unix.PROT_READ, unix.MAP_PRIVATE)
 		if !assert.True(t, bytes.Equal(want, data[:len(want)])) {
 			t.FailNow()
 		}
@@ -61,8 +59,8 @@ func runMmap(t *testing.T, f *Fixture) {
 	t.Run("PrivateWriteIsCopyOnWrite", func(t *testing.T) {
 		t.Parallel()
 		rel := "files/exact_block"
-		want := f.wantBytes(t, rel)
-		fd := openRO(t, f.Path(rel))
+		want := m.wantBytes(t, rel)
+		fd := openRO(t, m.Path(rel))
 		data, err := unix.Mmap(fd, 0, len(want), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -76,8 +74,7 @@ func runMmap(t *testing.T, f *Fixture) {
 			t.FailNow()
 		}
 
-		// Neither a fresh read nor a fresh mapping sees the private change.
-		after, err := os.ReadFile(f.Path(rel))
+		after, err := os.ReadFile(m.Path(rel))
 		if !assert.NoError(t, err) {
 			t.FailNow()
 		}
@@ -85,15 +82,13 @@ func runMmap(t *testing.T, f *Fixture) {
 			t.FailNow()
 		}
 
-		again := mapFile(t, f.Path(rel), len(want), unix.PROT_READ, unix.MAP_SHARED)
+		again := mapFile(t, m.Path(rel), len(want), unix.PROT_READ, unix.MAP_SHARED)
 		assert.True(t, bytes.Equal(want, again))
 	})
 
 	t.Run("SharedWriteMappingRejected", func(t *testing.T) {
 		t.Parallel()
-		// A shared writable mapping needs a writable descriptor, which the
-		// mount refuses (WriteRejection); one over a read-only descriptor is EACCES.
-		fd := openRO(t, f.Path("files/exact_block"))
+		fd := openRO(t, m.Path("files/exact_block"))
 		_, err := unix.Mmap(fd, 0, 4096, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 		assert.ErrorIs(t, err, unix.EACCES)
 	})

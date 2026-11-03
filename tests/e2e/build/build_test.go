@@ -343,7 +343,7 @@ func TestNoXattr(t *testing.T) {
 							continue
 						}
 
-						if !assert.Equal(t, tc.value, fstest.GetXattr(t, m.Path(tc.path), tc.key)) {
+						if !assert.Equal(t, tc.value, fstest.Xattr(t, m.Path(tc.path), tc.key)) {
 							t.FailNow()
 						}
 						if !assert.Contains(t, fstest.ListXattr(t, m.Path(tc.path)), tc.key) {

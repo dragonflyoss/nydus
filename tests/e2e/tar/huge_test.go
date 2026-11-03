@@ -1,6 +1,6 @@
 //go:build manual
 
-package hugetar
+package tar
 
 import (
 	"archive/tar"

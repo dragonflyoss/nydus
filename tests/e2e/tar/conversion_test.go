@@ -50,7 +50,7 @@ const (
 	typeGNUDumpDir = 'D'
 )
 
-func (layout tarLayout) checkTarConversion(t *testing.T, data []byte) tarOutcome {
+func (l tarLayout) checkTarConversion(t *testing.T, data []byte) tarOutcome {
 	t.Helper()
 	layer, goErr := gunzipLayer(data)
 
@@ -65,7 +65,7 @@ func (layout tarLayout) checkTarConversion(t *testing.T, data []byte) tarOutcome
 	}
 
 	work := t.TempDir()
-	img, packErr := fixture.PackTar(t, bytes.NewReader(data), work, layout.compressor, layout.chunkSize)
+	img, packErr := fixture.PackTar(t, bytes.NewReader(data), work, l.compressor, l.chunkSize)
 
 	if goErr != nil {
 		requireRejected(t, packErr)

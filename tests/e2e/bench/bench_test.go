@@ -1,5 +1,3 @@
-//go:build manual
-
 package bench
 
 import (

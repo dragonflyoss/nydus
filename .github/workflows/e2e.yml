@@ -45,13 +45,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: tests/e2e/go.mod
-          cache-dependency-path: |
-            nydusify/go.sum
-            tests/e2e/go.sum
-
-      - name: Download Go modules
-        run: go -C tests/e2e mod download
+          go-version-file: nydusify/go.mod
+          cache-dependency-path: nydusify/go.sum
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -87,16 +82,16 @@ jobs:
             pkgs: ./build/... ./export/... ./nydusify/... ./kernel/... ./tar/... ./api/... ./registry/... ./continuity/...
             parallel: 8
           - suite: fuse
-            pkgs: ./contract/...
+            pkgs: ./conformance/...
             run: ^TestFUSE$$
           - suite: fileio-semantics
-            pkgs: ./contract/...
+            pkgs: ./conformance/...
             run: ^TestFileio$$/^(Semantic|BackendFailure|Lifecycle)$$
           - suite: fileio-data-zstd
-            pkgs: ./contract/...
+            pkgs: ./conformance/...
             run: ^TestFileio$$/^Data$$/^zstd-4k$$
           - suite: fileio-data-other
-            pkgs: ./contract/...
+            pkgs: ./conformance/...
             run: ^TestFileio$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
           - suite: storage-recovery
             pkgs: ./fault/...
@@ -125,9 +120,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: tests/e2e/go.mod
-          cache-dependency-path: |
-            nydusify/go.sum
-            tests/e2e/go.sum
+          cache-dependency-path: tests/e2e/go.sum
 
       - name: Download binaries
         uses: actions/download-artifact@v7

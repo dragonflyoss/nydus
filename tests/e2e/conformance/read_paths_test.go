@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -9,10 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func runReadPaths(t *testing.T, f *Fixture) {
+func testReadPaths(t *testing.T, m *mounted) {
 	t.Run("ReadPastEOF", func(t *testing.T) {
 		t.Parallel()
-		fd := openRO(t, f.Path("files/tiny_2b"))
+		fd := openRO(t, m.Path("files/tiny_2b"))
 		buf := make([]byte, 16)
 
 		for _, off := range []int64{2, 1 << 20, 1 << 40} {
@@ -24,7 +24,6 @@ func runReadPaths(t *testing.T, f *Fixture) {
 			assert.Zero(t, n)
 		}
 
-		// A read straddling EOF is short, not padded.
 		n, err := unix.Pread(fd, buf, 1)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -35,7 +34,7 @@ func runReadPaths(t *testing.T, f *Fixture) {
 
 	t.Run("EmptyFile", func(t *testing.T) {
 		t.Parallel()
-		data, err := os.ReadFile(f.Path("files/empty"))
+		data, err := os.ReadFile(m.Path("files/empty"))
 		if !assert.NoError(t, err) {
 			t.FailNow()
 		}
@@ -46,22 +45,20 @@ func runReadPaths(t *testing.T, f *Fixture) {
 	t.Run("SparseHoleReadsZero", func(t *testing.T) {
 		t.Parallel()
 		for _, rel := range []string{"files/sparse_hole", "files/all_zeros", "sparse/all_hole", "sparse/islands_00"} {
-			got, err := os.ReadFile(f.Path(rel))
+			got, err := os.ReadFile(m.Path(rel))
 			if !assert.NoError(t, err) {
 				t.FailNow()
 			}
 
-			assert.True(t, bytes.Equal(f.wantBytes(t, rel), got))
+			assert.True(t, bytes.Equal(m.wantBytes(t, rel), got))
 		}
 	})
 
 	t.Run("UnalignedCrossBoundary", func(t *testing.T) {
 		t.Parallel()
-		// Straddle every 4KiB block boundary with lengths that are not powers
-		// of two, which is where chunk stitching tends to go wrong.
 		rel := "files/ten_blocks"
-		want := f.wantBytes(t, rel)
-		fd := openRO(t, f.Path(rel))
+		want := m.wantBytes(t, rel)
+		fd := openRO(t, m.Path(rel))
 
 		for _, off := range []int64{0, 1, 4095, 4096, 4097, 8191, 8192, 12287, 20479, 40959} {
 			for _, length := range []int{1, 3, 4095, 4096, 4097, 8193} {
@@ -84,8 +81,8 @@ func runReadPaths(t *testing.T, f *Fixture) {
 	t.Run("Preadv", func(t *testing.T) {
 		t.Parallel()
 		rel := "files/two_blocks"
-		want := f.wantBytes(t, rel)
-		fd := openRO(t, f.Path(rel))
+		want := m.wantBytes(t, rel)
+		fd := openRO(t, m.Path(rel))
 
 		first, second := make([]byte, 100), make([]byte, 4000)
 		n, err := unix.Preadv(fd, [][]byte{first, second}, 4090)
@@ -102,7 +99,6 @@ func runReadPaths(t *testing.T, f *Fixture) {
 			t.FailNow()
 		}
 
-		// Vectors running past EOF are filled up to it and no further.
 		third := make([]byte, 4096)
 		n, err = unix.Preadv(fd, [][]byte{first, third}, 8000)
 		if !assert.NoError(t, err) {

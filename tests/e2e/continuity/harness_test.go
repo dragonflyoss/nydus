@@ -113,7 +113,7 @@ func (h *harness) waitServing(t *testing.T, daemon *mount.Daemon, timeout time.D
 	}
 }
 
-func (h *harness) assertMountIdentity(t *testing.T, want uint64) {
+func (h *harness) expectMountIdentity(t *testing.T, want uint64) {
 	t.Helper()
 	assert.Equal(t, want, mountDev(t, h.mountpoint))
 }
@@ -414,7 +414,7 @@ func (h *harness) requireFilesystem(
 	wantDev uint64,
 ) {
 	t.Helper()
-	h.assertMountIdentity(t, wantDev)
+	h.expectMountIdentity(t, wantDev)
 	got, err := os.ReadFile(filepath.Join(h.mountpoint, stressFileRel))
 	if !assert.NoError(t, err) {
 		t.FailNow()

@@ -116,20 +116,20 @@ func free(t *testing.T, dir string) string {
 	return fmt.Sprintf("%.1fMiB", float64(st.Bavail*uint64(st.Bsize))/(1<<20))
 }
 
-func readParallel(t *testing.T, root string, files []dataFile, timeout time.Duration) []result {
+func readParallel(t *testing.T, root string, files []dataFile, timeout time.Duration) []readResult {
 	t.Helper()
-	ch := make(chan result, len(files))
+	ch := make(chan readResult, len(files))
 	start := time.Now()
 
 	for _, f := range files {
 		go func() {
 			sum, err := fstest.HashFileCold(filepath.Join(root, f.rel))
-			ch <- result{file: f, err: err, wrong: err == nil && sum != f.sha256, elapsed: time.Since(start)}
+			ch <- readResult{file: f, err: err, wrong: err == nil && sum != f.sha256, elapsed: time.Since(start)}
 		}()
 	}
 
 	deadline := time.After(timeout)
-	var out []result
+	var out []readResult
 
 	for range files {
 		select {

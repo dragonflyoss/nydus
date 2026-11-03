@@ -63,13 +63,13 @@ func (p *registryProxy) inject(status, count int) {
 	p.faults.Set(registry.Fault{Status: status, Times: count})
 }
 
-func (p *registryProxy) requireBasic(credential string) {
+func (p *registryProxy) enableBasicAuth(credential string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.basic = credential
 }
 
-func (p *registryProxy) requireBearer(token string) {
+func (p *registryProxy) enableBearerAuth(token string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.bearer = token

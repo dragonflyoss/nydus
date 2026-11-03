@@ -8,18 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/contract"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/fixture"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 	"github.com/stretchr/testify/assert"
 )
 
 const detachTimeout = 10 * time.Second
-
-func TestContract(t *testing.T) {
-	t.Parallel()
-	contract.Run(t, Ublk{})
-}
 
 func TestGracefulShutdown(t *testing.T) {
 	t.Parallel()

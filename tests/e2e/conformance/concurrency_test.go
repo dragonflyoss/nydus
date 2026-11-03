@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -13,14 +13,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func runConcurrency(t *testing.T, f *Fixture) {
+func testConcurrency(t *testing.T, m *mounted) {
 	t.Run("ParallelReadsAgree", func(t *testing.T) {
 		t.Parallel()
 		files := []string{"files/large_256k", "files/ten_blocks", "files/sparse_hole", "sparse/alternating_064"}
 		want := map[string][]byte{}
 
 		for _, rel := range files {
-			want[rel] = f.wantBytes(t, rel)
+			want[rel] = m.wantBytes(t, rel)
 		}
 
 		const workers, rounds = 16, 4
@@ -36,7 +36,7 @@ func runConcurrency(t *testing.T, f *Fixture) {
 				for round := range rounds {
 					rel := files[(i+round)%len(files)]
 
-					got, err := os.ReadFile(f.Path(rel))
+					got, err := os.ReadFile(m.Path(rel))
 					if err == nil && !bytes.Equal(want[rel], got) {
 						err = fmt.Errorf("%s: round %d read different bytes", rel, round)
 					}
@@ -69,7 +69,7 @@ func runConcurrency(t *testing.T, f *Fixture) {
 			go func() {
 				defer wg.Done()
 
-				errs[i] = filepath.WalkDir(f.Root, func(path string, _ fs.DirEntry, err error) error {
+				errs[i] = filepath.WalkDir(m.Root, func(path string, _ fs.DirEntry, err error) error {
 					paths[i] = append(paths[i], path)
 					return err
 				})
@@ -90,7 +90,7 @@ func runConcurrency(t *testing.T, f *Fixture) {
 	t.Run("ReadDoesNotChangeTimes", func(t *testing.T) {
 		t.Parallel()
 		for _, rel := range []string{"files/small_100b", "dirs/many_entries"} {
-			path := f.Path(rel)
+			path := m.Path(rel)
 			var before, after unix.Stat_t
 			if !assert.NoError(t, unix.Stat(path, &before)) {
 				t.FailNow()
@@ -125,7 +125,7 @@ func runConcurrency(t *testing.T, f *Fixture) {
 	t.Run("StatxReportsNoBirthTime", func(t *testing.T) {
 		t.Parallel()
 		var stx unix.Statx_t
-		if !assert.NoError(t, unix.Statx(unix.AT_FDCWD, f.Path("files/small_100b"), 0, unix.STATX_ALL, &stx)) {
+		if !assert.NoError(t, unix.Statx(unix.AT_FDCWD, m.Path("files/small_100b"), 0, unix.STATX_ALL, &stx)) {
 			t.FailNow()
 		}
 		if !assert.Zero(t, stx.Mask&unix.STATX_BTIME) {
@@ -145,7 +145,7 @@ func runConcurrency(t *testing.T, f *Fixture) {
 		t.Parallel()
 		rel := "symlinks/link_to_file"
 		var stx unix.Statx_t
-		if !assert.NoError(t, unix.Statx(unix.AT_FDCWD, f.Path(rel), unix.AT_SYMLINK_NOFOLLOW, unix.STATX_ALL, &stx)) {
+		if !assert.NoError(t, unix.Statx(unix.AT_FDCWD, m.Path(rel), unix.AT_SYMLINK_NOFOLLOW, unix.STATX_ALL, &stx)) {
 			t.FailNow()
 		}
 		if !assert.EqualValues(t, unix.S_IFLNK, stx.Mode&unix.S_IFMT) {
@@ -159,12 +159,12 @@ func runConcurrency(t *testing.T, f *Fixture) {
 		t.Parallel()
 		for _, rel := range []string{"files/large_256k", "hardlinks/link2", "special/chardev", "dirs"} {
 			var first, again unix.Stat_t
-			if !assert.NoError(t, unix.Lstat(f.Path(rel), &first)) {
+			if !assert.NoError(t, unix.Lstat(m.Path(rel), &first)) {
 				t.FailNow()
 			}
 
 			for range 3 {
-				if !assert.NoError(t, unix.Lstat(f.Path(rel), &again)) {
+				if !assert.NoError(t, unix.Lstat(m.Path(rel), &again)) {
 					t.FailNow()
 				}
 

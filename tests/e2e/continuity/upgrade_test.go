@@ -95,7 +95,7 @@ func TestHotUpgrade(t *testing.T) {
 
 	successor := h.spawn(t, "new")
 	h.waitServing(t, successor, 30*time.Second)
-	h.assertMountIdentity(t, devOld)
+	h.expectMountIdentity(t, devOld)
 
 	if !assert.True(t, successor.Alive()) {
 		t.FailNow()
@@ -191,7 +191,7 @@ func TestPreReadyRollback(t *testing.T) {
 	}
 
 	h.waitServing(t, old, 10*time.Second)
-	h.assertMountIdentity(t, devOld)
+	h.expectMountIdentity(t, devOld)
 
 	resumed := stress.count()
 	if !assert.Eventually(t, func() bool { return stress.count() > resumed }, maxUpgradeStall, 100*time.Millisecond) {
@@ -392,29 +392,29 @@ func runPreReadyHelper(t *testing.T) {
 	if !assert.Equal(t, fmt.Sprintf("%x", imageDigest), state.ImageDigest) {
 		t.FailNow()
 	}
-	if !assert.Equal(t, uint32(7), state.FuseSessionState.ProtoMajor) {
+	if !assert.Equal(t, uint32(7), state.FUSESessionState.ProtoMajor) {
 		t.FailNow()
 	}
 
-	assert.NotZero(t, state.FuseSessionState.ProtoMinor)
+	assert.NotZero(t, state.FUSESessionState.ProtoMinor)
 	fds, err := conn.recvFDs(1)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
 
 	defer closeFDs(fds)
-	var receivedFuse, fuseDevice unix.Stat_t
-	if !assert.NoError(t, unix.Fstat(fds[0], &receivedFuse)) {
+	var receivedFUSE, fuseDevice unix.Stat_t
+	if !assert.NoError(t, unix.Fstat(fds[0], &receivedFUSE)) {
 		t.FailNow()
 	}
 	if !assert.NoError(t, unix.Stat("/dev/fuse", &fuseDevice)) {
 		t.FailNow()
 	}
-	if !assert.Equal(t, uint32(unix.S_IFCHR), receivedFuse.Mode&unix.S_IFMT) {
+	if !assert.Equal(t, uint32(unix.S_IFCHR), receivedFUSE.Mode&unix.S_IFMT) {
 		t.FailNow()
 	}
 
-	assert.Equal(t, fuseDevice.Rdev, receivedFuse.Rdev)
+	assert.Equal(t, fuseDevice.Rdev, receivedFUSE.Rdev)
 
 	_, err = fmt.Fprintln(os.Stdout, "TRANSFERRED")
 	assert.NoError(t, err)

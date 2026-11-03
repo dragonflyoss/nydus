@@ -33,7 +33,7 @@ func (r ref) parse(t testing.TB) name.Reference {
 	return parsed
 }
 
-func (r ref) assertAbsent(t testing.TB) {
+func (r ref) expectAbsent(t testing.TB) {
 	t.Helper()
 	_, err := remote.Head(r.parse(t))
 

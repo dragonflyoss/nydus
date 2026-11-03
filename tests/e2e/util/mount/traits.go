@@ -1,7 +1,7 @@
 package mount
 
 // Traits describe how an adapter's daemon relates to what it serves, so
-// contract cases can hold each adapter to what it promises.
+// conformance cases can hold each adapter to what it promises.
 type Traits struct {
 	// API reports whether the daemon serves --apiserver metrics.
 	API bool

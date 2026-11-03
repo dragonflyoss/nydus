@@ -39,13 +39,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: tests/e2e/go.mod
-          cache-dependency-path: |
-            nydusify/go.sum
-            tests/e2e/go.sum
-
-      - name: Download Go modules
-        run: go -C tests/e2e mod download
+          go-version-file: nydusify/go.mod
+          cache-dependency-path: nydusify/go.sum
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -95,9 +90,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: tests/e2e/go.mod
-          cache-dependency-path: |
-            nydusify/go.sum
-            tests/e2e/go.sum
+          cache-dependency-path: tests/e2e/go.sum
 
       - name: Download binaries
         uses: actions/download-artifact@v7
@@ -119,6 +112,10 @@ jobs:
 
       - name: Run E2E test
         run: make e2e-run PKG=./experimental/${{ matrix.transport }}/... E2E_TIMEOUT=4m E2E_PARALLEL=${{ matrix.transport == 'ublk' && 2 || 8 }}
+
+      - name: Run conformance test
+        if: ${{ matrix.transport != 'uffd' }}
+        run: make e2e-run PKG=./conformance/... E2E_RUN='(?i)^Test${{ matrix.transport }}$$' E2E_TIMEOUT=4m E2E_PARALLEL=${{ matrix.transport == 'ublk' && 2 || 8 }}
 
       - name: Run UFFD stability test
         if: ${{ matrix.transport == 'uffd' && github.event_name == 'schedule' }}

@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -16,20 +16,16 @@ import (
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 )
 
-func runBackendFailure(t *testing.T, a mount.Adapter) {
+func testBackendFailure(t *testing.T, a mount.Adapter) {
 	img := fixture.Copy(t, semanticImage(t))
 
-	m := mount.Mount(t, a, img, mount.Options{
-		Mode: mount.Cold,
-		// Fetch only the missed chunk group, so reading one file does not
-		// pull its neighbours into the cache.
+	m := &mounted{Mounted: mount.Mount(t, a, img, mount.Options{
+		Mode:   mount.Cold,
 		Config: func(c *mount.Config) { c.Storage.FetchSize = mount.Ptr(int64(0)) },
-	})
-
-	f := &Fixture{Mounted: m, Adapter: a}
+	}), adapter: a}
 
 	cached := "files/ten_blocks"
-	want := f.wantBytes(t, cached)
+	want := m.wantBytes(t, cached)
 	got, err := os.ReadFile(m.Path(cached))
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -37,10 +33,6 @@ func runBackendFailure(t *testing.T, a mount.Adapter) {
 	if !assert.True(t, bytes.Equal(want, got)) {
 		t.FailNow()
 	}
-
-	// The local backend keeps the blob open once it has read from it, so
-	// removing the file would change nothing; truncating it makes every
-	// further backend read come up short.
 	if !assert.NotEmpty(t, img.Blobs) {
 		t.FailNow()
 	}
@@ -96,8 +88,6 @@ func runBackendFailure(t *testing.T, a mount.Adapter) {
 
 	assert.Positive(t, failed)
 
-	// What was cached before the failure is still served, from the cache
-	// rather than the page cache.
 	fd := openRO(t, m.Path(cached))
 	if !assert.NoError(t, unix.Fadvise(fd, 0, 0, unix.FADV_DONTNEED)) {
 		t.FailNow()
@@ -111,7 +101,6 @@ func runBackendFailure(t *testing.T, a mount.Adapter) {
 
 	assert.True(t, bytes.Equal(want, buf[:n]))
 
-	// A failed read is not cached as success: retrying fails again.
 	for _, r := range results {
 		if r.err == nil {
 			continue
@@ -128,6 +117,6 @@ func runBackendFailure(t *testing.T, a mount.Adapter) {
 	if !assert.True(t, mount.IsMountpoint(m.Root)) {
 		t.FailNow()
 	}
-	// Metadata does not depend on the blobs.
+
 	assert.NotEmpty(t, fstest.SortedDirents(t, m.Path("dirs/many_entries")))
 }

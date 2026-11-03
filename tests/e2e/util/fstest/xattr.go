@@ -94,8 +94,8 @@ func ListXattr(t testing.TB, path string) []string {
 	return names
 }
 
-// GetXattr reads an xattr of path itself, not of a symlink target.
-func GetXattr(t testing.TB, path, name string) []byte {
+// Xattr reads an xattr of path itself, not of a symlink target.
+func Xattr(t testing.TB, path, name string) []byte {
 	t.Helper()
 	size, err := unix.Lgetxattr(path, name, nil)
 	if !assert.NoError(t, err) {

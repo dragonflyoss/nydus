@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -13,10 +13,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func runSparse(t *testing.T, f *Fixture) {
+func testSparse(t *testing.T, m *mounted) {
 	var files, empty, huge []fstest.Entry
 
-	for _, e := range f.Image.Want {
+	for _, e := range m.Image.Want {
 		switch {
 		case e.Type != fstest.TypeReg:
 
@@ -39,27 +39,25 @@ func runSparse(t *testing.T, f *Fixture) {
 	t.Run("MapIsWellFormed", func(t *testing.T) {
 		t.Parallel()
 		for _, e := range files {
-			withFile(t, f.Path(string(e.Path)), func(fd int) { walkMap(t, fd, e) })
+			withFile(t, m.Path(string(e.Path)), func(fd int) { walkMap(t, fd, e) })
 		}
 	})
 
 	t.Run("HolesReadZero", func(t *testing.T) {
 		t.Parallel()
 		for _, e := range files {
-			withFile(t, f.Path(string(e.Path)), func(fd int) { readHoles(t, fd, e) })
+			withFile(t, m.Path(string(e.Path)), func(fd int) { readHoles(t, fd, e) })
 		}
 	})
 
 	t.Run("DataIsNeverAHole", func(t *testing.T) {
 		t.Parallel()
-		// The recorded data extents of large sparse files must lie in what
-		// the map reports as data, or a hole-aware copy would drop them.
 		for _, e := range files {
 			if len(e.Extents) == 0 {
 				continue
 			}
 
-			withFile(t, f.Path(string(e.Path)), func(fd int) {
+			withFile(t, m.Path(string(e.Path)), func(fd int) {
 				for _, x := range e.Extents {
 					data, err := unix.Seek(fd, x.Offset, unix.SEEK_DATA)
 					if !assert.NoError(t, err) {
@@ -83,7 +81,7 @@ func runSparse(t *testing.T, f *Fixture) {
 	t.Run("SetCurEnd", func(t *testing.T) {
 		t.Parallel()
 		e := files[len(files)/2]
-		fd := openRO(t, f.Path(string(e.Path)))
+		fd := openRO(t, m.Path(string(e.Path)))
 		pos, err := unix.Seek(fd, 0, unix.SEEK_END)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -108,7 +106,6 @@ func runSparse(t *testing.T, f *Fixture) {
 			t.FailNow()
 		}
 
-		// Seeking past EOF is allowed; reading there returns nothing.
 		pos, err = unix.Seek(fd, e.Size+4096, unix.SEEK_SET)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -129,9 +126,7 @@ func runSparse(t *testing.T, f *Fixture) {
 	t.Run("DataHoleAtEOF", func(t *testing.T) {
 		t.Parallel()
 		for _, e := range []fstest.Entry{files[0], files[len(files)-1]} {
-			fd := openRO(t, f.Path(string(e.Path)))
-			// SEEK_HOLE from the last byte always lands at EOF, and both whences
-			// fail with ENXIO at or past it.
+			fd := openRO(t, m.Path(string(e.Path)))
 			pos, err := unix.Seek(fd, e.Size-1, unix.SEEK_HOLE)
 			if !assert.NoError(t, err) {
 				t.FailNow()
@@ -152,16 +147,14 @@ func runSparse(t *testing.T, f *Fixture) {
 		}
 	})
 
-	// Only the Huge corpus carries files past 4GiB, where sizes and offsets
-	// need the extended inode, and it carries no empty file.
-	if f.Image.Corpus != fixture.Huge {
+	if m.Image.Corpus != fixture.Huge {
 		t.Run("EmptyFileHasNoData", func(t *testing.T) {
 			t.Parallel()
 			if !assert.NotEmpty(t, empty) {
 				t.FailNow()
 			}
 
-			fd := openRO(t, f.Path(string(empty[0].Path)))
+			fd := openRO(t, m.Path(string(empty[0].Path)))
 			_, err := unix.Seek(fd, 0, unix.SEEK_DATA)
 			if !assert.ErrorIs(t, err, unix.ENXIO) {
 				t.FailNow()
@@ -181,13 +174,11 @@ func runSparse(t *testing.T, f *Fixture) {
 		}
 
 		for _, e := range huge {
-			withFile(t, f.Path(string(e.Path)), func(fd int) { readBeyond4GiB(t, fd, e) })
+			withFile(t, m.Path(string(e.Path)), func(fd int) { readBeyond4GiB(t, fd, e) })
 		}
 	})
 }
 
-// walkMap alternates SEEK_DATA and SEEK_HOLE from 0: every step must
-// advance, stay within the file, and terminate.
 func walkMap(t *testing.T, fd int, e fstest.Entry) {
 	t.Helper()
 	for pos, steps := int64(0), 0; pos < e.Size; steps++ {
@@ -224,8 +215,6 @@ func walkMap(t *testing.T, fd int, e fstest.Entry) {
 	}
 }
 
-// readHoles reads (up to 1MiB of) every hole the map reports and requires
-// zeros there.
 func readHoles(t *testing.T, fd int, e fstest.Entry) {
 	t.Helper()
 	for pos := int64(0); pos < e.Size; {
@@ -259,7 +248,6 @@ func readHoles(t *testing.T, fd int, e fstest.Entry) {
 	}
 }
 
-// readBeyond4GiB checks EOF and the last data extent of a file past 4GiB.
 func readBeyond4GiB(t *testing.T, fd int, e fstest.Entry) {
 	t.Helper()
 	pos, err := unix.Seek(fd, 0, unix.SEEK_END)
@@ -312,8 +300,6 @@ func readBeyond4GiB(t *testing.T, fd int, e fstest.Entry) {
 	assert.Equal(t, x.SHA256, hex.EncodeToString(sum[:]))
 }
 
-// withFile runs fn with path open read-only and closes it again, for loops
-// over many files.
 func withFile(t *testing.T, path string, fn func(fd int)) {
 	t.Helper()
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)

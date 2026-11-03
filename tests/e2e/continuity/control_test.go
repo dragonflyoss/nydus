@@ -150,7 +150,7 @@ type controlTransferState struct {
 	Version          uint32              `json:"version"`
 	Mountpoint       string              `json:"mountpoint"`
 	ImageDigest      string              `json:"image_digest"`
-	FuseSessionState controlSessionState `json:"fuse_session_state"`
+	FUSESessionState controlSessionState `json:"fuse_session_state"`
 }
 
 func (c control) writeRaw(payload []byte) error {

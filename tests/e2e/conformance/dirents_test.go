@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"fmt"
@@ -11,10 +11,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func runDirents(t *testing.T, f *Fixture) {
+func testDirents(t *testing.T, m *mounted) {
 	t.Run("DotEntries", func(t *testing.T) {
 		t.Parallel()
-		names := direntNames(fstest.ReadDirents(t, f.Path("dirs/empty_dir"), 32<<10))
+		names := direntNames(fstest.ReadDirents(t, m.Path("dirs/empty_dir"), 32<<10))
 		sort.Strings(names)
 		assert.Equal(t, []string{".", ".."}, names)
 	})
@@ -22,13 +22,13 @@ func runDirents(t *testing.T, f *Fixture) {
 	t.Run("TypeAndInoMatchStat", func(t *testing.T) {
 		t.Parallel()
 		for _, dir := range []string{"files", "symlinks", "special", "hardlinks", "names", "inode", "dirs"} {
-			for _, e := range fstest.ReadDirents(t, f.Path(dir), 32<<10) {
+			for _, e := range fstest.ReadDirents(t, m.Path(dir), 32<<10) {
 				if e.Name == "." || e.Name == ".." {
 					continue
 				}
 
 				var st unix.Stat_t
-				if !assert.NoError(t, unix.Lstat(filepath.Join(f.Path(dir), e.Name), &st)) {
+				if !assert.NoError(t, unix.Lstat(filepath.Join(m.Path(dir), e.Name), &st)) {
 					t.FailNow()
 				}
 				if !assert.Equal(t, uint8((st.Mode&unix.S_IFMT)>>12), e.Type) {
@@ -42,11 +42,9 @@ func runDirents(t *testing.T, f *Fixture) {
 
 	t.Run("LargeDirectoryComplete", func(t *testing.T) {
 		t.Parallel()
-		// 200 entries do not fit in one 4KiB EROFS directory block, so this
-		// walks the block-splitting path in the builder.
 		got := map[string]int{}
 
-		for _, e := range fstest.ReadDirents(t, f.Path("dirs/many_entries"), 32<<10) {
+		for _, e := range fstest.ReadDirents(t, m.Path("dirs/many_entries"), 32<<10) {
 			got[e.Name]++
 		}
 
@@ -65,11 +63,9 @@ func runDirents(t *testing.T, f *Fixture) {
 
 	t.Run("SmallBufferYieldsSameStream", func(t *testing.T) {
 		t.Parallel()
-		// A buffer that only holds a few dirents forces many getdents64 calls
-		// and exposes off-by-one errors in the resume offset.
 		for _, dir := range []string{"dirs/many_entries", "wide/long"} {
-			big := fstest.ReadDirents(t, f.Path(dir), 64<<10)
-			small := fstest.ReadDirents(t, f.Path(dir), 512)
+			big := fstest.ReadDirents(t, m.Path(dir), 64<<10)
+			small := fstest.ReadDirents(t, m.Path(dir), 512)
 			assert.Equal(t, big, small)
 		}
 	})
@@ -81,7 +77,7 @@ func runDirents(t *testing.T, f *Fixture) {
 		for _, rel := range dirs {
 			seen := map[int64]string{}
 
-			for _, e := range fstest.ReadDirents(t, f.Path(rel), 4096) {
+			for _, e := range fstest.ReadDirents(t, m.Path(rel), 4096) {
 				_, dup := seen[e.Off]
 				if !assert.False(t, dup) {
 					t.FailNow()
@@ -95,7 +91,7 @@ func runDirents(t *testing.T, f *Fixture) {
 	t.Run("SeekResumesStream", func(t *testing.T) {
 		t.Parallel()
 		for _, rel := range dirs {
-			fd := openDir(t, f.Path(rel))
+			fd := openDir(t, m.Path(rel))
 
 			all := fstest.DrainDirents(t, fd, 4096)
 			for i := range all {
@@ -113,7 +109,6 @@ func runDirents(t *testing.T, f *Fixture) {
 				assert.Equal(t, all[i:], next)
 			}
 
-			// Past the last entry there is nothing left.
 			_, err := unix.Seek(fd, all[len(all)-1].Off, unix.SEEK_SET)
 			assert.NoError(t, err)
 			assert.Empty(t, fstest.DrainDirents(t, fd, 4096))
@@ -122,7 +117,7 @@ func runDirents(t *testing.T, f *Fixture) {
 
 	t.Run("SeekIsRepeatable", func(t *testing.T) {
 		t.Parallel()
-		fd := openDir(t, f.Path("dirs/many_entries"))
+		fd := openDir(t, m.Path("dirs/many_entries"))
 		all := fstest.DrainDirents(t, fd, 4096)
 		if !assert.Greater(t, len(all), 10) {
 			t.FailNow()
@@ -150,7 +145,7 @@ func runDirents(t *testing.T, f *Fixture) {
 
 	t.Run("SeparateHandlesAreIndependent", func(t *testing.T) {
 		t.Parallel()
-		path := f.Path("dirs/many_entries")
+		path := m.Path("dirs/many_entries")
 		want := fstest.ReadDirents(t, path, 1<<16)
 		a, b := openDir(t, path), openDir(t, path)
 		n, err := unix.Getdents(a, make([]byte, 4096))
@@ -159,13 +154,12 @@ func runDirents(t *testing.T, f *Fixture) {
 		}
 
 		assert.Positive(t, n)
-		// B has never been read, so it must still start from the beginning.
 		assert.Equal(t, want, fstest.DrainDirents(t, b, 1<<16))
 	})
 
 	t.Run("RewindRepeats", func(t *testing.T) {
 		t.Parallel()
-		fd := openDir(t, f.Path("dirs/many_entries"))
+		fd := openDir(t, m.Path("dirs/many_entries"))
 		want := fstest.DrainDirents(t, fd, 1024)
 		_, err := unix.Seek(fd, 0, unix.SEEK_SET)
 		if !assert.NoError(t, err) {

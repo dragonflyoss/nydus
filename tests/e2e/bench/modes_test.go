@@ -1,5 +1,3 @@
-//go:build manual
-
 package bench
 
 import (
@@ -51,7 +49,7 @@ func modes(t testing.TB, nydus string, img fixture.Image, v2 *v2Image, fileioNoW
 		return ""
 	}
 
-	const noErofs = "kernel lacks EROFS support"
+	const noEROFS = "kernel lacks EROFS support"
 	major, minor := env.KernelVersion()
 
 	fuse := adapterMode("fuse", mount.FUSE{}, img)
@@ -61,12 +59,12 @@ func modes(t testing.TB, nydus string, img fixture.Image, v2 *v2Image, fileioNoW
 
 	nbdMode := adapterMode("nbd", nbd.NBD{}, img)
 	if nbdMode.skip = subcommand("nbd"); nbdMode.skip == "" && !env.HasFilesystem("erofs") {
-		nbdMode.skip = noErofs
+		nbdMode.skip = noEROFS
 	}
 
 	ublkMode := adapterMode("ublk", ublk.Ublk{}, img)
 	if ublkMode.skip = subcommand("ublk"); ublkMode.skip == "" && !env.HasFilesystem("erofs") {
-		ublkMode.skip = noErofs
+		ublkMode.skip = noEROFS
 	}
 
 	fan := adapterMode("fanotify", fanotify.Fanotify{}, img)
@@ -80,7 +78,7 @@ func modes(t testing.TB, nydus string, img fixture.Image, v2 *v2Image, fileioNoW
 	case fileioSkip != "":
 
 	case !env.HasFilesystem("erofs"):
-		fileioSkip = noErofs
+		fileioSkip = noEROFS
 
 	case !env.KernelAtLeast(6, 12):
 		fileioSkip = fmt.Sprintf("kernel %d.%d < 6.12: CONFIG_EROFS_FS_BACKED_BY_FILE unavailable", major, minor)
@@ -112,7 +110,7 @@ func modes(t testing.TB, nydus string, img fixture.Image, v2 *v2Image, fileioNoW
 
 	if v2 != nil {
 		v2fuse.skip = ""
-		v2fuse.start = func(t testing.TB) *served { return v2.startV2Fuse(t) }
+		v2fuse.start = func(t testing.TB) *served { return v2.startV2FUSE(t) }
 	}
 
 	return []*mode{v2fuse, fuse, nbdMode, ublkMode, fan, fileio, fileioNoWarm, fileioBuffered, erofsfuse}
@@ -191,7 +189,7 @@ func buildV2Image(t testing.TB, work, src string) *v2Image {
 	return img
 }
 
-func (img *v2Image) startV2Fuse(t testing.TB) *served {
+func (img *v2Image) startV2FUSE(t testing.TB) *served {
 	t.Helper()
 	dir := env.WorkDir(t)
 	mnt := filepath.Join(dir, "mnt")

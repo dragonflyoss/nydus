@@ -493,7 +493,7 @@ func TestConvertArtifact(t *testing.T) {
 			}
 
 			assert.Equal(t, "retained bootstrap", string(data))
-			ref(target).assertAbsent(t)
+			ref(target).expectAbsent(t)
 		})
 	}
 
@@ -623,7 +623,7 @@ func TestConvertCancel(t *testing.T) {
 	}
 
 	assert.Positive(t, d.ExitCode())
-	ref(target).assertAbsent(t)
+	ref(target).expectAbsent(t)
 	reg.Faults.Clear()
 	nydusify(t, args...)
 	img := ref(target).pull(t, fstest.ScanSource(t, src))
@@ -678,7 +678,7 @@ func TestPublishRecovery(t *testing.T) {
 					t.FailNow()
 				}
 
-				ref(target).assertAbsent(t)
+				ref(target).expectAbsent(t)
 				reg.Faults.Clear()
 				nydusify(t, args...)
 			}

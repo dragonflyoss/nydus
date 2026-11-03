@@ -62,7 +62,7 @@ type Request struct {
 }
 
 // Adapter is a way of serving an image as a filesystem: FUSE, fileio and the
-// experimental transports all implement it, so the contract cases run
+// experimental transports all implement it, so the conformance cases run
 // unchanged against each.
 type Adapter interface {
 	// Name returns the adapter's short name, such as fuse.

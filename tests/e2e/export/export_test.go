@@ -36,7 +36,7 @@ func TestExport(t *testing.T) {
 	}
 }
 
-func TestExportRoundtrip(t *testing.T) {
+func TestExportRoundTrip(t *testing.T) {
 	t.Parallel()
 	for _, layout := range fixture.Layouts {
 		if !layout.Tar {

@@ -1,4 +1,4 @@
-package contract
+package conformance
 
 import (
 	"bytes"
@@ -11,20 +11,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func runZeroCopy(t *testing.T, f *Fixture) {
+func testZeroCopy(t *testing.T, m *mounted) {
 	rel := "files/ten_blocks"
 
 	t.Run("Sendfile", func(t *testing.T) {
 		t.Parallel()
-		want := f.wantBytes(t, rel)
-		src := openRO(t, f.Path(rel))
+		want := m.wantBytes(t, rel)
+		src := openRO(t, m.Path(rel))
 		dst, err := os.Create(filepath.Join(t.TempDir(), "sendfile"))
 		if !assert.NoError(t, err) {
 			t.FailNow()
 		}
 
 		defer func() { _ = dst.Close() }()
-		// From an unaligned offset, through EOF.
 		offset := int64(4095)
 		var sent int
 
@@ -57,15 +56,14 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 
 	t.Run("Splice", func(t *testing.T) {
 		t.Parallel()
-		want := f.wantBytes(t, rel)
-		src := openRO(t, f.Path(rel))
+		want := m.wantBytes(t, rel)
+		src := openRO(t, m.Path(rel))
 		var p [2]int
 		if !assert.NoError(t, unix.Pipe2(p[:], unix.O_CLOEXEC)) {
 			t.FailNow()
 		}
 
 		defer func() { _ = unix.Close(p[0]); _ = unix.Close(p[1]) }()
-		// A pipe holds 64KiB by default, more than the file.
 		offset := int64(1)
 		var got []byte
 		buf := make([]byte, 64<<10)
@@ -80,13 +78,13 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 			}
 
 			for read := 0; read < int(n); {
-				m, err := unix.Read(p[0], buf[:int(n)-read])
+				nr, err := unix.Read(p[0], buf[:int(n)-read])
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
 
-				got = append(got, buf[:m]...)
-				read += m
+				got = append(got, buf[:nr]...)
+				read += nr
 			}
 		}
 
@@ -95,8 +93,8 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 
 	t.Run("CopyFileRange", func(t *testing.T) {
 		t.Parallel()
-		want := f.wantBytes(t, rel)
-		src := openRO(t, f.Path(rel))
+		want := m.wantBytes(t, rel)
+		src := openRO(t, m.Path(rel))
 		dstPath := filepath.Join(t.TempDir(), "copy")
 		dst, err := unix.Open(dstPath, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC, 0o600)
 		if !assert.NoError(t, err) {
@@ -107,10 +105,6 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 
 		n, err := unix.CopyFileRange(src, nil, dst, nil, len(want), 0)
 		if errors.Is(err, unix.EXDEV) {
-			// The destination has to be writable, so it is always on another
-			// filesystem, and the kernel refuses most cross-filesystem copies
-			// before the source is involved; callers then fall back to
-			// read/write, which the other cases cover.
 			t.Logf("copy_file_range across filesystems: %v", err)
 			return
 		}
@@ -130,14 +124,13 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 		assert.True(t, bytes.Equal(want, got))
 	})
 
-	if f.directIO(f.Path(rel)) {
+	if m.directIO(m.Path(rel)) {
 		t.Run("DirectIO", func(t *testing.T) {
 			t.Parallel()
-			want := f.wantBytes(t, rel)
-			fd := openDirect(t, f.Path(rel))
+			want := m.wantBytes(t, rel)
+			fd := openDirect(t, m.Path(rel))
 			buf := alignedBuffer(t, len(want)+4096)
-			// Aligned blocks, then a read running into EOF, which O_DIRECT
-			// shortens like any other read.
+
 			for _, off := range []int{0, 4096, 8192 * 2} {
 				n, err := unix.Pread(fd, buf[:8192], int64(off))
 				if !assert.NoError(t, err) {
@@ -164,19 +157,17 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 
 	t.Run("OpenFlags", func(t *testing.T) {
 		t.Parallel()
-		if !assert.ErrorIs(t, openErr(f.Path("files/tiny_2b"), unix.O_RDONLY|unix.O_DIRECTORY, 0), unix.ENOTDIR) {
+		if !assert.ErrorIs(t, openErr(m.Path("files/tiny_2b"), unix.O_RDONLY|unix.O_DIRECTORY, 0), unix.ENOTDIR) {
 			t.FailNow()
 		}
-		if !assert.NoError(t, openErr(f.Path("dirs"), unix.O_RDONLY|unix.O_DIRECTORY, 0)) {
+		if !assert.NoError(t, openErr(m.Path("dirs"), unix.O_RDONLY|unix.O_DIRECTORY, 0)) {
 			t.FailNow()
 		}
-		if !assert.ErrorIs(t, openErr(f.Path("dirs"), unix.O_WRONLY, 0), unix.EISDIR) {
+		if !assert.ErrorIs(t, openErr(m.Path("dirs"), unix.O_WRONLY, 0), unix.EISDIR) {
 			t.FailNow()
 		}
 
-		// O_PATH resolves a FIFO without engaging pipe semantics (a plain
-		// open for reading would block) and still allows fstat.
-		fd, err := unix.Open(f.Path("special/fifo"), unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err := unix.Open(m.Path("special/fifo"), unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if !assert.NoError(t, err) {
 			t.FailNow()
 		}
@@ -192,8 +183,7 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 			t.FailNow()
 		}
 
-		// O_PATH|O_NOFOLLOW on a symlink yields the link itself.
-		fd, err = unix.Open(f.Path("symlinks/link_to_file"), unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err = unix.Open(m.Path("symlinks/link_to_file"), unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if !assert.NoError(t, err) {
 			t.FailNow()
 		}
@@ -209,7 +199,7 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 
 	t.Run("OpenatRelative", func(t *testing.T) {
 		t.Parallel()
-		dirFd := openDir(t, f.Path("files"))
+		dirFd := openDir(t, m.Path("files"))
 		fd, err := unix.Openat(dirFd, "tiny_2b", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 		if !assert.NoError(t, err) {
 			t.FailNow()
@@ -233,8 +223,6 @@ func runZeroCopy(t *testing.T, f *Fixture) {
 	})
 }
 
-// alignedBuffer returns a page-aligned buffer for the rest of the test,
-// which O_DIRECT requires.
 func alignedBuffer(t *testing.T, size int) []byte {
 	t.Helper()
 	buf, err := unix.Mmap(-1, 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)

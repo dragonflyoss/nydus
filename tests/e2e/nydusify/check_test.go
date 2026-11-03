@@ -159,7 +159,7 @@ exec %q "$@"
 			}
 
 			t.Cleanup(func() {
-				mounts, err := mount.MountsUnder(work)
+				mounts, err := mount.PointsUnder(work)
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
@@ -262,7 +262,7 @@ func expectCheckScratchClean(t *testing.T, work string) {
 	}
 
 	assert.Empty(t, entries)
-	mounts, err := mount.MountsUnder(work)
+	mounts, err := mount.PointsUnder(work)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}

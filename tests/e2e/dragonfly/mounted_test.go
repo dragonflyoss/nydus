@@ -54,7 +54,7 @@ func (m mounted) readData(t testing.TB) error {
 	return nil
 }
 
-func (m mounted) assertNoDirectOrigin(t *testing.T) {
+func (m mounted) expectNoDirectOrigin(t *testing.T) {
 	t.Helper()
 	metrics := m.API.Metrics(t)
 	if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `source="fallback"`)) {
@@ -86,7 +86,7 @@ func (m mounted) waitPrefetch(t *testing.T) {
 		t.FailNow()
 	}
 
-	m.assertNoDirectOrigin(t)
+	m.expectNoDirectOrigin(t)
 }
 
 func (m mounted) readMeasured(t testing.TB, status int) (delta, error) {

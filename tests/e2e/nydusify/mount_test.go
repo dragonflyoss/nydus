@@ -124,7 +124,7 @@ func TestMountLifecycle(t *testing.T) {
 				t.FailNow()
 			}
 
-			mounts, err := mount.MountsUnder(mnt)
+			mounts, err := mount.PointsUnder(mnt)
 			if !assert.NoError(t, err) {
 				t.FailNow()
 			}
@@ -215,7 +215,7 @@ func TestMountLifecycle(t *testing.T) {
 				assert.NoFileExists(t, pidPath)
 			}
 
-			mounts, err := mount.MountsUnder(foreignMount)
+			mounts, err := mount.PointsUnder(foreignMount)
 			if !assert.NoError(t, err) {
 				t.FailNow()
 			}
