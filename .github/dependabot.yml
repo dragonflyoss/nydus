@@ -8,6 +8,10 @@ updates:
   directory: "nydusify"
   schedule:
     interval: "weekly"
+- package-ecosystem: "gomod"
+  directory: "tests/e2e"
+  schedule:
+    interval: "weekly"
 - package-ecosystem: "github-actions"
   directory: "/"
   schedule:

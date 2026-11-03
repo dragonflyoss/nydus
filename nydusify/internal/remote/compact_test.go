@@ -13,6 +13,7 @@ import (
 
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,7 +61,7 @@ func TestOpenBlobDefersTransferAndSeeks(t *testing.T) {
 			return
 		}
 		requests.Add(1)
-		require.Equal(t, "bytes=4-5", r.Header.Get("Range"))
+		assert.Equal(t, "bytes=4-5", r.Header.Get("Range"))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		http.ServeContent(w, r, "blob", time.Time{}, strings.NewReader("abcdefgh"))
 	}))

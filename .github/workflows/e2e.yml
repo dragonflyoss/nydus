@@ -20,7 +20,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -48,6 +48,11 @@ jobs:
           go-version-file: nydusify/go.mod
           cache-dependency-path: nydusify/go.sum
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
       - name: Build binaries
         run: make build-coverage
 
@@ -59,7 +64,6 @@ jobs:
             target/ci/nydus
             target/ci/examples/writer-fixture
             nydusify/nydusify
-            coverage-tools/
           if-no-files-found: error
           retention-days: 3
 
@@ -67,25 +71,27 @@ jobs:
     name: e2e (${{ matrix.suite }})
     needs: [build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
+    timeout-minutes: 8
+    env:
+      COVERAGE: 1
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: image-tools
-            pkgs: ./internal/... ./build/... ./export/... ./nydusify/... ./kernel/... ./tar/... ./api/... ./registry/... ./continuity/...
+            pkgs: ./build/... ./export/... ./nydusify/... ./kernel/... ./tar/... ./api/... ./registry/... ./continuity/...
             parallel: 8
           - suite: fuse
-            pkgs: ./contract/...
+            pkgs: ./conformance/...
             run: ^TestFUSE$$
           - suite: fileio-semantics
-            pkgs: ./contract/...
-            run: ^TestFileio$$/^(Semantic|C[0-9]+_.*)$$
+            pkgs: ./conformance/...
+            run: ^TestFileio$$/^(Semantic|BackendFailure|Lifecycle)$$
           - suite: fileio-data-zstd
-            pkgs: ./contract/...
+            pkgs: ./conformance/...
             run: ^TestFileio$$/^Data$$/^zstd-4k$$
           - suite: fileio-data-other
-            pkgs: ./contract/...
+            pkgs: ./conformance/...
             run: ^TestFileio$$/^Data$$/^(erofs-lz4|tar-zstd|merged-zstd-4k|huge-zstd)$$
           - suite: storage-recovery
             pkgs: ./fault/...
@@ -98,6 +104,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -113,7 +130,8 @@ jobs:
       - name: Install dependencies
         run: |
           chmod +x target/ci/nydus target/ci/examples/writer-fixture nydusify/nydusify
-          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo apt-get update
+          sudo apt-get install -y acl attr erofs-utils fuse3
           sudo modprobe fuse
 
       - name: Run E2E test
@@ -122,7 +140,7 @@ jobs:
         run: make e2e-run PKG="${{ matrix.pkgs }}" E2E_RUN='${{ matrix.run }}' E2E_PARALLEL=${{ matrix.parallel || 4 }} E2E_TIMEOUT=4m E2E_GO_TEST_ARGS=-p=2
 
       - name: Export coverage
-        run: bash tests/scripts/e2e_coverage.sh export
+        run: make coverage-report
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

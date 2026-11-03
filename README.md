@@ -362,7 +362,7 @@ cargo build -p nydus-core
 # With the OCI registry backend enabled.
 cargo build -p nydus-core --features nydus-backend/registry
 
-# Validate crates.io packaging (cargo publish dry run).
+# Validate crates.io packaging.
 make crate
 ```
 
@@ -375,7 +375,7 @@ make test
 # End-to-end suites (root via sudo, FUSE; see tests/e2e/README.md). Each
 # directory under tests/e2e is a suite; CI=1 turns missing preconditions
 # into failures, as GitHub Actions does.
-make e2e PKG=./contract/...
+make e2e PKG=./conformance/...
 make e2e-ga                      # every GA suite but dragonfly
 make e2e-dragonfly               # needs upstream Kind/Helm setup; see tests/e2e/README.md
 make e2e-experimental            # nbd, fanotify, ublk, uffd

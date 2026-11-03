@@ -20,7 +20,9 @@ jobs:
   fuzz:
     name: Fuzz
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      COVERAGE: 1
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -52,8 +54,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          bash tests/scripts/install_ci_packages.sh fuse3
+          sudo apt-get update
+          sudo apt-get install -y fuse3
           sudo modprobe fuse
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Build binaries
         run: make build-coverage
@@ -75,7 +83,7 @@ jobs:
           exit "$status"
 
       - name: Export coverage
-        run: bash tests/scripts/e2e_coverage.sh export
+        run: make coverage-report
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

@@ -12,6 +12,7 @@ import (
 
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,8 +29,8 @@ func TestCompactBoundedRegistryRanges(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var transferred atomic.Int32
 			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, tc.upstream, r.Header.Get("Range"))
-				require.Equal(t, "identity", r.Header.Get("Accept-Encoding"))
+				assert.Equal(t, tc.upstream, r.Header.Get("Range"))
+				assert.Equal(t, "identity", r.Header.Get("Accept-Encoding"))
 				w.Header().Set("Content-Type", "application/octet-stream")
 				http.ServeContent(w, r, "blob", time.Time{}, strings.NewReader("abcdefgh"))
 				transferred.Add(1)

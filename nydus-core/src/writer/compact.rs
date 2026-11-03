@@ -586,7 +586,7 @@ fn locate_compact_chunk(
         .blkaddr
         .checked_mul(u64::from(EROFS_BLOCK_SIZE))
         .ok_or_else(|| Error::Overflow("compact chunk address overflow".to_string()))?;
-    if let Some(Segment::Blob { range }) = layout.segments(offset, 1)?.next() {
+    if let Some(Segment::Blob { range, .. }) = layout.segments(offset, 1)?.next() {
         if infos[usize::from(range.index) - 1].mapped_blkaddr != 0 {
             return Ok(ChunkLocation::Blob {
                 index: range.index,

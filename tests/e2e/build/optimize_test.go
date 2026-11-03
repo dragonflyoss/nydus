@@ -2,151 +2,292 @@ package build
 
 import (
 	"bytes"
-	"encoding/json"
+	"cmp"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"testing"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/oracle"
-	"github.com/stretchr/testify/require"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/erofs"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fixture"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
+	"github.com/stretchr/testify/assert"
 )
 
-// trace is the access pattern a daemon serves at /trace and `nydus optimize
-// --trace-file` reads.
-type trace struct {
-	Version  int `json:"version"`
-	Patterns []struct {
-		BlobIndex       int `json:"blob_index"`
-		ChunkGroupIndex int `json:"chunk_group_index"`
-	} `json:"patterns"`
-}
-
-// TestOptimize records the access trace of a workload on a merged image,
-// builds the ondemand blob from it with `nydus optimize`, and checks the
-// result: the blob holds exactly the traced chunk groups, copied verbatim in
-// access order; the rewritten bootstrap appends it to the device table and
-// passes `nydus check`; and the optimized image, prefetching the ondemand
-// blob, still reproduces the tree.
 func TestOptimize(t *testing.T) {
 	t.Parallel()
 	nydus := env.Nydus(t)
-	// optimize writes into the blob directory.
-	img := fixture.Copy(t, fixture.Get(t, fixture.MergedPrefix+"zstd-4k"))
-	parentSHA := fileSHA256(t, img.Bootstrap)
-	parentTags, err := oracle.ErofsDeviceTags(img.Bootstrap)
-	require.NoError(t, err)
 
-	// The workload: the largest files, which span several chunk groups of
-	// more than one layer, read largest first rather than in blob order.
-	var files []oracle.Entry
+	img := fixture.Copy(t, fixture.Get(t, fixture.MergedPrefix+"zstd-4k"))
+	parentSHA := fstest.FileSHA256(t, img.Bootstrap)
+	parentTags, err := erofs.DeviceTags(img.Bootstrap)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	var files []fstest.Entry
+
 	for _, e := range img.Want {
-		if e.Type == "reg" && e.Size > 0 && e.SHA256 != "" {
+		if e.Type == fstest.TypeReg && e.Size > 0 && e.SHA256 != "" {
 			files = append(files, e)
 		}
 	}
-	sort.SliceStable(files, func(i, j int) bool { return files[i].Size > files[j].Size })
+
+	slices.SortStableFunc(files, func(a, b fstest.Entry) int { return cmp.Compare(b.Size, a.Size) })
 	var workload []string
+
 	for _, e := range files[:min(5, len(files))] {
 		workload = append(workload, string(e.Path))
 	}
+
 	m := mount.Mount(t, mount.FUSE{}, img, mount.Options{})
+
 	for _, path := range workload {
 		_, err := os.ReadFile(m.Path(path))
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}
+
 	raw, err := m.API.Get("/trace")
-	require.NoError(t, err)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	tr := m.API.Trace(t)
 	m.Unmount()
-	var tr trace
-	require.NoError(t, json.Unmarshal(raw, &tr), "trace: %s", raw)
-	require.Equal(t, 1, tr.Version, "trace version")
-	require.Greater(t, len(tr.Patterns), 1, "the workload must touch several chunk groups")
+
+	if !assert.Greater(t, len(tr.Patterns), 1) {
+		t.FailNow()
+	}
 
 	dir := env.WorkDir(t)
 	traceFile := filepath.Join(dir, "trace.json")
-	require.NoError(t, os.WriteFile(traceFile, raw, 0o644))
+	if !assert.NoError(t, os.WriteFile(traceFile, raw, 0o644)) {
+		t.FailNow()
+	}
+
 	config := mount.LocalConfig(img.BlobDir, filepath.Join(dir, "cache")).Write(t, dir, "storage.json")
 	optimized := filepath.Join(dir, "optimized.bootstrap")
-	before := listFiles(t, img.BlobDir)
-	fixture.Run(t, nydus, "optimize", "--parent-bootstrap", img.Bootstrap, "--bootstrap", optimized,
+	before := fixture.ListDir(t, img.BlobDir)
+
+	env.Run(t, nydus, "optimize", "--parent-bootstrap", img.Bootstrap, "--bootstrap", optimized,
 		"--blob-dir", img.BlobDir, "--config", config, "--trace-file", traceFile)
 
-	require.Equal(t, parentSHA, fileSHA256(t, img.Bootstrap), "the parent bootstrap must be left untouched")
+	if !assert.Equal(t, parentSHA, fstest.FileSHA256(t, img.Bootstrap)) {
+		t.FailNow()
+	}
+
 	added := newFiles(t, img.BlobDir, before)
-	sort.Strings(added)
-	require.Len(t, added, 2, "optimize writes the ondemand blob and its blob meta: %v", added)
+	slices.Sort(added)
+
+	if !assert.Len(t, added, 2) {
+		t.FailNow()
+	}
+
 	ondemand := filepath.Join(img.BlobDir, added[0])
-	require.Equal(t, added[0]+".blob.meta", added[1])
-	require.Equal(t, added[0], fileSHA256(t, ondemand), "the ondemand blob is named by its SHA256")
-	tags, err := oracle.ErofsDeviceTags(optimized)
-	require.NoError(t, err)
-	require.Equal(t, append(append([]string(nil), parentTags...), added[0]), tags, "device table")
+
+	if !assert.Equal(t, added[0]+mount.CacheMetaSuffix, added[1]) {
+		t.FailNow()
+	}
+	if !assert.Equal(t, added[0], fstest.FileSHA256(t, ondemand)) {
+		t.FailNow()
+	}
+
+	tags, err := erofs.DeviceTags(optimized)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	if !assert.Equal(t, append(append([]string(nil), parentTags...), added[0]), tags) {
+		t.FailNow()
+	}
+
 	requireVerified(t, optimized, img.BlobDir, append(append([]string(nil), img.Blobs...), ondemand))
+
 	t.Run("AlreadyOptimizedTrace", func(t *testing.T) {
 		tracePath := filepath.Join(dir, "optimized-trace.json")
-		require.NoError(t, os.WriteFile(tracePath, []byte(fmt.Sprintf(
-			`{"version":1,"patterns":[{"blob_index":%d,"chunk_group_index":0}]}`, len(tags))), 0o600))
+		if !assert.NoError(t, os.WriteFile(tracePath, []byte(fmt.Sprintf(
+			`{"version":1,"patterns":[{"blob_index":%d,"chunk_group_index":0}]}`, len(tags))), 0o600)) {
+			t.FailNow()
+		}
+
 		output := filepath.Join(dir, "reoptimized.boot")
-		before := fileSHA256(t, optimized)
-		out, err := formatCommand(t, "optimize", "--parent-bootstrap", optimized, "--bootstrap", output,
+		before := fstest.FileSHA256(t, optimized)
+
+		out, err := runNydus(t, "optimize", "--parent-bootstrap", optimized, "--bootstrap", output,
 			"--blob-dir", img.BlobDir, "--config", config, "--trace-file", tracePath)
-		require.Error(t, err, "%s", out)
-		require.Contains(t, string(out), "already an ondemand blob")
-		require.NoFileExists(t, output)
-		require.Equal(t, before, fileSHA256(t, optimized))
+
+		if !assert.Error(t, err) {
+			t.FailNow()
+		}
+
+		assert.Contains(t, string(out), "already an ondemand blob")
+		assert.NoFileExists(t, output)
+		assert.Equal(t, before, fstest.FileSHA256(t, optimized))
 	})
 
-	// The ondemand blob's data region is every traced group's payload, as
-	// stored in its source blob, deduplicated and in first-access order.
 	var want bytes.Buffer
 	seen := map[[2]int]bool{}
 	offsets := map[string][]uint64{}
+
 	for _, p := range tr.Patterns {
 		key := [2]int{p.BlobIndex, p.ChunkGroupIndex}
 		if seen[key] {
 			continue
 		}
+
 		seen[key] = true
-		require.True(t, p.BlobIndex >= 1 && p.BlobIndex <= len(parentTags), "trace names blob %d", p.BlobIndex)
+
+		if !assert.GreaterOrEqual(t, p.BlobIndex, 1) || !assert.LessOrEqual(t, p.BlobIndex, len(parentTags)) {
+			t.FailNow()
+		}
+
 		tag := parentTags[p.BlobIndex-1]
 		if offsets[tag] == nil {
-			offsets[tag] = chunkGroupOffsets(t, filepath.Join(img.BlobDir, tag+".blob.meta"))
+			offsets[tag] = blobFile(filepath.Join(img.BlobDir, tag)).chunkGroupOffsets(t)
 		}
+
 		groups := offsets[tag]
-		require.Less(t, p.ChunkGroupIndex+1, len(groups), "trace names group %d of blob %d", p.ChunkGroupIndex, p.BlobIndex)
-		want.Write(readRange(t, filepath.Join(img.BlobDir, tag), groups[p.ChunkGroupIndex], groups[p.ChunkGroupIndex+1]))
+		if !assert.Less(t, p.ChunkGroupIndex+1, len(groups)) {
+			t.FailNow()
+		}
+
+		start, end := groups[p.ChunkGroupIndex], groups[p.ChunkGroupIndex+1]
+		data, err := fstest.ReadAt(filepath.Join(img.BlobDir, tag), int64(start), int64(end-start))
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+
+		want.Write(data)
 	}
-	f := readFooter(t, ondemand)
-	require.False(t, f.rawDevice())
-	require.NotZero(t, f.MetaSize, "blob meta region of the ondemand blob")
-	got := readRange(t, ondemand, f.DataOffset, f.DataOffset+f.DataSize)
-	require.True(t, bytes.Equal(want.Bytes(), got),
-		"ondemand blob data (%d bytes) is not the traced groups in access order (%d bytes)", len(got), want.Len())
+
+	f := blobFile(ondemand).footer(t)
+	if !assert.False(t, f.rawDevice()) {
+		t.FailNow()
+	}
+	if !assert.NotZero(t, f.metaSize) {
+		t.FailNow()
+	}
+
+	got, err := fstest.ReadAt(ondemand, int64(f.dataOffset), int64(f.dataSize))
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	assert.True(t, bytes.Equal(want.Bytes(), got))
 
 	opt := img
 	opt.Bootstrap = optimized
 	opt.Blobs = append(append([]string(nil), img.Blobs...), ondemand)
+
 	m = mount.Mount(t, mount.FUSE{}, opt, mount.Options{Config: func(c *mount.Config) {
-		c.Prefetch = &mount.Prefetch{Scope: "ondemand"}
+		c.Prefetch = &mount.PrefetchConfig{Scope: "ondemand"}
 	}})
-	// Reads race the prefetch of the ondemand blob into the sources' caches.
-	oracle.VerifyMount(t, m.Root, opt.Want, opt.Compare())
+
+	fstest.VerifyMount(t, m.Root, opt.Want, opt.Compare())
 }
 
-func readRange(t env.TB, path string, start, end uint64) []byte {
+func TestOptimizeReject(t *testing.T) {
+	t.Parallel()
+	base := fixture.Get(t, "zstd-4k")
+
+	for _, tc := range []struct {
+		name, trace  string
+		mixedParent  bool
+		outputIsDir  bool
+		wantInOutput string
+	}{
+		{name: "Malformed", trace: `{"version":`},
+		{name: "Version", trace: `{"version":999,"patterns":[]}`},
+		{name: "Empty", trace: `{"version":1,"patterns":[]}`},
+		{name: "UnknownBlob", trace: `{"version":1,"patterns":[{"blob_index":65535,"chunk_group_index":0}]}`},
+		{name: "UnknownGroup", trace: `{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":4294967295}]}`},
+		{name: "IndexOverflow", trace: `{"version":1,"patterns":[{"blob_index":65536,"chunk_group_index":0}]}`},
+		{name: "OutputFailure", trace: `{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":0}]}`, outputIsDir: true},
+		{
+			name:         "MixedCompressors",
+			trace:        `{"version":1,"patterns":[{"blob_index":1,"chunk_group_index":0},{"blob_index":2,"chunk_group_index":0}]}`,
+			mixedParent:  true,
+			wantInOutput: "the other source blobs",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			img := base
+
+			if tc.mixedParent {
+				img.Bootstrap, img.BlobDir = filepath.Join(dir, "parent.boot"), filepath.Join(dir, "sources")
+				if !assert.NoError(t, os.Mkdir(img.BlobDir, 0o755)) {
+					t.FailNow()
+				}
+
+				var blobs []string
+
+				for _, layout := range []string{"lz4-64k", "zstd-4k"} {
+					blob := fixture.Get(t, layout).Blob(t)
+					if !assert.NoError(t, os.Symlink(blob, filepath.Join(img.BlobDir, filepath.Base(blob)))) {
+						t.FailNow()
+					}
+
+					blobs = append(blobs, blob)
+				}
+
+				env.Run(t, env.Nydus(t), append([]string{"merge", "--bootstrap", img.Bootstrap}, blobs...)...)
+			}
+
+			parent := fstest.FileSHA256(t, img.Bootstrap)
+			trace := filepath.Join(dir, "trace.json")
+			if !assert.NoError(t, os.WriteFile(trace, []byte(tc.trace), 0o600)) {
+				t.FailNow()
+			}
+
+			output := filepath.Join(dir, "optimized.boot")
+
+			if tc.outputIsDir {
+				if !assert.NoError(t, os.Mkdir(output, 0o755)) {
+					t.FailNow()
+				}
+			}
+
+			config := mount.LocalConfig(img.BlobDir, filepath.Join(dir, "cache")).Write(t, dir, "config.json")
+
+			out, err := runNydus(t, "optimize",
+				"--parent-bootstrap", img.Bootstrap, "--bootstrap", output, "--blob-dir", filepath.Join(dir, "blobs"),
+				"--config", config, "--trace-file", trace)
+
+			if !assert.Error(t, err) {
+				t.FailNow()
+			}
+			if !assert.Contains(t, string(out), "error") {
+				t.FailNow()
+			}
+
+			assert.Contains(t, string(out), tc.wantInOutput)
+			assert.Equal(t, parent, fstest.FileSHA256(t, img.Bootstrap))
+
+			if !tc.outputIsDir {
+				assert.NoFileExists(t, output)
+			}
+		})
+	}
+}
+
+func newFiles(t testing.TB, dir string, before map[string]bool) []string {
 	t.Helper()
-	require.LessOrEqual(t, start, end)
-	f, err := os.Open(path)
-	require.NoError(t, err)
-	defer func() { _ = f.Close() }()
-	buf := make([]byte, end-start)
-	_, err = io.ReadFull(io.NewSectionReader(f, int64(start), int64(end-start)), buf)
-	require.NoError(t, err, "reading [%d, %d) of %s", start, end, path)
-	return buf
+	entries, err := os.ReadDir(dir)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	var names []string
+
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && !before[entry.Name()] {
+			names = append(names, entry.Name())
+		}
+	}
+
+	return names
 }

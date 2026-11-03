@@ -351,7 +351,7 @@ the daemon reads pre-content events, writes responses, and pwrites the
 cache, i.e. that it is on the read path. `make benchmark` runs the
 unified cold-start benchmark that compares fanotify against the FUSE,
 fileio, NBD, and ublk transports
-([`tests/e2e/manual/bench`](../tests/e2e/manual/bench)).
+([`tests/e2e/bench`](../tests/e2e/bench)).
 
 Sources: dragonflyoss/nydus#1826; erofs-utils `lib/backends/fanotify.c` and
 `mount/main.c` (`erofsmount_fanotify`); LWN "fanotify: add pre-content hooks".
