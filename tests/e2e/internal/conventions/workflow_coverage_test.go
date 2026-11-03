@@ -260,7 +260,8 @@ func TestWorkflowCoverage(t *testing.T) {
 		}
 		codecov, err := os.ReadFile(filepath.Join(root, "codecov.yml"))
 		require.NoError(t, err)
-		require.Equal(t, 2, strings.Count(string(codecov), "target: 90%"), "Rust and Go are gated separately")
+		require.Equal(t, 1, strings.Count(string(codecov), "target: 90%"), "Rust is gated at 90%")
+		require.Equal(t, 1, strings.Count(string(codecov), "target: 85%"), "Go is gated at 85%")
 	})
 	t.Run("ExperimentalScope", func(t *testing.T) {
 		experimental := read("e2e-experimental.yml")
