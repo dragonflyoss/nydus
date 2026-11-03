@@ -2766,6 +2766,115 @@ suitable for embedding; enable the registry backend with
 OCI registry. See [Crate Architecture](#crate-architecture) for how the
 library crates layer.
 
+## Artifact Pruning And Compaction
+
+Writer pruning is opt-in: `IncrementalWriterOptions::prune` defaults to
+`false`. Set it to `true` to remove unreferenced parent devices during
+commit. Pruning changes only the final device table, chunk device IDs and
+prefetch references; it does not read parent blob data.
+
+For checkpoints produced by writers without pruning support, use
+`nydusify convert --bootstrap image.boot --parent-image <parent> --target <child> --prune`
+(with local upper blobs supplied as usual). Packaging prunes the final
+filesystem view itself, without requiring an updated writer library in the
+snapshot producer. Pure pruning does not download source blob data.
+
+`nydusify convert --bootstrap image.boot --blob <upper-digest> --parent-image <parent> --target <child> --compact-max-layers 8`
+merges all live data blobs into one when the post-prune data-layer count exceeds
+8. The bootstrap layer is excluded from the limit; 0 (the default) disables
+compaction. At or below the limit, parent blobs remain metadata-only references.
+A nonzero limit also enables pruning before counting live unique data blobs.
+Above it, packaging runs `nydus repack` and uploads one new data blob plus
+the rewritten bootstrap. Referenced non-local blobs are read on demand through
+a temporary loopback range endpoint: Go retains containerd resolver credentials
+and TLS policy, while Rust reuses its registry backend to fetch metadata and
+live encoded ranges. Local full blobs are served directly. No complete parent
+blob download or staging file is required. Parent images and
+the original checkpoint artifacts are unchanged. Config, manifest annotations,
+and files appended to the bootstrap layer are preserved.
+Use `--output-bootstrap <path>` to atomically save the final filesystem view
+after a successful push. Packaging retains the final bootstrap file path, not
+an in-memory copy throughout upload; the local export streams from that file
+into an adjacent temporary file and atomically renames it into place. Existing
+file permissions are preserved; new destinations use private permissions.
+This artifact-mode option may point to the input `image.boot`; without it,
+the input remains unchanged. An upload failure does
+not replace the destination. The output is bootstrap metadata, not a copy of
+the compacted data blob, whose contents are already in the target registry.
+A long-running snapshot writer must adopt this final bootstrap as its next
+parent when packaging compacts data: the pre-compaction device map references
+blobs that are no longer layers of the child image.
+Locally supplied parent blobs are reused even when their OCI descriptors are
+external references. The repack builder loads the bootstrap and inode tree
+once, reports the live source blob digests, and waits while packaging prepares
+data only if compaction is needed. It then reuses that in-memory view to
+produce the final bootstrap. There is no intermediate pruned bootstrap or
+second metadata parse between pruning and compaction.
+The range endpoint, staging metadata and decoded fallback caches are removed
+after compact; only output artifacts remain available for upload.
+Failed attempts remove their temporary directories without changing inputs.
+
+The combined core operation is
+`NydusCore::repack(IncrementalWriterOptions, compact_max_layers, prepare)`.
+The preparation callback receives live blob IDs and the pruning/compaction
+decision before any source blob data is read. A zero limit disables
+compaction; the writer option still enables prune-only processing.
+A no-op produces no bootstrap. To merge all live data blobs into one, use
+`nydus repack --compact-max-layers 1` or pass a limit of one to
+`NydusCore::repack`; a single-blob image is already compact and is not
+rewritten. Compaction allows
+in-place output: the new bootstrap is atomically renamed into place only after
+the new blob and bootstrap are complete. Existing readers retain the old inode;
+failure before publication leaves the old bootstrap available. It supports
+chunk-based files, preserves file metadata and holes, and reuses the writer's
+blob metadata and bootstrap renderer.
+On failure, both copy and reencoding paths remove artifacts created by that
+compact without deleting or overwriting existing data blobs. Sidecars are
+atomically regenerated, repairing truncated sidecars left by an interrupted
+old publisher. Callers must
+serialize publishers sharing an output directory; readers may remain open.
+
+When compression and digest settings are compatible, compaction copies encoded
+chunk groups directly without decompression, recompression, or materializing a
+decoded source cache. Fully unreferenced groups are dropped. A partially live
+group is retained whole, including its unreferenced members; only live file
+references are remapped. All data blobs, including the first, participate in
+the single output blob. CRC32 and group digests are preserved, not recomputed
+or verified against decoded data on this path. Range reads follow the existing
+runtime backend's trust model: TLS/authentication and strict range validation,
+not a whole-source OCI SHA256 verification (which would require downloading
+every source byte). The new output blob's SHA256 is computed while writing.
+Remote compact reads forward bounded HTTP byte ranges through containerd's
+registry authentication and redirect handling, and reuse HTTP connections.
+Packaging stages the already-loaded source blob metadata in its temporary cache.
+Compaction and decoded fallback reads reuse those sidecars instead of fetching
+source footers and metadata again. Missing sidecars fall back to the backend;
+invalid sidecars fail validation rather than silently replacing trusted metadata.
+Bootstrap tar/gzip output streams directly into the local content store;
+packaging does not retain a complete compressed bootstrap layer in memory.
+Adjacent live groups in the same source blob share bounded read windows
+(at most 4 MiB), without reading intervening dead groups. Flattened addresses
+reuse the reader's binary-search device layout.
+The smallest retained group is placed last, allowing one short source tail
+without reducing the output index stride. Index size is estimated before
+payload I/O: if it would grow by more than 16 MiB relative to the total input
+index tables of referenced source blobs, compaction falls back to reencoding
+and regrouping. This is an index-amplification limit, not a total metadata
+memory limit.
+
+Compression conversion, missing requested group digests, bootstrap-local data,
+redirect blobs, or filesystem chunks spanning groups fall back to decoding
+and reencoding through the writer. Duplicate source references share output
+addresses. Memory includes filesystem metadata, source/output blob metadata,
+one destination marker per source group (or a chunk deduplication index on
+fallback), and bounded I/O buffers rather than full file data.
+Group sizing is preserved on direct copy;
+writer grouping options apply only to the reencoding path. Geometry options
+are validated before creating output, including on direct copy. Metadata
+import skips the path lookup index used by incremental writes.
+On the copy path, temporary group metadata and I/O buffers are released before
+rendering the output bootstrap.
+
 ## Incremental Image Writer
 
 The nydus-core crate exposes an incremental writer for VM snapshots and other
@@ -2791,6 +2900,16 @@ building an upper filesystem and running a separate merge:
 - **commit** materializes all dirty chunks into at most one upper blob, renders
   image.boot, and preserves parent device mappings used by flattened chunk
   addresses.
+  It removes parent blobs with no remaining chunk references from the child
+  device table and renumbers retained device IDs. This only reads in-memory
+  chunk metadata; blob data is neither read nor rewritten. Packaging the child
+  bootstrap consequently omits those unused parent layers.
+  Device IDs are remapped during serialization without rewriting the in-memory
+  chunk table. Reference tracking uses memory proportional to the blob count.
+  When no blobs remain, the bootstrap alone is a valid image. NydusCore can
+  read its zero-filled files and create a subsequent writer with or without a
+  data cache. Packaging requires no blob or parent inputs in this case;
+  nonempty bootstrap references still require every referenced blob.
 
 Aligned complete chunks remain source-backed until materialization. Owned
 buffers can move into the blob writer, file ranges retain an Arc<File>, and

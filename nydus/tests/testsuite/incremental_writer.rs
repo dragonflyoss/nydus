@@ -80,6 +80,7 @@ fn incremental_writer_options_match_build_defaults() {
     assert_eq!(options.chunk_group_min_size, DEFAULT_CHUNK_GROUP_MIN_SIZE);
     assert_eq!(options.compressor, BlobMetadataCompressor::Zstd);
     assert_eq!(options.digester, Some(BlobMetadataDigester::Blake3));
+    assert!(!options.prune);
 }
 
 fn local_config(blob_dir: &Path, cache_dir: &Path) -> Config {
@@ -142,19 +143,24 @@ fn blob_metadata_path(blob_path: &Path) -> PathBuf {
 }
 
 fn commit_upper_blob(output_dir: &Path, writer: IncrementalWriter) -> CommittedImage {
+    let existing: HashSet<_> = if output_dir.exists() {
+        fs::read_dir(output_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     writer.commit().unwrap();
     let bootstrap_path = output_dir.join("image.boot");
     assert!(bootstrap_path.exists());
 
     let reader = ErofsReader::open_metadata_only(&bootstrap_path).unwrap();
     let blob_infos = reader.blob_infos().unwrap();
-    let blob_path = if blob_infos.len() > 1 {
-        let path = output_dir.join(hex::encode(blob_infos.last().unwrap().blob_id));
-        assert!(path.exists());
-        Some(path)
-    } else {
-        None
-    };
+    let blob_path = blob_infos
+        .last()
+        .map(|info| output_dir.join(hex::encode(info.blob_id)))
+        .filter(|path| path.exists() && !existing.contains(path));
     let blob_metadata_path = blob_path.as_ref().map(|path| {
         let path = blob_metadata_path(path);
         assert!(path.exists());
@@ -663,7 +669,7 @@ fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
         (
             "bootstrap",
             std::ffi::OsStr::new("image.boot"),
-            "failed to write incremental bootstrap",
+            "failed to publish bootstrap",
             true,
             true,
             libc::EISDIR,
@@ -674,14 +680,6 @@ fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
             "",
             true,
             false,
-            libc::ENOSPC,
-        ),
-        (
-            "bootstrap-full",
-            std::ffi::OsStr::new("image.boot"),
-            "failed to write incremental bootstrap",
-            true,
-            true,
             libc::ENOSPC,
         ),
     ] {
@@ -803,6 +801,254 @@ fn incremental_writer_replaces_one_chunk_with_upper_blob_data() {
 }
 
 #[test]
+fn incremental_writer_prune_is_opt_in() {
+    for prune in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let chunk = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+        let (parent, _) = build_parent_blob(&temp, &vec![b'A'; chunk]);
+        let mut options = writer_options(temp.path().join("child"));
+        options.prune = prune;
+        let output = options.output_dir.clone();
+        let mut writer = IncrementalWriter::open_metadata_only(&parent, options).unwrap();
+        writer
+            .replace_file(Path::new("memory.bin"), vec![b'B'; chunk])
+            .unwrap();
+        let image = commit_upper_blob(&output, writer);
+        let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+        assert_eq!(
+            reader.blob_infos().unwrap().len(),
+            if prune { 1 } else { 2 }
+        );
+    }
+}
+
+#[test]
+fn incremental_writer_repack_prunes_without_blob_data_before_compact_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let (parent, _) = build_parent_blob(&temp, &vec![b'A'; chunk]);
+    let (mut writer, output) = open_metadata_writer(&temp, &parent);
+    writer
+        .replace_file(Path::new("memory.bin"), vec![b'B'; chunk])
+        .unwrap();
+    let image = commit_upper_blob(&output, writer);
+    let original = fs::read(&image.bootstrap_path).unwrap();
+    assert_eq!(
+        ErofsReader::open_metadata_only(&image.bootstrap_path)
+            .unwrap()
+            .blob_infos()
+            .unwrap()
+            .len(),
+        2
+    );
+    let empty = temp.path().join("no-data");
+    fs::create_dir(&empty).unwrap();
+    let core = NydusCore::new(
+        &image.bootstrap_path,
+        local_config(&empty, &temp.path().join("empty-cache")),
+        None,
+    )
+    .unwrap();
+
+    for (prune, limit, expected) in [(false, 0, false), (true, 0, true), (false, 1, true)] {
+        let output = temp.path().join(format!("repack-{prune}-{limit}"));
+        let mut options = writer_options(output.clone());
+        options.prune = prune;
+        let result = core
+            .repack(options, limit, |plan| {
+                assert_eq!(plan.pruned, expected);
+                assert!(!plan.compacted);
+                assert_eq!(plan.blobs.len(), if expected { 1 } else { 2 });
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(result.pruned, expected);
+        assert!(!result.compacted);
+        assert_eq!(output.join("image.boot").exists(), expected);
+        if expected {
+            let reader = ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
+            assert_eq!(reader.blob_infos().unwrap().len(), 1);
+        }
+        assert_eq!(fs::read(&image.bootstrap_path).unwrap(), original);
+    }
+}
+
+fn open_pruning_writer(temp: &tempfile::TempDir, bootstrap: &Path) -> (IncrementalWriter, PathBuf) {
+    let output_dir = temp.path().to_path_buf();
+    let mut options = writer_options(output_dir.clone());
+    options.prune = true;
+    let writer = IncrementalWriter::open_metadata_only(bootstrap, options).unwrap();
+    (writer, output_dir)
+}
+
+#[test]
+fn incremental_writer_prunes_superseded_blobs_across_generations() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let parent_data = vec![b'A'; chunk_size * 2];
+    let (parent, parent_digest) = build_parent_blob(&temp, &parent_data);
+    let mut bootstrap = parent;
+    for value in [b'B', b'C', b'D'] {
+        let (mut writer, output_dir) = open_pruning_writer(&temp, &bootstrap);
+        writer
+            .write_at(
+                Path::new("memory.bin"),
+                chunk_size as u64,
+                &vec![value; chunk_size],
+            )
+            .unwrap();
+        let image = commit_upper_blob(&output_dir, writer);
+        let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+        let blobs = reader.blob_infos().unwrap();
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(blobs[0].blob_id, parent_digest);
+        let nid = find_path(&reader, "memory.bin");
+        let inode = reader.inode(nid).unwrap();
+        let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+        assert_eq!(chunks[0].device_id, 1);
+        assert_eq!(chunks[1].device_id, 2);
+        let config = local_config(temp.path(), &temp.path().join(format!("cache-{value}")));
+        let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+        let mut expected = vec![b'A'; chunk_size];
+        expected.extend(vec![value; chunk_size]);
+        assert_eq!(
+            core.fs.open("memory.bin").unwrap().read().unwrap(),
+            expected
+        );
+        bootstrap = image.bootstrap_path;
+    }
+
+    // Keep a flattened reference to the second device while removing the first.
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let mapping = 1 << 20;
+    let mut slots: Vec<_> = reader
+        .blob_infos()
+        .unwrap()
+        .iter()
+        .map(|info| {
+            nydus_format::erofs::ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(
+                info.blocks,
+                &info.blob_id,
+                info.mapped_blkaddr,
+            )
+            .unwrap()
+        })
+        .collect();
+    slots[1].set_mapped_blkaddr(mapping).unwrap();
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+    let inode_offset = reader.superblock().meta_blkaddr() as usize * EROFS_BLOCK_SIZE as usize
+        + nid as usize * EROFS_SLOTSIZE as usize;
+    let index_offset = inode_offset
+        + (inode.header_size() + inode.xattr_size()).next_multiple_of(EROFS_CHUNK_INDEX_SIZE)
+        + EROFS_CHUNK_INDEX_SIZE;
+    let flattened = ErofsChunkIndex::new(ErofsChunkAddr {
+        blkaddr: mapping + chunks[1].blkaddr,
+        device_id: 0,
+    })
+    .unwrap();
+    let mut data = fs::read(&bootstrap).unwrap();
+    nydus_core::build::bootstrap::patch_device_slots(&mut data, &slots).unwrap();
+    data[index_offset..index_offset + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(flattened.as_bytes());
+    fs::write(&bootstrap, data).unwrap();
+    let (mut writer, output_dir) = open_pruning_writer(&temp, &bootstrap);
+    writer
+        .write_at(Path::new("memory.bin"), 0, &vec![b'X'; chunk_size])
+        .unwrap();
+    let image = commit_upper_blob(&output_dir, writer);
+    let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+    assert_eq!(reader.blob_infos().unwrap().len(), 2);
+    assert_eq!(reader.blob_infos().unwrap()[0].mapped_blkaddr, mapping);
+    assert!(reader.read_prefetch_order().is_empty());
+    let config = local_config(temp.path(), &temp.path().join("cache-flattened"));
+    let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+    let mut expected = vec![b'X'; chunk_size];
+    expected.extend(vec![b'D'; chunk_size]);
+    assert_eq!(
+        core.fs.open("memory.bin").unwrap().read().unwrap(),
+        expected
+    );
+    bootstrap = image.bootstrap_path;
+
+    let (mut writer, output_dir) = open_pruning_writer(&temp, &bootstrap);
+    writer
+        .replace_file(Path::new("memory.bin"), vec![b'Z'; chunk_size])
+        .unwrap();
+    let image = commit_upper_blob(&output_dir, writer);
+    let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+    assert_eq!(reader.blob_infos().unwrap().len(), 1);
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    assert_eq!(
+        reader.read_chunk_index_entries(nid, &inode).unwrap()[0].device_id,
+        1
+    );
+    let config = local_config(temp.path(), &temp.path().join("cache-replaced"));
+    let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+    assert_eq!(
+        core.fs.open("memory.bin").unwrap().read().unwrap(),
+        vec![b'Z'; chunk_size]
+    );
+
+    let (mut writer, output_dir) = open_pruning_writer(&temp, &image.bootstrap_path);
+    writer
+        .replace_file(Path::new("memory.bin"), vec![0; chunk_size])
+        .unwrap();
+    let image = commit_upper_blob(&output_dir, writer);
+    let reader = ErofsReader::open_metadata_only(&image.bootstrap_path).unwrap();
+    assert!(reader.blob_infos().unwrap().is_empty());
+    assert!(image.blob_path.is_none());
+    let empty_blobs = temp.path().join("empty-blobs");
+    fs::create_dir(&empty_blobs).unwrap();
+    for cached in [false, true] {
+        let mut config = local_config(&empty_blobs, &temp.path().join("cache-null-only"));
+        if !cached {
+            config.storage.dir = None;
+        }
+        let core = NydusCore::new(&image.bootstrap_path, config, None).unwrap();
+        let file = core.fs.open("memory.bin").unwrap();
+        assert_eq!(file.read().unwrap(), vec![0; chunk_size]);
+        file.fetch(0, chunk_size as u64).unwrap();
+        for ranges in [
+            file.probe_ranges(0, chunk_size as u64).unwrap(),
+            file.fetch_ranges(0, chunk_size as u64).unwrap(),
+        ] {
+            assert_eq!(
+                ranges.iter().map(|range| range.len).sum::<u64>(),
+                chunk_size as u64
+            );
+            assert!(ranges
+                .iter()
+                .all(|range| range.fd == core.zero_fd() && range.offset == 0));
+        }
+
+        // A partial write must patch the parent's logical zeros without blobs.
+        let next_dir = temp.path().join(format!("after-null-{cached}"));
+        let mut writer = core.writer(writer_options(next_dir.clone())).unwrap();
+        writer
+            .write_at(Path::new("memory.bin"), 7, b"next")
+            .unwrap();
+        writer.commit().unwrap();
+        let next = NydusCore::new(
+            &next_dir.join("image.boot"),
+            local_config(
+                &next_dir,
+                &temp.path().join(format!("cache-after-null-{cached}")),
+            ),
+            None,
+        )
+        .unwrap();
+        let mut expected = vec![0; chunk_size];
+        expected[7..11].copy_from_slice(b"next");
+        assert_eq!(
+            next.fs.open("memory.bin").unwrap().read().unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn incremental_writer_replace_file_does_not_require_parent_data() {
     let temp = tempfile::tempdir().unwrap();
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
@@ -822,6 +1068,12 @@ fn incremental_writer_replace_file_does_not_require_parent_data() {
     assert_eq!(inode.size(), chunk_size as u64);
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].device_id, 2);
+    assert_eq!(
+        reader.read_prefetch_order(),
+        ErofsReader::open_metadata_only(&parent_bootstrap)
+            .unwrap()
+            .read_prefetch_order()
+    );
     assert!(commit.blob_path.as_ref().unwrap().exists());
     assert!(commit.blob_metadata_path.as_ref().unwrap().exists());
 }
@@ -1662,4 +1914,785 @@ fn incremental_writer_write_at_truncates_at_eof() {
     let mut expected = parent_data;
     expected[chunk_size - 2..chunk_size].copy_from_slice(b"AB");
     assert_eq!(data, expected);
+}
+
+#[test]
+fn incremental_writer_rejects_invalid_parent_device_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let (bootstrap, _) = build_parent_blob(&temp, &vec![b'A'; chunk_size * 2]);
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+    let inode_offset = reader.superblock().meta_blkaddr() as usize * EROFS_BLOCK_SIZE as usize
+        + nid as usize * EROFS_SLOTSIZE as usize;
+    let index_offset = inode_offset
+        + (inode.header_size() + inode.xattr_size()).next_multiple_of(EROFS_CHUNK_INDEX_SIZE)
+        + EROFS_CHUNK_INDEX_SIZE;
+    let original = fs::read(&bootstrap).unwrap();
+    // The first chunk keeps device 1 live; the later invalid ID must still
+    // be rejected even though liveness analysis can finish after that first chunk.
+    for device_id in [2, u16::MAX] {
+        let mut data = original.clone();
+        let entry = ErofsChunkIndex::new(ErofsChunkAddr {
+            blkaddr: chunks[1].blkaddr,
+            device_id,
+        })
+        .unwrap();
+        data[index_offset..index_offset + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(entry.as_bytes());
+        fs::write(&bootstrap, data).unwrap();
+        let result = IncrementalWriter::open_metadata_only(
+            &bootstrap,
+            writer_options(temp.path().join(format!("invalid-{device_id}"))),
+        );
+        assert!(
+            result.is_err(),
+            "accepted missing parent device {device_id}"
+        );
+    }
+}
+
+#[test]
+fn compact_merges_live_parent_and_upper_chunks_preserving_holes() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let mut parent_data = vec![b'A'; chunk_size * 2];
+    parent_data.extend(vec![0; chunk_size]);
+    let (parent, _) = build_parent_blob(&temp, &parent_data);
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &parent);
+    writer
+        .write_at(
+            Path::new("memory.bin"),
+            chunk_size as u64,
+            &vec![b'B'; chunk_size],
+        )
+        .unwrap();
+    let child = commit_upper_blob(&output_dir, writer);
+    let config = local_config(temp.path(), &temp.path().join("source-cache"));
+    let core = NydusCore::new(&child.bootstrap_path, config, None).unwrap();
+    let output = temp.path().join("compact");
+    core.repack(writer_options(output.clone()), 1, |_| Ok(()))
+        .unwrap();
+    let boot = output.join("image.boot");
+    let reader = ErofsReader::open_metadata_only(&boot).unwrap();
+    assert_eq!(reader.blob_infos().unwrap().len(), 1);
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    let chunks = reader.read_chunk_index_entries(nid, &inode).unwrap();
+    assert_eq!(chunks[0].device_id, 1);
+    assert_eq!(chunks[1].device_id, 1);
+    assert!(chunks[2].is_hole());
+    let config = local_config(&output, &temp.path().join("compact-cache"));
+    let compacted = NydusCore::new(&boot, config, None).unwrap();
+    parent_data[chunk_size..chunk_size * 2].fill(b'B');
+    assert_eq!(
+        compacted.fs.open("memory.bin").unwrap().read().unwrap(),
+        parent_data
+    );
+    assert_eq!(
+        core.fs.open("memory.bin").unwrap().read().unwrap(),
+        parent_data
+    );
+    assert_eq!(
+        ErofsReader::open_metadata_only(&child.bootstrap_path)
+            .unwrap()
+            .blob_infos()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn repack_prunes_then_compacts_live_data_with_deferred_blob_preparation() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let (parent, parent_id) = build_parent_blob(&temp, &vec![b'A'; chunk * 2]);
+    let (mut writer, output) = open_metadata_writer(&temp, &parent);
+    writer
+        .write_at(Path::new("memory.bin"), chunk as u64, &vec![b'B'; chunk])
+        .unwrap();
+    let child = commit_upper_blob(&output, writer);
+    let (mut writer, output) = open_metadata_writer(&temp, &child.bootstrap_path);
+    writer
+        .write_at(Path::new("memory.bin"), chunk as u64, &vec![b'C'; chunk])
+        .unwrap();
+    let final_image = commit_upper_blob(&output, writer);
+    assert_eq!(
+        ErofsReader::open_metadata_only(&final_image.bootstrap_path)
+            .unwrap()
+            .blob_infos()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let staged = temp.path().join("staged");
+    fs::create_dir(&staged).unwrap();
+    let config = local_config(&staged, &temp.path().join("repack-cache"));
+    let core = NydusCore::new(&final_image.bootstrap_path, config, None).unwrap();
+    let output = temp.path().join("repacked");
+    let result = core
+        .repack(writer_options(output.clone()), 1, |plan| {
+            assert!(plan.pruned);
+            assert!(plan.compacted);
+            assert_eq!(plan.blobs.len(), 2);
+            assert_eq!(plan.blobs[0], BlobId::from(parent_id));
+            // Backend starts empty: only the live blobs are made available here.
+            for id in &plan.blobs {
+                fs::copy(
+                    temp.path().join(id.to_string()),
+                    staged.join(id.to_string()),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(result.pruned && result.compacted);
+    assert_eq!(result.blobs.len(), 1);
+    let core = NydusCore::new(
+        &output.join("image.boot"),
+        local_config(&output, &temp.path().join("result-cache")),
+        None,
+    )
+    .unwrap();
+    let mut expected = vec![b'A'; chunk];
+    expected.extend(vec![b'C'; chunk]);
+    assert_eq!(
+        core.fs.open("memory.bin").unwrap().read().unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn compact_publishes_in_place_without_invalidating_source_readers() {
+    for alias in ["same", "hardlink", "symlink"] {
+        let temp = tempfile::tempdir().unwrap();
+        let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+        let parent_data = vec![b'A'; chunk_size * 2];
+        let (parent, _) = build_parent_blob(&temp, &parent_data);
+        let (mut writer, output_dir) = open_metadata_writer(&temp, &parent);
+        writer
+            .write_at(
+                Path::new("memory.bin"),
+                chunk_size as u64,
+                &vec![b'B'; chunk_size],
+            )
+            .unwrap();
+        let child = commit_upper_blob(&output_dir, writer);
+        let core = NydusCore::new(
+            &child.bootstrap_path,
+            local_config(temp.path(), &temp.path().join("source-cache")),
+            None,
+        )
+        .unwrap();
+        let output = if alias == "same" {
+            output_dir
+        } else {
+            let dir = temp.path().join(alias);
+            fs::create_dir(&dir).unwrap();
+            if alias == "hardlink" {
+                fs::hard_link(&child.bootstrap_path, dir.join("image.boot")).unwrap();
+            } else {
+                std::os::unix::fs::symlink(&child.bootstrap_path, dir.join("image.boot")).unwrap();
+            }
+            dir
+        };
+        core.repack(writer_options(output.clone()), 1, |_| Ok(()))
+            .unwrap();
+        let mut expected = vec![b'A'; chunk_size];
+        expected.extend(vec![b'B'; chunk_size]);
+        assert_eq!(
+            core.fs.open("memory.bin").unwrap().read().unwrap(),
+            expected
+        );
+        let boot = output.join("image.boot");
+        let reader = ErofsReader::open_metadata_only(&boot).unwrap();
+        let infos = reader.blob_infos().unwrap();
+        assert_eq!(infos.len(), 1);
+        // The newly published bootstrap must use only the compact output blob.
+        let result = NydusCore::new(
+            &boot,
+            local_config(&output, &temp.path().join("result-cache")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result.fs.open("memory.bin").unwrap().read().unwrap(),
+            expected
+        );
+        assert!(!fs::read_dir(&output).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".nydus-bootstrap-")));
+    }
+}
+
+#[test]
+fn failed_in_place_compact_keeps_original_bootstrap() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
+    let (parent, parent_digest) = build_parent_blob(&temp, &vec![b'A'; chunk_size * 2]);
+    let (mut writer, output_dir) = open_metadata_writer(&temp, &parent);
+    writer
+        .write_at(
+            Path::new("memory.bin"),
+            chunk_size as u64,
+            &vec![b'B'; chunk_size],
+        )
+        .unwrap();
+    let child = commit_upper_blob(&output_dir, writer);
+    let before = fs::read(&child.bootstrap_path).unwrap();
+    let partial = temp.path().join("partial-blobs");
+    fs::create_dir(&partial).unwrap();
+    let parent_name = hex::encode(parent_digest);
+    fs::hard_link(temp.path().join(&parent_name), partial.join(&parent_name)).unwrap();
+    let core = NydusCore::new(
+        &child.bootstrap_path,
+        local_config(&partial, &temp.path().join("partial-cache")),
+        None,
+    )
+    .unwrap();
+    assert!(core
+        .repack(writer_options(output_dir.clone()), 1, |_| Ok(()))
+        .is_err());
+    assert_eq!(fs::read(&child.bootstrap_path).unwrap(), before);
+    assert_no_temporary_blob(&output_dir);
+}
+
+#[test]
+fn compact_copies_live_encoded_groups_without_decoded_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let pool = temp.path().join("pool");
+    let chunk = EROFS_BLOCK_SIZE as usize;
+    let options = |output_dir| {
+        let mut options = writer_options(output_dir);
+        options.chunk_size = EROFS_BLOCK_SIZE;
+        options.chunk_group_min_size = EROFS_BLOCK_SIZE * 2;
+        options
+    };
+    let mut writer = IncrementalWriter::create(options(pool.clone())).unwrap();
+    writer
+        .create_file(
+            Path::new("memory.bin"),
+            (chunk * 16) as u64,
+            CreateFileOptions::default(),
+        )
+        .unwrap();
+    for index in 0..16 {
+        writer
+            .write_at_owned(
+                Path::new("memory.bin"),
+                (index * chunk) as u64,
+                vec![b'A'; chunk],
+            )
+            .unwrap();
+    }
+    let parent = commit_upper_blob(&pool, writer);
+    let parent_blob = parent.blob_path.unwrap();
+    let parent_metadata =
+        BlobMetadata::from_path(parent.blob_metadata_path.as_ref().unwrap()).unwrap();
+    assert_eq!(parent_metadata.chunk_group_count(), 2);
+
+    let mut writer =
+        IncrementalWriter::open_metadata_only(&parent.bootstrap_path, options(pool.clone()))
+            .unwrap();
+    writer
+        .write_at_owned(Path::new("memory.bin"), chunk as u64, vec![b'E'; chunk])
+        .unwrap();
+    writer
+        .write_at_owned(
+            Path::new("memory.bin"),
+            (chunk * 2) as u64,
+            vec![0; chunk * 14],
+        )
+        .unwrap();
+    let child = commit_upper_blob(&pool, writer);
+    let upper_blob = child.blob_path.unwrap();
+    let upper_metadata =
+        BlobMetadata::from_path(child.blob_metadata_path.as_ref().unwrap()).unwrap();
+    let source_cache = temp.path().join("source-cache");
+    let core = NydusCore::new(
+        &child.bootstrap_path,
+        local_config(&pool, &source_cache),
+        None,
+    )
+    .unwrap();
+    let output = temp.path().join("compact");
+    core.repack(options(output.clone()), 1, |_| Ok(())).unwrap();
+
+    // Raw compaction must not materialize a decoded source blob cache.
+    if source_cache.exists() {
+        assert!(!fs::read_dir(&source_cache).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".blob.data")
+        }));
+    }
+    let bootstrap = output.join("image.boot");
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let infos = reader.blob_infos().unwrap();
+    assert_eq!(infos.len(), 1);
+    let blob = output.join(hex::encode(infos[0].blob_id));
+    let metadata = BlobMetadata::from_path(&blob_metadata_path(&blob)).unwrap();
+    assert_eq!(metadata.chunk_group_count(), 2);
+    // The first pack is retained whole with only one live member; the second is removed.
+    assert_eq!(metadata.chunk_count(), 9);
+    let bytes = fs::read(&blob).unwrap();
+    for (index, (source, source_metadata)) in [
+        (&parent_blob, &parent_metadata),
+        (&upper_blob, &upper_metadata),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let old = source_metadata.chunk_group(0).unwrap();
+        let new = metadata.chunk_group(index).unwrap();
+        assert!(!old.is_uncompressed(source_metadata));
+        let source_bytes = fs::read(source).unwrap();
+        assert_eq!(
+            &bytes[new.compressed_range().start as usize..new.compressed_range().end as usize],
+            &source_bytes
+                [old.compressed_range().start as usize..old.compressed_range().end as usize],
+        );
+        assert_eq!(new.uncompressed_crc32(), old.uncompressed_crc32());
+        assert_eq!(
+            metadata.chunk_group_digest(index),
+            source_metadata.chunk_group_digest(0)
+        );
+    }
+    let compacted = NydusCore::new(
+        &bootstrap,
+        local_config(&output, &temp.path().join("result-cache")),
+        None,
+    )
+    .unwrap();
+    let mut expected = vec![b'A'; chunk];
+    expected.extend(vec![b'E'; chunk]);
+    expected.extend(vec![0; chunk * 14]);
+    assert_eq!(
+        compacted.fs.open("memory.bin").unwrap().read().unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn compact_reencodes_when_compressor_or_digest_is_incompatible() {
+    for (missing_digest, target_compressor) in [
+        (false, BlobMetadataCompressor::Lz4Block),
+        (false, BlobMetadataCompressor::None),
+        (true, BlobMetadataCompressor::Zstd),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = temp.path().join("pool");
+        let mut options = writer_options(pool.clone());
+        options.chunk_size = EROFS_BLOCK_SIZE;
+        if missing_digest {
+            options.digester = None;
+        }
+        let data = vec![b'A'; EROFS_BLOCK_SIZE as usize * 2 + 31];
+        let mut writer = IncrementalWriter::create(options).unwrap();
+        writer
+            .replace_file(Path::new("memory.bin"), data.clone())
+            .unwrap();
+        let parent = commit_upper_blob(&pool, writer);
+        let mut writer = IncrementalWriter::open_metadata_only(
+            &parent.bootstrap_path,
+            writer_options(pool.clone()),
+        )
+        .unwrap();
+        writer
+            .replace_file(Path::new("extra"), vec![b'B'; EROFS_BLOCK_SIZE as usize])
+            .unwrap();
+        writer.commit().unwrap();
+        let core = NydusCore::new(
+            &parent.bootstrap_path,
+            local_config(&pool, &temp.path().join("source-cache")),
+            None,
+        )
+        .unwrap();
+        let output = temp.path().join("compact");
+        let mut options = writer_options(output.clone());
+        options.chunk_size = EROFS_BLOCK_SIZE;
+        if missing_digest {
+            options.digester = Some(BlobMetadataDigester::Blake3);
+        } else {
+            options.compressor = target_compressor;
+        }
+        let expected_compressor = options.compressor;
+        core.repack(options, 1, |_| Ok(())).unwrap();
+        let bootstrap = output.join("image.boot");
+        let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+        let infos = reader.blob_infos().unwrap();
+        assert_eq!(infos.len(), 1);
+        let blob = output.join(hex::encode(infos[0].blob_id));
+        let metadata = BlobMetadata::from_path(&blob_metadata_path(&blob)).unwrap();
+        assert_eq!(metadata.compressor(), expected_compressor);
+        assert_eq!(
+            metadata.digester().unwrap(),
+            Some(BlobMetadataDigester::Blake3)
+        );
+        let compacted = NydusCore::new(
+            &bootstrap,
+            local_config(&output, &temp.path().join("result-cache")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            compacted.fs.open("memory.bin").unwrap().read().unwrap(),
+            data
+        );
+        assert_eq!(
+            compacted.fs.open("extra").unwrap().read().unwrap(),
+            vec![b'B'; EROFS_BLOCK_SIZE as usize]
+        );
+    }
+}
+
+#[test]
+fn compact_rejects_invalid_geometry_before_creating_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let (parent, _) = build_parent_blob(&temp, &vec![b'A'; EROFS_BLOCK_SIZE as usize]);
+    let core = NydusCore::new(
+        &parent,
+        local_config(temp.path(), &temp.path().join("cache")),
+        None,
+    )
+    .unwrap();
+    for (index, (chunk_size, minimum)) in [
+        (0, EROFS_BLOCK_SIZE),
+        (EROFS_BLOCK_SIZE, EROFS_BLOCK_SIZE + 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = temp.path().join(format!("invalid-{index}"));
+        let mut options = writer_options(output.clone());
+        options.chunk_size = chunk_size;
+        options.chunk_group_min_size = minimum;
+        assert!(core.repack(options, 1, |_| Ok(())).is_err());
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn compact_handles_flattened_chunks_and_mixed_group_sizes() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk = EROFS_BLOCK_SIZE as usize;
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let mut expected = vec![b'A'; chunk * 6 + 31];
+    fs::write(source.join("memory.bin"), &expected).unwrap();
+    let path = temp.path().join("parent.blob");
+    let parent = build_image(
+        &BuildImageOptions::new(
+            source,
+            EROFS_BLOCK_SIZE,
+            BlobMetadataCompressor::Zstd,
+            HashSet::new(),
+            true,
+        )
+        .unwrap()
+        .with_chunk_group_min_size(EROFS_BLOCK_SIZE)
+        .unwrap(),
+        fs::File::create(&path).unwrap(),
+    )
+    .unwrap();
+    fs::rename(path, temp.path().join(hex::encode(parent.full_blob_digest))).unwrap();
+    let boot = temp.path().join("parent.boot");
+    fs::write(&boot, parent.standalone_bootstrap.unwrap()).unwrap();
+    let mut options = writer_options(temp.path().to_path_buf());
+    options.chunk_size = EROFS_BLOCK_SIZE;
+    options.chunk_group_min_size = EROFS_BLOCK_SIZE * 2;
+    let mut writer = IncrementalWriter::open_metadata_only(&boot, options).unwrap();
+    writer
+        .write_at_owned(Path::new("memory.bin"), chunk as u64, vec![b'E'; chunk * 2])
+        .unwrap();
+    writer.commit().unwrap();
+    expected[chunk..chunk * 3].fill(b'E');
+
+    let boot = temp.path().join("image.boot");
+    let reader = ErofsReader::open_metadata_only(&boot).unwrap();
+    let mapping = reader.blob_infos().unwrap()[0].mapped_blkaddr;
+    assert_ne!(mapping, 0);
+    let nid = find_path(&reader, "memory.bin");
+    let inode = reader.inode(nid).unwrap();
+    let entries = reader.read_chunk_index_entries(nid, &inode).unwrap();
+    let base = reader.superblock().meta_blkaddr() as usize * chunk
+        + nid as usize * EROFS_SLOTSIZE as usize
+        + (inode.header_size() + inode.xattr_size()).next_multiple_of(EROFS_CHUNK_INDEX_SIZE);
+    let mut bytes = fs::read(&boot).unwrap();
+    for (index, entry) in entries.into_iter().enumerate() {
+        if entry.device_id == 1 {
+            let flattened = ErofsChunkIndex::new(ErofsChunkAddr {
+                device_id: 0,
+                blkaddr: mapping + entry.blkaddr,
+            })
+            .unwrap();
+            let offset = base + index * EROFS_CHUNK_INDEX_SIZE;
+            bytes[offset..offset + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(flattened.as_bytes());
+        }
+    }
+    fs::write(&boot, bytes).unwrap();
+    let cache = temp.path().join("source-cache");
+    let core = NydusCore::new(&boot, local_config(temp.path(), &cache), None).unwrap();
+    let output = temp.path().join("compact");
+    core.repack(writer_options(output.clone()), 1, |_| Ok(()))
+        .unwrap();
+    let result_boot = output.join("image.boot");
+    let result_reader = ErofsReader::open_metadata_only(&result_boot).unwrap();
+    let infos = result_reader.blob_infos().unwrap();
+    assert_eq!(infos.len(), 1);
+    let metadata = BlobMetadata::from_path(&blob_metadata_path(
+        &output.join(hex::encode(infos[0].blob_id)),
+    ))
+    .unwrap();
+    let sizes: HashSet<_> = metadata
+        .chunk_groups()
+        .map(|group| group.logical_block_count())
+        .collect();
+    assert!(sizes.contains(&1) && sizes.contains(&2));
+    assert!(!fs::read_dir(&cache).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".blob.data")));
+    let result = NydusCore::new(
+        &result_boot,
+        local_config(&output, &temp.path().join("result-cache")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        result.fs.open("memory.bin").unwrap().read().unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn compact_defers_unique_short_tail_to_preserve_index_stride() {
+    let temp = tempfile::tempdir().unwrap();
+    let chunk = EROFS_BLOCK_SIZE as usize * 2;
+    let options = |output| {
+        let mut options = writer_options(output);
+        options.chunk_size = chunk as u32;
+        options.chunk_group_min_size = chunk as u32;
+        options
+    };
+    let mut writer = IncrementalWriter::create(options(temp.path().to_path_buf())).unwrap();
+    writer
+        .replace_file(Path::new("memory.bin"), vec![b'A'; chunk + chunk / 2])
+        .unwrap();
+    writer.commit().unwrap();
+    let bootstrap = temp.path().join("image.boot");
+    let mut writer =
+        IncrementalWriter::open_metadata_only(&bootstrap, options(temp.path().to_path_buf()))
+            .unwrap();
+    writer
+        .replace_file(Path::new("extra"), vec![b'B'; chunk])
+        .unwrap();
+    writer.commit().unwrap();
+    let core = NydusCore::new(
+        &bootstrap,
+        local_config(temp.path(), &temp.path().join("cache")),
+        None,
+    )
+    .unwrap();
+    let output = temp.path().join("compact");
+    core.repack(options(output.clone()), 1, |_| Ok(())).unwrap();
+    let bootstrap = output.join("image.boot");
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let infos = reader.blob_infos().unwrap();
+    assert_eq!(infos.len(), 1);
+    let metadata = BlobMetadata::from_path(&blob_metadata_path(
+        &output.join(hex::encode(infos[0].blob_id)),
+    ))
+    .unwrap();
+    assert_eq!(metadata.blocks_per_chunk_group_index(), 2);
+    assert_eq!(
+        metadata
+            .chunk_groups()
+            .map(|group| group.logical_block_count())
+            .collect::<Vec<_>>(),
+        [2, 2, 1]
+    );
+    let result = NydusCore::new(
+        &bootstrap,
+        local_config(&output, &temp.path().join("result-cache")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        result.fs.open("memory.bin").unwrap().read().unwrap(),
+        vec![b'A'; chunk + chunk / 2]
+    );
+    assert_eq!(
+        result.fs.open("extra").unwrap().read().unwrap(),
+        vec![b'B'; chunk]
+    );
+}
+
+#[test]
+fn compact_repairs_truncated_sidecar_on_retry() {
+    for compressor in [
+        BlobMetadataCompressor::Zstd,
+        BlobMetadataCompressor::Lz4Block,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = temp.path().join("pool");
+        let mut writer = IncrementalWriter::create(writer_options(pool.clone())).unwrap();
+        writer
+            .replace_file(
+                Path::new("memory.bin"),
+                vec![b'A'; EROFS_BLOCK_SIZE as usize],
+            )
+            .unwrap();
+        writer.commit().unwrap();
+        let mut writer = IncrementalWriter::open_metadata_only(
+            &pool.join("image.boot"),
+            writer_options(pool.clone()),
+        )
+        .unwrap();
+        writer
+            .replace_file(Path::new("extra"), vec![b'B'; EROFS_BLOCK_SIZE as usize])
+            .unwrap();
+        writer.commit().unwrap();
+        let core = NydusCore::new(
+            &pool.join("image.boot"),
+            local_config(&pool, &temp.path().join("cache")),
+            None,
+        )
+        .unwrap();
+        let output = temp.path().join("compact");
+        let options = || {
+            let mut options = writer_options(output.clone());
+            options.compressor = compressor;
+            options
+        };
+        core.repack(options(), 1, |_| Ok(())).unwrap();
+        let reader = ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
+        let blob = output.join(hex::encode(reader.blob_infos().unwrap()[0].blob_id));
+        let metadata = blob_metadata_path(&blob);
+        let expected = fs::read(&metadata).unwrap();
+        let blob_before = fs::read(&blob).unwrap();
+        fs::write(&metadata, b"truncated").unwrap();
+        core.repack(options(), 1, |_| Ok(())).unwrap();
+        assert_eq!(fs::read(metadata).unwrap(), expected);
+        assert_eq!(fs::read(blob).unwrap(), blob_before);
+        assert_no_temporary_blob(&output);
+    }
+}
+
+#[test]
+fn incremental_writer_atomically_replaces_bootstrap_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let (parent, _) = build_parent_blob(
+        &temp,
+        &vec![b'A'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize],
+    );
+    let output = temp.path().join("child");
+    fs::create_dir(&output).unwrap();
+    let target = temp.path().join("untouched");
+    fs::write(&target, b"sentinel").unwrap();
+    std::os::unix::fs::symlink(&target, output.join("image.boot")).unwrap();
+    let mut writer =
+        IncrementalWriter::open_metadata_only(&parent, writer_options(output.clone())).unwrap();
+    writer
+        .replace_file(Path::new("memory.bin"), vec![b'B'; 4096])
+        .unwrap();
+    writer.commit().unwrap();
+    assert_eq!(fs::read(target).unwrap(), b"sentinel");
+    assert!(!fs::symlink_metadata(output.join("image.boot"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
+    assert_no_temporary_blob(&output);
+}
+
+#[test]
+fn compact_rolls_back_new_artifacts_on_late_publication_failure() {
+    for compressor in [
+        BlobMetadataCompressor::Zstd,
+        BlobMetadataCompressor::Lz4Block,
+    ] {
+        for failure in ["bootstrap-new", "bootstrap-dedup", "sidecar"] {
+            let temp = tempfile::tempdir().unwrap();
+            let pool = temp.path().join("pool");
+            let mut writer = IncrementalWriter::create(writer_options(pool.clone())).unwrap();
+            writer
+                .replace_file(
+                    Path::new("memory.bin"),
+                    vec![b'A'; EROFS_BLOCK_SIZE as usize],
+                )
+                .unwrap();
+            writer.commit().unwrap();
+            let mut writer = IncrementalWriter::open_metadata_only(
+                &pool.join("image.boot"),
+                writer_options(pool.clone()),
+            )
+            .unwrap();
+            writer
+                .replace_file(Path::new("extra"), vec![b'B'; EROFS_BLOCK_SIZE as usize])
+                .unwrap();
+            writer.commit().unwrap();
+            let bootstrap = pool.join("image.boot");
+            let input_before = fs::read(&bootstrap).unwrap();
+            let core = NydusCore::new(
+                &bootstrap,
+                local_config(&pool, &temp.path().join("cache")),
+                None,
+            )
+            .unwrap();
+            let output = temp.path().join("compact");
+            let options = || {
+                let mut options = writer_options(output.clone());
+                options.compressor = compressor;
+                options
+            };
+            // Establish the deterministic digest for sidecar failure injection
+            // and exercise dedup hits without allowing cleanup to remove them.
+            core.repack(options(), 1, |_| Ok(())).unwrap();
+            let result_reader =
+                ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
+            let digest = hex::encode(result_reader.blob_infos().unwrap()[0].blob_id);
+            drop(result_reader);
+            let blob = output.join(digest);
+            let sidecar = blob_metadata_path(&blob);
+            fs::remove_file(output.join("image.boot")).unwrap();
+            if failure != "bootstrap-dedup" {
+                fs::remove_file(&blob).unwrap();
+                fs::remove_file(&sidecar).unwrap();
+            }
+            if failure == "sidecar" {
+                fs::create_dir(&sidecar).unwrap();
+                fs::write(output.join("image.boot"), b"previous bootstrap").unwrap();
+            } else {
+                fs::create_dir(output.join("image.boot")).unwrap();
+            }
+            let snapshot = || {
+                let mut entries: Vec<_> = fs::read_dir(&output)
+                    .unwrap()
+                    .map(|entry| {
+                        let path = entry.unwrap().path();
+                        let data = path.is_file().then(|| fs::read(&path).unwrap());
+                        (path.file_name().unwrap().to_os_string(), data)
+                    })
+                    .collect();
+                entries.sort();
+                entries
+            };
+            let before = snapshot();
+            assert!(
+                core.repack(options(), 1, |_| Ok(())).is_err(),
+                "{compressor:?}/{failure}"
+            );
+            assert_eq!(snapshot(), before, "{compressor:?}/{failure}");
+            assert_eq!(fs::read(&bootstrap).unwrap(), input_before);
+        }
+    }
 }

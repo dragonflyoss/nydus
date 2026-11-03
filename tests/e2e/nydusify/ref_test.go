@@ -208,13 +208,14 @@ func (r ref) mount(t testing.TB, prefetch bool) (*mount.Daemon, string, *mount.A
 	d.WaitFor(t, time.Minute, "mount at "+mnt, func() bool { return mount.IsMountpoint(mnt) })
 
 	socket := filepath.Join(work, "apiserver.sock")
+	api := mount.NewAPI(socket)
 
 	d.WaitFor(t, 10*time.Second, "apiserver at "+socket, func() bool {
-		_, err := os.Stat(socket)
+		_, err := api.Get("/metrics")
 		return err == nil
 	})
 
-	return d, mnt, mount.NewAPI(socket)
+	return d, mnt, api
 }
 
 func (r ref) extract(t testing.TB) string {

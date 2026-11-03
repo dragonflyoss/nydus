@@ -4,8 +4,8 @@ use crate::build::image::{
     device_table_meta_blkaddr, fill_image_head, head_layout, write_erofs_superblock_checksum,
 };
 use crate::build::inode::{
-    directory_inline_len, erofs_inode_size, has_inline_data, serialize_inode, symlink_is_inline,
-    InodeData, InodeInfo,
+    directory_inline_len, erofs_inode_size, has_inline_data, serialize_inode,
+    serialize_inode_remapped, symlink_is_inline, InodeData, InodeInfo,
 };
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
@@ -25,7 +25,17 @@ pub fn render_bootstrap(
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
 ) -> Result<Vec<u8>> {
-    let bootstrap = render_bootstrap_inner(inodes, epoch, device_slots, uuid)?;
+    render_bootstrap_remapped(inodes, epoch, device_slots, uuid, None)
+}
+
+pub(crate) fn render_bootstrap_remapped(
+    inodes: &mut [InodeInfo],
+    epoch: u64,
+    device_slots: &[ErofsDeviceSlot],
+    uuid: &[u8; 16],
+    device_ids: Option<&[u16]>,
+) -> Result<Vec<u8>> {
+    let bootstrap = render_bootstrap_inner(inodes, epoch, device_slots, uuid, device_ids)?;
     debug_assert_eq!(bootstrap.len() % EROFS_BLOCK_SIZE as usize, 0);
     Ok(bootstrap)
 }
@@ -568,6 +578,7 @@ fn render_bootstrap_inner(
     epoch: u64,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
+    device_ids: Option<&[u16]>,
 ) -> Result<Vec<u8>> {
     if inodes.is_empty() {
         return Err(Error::InvalidParameter(
@@ -638,7 +649,7 @@ fn render_bootstrap_inner(
     }
 
     for inode in inodes.iter() {
-        let inode_bytes = serialize_inode(inode, epoch)?;
+        let inode_bytes = serialize_inode_remapped(inode, epoch, device_ids)?;
         let offset = inode.meta_offset;
         layout.write_at(offset, &inode_bytes);
     }

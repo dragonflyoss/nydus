@@ -29,6 +29,9 @@ func TestCommandFailures(t *testing.T) {
 	}{
 		{"annotation", []string{"convert", "--source", dir, "--manifest-annotation", "bad"}, "expected key=value"},
 		{"inputs", []string{"convert"}, "source"},
+		{"prune-source", []string{"convert", "--source", dir, "--prune"}, "--prune requires --bootstrap"},
+		{"compact-source", []string{"convert", "--source", dir, "--compact-max-layers", "1"}, "--compact-max-layers requires --bootstrap"},
+		{"export-source", []string{"convert", "--source", dir, "--output-bootstrap", missing}, "--output-bootstrap requires --bootstrap"},
 		{"compressor", []string{"convert", "--source", dir, "--compressor", "invalid"}, "unsupported --compressor"},
 		{"oci-annotation", []string{"convert", "--source", dir, "--compressor", "oci-tar", "--manifest-annotation", "key=value"}, "only supported"},
 		{"chunk-overflow", []string{"convert", "--source", dir, "--chunk-size", "4294967296"}, "fit uint32"},

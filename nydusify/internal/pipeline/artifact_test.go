@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/v2/plugins/content/local"
@@ -22,6 +23,77 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+func TestConvertNydusArtifactsWithAllParentBlobsPruned(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	bootstrapPath := filepath.Join(dir, "image.boot")
+	if err := os.WriteFile(bootstrapPath, []byte("null-only bootstrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := inspectBootstrapBlobDigests
+	defer func() { inspectBootstrapBlobDigests = previous }()
+	dgst := digest.FromString("unused parent")
+	for _, tc := range []struct {
+		name             string
+		options          ArtifactOption
+		missingReference bool
+	}{
+		{
+			name: "unused parent",
+			options: ArtifactOption{ParentImages: []ParentImageMetadata{{
+				Blobs:     []ocispec.Descriptor{{Digest: dgst}},
+				BlobMetas: []nydus.BlobMetaFile{{Name: dgst.Encoded() + ".blob.meta"}},
+			}}},
+		},
+		{name: "bootstrap only"},
+		{name: "empty blob directory", options: ArtifactOption{BlobDir: t.TempDir()}},
+		{name: "missing referenced blob", missingReference: true},
+		{name: "empty directory with referenced blob", options: ArtifactOption{BlobDir: t.TempDir()}, missingReference: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inspectBootstrapBlobDigests = func(context.Context, string, string) (map[digest.Digest]struct{}, error) {
+				refs := make(map[digest.Digest]struct{})
+				if tc.missingReference {
+					refs[dgst] = struct{}{}
+				}
+				return refs, nil
+			}
+			store, err := local.NewStore(filepath.Join(t.TempDir(), "content"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.options.BootstrapPath = bootstrapPath
+			result, err := ConvertNydusArtifacts(ctx, store, tc.options)
+			if tc.missingReference {
+				if err == nil || !strings.Contains(err.Error(), "bootstrap references missing nydus blob") {
+					t.Fatalf("missing blob error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.ExternalBlobs) != 0 || len(result.LocalBlobs) != 0 {
+				t.Fatal("unused blobs retained")
+			}
+			var manifest ocispec.Manifest
+			if err := oci.ReadJSON(ctx, store, *result.Descriptor, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.Layers) != 1 || !nydus.IsBootstrap(manifest.Layers[0]) {
+				t.Fatalf("layers = %+v", manifest.Layers)
+			}
+			parent, err := LoadParentNydusArtifact(ctx, store, *result.Descriptor, platforms.All)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(parent.Blobs) != 0 || len(parent.BlobMetas) != 0 {
+				t.Fatal("null-only parent has data blobs")
+			}
+		})
+	}
+}
 
 func TestConvertNydusArtifactsBuildsImage(t *testing.T) {
 	ctx := context.Background()
@@ -363,11 +435,10 @@ func TestFilterArtifactBlobsForBootstrap(t *testing.T) {
 			wantExternal: []digest.Digest{blobA},
 		},
 		{
-			name:       "bootstrap with no device table keeps provided descriptors",
+			name:       "bootstrap with no device table drops all descriptors",
 			referenced: nil,
 			descs:      []ocispec.Descriptor{{Digest: blobA}},
 			metas:      []nydus.BlobMetaFile{{Name: blobA.Encoded() + ".blob.meta"}},
-			wantDescs:  []digest.Digest{blobA},
 		},
 	}
 

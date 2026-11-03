@@ -159,6 +159,30 @@ impl<'a> ExtentResolver<'a> {
         Ok(())
     }
 
+    /// Expand a fetched blob segment to its accessed groups, bounded by the
+    /// device table rather than by any extra bytes in the cache file.
+    pub(crate) fn push_blob_groups(&mut self, spec: BlobRangeSpec, end: u64) -> Result<()> {
+        let cache = self
+            .reader
+            .blob_cache(spec.index)
+            .with_context(|| format!("failed to open blob {}", spec.index))?;
+        let fd = cache
+            .cache_fd()
+            .with_context(|| format!("failed to get cache fd for blob {}", spec.index))?;
+        let group = cache
+            .ensure_range_with_groups(spec.offset, spec.len)
+            .with_context(|| format!("failed to fetch groups of blob {}", spec.index))?;
+        let base = spec.source_offset - spec.offset;
+        let end = group.end.min(end - base);
+        self.push(Extent::new(
+            fd,
+            group.start,
+            end - group.start,
+            base + group.start,
+        ));
+        Ok(())
+    }
+
     /// Consume the resolver and return the accumulated ranges.
     pub(crate) fn finish(self) -> Vec<Extent> {
         self.ranges

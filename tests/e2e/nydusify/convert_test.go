@@ -1,6 +1,7 @@
 package nydusify
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"os"
@@ -195,7 +196,7 @@ func TestConvertArtifact(t *testing.T) {
 	dir := env.WorkDir(t)
 	parentBoot, parentBlobs := filepath.Join(dir, "parent.boot"), filepath.Join(dir, "parent-blobs")
 	layout := fixture.MustLayout(t, "zstd")
-	fixture.BuildInto(t, parentBlobs, parentBoot, src, layout)
+	parentBlob, _ := fixture.BuildInto(t, parentBlobs, parentBoot, src, layout)
 	parentRef, childRef := reg.Ref("artifact", "parent"), reg.Ref("artifact", "child")
 
 	nydusify(t, "convert", "--bootstrap", parentBoot, "--blob-dir", parentBlobs, "--target", parentRef,
@@ -290,6 +291,211 @@ func TestConvertArtifact(t *testing.T) {
 		crossImage := ref(crossRef).pull(t, nil)
 		expectChild(t, mount.Mount(t, mount.FUSE{}, crossImage, mount.Options{}).Root)
 	})
+
+	t.Run("PruneUnusedDevice", func(t *testing.T) {
+		work := env.WorkDir(t)
+		obsolete := inputTree(t, map[string]string{"changed": "obsolete changed", "unchanged": "obsolete unchanged"})
+		deadBlob, _ := fixture.BuildInto(t, filepath.Join(work, "dead-blobs"), filepath.Join(work, "dead.boot"), obsolete, layout)
+		boot := filepath.Join(work, "image.boot")
+		env.Run(t, env.Nydus(t), "merge", deadBlob, parentBlob, "--bootstrap", boot)
+
+		original, err := os.ReadFile(boot)
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+
+		prunedRef := reg.Ref("artifact", "pruned")
+
+		nydusify(t, "convert", "--bootstrap", boot, "--blob", parentBlob, "--prune",
+			"--output-bootstrap", boot, "--target", prunedRef)
+
+		published := ref(prunedRef).image(t)
+		manifest, err := published.Manifest()
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+		if !assert.Len(t, manifest.Layers, 2) {
+			t.FailNow()
+		}
+
+		assert.Equal(t, parent.Layers[0].Digest, manifest.Layers[0].Digest)
+		final, err := os.ReadFile(boot)
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+
+		assert.False(t, bytes.Equal(original, final))
+		assert.True(t, bytes.Equal(bootstrapEntries(t, published)[bootstrapInLayer], final))
+		pruned := mount.Mount(t, mount.FUSE{}, ref(prunedRef).pull(t, nil), mount.Options{})
+
+		for _, name := range []string{"changed", "unchanged"} {
+			want, err := os.ReadFile(filepath.Join(src, name))
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			got, err := os.ReadFile(pruned.Path(name))
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			assert.True(t, bytes.Equal(want, got))
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		repo    string
+		limit   string
+		compact bool
+		layers  int
+	}{
+		{"ExportWithoutCompact", "artifact", "2", false, 3},
+		{"RemoteParentCompact", "repacked-artifact", "1", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original, err := os.ReadFile(childBoot)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			work := env.WorkDir(t)
+			boot := filepath.Join(work, "image.boot")
+			if !assert.NoError(t, os.WriteFile(boot, original, 0o600)) {
+				t.FailNow()
+			}
+
+			export := boot
+			if !tc.compact {
+				export = filepath.Join(work, "export.boot")
+			}
+
+			target := reg.Ref(tc.repo, strings.ToLower(tc.name))
+			start := len(reg.Faults.Requests())
+
+			nydusify(t, "convert", "--bootstrap", boot, "--blob-dir", childDir, "--parent-image", parentRef,
+				"--compact-max-layers", tc.limit, "--output-bootstrap", export, "--target", target)
+
+			var parentReads []registry.Request
+
+			for _, r := range reg.Faults.Requests()[start:] {
+				if parentBlobGet(r) {
+					parentReads = append(parentReads, r)
+				}
+			}
+
+			assert.Equal(t, tc.compact, len(parentReads) > 0)
+
+			for _, r := range parentReads {
+				assert.Regexp(t, `^bytes=[0-9]+-[0-9]+$`, r.Range)
+			}
+
+			published := ref(target).image(t)
+			manifest, err := published.Manifest()
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			if !assert.Len(t, manifest.Layers, tc.layers) {
+				t.FailNow()
+			}
+
+			final, err := os.ReadFile(export)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			assert.True(t, bytes.Equal(bootstrapEntries(t, published)[bootstrapInLayer], final))
+			assert.Equal(t, !tc.compact, bytes.Equal(original, final))
+			expectChild(t, mount.Mount(t, mount.FUSE{}, ref(target).pull(t, nil), mount.Options{}).Root)
+		})
+	}
+
+	t.Run("ExportFailureAfterPush", func(t *testing.T) {
+		blocked := env.WorkDir(t)
+		target := reg.Ref("artifact", "export-failure")
+
+		out, err := tryNydusify(t, "convert", "--bootstrap", childBoot, "--blob-dir", childDir,
+			"--parent-image", parentRef, "--output-bootstrap", blocked, "--target", target)
+
+		if !assert.Error(t, err) {
+			t.FailNow()
+		}
+
+		assert.Contains(t, out, "save published bootstrap")
+		manifest, err := ref(target).image(t).Manifest()
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+
+		assert.Len(t, manifest.Layers, 3)
+		entries, err := os.ReadDir(blocked)
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+
+		assert.Empty(t, entries)
+	})
+
+	for _, tc := range []struct {
+		name   string
+		repo   string
+		want   string
+		faults []registry.Fault
+	}{
+		{"ParentPublicationFailure", "rejected-artifact", "make parent blob", []registry.Fault{
+			{Status: http.StatusNotFound, Match: func(r *http.Request) bool {
+				return r.Method == http.MethodHead && r.URL.Path == "/v2/rejected-artifact/blobs/"+parent.Layers[0].Digest.String()
+			}},
+			{Status: http.StatusForbidden, Match: func(r *http.Request) bool {
+				return r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v2/rejected-artifact/blobs/uploads")
+			}},
+		}},
+		{"LocalBlobUploadFailure", "artifact", "push local artifact blob", []registry.Fault{
+			{Status: http.StatusNotFound, Match: func(r *http.Request) bool {
+				return r.Method == http.MethodHead && r.URL.Path == "/v2/artifact/blobs/"+child.Layers[1].Digest.String()
+			}},
+			{Status: http.StatusForbidden, Match: func(r *http.Request) bool {
+				return r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v2/artifact/blobs/uploads")
+			}},
+		}},
+		{"ManifestPublicationFailure", "artifact", "push ", []registry.Fault{
+			{Status: http.StatusForbidden, Match: func(r *http.Request) bool {
+				return r.Method == http.MethodPut && r.URL.Path == "/v2/artifact/manifests/ManifestPublicationFailure"
+			}},
+		}},
+		{"ParentMetadataPullFailure", "artifact", "pull parent metadata", []registry.Fault{
+			{Status: http.StatusNotFound, Match: func(r *http.Request) bool {
+				return r.URL.Path == "/v2/artifact/manifests/parent"
+			}},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			export := filepath.Join(env.WorkDir(t), "image.boot")
+			if !assert.NoError(t, os.WriteFile(export, []byte("retained bootstrap"), 0o600)) {
+				t.FailNow()
+			}
+
+			target := reg.Ref(tc.repo, tc.name)
+			reg.Faults.Set(tc.faults...)
+			t.Cleanup(reg.Faults.Clear)
+
+			out, err := tryNydusify(t, "convert", "--bootstrap", childBoot, "--blob-dir", childDir,
+				"--parent-image", parentRef, "--output-bootstrap", export, "--target", target)
+
+			if !assert.Error(t, err) {
+				t.FailNow()
+			}
+
+			assert.Contains(t, out, tc.want)
+			data, err := os.ReadFile(export)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			assert.Equal(t, "retained bootstrap", string(data))
+			ref(target).assertAbsent(t)
+		})
+	}
 
 	t.Run("MissingParentBlob", func(t *testing.T) {
 		out, err := tryNydusify(t, "convert", "--bootstrap", childBoot, "--blob-dir", childDir,

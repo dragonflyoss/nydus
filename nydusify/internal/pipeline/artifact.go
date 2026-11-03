@@ -33,6 +33,17 @@ import (
 // nydusify, such as an incremental writer that already emitted image.boot and
 // the full blob files referenced by that bootstrap.
 type ArtifactOption struct {
+	// Prune removes unreferenced bootstrap devices without reading blob data.
+	Prune bool
+	// CompactMaxLayers is the data-blob threshold; zero disables compaction.
+	CompactMaxLayers uint
+	// WorkDir retains compacted artifacts until the caller finishes uploading them.
+	WorkDir           string
+	CompactCompressor string
+	// OpenCompactBlob opens a seekable registry reader only when compact needs data.
+	OpenCompactBlob func(context.Context, ocispec.Descriptor, string) (io.ReadSeekCloser, error)
+	// Private configuration of the transient range backend used by repack.
+	repackConfig string
 	// BuilderPath is the nydus binary used to inspect the bootstrap metadata.
 	BuilderPath string
 	// BootstrapPath is the writer-produced nydus bootstrap to pack as
@@ -79,7 +90,14 @@ type LocalBlob struct {
 // pushed. External blobs already belong to the parent repository; local blobs
 // must be uploaded directly from Path.
 type ArtifactResult struct {
-	Descriptor    *ocispec.Descriptor
+	// Pruned reports whether unused source devices were removed.
+	Pruned bool
+	// Compacted reports whether live data blobs were merged into a new blob.
+	Compacted  bool
+	Descriptor *ocispec.Descriptor
+	// BootstrapPath remains valid until the caller removes WorkDir. Sources must
+	// stay unchanged through packaging, upload and optional local export.
+	BootstrapPath string
 	ExternalBlobs []ocispec.Descriptor
 	LocalBlobs    []LocalBlob
 }
@@ -88,7 +106,13 @@ type ArtifactResult struct {
 // files into an OCI nydus image rooted at a single manifest descriptor. It
 // leaves local data blobs at their source paths so callers can upload them
 // directly instead of copying them through the content store.
-func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOption) (*ArtifactResult, error) {
+func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOption) (_ *ArtifactResult, retErr error) {
+	var repackWork string
+	defer func() {
+		if retErr != nil && repackWork != "" {
+			_ = os.RemoveAll(repackWork)
+		}
+	}()
 	if opt.BootstrapPath == "" {
 		return nil, errors.New("--bootstrap is required when packaging nydus artifacts")
 	}
@@ -96,10 +120,7 @@ func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOp
 		opt.Platform = platforms.DefaultSpec()
 	}
 
-	bootstrapData, err := os.ReadFile(opt.BootstrapPath)
-	if err != nil {
-		return nil, errors.Wrapf(err, "read bootstrap %q", opt.BootstrapPath)
-	}
+	bootstrapPath := opt.BootstrapPath
 	appendFiles, err := validateAndReadAppendFiles(opt.AppendInBootstrap)
 	if err != nil {
 		return nil, err
@@ -108,67 +129,126 @@ func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOp
 	if err != nil {
 		return nil, err
 	}
-	if len(blobPaths) == 0 && len(opt.ParentImages) == 0 {
-		return nil, errors.New("at least one --blob/--blob-dir or --parent-image is required")
-	}
 	if len(opt.ParentImages) > 1 {
 		return nil, errors.New("only one --parent-image is supported")
 	}
-	referenced, err := inspectBootstrapBlobDigests(ctx, opt.BuilderPath, opt.BootstrapPath)
-	if err != nil {
-		return nil, err
-	}
-	blobPaths = filterArtifactBlobPaths(blobPaths, referenced)
-
 	blobDescs := make([]ocispec.Descriptor, 0, len(blobPaths))
 	blobMetas := make([]nydus.BlobMetaFile, 0, len(blobPaths))
 	externalBlobs := make([]ocispec.Descriptor, 0)
 	localBlobs := make([]LocalBlob, 0, len(blobPaths))
 	var baseConfig json.RawMessage
 	var manifestAnnotations map[string]string
-	for _, parent := range opt.ParentImages {
-		blobDescs = append(blobDescs, parent.Blobs...)
-		blobMetas = append(blobMetas, parent.BlobMetas...)
-		externalBlobs = append(externalBlobs, parent.Blobs...)
-		if len(parent.Config) > 0 {
-			baseConfig = parent.Config
+	var compactPaths map[digest.Digest]string
+	prepare := func(referenced map[digest.Digest]struct{}) error {
+		blobPaths = filterArtifactBlobPaths(blobPaths, referenced)
+		for _, parent := range opt.ParentImages {
+			blobDescs = append(blobDescs, parent.Blobs...)
+			blobMetas = append(blobMetas, parent.BlobMetas...)
+			externalBlobs = append(externalBlobs, parent.Blobs...)
+			if len(parent.Config) > 0 {
+				baseConfig = parent.Config
+			}
+			for key, value := range parent.Annotations {
+				if manifestAnnotations == nil {
+					manifestAnnotations = make(map[string]string)
+				}
+				manifestAnnotations[key] = value
+			}
 		}
-		for key, value := range parent.Annotations {
+		for key, value := range opt.Annotations {
 			if manifestAnnotations == nil {
 				manifestAnnotations = make(map[string]string)
 			}
 			manifestAnnotations[key] = value
 		}
-	}
-	for key, value := range opt.Annotations {
-		if manifestAnnotations == nil {
-			manifestAnnotations = make(map[string]string)
-		}
-		manifestAnnotations[key] = value
-	}
 
-	for _, path := range blobPaths {
-		desc, meta, err := describeArtifactBlob(path)
+		for _, path := range blobPaths {
+			desc, meta, err := describeArtifactBlob(path)
+			if err != nil {
+				return errors.Wrapf(err, "inspect blob %q", path)
+			}
+			blobDescs = append(blobDescs, desc)
+			blobMetas = append(blobMetas, meta)
+			localBlobs = append(localBlobs, LocalBlob{Path: path, Descriptor: desc})
+		}
+		// Preserve local data sources independently of which descriptors need upload.
+		if opt.Prune || opt.CompactMaxLayers > 0 {
+			compactPaths = make(map[digest.Digest]string, len(localBlobs))
+			for _, blob := range localBlobs {
+				compactPaths[blob.Descriptor.Digest] = blob.Path
+			}
+		}
+		blobDescs, blobMetas, externalBlobs, localBlobs, err = deduplicateArtifactBlobs(blobDescs, blobMetas, externalBlobs, localBlobs)
 		if err != nil {
-			return nil, errors.Wrapf(err, "inspect blob %q", path)
+			return err
 		}
-		blobDescs = append(blobDescs, desc)
-		blobMetas = append(blobMetas, meta)
-		localBlobs = append(localBlobs, LocalBlob{Path: path, Descriptor: desc})
-	}
-	blobDescs, blobMetas, externalBlobs, localBlobs, err = deduplicateArtifactBlobs(blobDescs, blobMetas, externalBlobs, localBlobs)
-	if err != nil {
-		return nil, err
-	}
-	blobDescs, blobMetas, externalBlobs, localBlobs, err = filterArtifactBlobsByReferences(referenced, blobDescs, blobMetas, externalBlobs, localBlobs)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateArtifactBlobMetas(blobDescs, blobMetas); err != nil {
-		return nil, err
+		blobDescs, blobMetas, externalBlobs, localBlobs, err = filterArtifactBlobsByReferences(referenced, blobDescs, blobMetas, externalBlobs, localBlobs)
+		if err != nil {
+			return err
+		}
+		if err := validateArtifactBlobMetas(blobDescs, blobMetas); err != nil {
+			return err
+		}
+		return nil
 	}
 
-	bootstrapDesc, err := oci.WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas, appendFiles)
+	var compacted, pruned bool
+	if opt.Prune || opt.CompactMaxLayers > 0 {
+		// The number of supplied blobs bounds the live count before pruning.
+		// Avoid starting a remote backend when compaction cannot trigger.
+		sourceBlobCount := len(blobPaths)
+		for _, parent := range opt.ParentImages {
+			sourceBlobCount += len(parent.Blobs)
+		}
+		report, work, err := repackArtifact(ctx, opt, sourceBlobCount, func(plan repackReport, blobs string) error {
+			referenced, err := plan.references()
+			if err != nil {
+				return err
+			}
+			if err := prepare(referenced); err != nil {
+				return err
+			}
+			if plan.Compacted {
+				return stageRepackBlobs(opt, blobDescs, compactPaths, blobs, blobMetas)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		repackWork = work
+		compacted, pruned = report.Compacted, report.Pruned
+		if compacted || pruned {
+			bootstrapPath = filepath.Join(work, "output", "image.boot")
+		} else {
+			_ = os.RemoveAll(work)
+			repackWork = ""
+		}
+		if compacted {
+			if len(report.Blobs) != 1 {
+				return nil, errors.Errorf("compact produced %d blobs, expected one", len(report.Blobs))
+			}
+			path := filepath.Join(work, "output", report.Blobs[0])
+			desc, meta, err := describeArtifactBlob(path)
+			if err != nil {
+				return nil, err
+			}
+			blobDescs = []ocispec.Descriptor{desc}
+			blobMetas = []nydus.BlobMetaFile{meta}
+			localBlobs = []LocalBlob{{Path: path, Descriptor: desc}}
+			externalBlobs = nil
+		}
+	} else {
+		referenced, err := inspectBootstrapBlobDigests(ctx, opt.BuilderPath, opt.BootstrapPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := prepare(referenced); err != nil {
+			return nil, err
+		}
+	}
+
+	bootstrapDesc, err := oci.WriteBootstrapLayerFromFile(ctx, cs, bootstrapPath, blobMetas, appendFiles)
 	if err != nil {
 		return nil, errors.Wrap(err, "write bootstrap layer")
 	}
@@ -178,7 +258,10 @@ func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOp
 		return nil, err
 	}
 	return &ArtifactResult{
+		Compacted:     compacted,
+		Pruned:        pruned,
 		Descriptor:    manifestDesc,
+		BootstrapPath: bootstrapPath,
 		ExternalBlobs: externalBlobs,
 		LocalBlobs:    localBlobs,
 	}, nil
@@ -207,6 +290,9 @@ func LoadParentNydusArtifact(ctx context.Context, cs content.Store, rootDesc oci
 	}
 	metas, err := readBootstrapBlobMetas(ctx, cs, *bootstrap)
 	if err != nil {
+		return ParentImageMetadata{}, err
+	}
+	if err := validateArtifactBlobMetas(blobs, metas); err != nil {
 		return ParentImageMetadata{}, err
 	}
 	var config json.RawMessage
@@ -301,9 +387,6 @@ func readBootstrapBlobMetas(ctx context.Context, cs content.Store, desc ocispec.
 	if err != nil {
 		return nil, err
 	}
-	if len(metas) == 0 {
-		return nil, errors.New("parent bootstrap layer has no blob meta files")
-	}
 	return metas, nil
 }
 
@@ -345,10 +428,6 @@ func filterArtifactBlobsByReferences(
 	externalBlobs []ocispec.Descriptor,
 	localBlobs []LocalBlob,
 ) ([]ocispec.Descriptor, []nydus.BlobMetaFile, []ocispec.Descriptor, []LocalBlob, error) {
-	if len(referenced) == 0 {
-		return blobDescs, blobMetas, externalBlobs, localBlobs, nil
-	}
-
 	provided := make(map[digest.Digest]struct{}, len(blobDescs))
 	for _, desc := range blobDescs {
 		provided[desc.Digest] = struct{}{}
@@ -485,7 +564,7 @@ func collectArtifactBlobPaths(paths []string, dir string) ([]string, error) {
 
 func filterArtifactBlobPaths(paths []string, referenced map[digest.Digest]struct{}) []string {
 	if len(referenced) == 0 {
-		return paths
+		return nil
 	}
 	filtered := paths[:0]
 	for _, path := range paths {

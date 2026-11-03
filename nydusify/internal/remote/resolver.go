@@ -64,6 +64,10 @@ func NewDockerConfigCredFunc() CredentialFunc {
 // NewResolver builds a docker registry resolver that handles authentication,
 // optional TLS verification skipping, and optional plain HTTP.
 func NewResolver(insecure, plainHTTP bool, credFunc CredentialFunc) remotes.Resolver {
+	return newResolver(insecure, plainHTTP, credFunc, newHTTPClient(insecure))
+}
+
+func newResolver(insecure, plainHTTP bool, credFunc CredentialFunc, client *http.Client) remotes.Resolver {
 	registryHosts := docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(
 			docker.NewDockerAuthorizer(
@@ -71,7 +75,7 @@ func NewResolver(insecure, plainHTTP bool, credFunc CredentialFunc) remotes.Reso
 				docker.WithAuthCreds(credFunc),
 			),
 		),
-		docker.WithClient(newHTTPClient(insecure)),
+		docker.WithClient(client),
 		docker.WithPlainHTTP(func(_ string) (bool, error) {
 			return plainHTTP, nil
 		}),

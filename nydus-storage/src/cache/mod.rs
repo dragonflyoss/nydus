@@ -120,6 +120,21 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
+    /// Ensure the range as in [`Self::ensure_range`], returning its complete
+    /// logical groups (including padding) for chunked caches, or the exact
+    /// request otherwise. Only requested groups are traced and returned;
+    /// read-ahead groups are excluded. Boundaries need not align to host pages.
+    /// Empty requests do no I/O; overflow and fetch failures return errors.
+    fn ensure_range_with_groups(&self, offset: u64, len: u64) -> io::Result<Range<u64>> {
+        let end = offset.checked_add(len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
+        })?;
+        if len != 0 {
+            self.ensure_range(offset, len)?;
+        }
+        Ok(offset..end)
+    }
+
     /// Return ready byte intervals overlapping `[offset, offset + len)`.
     /// This must not trigger backend fetch.
     fn ready_ranges(&self, _offset: u64, _len: u64) -> io::Result<Vec<Range<u64>>> {
