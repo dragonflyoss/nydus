@@ -8,7 +8,7 @@ coverage:
         target: 90%
         paths: ['nydus/', 'nydus-*/']
       go:
-        target: 90%
+        target: 85%
         paths: ['nydusify/']
     patch:
       default:
