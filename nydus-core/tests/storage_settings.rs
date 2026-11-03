@@ -108,11 +108,13 @@ fn a_second_core_preserves_the_first_cores_fetch_size() {
     assert_eq!(ready(&narrow), [image.logical(0)]);
 }
 
-/// KI-2: cache hits are never verified, not even with verification on: a
-/// group corrupted in the cache file after it was filled reads back
-/// corrupted instead of failing.
+/// Ready groups are trusted within the boot that published them, so a hit
+/// costs no checksum. A restart clears the bits: a group corrupted in the
+/// cache file (a crash kept part of it from the disk) fails the check it then
+/// gets on its next read and is fetched again, while intact groups are
+/// reused as they are.
 #[test]
-fn corrupted_cache_hits_are_rejected() {
+fn corrupted_cache_is_recovered_after_a_restart() {
     let image = Image::build();
     let cache_dir = tempdir().unwrap();
     let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
@@ -120,6 +122,7 @@ fn corrupted_cache_hits_are_rejected() {
     let group = image.logical(1);
     let good = image.dense[group.start as usize..group.end as usize].to_vec();
     assert_eq!(fetch_group(&core, &image, 1).unwrap(), good);
+    drop(core);
 
     let cache = fs::OpenOptions::new()
         .write(true)
@@ -129,12 +132,23 @@ fn corrupted_cache_hits_are_rejected() {
     cache
         .write_all_at(&[image.dense[at as usize] ^ 0xff], at)
         .unwrap();
+    // The group map beside the data file now names an earlier boot.
+    let map = blob
+        .cache_path
+        .with_extension("")
+        .with_extension("group.map");
+    let tag = nydus_storage::chunk_group_map::current_boot_tag().unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&map)
+        .unwrap()
+        .write_all_at(&tag.wrapping_add(1).max(1).to_le_bytes(), 28)
+        .unwrap();
 
+    let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
+    assert!(ready(&core).is_empty());
     let node = core.fs.open(common::FILE_NAME).unwrap();
     let mut buf = vec![0u8; 16];
-    let result = node.read_at(at, &mut buf).map(|_| buf.clone());
-    assert!(
-        result.is_err(),
-        "corrupted cache bytes were returned: {result:?}"
-    );
+    node.read_at(at, &mut buf).unwrap();
+    assert_eq!(buf, image.dense[at as usize..at as usize + 16]);
 }

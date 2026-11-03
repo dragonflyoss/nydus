@@ -312,7 +312,7 @@ pub fn decode_chunk_group_from_window<'a>(
         decoded.as_slice()
     };
 
-    validate_group_payload(blob_metadata, group, payload, skip_verify_checksums)?;
+    validate_decoded_chunk_group(group, payload, skip_verify_checksums)?;
     Ok(payload)
 }
 
@@ -500,26 +500,47 @@ pub fn validate_decoded_chunk_group(
     Ok(())
 }
 
-/// Validate both the transport checksum and the stored content identity.
-pub(crate) fn validate_group_payload(
+/// Whether `span`, the bytes of `group`'s span of a cache file (its chunks on
+/// their blocks), holds the group intact: the chunk lengths add up and the
+/// chunks match the group's crc32c and, when the blob meta records one, its
+/// digest. The check is unconditional, `skip_verify_checksums` or not: it
+/// decides whether bytes found in the cache file, which a power loss may have
+/// left partly unwritten, can be published as ready without a fetch.
+pub(crate) fn cached_chunk_group_is_intact(
     metadata: &BlobMetadata,
     group: &BlobMetadataChunkGroupExtent,
-    payload: &[u8],
-    skip_verify_checksums: bool,
-) -> io::Result<()> {
-    validate_decoded_chunk_group(group, payload, skip_verify_checksums)?;
-    if !skip_verify_checksums {
-        if let Some(expected) = metadata.chunk_group_digest(group.index() as usize) {
-            let actual = nydus_format::blob::BlobMetadataChunkGroupDigest::from_chunks([payload]);
-            if expected != actual {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "chunk group digest mismatch",
-                ));
-            }
-        }
+    span: &[u8],
+) -> bool {
+    let block = nydus_format::erofs::EROFS_BLOCK_SIZE as usize;
+    let mut chunks = Vec::with_capacity(group.chunk_range().len());
+    let mut at = 0usize;
+    for index in group.chunk_range() {
+        let Some(length) = metadata.chunk_length(index) else {
+            return false;
+        };
+        let length = length as usize;
+        let Some(chunk) = at.checked_add(length).and_then(|end| span.get(at..end)) else {
+            return false;
+        };
+        chunks.push(chunk);
+        at += length.div_ceil(block) * block;
     }
-    Ok(())
+    let length: u64 = chunks.iter().map(|chunk| chunk.len() as u64).sum();
+    if length != u64::from(group.uncompressed_size()) {
+        return false;
+    }
+    let crc32 = chunks
+        .iter()
+        .fold(0, |crc32, chunk| crc32c::crc32c_append(crc32, chunk));
+    if crc32 != group.uncompressed_crc32() {
+        return false;
+    }
+    match metadata.chunk_group_digest(group.index() as usize) {
+        Some(expected) => {
+            nydus_format::blob::BlobMetadataChunkGroupDigest::from_chunks(chunks) == expected
+        }
+        None => true,
+    }
 }
 
 /// Marker error wrapped in an [`io::Error`] when a decoded chunk group fails
@@ -565,7 +586,7 @@ mod tests {
     use nydus_format::blob::BlobMetadataDigester;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_test_utils::blob::uncompressed_data;
-    use nydus_test_utils::metadata::from_chunk_groups;
+    use nydus_test_utils::metadata::{from_chunk_groups, with_wrong_chunk_group_digest};
 
     #[test]
     fn group_buffer_reuses_and_releases_large_mappings() {
@@ -719,35 +740,16 @@ mod tests {
         let group = metadata.chunk_group(0).unwrap();
         validate_decoded_chunk_group(&group, &data, false).unwrap();
 
-        // A wrong digest is not checked: the digests name content, the crc
-        // guards it.
-        let mut digests: Vec<_> = metadata.chunk_group_digests().collect();
-        digests[0] = nydus_format::blob::BlobMetadataChunkGroupDigest::new([0; 32]);
-        let wrong = BlobMetadata::new(
-            4,
-            1,
-            BlobMetadataCompressor::None,
-            Some(BlobMetadataDigester::Blake3),
-            vec![
-                nydus_format::blob::BlobMetadataChunkGroup::new(
-                    0,
-                    0,
-                    0,
-                    data.len() as u32,
-                    group.uncompressed_crc32(),
-                ),
-                nydus_format::blob::BlobMetadataChunkGroup::new(data.len() as u64, 3, 2, 0, 0),
-            ],
-            vec![
-                nydus_format::blob::BlobMetadataChunkLength::new(100),
-                nydus_format::blob::BlobMetadataChunkLength::new(5000),
-            ],
-            digests,
-            Vec::new(),
-        )
-        .unwrap();
+        // A fetched group is not checked against its digest: the digests name
+        // content, the crc guards the transfer.
+        let wrong = with_wrong_chunk_group_digest(&metadata, 0);
         let wrong_group = wrong.chunk_group(0).unwrap();
         validate_decoded_chunk_group(&wrong_group, &data, false).unwrap();
+        let mut decoded = Vec::new();
+        let payload =
+            decode_chunk_group_from_window(&wrong, &wrong_group, 0, &data, &mut decoded, false)
+                .unwrap();
+        assert_eq!(payload, data.as_slice());
 
         // A corrupted payload fails the crc.
         let mut corrupted = data.clone();
@@ -875,6 +877,83 @@ mod tests {
 
         for (err, expected) in test_cases {
             assert_eq!(write_failure_reason(&err), expected, "{err}");
+        }
+    }
+
+    /// A group found in the cache file is intact only when every chunk on its
+    /// blocks matches: a lost page of data, a stray byte or a span cut short
+    /// is rejected, with or without a digest; a lost page that held zeros
+    /// anyway is, correctly, intact. With a digest, the crc alone is not
+    /// enough.
+    #[test]
+    fn cached_chunk_groups_are_intact_only_when_every_chunk_matches() {
+        let block = EROFS_BLOCK_SIZE as usize;
+        let mut data_page = vec![0x5au8; block];
+        data_page[7] = 1;
+        let groups = vec![
+            // A full chunk spanning a zero page and a data page, then a chunk
+            // short of a block (its tail is padding outside the payload).
+            vec![
+                [vec![0u8; block], data_page.clone()].concat(),
+                vec![0x77; 100],
+            ],
+            vec![vec![0x33; 3 * block]],
+        ];
+        let image = uncompressed_data(&groups);
+        for digester in [Some(BlobMetadataDigester::Blake3), None] {
+            let (_, meta) = from_chunk_groups(
+                BlobMetadataCompressor::Zstd,
+                4 * EROFS_BLOCK_SIZE,
+                &groups,
+                digester,
+            );
+            for index in 0..groups.len() {
+                let group = meta.chunk_group(index).unwrap();
+                let range = group.logical_range();
+                let span = &image[range.start as usize..range.end as usize];
+                assert!(cached_chunk_group_is_intact(&meta, &group, span), "{index}");
+
+                let mut lost = span.to_vec();
+                lost[block..2 * block].fill(0);
+                let mut flipped = span.to_vec();
+                flipped[block + 9] ^= 0x10;
+                assert!(
+                    !cached_chunk_group_is_intact(&meta, &group, &lost),
+                    "{index}"
+                );
+                assert!(
+                    !cached_chunk_group_is_intact(&meta, &group, &flipped),
+                    "{index}"
+                );
+                assert!(!cached_chunk_group_is_intact(
+                    &meta,
+                    &group,
+                    &span[..span.len() - block]
+                ));
+                assert!(!cached_chunk_group_is_intact(
+                    &meta,
+                    &group,
+                    &vec![0u8; span.len()]
+                ));
+            }
+            let group = meta.chunk_group(0).unwrap();
+            let mut zero_page_lost = image[..group.logical_size() as usize].to_vec();
+            zero_page_lost[..block].fill(0);
+            assert!(cached_chunk_group_is_intact(&meta, &group, &zero_page_lost));
+            // Padding is not part of the payload.
+            let mut padding = image[..group.logical_size() as usize].to_vec();
+            *padding.last_mut().unwrap() = 0xee;
+            assert!(cached_chunk_group_is_intact(&meta, &group, &padding));
+            // With a digest, matching the crc is not enough.
+            if digester.is_some() {
+                let wrong = with_wrong_chunk_group_digest(&meta, 0);
+                let span = &image[..group.logical_size() as usize];
+                assert!(!cached_chunk_group_is_intact(
+                    &wrong,
+                    &wrong.chunk_group(0).unwrap(),
+                    span
+                ));
+            }
         }
     }
 }

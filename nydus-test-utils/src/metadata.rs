@@ -153,13 +153,33 @@ pub fn single_chunk_group_ondemand(payload: &[u8], source_blob_index: u16) -> Bl
 
 /// A copy claiming a wrong CRC32C for `group`, with the other entries kept.
 pub fn with_wrong_chunk_group_checksum(blob_metadata: &BlobMetadata, group: usize) -> BlobMetadata {
+    rebuild(blob_metadata, group, true, false)
+}
+
+/// A copy claiming a wrong digest for `group`, with the other entries kept.
+/// The blob meta must have digests.
+pub fn with_wrong_chunk_group_digest(blob_metadata: &BlobMetadata, group: usize) -> BlobMetadata {
+    rebuild(blob_metadata, group, false, true)
+}
+
+fn rebuild(
+    blob_metadata: &BlobMetadata,
+    group: usize,
+    wrong_checksum: bool,
+    wrong_digest: bool,
+) -> BlobMetadata {
     assert!(
         !blob_metadata.is_ondemand() && !blob_metadata.is_incremental(),
         "only a plain blob meta can be rebuilt"
     );
     assert!(group < blob_metadata.chunk_group_count());
     let digester = blob_metadata.digester().unwrap();
-    let digests = blob_metadata.chunk_group_digests().collect();
+    let mut digests: Vec<_> = blob_metadata.chunk_group_digests().collect();
+    if wrong_digest {
+        let mut digest = digests[group].get();
+        digest[0] ^= 1;
+        digests[group] = BlobMetadataChunkGroupDigest::new(digest);
+    }
 
     let mut chunk_groups: Vec<_> = blob_metadata
         .chunk_groups()
@@ -170,7 +190,7 @@ pub fn with_wrong_chunk_group_checksum(blob_metadata: &BlobMetadata, group: usiz
                 chunk_group.logical_block_offset() as u32,
                 chunk_group.first_chunk_index(),
                 chunk_group.uncompressed_size(),
-                chunk_group.uncompressed_crc32() ^ u32::from(index == group),
+                chunk_group.uncompressed_crc32() ^ u32::from(wrong_checksum && index == group),
             )
         })
         .collect();
@@ -230,6 +250,31 @@ mod tests {
                 left.uncompressed_crc32(),
                 right.uncompressed_crc32() ^ u32::from(index == 1)
             );
+            assert_eq!(left.logical_range(), right.logical_range());
+        }
+    }
+
+    #[test]
+    fn wrong_chunk_group_digest_changes_only_that_digest() {
+        let chunk_groups = vec![vec![vec![0x11; 4096]], vec![vec![0x22; 4096]]];
+        let (_, blob_metadata) = from_chunk_groups(
+            BlobMetadataCompressor::Zstd,
+            4096,
+            &chunk_groups,
+            Some(BlobMetadataDigester::Blake3),
+        );
+        let tampered = with_wrong_chunk_group_digest(&blob_metadata, 1);
+        assert_eq!(
+            tampered.chunk_group_digest(0),
+            blob_metadata.chunk_group_digest(0)
+        );
+        assert_ne!(
+            tampered.chunk_group_digest(1),
+            blob_metadata.chunk_group_digest(1)
+        );
+        for (left, right) in tampered.chunk_groups().zip(blob_metadata.chunk_groups()) {
+            assert_eq!(left.compressed_range(), right.compressed_range());
+            assert_eq!(left.uncompressed_crc32(), right.uncompressed_crc32());
             assert_eq!(left.logical_range(), right.logical_range());
         }
     }
