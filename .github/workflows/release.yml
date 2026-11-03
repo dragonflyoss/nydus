@@ -141,5 +141,5 @@ jobs:
         run: |
           gh release delete nightly --cleanup-tag --yes || true
           gh release create nightly nydus-tarball/* --prerelease --target "$GITHUB_SHA" \
-            --title "Nydus development (prerelease) build" \
+            --title "Nydus nightly" \
             --notes "Nightly build of ${GITHUB_REF_NAME} at ${GITHUB_SHA}. Not a stable release."
