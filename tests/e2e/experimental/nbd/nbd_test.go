@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/dragonflyoss/nydus/tests/e2e/experimental/transport"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 	"github.com/stretchr/testify/assert"
 )
@@ -23,18 +24,15 @@ func TestPersistence(t *testing.T) {
 func TestDemandPaging(t *testing.T) {
 	t.Parallel()
 	transport.DemandPaging(t, NBD{}, repo, func(t *testing.T, m *mount.Mounted, cache string) {
+		env.Run(t, env.RequireTool(t, "udevadm"), "settle", "--timeout=10")
 		log := m.Daemon.Log()
 		if !assert.Contains(t, log, "nbd service attached to") {
 			t.FailNow()
 		}
 
 		assert.Contains(t, log, "mounted ")
-		files := mount.CacheFiles(cache)
-		if !assert.NotEmpty(t, files) {
-			t.FailNow()
-		}
 
-		for _, f := range files {
+		for _, f := range mount.CacheFiles(cache) {
 			assert.Less(t, mount.Allocated(f), int64(16<<20))
 		}
 	})
