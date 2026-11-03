@@ -15,6 +15,8 @@ jobs:
     name: Soak
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      COVERAGE: 1
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -41,9 +43,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          bash tests/scripts/install_ci_packages.sh acl attr erofs-utils fuse3
+          sudo apt-get update
+          sudo apt-get install -y acl attr erofs-utils fuse3
           sudo modprobe fuse
           sudo modprobe erofs
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Build binaries
         run: make build-coverage FEATURES=cli,fuse,fileio
@@ -52,7 +60,7 @@ jobs:
         run: make e2e-soak E2E_PARALLEL=4
 
       - name: Export coverage
-        run: bash tests/scripts/e2e_coverage.sh export
+        run: make coverage-report
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -93,7 +101,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          bash tests/scripts/install_ci_packages.sh erofs-utils fuse3
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils fuse3
           sudo modprobe fuse
 
       - name: Run E2E test

@@ -2,66 +2,128 @@ package build
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/fixture"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/mount"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/oracle"
-	"github.com/stretchr/testify/require"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/erofs"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fixture"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
+	"github.com/stretchr/testify/assert"
 )
 
-// TestMerge merges the three layers of the layers corpus (every whiteout
-// form, type changes, a hardlink group broken by an upper layer) built with
-// each merge layout, and checks the merged bootstrap: device table, fsck,
-// `nydus check`, reproducibility, and that a FUSE mount reproduces the OCI
-// overlay of the layers.
 func TestMerge(t *testing.T) {
 	t.Parallel()
 	for _, name := range fixture.MergeLayouts {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			layout, err := fixture.LayoutByName(name)
-			require.NoError(t, err)
+			layout := fixture.MustLayout(t, name)
 			dir := env.WorkDir(t)
 			blobDir := filepath.Join(dir, "blobs")
 			merged := filepath.Join(dir, "merged.bootstrap")
 
 			args := []string{"merge", "--bootstrap", merged}
 			var blobs []string
+
 			for i, layer := range fixture.LayerDirs(t) {
 				bootstrap := filepath.Join(dir, fmt.Sprintf("layer%d.bootstrap", i+1))
 				blob, _ := fixture.BuildInto(t, blobDir, bootstrap, layer, layout)
 				blobs = append(blobs, blob)
 			}
-			fixture.Run(t, env.Nydus(t), append(args, blobs...)...)
 
-			tags, err := oracle.ErofsDeviceTags(merged)
-			require.NoError(t, err)
+			env.Run(t, env.Nydus(t), append(args, blobs...)...)
+
+			tags, err := erofs.DeviceTags(merged)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
 			var want []string
+
 			for _, blob := range blobs {
 				want = append(want, filepath.Base(blob))
 			}
-			require.Equal(t, want, tags, "device table is the layers, lowest first")
-			if fsckDecodes(t, layout) {
-				oracle.FsckErofs(t, merged, blobDir)
+
+			assert.Equal(t, want, tags)
+
+			if erofs.FsckDecodes(t, layout.Compressor()) {
+				erofs.Fsck(t, merged, blobDir)
 			}
+
 			requireVerified(t, merged, blobDir, blobs)
 
 			cached := fixture.Merged(t, layout)
-			require.Equal(t, fileSHA256(t, cached.Bootstrap), fileSHA256(t, merged), "merged bootstrap differs from the cached merge")
+			if !assert.Equal(t, fstest.FileSHA256(t, cached.Bootstrap), fstest.FileSHA256(t, merged)) {
+				t.FailNow()
+			}
 
 			img := cached
 			img.Bootstrap, img.BlobDir, img.Blobs = merged, blobDir, blobs
 			m := mount.Mount(t, mount.FUSE{}, img, mount.Options{})
-			oracle.VerifyMount(t, m.Root, img.Want, img.Compare())
+			fstest.VerifyMount(t, m.Root, img.Want, img.Compare())
+
 			if !layout.Native {
-				// Every layer has a visible file, all of which were just read.
 				requireCacheArtifacts(t, m.CacheDir, blobs)
 			}
 
-			oracle.CompareTree(t, withMergedNlink(img.Want), oracle.ScanTree(t, m.Root), oracle.CompareOptions{Nlink: true})
+			fstest.CompareTree(t, withMergedNlink(img.Want), fstest.ScanTree(t, m.Root), fstest.CompareOptions{Nlink: true})
 		})
+	}
+}
+
+func withMergedNlink(entries []fstest.Entry) []fstest.Entry {
+	members := map[fstest.Bytes]uint64{}
+
+	for _, entry := range entries {
+		if entry.Link != "" {
+			members[entry.Link]++
+		}
+	}
+
+	out := make([]fstest.Entry, len(entries))
+	copy(out, entries)
+
+	for i := range out {
+		if out[i].Type == fstest.TypeDir {
+			continue
+		}
+
+		out[i].Nlink = 1
+		if out[i].Link != "" {
+			out[i].Nlink = members[out[i].Link]
+		}
+	}
+
+	return out
+}
+
+func requireCacheArtifacts(t testing.TB, cacheDir string, blobs []string) {
+	t.Helper()
+	entries, err := os.ReadDir(cacheDir)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	counts := map[string]int{}
+
+	for _, entry := range entries {
+		for _, suffix := range []string{mount.CacheDataSuffix, mount.CacheMapSuffix, mount.CacheMetaSuffix} {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), suffix) {
+				counts[suffix]++
+			}
+		}
+	}
+
+	for _, suffix := range []string{mount.CacheDataSuffix, mount.CacheMapSuffix, mount.CacheMetaSuffix} {
+		if !assert.Equal(t, len(blobs), counts[suffix]) {
+			t.FailNow()
+		}
+
+		for _, blob := range blobs {
+			assert.FileExists(t, filepath.Join(cacheDir, filepath.Base(blob)+suffix))
+		}
 	}
 }

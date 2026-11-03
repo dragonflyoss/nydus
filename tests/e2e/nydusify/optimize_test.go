@@ -1,38 +1,37 @@
 package nydusify
 
 import (
-	"fmt"
+	"encoding/json"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/env"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/oracle"
-	"github.com/dragonflyoss/nydus/tests/e2e/internal/registry"
-	"github.com/stretchr/testify/require"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/corpus"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/registry"
+	"github.com/stretchr/testify/assert"
 )
 
-// TestOptimize runs the image-level optimize pipeline: record a workload on
-// a mount of the converted image, `nydusify optimize --trace-file` it into an
-// ondemand blob, and mount the optimized image with prefetch on a cold
-// cache. Prefetch must land every traced chunk group in its source blob's
-// cache through the ondemand blob alone, so replaying the workload reads
-// nothing on demand. The optimized image still converts back to OCI.
 func TestOptimize(t *testing.T) {
 	t.Parallel()
 	env.RequireRoot(t)
 
-	// Four incompressible files, each spanning more than one 2MiB chunk.
 	srcDir := filepath.Join(env.WorkDir(t), "src")
-	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "data"), 0o755))
-	rng := rand.New(rand.NewSource(20261019))
-	for i := 1; i <= 4; i++ {
-		data := make([]byte, 2<<20+i*64<<10)
-		_, _ = rng.Read(data)
-		require.NoError(t, os.WriteFile(filepath.Join(srcDir, "data", fmt.Sprintf("file%d", i)), data, 0o644))
+	if !assert.NoError(t, os.MkdirAll(filepath.Join(srcDir, "data"), 0o755)) {
+		t.FailNow()
 	}
+
+	for i, name := range []string{"partial", "unread", "first", "last"} {
+		data := corpus.Bytes(uint64(20261019+i), 2<<20+(i+1)*64<<10)
+		if !assert.NoError(t, os.WriteFile(filepath.Join(srcDir, "data", name), data, 0o644)) {
+			t.FailNow()
+		}
+	}
+
 	src := newSource(t, "optimize", srcDir)
 
 	reg := registry.Start(t)
@@ -43,64 +42,133 @@ func TestOptimize(t *testing.T) {
 	nydusify(t, "convert", "--source", srcRef, "--target", nydusRef)
 	nydusify(t, "check", "--source", srcRef, "--target", nydusRef)
 
-	// Two whole files and the head of a third, out of order.
 	workload := func(mnt string) {
-		for _, name := range []string{"file3", "file1", "file4"} {
+		for _, name := range []string{"first", "partial", "last"} {
 			f, err := os.Open(filepath.Join(mnt, "data", name))
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
 			var r io.Reader = f
-			if name == "file1" {
+			if name == "partial" {
 				r = io.LimitReader(f, 100<<10)
 			}
+
 			_, err = io.Copy(io.Discard, r)
-			require.NoError(t, f.Close())
-			require.NoError(t, err, "read %s", name)
+
+			if !assert.NoError(t, f.Close()) {
+				t.FailNow()
+			}
+
+			assert.NoError(t, err)
 		}
 	}
 
-	baseline, mnt, api := startMount(t, nydusRef, false)
+	baseline, mnt, api := ref(nydusRef).mount(t, false)
 	workload(mnt)
 	metrics := api.Metrics(t)
-	require.Positive(t, metrics.Sum("nydus_backend_read_total", `type="ondemand"`), "the workload must read on demand")
-	require.Zero(t, metrics.Sum("nydus_backend_read_total", `type="prefetch"`), "prefetch is off")
-	require.Zero(t, metrics.Sum("nydus_cache_write_total", `type="prefetch"`), "prefetch is off")
+	if !assert.Positive(t, metrics.Sum("nydus_backend_read_total", `type="ondemand"`)) {
+		t.FailNow()
+	}
+	if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `type="prefetch"`)) {
+		t.FailNow()
+	}
+	if !assert.Zero(t, metrics.Sum("nydus_cache_write_total", `type="prefetch"`)) {
+		t.FailNow()
+	}
+
 	raw, err := api.Get("/trace")
-	require.NoError(t, err)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
 	traced := traceLen(t, raw)
-	require.Greater(t, traced, 1, "the trace must cover several chunk groups")
+	if !assert.Greater(t, traced, 1) {
+		t.FailNow()
+	}
+
 	baseline.Stop()
 
 	record := filepath.Join(env.WorkDir(t), "trace.json")
-	require.NoError(t, os.WriteFile(record, raw, 0o644))
+	if !assert.NoError(t, os.WriteFile(record, raw, 0o644)) {
+		t.FailNow()
+	}
+
 	nydusify(t, "optimize", "--type", "ondemand", "--trace-file", record, "--source", nydusRef, "--target", optRef)
 
-	opt := pullNydus(t, optRef, src.want)
-	require.Len(t, opt.Blobs, 2, "the source blob and the ondemand blob")
-	manifest, err := remoteImage(t, optRef).Manifest()
-	require.NoError(t, err)
-	require.Contains(t, manifest.Layers[1].Annotations, nydusOptimizedAnnotation, "the ondemand blob is marked")
+	opt := ref(optRef).pull(t, src.want)
+	assert.Len(t, opt.Blobs, 2)
+	manifest, err := ref(optRef).image(t).Manifest()
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	if !assert.Contains(t, manifest.Layers[1].Annotations, nydusOptimizedAnnotation) {
+		t.FailNow()
+	}
 
-	_, mnt, api = startMount(t, optRef, true)
+	_, mnt, api = ref(optRef).mount(t, true)
 	waitRedirectFill(t, api, traced)
 	metrics = api.Metrics(t)
-	require.Positive(t, metrics.Sum("nydus_backend_read_total", `type="prefetch"`), "prefetch must fetch the ondemand blob")
-	require.EqualValues(t, traced, metrics.Sum("nydus_cache_write_total", `type="redirect"`),
-		"prefetch must fill every traced chunk group into its source blob's cache")
-	require.Zero(t, metrics.Sum("nydus_cache_write_failure_total"), "all redirected fills must succeed")
-	require.Zero(t, metrics.Sum("nydus_cache_write_total", `type="prefetch"`), "the ondemand blob fills the source caches, never its own")
-	require.Zero(t, metrics.Sum("nydus_backend_read_total", `type="ondemand"`), "prefetch must not read on demand")
+	if !assert.Positive(t, metrics.Sum("nydus_backend_read_total", `type="prefetch"`)) {
+		t.FailNow()
+	}
+	if !assert.EqualValues(t, traced, metrics.Sum("nydus_cache_write_total", `type="redirect"`)) {
+		t.FailNow()
+	}
+	if !assert.Zero(t, metrics.Sum("nydus_cache_write_failure_total")) {
+		t.FailNow()
+	}
+	if !assert.Zero(t, metrics.Sum("nydus_cache_write_total", `type="prefetch"`)) {
+		t.FailNow()
+	}
+	if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `type="ondemand"`)) {
+		t.FailNow()
+	}
+
 	workload(mnt)
 	metrics = api.Metrics(t)
-	require.Zero(t, metrics.Sum("nydus_backend_read_total", `type="ondemand"`), "the traced workload must be served from the prefetched cache")
-	require.Positive(t, metrics.Sum("nydus_cache_read_total"))
-	oracle.VerifyMount(t, mnt, src.want, src.compare())
+	if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `type="ondemand"`)) {
+		t.FailNow()
+	}
 
-	// The ondemand blob only holds copies, so the reverse conversion skips it.
+	assert.Positive(t, metrics.Sum("nydus_cache_read_total"))
+	fstest.VerifyMount(t, mnt, src.want, src.compare())
+
 	backRef := reg.Ref("optimize", "oci-back")
 	nydusify(t, "convert", "--compressor", "oci-gzip", "--source", optRef, "--target", backRef)
 	nydusify(t, "check", "--source", optRef, "--target", backRef)
-	manifest, err = remoteImage(t, backRef).Manifest()
-	require.NoError(t, err)
-	require.Len(t, manifest.Layers, 1, "one OCI layer per source layer")
-	oracle.VerifyMount(t, extractOCI(t, backRef), src.want, src.compare())
+	manifest, err = ref(backRef).image(t).Manifest()
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	assert.Len(t, manifest.Layers, 1)
+	fstest.VerifyMount(t, ref(backRef).extract(t), src.want, src.compare())
+}
+
+func traceLen(t testing.TB, raw []byte) int {
+	t.Helper()
+	var doc struct {
+		Version  int               `json:"version"`
+		Patterns []json.RawMessage `json:"patterns"`
+	}
+
+	if !assert.NoError(t, json.Unmarshal(raw, &doc)) {
+		t.FailNow()
+	}
+	if !assert.Equal(t, 1, doc.Version) {
+		t.FailNow()
+	}
+
+	return len(doc.Patterns)
+}
+
+func waitRedirectFill(t testing.TB, api *mount.API, want int) {
+	t.Helper()
+	if !assert.Eventually(t, func() bool {
+		body, err := api.Get("/metrics")
+		return err == nil && mount.ParseMetrics(string(body)).Sum("nydus_cache_write_total", `type="redirect"`) >= float64(want)
+	}, time.Minute, 100*time.Millisecond) {
+		t.FailNow()
+	}
 }

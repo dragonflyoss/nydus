@@ -362,7 +362,7 @@ cargo build -p nydus-core
 # With the OCI registry backend enabled.
 cargo build -p nydus-core --features nydus-backend/registry
 
-# Validate crates.io packaging (cargo publish dry run).
+# Validate crates.io packaging.
 make crate
 ```
 

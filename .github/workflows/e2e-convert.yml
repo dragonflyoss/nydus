@@ -63,8 +63,8 @@ jobs:
 
       - name: Run E2E test
         env:
-          NYDUSFS_TOP_IMAGES_REGISTRY: ghcr.io/${{ github.repository }}
-          NYDUSFS_TOP_IMAGES_WORKDIR: /mnt/nydusify-top-images
+          NYDUS_E2E_CONVERT_REGISTRY: ghcr.io/${{ github.repository }}
+          TMPDIR: /mnt/nydusify-convert
         run: |
-          sudo mkdir -p -m 0777 /mnt/nydusify-top-images
+          sudo mkdir -p -m 0777 /mnt/nydusify-convert
           make e2e-convert

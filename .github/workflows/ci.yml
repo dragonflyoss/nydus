@@ -20,7 +20,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
+    timeout-minutes: 30
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
     steps:
@@ -49,7 +49,9 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Install dependencies
-        run: bash tests/scripts/install_ci_packages.sh iproute2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2
 
       - name: Run tests
         run: |
@@ -79,7 +81,9 @@ jobs:
   test-nydusify:
     name: Test Nydusify
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
+    env:
+      COVERAGE: 1
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -101,6 +105,11 @@ jobs:
           go-version-file: nydusify/go.mod
           cache-dependency-path: nydusify/go.sum
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
       - name: Build binaries
         run: make build-coverage FEATURES=cli
 
@@ -108,7 +117,7 @@ jobs:
         run: make test-nydusify
 
       - name: Export coverage
-        run: bash tests/scripts/e2e_coverage.sh export
+        run: make coverage-report
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

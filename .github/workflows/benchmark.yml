@@ -39,20 +39,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          bash tests/scripts/install_ci_packages.sh erofs-utils fuse3 fio
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils erofsfuse fuse3 fio
           sudo modprobe fuse
 
-      - name: Install erofsfuse
-        run: sudo bash tests/scripts/setup_erofsfuse.sh
-
       - name: Run benchmark
-        env:
-          NYDUSFS_BENCH_MODES: fuse,fileio
-          NYDUSFS_BENCH_OUTPUT: ${{ github.workspace }}/bench-results.json
-        run: make benchmark
+        run: make benchmark BENCH='Mount/^(fuse|fileio)$$' E2E_COUNT=6 | tee bench.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v6
         with:
-          name: bench-results
-          path: bench-results.json
+          name: bench
+          path: bench.txt

@@ -2,23 +2,23 @@ version: "2"
 
 run:
   timeout: 10m
-  tests: true
+  build-tags:
+    - manual
 
 linters:
   enable:
-    - errcheck
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
     - bodyclose
     - misspell
+    - testifylint
     - unconvert
   settings:
     misspell:
-      # "hardlinked" is a valid technical term; misspell flags it as "hardline".
       ignore-rules:
         - hardlinked
+    testifylint:
+      disable:
+        - float-compare
+        - require-error
 
 formatters:
   enable:

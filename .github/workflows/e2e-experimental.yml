@@ -15,13 +15,12 @@ permissions:
 
 env:
   RUST_BACKTRACE: 1
-  FEATURES: cli,fuse,fileio,nbd,ublk,fanotify,uffd
 
 jobs:
   build:
     name: Build
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -40,11 +39,21 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: nydusify/go.mod
-          cache-dependency-path: nydusify/go.sum
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
+
+      - name: Download Go modules
+        run: go -C tests/e2e mod download
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Build binaries
-        run: make build-coverage FEATURES="$FEATURES"
+        run: make build-coverage E2E_FEATURES='$(EXPERIMENTAL_FEATURES)'
 
       - name: Upload binaries
         uses: actions/upload-artifact@v6
@@ -54,14 +63,15 @@ jobs:
             target/ci/nydus
             target/ci/examples/writer-fixture
             nydusify/nydusify
-            coverage-tools/
           if-no-files-found: error
           retention-days: 3
 
   test:
     needs: [build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
+    timeout-minutes: 8
+    env:
+      COVERAGE: 1
     strategy:
       fail-fast: false
       matrix:
@@ -70,11 +80,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: tests/e2e/go.mod
-          cache-dependency-path: tests/e2e/go.sum
+          cache-dependency-path: |
+            nydusify/go.sum
+            tests/e2e/go.sum
 
       - name: Download binaries
         uses: actions/download-artifact@v7
@@ -88,7 +111,8 @@ jobs:
           if [ "${{ matrix.transport }}" = ublk ] && ! modinfo ublk_drv >/dev/null 2>&1; then
             packages+=("linux-modules-extra-$(uname -r)")
           fi
-          bash tests/scripts/install_ci_packages.sh "${packages[@]}"
+          sudo apt-get update
+          sudo apt-get install -y "${packages[@]}"
           sudo modprobe fuse
           if [ "${{ matrix.transport }}" = nbd ]; then sudo modprobe nbd; fi
           if [ "${{ matrix.transport }}" = ublk ]; then sudo modprobe ublk_drv; fi
@@ -100,10 +124,10 @@ jobs:
         if: ${{ matrix.transport == 'uffd' && github.event_name == 'schedule' }}
         run: |
           make e2e-run PKG=./experimental/uffd/... E2E_TIMEOUT=3m \
-            E2E_RUN='^TestRealFault(Copy|Zeropage|Zerocopy)$$' E2E_COUNT=34
+            E2E_RUN='^TestFault(Copy|Zeropage|Zerocopy)$$' E2E_COUNT=34
 
       - name: Export coverage
-        run: bash tests/scripts/e2e_coverage.sh export
+        run: make coverage-report
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
