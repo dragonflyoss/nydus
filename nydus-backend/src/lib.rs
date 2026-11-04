@@ -64,6 +64,14 @@ pub trait Backend: Send + Sync {
     /// and the caches, prefetcher and filesystem above it record into.
     fn metrics(&self) -> &Arc<Metrics>;
 
+    /// Waits until the backend is ready to serve, returning the error that
+    /// failed it. A backend that connects in the background, as the
+    /// registry's Dragonfly seed peer clients do, is built without waiting on
+    /// it, so a daemon mounts first and stops when this fails.
+    fn ready(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Returns the full blob digest of `blob_id`, the digest the blob's cache
     /// files are named by.
     ///

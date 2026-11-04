@@ -161,6 +161,10 @@ impl UblkCommand {
         };
         let metrics = core.core().metrics().clone();
         let ondemand_recorder = core.core().ondemand_recorder().clone();
+        let ready = {
+            let core = core.core().clone();
+            move || core.ready()
+        };
         let service = UblkService::new(core, &options)?;
         println!("{}", service.dev_path());
 
@@ -182,6 +186,7 @@ impl UblkCommand {
         let signal_thread = signal::spawn_signal_thread("ublk", signals, move || {
             handle.stop();
         })?;
+        let ready_thread = signal::spawn_ready_thread("ublk", ready)?;
 
         let result = service.run();
         service.delete();
@@ -190,6 +195,7 @@ impl UblkCommand {
         }
 
         signal_thread.shutdown()?;
+        ready_thread.join()?;
         result
     }
 }

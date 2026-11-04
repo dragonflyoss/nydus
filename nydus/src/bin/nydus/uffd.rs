@@ -107,11 +107,16 @@ impl UffdCommand {
     /// a fatal error stops it.
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         let core = Arc::new(UffdCore::new(&self.bootstrap, config)?);
+        let ready = {
+            let core = core.core().clone();
+            move || core.ready()
+        };
         let service = Arc::new(UffdService::new(core, self.socket.clone()));
         let signal_service = service.clone();
         let signal_thread = signal::spawn_signal_thread("uffd", signals, move || {
             signal_service.stop();
         })?;
+        let ready_thread = signal::spawn_ready_thread("uffd", ready)?;
 
         let mut runtime = tokio::runtime::Builder::new_multi_thread();
         runtime.enable_all().thread_name("nydus_uffd");
@@ -121,6 +126,7 @@ impl UffdCommand {
         let rt = runtime.build().context("failed to build tokio runtime")?;
         let result = rt.block_on(service.run());
         signal_thread.shutdown()?;
+        ready_thread.join()?;
         result
     }
 }

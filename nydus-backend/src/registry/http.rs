@@ -58,7 +58,8 @@ impl Http {
     ///
     /// Redirects are returned rather than followed so the caller can cache
     /// the signed URL a blob `GET` is redirected to; names are resolved by
-    /// hickory, which honours record TTLs.
+    /// hickory, which honours record TTLs. TLS always runs on rustls, whatever
+    /// TLS backend other crates turn on in reqwest.
     pub(crate) fn new(
         request_timeout: Duration,
         max_retries: u32,
@@ -68,7 +69,6 @@ impl Http {
         rate_limit: Option<RateLimit>,
         source: Source,
     ) -> io::Result<Self> {
-        // Other workspace dependencies may also enable reqwest's native TLS.
         let mut builder = Client::builder()
             .use_rustls_tls()
             .redirect(Policy::none())
@@ -256,7 +256,16 @@ impl Middleware for RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::CertifiedKey;
+    use std::fs;
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_rustls::rustls::crypto::ring;
+    use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
 
     #[tokio::test]
     async fn prefetch_fails_at_once_on_a_transport_failure() {
@@ -315,66 +324,71 @@ mod tests {
         assert!(limit.limiter.is_fair());
     }
 
-    #[tokio::test]
-    async fn tls_verification_and_custom_ca_are_preserved() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio_rustls::rustls::{self, pki_types::PrivatePkcs8KeyDer};
+    async fn start_https_server(cert: CertifiedKey) -> String {
+        let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()).into(),
+            )
+            .unwrap();
 
-        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-        let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-        let server_config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert.cert.der().clone()], key.into())
-        .unwrap();
-        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let acceptor = TlsAcceptor::from(Arc::new(config));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("https://{}/", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for trusted in [false, true, false] {
-                let (tcp, _) = listener.accept().await.unwrap();
-                let accepted = acceptor.accept(tcp).await;
-                if !trusted {
-                    assert!(accepted.is_err());
-                    continue;
-                }
-                let mut stream = accepted.unwrap();
-                let mut request = Vec::new();
-                let mut buf = [0; 1024];
-                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                    let n = stream.read(&mut buf).await.unwrap();
-                    assert!(n > 0 && request.len() < 16384);
-                    request.extend_from_slice(&buf[..n]);
-                }
-                stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                    )
-                    .await
-                    .unwrap();
-                stream.flush().await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    while stream.read_line(&mut line).await.unwrap() > 2 {
+                        line.clear();
+                    }
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                        )
+                        .await
+                        .unwrap();
+                    stream.flush().await.unwrap();
+                });
             }
         });
-        let dir = tempfile::tempdir().unwrap();
-        let trusted_path = dir.path().join("trusted.pem");
-        std::fs::write(&trusted_path, cert.cert.pem()).unwrap();
-        let other = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-        let wrong_path = dir.path().join("wrong.pem");
-        std::fs::write(&wrong_path, other.cert.pem()).unwrap();
-        for (ca_cert, trusted) in [
-            (None, false),
-            (Some(trusted_path), true),
-            (Some(wrong_path), false),
-        ] {
+
+        format!("https://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn new_trusts_the_ca_cert_or_skips_verification() {
+        let dir = tempdir().unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let wrong_cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let ca_cert = dir.path().join("ca.pem");
+        let wrong_ca_cert = dir.path().join("wrong_ca.pem");
+        fs::write(&ca_cert, cert.cert.pem()).unwrap();
+        fs::write(&wrong_ca_cert, wrong_cert.cert.pem()).unwrap();
+        let test_cases = vec![
+            (false, Some(ca_cert), true),
+            (false, Some(wrong_ca_cert), false),
+            (false, None, false),
+            (true, None, true),
+        ];
+
+        let url = start_https_server(cert).await;
+        for (skip_verify, ca_cert, ok) in test_cases {
             let http = Http::new(
                 Duration::from_secs(5),
                 0,
                 None,
                 &TlsConfig {
-                    skip_verify: false,
+                    skip_verify,
                     ca_cert,
                 },
                 Duration::from_secs(1),
@@ -382,16 +396,7 @@ mod tests {
                 Source::Origin,
             )
             .unwrap();
-            let result = http.client.get(&url).send().await;
-            if trusted {
-                assert_eq!(result.unwrap().text().await.unwrap(), "ok");
-            } else {
-                assert!(result.is_err());
-            }
+            assert_eq!(http.get(&url, HeaderMap::new()).await.is_ok(), ok);
         }
-        tokio::time::timeout(Duration::from_secs(10), server)
-            .await
-            .unwrap()
-            .unwrap();
     }
 }

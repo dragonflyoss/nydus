@@ -165,6 +165,10 @@ impl FanotifyCommand {
             let stop = stop.clone();
             signal::spawn_signal_thread("fanotify", signals, move || stop.stop())?
         };
+        let ready_thread = signal::spawn_ready_thread("fanotify", {
+            let core = core.core().clone();
+            move || core.ready()
+        })?;
 
         let (ready_tx, ready_rx) = mpsc::channel();
 
@@ -238,6 +242,7 @@ impl FanotifyCommand {
         drop(fan_fd);
 
         signal_thread.shutdown()?;
+        ready_thread.join()?;
 
         outcome
     }

@@ -81,6 +81,12 @@ impl Runtime {
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))?
     }
 
+    /// Runs `future` on a thread of the runtime in the background.
+    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
+    pub(crate) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(future);
+    }
+
     /// Returns the tokio runtime itself, for tests that poll a future on the
     /// calling thread.
     #[cfg(test)]
@@ -115,8 +121,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "requires CAP_SYS_ADMIN to create a netns"]
     fn only_worker_polls_run_in_the_configured_netns() {
-        let unshared = std::thread::scope(|scope| {
+        let netns = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     // SAFETY: unshare only affects this scratch thread, which
@@ -128,19 +135,8 @@ mod tests {
                 })
                 .join()
                 .unwrap()
-        });
-        let netns = match unshared {
-            Ok(netns) => netns,
-            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "cannot create a required netns: {err}"
-                );
-                eprintln!("skipped: cannot create a netns ({err})");
-                return;
-            }
-            Err(err) => panic!("unshare(CLONE_NEWNET): {err}"),
-        };
+        })
+        .unwrap();
         let configured = netns.id();
         let caller = current_netns();
         assert_ne!(caller, configured);

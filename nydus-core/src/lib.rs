@@ -287,6 +287,12 @@ impl NydusCore {
         &self.bootstrap
     }
 
+    /// Wait until the blob backend is ready to serve, returning the error
+    /// that failed it; see [`Backend::ready`].
+    pub fn ready(&self) -> Result<()> {
+        self.backend.ready().context("blob backend failed")
+    }
+
     /// Return the metrics of this core alone: every backend read, cache fill
     /// and prefetch of it, counters an embedder reads directly or gathers
     /// from the registry for its own stats endpoint.

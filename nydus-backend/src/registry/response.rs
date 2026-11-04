@@ -7,6 +7,7 @@ use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use super::range::{ContentRange, GetRange};
 use crate::Source;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
@@ -38,57 +39,52 @@ pub(crate) enum Body {
 
 /// Implements the response.
 impl Response {
-    /// Rejects a successful whole-blob answer before its bytes can be used
-    /// at the requested range's offset.
-    pub(crate) fn require_partial(self, range: &str) -> io::Result<Self> {
-        // Dragonfly 1.3 returns 200 for a partial download but supplies the
-        // exact Content-Range. Do not extend this exception to origin servers.
-        if self.status == StatusCode::OK && self.source == Source::Dragonfly {
-            let decimal = |value: &str| {
-                if value.bytes().all(|byte| byte.is_ascii_digit()) {
-                    value.parse::<u64>().ok()
-                } else {
-                    None
-                }
-            };
-            if let Some((start, end, total)) = self
-                .headers
-                .get(CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("bytes "))
-                .and_then(|value| {
-                    let (span, total) = value.split_once('/')?;
-                    let (start, end) = span.split_once('-')?;
-                    Some((decimal(start)?, decimal(end)?, decimal(total)?))
-                })
-            {
-                let requested = range.strip_prefix("bytes=").and_then(|value| {
-                    let (first, last) = value.split_once('-')?;
-                    if first.is_empty() {
-                        let length = decimal(last)?;
-                        Some((total.saturating_sub(length), total.checked_sub(1)?))
-                    } else {
-                        Some((decimal(first)?, decimal(last)?))
-                    }
-                });
-                if start <= end
-                    && end < total
-                    && requested == Some((start, end))
-                    && matches!(&self.body, Body::Bytes(bytes) if bytes.len() as u64 == end - start + 1)
-                {
-                    return Ok(self);
-                }
+    /// Turns the answer to a `range` read into an error unless it carries
+    /// exactly that range: a `206` whose `Content-Range` names it, and a body
+    /// already in memory as long as it (RFC 9110 §15.3.7). A `206` without a
+    /// `Content-Range` is taken as the range it answers.
+    ///
+    /// Dragonfly 1.3 answers a partial download with a `200` and the exact
+    /// `Content-Range`, so a seed peer's `200` goes through the same checks;
+    /// an origin's `200` is the whole blob and never does.
+    pub(crate) fn error_for_range(self, range: &GetRange) -> io::Result<Self> {
+        match (self.status, self.source) {
+            (StatusCode::PARTIAL_CONTENT, _) if !self.headers.contains_key(CONTENT_RANGE) => {
+                return Ok(self);
+            }
+            (StatusCode::PARTIAL_CONTENT, _) | (StatusCode::OK, Source::Dragonfly) => {}
+            (status, _) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "registry range request returned {status}, expected 206 Partial Content"
+                    ),
+                ));
             }
         }
-        if self.status != StatusCode::PARTIAL_CONTENT {
+
+        let content_range = self.content_range()?;
+        let expected = range.to_range(content_range.complete_length);
+        if content_range.range != expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "registry range request returned {}, expected 206 Partial Content",
-                    self.status
+                    "registry returned bytes {:?}, expected {expected:?}",
+                    content_range.range
                 ),
             ));
         }
+
+        let length = expected.end() - expected.start() + 1;
+        if let Body::Bytes(bytes) = &self.body {
+            if bytes.len() as u64 != length {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("registry returned {} bytes, expected {length}", bytes.len()),
+                ));
+            }
+        }
+
         Ok(self)
     }
 
@@ -174,20 +170,18 @@ impl Response {
             })
     }
 
-    /// Returns the complete length of the blob a `206` carries in its
-    /// `Content-Range`, the `complete-length` of `bytes first-last/complete-length`.
-    pub(crate) fn complete_length(&self) -> io::Result<u64> {
+    /// Returns the byte range the answer names in its `Content-Range`.
+    pub(crate) fn content_range(&self) -> io::Result<ContentRange> {
         self.headers
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.rsplit_once('/'))
-            .and_then(|(_, complete_length)| complete_length.parse().ok())
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     "registry range response missing a valid content-range",
                 )
-            })
+            })?
+            .parse()
     }
 }
 
@@ -198,154 +192,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn require_partial_dragonfly_200_requires_an_exact_buffered_range() {
-        for (range, content_range, length, accepted) in [
-            ("bytes=2-5", Some("bytes 2-5/8"), 4, true),
-            ("bytes=0-7", Some("bytes 0-7/8"), 8, true),
-            ("bytes=-4", Some("bytes 4-7/8"), 4, true),
-            ("bytes=-8", Some("bytes 0-7/8"), 8, true),
-            ("bytes=-9", Some("bytes 0-7/8"), 8, true),
-            ("bytes=0-0", Some("bytes 0-0/1"), 1, true),
-            ("bytes=2-5", None, 4, false),
-            ("bytes=2-5", Some("bytes 2-5/*"), 4, false),
-            ("bytes=2-5", Some("items 2-5/8"), 4, false),
-            ("bytes=2-5", Some("bytes 2/8"), 4, false),
-            ("bytes=2-5", Some("bytes x-5/8"), 4, false),
-            ("bytes=2-5", Some("bytes 2-x/8"), 4, false),
-            ("bytes=2-5", Some("bytes 2-5/x"), 4, false),
-            ("bytes=2-5", Some("bytes +2-5/8"), 4, false),
-            ("bytes=2-5", Some("bytes 2-+5/8"), 4, false),
-            ("bytes=2-5", Some("bytes 2-5/+8"), 4, false),
-            ("bytes=+2-5", Some("bytes 2-5/8"), 4, false),
-            ("bytes=2-+5", Some("bytes 2-5/8"), 4, false),
-            ("bytes=-+4", Some("bytes 4-7/8"), 4, false),
-            ("bytes=2-5", Some("bytes 2-5/8/9"), 4, false),
-            ("bytes=2-5", Some("bytes 2-5/8 "), 4, false),
-            ("bytes=2-5", Some("bytes \u{80}-5/8"), 4, false),
-            ("bytes=2-5", Some("bytes 1-4/8"), 4, false),
-            ("bytes=2-5", Some("bytes 5-2/8"), 4, false),
-            ("bytes=2-5", Some("bytes 2-5/5"), 4, false),
-            ("bytes=2-5", Some("bytes 2-5/0"), 4, false),
-            ("bytes=2-5", Some("bytes 2-5/8"), 3, false),
-            ("bytes=2-5", Some("bytes 2-5/8"), 5, false),
-            ("bytes=2-5", Some("bytes 2-5/8"), 0, false),
-            ("bytes=-0", Some("bytes 0-0/1"), 1, false),
-            ("bytes=-1", Some("bytes 0-0/0"), 1, false),
-            ("bytes=-x", Some("bytes 4-7/8"), 4, false),
-            ("bytes=2-", Some("bytes 2-7/8"), 6, false),
-            ("bytes=x-5", Some("bytes 2-5/8"), 4, false),
-            ("bytes=2-x", Some("bytes 2-5/8"), 4, false),
-            ("bytes=2", Some("bytes 2-5/8"), 4, false),
-            ("items=2-5", Some("bytes 2-5/8"), 4, false),
-            ("bytes=2-5,6-7", Some("bytes 2-5/8"), 4, false),
-            ("bytes=-18446744073709551616", Some("bytes 0-7/8"), 8, false),
-            (
-                "bytes=18446744073709551616-5",
-                Some("bytes 2-5/8"),
-                4,
-                false,
-            ),
-            (
-                "bytes=2-18446744073709551616",
-                Some("bytes 2-5/8"),
-                4,
-                false,
-            ),
-            (
-                "bytes=2-5",
-                Some("bytes 18446744073709551616-5/8"),
-                4,
-                false,
-            ),
-            (
-                "bytes=2-5",
-                Some("bytes 2-18446744073709551616/8"),
-                4,
-                false,
-            ),
-            (
-                "bytes=2-5",
-                Some("bytes 2-5/18446744073709551616"),
-                4,
-                false,
-            ),
-            (
-                "bytes=0-18446744073709551615",
-                Some("bytes 0-18446744073709551615/18446744073709551615"),
-                0,
-                false,
-            ),
-            (
-                "bytes=-1",
-                Some("bytes 18446744073709551614-18446744073709551614/18446744073709551615"),
-                1,
-                true,
-            ),
-        ] {
-            for source in [Source::Dragonfly, Source::Origin] {
-                for streaming in [false, true] {
-                    let mut headers = HeaderMap::new();
-                    if let Some(value) = content_range {
-                        headers.insert(CONTENT_RANGE, value.parse().unwrap());
-                    }
-                    let bytes = Bytes::from(vec![42; length]);
-                    let body = if streaming {
-                        Body::Stream(Box::new(io::Cursor::new(bytes)))
-                    } else {
-                        Body::Bytes(bytes)
-                    };
-                    let result = Response {
-                        status: StatusCode::OK,
-                        headers,
-                        body,
-                        source,
-                    }
-                    .require_partial(range);
-                    let expected = accepted && source == Source::Dragonfly && !streaming;
-                    assert_eq!(
-                        result.is_ok(),
-                        expected,
-                        "{source:?} {streaming} {range} {content_range:?}"
-                    );
-                    match result {
-                        Ok(response) => {
-                            assert_eq!(response.headers[CONTENT_RANGE], content_range.unwrap());
-                            assert!(matches!(response.body, Body::Bytes(bytes)
-                                if bytes.as_ref() == vec![42; length]));
-                        }
-                        Err(error) => {
-                            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-                            assert!(error.to_string().contains("expected 206 Partial Content"));
-                        }
-                    }
-                }
-            }
+    fn error_for_range_accepts_a_206_or_a_dragonfly_200() {
+        let test_cases = vec![
+            (StatusCode::PARTIAL_CONTENT, Source::Origin, true),
+            (StatusCode::PARTIAL_CONTENT, Source::Dragonfly, true),
+            (StatusCode::OK, Source::Dragonfly, true),
+            (StatusCode::OK, Source::Origin, false),
+            (StatusCode::OK, Source::Fallback, false),
+            (StatusCode::NO_CONTENT, Source::Origin, false),
+        ];
+
+        for (status, source, expected) in test_cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_RANGE, "bytes 2-5/8".parse().unwrap());
+            let response = Response {
+                status,
+                headers,
+                body: Body::Bytes(Bytes::from_static(b"abcd")),
+                source,
+            };
+            assert_eq!(
+                response.error_for_range(&GetRange::Bounded(2..=5)).is_ok(),
+                expected,
+                "{status} {source:?}"
+            );
         }
     }
 
     #[test]
-    fn require_partial_preserves_206_and_rejects_other_statuses() {
-        for source in [Source::Origin, Source::Dragonfly] {
-            for status in [
-                StatusCode::PARTIAL_CONTENT,
-                StatusCode::NO_CONTENT,
-                StatusCode::TEMPORARY_REDIRECT,
-                StatusCode::RANGE_NOT_SATISFIABLE,
-            ] {
-                let result = Response {
-                    status,
-                    source,
-                    headers: HeaderMap::new(),
-                    body: Body::Bytes(Bytes::from_static(b"range")),
-                }
-                .require_partial("bytes=0-4");
-                assert_eq!(result.is_ok(), status == StatusCode::PARTIAL_CONTENT);
-                if let Ok(response) = result {
-                    assert_eq!(response.status, status);
-                    assert_eq!(response.source, source);
-                    assert!(matches!(response.body, Body::Bytes(bytes) if bytes == "range"));
-                }
+    fn error_for_range_requires_the_content_range_to_name_the_range() {
+        let test_cases = vec![
+            (StatusCode::PARTIAL_CONTENT, Some("bytes 2-5/8"), true),
+            (StatusCode::PARTIAL_CONTENT, Some("bytes 1-4/8"), false),
+            (StatusCode::PARTIAL_CONTENT, Some("bytes 2-5/*"), false),
+            (StatusCode::PARTIAL_CONTENT, None, true),
+            (StatusCode::OK, Some("bytes 2-5/8"), true),
+            (StatusCode::OK, Some("bytes 0-7/8"), false),
+            (StatusCode::OK, None, false),
+        ];
+
+        for (status, content_range, expected) in test_cases {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = content_range {
+                headers.insert(CONTENT_RANGE, value.parse().unwrap());
             }
+            let response = Response {
+                status,
+                headers,
+                body: Body::Bytes(Bytes::from_static(b"abcd")),
+                source: Source::Dragonfly,
+            };
+            assert_eq!(
+                response.error_for_range(&GetRange::Bounded(2..=5)).is_ok(),
+                expected,
+                "{status} {content_range:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_for_range_requires_a_buffered_body_as_long_as_the_range() {
+        let test_cases = vec![
+            (Body::Bytes(Bytes::from_static(b"abcd")), true),
+            (Body::Bytes(Bytes::from_static(b"abc")), false),
+            (Body::Bytes(Bytes::from_static(b"abcde")), false),
+            (
+                Body::Stream(Box::new(io::Cursor::new(b"abc".to_vec()))),
+                true,
+            ),
+        ];
+
+        for (body, expected) in test_cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_RANGE, "bytes 2-5/8".parse().unwrap());
+            let response = Response {
+                status: StatusCode::PARTIAL_CONTENT,
+                headers,
+                body,
+                source: Source::Dragonfly,
+            };
+            assert_eq!(
+                response.error_for_range(&GetRange::Bounded(2..=5)).is_ok(),
+                expected
+            );
         }
     }
 

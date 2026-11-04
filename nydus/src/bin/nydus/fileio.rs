@@ -223,6 +223,10 @@ impl FileioCommand {
         let signal_thread = signal::spawn_signal_thread("fileio", signals, move || {
             let _ = shutdown_tx.send(());
         })?;
+        let ready_thread = signal::spawn_ready_thread("fileio", {
+            let core = flat.core().clone();
+            move || core.ready()
+        })?;
         let _ = shutdown_rx.recv();
 
         service.shutdown();
@@ -230,6 +234,6 @@ impl FileioCommand {
             server.stop();
         }
         signal_thread.shutdown()?;
-        Ok(())
+        ready_thread.join()
     }
 }
