@@ -333,7 +333,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
 }
 
 #[test]
-fn flat_group_ranges_expand_only_accessed_groups() {
+fn flat_chunk_group_ranges_expand_only_accessed_chunk_groups() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, id, _) = build_flattened_test_image(dir.path());
     let meta = nydus_format::blob::BlobMetadata::from_path(
@@ -351,7 +351,7 @@ fn flat_group_ranges_expand_only_accessed_groups() {
     let base = FLATTENED_BLOB_ALIGNMENT;
     let group = &groups[1];
     let offset = base + group.start + 4096;
-    let expanded = core.fetch_flat_group_ranges(offset, 4096).unwrap();
+    let expanded = core.fetch_flat_chunk_group_ranges(offset, 4096).unwrap();
     assert_eq!(expanded.len(), 1);
     assert_eq!(expanded[0].offset, group.start);
     assert_eq!(expanded[0].source_offset, base + group.start);
@@ -364,15 +364,15 @@ fn flat_group_ranges_expand_only_accessed_groups() {
     assert_eq!(core.ondemand_snapshot().entries.len(), 1);
     assert_eq!(core.ondemand_snapshot().entries[0].chunk_group_index, 1);
     assert_eq!(
-        core.fetch_flat_group_ranges(offset, 4096).unwrap(),
+        core.fetch_flat_chunk_group_ranges(offset, 4096).unwrap(),
         expanded
     );
     let exact = core.fetch_flat_ranges(offset, 4096).unwrap();
     assert_eq!(exact[0].source_offset, offset);
     assert_eq!(exact[0].len, 4096);
-    // A request straddling two groups returns both, with no overlap.
+    // A request crossing two chunk groups returns their combined range.
     let crossed = core
-        .fetch_flat_group_ranges(base + group.end - 1, 2)
+        .fetch_flat_chunk_group_ranges(base + group.end - 1, 2)
         .unwrap();
     assert_eq!(crossed.len(), 1);
     assert_eq!(crossed[0].source_offset, base + group.start);
@@ -380,21 +380,21 @@ fn flat_group_ranges_expand_only_accessed_groups() {
     assert_eq!(core.ondemand_snapshot().entries.len(), 2);
     assert_eq!(core.ondemand_snapshot().entries[1].chunk_group_index, 2);
     let tail = core
-        .fetch_flat_group_ranges(core.flat_size() - 1, 4096)
+        .fetch_flat_chunk_group_ranges(core.flat_size() - 1, 4096)
         .unwrap();
     assert_eq!(
         tail.last().unwrap().source_offset + tail.last().unwrap().len,
         core.flat_size()
     );
     assert!(core
-        .fetch_flat_group_ranges(core.flat_size(), 1)
+        .fetch_flat_chunk_group_ranges(core.flat_size(), 1)
         .unwrap()
         .is_empty());
     assert!(core
-        .fetch_flat_group_ranges(u64::MAX, 0)
+        .fetch_flat_chunk_group_ranges(u64::MAX, 0)
         .unwrap()
         .is_empty());
-    assert!(core.fetch_flat_group_ranges(u64::MAX, 1).is_err());
+    assert!(core.fetch_flat_chunk_group_ranges(u64::MAX, 1).is_err());
 }
 
 #[test]
@@ -411,7 +411,10 @@ fn flat_geometry_does_not_prepare_caches_for_bootstrap_or_holes() {
     assert_eq!(ranges[1].fd, core.zero_fd());
     assert_eq!(ranges[1].source_offset, core.bootstrap_size);
     assert_eq!(ranges[1].len, start - core.bootstrap_size);
-    assert_eq!(core.fetch_flat_group_ranges(0, start).unwrap(), ranges);
+    assert_eq!(
+        core.fetch_flat_chunk_group_ranges(0, start).unwrap(),
+        ranges
+    );
     // Actual blob I/O still surfaces the unavailable source; the explicit
     // public preparation API also keeps its original eager behavior.
     assert!(core.probe_flat_ranges(start, 4096).is_err());
@@ -477,7 +480,7 @@ fn flat_ranges_leave_unrelated_blobs_unopened() {
         let ranges = match mode {
             0 => core.fetch_flat_ranges(offset, len).unwrap(),
             1 => core.probe_flat_ranges(offset, len).unwrap(),
-            _ => core.fetch_flat_group_ranges(offset, len).unwrap(),
+            _ => core.fetch_flat_chunk_group_ranges(offset, len).unwrap(),
         };
         let mut actual = vec![0; len as usize];
         nydus_core::extent::MmapCache::default()
@@ -489,7 +492,7 @@ fn flat_ranges_leave_unrelated_blobs_unopened() {
         // explicit whole-image preparation retains its eager behavior.
         let missing = infos[1].mapped_blkaddr * EROFS_BLOCK_SIZE as u64;
         assert!(core.fetch_flat_ranges(missing, 4096).is_err());
-        assert!(core.fetch_flat_group_ranges(missing, 4096).is_err());
+        assert!(core.fetch_flat_chunk_group_ranges(missing, 4096).is_err());
         assert!(core.blobs.flat_layout().is_err());
     }
 }
@@ -542,7 +545,8 @@ fn core_maps_local_native_layers_without_a_cache() {
     }
     let extents = core.fetch_flat_ranges(0, core.flat_size()).unwrap();
     assert_eq!(
-        core.fetch_flat_group_ranges(0, core.flat_size()).unwrap(),
+        core.fetch_flat_chunk_group_ranges(0, core.flat_size())
+            .unwrap(),
         extents
     );
     assert_eq!(
@@ -650,17 +654,17 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     );
     assert!(infos[1].mapped_blkaddr > infos[0].mapped_blkaddr);
 
-    // Only the first compressed blob exists in the configured store. Group
-    // expansion must not prepare the second blob's metadata, even on a hit.
+    // Only the first compressed blob exists in the configured store. Chunk
+    // group expansion must not prepare the second blob's metadata, even on a hit.
     let core = NydusCore::new(&flattened_path, config, None).unwrap();
     let ranges = core
-        .fetch_flat_group_ranges(first_offset + 4096, 4096)
+        .fetch_flat_chunk_group_ranges(first_offset + 4096, 4096)
         .unwrap();
     assert_eq!(ranges.len(), 1);
     assert!(ranges[0].source_offset >= first_offset);
     assert!(ranges[0].source_offset + ranges[0].len <= first_offset + infos[0].blocks * 4096);
     assert_eq!(
-        core.fetch_flat_group_ranges(first_offset + 4096, 4096)
+        core.fetch_flat_chunk_group_ranges(first_offset + 4096, 4096)
             .unwrap(),
         ranges
     );
@@ -669,7 +673,9 @@ fn flattened_bootstrap_records_mapped_device_slots() {
         .entries
         .iter()
         .all(|entry| entry.blob_index == 1));
-    assert!(core.fetch_flat_group_ranges(second_offset, 4096).is_err());
+    assert!(core
+        .fetch_flat_chunk_group_ranges(second_offset, 4096)
+        .is_err());
 }
 
 #[test]

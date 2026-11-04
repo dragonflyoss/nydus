@@ -6,12 +6,12 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-use crate::chunk_group_map::ChunkGroupMap;
+use crate::chunk_group_map::{current_boot_tag, ChunkGroupMap};
 use crate::ondemand::OndemandRecorder;
 use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
@@ -21,8 +21,8 @@ use nydus_telemetry::metrics::WriteKind;
 
 use super::chunk_group_lock::ChunkGroupLocks;
 use super::{
-    plan_prefetch_batches, validate_group_payload, write_failure_reason, BlobCache, CacheOptions,
-    ChunkGroupBuffers,
+    cached_chunk_group_is_intact, plan_prefetch_batches, validate_decoded_chunk_group,
+    write_failure_reason, BlobCache, CacheOptions, ChunkGroupBuffers,
 };
 
 #[derive(Clone)]
@@ -98,10 +98,13 @@ pub struct LocalBlobCache {
     recorded_chunk_groups: Box<[AtomicBool]>,
     cache_data_path: PathBuf,
     prefetch_lock_path: PathBuf,
-    /// Lazily opened cache data file. Double-checked: reads take the read
-    /// lock (per-I/O hot path), the first opener takes the write lock and
-    /// re-checks. A failed open leaves the slot empty and retryable.
-    cache_file: RwLock<Option<Arc<File>>>,
+    /// The cache data file, opened with the cache and held for its lifetime.
+    /// Holding it is what keeps the ready bits honest: were the file removed
+    /// and reopened by path, a new empty file would take its place under the
+    /// bits of the old one. A removed file stays readable through this
+    /// descriptor, and [`Self::ensure_data_file_linked`] stops publishing
+    /// readiness into it.
+    cache_file: Arc<File>,
     backend: Arc<dyn Backend>,
     ondemand_recorder: Option<Arc<OndemandRecorder>>,
     /// In-process single flight keyed by group index; one flight covers
@@ -163,34 +166,12 @@ impl LocalBlobCache {
         let group_map_existed = group_map_path.exists();
         let chunk_group_map =
             ChunkGroupMap::open(&group_map_path, blob_metadata.chunk_group_count())?;
-        let reset_guard = if !cache_data_path.exists() {
-            let guard = chunk_group_map.lock_for_reset()?;
-            // A peer may have recreated and filled the data while we waited.
-            if !cache_data_path.exists() {
-                guard.reset();
-                if group_map_existed {
-                    warn!(
-                        "stale group map without cache data file, reset: {}",
-                        group_map_path.display()
-                    );
-                }
-            }
-            Some(guard)
-        } else {
-            None
-        };
-
-        // Only publish a replacement after reset succeeds, and keep the lock
-        // until creation finishes so another opener cannot reset it afterwards.
-        let data_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&cache_data_path)?;
-        data_file.set_len(blob_metadata.logical_size())?;
-        drop(data_file);
-        drop(reset_guard);
+        let cache_file = Arc::new(open_cache_data_file(
+            &chunk_group_map,
+            &cache_data_path,
+            blob_metadata.logical_size(),
+            group_map_existed,
+        )?);
 
         let prefetch_lock_path = cache_dir.join(format!("{hex}.prefetch.lock"));
         // Byte `i` of the group map file stands for group `i` in the
@@ -209,7 +190,7 @@ impl LocalBlobCache {
             recorded_chunk_groups,
             cache_data_path,
             prefetch_lock_path,
-            cache_file: RwLock::new(None),
+            cache_file,
             backend,
             ondemand_recorder,
             inflight: Mutex::new(HashMap::new()),
@@ -260,26 +241,7 @@ impl LocalBlobCache {
     }
 
     fn cache_file(&self) -> io::Result<Arc<File>> {
-        if let Some(file) = self.cache_file.read().unwrap().as_ref() {
-            return Ok(file.clone());
-        }
-
-        let mut cache_file = self.cache_file.write().unwrap();
-        if let Some(file) = cache_file.as_ref() {
-            return Ok(file.clone());
-        }
-
-        let file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&self.cache_data_path)?,
-        );
-        file.set_len(self.blob_metadata.logical_size())?;
-        *cache_file = Some(file.clone());
-        Ok(file)
+        Ok(self.cache_file.clone())
     }
 
     /// Reject work against a cache data file that has been unlinked.
@@ -305,13 +267,17 @@ impl LocalBlobCache {
     /// group is ready, `None` when the blob is still filling (callers then
     /// take the ensure + pread path).
     fn all_ready_slice(&self, offset: u64, len: usize) -> io::Result<Option<&[u8]>> {
-        if !self.options.skip_verify_checksums || !self.chunk_group_map.is_all_ready() {
+        if !self.chunk_group_map.is_all_ready() {
             return Ok(None);
         }
         let mmap = if let Some(mmap) = self.cache_mmap.get() {
             mmap
         } else {
             let file = self.cache_file()?;
+            // Every group is ready in the shared map, but not necessarily in
+            // this file: a removed one was replaced, and the bits now speak
+            // for its successor.
+            self.ensure_data_file_linked(&file)?;
             // SAFETY: the mapping is read-only and its bytes are final once
             // ALL_READY latches; concurrent identical rewrites are benign.
             let mmap = unsafe { memmap2::MmapOptions::new().map(file.as_ref())? };
@@ -465,13 +431,14 @@ impl LocalBlobCache {
                 self.count_chunk_groups(first..first + 1);
                 return Ok(());
             }
+            // Groups whose bytes survived in the cache file (their bits were
+            // cleared after a restart) are verified and published as they
+            // are; only the rest is fetched.
+            self.adopt_intact_groups(window.clone(), cache_file)?;
             let mut buffers = ChunkGroupBuffers::default();
-            self.fill_chunk_group_window(
-                window.clone(),
-                ReadKind::Ondemand,
-                &mut buffers,
-                cache_file,
-            )?;
+            if !self.fill_unready_groups(window, ReadKind::Ondemand, &mut buffers, cache_file)? {
+                self.count_chunk_groups(first..first + 1);
+            }
             Ok(())
         })();
 
@@ -496,7 +463,8 @@ impl LocalBlobCache {
     }
 
     /// Fetch and decode one prefetch batch, trimmed to the groups no other
-    /// reader or process has published yet.
+    /// reader or process has published yet; groups whose bytes are intact in
+    /// the cache file are published without a fetch.
     fn prefetch_batch(
         &self,
         batch: Range<usize>,
@@ -507,7 +475,8 @@ impl LocalBlobCache {
         if batch.is_empty() {
             return Ok(());
         }
-        self.fill_chunk_group_window(batch.clone(), ReadKind::Prefetch, buffers, cache_file)?;
+        self.adopt_intact_groups(batch.clone(), cache_file)?;
+        self.fill_unready_groups(batch, ReadKind::Prefetch, buffers, cache_file)?;
         Ok(())
     }
 
@@ -566,12 +535,7 @@ impl LocalBlobCache {
             )?;
             out
         };
-        validate_group_payload(
-            &self.blob_metadata,
-            group,
-            payload,
-            self.options.skip_verify_checksums,
-        )?;
+        validate_decoded_chunk_group(group, payload, self.options.skip_verify_checksums)?;
         Ok(payload)
     }
 
@@ -750,21 +714,58 @@ impl LocalBlobCache {
         self.ensure_chunk_groups(offset, end, cache_file)
     }
 
-    fn read_verified_group(&self, index: usize, file: &File) -> io::Result<Vec<u8>> {
-        let group = self.chunk_group(index);
-        let mut padded = vec![0; group.logical_size() as usize];
-        file.read_exact_at(&mut padded, group.logical_offset())?;
-        let layout = vec![0; u64::from(group.uncompressed_size()) as usize];
-        let mut payload = Vec::with_capacity(layout.len());
-        for (offset, bytes) in group
-            .chunks(&self.blob_metadata, &layout)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
-        {
-            let start = (offset - group.logical_offset()) as usize;
-            payload.extend_from_slice(&padded[start..start + bytes.len()]);
+    /// Publish the groups of `groups` that are not ready but whose bytes are
+    /// intact in the cache file, which is how a cache whose ready bits were
+    /// cleared after a restart is reused without a fetch. A group is read
+    /// back only when the file may hold data in its span; one that fails the
+    /// check is left for the caller to fetch. Publishing is idempotent and
+    /// only follows a successful check, so callers need no lock for
+    /// correctness: the window claim merely keeps peers from repeating it.
+    fn adopt_intact_groups(&self, groups: Range<usize>, cache_file: &File) -> io::Result<()> {
+        for index in groups {
+            if self.chunk_group_ready(index)? {
+                continue;
+            }
+            let group = self.chunk_group(index);
+            let span = group.logical_range();
+            if !may_hold_data(cache_file, &span) {
+                continue;
+            }
+            let mut bytes = vec![0u8; group.logical_size() as usize];
+            cache_file.read_exact_at(&mut bytes, span.start)?;
+            if cached_chunk_group_is_intact(&self.blob_metadata, &group, &bytes) {
+                self.ensure_data_file_linked(cache_file)?;
+                self.chunk_group_map.set_ready(index)?;
+            }
         }
-        validate_group_payload(&self.blob_metadata, &group, &payload, false)?;
-        Ok(padded)
+        Ok(())
+    }
+
+    /// Fetch the groups of `groups` that are still not ready, one backend
+    /// read per run of consecutive unready groups. Returns whether anything
+    /// was fetched.
+    fn fill_unready_groups(
+        &self,
+        groups: Range<usize>,
+        kind: ReadKind,
+        buffers: &mut ChunkGroupBuffers,
+        cache_file: &File,
+    ) -> io::Result<bool> {
+        let mut fetched = false;
+        let mut index = groups.start;
+        while index < groups.end {
+            if self.chunk_group_ready(index)? {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < groups.end && !self.chunk_group_ready(index)? {
+                index += 1;
+            }
+            self.fill_chunk_group_window(start..index, kind, buffers, cache_file)?;
+            fetched = true;
+        }
+        Ok(fetched)
     }
 }
 
@@ -825,21 +826,6 @@ impl BlobCache for LocalBlobCache {
         let cache_file = self.cache_file()?;
         self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref())?;
 
-        if !self.options.skip_verify_checksums {
-            let end = offset + dst.len() as u64;
-            for index in self.chunk_group_span(offset, end)? {
-                let group = self.chunk_group(index);
-                let padded = self.read_verified_group(index, &cache_file)?;
-                let first = offset.max(group.logical_offset());
-                let last = end.min(group.logical_range().end);
-                dst[(first - offset) as usize..(last - offset) as usize].copy_from_slice(
-                    &padded[(first - group.logical_offset()) as usize
-                        ..(last - group.logical_offset()) as usize],
-                );
-            }
-            return Ok(());
-        }
-
         // The cache file mirrors the padded address space, so once the
         // covering groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
@@ -858,9 +844,8 @@ impl BlobCache for LocalBlobCache {
     }
 
     fn prepare(&self) -> io::Result<PathBuf> {
-        // Opening the cache file creates it (sparse) and sizes it to the
+        // Opening the cache created the file (sparse) and sized it to the
         // padded address space.
-        self.cache_file()?;
         Ok(self.cache_data_path.clone())
     }
 
@@ -874,16 +859,10 @@ impl BlobCache for LocalBlobCache {
         }
         self.record_ondemand_range(offset, usize::try_from(len).unwrap_or(usize::MAX));
         let cache_file = self.cache_file()?;
-        self.ensure_byte_range(offset, len, cache_file.as_ref())?;
-        if !self.options.skip_verify_checksums {
-            for index in self.chunk_group_span(offset, offset + len)? {
-                self.read_verified_group(index, &cache_file)?;
-            }
-        }
-        Ok(())
+        self.ensure_byte_range(offset, len, cache_file.as_ref())
     }
 
-    fn ensure_range_with_groups(&self, offset: u64, len: u64) -> io::Result<Range<u64>> {
+    fn ensure_chunk_group_range(&self, offset: u64, len: u64) -> io::Result<Range<u64>> {
         self.ensure_range(offset, len)?;
         if len == 0 {
             return Ok(offset..offset);
@@ -987,12 +966,7 @@ impl BlobCache for LocalBlobCache {
         // crc32 and chunk lengths were copied from this group at optimize
         // time, so any divergence (stale optimize artifact, corrupted
         // transfer) is caught here before it can poison the cache.
-        validate_group_payload(
-            &self.blob_metadata,
-            &group,
-            payload,
-            self.options.skip_verify_checksums,
-        )?;
+        validate_decoded_chunk_group(&group, payload, self.options.skip_verify_checksums)?;
         let cache_file = self.cache_file()?;
         self.write_chunk_group(&group, payload, cache_file.as_ref())?;
         self.backend.metrics().cache.collect_write_finished_metrics(
@@ -1080,6 +1054,102 @@ impl BlobCache for LocalBlobCache {
             .sum();
         Some((cached, self.blob_metadata.uncompressed_size()))
     }
+}
+
+/// A cache data file as found when the cache opens.
+enum CacheDataFile {
+    Missing,
+    /// Not the size of the blob's address space: truncated or grown by
+    /// someone else.
+    Resized(File),
+    Sized(File),
+}
+
+fn find_cache_data_file(path: &Path, logical_size: u64) -> io::Result<CacheDataFile> {
+    match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) if file.metadata()?.len() == logical_size => Ok(CacheDataFile::Sized(file)),
+        Ok(file) => Ok(CacheDataFile::Resized(file)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(CacheDataFile::Missing),
+        Err(err) => Err(err),
+    }
+}
+
+/// Open the blob's cache data file, first clearing the ready bits of `map`
+/// when they cannot vouch for its bytes:
+///
+/// - the file is missing: the cache is new, or the file was removed and the
+///   bits name bytes that are gone;
+/// - the file is not the size of the blob's address space: someone truncated
+///   or grew it;
+/// - the bits were published in an earlier boot: they reach the disk through
+///   writeback on no schedule relative to the data, so a power loss or a
+///   kernel crash may have kept a bit and lost its group's bytes.
+///
+/// Clearing keeps the data: a cleared group whose bytes are still intact is
+/// verified on its next read and published again without a fetch. The
+/// decision is taken again under the map's reset lock, so after a restart the
+/// first opener clears the bits once and every later opener finds them
+/// current; the file is only ever created under that lock.
+fn open_cache_data_file(
+    map: &ChunkGroupMap,
+    path: &Path,
+    logical_size: u64,
+    map_existed: bool,
+) -> io::Result<File> {
+    let boot_tag = current_boot_tag();
+    let earlier_boot = |map: &ChunkGroupMap| boot_tag.is_some_and(|tag| map.boot_tag() != tag);
+    if let CacheDataFile::Sized(file) = find_cache_data_file(path, logical_size)? {
+        if !earlier_boot(map) {
+            return Ok(file);
+        }
+    }
+
+    let guard = map.lock_for_reset()?;
+    // A peer may have rebuilt the file or cleared the bits while we waited.
+    let (file, reason) = match find_cache_data_file(path, logical_size)? {
+        CacheDataFile::Sized(file) if !earlier_boot(map) => return Ok(file),
+        CacheDataFile::Sized(file) => (file, "the machine restarted since they were published"),
+        CacheDataFile::Resized(file) => (file, "the cache data file was resized"),
+        CacheDataFile::Missing => (
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?,
+            "the cache data file is missing",
+        ),
+    };
+    guard.reset();
+    file.set_len(logical_size)?;
+    if let Some(tag) = boot_tag {
+        map.set_boot_tag(tag);
+    }
+    if map_existed {
+        info!(
+            "cleared the chunk group ready bits of {}: {reason}",
+            path.display()
+        );
+    }
+    Ok(file)
+}
+
+/// Whether `file` may hold data in `span`. A span that is all hole, a group
+/// never written, needs no read back. A file system may report data in a
+/// hole, or a hole where zeros were written: the first costs one check of a
+/// group that then fails it, the second one fetch of bytes that were zeros;
+/// neither is a wrong answer. Without `SEEK_DATA` every span may hold data.
+fn may_hold_data(file: &File, span: &Range<u64>) -> bool {
+    let Ok(start) = libc::off_t::try_from(span.start) else {
+        return true;
+    };
+    // SAFETY: lseek takes no pointers. It moves the descriptor's file offset,
+    // which nothing uses: the cache file is only accessed positionally.
+    let data = unsafe { libc::lseek(file.as_raw_fd(), start, libc::SEEK_DATA) };
+    if data < 0 {
+        return io::Error::last_os_error().raw_os_error() != Some(libc::ENXIO);
+    }
+    (data as u64) < span.end
 }
 
 fn load_or_fetch_blob_metadata(
@@ -1246,7 +1316,9 @@ mod tests {
     use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
     use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::{uncompressed_data, FullBlob};
-    use nydus_test_utils::metadata::{from_chunk_groups, single_chunk_group};
+    use nydus_test_utils::metadata::{
+        from_chunk_groups, single_chunk_group, with_wrong_chunk_group_digest,
+    };
     use sha2::{Digest, Sha256};
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
@@ -1613,9 +1685,9 @@ mod tests {
     }
 
     #[test]
-    fn fetched_groups_exclude_read_ahead_and_preserve_ondemand_record() {
+    fn fetched_chunk_groups_exclude_read_ahead_and_preserve_ondemand_record() {
         let backend_dir = tempdir().unwrap();
-        // Deliberately unequal, sub-64-KiB groups, including zero padding.
+        // Unequal chunk groups with sub-64-KiB boundaries and zero padding.
         let groups = vec![
             vec![vec![0x11; 4096], vec![0x12; 100]],
             vec![vec![0x21; 4096]],
@@ -1645,12 +1717,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cached.ensure_range_with_groups(u64::MAX, 0).unwrap(),
+            cached.ensure_chunk_group_range(u64::MAX, 0).unwrap(),
             u64::MAX..u64::MAX
         );
         assert_eq!(backend.reads(), 0);
-        assert_eq!(cached.ensure_range_with_groups(4096, 1).unwrap(), 0..8192);
-        // One compressed read warms all groups, but only the first was accessed.
+        assert_eq!(cached.ensure_chunk_group_range(4096, 1).unwrap(), 0..8192);
+        // One compressed read warms all chunk groups; only the first was accessed.
         assert_eq!(backend.reads(), 1);
         assert!(cached.is_all_ready());
         assert_eq!(
@@ -1659,22 +1731,22 @@ mod tests {
         );
         assert_eq!(recorder.snapshot().entries.len(), 1);
         assert_eq!(recorder.snapshot().entries[0].chunk_group_index, 0);
-        assert_eq!(cached.ensure_range_with_groups(8191, 2).unwrap(), 0..12288);
+        assert_eq!(cached.ensure_chunk_group_range(8191, 2).unwrap(), 0..12288);
         assert_eq!(
-            cached.ensure_range_with_groups(8192, 4096).unwrap(),
+            cached.ensure_chunk_group_range(8192, 4096).unwrap(),
             8192..12288
         );
         assert_eq!(recorder.snapshot().entries.len(), 2);
         assert_eq!(recorder.snapshot().entries[1].chunk_group_index, 1);
         assert_eq!(backend.reads(), 1);
         assert_eq!(
-            cached.ensure_range_with_groups(24575, 1).unwrap(),
+            cached.ensure_chunk_group_range(24575, 1).unwrap(),
             12288..24576
         );
         for offset in [24576, u64::MAX] {
             assert_eq!(
                 cached
-                    .ensure_range_with_groups(offset, 1)
+                    .ensure_chunk_group_range(offset, 1)
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::InvalidInput,
@@ -1684,7 +1756,7 @@ mod tests {
     }
 
     #[test]
-    fn fetched_groups_propagate_payload_failure() {
+    fn fetched_chunk_groups_propagate_payload_failure() {
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, _) = groups_blob();
         let id = FullBlob::new(&data)
@@ -1700,7 +1772,7 @@ mod tests {
         );
         // Truncate the payload because the backend may retain an open fd.
         File::create(backend_dir.path().join(hex::encode(id))).unwrap();
-        assert!(cache.ensure_range_with_groups(4096, 4096).is_err());
+        assert!(cache.ensure_chunk_group_range(4096, 4096).is_err());
         assert!(cache.ready_ranges(4096, 4096).unwrap().is_empty());
     }
 
@@ -2450,5 +2522,358 @@ mod tests {
             .path()
             .join(format!("{}.blob.data", hex::encode(data_blob_id)))
             .exists());
+    }
+
+    // ---- ready bits across restarts and around a removed or resized file ----
+
+    /// A blob of four 16 KiB groups saved in a fresh backend directory.
+    struct Fixture {
+        backend_dir: tempfile::TempDir,
+        cache_dir: tempfile::TempDir,
+        id: [u8; SHA256_DIGEST_SIZE],
+        image: Vec<u8>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self::with_metadata(|meta| meta)
+        }
+
+        /// A fixture whose blob meta `change` rewrites.
+        fn with_metadata(change: impl FnOnce(BlobMetadata) -> BlobMetadata) -> Self {
+            let backend_dir = tempdir().unwrap();
+            let (data, meta, _, image) = groups_blob();
+            let meta = change(meta);
+            let id = FullBlob::new(&data)
+                .with_blob_metadata(&meta)
+                .with_blob_metadata_file()
+                .save_in(backend_dir.path());
+            Self {
+                backend_dir,
+                cache_dir: tempdir().unwrap(),
+                id,
+                image,
+            }
+        }
+
+        fn backend(&self) -> Arc<CountingBackend> {
+            CountingBackend::new(self.backend_dir.path())
+        }
+
+        fn open(&self, backend: &Arc<CountingBackend>, options: CacheOptions) -> LocalBlobCache {
+            open(self.id, self.cache_dir.path(), backend.clone(), options)
+        }
+
+        fn path(&self, suffix: &str) -> PathBuf {
+            self.cache_dir
+                .path()
+                .join(format!("{}{suffix}", hex::encode(self.id)))
+        }
+
+        /// Fill every group of the cache, then close it.
+        fn warm(&self) {
+            let backend = self.backend();
+            let cache = self.open(&backend, fetch(1 << 20));
+            let mut all = vec![0u8; self.image.len()];
+            cache.read_at(0, &mut all).unwrap();
+            assert_eq!(all, self.image);
+            assert!(cache.is_all_ready());
+        }
+
+        /// Leave the group map as a restart finds it: its bits were published
+        /// in another boot.
+        fn restart(&self) {
+            let current = current_boot_tag().expect("the test host exposes a boot id");
+            let map = ChunkGroupMap::open(&self.path(".group.map"), 4).unwrap();
+            map.set_boot_tag(current.wrapping_add(1).max(1));
+        }
+
+        /// Lose `len` bytes of the cache data file at `offset`, as a page the
+        /// crash kept from the disk.
+        fn punch(&self, offset: u64, len: u64) {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(self.path(".blob.data"))
+                .unwrap();
+            let rc = unsafe {
+                libc::fallocate(
+                    file.as_raw_fd(),
+                    libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                    offset as libc::off_t,
+                    len as libc::off_t,
+                )
+            };
+            assert_eq!(rc, 0, "punch hole: {}", io::Error::last_os_error());
+        }
+
+        fn flip(&self, offset: u64) {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(self.path(".blob.data"))
+                .unwrap();
+            let mut byte = [0u8];
+            file.read_exact_at(&mut byte, offset).unwrap();
+            file.write_all_at(&[byte[0] ^ 0x40], offset).unwrap();
+        }
+
+        fn read_all(&self, cache: &LocalBlobCache) -> io::Result<Vec<u8>> {
+            let mut all = vec![0u8; self.image.len()];
+            cache.read_at(0, &mut all).map(|()| all)
+        }
+    }
+
+    fn ready_groups(cache: &LocalBlobCache) -> Vec<usize> {
+        (0..4).filter(|&i| cache.is_chunk_group_ready(i)).collect()
+    }
+
+    fn options(skip_verify_checksums: bool) -> CacheOptions {
+        CacheOptions {
+            skip_verify_checksums,
+            fetch_size: 0,
+        }
+    }
+
+    /// After a restart the ready bits are cleared, but groups whose bytes
+    /// survived are verified and published again without a fetch.
+    #[test]
+    fn restart_clears_ready_bits_and_reuses_intact_groups() {
+        for skip_verify_checksums in [false, true] {
+            let fixture = Fixture::new();
+            fixture.warm();
+            fixture.restart();
+
+            let backend = fixture.backend();
+            let cache = fixture.open(&backend, options(skip_verify_checksums));
+            assert_eq!(ready_groups(&cache), Vec::<usize>::new());
+            assert!(!cache.is_all_ready());
+            assert_eq!(
+                cache.chunk_group_map.boot_tag(),
+                current_boot_tag().unwrap()
+            );
+
+            assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+            assert_eq!(backend.reads(), 0, "intact groups need no fetch");
+            assert_eq!(ready_groups(&cache), vec![0, 1, 2, 3]);
+            assert!(cache.chunk_group_map.latch_all_ready());
+        }
+    }
+
+    /// Groups a crash left partly unwritten or with stray bytes fail the
+    /// check and are fetched again, each once, whatever the checksum option;
+    /// the intact ones are reused.
+    #[test]
+    fn restart_refetches_groups_the_crash_damaged() {
+        for skip_verify_checksums in [false, true] {
+            let fixture = Fixture::new();
+            fixture.warm();
+            fixture.punch(16384 + 4096, 4096);
+            fixture.flip(3 * 16384 + 100);
+            fixture.restart();
+
+            let backend = fixture.backend();
+            let cache = fixture.open(&backend, options(skip_verify_checksums));
+            assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+            assert_eq!(backend.reads(), 2, "groups 1 and 3 are fetched, alone");
+            assert_eq!(ready_groups(&cache), vec![0, 1, 2, 3]);
+            assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+            assert_eq!(backend.reads(), 2);
+        }
+    }
+
+    /// A fetched group is checked against its crc only: a group whose digest
+    /// does not match is still served and cached, whatever the checksum
+    /// option.
+    #[test]
+    fn fetched_groups_are_not_checked_against_their_digests() {
+        for skip_verify_checksums in [false, true] {
+            let fixture = Fixture::with_metadata(|meta| with_wrong_chunk_group_digest(&meta, 2));
+            let backend = fixture.backend();
+            let cache = fixture.open(&backend, options(skip_verify_checksums));
+            assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+            assert_eq!(backend.reads(), 4);
+            assert_eq!(ready_groups(&cache), vec![0, 1, 2, 3]);
+        }
+    }
+
+    /// After a restart a cached group is reused only when its digest matches
+    /// too: a group matching its crc but not its digest is fetched again,
+    /// whatever the checksum option.
+    #[test]
+    fn restart_checks_cached_groups_against_their_digests() {
+        for skip_verify_checksums in [false, true] {
+            let fixture = Fixture::with_metadata(|meta| with_wrong_chunk_group_digest(&meta, 2));
+            fixture.warm();
+            fixture.restart();
+
+            let backend = fixture.backend();
+            let cache = fixture.open(&backend, options(skip_verify_checksums));
+            assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+            assert_eq!(backend.reads(), 1, "only group 2 is fetched again");
+            assert_eq!(ready_groups(&cache), vec![0, 1, 2, 3]);
+        }
+    }
+
+    /// Within one boot the ready bits are trusted as they are: reopening
+    /// keeps them, and a map written before the boot tag existed is cleared
+    /// once, then kept.
+    #[test]
+    fn ready_bits_survive_reopening_within_a_boot() {
+        let fixture = Fixture::new();
+        fixture.warm();
+        let backend = fixture.backend();
+        let cache = fixture.open(&backend, fetch(0));
+        assert_eq!(ready_groups(&cache), vec![0, 1, 2, 3]);
+        assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+        assert_eq!(backend.reads(), 0);
+
+        cache.chunk_group_map.set_boot_tag(0);
+        drop(cache);
+        let cache = fixture.open(&backend, fetch(0));
+        assert_eq!(
+            ready_groups(&cache),
+            Vec::<usize>::new(),
+            "no boot tag, no trust"
+        );
+        assert_eq!(
+            cache.chunk_group_map.boot_tag(),
+            current_boot_tag().unwrap()
+        );
+        assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+        drop(cache);
+        let cache = fixture.open(&backend, fetch(0));
+        assert_eq!(ready_groups(&cache), vec![0, 1, 2, 3]);
+        assert_eq!(backend.reads(), 0);
+    }
+
+    /// Readers of two handles on one cache directory (standing in for two
+    /// processes) race over a restarted cache: every byte they get is right,
+    /// and the one damaged group is fetched exactly once.
+    #[test]
+    fn concurrent_readers_after_a_restart_fetch_a_damaged_group_once() {
+        let fixture = Fixture::new();
+        fixture.warm();
+        fixture.punch(2 * 16384, 8192);
+        fixture.restart();
+
+        let (backend_a, backend_b) = (fixture.backend(), fixture.backend());
+        let a = fixture.open(&backend_a, fetch(0));
+        let b = fixture.open(&backend_b, fetch(0));
+        thread::scope(|scope| {
+            for t in 0..16usize {
+                let cache = if t % 2 == 0 { &a } else { &b };
+                let image = &fixture.image;
+                scope.spawn(move || {
+                    for round in 0..64usize {
+                        let group = (t + round) % 4;
+                        let offset = group * 16384 + (round * 97) % 16000;
+                        let mut buf = vec![0u8; 256];
+                        cache.read_at(offset as u64, &mut buf).unwrap();
+                        assert_eq!(buf, image[offset..offset + 256], "group {group}");
+                    }
+                });
+            }
+        });
+        assert_eq!(backend_a.reads() + backend_b.reads(), 1);
+        assert_eq!(ready_groups(&a), vec![0, 1, 2, 3]);
+    }
+
+    /// Prefetch after a restart publishes the intact groups in place and
+    /// fetches only the damaged one.
+    #[test]
+    fn prefetch_after_a_restart_fetches_only_damaged_groups() {
+        let fixture = Fixture::new();
+        fixture.warm();
+        fixture.flip(100);
+        fixture.restart();
+
+        let backend = fixture.backend();
+        let cache = fixture.open(&backend, fetch(0));
+        cache.prefetch_all(2, None).unwrap();
+        assert_eq!(backend.reads(), 1);
+        assert!(cache.is_all_ready());
+        assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+    }
+
+    /// A cache data file removed after the cache opened is never replaced
+    /// by an empty one under the old bits: the handle keeps its descriptor
+    /// and refuses the removed file, and the next open starts over.
+    #[test]
+    fn removed_data_file_never_resurfaces_as_holes() {
+        for skip_verify_checksums in [false, true] {
+            let fixture = Fixture::new();
+            fixture.warm();
+            let backend = fixture.backend();
+            let cache = fixture.open(&backend, options(skip_verify_checksums));
+            fs::remove_file(fixture.path(".blob.data")).unwrap();
+
+            let mut buf = vec![0u8; 64];
+            match cache.read_at(16384, &mut buf) {
+                Ok(()) => assert_eq!(buf, fixture.image[16384..16448]),
+                Err(err) => assert_eq!(err.kind(), io::ErrorKind::NotFound),
+            }
+            assert!(
+                !fixture.path(".blob.data").exists(),
+                "never recreated by a read"
+            );
+            drop(cache);
+
+            let cache = fixture.open(&backend, options(skip_verify_checksums));
+            assert_eq!(ready_groups(&cache), Vec::<usize>::new());
+            assert_eq!(fixture.read_all(&cache).unwrap(), fixture.image);
+        }
+    }
+
+    /// A handle still holding a removed data file never serves it after a
+    /// peer rebuilt the replacement and published every group in the shared
+    /// map, the mapped fast path included.
+    #[test]
+    fn handle_on_a_removed_file_ignores_a_peers_rebuilt_cache() {
+        let fixture = Fixture::new();
+        let backend = fixture.backend();
+        let old = fixture.open(&backend, options(true));
+        let mut buf = vec![0u8; 16];
+        old.read_at(0, &mut buf).unwrap();
+        fs::remove_file(fixture.path(".blob.data")).unwrap();
+
+        let peer = fixture.open(&backend, options(true));
+        peer.prefetch_all(1, None).unwrap();
+        assert!(peer.is_all_ready());
+
+        let offset = 2 * 16384;
+        match old.read_at(offset as u64, &mut buf) {
+            Ok(()) => assert_eq!(buf, fixture.image[offset..offset + 16]),
+            Err(err) => assert_eq!(err.kind(), io::ErrorKind::NotFound),
+        }
+        assert_eq!(fixture.read_all(&peer).unwrap(), fixture.image);
+    }
+
+    /// A cache data file truncated (or grown) by someone else is detected
+    /// when the cache opens: the bits are cleared and the data fetched again.
+    #[test]
+    fn resized_data_file_is_reset_on_open() {
+        for len in [0u64, 4096, 5 * 16384] {
+            let fixture = Fixture::new();
+            fixture.warm();
+            OpenOptions::new()
+                .write(true)
+                .open(fixture.path(".blob.data"))
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+
+            let backend = fixture.backend();
+            let cache = fixture.open(&backend, options(true));
+            assert_eq!(ready_groups(&cache), Vec::<usize>::new(), "len {len}");
+            assert_eq!(
+                fs::metadata(fixture.path(".blob.data")).unwrap().len(),
+                fixture.image.len() as u64
+            );
+            assert_eq!(
+                fixture.read_all(&cache).unwrap(),
+                fixture.image,
+                "len {len}"
+            );
+        }
     }
 }

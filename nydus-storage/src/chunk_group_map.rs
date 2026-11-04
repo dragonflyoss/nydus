@@ -24,9 +24,43 @@ const GROUP_MAP_FEATURE_INCOMPAT_OFFSET: usize = 12;
 const GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET: usize = 16;
 const GROUP_MAP_READY_COUNT_OFFSET: usize = 20;
 const GROUP_MAP_STATE_OFFSET: usize = 24;
+/// The tag of the boot the ready bits belong to, see [`current_boot_tag`].
+/// Zero, as in files written before the field existed, matches no boot.
+const GROUP_MAP_BOOT_TAG_OFFSET: usize = 28;
 /// `state` bit: every group of this blob is ready. This is only a hint; reset
 /// may clear the bitmap while a concurrent writer still updates the header.
 const GROUP_MAP_STATE_ALL_READY: u32 = 1;
+
+/// The kernel's random identity of the running boot.
+const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+
+/// A 32-bit tag of the running boot: the first four bytes of the kernel's
+/// boot id, never zero. `None` when the boot id cannot be read, which
+/// disables the restart check rather than resetting on every open.
+pub fn current_boot_tag() -> Option<u32> {
+    static TAG: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *TAG.get_or_init(|| match std::fs::read_to_string(BOOT_ID_PATH) {
+        Ok(text) => boot_tag_from(&text).or_else(|| {
+            tracing::warn!("unrecognized boot id {text:?}; ready bits survive restarts");
+            None
+        }),
+        Err(err) => {
+            tracing::warn!("cannot read {BOOT_ID_PATH}: {err}; ready bits survive restarts");
+            None
+        }
+    })
+}
+
+/// The tag of a boot id such as `8617082a-a178-4e39-bec9-f88dff18f781`: its
+/// first eight hex digits, with zero mapped to one so that zero stays free
+/// for "no boot".
+fn boot_tag_from(boot_id: &str) -> Option<u32> {
+    let head = boot_id.trim().get(..8)?;
+    if !head.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(u32::from_str_radix(head, 16).ok()?.max(1))
+}
 
 /// Holds `flock(LOCK_EX)` on a file for the guard's lifetime.
 pub(crate) struct ResetGuard<'a> {
@@ -88,7 +122,8 @@ impl Drop for ResetGuard<'_> {
 ///     16     4  chunk_group_count
 ///     20     4  ready_count             advisory, atomically updated
 ///     24     4  state                   bit 0 ALL_READY, atomically updated
-///     28  4068  reserved                writers zero it, readers ignore it
+///     28     4  boot_tag                boot the ready bits belong to, 0 none
+///     32  4064  reserved                writers zero it, readers ignore it
 /// ```
 ///
 /// The bitmap follows at offset 4096. Bytes past it are ignored, so a newer
@@ -99,8 +134,9 @@ impl Drop for ResetGuard<'_> {
 /// every process (or thread) that opens the same chunk_group_map file observes
 /// `set_ready` updates from all the others through the shared page cache —
 /// this is what lets concurrent nydus instances on one node share a single
-/// warmed cache. Persistence across reboots is provided by regular kernel
-/// writeback of the dirty pages.
+/// warmed cache. The bits reach the disk through regular kernel writeback,
+/// in no order relative to the data they describe, so they are only trusted
+/// within the boot named by `boot_tag` (see [`current_boot_tag`]).
 ///
 /// The header additionally carries an `ALL_READY` state hint for the common
 /// fully cached case. Since reset may race with a writer's header update,
@@ -255,6 +291,19 @@ impl ChunkGroupMap {
     /// Keep orphan detection, reset and data-file recreation under one lock.
     pub(crate) fn lock_for_reset(&self) -> io::Result<ResetGuard<'_>> {
         ResetGuard::exclusive(self)
+    }
+
+    /// The tag of the boot the ready bits belong to, zero for none.
+    pub(crate) fn boot_tag(&self) -> u32 {
+        self.header_u32(GROUP_MAP_BOOT_TAG_OFFSET)
+            .load(Ordering::Acquire)
+    }
+
+    /// Record that the ready bits belong to the boot tagged `tag`. Callers
+    /// clear the bits of an earlier boot first, under the reset lock.
+    pub(crate) fn set_boot_tag(&self, tag: u32) {
+        self.header_u32(GROUP_MAP_BOOT_TAG_OFFSET)
+            .store(tag, Ordering::Release);
     }
 
     pub fn is_ready(&self, index: usize) -> io::Result<bool> {
@@ -742,6 +791,50 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "chunk_group_map operations too slow: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn boot_tag_is_the_nonzero_head_of_the_boot_id() {
+        for (boot_id, expected) in [
+            ("8617082a-a178-4e39-bec9-f88dff18f781\n", Some(0x8617_082a)),
+            ("FFFFFFFF-0000-0000-0000-000000000000", Some(u32::MAX)),
+            ("00000000-a178-4e39-bec9-f88dff18f781", Some(1)),
+            ("00000001-a178-4e39-bec9-f88dff18f781", Some(1)),
+            ("8617082", None),
+            ("8617082z-a178-4e39-bec9-f88dff18f781", None),
+            ("", None),
+        ] {
+            assert_eq!(boot_tag_from(boot_id), expected, "{boot_id:?}");
+        }
+        if let Ok(text) = std::fs::read_to_string(BOOT_ID_PATH) {
+            assert_eq!(current_boot_tag(), boot_tag_from(&text));
+            assert_ne!(current_boot_tag(), Some(0));
+        }
+    }
+
+    #[test]
+    fn boot_tag_is_shared_persisted_and_kept_by_reset() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob.group.map");
+        let map = ChunkGroupMap::open(&path, 10).unwrap();
+        assert_eq!(map.boot_tag(), 0, "a new map belongs to no boot");
+
+        let peer = ChunkGroupMap::open(&path, 10).unwrap();
+        map.set_boot_tag(0x1234_5678);
+        assert_eq!(peer.boot_tag(), 0x1234_5678);
+        map.set_ready(3).unwrap();
+        map.reset().unwrap();
+        assert!(!peer.is_ready(3).unwrap());
+        assert_eq!(peer.boot_tag(), 0x1234_5678, "reset leaves the tag alone");
+        drop((map, peer));
+
+        let reopened = ChunkGroupMap::open(&path, 10).unwrap();
+        assert_eq!(reopened.boot_tag(), 0x1234_5678);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            bytes[GROUP_MAP_BOOT_TAG_OFFSET..GROUP_MAP_BOOT_TAG_OFFSET + 4],
+            0x1234_5678u32.to_le_bytes()
         );
     }
 }

@@ -442,8 +442,9 @@ caller already trusts the content:
 	header then carries no digester bit and an empty digest table; packs then
 	close only when they span four times the chunk group minimum size, since
 	no digest
-	marks a boundary. No mount path verifies digests, they name content for
-	content-addressed caches; `nydus check` reports the digester.
+	marks a boundary. Mounts verify digests only for groups a restart left
+	unconfirmed in the cache; otherwise they name content for
+	content-addressed caches. `nydus check` reports the digester.
 - `--blob-id <64-hex>` (optionally prefixed `sha256:`) names the blob up front,
 	e.g. with the OCI layer digest, and skips both SHA256 passes. The id is
 	written to the device slot tag, used as the file name under `--blob-dir`
@@ -1134,10 +1135,14 @@ Fields:
 	and `nydus optimize` require a directory and reject its absence at startup,
 	except that the kernel modes accept an image whose every blob is a native
 	layer in a `local` store: its store file is handed to the kernel directly.
-- `storage.skip_verify_checksums` (default `false`) skips checking decoded
-	chunk groups against their `crc32c` before they are served; set this to
-	`true` when the transport is trusted end to end. The blob meta's BLAKE3
-	digests are never checked at mount time, they name content.
+- `storage.skip_verify_checksums` (default `false`) skips checking fetched
+	chunk groups against their `crc32c` before they are cached; set this to
+	`true` when the transport is trusted end to end. Groups served from the
+	cache are never checked again within a boot. Groups a restart left
+	unconfirmed in the cache file are always checked against their `crc32c`
+	and, when the blob meta records them, their BLAKE3 digests before they are
+	reused (see
+	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 - `storage.fetch_size` (default `2097152`, 2 MiB) is how many compressed
 	bytes one on-demand backend read covers: the chunk groups whose compressed
 	ranges overlap the fetch-size-aligned cell holding the missed group,
@@ -1890,9 +1895,10 @@ meta preserves the tables the reader does not know.
 	content digest. The table uses 32 bytes per group rather than per chunk,
 	so its reduction depends on the number of chunks per group. These digests
 	are the identities a content-addressed cache uses for groups.
-- The runtime does not check a decoded group against its entry; the group's
-	`crc32c` guards the bytes (`storage.skip_verify_checksums`), the digest
-	names them.
+- The runtime checks a fetched group against its `crc32c` only
+	(`storage.skip_verify_checksums`); the digest names it. A group a restart
+	left unconfirmed in the cache file is always checked against both before
+	it is reused.
 
 Redirect details (ondemand blobs only):
 
@@ -2016,8 +2022,8 @@ Hash and validation summary:
 - **BLAKE3 per chunk group** (blob meta digest table, one entry per group)
 	— the content identity of the group, BLAKE3 over its decoded payload,
 	for a lone chunk the chunk's own digest (see
-	[Chunk group digest](#chunk-group-digest)); what a read checks a decoded
-	group against when checksum verification is enabled.
+	[Chunk group digest](#chunk-group-digest)); what a mount checks a group
+	in the cache against, with its CRC32C, after a restart.
 - **CRC32C per chunk group** (blob meta chunk group entry) — validated after
 	every fetch and decode, on demand and prefetch alike.
 - **SHA256 over the data region** — written into the bootstrap device slot as
@@ -2389,11 +2395,15 @@ built-in tuning.
 
 The local backend opens source blob files lazily when read IO is first issued and
 caches the file descriptor for later `pread` calls. The persistent local cache
-also opens `<full_blob_digest>.blob.data` lazily, then serves repeated reads via
-cached `pread`/`pwrite` file descriptors. Cache artifacts are named by the full
+opens `<full_blob_digest>.blob.data` when the blob's cache opens and holds that
+descriptor for the cache's lifetime, serving every `pread`/`pwrite` through it:
+a data file removed underneath is never reopened by path, which would put a new
+empty file under the old ready bits. Cache artifacts are named by the full
 blob digest:
 
-- `<full_blob_digest>.blob.data` stores decoded uncompressed data.
+- `<full_blob_digest>.blob.data` stores decoded uncompressed data. Remove it
+	whole, never truncate it: a fully cached blob is read through a mapping, and
+	a running daemon faults (`SIGBUS`) on a mapped page truncated away.
 - `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
 	the local backend.
 - `<full_blob_digest>.group.map` records which chunk groups have been decoded
@@ -2431,9 +2441,10 @@ ChunkGroupRedirectTable     source blob and group, for ondemand blobs only
 <hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
 +---------------------------------+----------------------+
 | 4 KiB header (NDGRPMAP, features| 1 bit per group ...  |
-| count, ready count, state)      |                      |
+| count, ready count, state, boot)|                      |
 +---------------------------------+----------------------+
   bits set only after the group's bytes are resident in .blob.data;
+  bits only count within the boot the header names (see below);
   the ALL_READY header state bit latches once every bit is set;
   byte N also carries the OFD lock claiming group N's fetch
 
@@ -2536,8 +2547,9 @@ header followed by one readiness bit per chunk group. The header carries the
 8-byte ASCII magic `NDGRPMAP` (same raw-bytes style as the blob meta's
 `NDBLMETA`), the `feature_compat` and `feature_incompat` words at offsets 8
 and 12 (the blob meta prefix, without a crc32 since the file is mutable), the
-group count at 16, a mutable ready-group counter at 20 and a mutable `state`
-word at 24 whose bit 0 is `ALL_READY`; the rest of the header page is
+group count at 16, a mutable ready-group counter at 20, a mutable `state`
+word at 24 whose bit 0 is `ALL_READY` and the `boot_tag` at 28 naming the
+boot the bits belong to; the rest of the header page is
 reserved and zero. Readers require the file to be at least header plus
 bitmap long and ignore any bytes past the bitmap, which a newer writer may
 append behind a compat feature bit. The whole file is mapped `MAP_SHARED`
@@ -2556,7 +2568,22 @@ crash safety:
 - Bits are set only after the decoded, validated group bytes have been
 	written to the cache data file, and persistence rides on regular kernel
 	writeback of the dirty mapping — there is no per-bit write syscall on the hot
-	path.
+	path. Writeback orders nothing, though: after a power loss or a kernel crash
+	a bit may have reached the disk while its group's bytes did not. So the bits
+	only count within the boot that published them. `boot_tag` is the first
+	four bytes of `/proc/sys/kernel/random/boot_id` (never zero; zero, as in
+	maps written before the field existed, names no boot), and the first open
+	of a blob after a restart clears its bits, under the reset lock, before
+	recording the current tag; later openers find the tag current and keep the
+	bits. Clearing keeps the data: a cleared group whose bytes are in the cache
+	file is read back on its next miss, checked against its crc32c and, when
+	the blob meta has one, its digest — always, `skip_verify_checksums` or not —
+	and published without a fetch; only groups that fail the check are fetched.
+	The check runs under the same in-process flight and cross-process window
+	claim as a fetch, and prefetch does the same for its batches. A cache data
+	file that is missing or not the size of the blob's address space when the
+	cache opens clears the bits the same way. Within a boot, ready groups are
+	served without any check.
 
 `is_all_ready()` is the O(1) fast path: the process that flips the last
 missing bit (tracked by the shared ready counter) latches the sticky

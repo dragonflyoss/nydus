@@ -65,11 +65,11 @@ use nydus_config::PrefetchScope;
 use nydus_storage::ondemand::OndemandDocument;
 use nydus_storage::prefetch::BlobPrefetcher;
 
-/// Separate from ResolveMode to limit group expansion to flat-device callers.
+/// Separate from ResolveMode to limit chunk group expansion to flat-device callers.
 #[derive(Clone, Copy, PartialEq)]
 enum FlatResolveMode {
     Fetch,
-    FetchGroups,
+    FetchChunkGroups,
     Probe,
 }
 
@@ -324,18 +324,18 @@ impl NydusCore {
     /// groups intersecting it, clipped to each blob's device-table bounds.
     /// Bootstrap, holes and native raw blobs keep exact-range behavior.
     ///
-    /// Only intersecting blobs are opened. Requested groups are traced on hits
-    /// and misses; groups warmed only by read-ahead or prefetch are excluded.
+    /// Only intersecting blobs are opened. Requested chunk groups are recorded
+    /// on hits and misses; unrequested chunk groups are excluded even if warm.
     /// Extents are ordered and non-overlapping, cover the request clipped to
     /// [`Self::flat_size`], and may extend beyond the request. Zero length
     /// returns no extents; overflow and fetch failures return errors.
     ///
-    /// Group boundaries need not be host-page aligned. For mmap, fetch the
+    /// Chunk group boundaries need not be host-page aligned. For mmap, fetch the
     /// whole faulting host page, then clip to the mapping window and complete
     /// host pages with aligned backing offsets. Never round into cold bytes;
     /// copy pages spanning different backing files.
-    pub fn fetch_flat_group_ranges(&self, offset: u64, len: u64) -> Result<Vec<Extent>> {
-        self.resolve_flat_ranges(offset, len, FlatResolveMode::FetchGroups)
+    pub fn fetch_flat_chunk_group_ranges(&self, offset: u64, len: u64) -> Result<Vec<Extent>> {
+        self.resolve_flat_ranges(offset, len, FlatResolveMode::FetchChunkGroups)
     }
 
     /// Probe `[offset, offset + len)` in the flattened device view without
@@ -389,7 +389,9 @@ impl NydusCore {
                 Segment::Blob { range, end } => match mode {
                     FlatResolveMode::Fetch => resolver.push_blob(range, ResolveMode::Fetch)?,
                     FlatResolveMode::Probe => resolver.push_blob(range, ResolveMode::Probe)?,
-                    FlatResolveMode::FetchGroups => resolver.push_blob_groups(range, end)?,
+                    FlatResolveMode::FetchChunkGroups => {
+                        resolver.push_blob_chunk_group_range(range, end)?
+                    }
                 },
             }
         }

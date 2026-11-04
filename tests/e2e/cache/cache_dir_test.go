@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,10 +18,11 @@ import (
 )
 
 const (
-	mapCountOffset = 16
-	mapStateOffset = 24
-	mapAllReady    = 1
-	mapHeaderSize  = 4096
+	mapCountOffset   = 16
+	mapStateOffset   = 24
+	mapBootTagOffset = 28
+	mapAllReady      = 1
+	mapHeaderSize    = 4096
 )
 
 type cacheDir struct {
@@ -167,6 +169,34 @@ func (c cacheDir) forgeReady(t testing.TB, blob string) int {
 	}
 
 	return forged
+}
+
+// restart makes the blob's group map name an earlier boot, as it does after
+// the machine restarted: the boot tag is the first eight hex digits of the
+// kernel boot id, never zero, and the map's bits only count within its boot.
+func (c cacheDir) restart(t testing.TB, blob string) {
+	t.Helper()
+	id, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if !assert.NoError(t, err) || !assert.GreaterOrEqual(t, len(id), 8) {
+		t.FailNow()
+	}
+
+	var tag [4]byte
+	if _, err := hex.Decode(tag[:], id[:8]); !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	current := max(binary.BigEndian.Uint32(tag[:]), 1)
+	f, err := os.OpenFile(c.file(blob, mount.CacheMapSuffix), os.O_RDWR, 0)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	defer func() { _ = f.Close() }()
+	binary.LittleEndian.PutUint32(tag[:], max(current+1, 1))
+	if _, err := f.WriteAt(tag[:], mapBootTagOffset); !assert.NoError(t, err) {
+		t.FailNow()
+	}
 }
 
 func (c cacheDir) holdFlock(t testing.TB, blob, suffix string) func() {
