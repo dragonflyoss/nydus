@@ -36,11 +36,13 @@ func (NBD) Name() string { return "nbd" }
 
 func (NBD) Require(t testing.TB) {
 	t.Helper()
-	env.RequireRoot(t)
-	env.RequireKernel(t, 6, 4, "EROFS flatdev mounts of a flattened image")
-	env.RequireFilesystem(t, "erofs")
-	env.Require(t, loadModule(), "nbd kernel module unavailable (modprobe nbd)")
-	env.RequireSubcommand(t, "nbd")
+	env.MustHaveRoot(t)
+	env.MustHaveKernel(t, 6, 4, "EROFS flatdev mounts of a flattened image")
+	env.MustHaveFilesystem(t, "erofs")
+	if !loadModule() {
+		env.Skipf(t, "nbd kernel module unavailable (modprobe nbd)")
+	}
+	env.MustHaveSubcommand(t, "nbd")
 }
 
 // Supports reports Cold and Warm: the flattened device needs a bootstrap.

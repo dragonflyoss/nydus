@@ -22,293 +22,414 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
-	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
-func TestBootstrapFileAndBytesHaveIdenticalLayers(t *testing.T) {
-	ctx := context.Background()
-	provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-	require.NoError(t, err)
-	data := bytes.Repeat([]byte("bootstrap"), 1024)
-	path := filepath.Join(t.TempDir(), "image.boot")
-	require.NoError(t, os.WriteFile(path, data, 0644))
-	meta := []nydus.BlobMetaFile{{Name: "test.blob.meta", Data: []byte("meta")}}
-	extra := []nydus.AppendFile{{Name: "extra.json", Data: []byte("{}")}}
-	original, err := oci.WriteBootstrapLayer(ctx, provider.ContentStore(), data, meta, extra)
-	require.NoError(t, err)
-	streamed, err := oci.WriteBootstrapLayerFromFile(ctx, provider.ContentStore(), path, meta, extra)
-	require.NoError(t, err)
-	require.Equal(t, original, streamed)
-	contents := map[string][]byte{}
-	require.NoError(t, oci.WalkBootstrapLayer(ctx, provider.ContentStore(), *streamed, func(header *tar.Header, reader *tar.Reader) error {
-		if header.Typeflag == tar.TypeReg {
-			var err error
-			contents[header.Name], err = io.ReadAll(reader)
-			return err
-		}
-		return nil
-	}))
-	require.Equal(t, data, contents["image/image.boot"])
-	require.Equal(t, []byte("meta"), contents["image/test.blob.meta"])
-	require.Equal(t, []byte("{}"), contents["image/extra.json"])
-	_, err = oci.WriteBootstrapLayerFromFile(ctx, provider.ContentStore(), path+"-missing", nil, nil)
-	require.Error(t, err)
-	_, err = oci.WriteBootstrapLayerFromFile(ctx, provider.ContentStore(), filepath.Dir(path), nil, nil)
-	require.Error(t, err)
-	statuses, err := provider.ContentStore().ListStatuses(ctx)
-	require.NoError(t, err)
-	require.Empty(t, statuses, "bootstrap failure must abort its partial ingest")
-}
+var (
+	mockBlobData = []byte("blob bytes")
 
-func TestCommitBlobRetriesInterruptedIngest(t *testing.T) {
-	ctx := context.Background()
-	provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-	require.NoError(t, err)
-	store := provider.ContentStore()
-	interrupted := errors.New("interrupted write")
-	_, _, err = oci.CommitBlob(ctx, store, "retry", "", nil, func(w io.Writer) error {
-		_, err := io.WriteString(w, "partial data longer than the replacement")
-		require.NoError(t, err)
-		return interrupted
-	})
-	require.ErrorIs(t, err, interrupted)
-	status, err := store.Status(ctx, "retry")
-	require.NoError(t, err)
-	require.Positive(t, status.Offset)
+	mockBlobDigest = digest.FromBytes(mockBlobData)
 
-	data := []byte("replacement")
-	expected := digest.FromBytes(data)
-	got, size, err := oci.CommitBlob(ctx, store, "retry", expected, nil, func(w io.Writer) error {
-		_, err := w.Write(data)
-		return err
-	})
-	require.NoError(t, err)
-	require.Equal(t, expected, got)
-	require.Equal(t, int64(len(data)), size)
-	actual, err := content.ReadBlob(ctx, store, ocispec.Descriptor{Digest: got})
-	require.NoError(t, err)
-	require.Equal(t, data, actual)
-	_, err = store.Status(ctx, "retry")
-	require.True(t, errdefs.IsNotFound(err), "committed ingest must be removed: %v", err)
-}
+	mockPartialBlobData = []byte("partial data longer than the replacement")
 
-func TestCommitBlobValidatesDigestAndRestoresLabels(t *testing.T) {
-	ctx := context.Background()
-	provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-	require.NoError(t, err)
-	store := provider.ContentStore()
-	data := []byte("immutable blob")
-	expected := digest.FromBytes(data)
-	write := func(w io.Writer) error {
-		_, err := w.Write(data)
+	mockBlobLabels = func(d digest.Digest) map[string]string {
+		return map[string]string{nydus.LayerAnnotationUncompressed: d.String()}
+	}
+
+	mockWriteBlob = func(w io.Writer) error {
+		_, err := w.Write(mockBlobData)
 		return err
 	}
-	_, _, err = oci.CommitBlob(ctx, store, "wrong", digest.FromString("wrong digest"), nil, write)
-	require.Error(t, err)
-	_, err = store.Info(ctx, expected)
-	require.True(t, errdefs.IsNotFound(err), "digest mismatch must not publish content: %v", err)
 
-	_, _, err = oci.CommitBlob(ctx, store, "correct", expected, nil, write)
-	require.NoError(t, err)
-	labels := map[string]string{"containerd.io/uncompressed": expected.String()}
-	for range 2 {
-		got, size, err := oci.CommitBlob(ctx, store, "reuse", expected,
-			func(d digest.Digest) map[string]string {
-				require.Equal(t, expected, d)
-				return labels
-			}, write)
-		require.NoError(t, err)
-		require.Equal(t, expected, got)
-		require.Equal(t, int64(len(data)), size)
-		info, err := store.Info(ctx, got)
-		require.NoError(t, err)
-		require.Equal(t, labels, info.Labels)
-	}
-}
-
-type failingStore struct {
-	content.Store
-	phase           string
-	err             error
-	writer          *failingWriter
-	reader          *failingReaderAt
-	abortContextErr error
-	aborted         bool
-	cancel          context.CancelFunc
-}
-
-func (s *failingStore) Abort(ctx context.Context, ref string) error {
-	s.aborted = true
-	s.abortContextErr = ctx.Err()
-	return s.Store.Abort(ctx, ref)
-}
-
-func (s *failingStore) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) {
-	if s.phase == "open" {
-		return nil, s.err
-	}
-	w, err := s.Store.Writer(ctx, opts...)
-	if err != nil {
-		return nil, err
-	}
-	s.writer = &failingWriter{Writer: w, store: s}
-	return s.writer, nil
-}
-
-func (s *failingStore) Info(ctx context.Context, d digest.Digest) (content.Info, error) {
-	if s.phase == "info" {
-		return content.Info{}, s.err
-	}
-	return s.Store.Info(ctx, d)
-}
-
-func (s *failingStore) ReaderAt(ctx context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
-	ra, err := s.Store.ReaderAt(ctx, desc)
-	if err != nil || s.phase != "read" {
-		return ra, err
-	}
-	s.reader = &failingReaderAt{ReaderAt: ra, err: s.err}
-	return s.reader, nil
-}
-
-type failingReaderAt struct {
-	content.ReaderAt
-	err    error
-	closed bool
-}
-
-func (r *failingReaderAt) ReadAt([]byte, int64) (int, error) {
-	return 0, r.err
-}
-
-func (r *failingReaderAt) Close() error {
-	r.closed = true
-	return r.ReaderAt.Close()
-}
-
-func (s *failingStore) Update(ctx context.Context, info content.Info, fields ...string) (content.Info, error) {
-	return content.Info{}, s.err
-}
-
-type failingWriter struct {
-	content.Writer
-	store  *failingStore
-	closed bool
-}
-
-func (w *failingWriter) Status() (content.Status, error) {
-	if w.store.phase == "status" {
-		return content.Status{}, w.store.err
-	}
-	return w.Writer.Status()
-}
-
-func (w *failingWriter) Truncate(size int64) error {
-	return w.store.err
-}
-
-func (w *failingWriter) Write(p []byte) (int, error) {
-	if w.store.phase == "write" {
-		if w.store.cancel != nil {
-			w.store.cancel()
-		}
-		return 0, w.store.err
-	}
-	return w.Writer.Write(p)
-}
-
-func (w *failingWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
-	if w.store.phase == "commit" {
-		return w.store.err
-	}
-	return w.Writer.Commit(ctx, size, expected, opts...)
-}
-
-func (w *failingWriter) Close() error {
-	w.closed = true
-	return w.Writer.Close()
-}
-
-func TestCommitBlobPropagatesStoreErrors(t *testing.T) {
-	for _, phase := range []string{"open", "status", "truncate", "write", "commit", "labels", "info"} {
-		t.Run(phase, func(t *testing.T) {
-			ctx := context.Background()
-			provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-			require.NoError(t, err)
-			base := provider.ContentStore()
-			data := []byte("blob bytes")
-			if phase == "truncate" {
-				w, err := base.Writer(ctx, content.WithRef("blob"))
-				require.NoError(t, err)
-				_, err = w.Write([]byte("partial"))
-				require.NoError(t, err)
-				require.NoError(t, w.Close())
-			}
-			if phase == "labels" {
-				desc := ocispec.Descriptor{Digest: digest.FromBytes(data), Size: int64(len(data))}
-				require.NoError(t, content.WriteBlob(ctx, base, "existing", bytes.NewReader(data), desc))
-			}
-			failure := errors.New("content store " + phase)
-			store := &failingStore{Store: base, phase: phase, err: failure}
-			got, size, err := oci.CommitBlob(ctx, store, "blob", digest.FromBytes(data),
-				func(digest.Digest) map[string]string { return map[string]string{"test": "label"} },
-				func(w io.Writer) error {
-					_, err := w.Write(data)
-					return err
-				})
-			require.ErrorIs(t, err, failure)
-			require.Empty(t, got)
-			require.Zero(t, size)
-			if store.writer != nil {
-				require.True(t, store.writer.closed, "failed ingest must release its writer")
-			}
-		})
-	}
-}
-
-func TestBootstrapFileAbortsFailedIngest(t *testing.T) {
-	for _, phase := range []string{"open", "status", "write", "commit", "info"} {
-		t.Run(phase, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-			require.NoError(t, err)
-			path := filepath.Join(t.TempDir(), "image.boot")
-			require.NoError(t, os.WriteFile(path, []byte("bootstrap data"), 0600))
-			failure := errors.New("bootstrap ingest " + phase)
-			store := &failingStore{Store: provider.ContentStore(), phase: phase, err: failure}
-			if phase == "write" {
-				store.cancel = cancel
-			}
-			desc, err := oci.WriteBootstrapLayerFromFile(ctx, store, path, nil, nil)
-			require.ErrorIs(t, err, failure)
-			require.Nil(t, desc)
-			require.True(t, store.aborted)
-			require.NoError(t, store.abortContextErr)
-			if phase == "write" {
-				require.ErrorIs(t, ctx.Err(), context.Canceled)
-			}
-			if store.writer != nil {
-				require.True(t, store.writer.closed)
-			}
-			statuses, err := store.ListStatuses(context.Background())
-			require.NoError(t, err)
-			require.Empty(t, statuses, "failed packaging must not retain a partial ingest")
-		})
-	}
-}
-
-func TestWriteJSON(t *testing.T) {
-	mockOldDesc := ocispec.Descriptor{
+	mockOldDesc = ocispec.Descriptor{
 		MediaType:   ocispec.MediaTypeImageConfig,
 		Digest:      digest.FromString("old config"),
 		Size:        10,
 		Annotations: map[string]string{"kept": "annotation"},
 	}
+
+	mockBootstrapData = bytes.Repeat([]byte("bootstrap"), 1024)
+
+	mockBlobMetas = []nydus.BlobMetaFile{{Name: "test.blob.meta", Data: []byte("meta")}}
+
+	mockAppendFiles = []nydus.AppendFile{{Name: "extra.json", Data: []byte("{}")}}
+)
+
+func mockFile(t *testing.T, data []byte) string {
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+func mockIngest(t *testing.T, cs content.Store, ref string, data []byte) {
+	w, err := cs.Writer(context.Background(), content.WithRef(ref))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mockGzip(t *testing.T, data []byte) []byte {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf.Bytes()
+}
+
+func mockTar(t *testing.T, names ...string) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, name := range names {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(name)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := tw.Write([]byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf.Bytes()
+}
+
+type mockContentStore struct {
+	content.Store
+	phase           string
+	err             error
+	cancel          context.CancelFunc
+	aborted         bool
+	abortContextErr error
+	writerClosed    bool
+	readerClosed    bool
+}
+
+func (s *mockContentStore) Abort(ctx context.Context, ref string) error {
+	s.aborted = true
+	s.abortContextErr = ctx.Err()
+	return s.Store.Abort(ctx, ref)
+}
+
+func (s *mockContentStore) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) {
+	if s.phase == "open" {
+		return nil, s.err
+	}
+
+	w, err := s.Store.Writer(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return &mockWriter{Writer: w, store: s}, nil
+}
+
+func (s *mockContentStore) Info(ctx context.Context, d digest.Digest) (content.Info, error) {
+	if s.phase == "info" {
+		return content.Info{}, s.err
+	}
+
+	return s.Store.Info(ctx, d)
+}
+
+func (s *mockContentStore) Update(ctx context.Context, info content.Info, fieldpaths ...string) (content.Info, error) {
+	if s.phase == "labels" {
+		return content.Info{}, s.err
+	}
+
+	return s.Store.Update(ctx, info, fieldpaths...)
+}
+
+func (s *mockContentStore) ReaderAt(ctx context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
+	ra, err := s.Store.ReaderAt(ctx, desc)
+	if err != nil || s.phase != "read" {
+		return ra, err
+	}
+
+	return &mockReaderAt{ReaderAt: ra, store: s}, nil
+}
+
+type mockWriter struct {
+	content.Writer
+	store *mockContentStore
+}
+
+func (w *mockWriter) Status() (content.Status, error) {
+	if w.store.phase == "status" {
+		return content.Status{}, w.store.err
+	}
+
+	return w.Writer.Status()
+}
+
+func (w *mockWriter) Truncate(size int64) error {
+	if w.store.phase == "truncate" {
+		return w.store.err
+	}
+
+	return w.Writer.Truncate(size)
+}
+
+func (w *mockWriter) Write(p []byte) (int, error) {
+	if w.store.phase == "write" {
+		if w.store.cancel != nil {
+			w.store.cancel()
+		}
+
+		return 0, w.store.err
+	}
+
+	return w.Writer.Write(p)
+}
+
+func (w *mockWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
+	if w.store.phase == "commit" {
+		return w.store.err
+	}
+
+	return w.Writer.Commit(ctx, size, expected, opts...)
+}
+
+func (w *mockWriter) Close() error {
+	w.store.writerClosed = true
+	return w.Writer.Close()
+}
+
+type mockReaderAt struct {
+	content.ReaderAt
+	store *mockContentStore
+}
+
+func (r *mockReaderAt) ReadAt([]byte, int64) (int, error) {
+	return 0, r.store.err
+}
+
+func (r *mockReaderAt) Close() error {
+	r.store.readerClosed = true
+	return r.ReaderAt.Close()
+}
+
+func TestCommitBlob(t *testing.T) {
+	mockInterruptedErr := errors.New("interrupted write")
+	tests := []struct {
+		name     string
+		phase    string
+		expected digest.Digest
+		labels   func(digest.Digest) map[string]string
+		write    func(io.Writer) error
+		mock     func(t *testing.T, cs content.Store)
+		expect   func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error)
+	}{
+		{
+			name: "return write error and keep partial ingest",
+			write: func(w io.Writer) error {
+				if _, err := w.Write(mockPartialBlobData); err != nil {
+					return err
+				}
+
+				return mockInterruptedErr
+			},
+			mock: func(t *testing.T, cs content.Store) {},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, mockInterruptedErr)
+				status, err := cs.Status(context.Background(), "blob")
+				assert.NoError(err)
+				assert.Positive(status.Offset)
+			},
+		},
+		{
+			name:     "truncate interrupted ingest",
+			expected: mockBlobDigest,
+			write:    mockWriteBlob,
+			mock: func(t *testing.T, cs content.Store) {
+				mockIngest(t, cs, "blob", mockPartialBlobData)
+			},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(mockBlobDigest, dgst)
+				assert.Equal(int64(len(mockBlobData)), size)
+				data, err := content.ReadBlob(context.Background(), cs, ocispec.Descriptor{Digest: dgst})
+				assert.NoError(err)
+				assert.Equal(mockBlobData, data)
+				_, err = cs.Status(context.Background(), "blob")
+				assert.ErrorIs(err, errdefs.ErrNotFound)
+			},
+		},
+		{
+			name:     "reject mismatched digest",
+			expected: digest.FromString("wrong digest"),
+			write:    mockWriteBlob,
+			mock:     func(t *testing.T, cs content.Store) {},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+				_, err = cs.Info(context.Background(), mockBlobDigest)
+				assert.ErrorIs(err, errdefs.ErrNotFound)
+			},
+		},
+		{
+			name:     "restore labels on existing blob",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock: func(t *testing.T, cs content.Store) {
+				mockBlob(t, cs, "", mockBlobData)
+			},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(mockBlobDigest, dgst)
+				assert.Equal(int64(len(mockBlobData)), size)
+				info, err := cs.Info(context.Background(), mockBlobDigest)
+				assert.NoError(err)
+				assert.Equal(map[string]string{nydus.LayerAnnotationUncompressed: mockBlobDigest.String()}, info.Labels)
+			},
+		},
+		{
+			name:     "fail to open writer",
+			phase:    "open",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock:     func(t *testing.T, cs content.Store) {},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Empty(dgst)
+				assert.Zero(size)
+			},
+		},
+		{
+			name:     "fail to get writer status",
+			phase:    "status",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock:     func(t *testing.T, cs content.Store) {},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Empty(dgst)
+				assert.Zero(size)
+				assert.True(cs.writerClosed)
+			},
+		},
+		{
+			name:     "fail to truncate writer",
+			phase:    "truncate",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock: func(t *testing.T, cs content.Store) {
+				mockIngest(t, cs, "blob", mockPartialBlobData)
+			},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Empty(dgst)
+				assert.Zero(size)
+				assert.True(cs.writerClosed)
+			},
+		},
+		{
+			name:     "fail to write blob",
+			phase:    "write",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock:     func(t *testing.T, cs content.Store) {},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Empty(dgst)
+				assert.Zero(size)
+				assert.True(cs.writerClosed)
+			},
+		},
+		{
+			name:     "fail to commit blob",
+			phase:    "commit",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock:     func(t *testing.T, cs content.Store) {},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Empty(dgst)
+				assert.Zero(size)
+				assert.True(cs.writerClosed)
+			},
+		},
+		{
+			name:     "fail to restore labels on existing blob",
+			phase:    "labels",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock: func(t *testing.T, cs content.Store) {
+				mockBlob(t, cs, "", mockBlobData)
+			},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Empty(dgst)
+				assert.Zero(size)
+				assert.True(cs.writerClosed)
+			},
+		},
+		{
+			name:     "fail to stat committed blob",
+			phase:    "info",
+			expected: mockBlobDigest,
+			labels:   mockBlobLabels,
+			write:    mockWriteBlob,
+			mock:     func(t *testing.T, cs content.Store) {},
+			expect: func(t *testing.T, cs *mockContentStore, dgst digest.Digest, size int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Empty(dgst)
+				assert.Zero(size)
+				assert.True(cs.writerClosed)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &mockContentStore{Store: mockLabeledStore(t), phase: tc.phase, err: errors.New("content store " + tc.phase)}
+			tc.mock(t, cs.Store)
+			dgst, size, err := oci.CommitBlob(context.Background(), cs, "blob", tc.expected, tc.labels, tc.write)
+
+			tc.expect(t, cs, dgst, size, err)
+		})
+	}
+}
+
+func TestWriteJSON(t *testing.T) {
 	tests := []struct {
 		name   string
 		value  any
@@ -320,20 +441,19 @@ func TestWriteJSON(t *testing.T) {
 			value: map[string]string{"os": "linux"},
 			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				data := []byte(`{"os":"linux"}`)
-				assert.Equal(&ocispec.Descriptor{
+				want := ocispec.Descriptor{
 					MediaType:   mockOldDesc.MediaType,
 					Digest:      digest.FromBytes(data),
 					Size:        int64(len(data)),
 					Annotations: mockOldDesc.Annotations,
-				}, desc)
-				stored, err := content.ReadBlob(context.Background(), cs, *desc)
+				}
+				assert.Equal(&want, desc)
+				stored, err := content.ReadBlob(context.Background(), cs, want)
 				assert.NoError(err)
 				assert.Equal(data, stored)
-				info, err := cs.Info(context.Background(), desc.Digest)
+				info, err := cs.Info(context.Background(), want.Digest)
 				assert.NoError(err)
 				assert.Equal(map[string]string{"gc": "label"}, info.Labels)
 			},
@@ -362,38 +482,27 @@ func TestWriteJSON(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-			if !assert.NoError(t, err) {
-				t.FailNow()
-			}
-			cs := &failingStore{Store: provider.ContentStore(), phase: tc.phase, err: errors.New("content store " + tc.phase)}
+			cs := &mockContentStore{Store: mockLabeledStore(t), phase: tc.phase, err: errors.New("content store " + tc.phase)}
 			desc, err := oci.WriteJSON(context.Background(), cs, tc.value, mockOldDesc, map[string]string{"gc": "label"})
+
 			tc.expect(t, cs, desc, err)
 		})
 	}
 }
 
 func TestIngestBlobFile(t *testing.T) {
-	mockBlobData := []byte("nydus full blob")
-	mockBlobDigest := digest.FromBytes(mockBlobData)
 	tests := []struct {
 		name   string
-		path   func(t *testing.T) string
+		path   string
 		dgst   digest.Digest
 		expect func(t *testing.T, cs content.Store, desc ocispec.Descriptor, err error)
 	}{
 		{
 			name: "digest computed from file",
-			path: func(t *testing.T) string {
-				path := filepath.Join(t.TempDir(), "blob")
-				assert.NoError(t, os.WriteFile(path, mockBlobData, 0o600))
-				return path
-			},
+			path: mockFile(t, mockBlobData),
 			expect: func(t *testing.T, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				assert.Equal(ocispec.Descriptor{
 					MediaType: nydus.MediaTypeNydusBlob,
 					Digest:    mockBlobDigest,
@@ -413,11 +522,7 @@ func TestIngestBlobFile(t *testing.T) {
 		},
 		{
 			name: "provided digest is trusted",
-			path: func(t *testing.T) string {
-				path := filepath.Join(t.TempDir(), "blob")
-				assert.NoError(t, os.WriteFile(path, mockBlobData, 0o600))
-				return path
-			},
+			path: mockFile(t, mockBlobData),
 			dgst: mockBlobDigest,
 			expect: func(t *testing.T, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
@@ -428,25 +533,19 @@ func TestIngestBlobFile(t *testing.T) {
 		},
 		{
 			name: "mismatched digest is rejected",
-			path: func(t *testing.T) string {
-				path := filepath.Join(t.TempDir(), "blob")
-				assert.NoError(t, os.WriteFile(path, mockBlobData, 0o600))
-				return path
-			},
+			path: mockFile(t, mockBlobData),
 			dgst: digest.FromString("other blob"),
 			expect: func(t *testing.T, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "commit blob to content store")
 				assert.Empty(desc)
 				_, err = cs.Info(context.Background(), mockBlobDigest)
-				assert.True(errdefs.IsNotFound(err))
+				assert.ErrorIs(err, errdefs.ErrNotFound)
 			},
 		},
 		{
 			name: "missing file",
-			path: func(t *testing.T) string {
-				return filepath.Join(t.TempDir(), "missing")
-			},
+			path: filepath.Join(t.TempDir(), "missing"),
 			expect: func(t *testing.T, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "open blob file")
@@ -455,9 +554,7 @@ func TestIngestBlobFile(t *testing.T) {
 		},
 		{
 			name: "directory cannot be hashed",
-			path: func(t *testing.T) string {
-				return t.TempDir()
-			},
+			path: t.TempDir(),
 			expect: func(t *testing.T, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "hash blob file")
@@ -468,36 +565,176 @@ func TestIngestBlobFile(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-			if !assert.NoError(t, err) {
-				t.FailNow()
-			}
-			desc, err := oci.IngestBlobFile(context.Background(), provider.ContentStore(), tc.path(t), tc.dgst)
-			tc.expect(t, provider.ContentStore(), desc, err)
+			cs := mockLabeledStore(t)
+			desc, err := oci.IngestBlobFile(context.Background(), cs, tc.path, tc.dgst)
+
+			tc.expect(t, cs, desc, err)
+		})
+	}
+}
+
+func TestWriteBootstrapLayerFromFile(t *testing.T) {
+	tests := []struct {
+		name   string
+		phase  string
+		path   string
+		expect func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error)
+	}{
+		{
+			name: "match layer written from bytes",
+			path: mockFile(t, mockBootstrapData),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				want, err := oci.WriteBootstrapLayer(ctx, cs, mockBootstrapData, mockBlobMetas, mockAppendFiles)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				assert.Equal(want, desc)
+				contents := map[string][]byte{}
+				assert.NoError(oci.WalkBootstrapLayer(ctx, cs, *want, func(header *tar.Header, reader *tar.Reader) error {
+					if header.Typeflag != tar.TypeReg {
+						return nil
+					}
+
+					data, err := io.ReadAll(reader)
+					contents[header.Name] = data
+					return err
+				}))
+				assert.Equal(map[string][]byte{
+					"image/image.boot":     mockBootstrapData,
+					"image/test.blob.meta": []byte("meta"),
+					"image/extra.json":     []byte("{}"),
+				}, contents)
+			},
+		},
+		{
+			name: "missing file",
+			path: filepath.Join(t.TempDir(), "missing"),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, os.ErrNotExist)
+			},
+		},
+		{
+			name: "abort ingest when bootstrap cannot be read",
+			path: t.TempDir(),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+				statuses, err := cs.ListStatuses(context.Background())
+				assert.NoError(err)
+				assert.Empty(statuses)
+			},
+		},
+		{
+			name:  "abort ingest when writer cannot be opened",
+			phase: "open",
+			path:  mockFile(t, mockBootstrapData),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Nil(desc)
+				assert.True(cs.aborted)
+				assert.NoError(cs.abortContextErr)
+				statuses, err := cs.ListStatuses(context.Background())
+				assert.NoError(err)
+				assert.Empty(statuses)
+			},
+		},
+		{
+			name:  "abort ingest when writer status fails",
+			phase: "status",
+			path:  mockFile(t, mockBootstrapData),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Nil(desc)
+				assert.True(cs.aborted)
+				assert.NoError(cs.abortContextErr)
+				assert.True(cs.writerClosed)
+				statuses, err := cs.ListStatuses(context.Background())
+				assert.NoError(err)
+				assert.Empty(statuses)
+			},
+		},
+		{
+			name:  "abort ingest with canceled context when write fails",
+			phase: "write",
+			path:  mockFile(t, mockBootstrapData),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Nil(desc)
+				assert.True(cs.aborted)
+				assert.NoError(cs.abortContextErr)
+				assert.ErrorIs(ctx.Err(), context.Canceled)
+				assert.True(cs.writerClosed)
+				statuses, err := cs.ListStatuses(context.Background())
+				assert.NoError(err)
+				assert.Empty(statuses)
+			},
+		},
+		{
+			name:  "abort ingest when commit fails",
+			phase: "commit",
+			path:  mockFile(t, mockBootstrapData),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Nil(desc)
+				assert.True(cs.aborted)
+				assert.NoError(cs.abortContextErr)
+				assert.True(cs.writerClosed)
+				statuses, err := cs.ListStatuses(context.Background())
+				assert.NoError(err)
+				assert.Empty(statuses)
+			},
+		},
+		{
+			name:  "abort ingest when committed layer cannot be stat",
+			phase: "info",
+			path:  mockFile(t, mockBootstrapData),
+			expect: func(t *testing.T, ctx context.Context, cs *mockContentStore, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, cs.err)
+				assert.Nil(desc)
+				assert.True(cs.aborted)
+				assert.NoError(cs.abortContextErr)
+				assert.True(cs.writerClosed)
+				statuses, err := cs.ListStatuses(context.Background())
+				assert.NoError(err)
+				assert.Empty(statuses)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cs := &mockContentStore{Store: mockLabeledStore(t), phase: tc.phase, err: errors.New("bootstrap ingest " + tc.phase), cancel: cancel}
+			desc, err := oci.WriteBootstrapLayerFromFile(ctx, cs, tc.path, mockBlobMetas, mockAppendFiles)
+
+			tc.expect(t, ctx, cs, desc, err)
 		})
 	}
 }
 
 func TestOpenDecompressedBlob(t *testing.T) {
-	var mockGzipLayer bytes.Buffer
-	gw := gzip.NewWriter(&mockGzipLayer)
-	_, err := gw.Write([]byte("layer data"))
-	assert.NoError(t, err)
-	assert.NoError(t, gw.Close())
 	tests := []struct {
 		name   string
 		data   []byte
 		phase  string
-		expect func(t *testing.T, cs *failingStore, reader io.ReadCloser, err error)
+		expect func(t *testing.T, cs *mockContentStore, reader io.ReadCloser, err error)
 	}{
 		{
 			name: "gzip blob is decompressed",
-			data: mockGzipLayer.Bytes(),
-			expect: func(t *testing.T, cs *failingStore, reader io.ReadCloser, err error) {
+			data: mockGzip(t, []byte("layer data")),
+			expect: func(t *testing.T, cs *mockContentStore, reader io.ReadCloser, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				data, err := io.ReadAll(reader)
 				assert.NoError(err)
 				assert.Equal("layer data", string(data))
@@ -507,11 +744,9 @@ func TestOpenDecompressedBlob(t *testing.T) {
 		{
 			name: "uncompressed blob is passed through",
 			data: []byte("plain layer"),
-			expect: func(t *testing.T, cs *failingStore, reader io.ReadCloser, err error) {
+			expect: func(t *testing.T, cs *mockContentStore, reader io.ReadCloser, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				data, err := io.ReadAll(reader)
 				assert.NoError(err)
 				assert.Equal("plain layer", string(data))
@@ -520,7 +755,7 @@ func TestOpenDecompressedBlob(t *testing.T) {
 		},
 		{
 			name: "missing blob",
-			expect: func(t *testing.T, cs *failingStore, reader io.ReadCloser, err error) {
+			expect: func(t *testing.T, cs *mockContentStore, reader io.ReadCloser, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "open blob reader")
 				assert.Nil(reader)
@@ -530,45 +765,32 @@ func TestOpenDecompressedBlob(t *testing.T) {
 			name:  "unreadable blob releases its reader",
 			data:  []byte("plain layer"),
 			phase: "read",
-			expect: func(t *testing.T, cs *failingStore, reader io.ReadCloser, err error) {
+			expect: func(t *testing.T, cs *mockContentStore, reader io.ReadCloser, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "decompress blob")
 				assert.ErrorIs(err, cs.err)
 				assert.Nil(reader)
-				assert.True(cs.reader.closed)
+				assert.True(cs.readerClosed)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-			if !assert.NoError(t, err) {
-				t.FailNow()
-			}
+			cs := &mockContentStore{Store: mockLabeledStore(t), phase: tc.phase, err: errors.New("blob read failed")}
 			desc := ocispec.Descriptor{Digest: digest.FromString("missing"), Size: 7}
 			if tc.data != nil {
-				desc = ocispec.Descriptor{Digest: digest.FromBytes(tc.data), Size: int64(len(tc.data))}
-				if !assert.NoError(t, content.WriteBlob(context.Background(), provider.ContentStore(), "layer", bytes.NewReader(tc.data), desc)) {
-					t.FailNow()
-				}
+				desc = mockBlob(t, cs.Store, "", tc.data)
 			}
-			cs := &failingStore{Store: provider.ContentStore(), phase: tc.phase, err: errors.New("blob read failed")}
+
 			reader, err := oci.OpenDecompressedBlob(context.Background(), cs, desc)
+
 			tc.expect(t, cs, reader, err)
 		})
 	}
 }
 
 func TestWalkBootstrapLayer(t *testing.T) {
-	var mockBootstrapTar bytes.Buffer
-	tw := tar.NewWriter(&mockBootstrapTar)
-	for _, name := range []string{"image/image.boot", "image/blob.blob.meta"} {
-		assert.NoError(t, tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(name)), Typeflag: tar.TypeReg}))
-		_, err := tw.Write([]byte(name))
-		assert.NoError(t, err)
-	}
-	assert.NoError(t, tw.Close())
 	mockVisitErr := errors.New("visit failed")
 	tests := []struct {
 		name   string
@@ -578,7 +800,7 @@ func TestWalkBootstrapLayer(t *testing.T) {
 	}{
 		{
 			name: "visits every entry in order",
-			data: mockBootstrapTar.Bytes(),
+			data: mockTar(t, "image/image.boot", "image/blob.blob.meta"),
 			visit: func(names *[]string) func(*tar.Header, *tar.Reader) error {
 				return func(header *tar.Header, reader *tar.Reader) error {
 					data, err := io.ReadAll(reader)
@@ -594,7 +816,7 @@ func TestWalkBootstrapLayer(t *testing.T) {
 		},
 		{
 			name: "visitor error stops the walk",
-			data: mockBootstrapTar.Bytes(),
+			data: mockTar(t, "image/image.boot", "image/blob.blob.meta"),
 			visit: func(names *[]string) func(*tar.Header, *tar.Reader) error {
 				return func(header *tar.Header, _ *tar.Reader) error {
 					*names = append(*names, header.Name)
@@ -640,19 +862,15 @@ func TestWalkBootstrapLayer(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-			if !assert.NoError(t, err) {
-				t.FailNow()
-			}
+			cs := mockLabeledStore(t)
 			desc := ocispec.Descriptor{Digest: digest.FromString("missing"), Size: 7}
 			if tc.data != nil {
-				desc = ocispec.Descriptor{Digest: digest.FromBytes(tc.data), Size: int64(len(tc.data))}
-				if !assert.NoError(t, content.WriteBlob(context.Background(), provider.ContentStore(), "bootstrap", bytes.NewReader(tc.data), desc)) {
-					t.FailNow()
-				}
+				desc = mockBlob(t, cs, "", tc.data)
 			}
+
 			var names []string
-			err = oci.WalkBootstrapLayer(context.Background(), provider.ContentStore(), desc, tc.visit(&names))
+			err := oci.WalkBootstrapLayer(context.Background(), cs, desc, tc.visit(&names))
+
 			tc.expect(t, names, err)
 		})
 	}

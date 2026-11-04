@@ -220,7 +220,7 @@ func (r ref) mount(t testing.TB, prefetch bool) (*mount.Daemon, string, *mount.A
 
 func (r ref) extract(t testing.TB) string {
 	t.Helper()
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 	rootfs := filepath.Join(env.WorkDir(t), "rootfs")
 	nydusify(t, "mount", "--target", string(r), "--mountpoint", rootfs)
 

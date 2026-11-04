@@ -98,7 +98,9 @@ func probeCapability() error {
 func requireUserfaultfd(t testing.TB) {
 	t.Helper()
 	err := probeCapability()
-	env.Require(t, err == nil, "runner lacks userfaultfd: %v", err)
+	if err != nil {
+		env.Skipf(t, "runner lacks userfaultfd: %v", err)
+	}
 }
 
 func alignUp(v, a uint64) uint64 { return (v + a - 1) / a * a }

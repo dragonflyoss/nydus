@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func newMockTarLayer(t *testing.T, entries ...string) []byte {
+func mockTarLayer(t *testing.T, entries ...string) []byte {
 	var archive bytes.Buffer
 	tw := tar.NewWriter(&archive)
 	for _, entry := range entries {
@@ -31,16 +31,20 @@ func newMockTarLayer(t *testing.T, entries ...string) []byte {
 		if strings.HasSuffix(name, "/") {
 			header.Mode, header.Typeflag = 0o755, tar.TypeDir
 		}
-		if !assert.NoError(t, tw.WriteHeader(header)) {
-			t.FailNow()
+
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatal(err)
 		}
-		if _, err := tw.Write([]byte(data)); !assert.NoError(t, err) {
-			t.FailNow()
+
+		if _, err := tw.Write([]byte(data)); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !assert.NoError(t, tw.Close()) {
-		t.FailNow()
+
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
 	}
+
 	return archive.Bytes()
 }
 
@@ -55,8 +59,8 @@ func TestApplyOCIImage(t *testing.T) {
 			name: "layers are merged with whiteouts",
 			layers: func(t *testing.T, cs content.Store) []ocispec.Descriptor {
 				return []ocispec.Descriptor{
-					storeMockBlob(t, cs, ocispec.MediaTypeImageLayer, newMockTarLayer(t, "dir/", "dir/removed=old", "kept=lower", "replaced=lower")),
-					storeMockBlob(t, cs, ocispec.MediaTypeImageLayer, newMockTarLayer(t, "dir/.wh.removed", "replaced=upper", "added=upper")),
+					mockBlob(t, cs, ocispec.MediaTypeImageLayer, mockTarLayer(t, "dir/", "dir/removed=old", "kept=lower", "replaced=lower")),
+					mockBlob(t, cs, ocispec.MediaTypeImageLayer, mockTarLayer(t, "dir/.wh.removed", "replaced=upper", "added=upper")),
 				}
 			},
 			rootfs: func(t *testing.T) string {
@@ -64,14 +68,13 @@ func TestApplyOCIImage(t *testing.T) {
 			},
 			expect: func(t *testing.T, rootfs string, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				for name, data := range map[string]string{"kept": "lower", "replaced": "upper", "added": "upper"} {
 					got, err := os.ReadFile(filepath.Join(rootfs, name))
 					assert.NoError(err)
 					assert.Equal(data, string(got))
 				}
+
 				assert.DirExists(filepath.Join(rootfs, "dir"))
 				assert.NoFileExists(filepath.Join(rootfs, "dir", "removed"))
 				assert.NoFileExists(filepath.Join(rootfs, "dir", ".wh.removed"))
@@ -84,7 +87,10 @@ func TestApplyOCIImage(t *testing.T) {
 			},
 			rootfs: func(t *testing.T) string {
 				path := filepath.Join(t.TempDir(), "rootfs")
-				assert.NoError(t, os.WriteFile(path, nil, 0o600))
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+
 				return path
 			},
 			expect: func(t *testing.T, rootfs string, err error) {
@@ -110,8 +116,8 @@ func TestApplyOCIImage(t *testing.T) {
 			name: "corrupt layer archive",
 			layers: func(t *testing.T, cs content.Store) []ocispec.Descriptor {
 				return []ocispec.Descriptor{
-					storeMockBlob(t, cs, ocispec.MediaTypeImageLayer, newMockTarLayer(t, "applied=first")),
-					storeMockBlob(t, cs, ocispec.MediaTypeImageLayer, []byte("not a tar archive")),
+					mockBlob(t, cs, ocispec.MediaTypeImageLayer, mockTarLayer(t, "applied=first")),
+					mockBlob(t, cs, ocispec.MediaTypeImageLayer, []byte("not a tar archive")),
 				}
 			},
 			rootfs: func(t *testing.T) string {
@@ -129,11 +135,13 @@ func TestApplyOCIImage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cs, err := local.NewStore(t.TempDir())
-			if !assert.NoError(t, err) {
-				t.FailNow()
+			if err != nil {
+				t.Fatal(err)
 			}
+
 			img := &Image{Manifest: ocispec.Manifest{Layers: tc.layers(t, cs)}}
 			rootfs := tc.rootfs(t)
+
 			tc.expect(t, rootfs, ApplyOCIImage(context.Background(), cs, img, rootfs))
 		})
 	}

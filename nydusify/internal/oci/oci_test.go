@@ -56,30 +56,33 @@ var (
 	}
 )
 
-func newContentStore(t *testing.T) content.Store {
+func mockLabeledStore(t *testing.T) content.Store {
 	provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
+
 	return provider.ContentStore()
 }
 
-func storeBlob(t *testing.T, cs content.Store, mediaType string, data []byte, opts ...content.Opt) ocispec.Descriptor {
+func mockBlob(t *testing.T, cs content.Store, mediaType string, data []byte, opts ...content.Opt) ocispec.Descriptor {
 	desc := ocispec.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(data), Size: int64(len(data))}
-	if !assert.NoError(t, content.WriteBlob(context.Background(), cs, desc.Digest.String(), bytes.NewReader(data), desc, opts...)) {
-		t.FailNow()
+	if err := content.WriteBlob(context.Background(), cs, desc.Digest.String(), bytes.NewReader(data), desc, opts...); err != nil {
+		t.Fatal(err)
 	}
+
 	return desc
 }
 
-func storeIndex(t *testing.T, cs content.Store, manifests ...ocispec.Descriptor) ocispec.Descriptor {
+func mockIndex(t *testing.T, cs content.Store, manifests ...ocispec.Descriptor) ocispec.Descriptor {
 	index := ocispec.Index{MediaType: ocispec.MediaTypeImageIndex, Manifests: manifests}
 	index.SchemaVersion = 2
 	data, err := json.Marshal(index)
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
-	return storeBlob(t, cs, ocispec.MediaTypeImageIndex, data)
+
+	return mockBlob(t, cs, ocispec.MediaTypeImageIndex, data)
 }
 
 func TestResolveManifest(t *testing.T) {
@@ -104,7 +107,7 @@ func TestResolveManifest(t *testing.T) {
 		{
 			name: "most specific platform wins",
 			root: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return storeIndex(t, cs, mockAMD64Manifest, mockARM64Manifest)
+				return mockIndex(t, cs, mockAMD64Manifest, mockARM64Manifest)
 			},
 			platform: platforms.Ordered(mockARM64Platform, mockAMD64Platform),
 			expect: func(t *testing.T, desc ocispec.Descriptor, err error) {
@@ -116,7 +119,7 @@ func TestResolveManifest(t *testing.T) {
 		{
 			name: "manifest without platform matches",
 			root: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return storeIndex(t, cs, mockARM64Manifest, mockPlatformlessManifest)
+				return mockIndex(t, cs, mockARM64Manifest, mockPlatformlessManifest)
 			},
 			platform: platforms.OnlyStrict(mockAMD64Platform),
 			expect: func(t *testing.T, desc ocispec.Descriptor, err error) {
@@ -128,7 +131,7 @@ func TestResolveManifest(t *testing.T) {
 		{
 			name: "non-manifest entries are skipped",
 			root: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return storeIndex(t, cs, mockNestedIndex, mockARM64Manifest)
+				return mockIndex(t, cs, mockNestedIndex, mockARM64Manifest)
 			},
 			platform: platforms.OnlyStrict(mockAMD64Platform),
 			expect: func(t *testing.T, desc ocispec.Descriptor, err error) {
@@ -140,7 +143,7 @@ func TestResolveManifest(t *testing.T) {
 		{
 			name: "index without manifests",
 			root: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return storeIndex(t, cs)
+				return mockIndex(t, cs)
 			},
 			platform: platforms.All,
 			expect: func(t *testing.T, desc ocispec.Descriptor, err error) {
@@ -174,8 +177,9 @@ func TestResolveManifest(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cs := newContentStore(t)
+			cs := mockLabeledStore(t)
 			desc, err := oci.ResolveManifest(context.Background(), cs, tc.root(t, cs), tc.platform)
+
 			tc.expect(t, desc, err)
 		})
 	}
@@ -190,7 +194,7 @@ func TestReadJSON(t *testing.T) {
 		{
 			name: "decodes stored json",
 			desc: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return storeBlob(t, cs, ocispec.MediaTypeImageConfig, []byte(`{"architecture":"arm64","os":"linux"}`))
+				return mockBlob(t, cs, ocispec.MediaTypeImageConfig, []byte(`{"architecture":"arm64","os":"linux"}`))
 			},
 			expect: func(t *testing.T, config ocispec.Image, err error) {
 				assert := assert.New(t)
@@ -201,7 +205,7 @@ func TestReadJSON(t *testing.T) {
 		{
 			name: "invalid json",
 			desc: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return storeBlob(t, cs, ocispec.MediaTypeImageConfig, []byte("not json"))
+				return mockBlob(t, cs, ocispec.MediaTypeImageConfig, []byte("not json"))
 			},
 			expect: func(t *testing.T, config ocispec.Image, err error) {
 				assert := assert.New(t)
@@ -222,9 +226,10 @@ func TestReadJSON(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cs := newContentStore(t)
+			cs := mockLabeledStore(t)
 			var config ocispec.Image
 			err := oci.ReadJSON(context.Background(), cs, tc.desc(t, cs), &config)
+
 			tc.expect(t, config, err)
 		})
 	}
@@ -240,7 +245,7 @@ func TestLabels(t *testing.T) {
 		{
 			name: "content labels",
 			dgst: func(t *testing.T, cs content.Store) digest.Digest {
-				return storeBlob(t, cs, ocispec.MediaTypeImageLayer, []byte("labeled"), content.WithLabels(map[string]string{"key": "value"})).Digest
+				return mockBlob(t, cs, ocispec.MediaTypeImageLayer, []byte("labeled"), content.WithLabels(map[string]string{"key": "value"})).Digest
 			},
 			expect: func(t *testing.T, labels map[string]string, err error) {
 				assert := assert.New(t)
@@ -252,7 +257,7 @@ func TestLabels(t *testing.T) {
 			name:  "store without label support",
 			plain: true,
 			dgst: func(t *testing.T, cs content.Store) digest.Digest {
-				return storeBlob(t, cs, ocispec.MediaTypeImageLayer, []byte("unlabeled")).Digest
+				return mockBlob(t, cs, ocispec.MediaTypeImageLayer, []byte("unlabeled")).Digest
 			},
 			expect: func(t *testing.T, labels map[string]string, err error) {
 				assert := assert.New(t)
@@ -276,15 +281,18 @@ func TestLabels(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cs := newContentStore(t)
+			cs := mockLabeledStore(t)
 			if tc.plain {
 				store, err := local.NewStore(t.TempDir())
-				if !assert.NoError(t, err) {
-					t.FailNow()
+				if err != nil {
+					t.Fatal(err)
 				}
+
 				cs = store
 			}
+
 			labels, err := oci.Labels(context.Background(), cs, tc.dgst(t, cs))
+
 			tc.expect(t, labels, err)
 		})
 	}

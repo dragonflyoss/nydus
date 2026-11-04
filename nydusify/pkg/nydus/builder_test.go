@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026. Nydus Developers. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package nydus
 
 import (
@@ -12,86 +18,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestBuildArgumentsMatchLayouts(t *testing.T) {
-	for _, compressor := range []string{"", "none", "zstd", "lz4", "erofs-none", "erofs-lz4", "erofs-zstd"} {
-		t.Run(compressor, func(t *testing.T) {
-			for _, sourceType := range []string{"", "dir", "tar"} {
-				args, err := (BuildOption{SourceDir: "source", BlobPath: "blob", Compressor: compressor, SourceType: sourceType}).args()
-				if err != nil {
-					t.Fatal(err)
-				}
-				flags := make(map[string]string)
-				for index := 2; index < len(args); index += 2 {
-					flags[args[index]] = args[index+1]
-				}
-				if flags["--chunk-size"] != strconv.Itoa(DefaultChunkSize) {
-					t.Fatalf("unexpected geometry: %v", args)
-				}
-				if sourceType == "" {
-					sourceType = "dir"
-				}
-				if flags["--source-type"] != sourceType {
-					t.Fatalf("unexpected source type: %v", args)
-				}
-			}
-		})
-	}
-}
-
-func TestBuildRejectsUnsupportedTarOptions(t *testing.T) {
-	for _, option := range []BuildOption{{SourceType: "invalid"}, {SourceType: "tar", Excludes: []string{"secret"}}} {
-		if _, err := option.args(); err == nil {
-			t.Fatalf("expected rejection: %+v", option)
-		}
-	}
-}
-
-func TestIsNydusCompressor(t *testing.T) {
-	tests := []struct {
-		name       string
-		compressor string
-		expect     func(t *testing.T, ok bool)
-	}{
-		{
-			name:       "chunk layout",
-			compressor: "lz4",
-			expect: func(t *testing.T, ok bool) {
-				assert := assert.New(t)
-				assert.True(ok)
-			},
-		},
-		{
-			name:       "native erofs layout",
-			compressor: "erofs-zstd",
-			expect: func(t *testing.T, ok bool) {
-				assert := assert.New(t)
-				assert.True(ok)
-			},
-		},
-		{
-			name:       "unsupported compressor",
-			compressor: "gzip",
-			expect: func(t *testing.T, ok bool) {
-				assert := assert.New(t)
-				assert.False(ok)
-			},
-		},
-		{
-			name: "empty compressor",
-			expect: func(t *testing.T, ok bool) {
-				assert := assert.New(t)
-				assert.False(ok)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, IsNydusCompressor(tc.compressor))
-		})
-	}
-}
-
 func TestBuildOption_args(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -99,12 +25,75 @@ func TestBuildOption_args(t *testing.T) {
 		expect func(t *testing.T, args []string, err error)
 	}{
 		{
-			name: "directory exclusions are forwarded",
+			name: "default layout",
+			opt:  BuildOption{SourceDir: "source", BlobPath: "blob"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"build", "source", "--source-type", "dir", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", DefaultCompressor, "--log-level", DefaultLogLevel}, args)
+			},
+		},
+		{
+			name: "none layout",
+			opt:  BuildOption{SourceDir: "source", BlobPath: "blob", Compressor: "none"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"build", "source", "--source-type", "dir", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", "none", "--log-level", DefaultLogLevel}, args)
+			},
+		},
+		{
+			name: "zstd layout from directory",
+			opt:  BuildOption{SourceDir: "source", BlobPath: "blob", Compressor: "zstd", SourceType: "dir"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"build", "source", "--source-type", "dir", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", "zstd", "--log-level", DefaultLogLevel}, args)
+			},
+		},
+		{
+			name: "lz4 layout from tar",
+			opt:  BuildOption{SourceDir: "source", BlobPath: "blob", Compressor: "lz4", SourceType: "tar"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"build", "source", "--source-type", "tar", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", "lz4", "--log-level", DefaultLogLevel}, args)
+			},
+		},
+		{
+			name: "erofs-none layout",
+			opt:  BuildOption{SourceDir: "source", BlobPath: "blob", Compressor: "erofs-none"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"build", "source", "--source-type", "dir", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", "erofs-none", "--log-level", DefaultLogLevel}, args)
+			},
+		},
+		{
+			name: "erofs-lz4 layout from directory",
+			opt:  BuildOption{SourceDir: "source", BlobPath: "blob", Compressor: "erofs-lz4", SourceType: "dir"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"build", "source", "--source-type", "dir", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", "erofs-lz4", "--log-level", DefaultLogLevel}, args)
+			},
+		},
+		{
+			name: "erofs-zstd layout from tar",
+			opt:  BuildOption{SourceDir: "source", BlobPath: "blob", Compressor: "erofs-zstd", SourceType: "tar"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"build", "source", "--source-type", "tar", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", "erofs-zstd", "--log-level", DefaultLogLevel}, args)
+			},
+		},
+		{
+			name: "forward directory exclusions",
 			opt:  BuildOption{SourceDir: "source", BlobPath: "blob", Excludes: []string{"secret", "cache"}},
 			expect: func(t *testing.T, args []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"--exclude", "secret", "--exclude", "cache"}, args[len(args)-4:])
+				assert.Equal([]string{"build", "source", "--source-type", "dir", "--blob", "blob", "--chunk-size", strconv.Itoa(DefaultChunkSize), "--compressor", DefaultCompressor, "--log-level", DefaultLogLevel, "--exclude", "secret", "--exclude", "cache"}, args)
 			},
 		},
 		{
@@ -116,11 +105,30 @@ func TestBuildOption_args(t *testing.T) {
 				assert.Equal([]string{"build", "source", "--source-type", "dir", "--blob", "blob", "--chunk-size", "1048576", "--compressor", DefaultCompressor, "--log-level", "debug"}, args)
 			},
 		},
+		{
+			name: "reject unsupported source type",
+			opt:  BuildOption{SourceType: "invalid"},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `unsupported build source type "invalid"`)
+				assert.Nil(args)
+			},
+		},
+		{
+			name: "reject tar exclusions",
+			opt:  BuildOption{SourceType: "tar", Excludes: []string{"secret"}},
+			expect: func(t *testing.T, args []string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "tar sources do not support path exclusions")
+				assert.Nil(args)
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			args, err := tc.opt.args()
+
 			tc.expect(t, args, err)
 		})
 	}
@@ -134,12 +142,13 @@ func TestRunNydusBuild(t *testing.T) {
 		expect func(t *testing.T, blobPath string, err error)
 	}{
 		{
-			name: "streams stdin source into blob",
+			name: "stream stdin source into blob",
 			body: "test \"$type\" = tar\ncat \"$source\" > \"$blob\"\n",
 			opt:  BuildOption{SourceDir: "/dev/stdin", SourceType: "tar", Stdin: strings.NewReader("layer tar")},
 			expect: func(t *testing.T, blobPath string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
+
 				data, err := os.ReadFile(blobPath)
 				assert.NoError(err)
 				assert.Equal("layer tar", string(data))
@@ -169,8 +178,9 @@ func TestRunNydusBuild(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.opt.BuilderPath = fakeBuilder(t, tc.body)
+			tc.opt.BuilderPath = mockBuilder(t, tc.body)
 			tc.opt.BlobPath = filepath.Join(t.TempDir(), "blob")
+
 			tc.expect(t, tc.opt.BlobPath, RunNydusBuild(context.Background(), tc.opt))
 		})
 	}
@@ -183,7 +193,7 @@ func TestRunNydusExport(t *testing.T) {
 		expect func(t *testing.T, output string, err error)
 	}{
 		{
-			name: "streams exported tar to destination",
+			name: "stream exported tar to destination",
 			body: "test -f \"$source\"\nprintf 'exported tar'\n",
 			expect: func(t *testing.T, output string, err error) {
 				assert := assert.New(t)
@@ -205,11 +215,13 @@ func TestRunNydusExport(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			blobPath := filepath.Join(t.TempDir(), "blob")
-			if !assert.NoError(t, os.WriteFile(blobPath, []byte("blob"), 0o600)) {
-				t.FailNow()
+			if err := os.WriteFile(blobPath, []byte("blob"), 0o600); err != nil {
+				t.Fatal(err)
 			}
+
 			var output bytes.Buffer
-			err := RunNydusExport(context.Background(), ExportOption{BuilderPath: fakeBuilder(t, tc.body), BlobPath: blobPath}, &output)
+			err := RunNydusExport(context.Background(), ExportOption{BuilderPath: mockBuilder(t, tc.body), BlobPath: blobPath}, &output)
+
 			tc.expect(t, output.String(), err)
 		})
 	}

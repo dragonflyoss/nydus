@@ -22,8 +22,8 @@ import (
 	"time"
 
 	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/stretchr/testify/assert"
 )
 
 // Registry is an in-memory OCI distribution registry served over plain HTTP.
@@ -130,11 +130,23 @@ func (r *Registry) Store(repo, tag, mediaType string, data []byte) ocispec.Descr
 func (r *Registry) StoreJSON(t testing.TB, repo, tag, mediaType string, v any) ocispec.Descriptor {
 	t.Helper()
 	data, err := json.Marshal(v)
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	return r.Store(repo, tag, mediaType, data)
+}
+
+// StoreImage stores config and a manifest referencing it and layers in repo,
+// points tag at the manifest and returns the manifest descriptor.
+func (r *Registry) StoreImage(t testing.TB, repo, tag string, config ocispec.Image, layers ...ocispec.Descriptor) ocispec.Descriptor {
+	t.Helper()
+	return r.StoreJSON(t, repo, tag, ocispec.MediaTypeImageManifest, ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    r.StoreJSON(t, repo, "", ocispec.MediaTypeImageConfig, config),
+		Layers:    layers,
+	})
 }
 
 // Load returns the content that reference, a tag or a digest, names in repo
@@ -149,8 +161,12 @@ func (r *Registry) Load(repo, reference string) ([]byte, bool) {
 func (r *Registry) LoadJSON(t testing.TB, repo, reference string, v any) {
 	t.Helper()
 	data, ok := r.Load(repo, reference)
-	if !assert.True(t, ok, "%s@%s not found", repo, reference) || !assert.NoError(t, json.Unmarshal(data, v)) {
-		t.FailNow()
+	if !ok {
+		t.Fatalf("%s@%s not found", repo, reference)
+	}
+
+	if err := json.Unmarshal(data, v); err != nil {
+		t.Fatal(err)
 	}
 }
 

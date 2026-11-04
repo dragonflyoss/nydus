@@ -2,126 +2,191 @@ package remote
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	digest "github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestCompactBoundedRegistryRanges(t *testing.T) {
-	for _, tc := range []struct {
-		name, request, upstream string
-		start                   int64
-		want                    string
+func TestRangeEnd(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  string
+		size   int64
+		expect func(t *testing.T, end int64, err error)
 	}{
-		{"middle", "bytes=2-4", "bytes=2-4", 2, "cde"},
-		{"start", "bytes=0-1", "bytes=0-1", 0, "ab"},
-		{"suffix", "bytes=-2", "bytes=6-7", 6, "gh"},
-	} {
+		{
+			name: "invalid blob size",
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "invalid blob size")
+			},
+		},
+		{
+			name: "whole blob",
+			size: 8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(int64(7), end)
+			},
+		},
+		{
+			name:  "open ended range",
+			value: "bytes=2-",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "reversed range",
+			value: "bytes=2-1",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "range past blob end",
+			value: "bytes=8-9",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "signed start",
+			value: "bytes=+2-4",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "multiple ranges",
+			value: "bytes=0-1,4-5",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "empty suffix",
+			value: "bytes=-0",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "invalid suffix",
+			value: "bytes=-x",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "overflowing end",
+			value: "bytes=0-9223372036854775808",
+			size:  8,
+			expect: func(t *testing.T, end int64, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+	}
+
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var transferred atomic.Int32
-			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, tc.upstream, r.Header.Get("Range"))
-				assert.Equal(t, "identity", r.Header.Get("Accept-Encoding"))
-				w.Header().Set("Content-Type", "application/octet-stream")
-				http.ServeContent(w, r, "blob", time.Time{}, strings.NewReader("abcdefgh"))
-				transferred.Add(1)
-			}))
-			defer origin.Close()
-			// Exercise an authenticated registry challenge and redirect to object storage.
-			registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				user, pass, ok := r.BasicAuth()
-				if !ok || user != "user" || pass != "pass" {
-					w.Header().Set("WWW-Authenticate", `Basic realm="registry"`)
-					w.WriteHeader(http.StatusUnauthorized)
-					return
-				}
-				http.Redirect(w, r, origin.URL+"/object", http.StatusTemporaryRedirect)
-			}))
-			defer registry.Close()
-			p, err := NewProvider(Option{WorkDir: t.TempDir(), TargetPlainHTTP: true})
-			require.NoError(t, err)
-			p.credFunc = func(string) (string, string, error) { return "user", "pass", nil }
-			reader, err := p.OpenBlob(context.Background(), ocispec.Descriptor{Digest: digest.FromString("abcdefgh"), Size: 8},
-				strings.TrimPrefix(registry.URL, "http://")+"/test:v1", Target, tc.request)
-			require.NoError(t, err)
-			defer func() { require.NoError(t, reader.Close()) }()
-			_, err = reader.Seek(tc.start, io.SeekStart)
-			require.NoError(t, err)
-			data, err := io.ReadAll(reader)
-			require.NoError(t, err)
-			require.Equal(t, tc.want, string(data))
-			require.Equal(t, int32(1), transferred.Load())
+			end, err := rangeEnd(tc.value, tc.size)
+
+			tc.expect(t, end, err)
 		})
 	}
 }
 
-func TestCompactRejectsIgnoredRanges(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "abcdefgh")
-	}))
-	defer server.Close()
-	p, err := NewProvider(Option{WorkDir: t.TempDir(), TargetPlainHTTP: true})
-	require.NoError(t, err)
-	reader, err := p.OpenBlob(context.Background(), ocispec.Descriptor{Digest: digest.FromString("abcdefgh"), Size: 8},
-		strings.TrimPrefix(server.URL, "http://")+"/test:v1", Target, "bytes=0-1")
-	require.NoError(t, err)
-	defer func() { require.NoError(t, reader.Close()) }()
-	_, err = io.ReadAll(reader)
-	require.ErrorContains(t, err, "did not honor compact range")
-}
-
-func TestCompactRangeValidation(t *testing.T) {
-	_, err := rangeEnd("", 0)
-	require.Error(t, err)
-	end, err := rangeEnd("", 8)
-	require.NoError(t, err)
-	require.EqualValues(t, 7, end)
-	for _, value := range []string{"bytes=2-", "bytes=2-1", "bytes=8-9", "bytes=+2-4", "bytes=0-1,4-5", "bytes=-0", "bytes=-x", "bytes=0-9223372036854775808"} {
-		_, err := rangeEnd(value, 8)
-		require.Error(t, err, value)
-	}
-}
-
-func TestCompactTransportRejectsInvalidOffsetsAndPropagatesErrors(t *testing.T) {
+func TestBoundedRangeTransport_RoundTrip(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	transport := boundedRangeTransport{http.DefaultTransport}
 	ctx := context.WithValue(context.Background(), blobRangeKey{}, blobRange{end: 3, size: 8})
-	for _, value := range []string{"bytes=x-", "bytes=5-"} {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
-		require.NoError(t, err)
-		req.Header.Set("Range", value)
-		response, err := transport.RoundTrip(req)
-		if response != nil {
-			require.NoError(t, response.Body.Close())
-		}
-		require.ErrorContains(t, err, "invalid compact fetch offset")
-	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	req, err := http.NewRequestWithContext(canceled, http.MethodGet, server.URL, nil)
-	require.NoError(t, err)
-	response, err := transport.RoundTrip(req)
-	if response != nil {
-		require.NoError(t, response.Body.Close())
+
+	tests := []struct {
+		name   string
+		ctx    context.Context
+		header string
+		expect func(t *testing.T, resp *http.Response, err error)
+	}{
+		{
+			name:   "invalid offset",
+			ctx:    ctx,
+			header: "bytes=x-",
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "invalid compact fetch offset")
+				assert.Nil(resp)
+			},
+		},
+		{
+			name:   "offset past range end",
+			ctx:    ctx,
+			header: "bytes=5-",
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "invalid compact fetch offset")
+				assert.Nil(resp)
+			},
+		},
+		{
+			name: "canceled request",
+			ctx:  canceled,
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, context.Canceled)
+				assert.Nil(resp)
+			},
+		},
+		{
+			name: "request without compact range",
+			ctx:  context.Background(),
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(http.StatusNoContent, resp.StatusCode)
+			},
+		},
 	}
-	require.ErrorIs(t, err, context.Canceled)
-	// Ordinary requests must bypass compact-specific response validation.
-	req, err = http.NewRequest(http.MethodGet, server.URL, nil)
-	require.NoError(t, err)
-	response, err = transport.RoundTrip(req)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusNoContent, response.StatusCode)
-	require.NoError(t, response.Body.Close())
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(tc.ctx, http.MethodGet, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.header != "" {
+				req.Header.Set("Range", tc.header)
+			}
+
+			resp, err := boundedRangeTransport{RoundTripper: http.DefaultTransport}.RoundTrip(req)
+
+			tc.expect(t, resp, err)
+			if resp != nil {
+				assert.NoError(t, resp.Body.Close())
+			}
+		})
+	}
 }

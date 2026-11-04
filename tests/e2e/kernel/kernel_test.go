@@ -100,23 +100,25 @@ const blockSize = 4096
 
 func requireKernelFor(t testing.TB, layout fixture.Layout) {
 	t.Helper()
-	env.RequireKernel(t, 5, 16, "EROFS chunk-based files on extra devices")
+	env.MustHaveKernel(t, 5, 16, "EROFS chunk-based files on extra devices")
 
 	switch layout.Compressor() {
 	case "erofs-lz4":
-		env.RequireKernel(t, 6, 1, "EROFS LZ4 fragments")
+		env.MustHaveKernel(t, 6, 1, "EROFS LZ4 fragments")
 
 	case "erofs-zstd":
-		env.RequireKernel(t, 6, 10, "EROFS zstd")
+		env.MustHaveKernel(t, 6, 10, "EROFS zstd")
 	}
 }
 
 func mountEROFS(t testing.TB, bootstrap string, devices []string) string {
 	t.Helper()
-	env.RequireRoot(t)
-	env.RequireFilesystem(t, "erofs")
-	losetup := env.RequireTool(t, "losetup")
-	env.Require(t, os.Getpagesize() == blockSize, "EROFS images use 4KiB blocks, the page size is %d", os.Getpagesize())
+	env.MustHaveRoot(t)
+	env.MustHaveFilesystem(t, "erofs")
+	losetup := env.LookPath(t, "losetup")
+	if os.Getpagesize() != blockSize {
+		env.Skipf(t, "EROFS images use 4KiB blocks, the page size is %d", os.Getpagesize())
+	}
 
 	mnt := filepath.Join(env.WorkDir(t), "mnt")
 	if !assert.NoError(t, os.Mkdir(mnt, 0o755)) {

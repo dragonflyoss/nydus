@@ -17,10 +17,10 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/platforms"
-	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
-	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
 var (
@@ -38,63 +38,49 @@ func TestConvertLocalDir(t *testing.T) {
 		expect     func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error)
 	}{
 		{
-			name:       "moves append file from blob into bootstrap",
+			name:       "move append file from blob into bootstrap",
 			builder:    true,
 			appendFile: "append.json",
 			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 
-				manifest, config := readMockManifest(t, cs, *desc)
-				blobs, bootstrap, _, err := nydus.SplitLayers(manifest.Layers)
-				if !assert.NoError(err) || !assert.NotNil(bootstrap) || !assert.Len(blobs, 1) {
-					t.FailNow()
-				}
+				manifest, config := readManifest(t, cs, *desc)
+				blobs, _, _, err := nydus.SplitLayers(manifest.Layers)
+				assert.NoError(err)
+				assert.Len(blobs, 1)
 				assert.Equal(mockManifestAnnotations, manifest.Annotations)
 				assert.Equal(platforms.DefaultSpec().OS, config.OS)
 				assert.Equal(platforms.DefaultSpec().Architecture, config.Architecture)
+				assert.Equal(mockAppendFileData, readBootstrap(t, cs, manifest)["image/append.json"])
 
-				entries := map[string][]byte{}
-				assert.NoError(oci.WalkBootstrapLayer(context.Background(), cs, *bootstrap, func(hdr *tar.Header, tr *tar.Reader) error {
-					data, err := io.ReadAll(tr)
-					entries[hdr.Name] = data
-					return err
-				}))
-				assert.Equal(mockAppendFileData, entries["image/append.json"])
-
-				path, err := materializeBlob(context.Background(), cs, blobs[0], t.TempDir())
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
-
-				var exported bytes.Buffer
-				if !assert.NoError(nydus.RunNydusExport(context.Background(), nydus.ExportOption{BuilderPath: builder, BlobPath: path}, &exported)) {
-					t.FailNow()
-				}
-
-				files := map[string][]byte{}
-				tr := tar.NewReader(&exported)
-				for {
-					hdr, err := tr.Next()
-					if err == io.EOF {
-						break
-					}
-					if !assert.NoError(err) {
-						t.FailNow()
-					}
-
-					data, err := io.ReadAll(tr)
+				for _, blob := range blobs {
+					path, err := materializeBlob(context.Background(), cs, blob, t.TempDir())
 					assert.NoError(err)
-					files[filepath.Clean(hdr.Name)] = data
+
+					var exported bytes.Buffer
+					assert.NoError(nydus.RunNydusExport(context.Background(), nydus.ExportOption{BuilderPath: builder, BlobPath: path}, &exported))
+
+					files := map[string][]byte{}
+					tr := tar.NewReader(&exported)
+					for {
+						hdr, err := tr.Next()
+						if err != nil {
+							assert.ErrorIs(err, io.EOF)
+							break
+						}
+
+						data, err := io.ReadAll(tr)
+						assert.NoError(err)
+						files[filepath.Clean(hdr.Name)] = data
+					}
+					assert.Equal(mockSourceFileData, files["data"])
+					assert.NotContains(files, "append.json")
 				}
-				assert.Equal(mockSourceFileData, files["data"])
-				assert.NotContains(files, "append.json")
 			},
 		},
 		{
-			name:       "rejects reserved append file name",
+			name:       "reject reserved append file name",
 			appendFile: "image.boot",
 			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
 				assert := assert.New(t)
@@ -110,14 +96,14 @@ func TestConvertLocalDir(t *testing.T) {
 				t.Skip("set NYDUS_TEST_BUILDER to run real builder conversion tests")
 			}
 			source := t.TempDir()
-			if !assert.NoError(t, os.WriteFile(filepath.Join(source, "data"), mockSourceFileData, 0o644)) {
-				t.FailNow()
+			if err := os.WriteFile(filepath.Join(source, "data"), mockSourceFileData, 0o644); err != nil {
+				t.Fatal(err)
 			}
-			if !assert.NoError(t, os.WriteFile(filepath.Join(source, tc.appendFile), mockAppendFileData, 0o644)) {
-				t.FailNow()
+			if err := os.WriteFile(filepath.Join(source, tc.appendFile), mockAppendFileData, 0o644); err != nil {
+				t.Fatal(err)
 			}
 
-			cs := newMockStore(t)
+			cs := mockStore(t)
 			desc, err := ConvertLocalDir(context.Background(), cs, LocalDirOption{
 				BuilderPath:       builder,
 				WorkDir:           t.TempDir(),
@@ -125,6 +111,7 @@ func TestConvertLocalDir(t *testing.T) {
 				AppendInBootstrap: []string{filepath.Join(source, tc.appendFile)},
 				Annotations:       mockManifestAnnotations,
 			})
+
 			tc.expect(t, cs, desc, err)
 		})
 	}

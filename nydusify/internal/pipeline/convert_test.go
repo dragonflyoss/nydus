@@ -12,19 +12,25 @@ import (
 	"cmp"
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/platforms"
-	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
-	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
-	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
+	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
 var (
@@ -47,19 +53,138 @@ var (
 		Digest:      digest.FromString("bootstrap layer"),
 		Annotations: map[string]string{nydus.LayerAnnotationNydusBootstrap: "true"},
 	}
+
+	errMockStore = errors.New("injected content store failure")
 )
 
-func newMockStore(t *testing.T) content.Store {
+type mockContentStore struct {
+	content.Store
+	failAt int
+	calls  []string
+}
+
+func (s *mockContentStore) call(operation string) error {
+	s.calls = append(s.calls, operation)
+	if len(s.calls) == s.failAt {
+		return errMockStore
+	}
+
+	return nil
+}
+
+func (s *mockContentStore) ReaderAt(ctx context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
+	if err := s.call("read"); err != nil {
+		return nil, err
+	}
+
+	return s.Store.ReaderAt(ctx, desc)
+}
+
+func (s *mockContentStore) Info(ctx context.Context, dgst digest.Digest) (content.Info, error) {
+	if err := s.call("info"); err != nil {
+		return content.Info{}, err
+	}
+
+	return s.Store.Info(ctx, dgst)
+}
+
+func (s *mockContentStore) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) {
+	if err := s.call("write"); err != nil {
+		return nil, err
+	}
+
+	return s.Store.Writer(ctx, opts...)
+}
+
+func (s *mockContentStore) Update(ctx context.Context, info content.Info, fields ...string) (content.Info, error) {
+	if err := s.call("update"); err != nil {
+		return content.Info{}, err
+	}
+
+	return s.Store.Update(ctx, info, fields...)
+}
+
+func mockStore(t *testing.T) content.Store {
 	t.Helper()
 	provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	return provider.ContentStore()
 }
 
-func writeMockImage(t *testing.T, cs content.Store, imagePlatforms ...ocispec.Platform) ocispec.Descriptor {
+func mockLocalStore(t *testing.T) content.Store {
+	t.Helper()
+	cs, err := local.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return cs
+}
+
+func mockFile(t *testing.T, path string, data []byte) string {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+func mockBuilder(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "nydus")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+func mockTar(t *testing.T, name string, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf.Bytes()
+}
+
+func mockGzip(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf.Bytes()
+}
+
+func mockContent(t *testing.T, cs content.Store, mediaType string, data []byte) ocispec.Descriptor {
+	t.Helper()
+	desc := ocispec.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(data), Size: int64(len(data))}
+	if err := content.WriteBlob(context.Background(), cs, desc.Digest.String(), bytes.NewReader(data), desc); err != nil {
+		t.Fatal(err)
+	}
+
+	return desc
+}
+
+func mockImage(t *testing.T, cs content.Store, imagePlatforms ...ocispec.Platform) ocispec.Descriptor {
 	t.Helper()
 	ctx := context.Background()
 	index := ocispec.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageIndex}
@@ -70,33 +195,9 @@ func writeMockImage(t *testing.T, cs content.Store, imagePlatforms ...ocispec.Pl
 			history []ocispec.History
 		)
 		for _, name := range mockLayerNames {
-			var layer, compressed bytes.Buffer
-			data := []byte(name + " layer for " + platform.Architecture)
-			tw := tar.NewWriter(&layer)
-			if !assert.NoError(t, tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))})) {
-				t.FailNow()
-			}
-			if _, err := tw.Write(data); !assert.NoError(t, err) {
-				t.FailNow()
-			}
-			if !assert.NoError(t, tw.Close()) {
-				t.FailNow()
-			}
-
-			gw := gzip.NewWriter(&compressed)
-			if _, err := gw.Write(layer.Bytes()); !assert.NoError(t, err) {
-				t.FailNow()
-			}
-			if !assert.NoError(t, gw.Close()) {
-				t.FailNow()
-			}
-
-			desc := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageLayerGzip, Digest: digest.FromBytes(compressed.Bytes()), Size: int64(compressed.Len())}
-			if !assert.NoError(t, content.WriteBlob(ctx, cs, desc.Digest.String(), bytes.NewReader(compressed.Bytes()), desc)) {
-				t.FailNow()
-			}
-			layers = append(layers, desc)
-			diffIDs = append(diffIDs, digest.FromBytes(layer.Bytes()))
+			layer := mockTar(t, name, []byte(name+" layer for "+platform.Architecture))
+			layers = append(layers, mockContent(t, cs, ocispec.MediaTypeImageLayerGzip, mockGzip(t, layer)))
+			diffIDs = append(diffIDs, digest.FromBytes(layer))
 			history = append(history, ocispec.History{CreatedBy: "ADD " + name})
 		}
 
@@ -106,8 +207,8 @@ func writeMockImage(t *testing.T, cs content.Store, imagePlatforms ...ocispec.Pl
 			RootFS:   ocispec.RootFS{Type: "layers", DiffIDs: diffIDs},
 			History:  history,
 		}, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
-		if !assert.NoError(t, err) {
-			t.FailNow()
+		if err != nil {
+			t.Fatal(err)
 		}
 
 		manifest, err := oci.WriteJSON(ctx, cs, ocispec.Manifest{
@@ -116,22 +217,22 @@ func writeMockImage(t *testing.T, cs content.Store, imagePlatforms ...ocispec.Pl
 			Config:    *config,
 			Layers:    layers,
 		}, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, nil)
-		if !assert.NoError(t, err) {
-			t.FailNow()
+		if err != nil {
+			t.Fatal(err)
 		}
 		manifest.Platform = &platform
 		index.Manifests = append(index.Manifests, *manifest)
 	}
 
 	desc, err := oci.WriteJSON(ctx, cs, index, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageIndex}, nil)
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	return *desc
 }
 
-func writeMockManifest(t *testing.T, cs content.Store, layers ...ocispec.Descriptor) ocispec.Descriptor {
+func mockManifest(t *testing.T, cs content.Store, layers ...ocispec.Descriptor) ocispec.Descriptor {
 	t.Helper()
 	ctx := context.Background()
 	diffIDs := make([]digest.Digest, 0, len(layers))
@@ -140,8 +241,8 @@ func writeMockManifest(t *testing.T, cs content.Store, layers ...ocispec.Descrip
 	}
 	config, err := oci.WriteJSON(ctx, cs, ocispec.Image{Platform: mockPlatform, Config: mockImageConfig, RootFS: ocispec.RootFS{Type: "layers", DiffIDs: diffIDs}},
 		ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	desc, err := oci.WriteJSON(ctx, cs, ocispec.Manifest{
@@ -150,14 +251,14 @@ func writeMockManifest(t *testing.T, cs content.Store, layers ...ocispec.Descrip
 		Config:    *config,
 		Layers:    layers,
 	}, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, nil)
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	return *desc
 }
 
-func writeMockBlob(t *testing.T, cs content.Store, data string, annotations ...string) ocispec.Descriptor {
+func mockBlob(t *testing.T, cs content.Store, data string, annotations ...string) ocispec.Descriptor {
 	t.Helper()
 	dgst := digest.FromString(data)
 	desc := ocispec.Descriptor{
@@ -172,27 +273,78 @@ func writeMockBlob(t *testing.T, cs content.Store, data string, annotations ...s
 	for _, annotation := range annotations {
 		desc.Annotations[annotation] = "true"
 	}
-	if !assert.NoError(t, content.WriteBlob(context.Background(), cs, dgst.String(), bytes.NewReader([]byte(data)), desc)) {
-		t.FailNow()
+	if err := content.WriteBlob(context.Background(), cs, dgst.String(), bytes.NewReader([]byte(data)), desc); err != nil {
+		t.Fatal(err)
 	}
 
 	return desc
 }
 
-func readMockManifest(t *testing.T, cs content.Store, desc ocispec.Descriptor) (ocispec.Manifest, ocispec.Image) {
+func mockBootstrap(t *testing.T, cs content.Store) ocispec.Descriptor {
+	t.Helper()
+	desc, err := oci.WriteBootstrapLayer(context.Background(), cs, mockBootstrapData, []nydus.BlobMetaFile{mockBlobMetaFile}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return *desc
+}
+
+func mockNydusManifest(t *testing.T, cs content.Store) ocispec.Descriptor {
+	t.Helper()
+	return mockManifest(t, cs, mockBlob(t, cs, string(mockBlobData)), mockBootstrap(t, cs))
+}
+
+func mockIndex(t *testing.T, cs content.Store, manifests ...ocispec.Descriptor) ocispec.Descriptor {
+	t.Helper()
+	desc, err := oci.WriteJSON(context.Background(), cs, ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: manifests,
+	}, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageIndex}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return *desc
+}
+
+func readManifest(t *testing.T, cs content.Store, desc ocispec.Descriptor) (ocispec.Manifest, ocispec.Image) {
 	t.Helper()
 	var (
 		manifest ocispec.Manifest
 		config   ocispec.Image
 	)
-	if !assert.NoError(t, oci.ReadJSON(context.Background(), cs, desc, &manifest)) {
-		t.FailNow()
+	if err := oci.ReadJSON(context.Background(), cs, desc, &manifest); err != nil {
+		t.Fatal(err)
 	}
-	if !assert.NoError(t, oci.ReadJSON(context.Background(), cs, manifest.Config, &config)) {
-		t.FailNow()
+	if err := oci.ReadJSON(context.Background(), cs, manifest.Config, &config); err != nil {
+		t.Fatal(err)
 	}
 
 	return manifest, config
+}
+
+func readBootstrap(t *testing.T, cs content.Store, manifest ocispec.Manifest) map[string][]byte {
+	t.Helper()
+	_, bootstrap, _, err := nydus.SplitLayers(manifest.Layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap == nil {
+		t.Fatal("manifest has no nydus bootstrap layer")
+	}
+
+	entries := map[string][]byte{}
+	if err := oci.WalkBootstrapLayer(context.Background(), cs, *bootstrap, func(hdr *tar.Header, tr *tar.Reader) error {
+		data, err := io.ReadAll(tr)
+		entries[hdr.Name] = data
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	return entries
 }
 
 func TestConvert(t *testing.T) {
@@ -205,25 +357,21 @@ func TestConvert(t *testing.T) {
 		expect  func(t *testing.T, cs content.Store, source ocispec.Descriptor, desc *ocispec.Descriptor, converted []ocispec.Descriptor, err error)
 	}{
 		{
-			name:    "merges single platform index into nydus manifest",
+			name:    "merge single platform index into nydus manifest",
 			builder: true,
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return writeMockImage(t, cs, mockPlatform)
+				return mockImage(t, cs, mockPlatform)
 			},
 			opt: Option{Annotations: mockManifestAnnotations},
 			expect: func(t *testing.T, cs content.Store, source ocispec.Descriptor, desc *ocispec.Descriptor, converted []ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				assert.Equal(ocispec.MediaTypeImageManifest, desc.MediaType)
 				assert.Equal(&mockPlatform, desc.Platform)
 
-				manifest, config := readMockManifest(t, cs, *desc)
-				blobs, bootstrap, _, err := nydus.SplitLayers(manifest.Layers)
-				if !assert.NoError(err) || !assert.NotNil(bootstrap) {
-					t.FailNow()
-				}
+				manifest, config := readManifest(t, cs, *desc)
+				blobs, _, _, err := nydus.SplitLayers(manifest.Layers)
+				assert.NoError(err)
 				assert.Len(blobs, len(mockLayerNames))
 				assert.ElementsMatch(blobs, converted)
 				assert.Equal(mockManifestAnnotations, manifest.Annotations)
@@ -234,79 +382,75 @@ func TestConvert(t *testing.T) {
 				}
 				assert.Equal(diffIDs, config.RootFS.DiffIDs)
 				assert.Equal(mockImageConfig.Env, config.Config.Env)
-				assert.Len(config.History, len(mockLayerNames)+1)
-				assert.Equal(mockBootstrapHistory, config.History[len(config.History)-1])
+				assert.Equal([]ocispec.History{{CreatedBy: "ADD lower"}, {CreatedBy: "ADD upper"}, mockBootstrapHistory}, config.History)
 
 				labels, err := oci.Labels(context.Background(), cs, desc.Digest)
 				assert.NoError(err)
 				assert.Equal(manifest.Config.Digest.String(), labels["containerd.io/gc.ref.content.config"])
-				assert.Equal(bootstrap.Digest.String(), labels["containerd.io/gc.ref.content.l.2"])
-
-				var entries []string
-				assert.NoError(oci.WalkBootstrapLayer(context.Background(), cs, *bootstrap, func(hdr *tar.Header, _ *tar.Reader) error {
-					entries = append(entries, hdr.Name)
-					return nil
-				}))
-				assert.Contains(entries, nydus.BootstrapFileNameInLayer)
+				for i, layer := range manifest.Layers {
+					assert.Equal(layer.Digest.String(), labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)])
+				}
+				assert.Contains(readBootstrap(t, cs, manifest), nydus.BootstrapFileNameInLayer)
 			},
 		},
 		{
-			name:    "keeps multi platform index",
+			name:    "keep multi platform index",
 			builder: true,
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return writeMockImage(t, cs, mockPlatform, mockARM64Platform)
+				return mockImage(t, cs, mockPlatform, mockARM64Platform)
 			},
 			expect: func(t *testing.T, cs content.Store, source ocispec.Descriptor, desc *ocispec.Descriptor, converted []ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				assert.Equal(ocispec.MediaTypeImageIndex, desc.MediaType)
 				assert.NotEqual(source.Digest, desc.Digest)
 				assert.Len(converted, 2*len(mockLayerNames))
 
 				var index ocispec.Index
-				if !assert.NoError(oci.ReadJSON(context.Background(), cs, *desc, &index)) || !assert.Len(index.Manifests, 2) {
-					t.FailNow()
-				}
-				for i, platform := range []ocispec.Platform{mockPlatform, mockARM64Platform} {
-					assert.Equal(&platform, index.Manifests[i].Platform)
-					manifest, config := readMockManifest(t, cs, index.Manifests[i])
+				assert.NoError(oci.ReadJSON(context.Background(), cs, *desc, &index))
+
+				var (
+					manifestPlatforms []*ocispec.Platform
+					architectures     []string
+				)
+				for _, manifestDesc := range index.Manifests {
+					manifest, config := readManifest(t, cs, manifestDesc)
 					blobs, bootstrap, _, err := nydus.SplitLayers(manifest.Layers)
 					assert.NoError(err)
 					assert.NotNil(bootstrap)
 					assert.Len(blobs, len(mockLayerNames))
-					assert.Equal(platform.Architecture, config.Architecture)
+					manifestPlatforms = append(manifestPlatforms, manifestDesc.Platform)
+					architectures = append(architectures, config.Architecture)
 				}
+				assert.Equal([]*ocispec.Platform{&mockPlatform, &mockARM64Platform}, manifestPlatforms)
+				assert.Equal([]string{mockPlatform.Architecture, mockARM64Platform.Architecture}, architectures)
 			},
 		},
 		{
-			name:    "selects matching platform",
+			name:    "select matching platform",
 			builder: true,
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return writeMockImage(t, cs, mockPlatform, mockARM64Platform)
+				return mockImage(t, cs, mockPlatform, mockARM64Platform)
 			},
 			opt: Option{PlatformMC: platforms.Only(mockARM64Platform)},
 			expect: func(t *testing.T, cs content.Store, source ocispec.Descriptor, desc *ocispec.Descriptor, converted []ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				assert.Equal(ocispec.MediaTypeImageManifest, desc.MediaType)
 				assert.Equal(&mockARM64Platform, desc.Platform)
 				assert.Len(converted, len(mockLayerNames))
 
-				_, config := readMockManifest(t, cs, *desc)
+				_, config := readManifest(t, cs, *desc)
 				assert.Equal(mockARM64Platform.Architecture, config.Architecture)
 			},
 		},
 		{
-			name:    "returns already converted source",
+			name:    "return already converted source",
 			builder: true,
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				desc, err := Convert(context.Background(), cs, writeMockImage(t, cs, mockPlatform), Option{BuilderPath: builder, WorkDir: t.TempDir()})
-				if !assert.NoError(t, err) {
-					t.FailNow()
+				desc, err := Convert(context.Background(), cs, mockImage(t, cs, mockPlatform), Option{BuilderPath: builder, WorkDir: t.TempDir()})
+				if err != nil {
+					t.Fatal(err)
 				}
 
 				return *desc
@@ -319,7 +463,7 @@ func TestConvert(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects missing source index",
+			name: "reject missing source index",
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
 				return ocispec.Descriptor{MediaType: ocispec.MediaTypeImageIndex, Digest: digest.FromString("missing")}
 			},
@@ -330,13 +474,13 @@ func TestConvert(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects missing source config",
+			name: "reject missing source config",
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
 				desc, err := oci.WriteJSON(context.Background(), cs, ocispec.Manifest{
 					Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig, Digest: digest.FromString("missing")},
 				}, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, nil)
-				if !assert.NoError(t, err) {
-					t.FailNow()
+				if err != nil {
+					t.Fatal(err)
 				}
 
 				return *desc
@@ -348,9 +492,9 @@ func TestConvert(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects missing builder",
+			name: "reject missing builder",
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
-				return writeMockImage(t, cs, mockPlatform)
+				return mockImage(t, cs, mockPlatform)
 			},
 			opt: Option{BuilderPath: "/nonexistent/nydus"},
 			expect: func(t *testing.T, cs content.Store, source ocispec.Descriptor, desc *ocispec.Descriptor, converted []ocispec.Descriptor, err error) {
@@ -368,7 +512,7 @@ func TestConvert(t *testing.T) {
 			if tc.builder && builder == "" {
 				t.Skip("set NYDUS_TEST_BUILDER to run real builder conversion tests")
 			}
-			cs := newMockStore(t)
+			cs := mockStore(t)
 			var (
 				mu        sync.Mutex
 				converted []ocispec.Descriptor
@@ -383,6 +527,7 @@ func TestConvert(t *testing.T) {
 			}
 			source := tc.source(t, cs)
 			desc, err := Convert(context.Background(), cs, source, opt)
+
 			tc.expect(t, cs, source, desc, converted, err)
 		})
 	}

@@ -17,8 +17,8 @@ func (FUSE) Name() string { return "fuse" }
 // Require requires root and FUSE.
 func (FUSE) Require(t testing.TB) {
 	t.Helper()
-	env.RequireRoot(t)
-	env.RequireFilesystem(t, "fuse")
+	env.MustHaveRoot(t)
+	env.MustHaveFilesystem(t, "fuse")
 }
 
 // Supports reports true for every mode, Blob included.

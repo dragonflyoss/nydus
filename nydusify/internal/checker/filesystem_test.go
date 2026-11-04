@@ -13,7 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	digest "github.com/opencontainers/go-digest"
@@ -35,11 +39,34 @@ var (
 	}()
 
 	mockFuseFailure = "echo 'mock fuse failure' >&2\nexit 7\n"
+
+	mockAbsentImage = &nydusfs.Image{
+		Kind: nydusfs.KindOCI,
+		Manifest: ocispec.Manifest{
+			Layers: []ocispec.Descriptor{{MediaType: ocispec.MediaTypeImageLayer, Digest: digest.FromString("absent layer")}},
+		},
+	}
 )
 
 func mockOCIImage(t *testing.T, cs content.Store, entries []mockTarEntry) *nydusfs.Image {
 	layer := mockBlob(t, cs, ocispec.MediaTypeImageLayer, mockTar(t, entries))
 	return &nydusfs.Image{Kind: nydusfs.KindOCI, Manifest: ocispec.Manifest{Layers: []ocispec.Descriptor{layer}}}
+}
+
+func mockFilesystemRule(t *testing.T, builder string) (filesystemRule, *nydusfs.Image) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	provider, err := remote.NewProvider(remote.Option{WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bootstrap, err := oci.WriteBootstrapLayer(context.Background(), provider.ContentStore(), []byte("bootstrap"), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	img := &nydusfs.Image{Ref: "registry.invalid/source:tag", Kind: nydusfs.KindNydus, Bootstrap: bootstrap}
+	return filesystemRule{cs: provider.ContentStore(), provider: provider, builder: builder, workDir: t.TempDir()}, img
 }
 
 func TestEnsurePrivileged(t *testing.T) {
@@ -77,10 +104,6 @@ func TestEnsurePrivileged(t *testing.T) {
 }
 
 func TestFilesystemRule_Validate(t *testing.T) {
-	mockAbsentImage := &nydusfs.Image{Kind: nydusfs.KindOCI, Manifest: ocispec.Manifest{Layers: []ocispec.Descriptor{
-		{MediaType: ocispec.MediaTypeImageLayer, Digest: digest.FromString("absent layer")},
-	}}}
-
 	tests := []struct {
 		name   string
 		root   bool
@@ -182,9 +205,179 @@ func TestFilesystemRule_Validate(t *testing.T) {
 				t.Skip("applying oci layers with ownership requires root")
 			}
 
-			rule, _ := mountRule(t, "")
+			rule, _ := mockFilesystemRule(t, "")
 			rule.source, rule.target = tc.images(t, rule.cs)
 			tc.expect(t, rule.workDir, rule.Validate(context.Background()))
+		})
+	}
+}
+
+func TestFilesystemRule_mount(t *testing.T) {
+	tests := []struct {
+		name    string
+		builder string
+		setup   func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc)
+		expect  func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error)
+	}{
+		{
+			name: "reject occupied scratch dir",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {
+				rule.workDir = filepath.Join(rule.workDir, "file")
+				if err := os.WriteFile(rule.workDir, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "create scratch dir")
+				assert.Empty(root)
+				assert.Nil(cleanup)
+				paths, err := filepath.Glob(filepath.Join(workDir, "fs-source-*"))
+				assert.NoError(err)
+				assert.Empty(paths)
+			},
+		},
+		{
+			name: "reject nydus image without bootstrap",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {
+				img.Bootstrap = nil
+			},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "missing its bootstrap")
+				assert.Empty(root)
+				assert.Nil(cleanup)
+				paths, err := filepath.Glob(filepath.Join(workDir, "fs-source-*"))
+				assert.NoError(err)
+				assert.Empty(paths)
+			},
+		},
+		{
+			name: "report missing bootstrap layer",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {
+				img.Bootstrap.Digest = digest.FromString("absent bootstrap")
+			},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "extract bootstrap")
+				assert.Empty(root)
+				assert.Nil(cleanup)
+				paths, err := filepath.Glob(filepath.Join(workDir, "fs-source-*"))
+				assert.NoError(err)
+				assert.Empty(paths)
+			},
+		},
+		{
+			name: "report missing blob layer",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {
+				img.Manifest.Layers = []ocispec.Descriptor{{
+					MediaType:   nydus.MediaTypeNydusBlob,
+					Digest:      digest.FromString("absent blob"),
+					Size:        100,
+					Annotations: map[string]string{nydus.LayerAnnotationNydusBlob: "true"},
+				}}
+			},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "inspect blob layers")
+				assert.Empty(root)
+				assert.Nil(cleanup)
+				paths, err := filepath.Glob(filepath.Join(workDir, "fs-source-*"))
+				assert.NoError(err)
+				assert.Empty(paths)
+			},
+		},
+		{
+			name: "report missing oci layer",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {
+				img.Kind = nydusfs.KindOCI
+				img.Manifest = mockAbsentImage.Manifest
+			},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "apply oci image")
+				assert.Empty(root)
+				assert.Nil(cleanup)
+				paths, err := filepath.Glob(filepath.Join(workDir, "fs-source-*"))
+				assert.NoError(err)
+				assert.Empty(paths)
+			},
+		},
+		{
+			name:  "report builder start failure",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "start nydus fuse")
+				assert.Empty(root)
+				assert.Nil(cleanup)
+				assert.NoError(ctx.Err())
+				entries, err := os.ReadDir(workDir)
+				assert.NoError(err)
+				assert.Empty(entries)
+			},
+		},
+		{
+			name:    "report builder exit before ready",
+			builder: mockFuseFailure,
+			setup:   func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "mock fuse failure")
+				assert.Empty(root)
+				assert.Nil(cleanup)
+				assert.NoError(ctx.Err())
+				entries, err := os.ReadDir(workDir)
+				assert.NoError(err)
+				assert.Empty(entries)
+			},
+		},
+		{
+			name:    "reap builder on cancellation",
+			builder: "echo $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 30\n",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, cancel context.CancelFunc) {
+				pidFile := filepath.Join(filepath.Dir(rule.builder), "pid")
+				done := make(chan struct{})
+				t.Cleanup(func() { <-done })
+				go func() {
+					defer close(done)
+					assert.Eventually(t, func() bool {
+						data, err := os.ReadFile(pidFile)
+						return err == nil && strings.TrimSpace(string(data)) != ""
+					}, 2*time.Second, 10*time.Millisecond)
+					cancel()
+				}()
+			},
+			expect: func(t *testing.T, ctx context.Context, builderDir, workDir, root string, cleanup func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, context.Canceled)
+				assert.Empty(root)
+				assert.Nil(cleanup)
+
+				data, err := os.ReadFile(filepath.Join(builderDir, "pid"))
+				assert.NoError(err)
+				pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+				assert.NoError(err)
+				assert.ErrorIs(syscall.Kill(pid, 0), syscall.ESRCH)
+
+				entries, err := os.ReadDir(workDir)
+				assert.NoError(err)
+				assert.Empty(entries)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			builderDir := t.TempDir()
+			rule, img := mockFilesystemRule(t, mockBuilder(t, builderDir, tc.builder))
+			workDir := rule.workDir
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			tc.setup(t, &rule, img, cancel)
+
+			root, cleanup, err := rule.mount(ctx, "source", remote.Source, img)
+			tc.expect(t, ctx, builderDir, workDir, root, cleanup, err)
 		})
 	}
 }
@@ -193,18 +386,24 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 	tests := []struct {
 		name   string
 		setup  func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string)
-		expect func(t *testing.T, root, dir string, err error)
+		expect func(t *testing.T, root, dir, mountpoint string, unmount func(), err error)
 	}{
 		{
 			name:  "serve chunk layers through registry config",
 			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {},
-			expect: func(t *testing.T, root, dir string, err error) {
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "mock fuse failure")
-				args := mockBuilderArgs(t, root)
-				assert.Equal("fuse", args[0])
-				assert.Contains(args, "--config")
-				assert.NotContains(args, "--blob-dir")
+				assert.Empty(mountpoint)
+				assert.Nil(unmount)
+				assert.Equal([]string{
+					"fuse",
+					"--bootstrap", filepath.Join(dir, "bootstrap", "image.boot"),
+					"--mountpoint", filepath.Join(dir, "mnt"),
+					"--log-level", "warn",
+					"--log-dir", filepath.Join(dir, "log"),
+					"--config", filepath.Join(dir, "config.yaml"),
+				}, mockBuilderArgs(t, root))
 				config, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
 				assert.NoError(err)
 				assert.Contains(string(config), "addr: https://registry.invalid")
@@ -216,21 +415,38 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {
 				img.Manifest.Layers = []ocispec.Descriptor{mockBlob(t, rule.cs, nydus.MediaTypeNydusBlob, mockNativeBlob)}
 			},
-			expect: func(t *testing.T, root, dir string, err error) {
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "mock fuse failure")
-				args := mockBuilderArgs(t, root)
-				blobDir := slices.Index(args, "--blob-dir")
-				if !assert.Positive(blobDir) {
-					t.FailNow()
-				}
-
-				assert.Equal(filepath.Join(dir, "blobs"), args[blobDir+1])
-				assert.Contains(args, filepath.Join(dir, "cache"))
-				assert.NotContains(args, "--config")
+				assert.Empty(mountpoint)
+				assert.Nil(unmount)
+				assert.Equal([]string{
+					"fuse",
+					"--bootstrap", filepath.Join(dir, "bootstrap", "image.boot"),
+					"--mountpoint", filepath.Join(dir, "mnt"),
+					"--log-level", "warn",
+					"--log-dir", filepath.Join(dir, "log"),
+					"--blob-dir", filepath.Join(dir, "blobs"),
+					"--cache-dir", filepath.Join(dir, "cache"),
+				}, mockBuilderArgs(t, root))
 				data, err := os.ReadFile(filepath.Join(dir, "blobs", digest.FromBytes(mockNativeBlob).Encoded()))
 				assert.NoError(err)
 				assert.Equal(mockNativeBlob, data)
+			},
+		},
+		{
+			name: "reject occupied cache dir",
+			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "cache"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "create dir")
+				assert.Empty(mountpoint)
+				assert.Nil(unmount)
+				assert.Nil(mockBuilderArgs(t, root))
 			},
 		},
 		{
@@ -238,16 +454,20 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {
 				boot, err := oci.WriteBootstrapLayer(context.Background(), rule.cs, []byte("bootstrap"),
 					[]nydus.BlobMetaFile{{Name: "layer.blob.meta", Data: []byte("meta")}}, nil)
-				if !assert.NoError(t, err) {
-					t.FailNow()
+				if err != nil {
+					t.Fatal(err)
 				}
 
 				img.Bootstrap = boot
-				assert.NoError(t, os.MkdirAll(filepath.Join(dir, "cache", "layer.blob.meta"), 0o755))
+				if err := os.MkdirAll(filepath.Join(dir, "cache", "layer.blob.meta"), 0o755); err != nil {
+					t.Fatal(err)
+				}
 			},
-			expect: func(t *testing.T, root, dir string, err error) {
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "link blob meta to cache")
+				assert.Empty(mountpoint)
+				assert.Nil(unmount)
 				assert.Nil(mockBuilderArgs(t, root))
 			},
 		},
@@ -255,11 +475,15 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 			name: "reject occupied blob dir",
 			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {
 				img.Manifest.Layers = []ocispec.Descriptor{mockBlob(t, rule.cs, nydus.MediaTypeNydusBlob, mockNativeBlob)}
-				assert.NoError(t, os.WriteFile(filepath.Join(dir, "blobs"), nil, 0o600))
+				if err := os.WriteFile(filepath.Join(dir, "blobs"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			},
-			expect: func(t *testing.T, root, dir string, err error) {
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "materialize blob layers")
+				assert.Empty(mountpoint)
+				assert.Nil(unmount)
 				assert.Nil(mockBuilderArgs(t, root))
 			},
 		},
@@ -268,9 +492,11 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {
 				img.Ref = "Invalid Reference"
 			},
-			expect: func(t *testing.T, root, dir string, err error) {
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "generate storage config")
+				assert.Empty(mountpoint)
+				assert.Nil(unmount)
 				assert.Nil(mockBuilderArgs(t, root))
 			},
 		},
@@ -279,17 +505,16 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			rule, img := mountRule(t, mockBuilder(t, root, mockFuseFailure))
+			rule, img := mockFilesystemRule(t, mockBuilder(t, root, mockFuseFailure))
 			dir := filepath.Join(root, "fuse")
-			if !assert.NoError(t, os.Mkdir(dir, 0o755)) {
-				t.FailNow()
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
 			}
 
 			tc.setup(t, &rule, img, dir)
+
 			mountpoint, unmount, err := rule.fuseMount(context.Background(), dir, remote.Source, img)
-			assert.Empty(t, mountpoint)
-			assert.Nil(t, unmount)
-			tc.expect(t, root, dir, err)
+			tc.expect(t, root, dir, mountpoint, unmount, err)
 		})
 	}
 }
@@ -439,8 +664,8 @@ func TestUnmountFuse(t *testing.T) {
 			log := filepath.Join(dir, "calls")
 			for name, body := range tc.helpers {
 				script := "#!/bin/sh\necho \"${0##*/} $*\" >> '" + log + "'\n" + body + "\n"
-				if !assert.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700)) {
-					t.FailNow()
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil {
+					t.Fatal(err)
 				}
 			}
 

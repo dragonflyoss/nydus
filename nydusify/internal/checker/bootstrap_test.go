@@ -11,6 +11,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -26,14 +27,14 @@ func TestBootstrapRule_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
 		builder string
-		images  func(img *nydusfs.Image) (*nydusfs.Image, *nydusfs.Image)
+		setup   func(rule *bootstrapRule, img *nydusfs.Image)
 		expect  func(t *testing.T, dir, workDir string, err error)
 	}{
 		{
 			name:    "skip oci and absent images",
 			builder: "exit 0\n",
-			images: func(_ *nydusfs.Image) (*nydusfs.Image, *nydusfs.Image) {
-				return &nydusfs.Image{Kind: nydusfs.KindOCI}, nil
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				rule.source = &nydusfs.Image{Kind: nydusfs.KindOCI}
 			},
 			expect: func(t *testing.T, dir, workDir string, err error) {
 				assert := assert.New(t)
@@ -44,21 +45,13 @@ func TestBootstrapRule_Validate(t *testing.T) {
 		{
 			name:    "check source and target bootstraps",
 			builder: "exit 0\n",
-			images: func(img *nydusfs.Image) (*nydusfs.Image, *nydusfs.Image) {
-				return img, img
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				rule.source, rule.target = img, img
 			},
 			expect: func(t *testing.T, dir, workDir string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				args := mockBuilderArgs(t, dir)
-				if !assert.Len(args, 6) {
-					t.FailNow()
-				}
-
-				assert.Equal([]string{"check", "--bootstrap"}, args[:2])
-				assert.True(strings.HasPrefix(args[2], filepath.Join(workDir, "bootstrap-source-")))
-				assert.Equal([]string{"check", "--bootstrap"}, args[3:5])
-				assert.True(strings.HasPrefix(args[5], filepath.Join(workDir, "bootstrap-target-")))
+				assert.Regexp("^check --bootstrap "+regexp.QuoteMeta(filepath.Join(workDir, "bootstrap-source-"))+`\S+ check --bootstrap `+regexp.QuoteMeta(filepath.Join(workDir, "bootstrap-target-"))+`\S+$`, strings.Join(mockBuilderArgs(t, dir), " "))
 				entries, err := os.ReadDir(workDir)
 				assert.NoError(err)
 				assert.Empty(entries)
@@ -67,8 +60,8 @@ func TestBootstrapRule_Validate(t *testing.T) {
 		{
 			name:    "report nydus check output",
 			builder: "echo 'invalid superblock' >&2\nexit 1\n",
-			images: func(img *nydusfs.Image) (*nydusfs.Image, *nydusfs.Image) {
-				return img, nil
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				rule.source = img
 			},
 			expect: func(t *testing.T, dir, workDir string, err error) {
 				assert := assert.New(t)
@@ -80,8 +73,8 @@ func TestBootstrapRule_Validate(t *testing.T) {
 		},
 		{
 			name: "report missing builder",
-			images: func(img *nydusfs.Image) (*nydusfs.Image, *nydusfs.Image) {
-				return nil, img
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				rule.target = img
 			},
 			expect: func(t *testing.T, dir, workDir string, err error) {
 				assert := assert.New(t)
@@ -89,14 +82,59 @@ func TestBootstrapRule_Validate(t *testing.T) {
 				assert.ErrorIs(err, os.ErrNotExist)
 			},
 		},
+		{
+			name: "reject source without bootstrap",
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				img.Bootstrap = nil
+				rule.source = img
+			},
+			expect: func(t *testing.T, dir, workDir string, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "source bootstrap: nydus image is missing its bootstrap layer")
+			},
+		},
+		{
+			name: "reject target without bootstrap",
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				img.Bootstrap = nil
+				rule.target = img
+			},
+			expect: func(t *testing.T, dir, workDir string, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "target bootstrap: nydus image is missing its bootstrap layer")
+			},
+		},
+		{
+			name: "report missing work dir",
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				rule.workDir = filepath.Join(rule.workDir, "missing")
+				rule.source = img
+			},
+			expect: func(t *testing.T, dir, workDir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "source bootstrap: create scratch dir")
+			},
+		},
+		{
+			name: "report missing bootstrap blob",
+			setup: func(rule *bootstrapRule, img *nydusfs.Image) {
+				img.Bootstrap.Digest = digest.FromString("absent bootstrap")
+				rule.source = img
+			},
+			expect: func(t *testing.T, dir, workDir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "source bootstrap: extract bootstrap")
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			fs, img := mountRule(t, "")
-			source, target := tc.images(img)
-			rule := bootstrapRule{cs: fs.cs, builder: mockBuilder(t, dir, tc.builder), workDir: fs.workDir, source: source, target: target}
+			fs, img := mockFilesystemRule(t, "")
+			rule := &bootstrapRule{cs: fs.cs, builder: mockBuilder(t, dir, tc.builder), workDir: fs.workDir}
+			tc.setup(rule, img)
+
 			tc.expect(t, dir, fs.workDir, rule.Validate(context.Background()))
 		})
 	}
@@ -110,20 +148,21 @@ func TestRunNydusCheck(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+
 	source := t.TempDir()
-	if !assert.NoError(t, os.WriteFile(filepath.Join(source, "hostname"), []byte("nydus\n"), 0o644)) {
-		t.FailNow()
+	if err := os.WriteFile(filepath.Join(source, "hostname"), []byte("nydus\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	var blob bytes.Buffer
-	if !assert.NoError(t, nydus.BuildBlob(ctx, &blob, source, nydus.PackOption{BuilderPath: builder, WorkDir: t.TempDir()})) {
-		t.FailNow()
+	if err := nydus.BuildBlob(ctx, &blob, source, nydus.PackOption{BuilderPath: builder, WorkDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
 	}
 
 	bootstrap, _, err := nydus.MergeBootstrap(ctx, []nydus.Layer{{Digest: digest.FromBytes(blob.Bytes()), ReaderAt: bytes.NewReader(blob.Bytes())}},
 		nydus.MergeOption{BuilderPath: builder, WorkDir: t.TempDir()})
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	tests := []struct {
@@ -160,8 +199,8 @@ func TestRunNydusCheck(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "image.boot")
-			if !assert.NoError(t, os.WriteFile(path, tc.bootstrap, 0o600)) {
-				t.FailNow()
+			if err := os.WriteFile(path, tc.bootstrap, 0o600); err != nil {
+				t.Fatal(err)
 			}
 
 			tc.expect(t, runNydusCheck(ctx, builder, path))

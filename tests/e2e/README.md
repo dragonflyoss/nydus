@@ -258,8 +258,8 @@ opt-in heavy tests carry `//go:build manual` in the package they test:
 
 - A top-level test starts with `t.Parallel()`, except the dragonfly suite,
   whose tests share one Kind cluster.
-- Nothing calls `t.Skip*`. A missing precondition goes through `env.Require`
-  (or `RequireRoot`, `RequireKernel`, `RequireTool`, ...): locally it skips,
+- Nothing calls `t.Skip*`. A missing precondition goes through `env.Skipf`
+  (or `MustHaveRoot`, `MustHaveKernel`, `LookPath`, ...): locally it skips,
   under CI it fails.
 - Assertions use testify's `assert`, never `require`, in the specific form
   `testifylint` checks.

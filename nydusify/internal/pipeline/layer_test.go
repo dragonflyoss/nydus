@@ -1,9 +1,14 @@
+/*
+ * Copyright (c) 2026. Nydus Developers. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package pipeline
 
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"io"
@@ -15,223 +20,50 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/plugins/content/local"
-	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
-	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
-func TestStreamingLayerWithRealBuilder(t *testing.T) {
-	builder := os.Getenv("NYDUS_TEST_BUILDER")
-	if builder == "" {
-		t.Skip("set NYDUS_TEST_BUILDER to run real builder conversion/merge/export tests")
-	}
-	mtime := time.Unix(1700000001, 123456789)
-	files := map[string][]byte{"small": []byte("hello"), "large": bytes.Repeat([]byte("payload"), 45000), ".wh.removed": nil}
-	var source bytes.Buffer
-	tarWriter := tar.NewWriter(&source)
-	for _, name := range []string{"small", "large", ".wh.removed"} {
-		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0o640, Uid: 1234, Gid: 5678, Size: int64(len(files[name])), ModTime: mtime, Format: tar.FormatPAX}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tarWriter.Write(files[name]); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := tarWriter.WriteHeader(&tar.Header{Name: "device", Typeflag: tar.TypeChar, Mode: 0o600, Devmajor: 1, Devminor: 3}); err != nil {
-		t.Fatal(err)
-	}
-	if err := tarWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for _, compressor := range []string{"none", "zstd", "lz4", "erofs-none", "erofs-lz4", "erofs-zstd"} {
-		t.Run(compressor, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			work := t.TempDir()
-			store, err := local.NewStore(filepath.Join(work, "content"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var packed bytes.Buffer
-			gzipWriter := gzip.NewWriter(&packed)
-			if _, err := gzipWriter.Write(source.Bytes()); err != nil {
-				t.Fatal(err)
-			}
-			if err := gzipWriter.Close(); err != nil {
-				t.Fatal(err)
-			}
-			digest, size, err := oci.CommitBlob(ctx, store, "source", "", nil, func(writer io.Writer) error { _, err := writer.Write(packed.Bytes()); return err })
-			if err != nil {
-				t.Fatal(err)
-			}
-			converted, err := convertLayer(ctx, store, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageLayerGzip, Digest: digest, Size: size}, nydus.PackOption{BuilderPath: builder, WorkDir: work, Compressor: compressor})
-			if err != nil {
-				t.Fatal(err)
-			}
-			blob, err := content.ReadBlob(ctx, store, *converted)
-			if err != nil {
-				t.Fatal(err)
-			}
-			meta, err := nydus.ExtractBlobMeta(bytes.NewReader(blob), int64(len(blob)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			native := strings.HasPrefix(compressor, "erofs-")
-			switch {
-			case native && meta != nil:
-				t.Fatal("native layer must carry no blob meta")
-			case !native && (len(meta) < 24 || string(meta[:8]) != "NDBLMETA" || binary.LittleEndian.Uint32(meta[12:16]) != 0):
-				t.Fatal("not blob metadata without incompat features")
-			}
-			stage := filepath.Join(work, "stage")
-			if err := os.Mkdir(stage, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			staged, err := nydus.StageNydusMetadata(bytes.NewReader(blob), int64(len(blob)), converted.Digest.Encoded(), stage)
-			if err != nil {
-				t.Fatal(err)
-			}
-			bootstrap := filepath.Join(work, "bootstrap")
-			if err := nydus.RunNydusMerge(ctx, nydus.MergeBuildOption{BuilderPath: builder, SourcePaths: []string{staged}, BootstrapPath: bootstrap}); err != nil {
-				t.Fatal(err)
-			}
-			if output, err := exec.CommandContext(ctx, builder, "check", "--bootstrap", bootstrap).CombinedOutput(); err != nil {
-				t.Fatalf("check: %v: %s", err, output)
-			}
-			bootstrapData, err := os.ReadFile(bootstrap)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var bundle bytes.Buffer
-			bundleWriter := tar.NewWriter(&bundle)
-			metaName := converted.Digest.Encoded() + ".blob.meta"
-			if err := nydus.WriteBootstrapTar(bundleWriter, bootstrapData, []nydus.BlobMetaFile{{Name: metaName, Data: meta}}, nil); err != nil {
-				t.Fatal(err)
-			}
-			if err := bundleWriter.Close(); err != nil {
-				t.Fatal(err)
-			}
-			bundleReader := tar.NewReader(&bundle)
-			foundMeta := false
-			for {
-				header, err := bundleReader.Next()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				if header.Name == "image/"+metaName {
-					data, err := io.ReadAll(bundleReader)
-					if err != nil || !bytes.Equal(data, meta) {
-						t.Fatalf("blob metadata changed during packaging: %v", err)
-					}
-					foundMeta = true
-				}
-			}
-			if !foundMeta {
-				t.Fatal("blob metadata missing from bootstrap layer")
-			}
-			path := filepath.Join(work, converted.Digest.Encoded())
-			if err := os.WriteFile(path, blob, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			var exported bytes.Buffer
-			if err := nydus.RunNydusExport(ctx, nydus.ExportOption{BuilderPath: builder, BlobPath: path}, &exported); err != nil {
-				t.Fatal(err)
-			}
-			reader := tar.NewReader(&exported)
-			seen := make(map[string]bool)
-			for {
-				header, err := reader.Next()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				name := filepath.Clean(header.Name)
-				if want, ok := files[name]; ok {
-					data, err := io.ReadAll(reader)
-					if err != nil || !bytes.Equal(data, want) {
-						t.Fatalf("content %s: %v", name, err)
-					}
-					if header.Uid != 1234 || header.Gid != 5678 || !header.ModTime.Equal(mtime) {
-						t.Fatalf("metadata %s: %+v", name, header)
-					}
-					seen[name] = true
-				}
-				if name == "device" {
-					if header.Typeflag != tar.TypeChar || header.Devmajor != 1 || header.Devminor != 3 {
-						t.Fatalf("device: %+v", header)
-					}
-					seen[name] = true
-				}
-			}
-			if len(seen) != len(files)+1 {
-				t.Fatalf("missing exports: %v", seen)
-			}
-		})
-	}
-}
+var (
+	mockPAXModTime = time.Unix(1700000001, 123456789)
 
-func TestStreamingLayerRejectsTruncatedInput(t *testing.T) {
-	builder := os.Getenv("NYDUS_TEST_BUILDER")
-	if builder == "" {
-		t.Skip("set NYDUS_TEST_BUILDER to run real builder failure tests")
+	mockPAXFiles = map[string][]byte{
+		"small":       []byte("hello"),
+		"large":       bytes.Repeat([]byte("payload"), 45000),
+		".wh.removed": {},
 	}
-	var source bytes.Buffer
-	writer := tar.NewWriter(&source)
-	if err := writer.WriteHeader(&tar.Header{Name: "file", Mode: 0o644, Size: 4096}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write(make([]byte, 4096)); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for _, gzipInput := range []bool{false, true} {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		work := t.TempDir()
-		store, err := local.NewStore(filepath.Join(work, "content"))
-		if err != nil {
-			cancel()
+)
+
+func mockPAXTar(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, name := range []string{"small", "large", ".wh.removed"} {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:    name,
+			Mode:    0o640,
+			Uid:     1234,
+			Gid:     5678,
+			Size:    int64(len(mockPAXFiles[name])),
+			ModTime: mockPAXModTime,
+			Format:  tar.FormatPAX,
+		}); err != nil {
 			t.Fatal(err)
 		}
-		data := source.Bytes()[:600]
-		mediaType := ocispec.MediaTypeImageLayer
-		if gzipInput {
-			var compressed bytes.Buffer
-			encoder := gzip.NewWriter(&compressed)
-			if _, err := encoder.Write(source.Bytes()); err != nil {
-				cancel()
-				t.Fatal(err)
-			}
-			if err := encoder.Close(); err != nil {
-				cancel()
-				t.Fatal(err)
-			}
-			data = compressed.Bytes()[:compressed.Len()-5]
-			mediaType = ocispec.MediaTypeImageLayerGzip
-		}
-		digest, size, err := oci.CommitBlob(ctx, store, "source", "", nil, func(writer io.Writer) error {
-			_, err := writer.Write(data)
-			return err
-		})
-		if err != nil {
-			cancel()
+		if _, err := tw.Write(mockPAXFiles[name]); err != nil {
 			t.Fatal(err)
 		}
-		converted, err := convertLayer(ctx, store, ocispec.Descriptor{MediaType: mediaType, Digest: digest, Size: size}, nydus.PackOption{BuilderPath: builder, WorkDir: work})
-		if err == nil || converted != nil || ctx.Err() != nil {
-			cancel()
-			t.Fatalf("truncated input was accepted or hung (gzip=%v): %v", gzipInput, err)
-		}
-		cancel()
 	}
+	if err := tw.WriteHeader(&tar.Header{Name: "device", Typeflag: tar.TypeChar, Mode: 0o600, Devmajor: 1, Devminor: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf.Bytes()
 }
 
 func TestLayerConvertFunc(t *testing.T) {
@@ -242,7 +74,7 @@ func TestLayerConvertFunc(t *testing.T) {
 		expect   func(t *testing.T, desc *ocispec.Descriptor, err error)
 	}{
 		{
-			name:     "rejects canceled context",
+			name:     "reject canceled context",
 			canceled: true,
 			desc:     mockGzipLayer,
 			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
@@ -252,7 +84,7 @@ func TestLayerConvertFunc(t *testing.T) {
 			},
 		},
 		{
-			name: "skips image config",
+			name: "skip image config",
 			desc: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig, Digest: mockGzipLayer.Digest},
 			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
 				assert := assert.New(t)
@@ -261,7 +93,7 @@ func TestLayerConvertFunc(t *testing.T) {
 			},
 		},
 		{
-			name: "skips nydus blob",
+			name: "skip nydus blob",
 			desc: ocispec.Descriptor{MediaType: nydus.MediaTypeNydusBlob, Digest: mockGzipLayer.Digest},
 			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
 				assert := assert.New(t)
@@ -270,7 +102,7 @@ func TestLayerConvertFunc(t *testing.T) {
 			},
 		},
 		{
-			name: "skips nydus bootstrap",
+			name: "skip nydus bootstrap",
 			desc: mockBootstrapLayer,
 			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
 				assert := assert.New(t)
@@ -279,7 +111,7 @@ func TestLayerConvertFunc(t *testing.T) {
 			},
 		},
 		{
-			name: "wraps layer conversion error",
+			name: "wrap layer conversion error",
 			desc: mockGzipLayer,
 			expect: func(t *testing.T, desc *ocispec.Descriptor, err error) {
 				assert := assert.New(t)
@@ -296,8 +128,8 @@ func TestLayerConvertFunc(t *testing.T) {
 			if tc.canceled {
 				cancel()
 			}
+			desc, err := LayerConvertFunc(nydus.PackOption{BuilderPath: "/nonexistent/nydus", WorkDir: t.TempDir()})(ctx, mockStore(t), tc.desc)
 
-			desc, err := LayerConvertFunc(nydus.PackOption{BuilderPath: "/nonexistent/nydus", WorkDir: t.TempDir()})(ctx, newMockStore(t), tc.desc)
 			tc.expect(t, desc, err)
 		})
 	}
@@ -310,7 +142,7 @@ func TestLayerConvertConcurrency(t *testing.T) {
 		expect func(t *testing.T, concurrency int)
 	}{
 		{
-			name: "uses positive override",
+			name: "use positive override",
 			env:  "3",
 			expect: func(t *testing.T, concurrency int) {
 				assert := assert.New(t)
@@ -318,7 +150,7 @@ func TestLayerConvertConcurrency(t *testing.T) {
 			},
 		},
 		{
-			name: "defaults without override",
+			name: "default without override",
 			expect: func(t *testing.T, concurrency int) {
 				assert := assert.New(t)
 				assert.GreaterOrEqual(concurrency, 2)
@@ -326,7 +158,7 @@ func TestLayerConvertConcurrency(t *testing.T) {
 			},
 		},
 		{
-			name: "ignores zero override",
+			name: "ignore zero override",
 			env:  "0",
 			expect: func(t *testing.T, concurrency int) {
 				assert := assert.New(t)
@@ -335,7 +167,7 @@ func TestLayerConvertConcurrency(t *testing.T) {
 			},
 		},
 		{
-			name: "ignores invalid override",
+			name: "ignore invalid override",
 			env:  "many",
 			expect: func(t *testing.T, concurrency int) {
 				assert := assert.New(t)
@@ -348,7 +180,186 @@ func TestLayerConvertConcurrency(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("NYDUSIFY_LAYER_CONCURRENCY", tc.env)
+
 			tc.expect(t, layerConvertConcurrency())
+		})
+	}
+}
+
+func TestConvertLayer(t *testing.T) {
+	builder := os.Getenv("NYDUS_TEST_BUILDER")
+	if builder == "" {
+		t.Skip("set NYDUS_TEST_BUILDER to run real builder conversion tests")
+	}
+
+	expectExported := func(t *testing.T, ctx context.Context, cs content.Store, opt nydus.PackOption, desc *ocispec.Descriptor, err error) {
+		assert := assert.New(t)
+		assert.NoError(err)
+
+		blob, err := content.ReadBlob(ctx, cs, *desc)
+		assert.NoError(err)
+		meta, err := nydus.ExtractBlobMeta(bytes.NewReader(blob), int64(len(blob)))
+		assert.NoError(err)
+		if strings.HasPrefix(opt.Compressor, "erofs-") {
+			assert.Nil(meta)
+		} else {
+			var header struct {
+				Magic    [8]byte
+				_        uint32
+				Features uint32
+			}
+			assert.NoError(binary.Read(bytes.NewReader(meta), binary.LittleEndian, &header))
+			assert.Equal("NDBLMETA", string(header.Magic[:]))
+			assert.Zero(header.Features)
+			assert.GreaterOrEqual(len(meta), 24)
+		}
+
+		staged, err := nydus.StageNydusMetadata(bytes.NewReader(blob), int64(len(blob)), desc.Digest.Encoded(), t.TempDir())
+		assert.NoError(err)
+		bootstrap := filepath.Join(t.TempDir(), "bootstrap")
+		assert.NoError(nydus.RunNydusMerge(ctx, nydus.MergeBuildOption{BuilderPath: opt.BuilderPath, SourcePaths: []string{staged}, BootstrapPath: bootstrap}))
+		assert.NoError(exec.CommandContext(ctx, opt.BuilderPath, "check", "--bootstrap", bootstrap).Run())
+		bootstrapData, err := os.ReadFile(bootstrap)
+		assert.NoError(err)
+
+		var bundle bytes.Buffer
+		bundleWriter := tar.NewWriter(&bundle)
+		metaName := "image/" + desc.Digest.Encoded() + ".blob.meta"
+		assert.NoError(nydus.WriteBootstrapTar(bundleWriter, bootstrapData, []nydus.BlobMetaFile{{Name: filepath.Base(metaName), Data: meta}}, nil))
+		assert.NoError(bundleWriter.Close())
+		bundled := map[string]string{}
+		bundleReader := tar.NewReader(&bundle)
+		for {
+			hdr, err := bundleReader.Next()
+			if err != nil {
+				assert.ErrorIs(err, io.EOF)
+				break
+			}
+
+			data, err := io.ReadAll(bundleReader)
+			assert.NoError(err)
+			bundled[hdr.Name] = string(data)
+		}
+		assert.Contains(bundled, metaName)
+		assert.Equal(string(meta), bundled[metaName])
+
+		path := filepath.Join(t.TempDir(), desc.Digest.Encoded())
+		assert.NoError(os.WriteFile(path, blob, 0o600))
+		var exported bytes.Buffer
+		assert.NoError(nydus.RunNydusExport(ctx, nydus.ExportOption{BuilderPath: opt.BuilderPath, BlobPath: path}, &exported))
+		seen := map[string]bool{}
+		exportReader := tar.NewReader(&exported)
+		for {
+			hdr, err := exportReader.Next()
+			if err != nil {
+				assert.ErrorIs(err, io.EOF)
+				break
+			}
+
+			name := filepath.Clean(hdr.Name)
+			if want, ok := mockPAXFiles[name]; ok {
+				data, err := io.ReadAll(exportReader)
+				assert.NoError(err)
+				assert.Equal(want, data)
+				assert.Equal(1234, hdr.Uid)
+				assert.Equal(5678, hdr.Gid)
+				assert.Equal(mockPAXModTime.UnixNano(), hdr.ModTime.UnixNano())
+				seen[name] = true
+			}
+			if name == "device" {
+				assert.Equal(byte(tar.TypeChar), hdr.Typeflag)
+				assert.Equal(int64(1), hdr.Devmajor)
+				assert.Equal(int64(3), hdr.Devminor)
+				seen[name] = true
+			}
+		}
+		assert.Equal(map[string]bool{"small": true, "large": true, ".wh.removed": true, "device": true}, seen)
+	}
+
+	expectRejected := func(t *testing.T, ctx context.Context, cs content.Store, opt nydus.PackOption, desc *ocispec.Descriptor, err error) {
+		assert := assert.New(t)
+		assert.Error(err)
+		assert.Nil(desc)
+		assert.NoError(ctx.Err())
+	}
+
+	tests := []struct {
+		name       string
+		mediaType  string
+		data       func(t *testing.T) []byte
+		compressor string
+		expect     func(t *testing.T, ctx context.Context, cs content.Store, opt nydus.PackOption, desc *ocispec.Descriptor, err error)
+	}{
+		{
+			name:       "convert layer with none compressor",
+			mediaType:  ocispec.MediaTypeImageLayerGzip,
+			data:       func(t *testing.T) []byte { return mockGzip(t, mockPAXTar(t)) },
+			compressor: "none",
+			expect:     expectExported,
+		},
+		{
+			name:       "convert layer with zstd compressor",
+			mediaType:  ocispec.MediaTypeImageLayerGzip,
+			data:       func(t *testing.T) []byte { return mockGzip(t, mockPAXTar(t)) },
+			compressor: "zstd",
+			expect:     expectExported,
+		},
+		{
+			name:       "convert layer with lz4 compressor",
+			mediaType:  ocispec.MediaTypeImageLayerGzip,
+			data:       func(t *testing.T) []byte { return mockGzip(t, mockPAXTar(t)) },
+			compressor: "lz4",
+			expect:     expectExported,
+		},
+		{
+			name:       "convert layer to native erofs with none compressor",
+			mediaType:  ocispec.MediaTypeImageLayerGzip,
+			data:       func(t *testing.T) []byte { return mockGzip(t, mockPAXTar(t)) },
+			compressor: "erofs-none",
+			expect:     expectExported,
+		},
+		{
+			name:       "convert layer to native erofs with lz4 compressor",
+			mediaType:  ocispec.MediaTypeImageLayerGzip,
+			data:       func(t *testing.T) []byte { return mockGzip(t, mockPAXTar(t)) },
+			compressor: "erofs-lz4",
+			expect:     expectExported,
+		},
+		{
+			name:       "convert layer to native erofs with zstd compressor",
+			mediaType:  ocispec.MediaTypeImageLayerGzip,
+			data:       func(t *testing.T) []byte { return mockGzip(t, mockPAXTar(t)) },
+			compressor: "erofs-zstd",
+			expect:     expectExported,
+		},
+		{
+			name:      "reject truncated tar without hanging",
+			mediaType: ocispec.MediaTypeImageLayer,
+			data: func(t *testing.T) []byte {
+				return mockTar(t, "file", make([]byte, 4096))[:600]
+			},
+			expect: expectRejected,
+		},
+		{
+			name:      "reject truncated gzip without hanging",
+			mediaType: ocispec.MediaTypeImageLayerGzip,
+			data: func(t *testing.T) []byte {
+				data := mockGzip(t, mockTar(t, "file", make([]byte, 4096)))
+				return data[:len(data)-5]
+			},
+			expect: expectRejected,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cs := mockStore(t)
+			opt := nydus.PackOption{BuilderPath: builder, WorkDir: t.TempDir(), Compressor: tc.compressor}
+			desc, err := convertLayer(ctx, cs, mockContent(t, cs, tc.mediaType, tc.data(t)), opt)
+
+			tc.expect(t, ctx, cs, opt, desc, err)
 		})
 	}
 }

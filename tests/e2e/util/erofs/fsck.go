@@ -32,7 +32,7 @@ func FsckDecodes(t testing.TB, compressor string) bool {
 		return true
 	}
 
-	env.RequireTool(t, "fsck.erofs")
+	env.LookPath(t, "fsck.erofs")
 
 	major, minor := fsckVersion()
 	if major > 1 || (major == 1 && minor >= 8) {
@@ -52,7 +52,7 @@ func FsckDecodes(t testing.TB, compressor string) bool {
 // bootstrap references only its own.
 func Fsck(t testing.TB, bootstrap, blobDir string) {
 	t.Helper()
-	fsck := env.RequireTool(t, "fsck.erofs")
+	fsck := env.LookPath(t, "fsck.erofs")
 
 	tags, err := DeviceTags(bootstrap)
 	if !assert.NoError(t, err) {

@@ -26,9 +26,15 @@ func TestPrepareMountpoint(t *testing.T) {
 			path: func(t *testing.T) (string, string) {
 				dir := t.TempDir()
 				target := filepath.Join(dir, "mnt")
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+
 				link := filepath.Join(dir, "link")
-				assert.NoError(t, os.Mkdir(target, 0o700))
-				assert.NoError(t, os.Symlink(target, link))
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+
 				return link, target
 			},
 			expect: func(t *testing.T, want, mountpoint string, err error) {
@@ -68,6 +74,7 @@ func TestPrepareMountpoint(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path, want := tc.path(t)
 			mountpoint, err := prepareMountpoint(path)
+
 			tc.expect(t, want, mountpoint, err)
 		})
 	}
@@ -104,7 +111,10 @@ func TestUnmountExitedFuse(t *testing.T) {
 			name: "path through a regular file",
 			path: func(t *testing.T) string {
 				file := filepath.Join(t.TempDir(), "file")
-				assert.NoError(t, os.WriteFile(file, nil, 0o600))
+				if err := os.WriteFile(file, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+
 				return filepath.Join(file, "mnt")
 			},
 			expect: func(t *testing.T, path string, err error) {
@@ -117,6 +127,7 @@ func TestUnmountExitedFuse(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := tc.path(t)
+
 			tc.expect(t, path, unmountExitedFuse(path, "nydusify-test"))
 		})
 	}

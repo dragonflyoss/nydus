@@ -135,6 +135,7 @@ func TestSplitLayers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			blobs, bootstrap, optimized, err := SplitLayers(tc.layers)
+
 			tc.expect(t, blobs, bootstrap, optimized, err)
 		})
 	}

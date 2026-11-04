@@ -75,7 +75,7 @@ func corpusEntry(t testing.TB, name string) string {
 		t.Fatalf("no corpus %q", name)
 	}
 	// Device nodes and ownership need root.
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 
 	return cached(t, "corpus", name, sourceHash(t)+"\x00"+name, func(t testing.TB, dir string) {
 		tree := filepath.Join(dir, "tree")

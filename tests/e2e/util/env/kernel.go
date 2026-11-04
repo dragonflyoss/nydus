@@ -32,11 +32,14 @@ func KernelAtLeast(major, minor int) bool {
 	return gotMajor > major || (gotMajor == major && gotMinor >= minor)
 }
 
-// RequireKernel requires at least major.minor; why names the feature.
-func RequireKernel(t testing.TB, major, minor int, why string) {
+// MustHaveKernel skips t unless the kernel is at least major.minor; why names
+// the feature.
+func MustHaveKernel(t testing.TB, major, minor int, why string) {
 	t.Helper()
-	gotMajor, gotMinor := KernelVersion()
-	Require(t, KernelAtLeast(major, minor), "kernel %d.%d < %d.%d: %s", gotMajor, gotMinor, major, minor, why)
+	if !KernelAtLeast(major, minor) {
+		gotMajor, gotMinor := KernelVersion()
+		Skipf(t, "kernel %d.%d < %d.%d: %s", gotMajor, gotMinor, major, minor, why)
+	}
 }
 
 // HasFilesystem reports whether the kernel lists fsType in /proc/filesystems,
@@ -67,8 +70,10 @@ func listsFilesystem(fsType string) bool {
 	return false
 }
 
-// RequireFilesystem requires kernel support for fsType.
-func RequireFilesystem(t testing.TB, fsType string) {
+// MustHaveFilesystem skips t unless the kernel supports fsType.
+func MustHaveFilesystem(t testing.TB, fsType string) {
 	t.Helper()
-	Require(t, HasFilesystem(fsType), "kernel lacks %s support", fsType)
+	if !HasFilesystem(fsType) {
+		Skipf(t, "kernel lacks %s support", fsType)
+	}
 }

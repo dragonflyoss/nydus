@@ -10,25 +10,22 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/platforms"
 	digest "github.com/opencontainers/go-digest"
-	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/registrytest"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
-
-type mockTarEntry struct {
-	header tar.Header
-	data   string
-}
 
 var (
 	mockImageConfig = ocispec.Image{
@@ -48,23 +45,28 @@ var (
 	mockBuilderScript = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/args\"\n"
 )
 
+type mockTarEntry struct {
+	header tar.Header
+	data   string
+}
+
 func mockTar(t *testing.T, entries []mockTarEntry) []byte {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, entry := range entries {
 		header := entry.header
 		header.Size = int64(len(entry.data))
-		if !assert.NoError(t, tw.WriteHeader(&header)) {
-			t.FailNow()
+		if err := tw.WriteHeader(&header); err != nil {
+			t.Fatal(err)
 		}
 
-		if _, err := tw.Write([]byte(entry.data)); !assert.NoError(t, err) {
-			t.FailNow()
+		if _, err := tw.Write([]byte(entry.data)); err != nil {
+			t.Fatal(err)
 		}
 	}
 
-	if !assert.NoError(t, tw.Close()) {
-		t.FailNow()
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	return buf.Bytes()
@@ -72,8 +74,8 @@ func mockTar(t *testing.T, entries []mockTarEntry) []byte {
 
 func mockBlob(t *testing.T, cs content.Store, mediaType string, data []byte) ocispec.Descriptor {
 	desc := ocispec.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(data), Size: int64(len(data))}
-	if !assert.NoError(t, content.WriteBlob(context.Background(), cs, desc.Digest.String(), bytes.NewReader(data), desc)) {
-		t.FailNow()
+	if err := content.WriteBlob(context.Background(), cs, desc.Digest.String(), bytes.NewReader(data), desc); err != nil {
+		t.Fatal(err)
 	}
 
 	return desc
@@ -85,8 +87,8 @@ func mockBuilder(t *testing.T, dir, body string) string {
 		return path
 	}
 
-	if !assert.NoError(t, os.WriteFile(path, []byte(mockBuilderScript+body), 0o700)) {
-		t.FailNow()
+	if err := os.WriteFile(path, []byte(mockBuilderScript+body), 0o700); err != nil {
+		t.Fatal(err)
 	}
 
 	return path
@@ -98,51 +100,73 @@ func mockBuilderArgs(t *testing.T, dir string) []string {
 		return nil
 	}
 
-	if !assert.NoError(t, err) {
-		t.FailNow()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }
 
-type registry struct {
-	*registrytest.Registry
-}
-
-func newRegistry(t *testing.T) *registry {
-	return &registry{registrytest.New(t)}
-}
-
-func (r *registry) storeImage(t *testing.T, repo string, config ocispec.Image, layers ...ocispec.Descriptor) {
-	for _, layer := range layers {
-		config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, layer.Digest)
-	}
-
-	r.StoreJSON(t, repo, "latest", ocispec.MediaTypeImageManifest, ocispec.Manifest{
-		Versioned: specs.Versioned{SchemaVersion: 2},
-		MediaType: ocispec.MediaTypeImageManifest,
-		Config:    r.StoreJSON(t, repo, "", ocispec.MediaTypeImageConfig, config),
-		Layers:    layers,
-	})
-}
-
-func (r *registry) storeLayer(t *testing.T, repo, mediaType string, annotations map[string]string, entries []mockTarEntry) ocispec.Descriptor {
-	layer := r.Store(repo, "", "", mockTar(t, entries))
+func mockLayer(t *testing.T, reg *registrytest.Registry, repo, mediaType string, annotations map[string]string, entries []mockTarEntry) ocispec.Descriptor {
+	layer := reg.Store(repo, "", "", mockTar(t, entries))
 	layer.MediaType = mediaType
 	layer.Annotations = annotations
 	return layer
 }
 
+func TestNew(t *testing.T) {
+	tests := []struct {
+		name   string
+		opt    Option
+		expect func(t *testing.T, checker *Checker, err error)
+	}{
+		{
+			name: "fill default platform and log level",
+			opt:  Option{Source: "://invalid"},
+			expect: func(t *testing.T, checker *Checker, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(&Checker{opt: Option{Source: "://invalid", PlatformMC: platforms.Default(), LogLevel: "info"}}, checker)
+			},
+		},
+		{
+			name: "reject empty source and target",
+			expect: func(t *testing.T, checker *Checker, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "at least one of source or target must be provided")
+				assert.Nil(checker)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			checker, err := New(tc.opt)
+			tc.expect(t, checker, err)
+		})
+	}
+}
+
 func TestChecker_Check(t *testing.T) {
 	t.Setenv("DOCKER_CONFIG", t.TempDir())
-	reg := newRegistry(t)
-	reg.storeImage(t, "oci", mockImageConfig, reg.storeLayer(t, "oci", ocispec.MediaTypeImageLayer, nil, mockLayerEntries))
+	reg := registrytest.New(t)
+
+	ociLayer := mockLayer(t, reg, "oci", ocispec.MediaTypeImageLayer, nil, mockLayerEntries)
+	ociConfig := mockImageConfig
+	ociConfig.RootFS.DiffIDs = []digest.Digest{ociLayer.Digest}
+	reg.StoreImage(t, "oci", "latest", ociConfig, ociLayer)
+
+	driftLayer := mockLayer(t, reg, "drift", ocispec.MediaTypeImageLayer, nil, mockLayerEntries)
 	driftConfig := mockImageConfig
 	driftConfig.Config.Env = []string{"PATH=/usr/bin"}
-	reg.storeImage(t, "drift", driftConfig, reg.storeLayer(t, "drift", ocispec.MediaTypeImageLayer, nil, mockLayerEntries))
-	blob := reg.Store("nydus", "", nydus.MediaTypeNydusBlob, []byte("blob"))
-	reg.storeImage(t, "nydus", mockImageConfig, blob, reg.storeLayer(t, "nydus", ocispec.MediaTypeImageLayer,
-		map[string]string{nydus.LayerAnnotationNydusBootstrap: "true"}, mockBootstrapEntries))
+	driftConfig.RootFS.DiffIDs = []digest.Digest{driftLayer.Digest}
+	reg.StoreImage(t, "drift", "latest", driftConfig, driftLayer)
+
+	nydusBlob := reg.Store("nydus", "", nydus.MediaTypeNydusBlob, []byte("blob"))
+	nydusBootstrap := mockLayer(t, reg, "nydus", ocispec.MediaTypeImageLayer, map[string]string{nydus.LayerAnnotationNydusBootstrap: "true"}, mockBootstrapEntries)
+	nydusConfig := mockImageConfig
+	nydusConfig.RootFS.DiffIDs = []digest.Digest{nydusBlob.Digest, nydusBootstrap.Digest}
+	reg.StoreImage(t, "nydus", "latest", nydusConfig, nydusBlob, nydusBootstrap)
 
 	tests := []struct {
 		name    string
@@ -154,13 +178,10 @@ func TestChecker_Check(t *testing.T) {
 	}{
 		{
 			name:   "export oci source metadata",
-			source: "oci",
+			source: reg.Ref("oci", "latest"),
 			expect: func(t *testing.T, dir string, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
-
+				assert.NoError(err)
 				manifest, _ := reg.Load("oci", "latest")
 				data, err := os.ReadFile(filepath.Join(dir, "work", "source", "manifest.json"))
 				assert.NoError(err)
@@ -173,24 +194,15 @@ func TestChecker_Check(t *testing.T) {
 		},
 		{
 			name:    "export and check nydus target bootstrap",
-			target:  "nydus",
+			target:  reg.Ref("nydus", "latest"),
 			builder: "exit 0\n",
 			expect: func(t *testing.T, dir string, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
-
+				assert.NoError(err)
 				data, err := os.ReadFile(filepath.Join(dir, "work", "target", "bootstrap", "image", "image.boot"))
 				assert.NoError(err)
 				assert.Equal("bootstrap", string(data))
-				args := mockBuilderArgs(t, dir)
-				if !assert.Len(args, 3) {
-					t.FailNow()
-				}
-
-				assert.Equal([]string{"check", "--bootstrap"}, args[:2])
-				assert.True(strings.HasPrefix(args[2], filepath.Join(dir, "work", "scratch", "bootstrap-target-")))
+				assert.Regexp("^check --bootstrap "+regexp.QuoteMeta(filepath.Join(dir, "work", "scratch", "bootstrap-target-"))+`\S+$`, strings.Join(mockBuilderArgs(t, dir), " "))
 				entries, err := os.ReadDir(filepath.Join(dir, "work", "scratch"))
 				assert.NoError(err)
 				assert.Empty(entries)
@@ -198,7 +210,7 @@ func TestChecker_Check(t *testing.T) {
 		},
 		{
 			name:    "reject corrupted nydus bootstrap",
-			target:  "nydus",
+			target:  reg.Ref("nydus", "latest"),
 			builder: "echo 'invalid superblock' >&2\nexit 1\n",
 			expect: func(t *testing.T, dir string, err error) {
 				assert := assert.New(t)
@@ -206,10 +218,54 @@ func TestChecker_Check(t *testing.T) {
 			},
 		},
 		{
-			name:   "reject occupied source export path",
-			source: "oci",
+			name:   "reject occupied content dir",
+			source: reg.Ref("oci", "latest"),
 			setup: func(t *testing.T, workDir string) {
-				assert.NoError(t, os.WriteFile(filepath.Join(workDir, "source"), nil, 0o600))
+				if err := os.WriteFile(filepath.Join(workDir, "content"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, fmt.Sprintf("create dir %q", filepath.Join(dir, "work", "content")))
+			},
+		},
+		{
+			name:   "reject occupied scratch dir",
+			source: reg.Ref("oci", "latest"),
+			setup: func(t *testing.T, workDir string) {
+				if err := os.WriteFile(filepath.Join(workDir, "scratch"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, fmt.Sprintf("create dir %q", filepath.Join(dir, "work", "scratch")))
+			},
+		},
+		{
+			name:   "reject invalid source reference",
+			source: "://invalid",
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `load source "://invalid"`)
+			},
+		},
+		{
+			name:   "reject invalid target reference",
+			target: "://invalid",
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `load target "://invalid"`)
+			},
+		},
+		{
+			name:   "reject occupied source export path",
+			source: reg.Ref("oci", "latest"),
+			setup: func(t *testing.T, workDir string) {
+				if err := os.WriteFile(filepath.Join(workDir, "source"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			},
 			expect: func(t *testing.T, dir string, err error) {
 				assert := assert.New(t)
@@ -218,9 +274,11 @@ func TestChecker_Check(t *testing.T) {
 		},
 		{
 			name:   "reject occupied target export path",
-			target: "oci",
+			target: reg.Ref("oci", "latest"),
 			setup: func(t *testing.T, workDir string) {
-				assert.NoError(t, os.WriteFile(filepath.Join(workDir, "target"), nil, 0o600))
+				if err := os.WriteFile(filepath.Join(workDir, "target"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			},
 			expect: func(t *testing.T, dir string, err error) {
 				assert := assert.New(t)
@@ -229,8 +287,8 @@ func TestChecker_Check(t *testing.T) {
 		},
 		{
 			name:   "reject config drift between source and target",
-			source: "oci",
-			target: "drift",
+			source: reg.Ref("oci", "latest"),
+			target: reg.Ref("drift", "latest"),
 			expect: func(t *testing.T, dir string, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "manifest rule failed: config consistency: image config")
@@ -244,31 +302,24 @@ func TestChecker_Check(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			workDir := filepath.Join(dir, "work")
-			if !assert.NoError(t, os.Mkdir(workDir, 0o755)) {
-				t.FailNow()
+			if err := os.Mkdir(workDir, 0o755); err != nil {
+				t.Fatal(err)
 			}
 
 			if tc.setup != nil {
 				tc.setup(t, workDir)
 			}
 
-			opt := Option{
+			checker, err := New(Option{
+				Source:          tc.source,
+				Target:          tc.target,
 				WorkDir:         workDir,
 				BuilderPath:     mockBuilder(t, dir, tc.builder),
 				SourcePlainHTTP: true,
 				TargetPlainHTTP: true,
-			}
-			if tc.source != "" {
-				opt.Source = reg.Ref(tc.source, "latest")
-			}
-
-			if tc.target != "" {
-				opt.Target = reg.Ref(tc.target, "latest")
-			}
-
-			checker, err := New(opt)
-			if !assert.NoError(t, err) {
-				t.FailNow()
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
 
 			tc.expect(t, dir, checker.Check(context.Background()))

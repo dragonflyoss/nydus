@@ -38,9 +38,11 @@ type cluster struct {
 func newCluster(t *testing.T) *cluster {
 	t.Helper()
 	scheduler := os.Getenv(schedulerEnv)
-	env.Require(t, scheduler != "", "%s is unset: start the upstream Kind/Helm cluster (see tests/e2e/README.md)", schedulerEnv)
-	env.RequireRoot(t)
-	env.RequireTool(t, "kubectl")
+	if scheduler == "" {
+		env.Skipf(t, "%s is unset: start the upstream Kind/Helm cluster (see tests/e2e/README.md)", schedulerEnv)
+	}
+	env.MustHaveRoot(t)
+	env.LookPath(t, "kubectl")
 	c := &cluster{scheduler: scheduler, stopped: make(map[string]bool)}
 	t.Cleanup(func() { c.restore(t) })
 

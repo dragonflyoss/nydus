@@ -19,7 +19,7 @@ import (
 
 func TestConvertPublicImages(t *testing.T) {
 	t.Parallel()
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 	cfg := loadConfig(t)
 	images := readImageList(t, cfg.list)
 	if !assert.NotEmpty(t, images) {
@@ -68,7 +68,9 @@ func TestConvertPublicImages(t *testing.T) {
 			}
 
 			out, err := cfg.runWithRetry(t, "convert "+image, func() *exec.Cmd { return exec.Command(nydusify, args("convert")...) })
-			env.Require(t, err == nil || !isImageNotFound(out), "%s exists in its registry", image)
+			if err != nil && isImageNotFound(out) {
+				env.Skipf(t, "%s is not in its registry", image)
+			}
 
 			if !assert.NoError(t, err) {
 				t.FailNow()

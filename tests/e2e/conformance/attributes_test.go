@@ -329,7 +329,7 @@ func permissions(t *testing.T, m *mounted) {
 
 	t.Run("AccessMatchesOpen", func(t *testing.T) {
 		t.Parallel()
-		env.RequireKernel(t, 5, 8, "faccessat2 AT_EACCESS; the userspace fallback checks euid rather than fsuid")
+		env.MustHaveKernel(t, 5, 8, "faccessat2 AT_EACCESS; the userspace fallback checks euid rather than fsuid")
 
 		access := func(rel string, mode uint32) error {
 			return asUser(t, func() error {

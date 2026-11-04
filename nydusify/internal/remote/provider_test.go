@@ -9,19 +9,21 @@ package remote
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/errdefs"
-	dockerconfig "github.com/docker/cli/cli/config"
 	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 
@@ -29,83 +31,20 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
-func TestSameRepository(t *testing.T) {
-	tests := []struct {
-		name      string
-		left      string
-		right     string
-		want      bool
-		wantError bool
-	}{
-		{
-			name:  "same explicit repository",
-			left:  "localhost:5000/repo/image:parent",
-			right: "localhost:5000/repo/image:child",
-			want:  true,
-		},
-		{
-			name:  "different repository",
-			left:  "localhost:5000/repo/image:parent",
-			right: "localhost:5000/repo/other:child",
-			want:  false,
-		},
-		{
-			name:  "docker hub shorthand",
-			left:  "busybox:1.36",
-			right: "docker.io/library/busybox:latest",
-			want:  true,
-		},
-		{
-			name:  "digest reference",
-			left:  "localhost:5000/repo/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			right: "localhost:5000/repo/image:tag",
-			want:  true,
-		},
-		{
-			name:      "invalid reference",
-			left:      "not a valid reference",
-			right:     "localhost:5000/repo/image:tag",
-			wantError: true,
-		},
-		{
-			name:      "invalid right reference",
-			left:      "localhost:5000/repo/image:tag",
-			right:     "not a valid reference",
-			wantError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := SameRepository(tt.left, tt.right)
-			if tt.wantError {
-				if err == nil {
-					t.Fatalf("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("SameRepository returned error: %v", err)
-			}
-			if got != tt.want {
-				t.Fatalf("SameRepository() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 var (
-	mockImageConfig = []byte(`{"architecture":"amd64","os":"linux"}`)
+	mockImageConfig = ocispec.Image{Platform: ocispec.Platform{Architecture: "amd64", OS: "linux"}}
 
-	mockImageConfigDesc = contentTestDescriptor(ocispec.MediaTypeImageConfig, mockImageConfig)
+	mockImageConfigBlob, _ = json.Marshal(mockImageConfig)
+
+	mockImageConfigDesc = mockDescriptor(ocispec.MediaTypeImageConfig, mockImageConfigBlob)
 
 	mockOCILayer = []byte("oci layer")
 
-	mockOCILayerDesc = contentTestDescriptor(ocispec.MediaTypeImageLayerGzip, mockOCILayer)
+	mockOCILayerDesc = mockDescriptor(ocispec.MediaTypeImageLayerGzip, mockOCILayer)
 
 	mockNydusBlob = []byte("nydus blob")
 
-	mockNydusBlobDesc = contentTestDescriptor(nydus.MediaTypeNydusBlob, mockNydusBlob)
+	mockNydusBlobDesc = mockDescriptor(nydus.MediaTypeNydusBlob, mockNydusBlob)
 
 	mockBootstrap = []byte("nydus bootstrap")
 
@@ -116,77 +55,183 @@ var (
 		Annotations: map[string]string{nydus.LayerAnnotationNydusBootstrap: "true"},
 	}
 
-	mockManifest = newMockManifest(mockImageConfigDesc, mockOCILayerDesc, mockNydusBlobDesc, mockBootstrapDesc)
+	mockManifest, _ = json.Marshal(ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    mockImageConfigDesc,
+		Layers:    []ocispec.Descriptor{mockOCILayerDesc, mockNydusBlobDesc, mockBootstrapDesc},
+	})
 
-	mockManifestDesc = contentTestDescriptor(ocispec.MediaTypeImageManifest, mockManifest)
+	mockManifestDesc = mockDescriptor(ocispec.MediaTypeImageManifest, mockManifest)
 
 	mockImageBlobs = map[digest.Digest][]byte{
-		mockImageConfigDesc.Digest: mockImageConfig,
+		mockImageConfigDesc.Digest: mockImageConfigBlob,
 		mockOCILayerDesc.Digest:    mockOCILayer,
 		mockNydusBlobDesc.Digest:   mockNydusBlob,
 		mockBootstrapDesc.Digest:   mockBootstrap,
 		mockManifestDesc.Digest:    mockManifest,
 	}
+
+	mockBlobFile = []byte("local blob file")
+
+	mockBlobFileDesc = mockDescriptor(nydus.MediaTypeNydusBlob, mockBlobFile)
+
+	mockRangeBlob = []byte("abcdefgh")
+
+	mockRangeBlobDesc = ocispec.Descriptor{Digest: digest.FromBytes(mockRangeBlob), Size: int64(len(mockRangeBlob))}
+
+	mockBlobFetcherKey = struct {
+		side Side
+		ref  string
+	}{side: Target, ref: mockRef}
 )
 
-func newMockManifest(config ocispec.Descriptor, layers ...ocispec.Descriptor) []byte {
-	manifest := ocispec.Manifest{MediaType: ocispec.MediaTypeImageManifest, Config: config, Layers: layers}
-	manifest.SchemaVersion = 2
-	data, _ := json.Marshal(manifest)
-	return data
-}
-
-type registry struct {
-	*registrytest.Registry
-}
-
-func newRegistry(t *testing.T, opts ...registrytest.Option) *registry {
-	return &registry{registrytest.New(t, opts...)}
-}
-
-func (r *registry) storeImage(repo, tag string) {
-	for _, data := range mockImageBlobs {
-		r.Store(repo, "", "", data)
+func mockProvider(t *testing.T) *Provider {
+	t.Helper()
+	mockDockerConfig(t, `{}`)
+	provider, err := NewProvider(Option{WorkDir: t.TempDir(), TargetPlainHTTP: true})
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	r.Store(repo, tag, ocispec.MediaTypeImageManifest, mockManifest)
-}
-
-func (r *registry) requested(method string, dgst digest.Digest) bool {
-	return slices.ContainsFunc(r.Requests(), func(req registrytest.Request) bool {
-		return req.Method == method && strings.Contains(req.URL, dgst.String())
-	})
-}
-
-func mockDockerConfig(t *testing.T, config string) {
-	dir := t.TempDir()
-	if !assert.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600)) {
-		t.FailNow()
+	for dgst, data := range mockImageBlobs {
+		if err := content.WriteBlob(context.Background(), provider.ContentStore(), dgst.String(), bytes.NewReader(data), ocispec.Descriptor{Digest: dgst, Size: int64(len(data))}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	previous := dockerconfig.Dir()
-	dockerconfig.SetDir(dir)
-	t.Cleanup(func() { dockerconfig.SetDir(previous) })
+
+	return provider
+}
+
+func mockRangeRegistry(t *testing.T, upstreamRange string) (string, *atomic.Int32) {
+	t.Helper()
+	transferred := &atomic.Int32{}
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, upstreamRange, r.Header.Get("Range"))
+		assert.Equal(t, "identity", r.Header.Get("Accept-Encoding"))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeContent(w, r, "blob", time.Time{}, bytes.NewReader(mockRangeBlob))
+		transferred.Add(1)
+	}))
+	t.Cleanup(origin.Close)
+
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "user" || pass != "pass" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="registry"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		http.Redirect(w, r, origin.URL+"/object", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(registry.Close)
+
+	return strings.TrimPrefix(registry.URL, "http://") + "/test:v1", transferred
+}
+
+func requestMethods(reg *registrytest.Registry, dgst digest.Digest) []string {
+	var methods []string
+	for _, req := range reg.Requests() {
+		if strings.Contains(req.URL, dgst.String()) {
+			methods = append(methods, req.Method)
+		}
+	}
+
+	return methods
+}
+
+func TestSameRepository(t *testing.T) {
+	tests := []struct {
+		name   string
+		left   string
+		right  string
+		expect func(t *testing.T, same bool, err error)
+	}{
+		{
+			name:  "same explicit repository",
+			left:  "localhost:5000/repo/image:parent",
+			right: "localhost:5000/repo/image:child",
+			expect: func(t *testing.T, same bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(same)
+			},
+		},
+		{
+			name:  "different repository",
+			left:  "localhost:5000/repo/image:parent",
+			right: "localhost:5000/repo/other:child",
+			expect: func(t *testing.T, same bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(same)
+			},
+		},
+		{
+			name:  "docker hub shorthand",
+			left:  "busybox:1.36",
+			right: "docker.io/library/busybox:latest",
+			expect: func(t *testing.T, same bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(same)
+			},
+		},
+		{
+			name:  "digest reference",
+			left:  "localhost:5000/repo/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			right: "localhost:5000/repo/image:tag",
+			expect: func(t *testing.T, same bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(same)
+			},
+		},
+		{
+			name:  "invalid left reference",
+			left:  "not a valid reference",
+			right: "localhost:5000/repo/image:tag",
+			expect: func(t *testing.T, same bool, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+		{
+			name:  "invalid right reference",
+			left:  "localhost:5000/repo/image:tag",
+			right: "not a valid reference",
+			expect: func(t *testing.T, same bool, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			same, err := SameRepository(tc.left, tc.right)
+
+			tc.expect(t, same, err)
+		})
+	}
 }
 
 func TestProvider_Pull(t *testing.T) {
-	mockAuth := base64.StdEncoding.EncodeToString([]byte("user:secret"))
 	tests := []struct {
 		name   string
 		ref    string
 		opt    PullOption
-		auth   bool
-		setup  func(reg *registry)
-		expect func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error)
+		opts   []registrytest.Option
+		expect func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error)
 	}{
 		{
 			name: "pull every layer",
 			ref:  "repo/image:v1",
 			opt:  PullAll,
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				assert.Equal(mockManifestDesc.Digest, desc.Digest)
 				for dgst, data := range mockImageBlobs {
 					stored, err := content.ReadBlob(context.Background(), cs, ocispec.Descriptor{Digest: dgst})
@@ -198,19 +243,18 @@ func TestProvider_Pull(t *testing.T) {
 		{
 			name: "data layers are skipped",
 			ref:  "repo/image:v1",
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				for _, layer := range []ocispec.Descriptor{mockManifestDesc, mockImageConfigDesc, mockBootstrapDesc} {
 					_, err := cs.Info(context.Background(), layer.Digest)
 					assert.NoError(err)
 				}
+
 				for _, layer := range []ocispec.Descriptor{mockOCILayerDesc, mockNydusBlobDesc} {
 					_, err := cs.Info(context.Background(), layer.Digest)
-					assert.True(errdefs.IsNotFound(err))
-					assert.False(reg.requested(http.MethodGet, layer.Digest))
+					assert.ErrorIs(err, errdefs.ErrNotFound)
+					assert.NotContains(requestMethods(reg, layer.Digest), http.MethodGet)
 				}
 			},
 		},
@@ -218,38 +262,34 @@ func TestProvider_Pull(t *testing.T) {
 			name: "only nydus blobs are pulled",
 			ref:  "repo/image:v1",
 			opt:  PullOption{PullNydusBlobs: true},
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				_, err = cs.Info(context.Background(), mockNydusBlobDesc.Digest)
 				assert.NoError(err)
 				_, err = cs.Info(context.Background(), mockOCILayerDesc.Digest)
-				assert.True(errdefs.IsNotFound(err))
+				assert.ErrorIs(err, errdefs.ErrNotFound)
 			},
 		},
 		{
 			name: "only oci layers are pulled",
 			ref:  "repo/image:v1",
 			opt:  PullOption{PullOCILayers: true},
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
-				if !assert.NoError(err) {
-					t.FailNow()
-				}
+				assert.NoError(err)
 				_, err = cs.Info(context.Background(), mockOCILayerDesc.Digest)
 				assert.NoError(err)
 				_, err = cs.Info(context.Background(), mockNydusBlobDesc.Digest)
-				assert.True(errdefs.IsNotFound(err))
+				assert.ErrorIs(err, errdefs.ErrNotFound)
 			},
 		},
 		{
 			name: "docker config credentials are sent",
 			ref:  "repo/image:v1",
 			opt:  PullAll,
-			auth: true,
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			opts: []registrytest.Option{registrytest.WithBasicAuth("user", "secret")},
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Equal(mockManifestDesc.Digest, desc.Digest)
@@ -258,10 +298,7 @@ func TestProvider_Pull(t *testing.T) {
 		{
 			name: "corrupt manifest",
 			ref:  "repo/broken:v1",
-			setup: func(reg *registry) {
-				reg.Store("repo/broken", "v1", ocispec.MediaTypeImageManifest, []byte("{"))
-			},
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "fetch")
 				assert.Empty(desc)
@@ -270,7 +307,7 @@ func TestProvider_Pull(t *testing.T) {
 		{
 			name: "missing tag",
 			ref:  "repo/image:missing",
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "resolve")
 				assert.ErrorIs(err, errdefs.ErrNotFound)
@@ -279,7 +316,7 @@ func TestProvider_Pull(t *testing.T) {
 		{
 			name: "invalid reference",
 			ref:  "repo/Image:v1",
-			expect: func(t *testing.T, reg *registry, cs content.Store, desc ocispec.Descriptor, err error) {
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "parse reference")
 				assert.Empty(reg.Requests())
@@ -289,21 +326,21 @@ func TestProvider_Pull(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var opts []registrytest.Option
-			if tc.auth {
-				opts = append(opts, registrytest.WithBasicAuth("user", "secret"))
+			reg := registrytest.New(t, tc.opts...)
+			for _, data := range [][]byte{mockOCILayer, mockNydusBlob, mockBootstrap} {
+				reg.Store("repo/image", "", "", data)
 			}
-			reg := newRegistry(t, opts...)
-			reg.storeImage("repo/image", "v1")
-			if tc.setup != nil {
-				tc.setup(reg)
-			}
+
+			reg.StoreImage(t, "repo/image", "v1", mockImageConfig, mockOCILayerDesc, mockNydusBlobDesc, mockBootstrapDesc)
+			reg.Store("repo/broken", "v1", ocispec.MediaTypeImageManifest, []byte("{"))
 			mockDockerConfig(t, `{"auths":{"`+reg.Host+`":{"auth":"`+mockAuth+`"}}}`)
 			provider, err := NewProvider(Option{WorkDir: t.TempDir(), SourcePlainHTTP: true})
-			if !assert.NoError(t, err) {
-				t.FailNow()
+			if err != nil {
+				t.Fatal(err)
 			}
+
 			desc, err := provider.Pull(context.Background(), reg.Host+"/"+tc.ref, tc.opt, Source)
+
 			tc.expect(t, reg, provider.ContentStore(), desc, err)
 		})
 	}
@@ -312,15 +349,13 @@ func TestProvider_Pull(t *testing.T) {
 func TestProvider_Push(t *testing.T) {
 	tests := []struct {
 		name   string
-		push   func(t *testing.T, p *Provider, ref string) error
-		expect func(t *testing.T, reg *registry, err error)
+		ref    string
+		expect func(t *testing.T, reg *registrytest.Registry, err error)
 	}{
 		{
-			name: "push uploads image",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.Push(context.Background(), mockManifestDesc, ref)
-			},
-			expect: func(t *testing.T, reg *registry, err error) {
+			name: "push image",
+			ref:  "repo/image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				for dgst, data := range mockImageBlobs {
@@ -333,11 +368,38 @@ func TestProvider_Push(t *testing.T) {
 			},
 		},
 		{
-			name: "push skipping parent blob",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.PushSkipping(context.Background(), mockManifestDesc, ref, map[digest.Digest]struct{}{mockNydusBlobDesc.Digest: {}})
+			name: "invalid reference",
+			ref:  "Repo/Image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "parse reference")
+				assert.Empty(reg.Requests())
 			},
-			expect: func(t *testing.T, reg *registry, err error) {
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registrytest.New(t)
+			provider := mockProvider(t)
+
+			tc.expect(t, reg, provider.Push(context.Background(), mockManifestDesc, reg.Host+"/"+tc.ref))
+		})
+	}
+}
+
+func TestProvider_PushSkipping(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    string
+		skip   map[digest.Digest]struct{}
+		expect func(t *testing.T, reg *registrytest.Registry, err error)
+	}{
+		{
+			name: "skip parent blob",
+			ref:  "repo/image:v1",
+			skip: map[digest.Digest]struct{}{mockNydusBlobDesc.Digest: {}},
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				manifest, _ := reg.Load("repo/image", "v1")
@@ -346,15 +408,13 @@ func TestProvider_Push(t *testing.T) {
 				assert.Equal(mockOCILayer, layer)
 				_, ok := reg.Load("repo/image", mockNydusBlobDesc.Digest.String())
 				assert.False(ok)
-				assert.False(reg.requested(http.MethodHead, mockNydusBlobDesc.Digest))
+				assert.NotContains(requestMethods(reg, mockNydusBlobDesc.Digest), http.MethodHead)
 			},
 		},
 		{
-			name: "push skipping without skipped blobs",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.PushSkipping(context.Background(), mockManifestDesc, ref, nil)
-			},
-			expect: func(t *testing.T, reg *registry, err error) {
+			name: "no skipped blobs",
+			ref:  "repo/image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				for dgst, data := range mockImageBlobs {
@@ -364,11 +424,90 @@ func TestProvider_Push(t *testing.T) {
 			},
 		},
 		{
-			name: "push single blob",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.PushBlob(context.Background(), mockOCILayerDesc, ref)
+			name: "invalid reference",
+			ref:  "Repo/Image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "parse reference")
+				assert.Empty(reg.Requests())
 			},
-			expect: func(t *testing.T, reg *registry, err error) {
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registrytest.New(t)
+			provider := mockProvider(t)
+
+			tc.expect(t, reg, provider.PushSkipping(context.Background(), mockManifestDesc, reg.Host+"/"+tc.ref, tc.skip))
+		})
+	}
+}
+
+func TestProvider_EnsureParentBlobs(t *testing.T) {
+	tests := []struct {
+		name   string
+		expect func(t *testing.T, provider *Provider, reg *registrytest.Registry)
+	}{
+		{
+			name: "mount parent blobs without download",
+			expect: func(t *testing.T, provider *Provider, reg *registrytest.Registry) {
+				assert := assert.New(t)
+				reg.Store("ns/parent", "", "", mockOCILayer)
+				reg.Store("ns/parent", "", "", mockNydusBlob)
+				err := provider.EnsureParentBlobs(context.Background(), []ocispec.Descriptor{mockOCILayerDesc, mockNydusBlobDesc}, reg.Ref("ns/parent", "v1"), reg.Ref("ns/child", "v2"))
+				assert.NoError(err)
+				assert.Equal([]string{http.MethodHead, http.MethodPost}, requestMethods(reg, mockOCILayerDesc.Digest))
+				assert.Equal([]string{http.MethodHead, http.MethodPost}, requestMethods(reg, mockNydusBlobDesc.Digest))
+			},
+		},
+		{
+			name: "invalid parent reference",
+			expect: func(t *testing.T, provider *Provider, reg *registrytest.Registry) {
+				assert := assert.New(t)
+				err := provider.EnsureParentBlobs(context.Background(), []ocispec.Descriptor{mockNydusBlobDesc}, "Parent/Image:v1", "registry.test/ns/child:v1")
+				assert.ErrorContains(err, `parse reference "Parent/Image:v1"`)
+			},
+		},
+		{
+			name: "invalid target reference",
+			expect: func(t *testing.T, provider *Provider, reg *registrytest.Registry) {
+				assert := assert.New(t)
+				err := provider.EnsureParentBlobs(context.Background(), []ocispec.Descriptor{mockNydusBlobDesc}, "registry.test/ns/parent:v1", "Child/Image:v1")
+				assert.ErrorContains(err, `parse reference "Child/Image:v1"`)
+			},
+		},
+		{
+			name: "parent on another registry",
+			expect: func(t *testing.T, provider *Provider, reg *registrytest.Registry) {
+				assert := assert.New(t)
+				err := provider.EnsureParentBlobs(context.Background(), []ocispec.Descriptor{mockNydusBlobDesc}, "source.test/ns/parent:v1", "target.test/ns/child:v1")
+				assert.ErrorContains(err, "make parent blob "+mockNydusBlobDesc.Digest.String()+" available in target repository")
+				assert.ErrorContains(err, "must use the same registry")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registrytest.New(t)
+			provider := mockProvider(t)
+
+			tc.expect(t, provider, reg)
+		})
+	}
+}
+
+func TestProvider_PushBlob(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    string
+		expect func(t *testing.T, reg *registrytest.Registry, err error)
+	}{
+		{
+			name: "push single blob",
+			ref:  "repo/image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				layer, _ := reg.Load("repo/image", mockOCILayerDesc.Digest.String())
@@ -380,60 +519,9 @@ func TestProvider_Push(t *testing.T) {
 			},
 		},
 		{
-			name: "push blob file",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				path := filepath.Join(t.TempDir(), "blob")
-				if !assert.NoError(t, os.WriteFile(path, []byte("local blob file"), 0o600)) {
-					t.FailNow()
-				}
-				return p.PushBlobFile(context.Background(), path, contentTestDescriptor(nydus.MediaTypeNydusBlob, []byte("local blob file")), ref)
-			},
-			expect: func(t *testing.T, reg *registry, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				stored, _ := reg.Load("repo/image", digest.FromString("local blob file").String())
-				assert.Equal([]byte("local blob file"), stored)
-			},
-		},
-		{
-			name: "push rejects invalid reference",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.Push(context.Background(), mockManifestDesc, "Repo/Image:v1")
-			},
-			expect: func(t *testing.T, reg *registry, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "parse reference")
-				assert.Empty(reg.Requests())
-			},
-		},
-		{
-			name: "push skipping rejects invalid reference",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.PushSkipping(context.Background(), mockManifestDesc, "Repo/Image:v1", nil)
-			},
-			expect: func(t *testing.T, reg *registry, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "parse reference")
-				assert.Empty(reg.Requests())
-			},
-		},
-		{
-			name: "push blob rejects invalid reference",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.PushBlob(context.Background(), mockOCILayerDesc, "Repo/Image:v1")
-			},
-			expect: func(t *testing.T, reg *registry, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "parse reference")
-				assert.Empty(reg.Requests())
-			},
-		},
-		{
-			name: "push blob file rejects invalid reference",
-			push: func(t *testing.T, p *Provider, ref string) error {
-				return p.PushBlobFile(context.Background(), "blob", mockOCILayerDesc, "Repo/Image:v1")
-			},
-			expect: func(t *testing.T, reg *registry, err error) {
+			name: "invalid reference",
+			ref:  "Repo/Image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "parse reference")
 				assert.Empty(reg.Requests())
@@ -443,67 +531,51 @@ func TestProvider_Push(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			reg := newRegistry(t)
-			mockDockerConfig(t, `{}`)
-			provider, err := NewProvider(Option{WorkDir: t.TempDir(), TargetPlainHTTP: true})
-			if !assert.NoError(t, err) {
-				t.FailNow()
-			}
-			for dgst, data := range mockImageBlobs {
-				desc := ocispec.Descriptor{Digest: dgst, Size: int64(len(data))}
-				if !assert.NoError(t, content.WriteBlob(context.Background(), provider.ContentStore(), dgst.String(), bytes.NewReader(data), desc)) {
-					t.FailNow()
-				}
-			}
-			tc.expect(t, reg, tc.push(t, provider, reg.Ref("repo/image", "v1")))
+			reg := registrytest.New(t)
+			provider := mockProvider(t)
+
+			tc.expect(t, reg, provider.PushBlob(context.Background(), mockOCILayerDesc, reg.Host+"/"+tc.ref))
 		})
 	}
 }
 
-func TestProvider_EnsureParentBlobs(t *testing.T) {
+func TestProvider_PushBlobFile(t *testing.T) {
 	tests := []struct {
 		name   string
-		parent string
-		target string
-		expect func(t *testing.T, err error)
+		ref    string
+		expect func(t *testing.T, reg *registrytest.Registry, err error)
 	}{
 		{
-			name:   "invalid parent reference",
-			parent: "Parent/Image:v1",
-			target: "registry.test/ns/child:v1",
-			expect: func(t *testing.T, err error) {
+			name: "push blob file",
+			ref:  "repo/image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, `parse reference "Parent/Image:v1"`)
+				assert.NoError(err)
+				stored, _ := reg.Load("repo/image", mockBlobFileDesc.Digest.String())
+				assert.Equal(mockBlobFile, stored)
 			},
 		},
 		{
-			name:   "invalid target reference",
-			parent: "registry.test/ns/parent:v1",
-			target: "Child/Image:v1",
-			expect: func(t *testing.T, err error) {
+			name: "invalid reference",
+			ref:  "Repo/Image:v1",
+			expect: func(t *testing.T, reg *registrytest.Registry, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, `parse reference "Child/Image:v1"`)
-			},
-		},
-		{
-			name:   "parent on another registry",
-			parent: "source.test/ns/parent:v1",
-			target: "target.test/ns/child:v1",
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "make parent blob "+mockNydusBlobDesc.Digest.String()+" available in target repository")
-				assert.ErrorContains(err, "must use the same registry")
+				assert.ErrorContains(err, "parse reference")
+				assert.Empty(reg.Requests())
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			provider, err := NewProvider(Option{WorkDir: t.TempDir()})
-			if !assert.NoError(t, err) {
-				t.FailNow()
+			reg := registrytest.New(t)
+			provider := mockProvider(t)
+			path := filepath.Join(t.TempDir(), "blob")
+			if err := os.WriteFile(path, mockBlobFile, 0o600); err != nil {
+				t.Fatal(err)
 			}
-			tc.expect(t, provider.EnsureParentBlobs(context.Background(), []ocispec.Descriptor{mockNydusBlobDesc}, tc.parent, tc.target))
+
+			tc.expect(t, reg, provider.PushBlobFile(context.Background(), path, mockBlobFileDesc, reg.Host+"/"+tc.ref))
 		})
 	}
 }
@@ -549,74 +621,149 @@ func TestMemoryLabelStore_Update(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newMemoryLabelStore()
-			if !assert.NoError(t, store.Set(mockOCILayerDesc.Digest, map[string]string{"kept": "label", "removed": "label"})) {
-				t.FailNow()
+			if err := store.Set(mockOCILayerDesc.Digest, map[string]string{"kept": "label", "removed": "label"}); err != nil {
+				t.Fatal(err)
 			}
+
 			labels, err := store.Update(mockOCILayerDesc.Digest, tc.update)
 			assert.NoError(t, err)
+
 			tc.expect(t, store, labels)
 		})
 	}
 }
 
-func TestNewDockerConfigCredFunc(t *testing.T) {
+func TestProvider_OpenBlob(t *testing.T) {
 	tests := []struct {
 		name   string
-		config string
-		host   string
-		expect func(t *testing.T, username, password string, err error)
+		expect func(t *testing.T, provider *Provider)
 	}{
 		{
-			name:   "registry credentials",
-			config: `{"auths":{"registry.test":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("user:secret")) + `"}}}`,
-			host:   "registry.test",
-			expect: func(t *testing.T, username, password string, err error) {
+			name: "invalid blob size",
+			expect: func(t *testing.T, provider *Provider) {
 				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal("user", username)
-				assert.Equal("secret", password)
+				_, err := provider.OpenBlob(context.Background(), ocispec.Descriptor{}, mockRef, Target, "")
+				assert.ErrorContains(err, "invalid blob size")
 			},
 		},
 		{
-			name:   "docker hub uses legacy key",
-			config: `{"auths":{"https://index.docker.io/v1/":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("hub:token")) + `"}}}`,
-			host:   "registry-1.docker.io",
-			expect: func(t *testing.T, username, password string, err error) {
+			name: "invalid reference",
+			expect: func(t *testing.T, provider *Provider) {
 				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal("hub", username)
-				assert.Equal("token", password)
+				_, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, "://invalid", Target, "")
+				assert.ErrorContains(err, "parse reference")
 			},
 		},
 		{
-			name:   "unknown registry is anonymous",
-			config: `{"auths":{}}`,
-			host:   "registry.test",
-			expect: func(t *testing.T, username, password string, err error) {
+			name: "fetch failure",
+			expect: func(t *testing.T, provider *Provider) {
 				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Empty(username)
-				assert.Empty(password)
+				provider.blobFetchers.Store(mockBlobFetcherKey, &mockFetcher{err: errMock})
+				_, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, mockBlobFetcherKey.ref, Target, "")
+				assert.ErrorIs(err, errMock)
 			},
 		},
 		{
-			name:   "credential helper failure",
-			config: `{"credsStore":"nydusify-missing-helper"}`,
-			host:   "registry.test",
-			expect: func(t *testing.T, username, password string, err error) {
+			name: "close non-seekable reader",
+			expect: func(t *testing.T, provider *Provider) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, `get auth config for "registry.test"`)
-				assert.Empty(username)
-				assert.Empty(password)
+				fetcher := &mockFetcher{Reader: bytes.NewReader(mockRangeBlob)}
+				provider.blobFetchers.Store(mockBlobFetcherKey, fetcher)
+				_, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, mockBlobFetcherKey.ref, Target, "")
+				assert.ErrorContains(err, "does not support seeking")
+				assert.Equal(1, fetcher.closes)
+			},
+		},
+		{
+			name: "defer transfer until read",
+			expect: func(t *testing.T, provider *Provider) {
+				assert := assert.New(t)
+				ref, transferred := mockRangeRegistry(t, "bytes=4-5")
+				reader, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, ref, Target, "bytes=4-5")
+				assert.NoError(err)
+				assert.Zero(transferred.Load())
+				_, err = reader.Seek(4, io.SeekStart)
+				assert.NoError(err)
+				data, err := io.ReadAll(reader)
+				assert.NoError(err)
+				assert.Equal("ef", string(data))
+				assert.Equal(int32(1), transferred.Load())
+				assert.NoError(reader.Close())
+			},
+		},
+		{
+			name: "bound middle range",
+			expect: func(t *testing.T, provider *Provider) {
+				assert := assert.New(t)
+				ref, transferred := mockRangeRegistry(t, "bytes=2-4")
+				reader, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, ref, Target, "bytes=2-4")
+				assert.NoError(err)
+				_, err = reader.Seek(2, io.SeekStart)
+				assert.NoError(err)
+				data, err := io.ReadAll(reader)
+				assert.NoError(err)
+				assert.Equal("cde", string(data))
+				assert.Equal(int32(1), transferred.Load())
+				assert.NoError(reader.Close())
+			},
+		},
+		{
+			name: "bound start range",
+			expect: func(t *testing.T, provider *Provider) {
+				assert := assert.New(t)
+				ref, transferred := mockRangeRegistry(t, "bytes=0-1")
+				reader, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, ref, Target, "bytes=0-1")
+				assert.NoError(err)
+				_, err = reader.Seek(0, io.SeekStart)
+				assert.NoError(err)
+				data, err := io.ReadAll(reader)
+				assert.NoError(err)
+				assert.Equal("ab", string(data))
+				assert.Equal(int32(1), transferred.Load())
+				assert.NoError(reader.Close())
+			},
+		},
+		{
+			name: "bound suffix range",
+			expect: func(t *testing.T, provider *Provider) {
+				assert := assert.New(t)
+				ref, transferred := mockRangeRegistry(t, "bytes=6-7")
+				reader, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, ref, Target, "bytes=-2")
+				assert.NoError(err)
+				_, err = reader.Seek(6, io.SeekStart)
+				assert.NoError(err)
+				data, err := io.ReadAll(reader)
+				assert.NoError(err)
+				assert.Equal("gh", string(data))
+				assert.Equal(int32(1), transferred.Load())
+				assert.NoError(reader.Close())
+			},
+		},
+		{
+			name: "reject ignored range",
+			expect: func(t *testing.T, provider *Provider) {
+				assert := assert.New(t)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write(mockRangeBlob)
+				}))
+				defer server.Close()
+				reader, err := provider.OpenBlob(context.Background(), mockRangeBlobDesc, strings.TrimPrefix(server.URL, "http://")+"/test:v1", Target, "bytes=0-1")
+				assert.NoError(err)
+				_, err = io.ReadAll(reader)
+				assert.ErrorContains(err, "did not honor compact range")
+				assert.NoError(reader.Close())
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mockDockerConfig(t, tc.config)
-			username, password, err := NewDockerConfigCredFunc()(tc.host)
-			tc.expect(t, username, password, err)
+			provider := mockProvider(t)
+			provider.credFunc = func(string) (string, string, error) {
+				return "user", "pass", nil
+			}
+
+			tc.expect(t, provider)
 		})
 	}
 }

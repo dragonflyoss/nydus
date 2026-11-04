@@ -30,7 +30,7 @@ func TestRead(t *testing.T) {
 		return
 	}
 
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 	t.Logf("reader: %s", nydusVersion(t, env.Nydus(t)))
 
 	for _, dir := range dirs {
@@ -156,7 +156,7 @@ func nydusVersion(t testing.TB, bin string) string {
 func versionDirs(t *testing.T) []string {
 	t.Helper()
 	root, configured := imageRoot()
-	dirs, err := versions(root, os.Getenv("NYDUS_E2E_COMPATIBILITY_VERSIONS"), env.Strict(), configured)
+	dirs, err := versions(root, os.Getenv("NYDUS_E2E_COMPATIBILITY_VERSIONS"), env.CI(), configured)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}

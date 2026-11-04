@@ -20,7 +20,7 @@ import (
 
 func TestENOSPC(t *testing.T) {
 	t.Parallel()
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 	img, files := largeImage(t, 6, 16<<20)
 
 	for _, a := range adapters {

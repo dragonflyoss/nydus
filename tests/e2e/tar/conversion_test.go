@@ -103,7 +103,9 @@ func (l tarLayout) checkTarConversion(t *testing.T, data []byte) tarOutcome {
 func requireVerdict(t *testing.T, outcome tarOutcome) {
 	t.Helper()
 	assert.NotEqual(t, tarOverBudget, outcome)
-	env.Require(t, outcome != tarUnjudged, "the host filesystem can hold the reference tree")
+	if outcome == tarUnjudged {
+		env.Skipf(t, "the host filesystem cannot hold the reference tree")
+	}
 }
 
 func requireRejected(t *testing.T, packErr error) {

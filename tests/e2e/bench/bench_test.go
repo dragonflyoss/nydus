@@ -10,8 +10,8 @@ import (
 )
 
 func BenchmarkMount(b *testing.B) {
-	env.RequireRoot(b)
-	fio := env.RequireTool(b, "fio")
+	env.MustHaveRoot(b)
+	fio := env.LookPath(b, "fio")
 	work := env.WorkDir(b)
 	warm := env.Bool(b, "NYDUS_E2E_BENCH_WARM", false)
 	fileioNoWarm := env.Bool(b, "NYDUS_E2E_BENCH_FILEIO_NOWARM", false)
@@ -27,7 +27,9 @@ func BenchmarkMount(b *testing.B) {
 	v2 := buildV2Image(b, work, src)
 	for _, m := range modes(b, env.Nydus(b), img, v2, fileioNoWarm) {
 		b.Run(m.name, func(b *testing.B) {
-			env.Require(b, m.skip == "", "benchmark mode %s unavailable: %s", m.name, m.skip)
+			if m.skip != "" {
+				env.Skipf(b, "benchmark mode %s unavailable: %s", m.name, m.skip)
+			}
 			sums := map[string]float64{}
 
 			for b.Loop() {
