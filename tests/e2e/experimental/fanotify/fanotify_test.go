@@ -59,12 +59,12 @@ type straced struct{ Fanotify }
 func (straced) Require(t testing.TB) {
 	t.Helper()
 	Fanotify{}.Require(t)
-	env.RequireTool(t, "strace")
+	env.LookPath(t, "strace")
 }
 
 func (straced) Start(t testing.TB, req mount.Request) (string, *mount.Daemon, func()) {
 	t.Helper()
-	strace := env.RequireTool(t, "strace")
+	strace := env.LookPath(t, "strace")
 
 	mnt, d, teardown := start(t, req, []string{strace, "-f", "-tt", "-y",
 		"-e", "trace=fanotify_init,read,write,pwrite64,pwritev,pwritev2",

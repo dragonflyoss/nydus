@@ -51,9 +51,9 @@ func TestFaultCopy(t *testing.T) {
 	}
 
 	t.Run("LoopMount", func(t *testing.T) {
-		env.RequireRoot(t)
-		env.RequireKernel(t, 6, 4, "EROFS flatdev mounts of a flattened image")
-		env.RequireFilesystem(t, "erofs")
+		env.MustHaveRoot(t)
+		env.MustHaveKernel(t, 6, 4, "EROFS flatdev mounts of a flattened image")
+		env.MustHaveFilesystem(t, "erofs")
 		dir := env.WorkDir(t)
 		image := filepath.Join(dir, "faulted-device.img")
 		if !assert.NoError(t, os.WriteFile(image, cold, 0o644)) {

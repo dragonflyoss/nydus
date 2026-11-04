@@ -46,3 +46,15 @@ func Run(t testing.TB, bin string, args ...string) string {
 
 	return string(out)
 }
+
+// LookPath returns the absolute path of the external tool name, skipping t
+// when it is not on PATH.
+func LookPath(t testing.TB, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		Skipf(t, "%s not found on PATH", name)
+	}
+
+	return path
+}

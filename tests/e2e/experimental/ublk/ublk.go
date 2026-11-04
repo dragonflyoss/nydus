@@ -33,12 +33,14 @@ func (Ublk) Name() string { return "ublk" }
 
 func (Ublk) Require(t testing.TB) {
 	t.Helper()
-	env.RequireRoot(t)
-	env.RequireKernel(t, 6, 4, "EROFS flatdev mounts of a flattened image")
-	env.RequireFilesystem(t, "erofs")
+	env.MustHaveRoot(t)
+	env.MustHaveKernel(t, 6, 4, "EROFS flatdev mounts of a flattened image")
+	env.MustHaveFilesystem(t, "erofs")
 	err := loadDriver()
-	env.Require(t, err == nil, "ublk driver unavailable: %v", err)
-	env.RequireSubcommand(t, "ublk")
+	if err != nil {
+		env.Skipf(t, "ublk driver unavailable: %v", err)
+	}
+	env.MustHaveSubcommand(t, "ublk")
 }
 
 // Supports reports Cold and Warm: the flattened device needs a bootstrap.

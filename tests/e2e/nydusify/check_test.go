@@ -134,7 +134,7 @@ exec %q "$@"
 					body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q >> %q\n", name, unmountCalls)
 
 					if name == "umount" {
-						body += fmt.Sprintf("exec %q \"$@\"\n", env.RequireTool(t, "umount"))
+						body += fmt.Sprintf("exec %q \"$@\"\n", env.LookPath(t, "umount"))
 					} else {
 						body += "exit 23\n"
 					}

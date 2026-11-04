@@ -18,7 +18,7 @@ import (
 
 func TestOptimize(t *testing.T) {
 	t.Parallel()
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 
 	srcDir := filepath.Join(env.WorkDir(t), "src")
 	if !assert.NoError(t, os.MkdirAll(filepath.Join(srcDir, "data"), 0o755)) {

@@ -92,9 +92,11 @@ func HasSubcommand(t testing.TB, name string) bool {
 	return ok.(bool)
 }
 
-// RequireSubcommand requires the nydus binary to be built with the feature
-// that provides the subcommand.
-func RequireSubcommand(t testing.TB, name string) {
+// MustHaveSubcommand skips t unless the nydus binary was built with the
+// feature that provides the subcommand.
+func MustHaveSubcommand(t testing.TB, name string) {
 	t.Helper()
-	Require(t, HasSubcommand(t, name), "%s lacks the %s subcommand (build with FEATURES=...,%s)", Nydus(t), name, name)
+	if !HasSubcommand(t, name) {
+		Skipf(t, "%s lacks the %s subcommand (build with FEATURES=...,%s)", Nydus(t), name, name)
+	}
 }

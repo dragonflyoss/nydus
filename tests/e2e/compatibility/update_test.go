@@ -26,7 +26,7 @@ var versionName = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$
 
 func updateImages(t *testing.T) {
 	t.Helper()
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 	nydus := env.Nydus(t)
 	builder := nydusVersion(t, nydus)
 

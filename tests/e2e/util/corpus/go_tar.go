@@ -32,7 +32,7 @@ func GoTarTestdata(t testing.TB) string {
 		return dir
 	}
 
-	goBin := env.RequireTool(t, "go")
+	goBin := env.LookPath(t, "go")
 	goroot, err := exec.Command(goBin, "env", "GOROOT").Output()
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -40,7 +40,9 @@ func GoTarTestdata(t testing.TB) string {
 
 	dir := filepath.Join(strings.TrimSpace(string(goroot)), "src", "archive", "tar", "testdata")
 	_, err = os.Stat(dir)
-	env.Require(t, err == nil, "Go archive/tar testdata: %v (set NYDUS_E2E_GO_TAR_TESTDATA)", err)
+	if err != nil {
+		env.Skipf(t, "Go archive/tar testdata: %v (set NYDUS_E2E_GO_TAR_TESTDATA)", err)
+	}
 
 	return dir
 }

@@ -67,7 +67,7 @@ type service struct {
 
 func startService(t testing.TB, img fixture.Image) *service {
 	t.Helper()
-	env.RequireSubcommand(t, "uffd")
+	env.MustHaveSubcommand(t, "uffd")
 	dir := env.WorkDir(t)
 	cache := filepath.Join(dir, "cache")
 	if !assert.NoError(t, os.MkdirAll(cache, 0o755)) {

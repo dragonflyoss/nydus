@@ -24,7 +24,7 @@ func TestPersistence(t *testing.T) {
 func TestDemandPaging(t *testing.T) {
 	t.Parallel()
 	transport.DemandPaging(t, NBD{}, repo, func(t *testing.T, m *mount.Mounted, cache string) {
-		env.Run(t, env.RequireTool(t, "udevadm"), "settle", "--timeout=10")
+		env.Run(t, env.LookPath(t, "udevadm"), "settle", "--timeout=10")
 		log := m.Daemon.Log()
 		if !assert.Contains(t, log, "nbd service attached to") {
 			t.FailNow()

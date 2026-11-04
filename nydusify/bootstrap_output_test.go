@@ -4,161 +4,311 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func TestSaveBootstrapRejectsUnusableDestination(t *testing.T) {
-	dir := t.TempDir()
-	source := filepath.Join(dir, "source")
-	if err := os.WriteFile(source, []byte("bootstrap"), 0600); err != nil {
+func mockFile(t *testing.T, path, data string) string {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loop := filepath.Join(dir, "loop")
-	if err := os.Symlink(loop, loop); err != nil {
-		t.Fatal(err)
-	}
-	for _, target := range []string{loop, filepath.Join(dir, "missing", "image.boot")} {
-		if err := saveBootstrap(target, source); err == nil {
-			t.Fatalf("accepted unusable destination %s", target)
-		}
-	}
-	data, err := os.ReadFile(source)
-	if err != nil || string(data) != "bootstrap" {
-		t.Fatalf("source changed: %q, %v", data, err)
-	}
-	entries, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("temporary files: %v, %v", entries, err)
-	}
+
+	return path
 }
 
-func TestSaveBootstrapPreservesPermissions(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		mode os.FileMode
+func TestSaveBootstrap(t *testing.T) {
+	tests := []struct {
+		name   string
+		mock   func(t *testing.T, dir string) (string, string)
+		expect func(t *testing.T, dir, path, source string, err error)
 	}{
-		{"0644", 0644}, {"0640", 0640}, {"0444", 0444},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			source, target := filepath.Join(dir, "source"), filepath.Join(dir, "target")
-			if err := os.WriteFile(source, []byte("new"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(target, []byte("old"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(target, tc.mode); err != nil {
-				t.Fatal(err)
-			}
-			for _, input := range []string{source, target} {
-				if err := saveBootstrap(target, input); err != nil {
+		{
+			name: "reject symlink loop destination",
+			mock: func(t *testing.T, dir string) (string, string) {
+				path := filepath.Join(dir, "loop")
+				if err := os.Symlink(path, path); err != nil {
 					t.Fatal(err)
 				}
-				info, err := os.Stat(target)
+
+				return path, mockFile(t, filepath.Join(dir, "source"), "bootstrap")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+
+				data, err := os.ReadFile(source)
+				assert.NoError(err)
+				assert.Equal("bootstrap", string(data))
+
+				matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
+				assert.NoError(err)
+				assert.Empty(matches)
+			},
+		},
+		{
+			name: "reject destination in missing dir",
+			mock: func(t *testing.T, dir string) (string, string) {
+				return filepath.Join(dir, "missing", "image.boot"), mockFile(t, filepath.Join(dir, "source"), "bootstrap")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+
+				data, err := os.ReadFile(source)
+				assert.NoError(err)
+				assert.Equal("bootstrap", string(data))
+
+				matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
+				assert.NoError(err)
+				assert.Empty(matches)
+			},
+		},
+		{
+			name: "preserve 0644 destination mode",
+			mock: func(t *testing.T, dir string) (string, string) {
+				path := mockFile(t, filepath.Join(dir, "target"), "old")
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+
+				return path, mockFile(t, filepath.Join(dir, "source"), "new")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				info, err := os.Stat(path)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if info.Mode().Perm() != tc.mode {
-					t.Fatalf("mode=%o, want %o", info.Mode().Perm(), tc.mode)
+
+				assert.Equal(os.FileMode(0o644), info.Mode().Perm())
+				data, err := os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("new", string(data))
+
+				assert.NoError(saveBootstrap(path, path))
+				info, err = os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
 				}
-				data, err := os.ReadFile(target)
-				if err != nil || string(data) != "new" {
-					t.Fatalf("data=%q error=%v", data, err)
+
+				assert.Equal(os.FileMode(0o644), info.Mode().Perm())
+				data, err = os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("new", string(data))
+			},
+		},
+		{
+			name: "preserve 0640 destination mode",
+			mock: func(t *testing.T, dir string) (string, string) {
+				path := mockFile(t, filepath.Join(dir, "target"), "old")
+				if err := os.Chmod(path, 0o640); err != nil {
+					t.Fatal(err)
 				}
-			}
+
+				return path, mockFile(t, filepath.Join(dir, "source"), "new")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				assert.Equal(os.FileMode(0o640), info.Mode().Perm())
+				data, err := os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("new", string(data))
+
+				assert.NoError(saveBootstrap(path, path))
+				info, err = os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				assert.Equal(os.FileMode(0o640), info.Mode().Perm())
+				data, err = os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("new", string(data))
+			},
+		},
+		{
+			name: "preserve 0444 destination mode",
+			mock: func(t *testing.T, dir string) (string, string) {
+				path := mockFile(t, filepath.Join(dir, "target"), "old")
+				if err := os.Chmod(path, 0o444); err != nil {
+					t.Fatal(err)
+				}
+
+				return path, mockFile(t, filepath.Join(dir, "source"), "new")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				assert.Equal(os.FileMode(0o444), info.Mode().Perm())
+				data, err := os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("new", string(data))
+
+				assert.NoError(saveBootstrap(path, path))
+				info, err = os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				assert.Equal(os.FileMode(0o444), info.Mode().Perm())
+				data, err = os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("new", string(data))
+			},
+		},
+		{
+			name: "stream large bootstrap",
+			mock: func(t *testing.T, dir string) (string, string) {
+				source := filepath.Join(dir, "source")
+				file, err := os.Create(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if err := file.Truncate(16 << 20); err != nil {
+					t.Fatal(err)
+				}
+
+				if _, err := file.WriteAt([]byte("tail"), 16<<20-4); err != nil {
+					t.Fatal(err)
+				}
+
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+
+				return filepath.Join(dir, "target"), source
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				assert.Equal(int64(16<<20), info.Size())
+				assert.Equal(os.FileMode(0o600), info.Mode().Perm())
+
+				file, err := os.Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				tail := make([]byte, 4)
+				_, err = file.ReadAt(tail, 16<<20-4)
+				assert.NoError(err)
+				assert.NoError(file.Close())
+				assert.Equal("tail", string(tail))
+
+				matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
+				assert.NoError(err)
+				assert.Empty(matches)
+			},
+		},
+		{
+			name: "keep destination when source is missing",
+			mock: func(t *testing.T, dir string) (string, string) {
+				return mockFile(t, filepath.Join(dir, "target"), "old"), filepath.Join(dir, "missing")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+
+				data, err := os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("old", string(data))
+
+				matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
+				assert.NoError(err)
+				assert.Empty(matches)
+			},
+		},
+		{
+			name: "keep destination when source is a directory",
+			mock: func(t *testing.T, dir string) (string, string) {
+				return mockFile(t, filepath.Join(dir, "target"), "old"), dir
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+
+				data, err := os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("old", string(data))
+
+				matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
+				assert.NoError(err)
+				assert.Empty(matches)
+			},
+		},
+		{
+			name: "replace input without changing retained link",
+			mock: func(t *testing.T, dir string) (string, string) {
+				path := mockFile(t, filepath.Join(dir, "image.boot"), "original")
+				if err := os.Link(path, filepath.Join(dir, "retained.boot")); err != nil {
+					t.Fatal(err)
+				}
+
+				return path, mockFile(t, filepath.Join(dir, "final.boot"), "compacted")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				data, err := os.ReadFile(path)
+				assert.NoError(err)
+				assert.Equal("compacted", string(data))
+
+				data, err = os.ReadFile(filepath.Join(dir, "retained.boot"))
+				assert.NoError(err)
+				assert.Equal("original", string(data))
+			},
+		},
+		{
+			name: "remove temporary file when rename fails",
+			mock: func(t *testing.T, dir string) (string, string) {
+				path := filepath.Join(dir, "directory")
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+
+				return path, mockFile(t, filepath.Join(dir, "final.boot"), "compacted")
+			},
+			expect: func(t *testing.T, dir, path, source string, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+
+				matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
+				assert.NoError(err)
+				assert.Empty(matches)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, source := tc.mock(t, dir)
+			err := saveBootstrap(path, source)
+
+			tc.expect(t, dir, path, source, err)
 		})
-	}
-}
-
-func TestSaveBootstrapStreamsLargeFileAndKeepsFailedDestination(t *testing.T) {
-	dir := t.TempDir()
-	source, target := filepath.Join(dir, "source"), filepath.Join(dir, "target")
-	file, err := os.Create(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const size = 16 << 20
-	if err := file.Truncate(size); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.WriteAt([]byte("tail"), size-4); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveBootstrap(target, source); err != nil {
-		t.Fatal(err)
-	}
-	output, err := os.Open(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := output.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() != size || info.Mode().Perm() != 0600 {
-		t.Fatalf("size=%d mode=%o", info.Size(), info.Mode().Perm())
-	}
-	var tail [4]byte
-	if _, err := output.ReadAt(tail[:], size-4); err != nil {
-		t.Fatal(err)
-	}
-	if err := output.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if string(tail[:]) != "tail" {
-		t.Fatalf("tail=%q", tail)
-	}
-	for _, bad := range []string{filepath.Join(dir, "missing"), dir} {
-		if err := saveBootstrap(target, bad); err == nil {
-			t.Fatal("expected source read failure")
-		}
-		info, err := os.Stat(target)
-		if err != nil || info.Size() != size {
-			t.Fatalf("destination changed: %v", err)
-		}
-	}
-	matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
-	if err != nil || len(matches) != 0 {
-		t.Fatalf("temporary files left: %v, error=%v", matches, err)
-	}
-}
-
-func TestSaveBootstrapReplacesInputWithoutChangingRetainedLink(t *testing.T) {
-	dir := t.TempDir()
-	input := filepath.Join(dir, "image.boot")
-	retained := filepath.Join(dir, "retained.boot")
-	if err := os.WriteFile(input, []byte("original"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Link(input, retained); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(dir, "final.boot")
-	if err := os.WriteFile(source, []byte("compacted"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveBootstrap(input, source); err != nil {
-		t.Fatal(err)
-	}
-	for path, want := range map[string]string{input: "compacted", retained: "original"} {
-		data, err := os.ReadFile(path)
-		if err != nil || string(data) != want {
-			t.Fatalf("read %s: data=%q err=%v, want %q", path, data, err, want)
-		}
-	}
-	// A rename failure must leave its destination and no temporary files.
-	dest := filepath.Join(dir, "directory")
-	if err := os.Mkdir(dest, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveBootstrap(dest, source); err == nil {
-		t.Fatal("expected rename failure")
-	}
-	matches, err := filepath.Glob(filepath.Join(dir, ".image.boot-*"))
-	if err != nil || len(matches) != 0 {
-		t.Fatalf("temporary files left: %v, err=%v", matches, err)
 	}
 }

@@ -692,7 +692,7 @@ func TestPublishRecovery(t *testing.T) {
 
 func TestToOCI(t *testing.T) {
 	t.Parallel()
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 	reg := registry.Start(t)
 
 	srcs := []source{

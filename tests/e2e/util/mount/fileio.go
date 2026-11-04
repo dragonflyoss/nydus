@@ -19,11 +19,11 @@ func (Fileio) Name() string { return "fileio" }
 // and the fileio subcommand.
 func (Fileio) Require(t testing.TB) {
 	t.Helper()
-	env.RequireRoot(t)
-	env.RequireKernel(t, 6, 12, "file-backed EROFS mounts")
-	env.RequireFilesystem(t, "fuse")
-	env.RequireFilesystem(t, "erofs")
-	env.RequireSubcommand(t, "fileio")
+	env.MustHaveRoot(t)
+	env.MustHaveKernel(t, 6, 12, "file-backed EROFS mounts")
+	env.MustHaveFilesystem(t, "fuse")
+	env.MustHaveFilesystem(t, "erofs")
+	env.MustHaveSubcommand(t, "fileio")
 }
 
 // Supports reports Cold and Warm: fileio always needs a bootstrap.

@@ -211,7 +211,7 @@ func TestReproducibleBuild(t *testing.T) {
 
 func stageReproducible(t *testing.T, dir string, reverse bool) {
 	t.Helper()
-	env.RequireRoot(t)
+	env.MustHaveRoot(t)
 	d := filepath.Join(dir, "d")
 	if !assert.NoError(t, os.MkdirAll(d, 0o755)) {
 		t.FailNow()
@@ -294,7 +294,7 @@ func TestNoXattr(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			env.RequireRoot(t)
+			env.MustHaveRoot(t)
 			dir := env.WorkDir(t)
 			src := filepath.Join(dir, "source")
 			if !assert.NoError(t, os.MkdirAll(filepath.Join(src, "nested"), 0o755)) {

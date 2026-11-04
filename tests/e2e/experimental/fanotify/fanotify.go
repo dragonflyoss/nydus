@@ -31,10 +31,10 @@ func (Fanotify) Name() string { return "fanotify" }
 
 func (Fanotify) Require(t testing.TB) {
 	t.Helper()
-	env.RequireRoot(t)
-	env.RequireKernel(t, 6, 15, "fanotify pre-content events with range info")
-	env.RequireFilesystem(t, "erofs")
-	env.RequireSubcommand(t, "fanotify")
+	env.MustHaveRoot(t)
+	env.MustHaveKernel(t, 6, 15, "fanotify pre-content events with range info")
+	env.MustHaveFilesystem(t, "erofs")
+	env.MustHaveSubcommand(t, "fanotify")
 	// Mounts keep their caches under TMPDIR.
 	requireDiskFS(t, os.TempDir())
 }
@@ -117,6 +117,7 @@ func requireDiskFS(t testing.TB, dir string) {
 		t.Fatalf("statfs %s: %v", dir, err)
 	}
 
-	env.Require(t, st.Type != unix.TMPFS_MAGIC && st.Type != unix.RAMFS_MAGIC,
-		"%s is on tmpfs, which raises no fanotify pre-content events; point TMPDIR at a disk filesystem", dir)
+	if st.Type == unix.TMPFS_MAGIC || st.Type == unix.RAMFS_MAGIC {
+		env.Skipf(t, "%s is on tmpfs, which raises no fanotify pre-content events; point TMPDIR at a disk filesystem", dir)
+	}
 }
