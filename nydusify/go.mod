@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	d7y.io/api/v2 v2.3.7
 	d7y.io/dragonfly-sdk/client-request/go v0.0.0-20261027033902-418d116f44da
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/containerd/containerd/v2 v2.0.2
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/log v0.1.0
@@ -39,7 +40,6 @@ require (
 	github.com/casbin/casbin/v2 v2.81.0 // indirect
 	github.com/casbin/gorm-adapter/v3 v3.5.0 // indirect
 	github.com/casbin/govaluate v1.1.0 // indirect
-	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/containerd/cgroups/v3 v3.0.3 // indirect

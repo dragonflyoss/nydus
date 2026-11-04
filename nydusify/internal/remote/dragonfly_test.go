@@ -9,6 +9,7 @@ package remote
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -183,5 +184,55 @@ func TestEnableDragonfly(t *testing.T) {
 	}
 	if _, ok := newRegistryClient(false).Transport.(*dragonflyTransport); ok {
 		t.Fatal("the registry client must go straight to the origin once disabled")
+	}
+}
+
+func TestDragonflyTransportSettlesDefinitiveStatuses(t *testing.T) {
+	var originHits int
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	challenge := http.Header{"Www-Authenticate": {`Bearer realm="https://auth.example/token"`}}
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantOrigin bool
+	}{
+		{"401 from the proxy", &request.ProxyError{StatusCode: 401, Header: challenge, Message: "denied"}, 401, false},
+		{"404 from the backend", &request.BackendError{StatusCode: 404, Message: "no such blob"}, 404, false},
+		{"422 from dfdaemon", &request.DfdaemonError{StatusCode: 422, Message: "no length"}, 422, false},
+		{"wrapped 403", fmt.Errorf("get: %w", &request.ProxyError{StatusCode: 403}), 403, false},
+		{"503 falls back", &request.BackendError{StatusCode: 503}, 200, true},
+		{"429 falls back", &request.ProxyError{StatusCode: 429}, 200, true},
+		{"408 falls back", &request.DfdaemonError{StatusCode: 408}, 200, true},
+		{"507 falls back", &request.DfdaemonError{StatusCode: 507}, 200, true},
+		{"timeout falls back", request.ErrRequestTimeout, 200, true},
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, tt := range tests {
+			t.Run(method+" "+tt.name, func(t *testing.T) {
+				originHits = 0
+				client := &http.Client{Transport: &dragonflyTransport{base: http.DefaultTransport, getter: &fakeGetter{err: tt.err}}}
+				req, err := http.NewRequest(method, origin.URL+"/v2/library/busybox/manifests/sha256:abc", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+				if resp.StatusCode != tt.wantStatus || (originHits > 0) != tt.wantOrigin {
+					t.Fatalf("status=%d originHits=%d, want %d / origin=%v", resp.StatusCode, originHits, tt.wantStatus, tt.wantOrigin)
+				}
+				if tt.wantStatus == 401 && resp.Header.Get("Www-Authenticate") == "" {
+					t.Fatal("the auth challenge header must be relayed")
+				}
+			})
+		}
 	}
 }
