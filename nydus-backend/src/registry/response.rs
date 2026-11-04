@@ -39,53 +39,49 @@ pub(crate) enum Body {
 
 /// Implements the response.
 impl Response {
-    /// Turns the answer to a `range` read into an error unless it carries
-    /// exactly that range: a `206` whose `Content-Range` names it, and a body
-    /// already in memory as long as it (RFC 9110 §15.3.7). A `206` without a
-    /// `Content-Range` is taken as the range it answers.
+    /// Validates that the answer to a `range` read carries exactly that range,
+    /// since the server may ignore the `Range` header or transfer a range
+    /// different from the requested one, which is described by the
+    /// `Content-Range` header, refer to RFC 9110 Section 15.3.7. A `206`
+    /// without a `Content-Range` is taken as the range it answers.
     ///
     /// Dragonfly 1.3 answers a partial download with a `200` and the exact
     /// `Content-Range`, so a seed peer's `200` goes through the same checks;
     /// an origin's `200` is the whole blob and never does.
-    pub(crate) fn error_for_range(self, range: &GetRange) -> io::Result<Self> {
+    pub(crate) fn validate_range(&self, range: &GetRange) -> io::Result<()> {
+        let err = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+
         match (self.status, self.source) {
             (StatusCode::PARTIAL_CONTENT, _) if !self.headers.contains_key(CONTENT_RANGE) => {
-                return Ok(self);
+                return Ok(());
             }
             (StatusCode::PARTIAL_CONTENT, _) | (StatusCode::OK, Source::Dragonfly) => {}
             (status, _) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "registry range request returned {status}, expected 206 Partial Content"
-                    ),
-                ));
+                return Err(err(format!(
+                    "expected 206 Partial Content for range {range}, got {status}"
+                )));
             }
         }
 
         let content_range = self.content_range()?;
         let expected = range.to_range(content_range.complete_length);
         if content_range.range != expected {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "registry returned bytes {:?}, expected {expected:?}",
-                    content_range.range
-                ),
-            ));
+            return Err(err(format!(
+                "Content-Range {content_range} mismatches requested range {range}"
+            )));
         }
 
-        let length = expected.end() - expected.start() + 1;
+        // The Dragonfly SDK buffers the body, which holds the range alone.
         if let Body::Bytes(bytes) = &self.body {
-            if bytes.len() as u64 != length {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("registry returned {} bytes, expected {length}", bytes.len()),
-                ));
+            if bytes.len() as u64 != expected.end() - expected.start() + 1 {
+                return Err(err(format!(
+                    "body of {} bytes mismatches Content-Range {content_range}",
+                    bytes.len()
+                )));
             }
         }
 
-        Ok(self)
+        Ok(())
     }
 
     /// Reads exactly `length` bytes of the body, a shorter body being an
@@ -175,12 +171,7 @@ impl Response {
         self.headers
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "registry range response missing a valid content-range",
-                )
-            })?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Range"))?
             .parse()
     }
 }
@@ -192,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_for_range_accepts_a_206_or_a_dragonfly_200() {
+    fn validate_range_accepts_a_206_or_a_dragonfly_200() {
         let test_cases = vec![
             (StatusCode::PARTIAL_CONTENT, Source::Origin, true),
             (StatusCode::PARTIAL_CONTENT, Source::Dragonfly, true),
@@ -212,7 +203,7 @@ mod tests {
                 source,
             };
             assert_eq!(
-                response.error_for_range(&GetRange::Bounded(2..=5)).is_ok(),
+                response.validate_range(&GetRange::Bounded(2..=5)).is_ok(),
                 expected,
                 "{status} {source:?}"
             );
@@ -220,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn error_for_range_requires_the_content_range_to_name_the_range() {
+    fn validate_range_requires_the_content_range_to_name_the_range() {
         let test_cases = vec![
             (StatusCode::PARTIAL_CONTENT, Some("bytes 2-5/8"), true),
             (StatusCode::PARTIAL_CONTENT, Some("bytes 1-4/8"), false),
@@ -243,7 +234,7 @@ mod tests {
                 source: Source::Dragonfly,
             };
             assert_eq!(
-                response.error_for_range(&GetRange::Bounded(2..=5)).is_ok(),
+                response.validate_range(&GetRange::Bounded(2..=5)).is_ok(),
                 expected,
                 "{status} {content_range:?}"
             );
@@ -251,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn error_for_range_requires_a_buffered_body_as_long_as_the_range() {
+    fn validate_range_requires_a_buffered_body_as_long_as_the_range() {
         let test_cases = vec![
             (Body::Bytes(Bytes::from_static(b"abcd")), true),
             (Body::Bytes(Bytes::from_static(b"abc")), false),
@@ -272,7 +263,7 @@ mod tests {
                 source: Source::Dragonfly,
             };
             assert_eq!(
-                response.error_for_range(&GetRange::Bounded(2..=5)).is_ok(),
+                response.validate_range(&GetRange::Bounded(2..=5)).is_ok(),
                 expected
             );
         }

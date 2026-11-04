@@ -114,6 +114,9 @@ impl Dragonfly {
         max_retries: u8,
     ) -> Arc<SetOnce<io::Result<Proxy>>> {
         let client = Arc::new(SetOnce::new());
+
+        // Build the client on the runtime, so the reads waiting on it never
+        // block the caller.
         runtime.spawn({
             let client = client.clone();
             async move {
@@ -163,6 +166,7 @@ impl Transport for Dragonfly {
     /// HTTP status becomes a [`Response`], settled by status like an origin
     /// answer.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        // Keep the requested range to validate the seed peer's answer.
         let range = headers
             .get(RANGE)
             .and_then(|value| value.to_str().ok())
@@ -176,6 +180,8 @@ impl Transport for Dragonfly {
             ..Default::default()
         };
 
+        // Wait for the seed peer client, going back to the origin when it
+        // failed to connect to the scheduler.
         let client = match Self::wait(&self.ondemand_client).await {
             Ok(client) => client,
             Err(err) => {
@@ -228,9 +234,11 @@ impl Transport for Dragonfly {
             Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
         };
 
+        // Treat an answer outside the requested range as a failure, so the
+        // origin serves the read instead.
         let result = match (result, &range) {
             (Ok(response), Some(range)) if response.status.is_success() => {
-                response.error_for_range(range)
+                response.validate_range(range).map(|()| response)
             }
             (result, _) => result,
         };
@@ -273,6 +281,8 @@ impl Transport for Dragonfly {
             ..Default::default()
         };
 
+        // Wait for the seed peer client, failing at once when it failed to
+        // connect to the scheduler.
         let client = Self::wait(&self.prefetch_client).await?;
         let mut retried = false;
         loop {

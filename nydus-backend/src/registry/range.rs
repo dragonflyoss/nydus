@@ -1,5 +1,5 @@
 //! The byte ranges of a blob `GET`: the one a read asks for in `Range`, and
-//! the one an answer names in `Content-Range` (RFC 9110 §14).
+//! the one an answer names in `Content-Range`, refer to RFC 9110 Section 14.
 
 use std::fmt;
 use std::io;
@@ -20,7 +20,7 @@ pub(crate) enum GetRange {
 impl GetRange {
     /// Returns the bytes the range selects of a blob `complete_length` long:
     /// a suffix counts back from the end, and a range past the end stops at
-    /// the last byte (RFC 9110 §14.1.2).
+    /// the last byte, refer to RFC 9110 Section 14.1.2.
     pub(crate) fn to_range(&self, complete_length: u64) -> RangeInclusive<u64> {
         let last = complete_length.saturating_sub(1);
         match self {
@@ -56,7 +56,7 @@ impl FromStr for GetRange {
                 first => Some(GetRange::Bounded(first.parse().ok()?..=last.parse().ok()?)),
             })
             .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("invalid range {value}"))
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid Range {value}"))
             })
     }
 }
@@ -71,13 +71,28 @@ pub(crate) struct ContentRange {
     pub(crate) complete_length: u64,
 }
 
+/// Implements Display as the `Content-Range` header value.
+impl fmt::Display for ContentRange {
+    /// Formats the range as `bytes first-last/complete-length`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "bytes {}-{}/{}",
+            self.range.start(),
+            self.range.end(),
+            self.complete_length
+        )
+    }
+}
+
 /// Implements FromStr for the `Content-Range` header value.
 impl FromStr for ContentRange {
     type Err = io::Error;
 
     /// Parses `bytes first-last/complete-length`, rejecting an unknown `*`
-    /// length and the invalid ranges RFC 9110 §14.4 forbids recombining: a
-    /// last byte before the first, or a complete length not past the last.
+    /// length and the invalid ranges a recipient must not recombine: a last
+    /// byte before the first, or a complete length not past the last, refer
+    /// to RFC 9110 Section 14.4.
     fn from_str(value: &str) -> io::Result<Self> {
         value
             .strip_prefix("bytes ")
@@ -98,7 +113,7 @@ impl FromStr for ContentRange {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid content-range {value}"),
+                    format!("invalid Content-Range {value}"),
                 )
             })
     }

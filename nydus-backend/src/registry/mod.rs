@@ -289,7 +289,10 @@ impl Client {
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.get(&redirect, headers.clone()).await?;
             match response.status {
-                status if status.is_success() => return response.error_for_range(range),
+                status if status.is_success() => {
+                    response.validate_range(range)?;
+                    return Ok(response);
+                }
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -300,7 +303,8 @@ impl Client {
             .execute(headers.clone(), |headers| transport.get(&url, headers))
             .await?;
         if response.status.is_success() {
-            return response.error_for_range(range);
+            response.validate_range(range)?;
+            return Ok(response);
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -311,7 +315,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
-        let redirected = redirected.error_for_range(range)?;
+        redirected.validate_range(range)?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -335,7 +339,10 @@ impl Client {
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.prefetch(&redirect, headers.clone()).await?;
             match response.status {
-                status if status.is_success() => return response.error_for_range(range),
+                status if status.is_success() => {
+                    response.validate_range(range)?;
+                    return Ok(response);
+                }
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -346,7 +353,8 @@ impl Client {
             .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
             .await?;
         if response.status.is_success() {
-            return response.error_for_range(range);
+            response.validate_range(range)?;
+            return Ok(response);
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -357,7 +365,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
-        let redirected = redirected.error_for_range(range)?;
+        redirected.validate_range(range)?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -553,6 +561,7 @@ impl Backend for Registry {
 
 #[cfg(test)]
 mod tests {
+    use super::range::ContentRange;
     use super::response::Body;
     use super::*;
     use bytes::Bytes;
@@ -749,10 +758,11 @@ mod tests {
             let (content_range, body) = match range {
                 Some(range) => (
                     format!(
-                        "Content-Range: bytes {}-{}/{}\r\n",
-                        range.start(),
-                        range.end(),
-                        blob.len()
+                        "Content-Range: {}\r\n",
+                        ContentRange {
+                            range: range.clone(),
+                            complete_length: blob.len() as u64,
+                        }
                     ),
                     &blob[*range.start() as usize..=*range.end() as usize],
                 ),
