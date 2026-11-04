@@ -9,6 +9,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// TestCorrupt damages a shared cache the way a crash of the machine can (the
+// data and the ready bits reach the disk on their own schedules) and checks
+// that a daemon started after the restart never returns wrong bytes from it.
+// Within one boot the ready bits are trusted, so each damage is paired with a
+// restart of the map.
 func TestCorrupt(t *testing.T) {
 	t.Parallel()
 	w := setup(t)
@@ -25,6 +30,8 @@ func TestCorrupt(t *testing.T) {
 			if n := cache.flipData(t, w.sharedBlob); !assert.NotZero(t, n) {
 				t.FailNow()
 			}
+
+			cache.restart(t, w.sharedBlob)
 		}},
 		{"MapBits", func(t *testing.T, cache cacheDir) {
 			warm := cache.mount(t, w.lowerImage, fetchSize(64<<10))
@@ -34,6 +41,8 @@ func TestCorrupt(t *testing.T) {
 			if n := cache.forgeReady(t, w.sharedBlob); !assert.NotZero(t, n) {
 				t.FailNow()
 			}
+
+			cache.restart(t, w.sharedBlob)
 		}},
 	}
 
