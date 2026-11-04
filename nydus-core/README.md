@@ -26,8 +26,8 @@ and records into `Metrics` and an `OndemandRecorder` of its own (`core.metrics()
 mixing their namespaces, counters or ondemand records; an embedder gathers the values
 from `core.metrics().registry()`.
 
-For fault handlers, `NydusCore::fetch_flat_group_ranges(offset, len)` returns
-complete groups touched by the request for batched mapping. See the method
+For fault handlers, `NydusCore::fetch_flat_chunk_group_ranges(offset, len)` returns
+complete chunk groups touched by the request for batched mapping. See the method
 documentation for mapping and host-page alignment requirements.
 
 The low-level `build` modules are shared with the `nydus` crate so the regular

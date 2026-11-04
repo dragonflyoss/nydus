@@ -883,7 +883,7 @@ impl BlobCache for LocalBlobCache {
         Ok(())
     }
 
-    fn ensure_range_with_groups(&self, offset: u64, len: u64) -> io::Result<Range<u64>> {
+    fn ensure_chunk_group_range(&self, offset: u64, len: u64) -> io::Result<Range<u64>> {
         self.ensure_range(offset, len)?;
         if len == 0 {
             return Ok(offset..offset);
@@ -1613,9 +1613,9 @@ mod tests {
     }
 
     #[test]
-    fn fetched_groups_exclude_read_ahead_and_preserve_ondemand_record() {
+    fn fetched_chunk_groups_exclude_read_ahead_and_preserve_ondemand_record() {
         let backend_dir = tempdir().unwrap();
-        // Deliberately unequal, sub-64-KiB groups, including zero padding.
+        // Unequal chunk groups with sub-64-KiB boundaries and zero padding.
         let groups = vec![
             vec![vec![0x11; 4096], vec![0x12; 100]],
             vec![vec![0x21; 4096]],
@@ -1645,12 +1645,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cached.ensure_range_with_groups(u64::MAX, 0).unwrap(),
+            cached.ensure_chunk_group_range(u64::MAX, 0).unwrap(),
             u64::MAX..u64::MAX
         );
         assert_eq!(backend.reads(), 0);
-        assert_eq!(cached.ensure_range_with_groups(4096, 1).unwrap(), 0..8192);
-        // One compressed read warms all groups, but only the first was accessed.
+        assert_eq!(cached.ensure_chunk_group_range(4096, 1).unwrap(), 0..8192);
+        // One compressed read warms all chunk groups; only the first was accessed.
         assert_eq!(backend.reads(), 1);
         assert!(cached.is_all_ready());
         assert_eq!(
@@ -1659,22 +1659,22 @@ mod tests {
         );
         assert_eq!(recorder.snapshot().entries.len(), 1);
         assert_eq!(recorder.snapshot().entries[0].chunk_group_index, 0);
-        assert_eq!(cached.ensure_range_with_groups(8191, 2).unwrap(), 0..12288);
+        assert_eq!(cached.ensure_chunk_group_range(8191, 2).unwrap(), 0..12288);
         assert_eq!(
-            cached.ensure_range_with_groups(8192, 4096).unwrap(),
+            cached.ensure_chunk_group_range(8192, 4096).unwrap(),
             8192..12288
         );
         assert_eq!(recorder.snapshot().entries.len(), 2);
         assert_eq!(recorder.snapshot().entries[1].chunk_group_index, 1);
         assert_eq!(backend.reads(), 1);
         assert_eq!(
-            cached.ensure_range_with_groups(24575, 1).unwrap(),
+            cached.ensure_chunk_group_range(24575, 1).unwrap(),
             12288..24576
         );
         for offset in [24576, u64::MAX] {
             assert_eq!(
                 cached
-                    .ensure_range_with_groups(offset, 1)
+                    .ensure_chunk_group_range(offset, 1)
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::InvalidInput,
@@ -1684,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn fetched_groups_propagate_payload_failure() {
+    fn fetched_chunk_groups_propagate_payload_failure() {
         let backend_dir = tempdir().unwrap();
         let (data, meta, _, _) = groups_blob();
         let id = FullBlob::new(&data)
@@ -1700,7 +1700,7 @@ mod tests {
         );
         // Truncate the payload because the backend may retain an open fd.
         File::create(backend_dir.path().join(hex::encode(id))).unwrap();
-        assert!(cache.ensure_range_with_groups(4096, 4096).is_err());
+        assert!(cache.ensure_chunk_group_range(4096, 4096).is_err());
         assert!(cache.ready_ranges(4096, 4096).unwrap().is_empty());
     }
 
