@@ -108,6 +108,9 @@ enum Authorization {
     /// The configured basic credentials, which never expire.
     Basic(HeaderValue),
 
+    /// A caller-provided token whose expiry is unknown; a 401 invalidates it.
+    ProvidedBearer(HeaderValue),
+
     /// A bearer token from the token server, when it was fetched and how long
     /// it lives.
     Bearer {
@@ -161,16 +164,15 @@ impl Authorization {
     /// Returns the header value to send.
     fn value(&self) -> &HeaderValue {
         match self {
-            Self::Basic(value) | Self::Bearer { value, .. } => value,
+            Self::Basic(value) | Self::ProvidedBearer(value) | Self::Bearer { value, .. } => value,
         }
     }
 
-    /// Returns whether the authorization is still good to send: basic
-    /// credentials always, a bearer token until it is within the leeway of
-    /// expiring.
+    /// Basic credentials and caller-provided tokens remain usable until a 401;
+    /// fetched tokens also expire locally with a safety margin.
     fn is_valid(&self) -> bool {
         match self {
-            Self::Basic(_) => true,
+            Self::Basic(_) | Self::ProvidedBearer(_) => true,
             Self::Bearer {
                 created_at,
                 expires_in,
@@ -236,15 +238,25 @@ pub(crate) struct Authorizer {
 
 /// Implements the registry authorizer.
 impl Authorizer {
-    /// Creates an authorizer for a registry whose config carries `basic`, its
-    /// `base64(user:pass)`.
+    /// Creates an authorizer with optional basic credentials and a bearer token.
+    /// A provided token is used first; basic credentials remain for renewal.
     ///
     /// The credentials are validated here so a bad value fails when the
     /// backend is built rather than on the first read.
-    pub(crate) fn new(basic: Option<&str>) -> io::Result<Self> {
+    pub(crate) fn new(basic: Option<&str>, registry_token: Option<&str>) -> io::Result<Self> {
         Ok(Self {
             basic: basic.map(Authorization::basic).transpose()?,
-            authorization: RwLock::new(None),
+            authorization: RwLock::new(
+                registry_token
+                    .map(|token| {
+                        if token.trim().is_empty() {
+                            return Err(io::Error::other("registry bearer token is empty"));
+                        }
+                        Authorization::header_value(&format!("Bearer {token}"))
+                            .map(Authorization::ProvidedBearer)
+                    })
+                    .transpose()?,
+            ),
             handshake: tokio::sync::Mutex::new(()),
         })
     }
@@ -361,6 +373,35 @@ mod tests {
     use nydus_config::TlsConfig;
 
     #[test]
+    fn provided_token_is_sensitive_and_used_until_invalidated() {
+        let authorizer =
+            Authorizer::new(Some("YWxpY2U6c2VjcmV0"), Some("provided-secret")).unwrap();
+        let mut headers = HeaderMap::new();
+        authorizer.authorize(&mut headers);
+        assert_eq!(headers[AUTHORIZATION], "Bearer provided-secret");
+        assert!(headers[AUTHORIZATION].is_sensitive());
+        assert!(
+            !format!("{:?}", authorizer.authorization.read().unwrap()).contains("provided-secret")
+        );
+        authorizer.invalidate(&headers[AUTHORIZATION]);
+        headers.clear();
+        authorizer.authorize(&mut headers);
+        assert!(headers.is_empty());
+        assert!(authorizer.basic.is_some());
+    }
+
+    #[test]
+    fn provided_token_rejects_empty_and_invalid_header_values_without_exposing_them() {
+        for token in ["", "   ", "secret\r\nvalue"] {
+            let error = match Authorizer::new(None, Some(token)) {
+                Ok(_) => panic!("accepted invalid token"),
+                Err(error) => error,
+            };
+            assert!(!error.to_string().contains("secret"));
+        }
+    }
+
+    #[test]
     fn from_str_picks_the_challenge_to_answer() {
         let test_cases: Vec<(&str, fn(io::Result<Challenge>))> = vec![
             (
@@ -428,7 +469,7 @@ mod tests {
         let test_cases = vec![("YWxpY2U6c2VjcmV0", true), ("bad\nvalue", false)];
 
         for (basic, ok) in test_cases {
-            assert_eq!(Authorizer::new(Some(basic)).is_ok(), ok);
+            assert_eq!(Authorizer::new(Some(basic), None).is_ok(), ok);
         }
     }
 
@@ -458,7 +499,7 @@ mod tests {
         ];
 
         for (authorization, expected) in test_cases {
-            let authorizer = Authorizer::new(None).unwrap();
+            let authorizer = Authorizer::new(None, None).unwrap();
             let mut headers = HeaderMap::new();
             authorizer.authorize(&mut headers);
             assert_eq!(headers.get(AUTHORIZATION), None);
@@ -496,7 +537,7 @@ mod tests {
         ];
 
         for (basic, assert_fn) in test_cases {
-            let authorizer = Authorizer::new(basic).unwrap();
+            let authorizer = Authorizer::new(basic, None).unwrap();
             let result = authorizer.authenticate(&http, Challenge::Basic).await;
             let mut headers = HeaderMap::new();
             authorizer.authorize(&mut headers);
@@ -545,7 +586,7 @@ mod tests {
             Source::Origin,
         )
         .unwrap();
-        let authorizer = Authorizer::new(None).unwrap();
+        let authorizer = Authorizer::new(None, None).unwrap();
         let challenge = || Challenge::Bearer {
             realm: realm.clone(),
             service: String::new(),
@@ -567,7 +608,7 @@ mod tests {
 
     #[test]
     fn invalidate_forgets_only_the_answer_a_request_was_refused_with() {
-        let authorizer = Authorizer::new(None).unwrap();
+        let authorizer = Authorizer::new(None, None).unwrap();
         *authorizer.authorization.write().unwrap() =
             Some(Authorization::bearer("fresh", Duration::from_secs(3600)).unwrap());
 

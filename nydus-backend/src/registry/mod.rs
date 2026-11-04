@@ -176,7 +176,10 @@ impl Registry {
             client: Arc::new(Client {
                 addr: config.addr,
                 repository: config.repository,
-                authorizer: Authorizer::new(config.auth.as_deref())?,
+                authorizer: Authorizer::new(
+                    config.auth.as_deref(),
+                    config.registry_token.as_deref(),
+                )?,
                 redirects: RedirectCache::new(),
                 http,
                 dragonfly,
@@ -580,6 +583,7 @@ mod tests {
     struct ScriptedTransport {
         script: Mutex<VecDeque<Scripted>>,
         calls: AtomicU32,
+        headers: Mutex<Vec<HeaderMap>>,
     }
 
     impl ScriptedTransport {
@@ -587,6 +591,7 @@ mod tests {
             Arc::new(ScriptedTransport {
                 script: Mutex::new(script.into_iter().collect()),
                 calls: AtomicU32::new(0),
+                headers: Mutex::new(Vec::new()),
             })
         }
 
@@ -621,11 +626,13 @@ mod tests {
 
     #[async_trait]
     impl Transport for ScriptedTransport {
-        async fn get(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
+        async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.headers.lock().unwrap().push(headers);
             self.play()
         }
 
-        async fn prefetch(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
+        async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.headers.lock().unwrap().push(headers);
             self.play()
         }
     }
@@ -741,7 +748,7 @@ mod tests {
             client: Arc::new(Client {
                 addr: format!("http://{addr}").parse().unwrap(),
                 repository: "library/ubuntu".to_string(),
-                authorizer: Authorizer::new(auth).unwrap(),
+                authorizer: Authorizer::new(auth, None).unwrap(),
                 redirects: RedirectCache::new(),
                 http: Http::new(
                     http.request_timeout,
@@ -908,6 +915,7 @@ mod tests {
 addr: https://registry.example.com
 repository: library/ubuntu
 auth: YWxpY2U6c2VjcmV0
+registry_token: provided
 ";
         let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = Registry::new(
@@ -921,6 +929,9 @@ auth: YWxpY2U6c2VjcmV0
             registry.client.addr.as_str(),
             "https://registry.example.com/"
         );
+        let mut headers = HeaderMap::new();
+        registry.client.authorizer.authorize(&mut headers);
+        assert_eq!(headers[AUTHORIZATION], "Bearer provided");
         assert!(registry.client.dragonfly.is_none());
         assert_eq!(registry.client.source(), Source::Origin);
     }
@@ -972,6 +983,59 @@ auth: YWxpY2U6c2VjcmV0
 
         assert!(err.to_string().contains("503"), "{err}");
         assert_eq!(origin.hits(), 1);
+    }
+
+    #[test]
+    fn provided_token_avoids_a_handshake_and_renews_after_a_401() {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            for renewal in [None, Some(false), Some(true)] {
+                let origin = OriginStub::serve(
+                    "200 OK",
+                    br#"{"token":"renewed","expires_in":300}"#.to_vec(),
+                );
+                let body = b"authorized".to_vec();
+                let mut script = Vec::new();
+                if let Some(bearer) = renewal {
+                    let mut challenge = HeaderMap::new();
+                    challenge.insert(
+                        WWW_AUTHENTICATE,
+                        r#"Basic realm="registry""#.parse().unwrap(),
+                    );
+                    script.push(Scripted::Status(
+                        StatusCode::UNAUTHORIZED,
+                        challenge.clone(),
+                    ));
+                    if bearer {
+                        challenge.insert(WWW_AUTHENTICATE, format!("Bearer realm=\"http://{}/token\",service=\"registry\",scope=\"repository:library/ubuntu:pull\"", origin.addr).parse().unwrap());
+                    }
+                    script.push(Scripted::Status(StatusCode::UNAUTHORIZED, challenge));
+                }
+                script.push(Scripted::Body(StatusCode::PARTIAL_CONTENT, body.clone()));
+                let transport = ScriptedTransport::new(script);
+                let mut registry =
+                    scripted_registry(origin.addr, Some("YWxpY2U6c2VjcmV0"), transport.clone());
+                Arc::get_mut(&mut registry.client).unwrap().authorizer =
+                    Authorizer::new(Some("YWxpY2U6c2VjcmV0"), Some("provided")).unwrap();
+                let mut buf = vec![0; body.len()];
+                read(&registry, kind, &mut buf).unwrap();
+                assert_eq!(buf, body);
+                let headers = transport.headers.lock().unwrap();
+                assert_eq!(headers[0][AUTHORIZATION], "Bearer provided");
+                assert_eq!(headers.len(), if renewal.is_some() { 3 } else { 1 });
+                if let Some(bearer) = renewal {
+                    assert!(!headers[1].contains_key(AUTHORIZATION));
+                    assert_eq!(
+                        headers[2][AUTHORIZATION],
+                        if bearer {
+                            "Bearer renewed"
+                        } else {
+                            "Basic YWxpY2U6c2VjcmV0"
+                        }
+                    );
+                }
+                assert_eq!(origin.hits(), u32::from(renewal == Some(true)));
+            }
+        }
     }
 
     #[test]

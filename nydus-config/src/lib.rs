@@ -162,7 +162,7 @@ impl fmt::Display for ReadKind {
 
 /// The registry backend configuration, serving blobs from an OCI image
 /// registry.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
     /// The registry address, an `http` or `https` origin carrying no path,
@@ -178,6 +178,11 @@ pub struct RegistryConfig {
     #[serde(default)]
     pub auth: Option<String>,
 
+    /// An optional bearer token to use until the registry rejects it. Keep
+    /// `auth` to obtain a replacement when this externally supplied token expires.
+    #[serde(default)]
+    pub registry_token: Option<String>,
+
     /// The HTTP client configuration of requests to the origin registry:
     /// timeouts, retries, and TLS trust. Every origin request goes through
     /// it, the on-demand reads a Dragonfly backend falls back to the origin
@@ -192,6 +197,22 @@ pub struct RegistryConfig {
     /// the configuration is loaded instead of silently ignoring it.
     #[serde(default)]
     pub dragonfly: Option<DragonflyConfig>,
+}
+
+impl fmt::Debug for RegistryConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegistryConfig")
+            .field("addr", &self.addr)
+            .field("repository", &self.repository)
+            .field("auth", &self.auth.as_ref().map(|_| "<redacted>"))
+            .field(
+                "registry_token",
+                &self.registry_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("http", &self.http)
+            .field("dragonfly", &self.dragonfly)
+            .finish()
+    }
 }
 
 /// The HTTP client configuration for the registry backend.
@@ -610,6 +631,19 @@ mod tests {
     use clap::builder::TypedValueParser;
     use std::ffi::OsStr;
     use std::io::Write;
+
+    #[test]
+    fn registry_token_deserializes_and_credentials_are_redacted() {
+        let config: RegistryConfig = serde_yaml::from_str("addr: https://registry.example\nrepository: library/ubuntu\nauth: basic-secret\nregistry_token: provided-secret\n").unwrap();
+        assert_eq!(config.registry_token.as_deref(), Some("provided-secret"));
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("provided-secret"));
+        assert!(!debug.contains("basic-secret"));
+        let anonymous: RegistryConfig =
+            serde_yaml::from_str("addr: https://registry.example\nrepository: library/ubuntu\n")
+                .unwrap();
+        assert!(anonymous.registry_token.is_none());
+    }
 
     #[cfg(not(feature = "dragonfly"))]
     #[test]
