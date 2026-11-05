@@ -557,7 +557,7 @@ mod tests {
     use nydus_config::HttpConfig;
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
-    use reqwest::header::LOCATION;
+    use reqwest::header::{CONTENT_RANGE, LOCATION};
     use std::collections::VecDeque;
     use std::fs;
     use std::net::{SocketAddr, TcpListener};
@@ -611,12 +611,25 @@ mod tests {
                 .pop_front()
                 .expect("transport called more times than scripted");
             match scripted {
-                Scripted::Body(body) => Ok(Response {
-                    status: StatusCode::PARTIAL_CONTENT,
-                    headers: HeaderMap::new(),
-                    body: Body::Stream(Box::new(io::Cursor::new(body))),
-                    source: Source::Dragonfly,
-                }),
+                Scripted::Body(body) => {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        CONTENT_RANGE,
+                        ContentRange {
+                            range: 0..=body.len() as u64 - 1,
+                            complete_length: body.len() as u64,
+                        }
+                        .to_string()
+                        .parse()
+                        .unwrap(),
+                    );
+                    Ok(Response {
+                        status: StatusCode::PARTIAL_CONTENT,
+                        headers,
+                        body: Body::Stream(Box::new(io::Cursor::new(body))),
+                        source: Source::Dragonfly,
+                    })
+                }
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
@@ -662,9 +675,11 @@ mod tests {
                 tokio::time::sleep(self.delay).await;
             }
             if headers.contains_key(AUTHORIZATION) {
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_RANGE, "bytes 0-1/2".parse().unwrap());
                 return Ok(Response {
                     status: StatusCode::PARTIAL_CONTENT,
-                    headers: HeaderMap::new(),
+                    headers,
                     body: Body::Stream(Box::new(io::Cursor::new(b"ok".to_vec()))),
                     source: Source::Dragonfly,
                 });
