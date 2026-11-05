@@ -42,12 +42,13 @@ func TestMetadataResponse(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		fault registry.Fault
+		log   string
 	}{
-		{"MissingContentRange", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": ""}}},
-		{"InvalidContentRange", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": "bytes 0-1/not-a-length"}}},
-		{"UnknownContentLength", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": "bytes 0-1/*"}}},
-		{"ShortFooter", registry.Fault{Match: footer, ShortBody: 1}},
-		{"ShortMetadata", registry.Fault{Match: meta, ShortBody: 1}},
+		{"MissingContentRange", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": ""}}, "missing Content-Range"},
+		{"InvalidContentRange", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": "bytes 0-1/not-a-length"}}, "invalid Content-Range bytes 0-1/not-a-length"},
+		{"UnknownContentLength", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": "bytes 0-1/*"}}, "invalid Content-Range bytes 0-1/*"},
+		{"ShortFooter", registry.Fault{Match: footer, ShortBody: 1}, "early eof"},
+		{"ShortMetadata", registry.Fault{Match: meta, ShortBody: 1}, "early eof"},
 	} {
 		for _, scope := range []string{"none", "all"} {
 			t.Run(tc.name+"/"+scope, func(t *testing.T) {
@@ -61,11 +62,7 @@ func TestMetadataResponse(t *testing.T) {
 
 				m.expectFailure(t, scope)
 
-				if tc.fault.ShortBody > 0 {
-					m.Daemon.WaitForLog(t, 10*time.Second, "early eof")
-				} else {
-					m.Daemon.WaitForLog(t, 10*time.Second, "missing a valid content-range")
-				}
+				m.Daemon.WaitForLog(t, 10*time.Second, tc.log)
 
 				if !assert.Zero(t, m.API.Metrics(t).Sum("nydus_backend_read_total")) {
 					t.FailNow()
