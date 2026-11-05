@@ -157,14 +157,13 @@ impl Dragonfly {
         (ondemand_client, prefetch_client)
     }
 
-    /// Waits for `client` to connect to the scheduler, returning the error
-    /// that failed it.
+    /// Waits for `client` to connect to the scheduler, logging and returning
+    /// the error that failed it.
     async fn wait(client: &SetOnce<Result<Proxy, Error>>) -> io::Result<&Proxy> {
-        client
-            .wait()
-            .await
-            .as_ref()
-            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
+        client.wait().await.as_ref().map_err(|err| {
+            error!("failed to build dragonfly client: {err}");
+            io::Error::other(format!("failed to build dragonfly client: {err}"))
+        })
     }
 }
 
@@ -187,12 +186,8 @@ impl Transport for Dragonfly {
 
         // Wait until the seed peer client has connected to the scheduler,
         // falling back to the origin when it failed to.
-        let client = match Self::wait(&self.ondemand_client).await {
-            Ok(client) => client,
-            Err(err) => {
-                warn!("dragonfly request failed, falling back to the origin: {err}");
-                return self.fallback_http_client.get(url, headers).await;
-            }
+        let Ok(client) = Self::wait(&self.ondemand_client).await else {
+            return self.fallback_http_client.get(url, headers).await;
         };
 
         let start = Instant::now();
