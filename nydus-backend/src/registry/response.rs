@@ -42,44 +42,70 @@ impl Response {
     /// Validates that the answer to a `range` read carries exactly that range,
     /// since the server may ignore the `Range` header or transfer a range
     /// different from the requested one, which is described by the
-    /// `Content-Range` header, refer to RFC 9110 Section 15.3.7. A `206`
-    /// without a `Content-Range` is taken as the range it answers.
+    /// `Content-Range` header, refer to RFC 9110 Section 15.3.7. Only a `206`
+    /// passes: a `200` is the whole blob.
     ///
-    /// Dragonfly 1.3 answers a partial download with a `200` and the exact
-    /// `Content-Range`, so a seed peer's `200` goes through the same checks;
-    /// an origin's `200` is the whole blob and never does.
+    /// An origin's `206` without a `Content-Range` is taken as the range it
+    /// answers. A Dragonfly seed peer always names the range in its
+    /// `Content-Range`, and its body, buffered by the SDK, holds that range
+    /// alone.
     pub(crate) fn validate_range(&self, range: &Range) -> io::Result<()> {
-        let err = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+        if self.source == Source::Dragonfly {
+            if self.status != StatusCode::PARTIAL_CONTENT {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected 206 Partial Content for range {range}, got {}",
+                        self.status
+                    ),
+                ));
+            }
 
-        match (self.status, self.source) {
-            (StatusCode::PARTIAL_CONTENT, _) if !self.headers.contains_key(CONTENT_RANGE) => {
-                return Ok(());
+            let content_range = self.content_range()?;
+            let expected = range.to_range(content_range.complete_length);
+            if content_range.range != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Content-Range {content_range} mismatches requested range {range}"),
+                ));
             }
-            (StatusCode::PARTIAL_CONTENT, _) | (StatusCode::OK, Source::Dragonfly) => {}
-            (status, _) => {
-                return Err(err(format!(
-                    "expected 206 Partial Content for range {range}, got {status}"
-                )));
+
+            #[cfg(feature = "dragonfly")]
+            if let Body::Bytes(bytes) = &self.body {
+                if bytes.len() as u64 != expected.end() - expected.start() + 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "body of {} bytes mismatches Content-Range {content_range}",
+                            bytes.len()
+                        ),
+                    ));
+                }
             }
+
+            return Ok(());
+        }
+
+        if self.status != StatusCode::PARTIAL_CONTENT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "expected 206 Partial Content for range {range}, got {}",
+                    self.status
+                ),
+            ));
+        }
+
+        if !self.headers.contains_key(CONTENT_RANGE) {
+            return Ok(());
         }
 
         let content_range = self.content_range()?;
-        let expected = range.to_range(content_range.complete_length);
-        if content_range.range != expected {
-            return Err(err(format!(
-                "Content-Range {content_range} mismatches requested range {range}"
-            )));
-        }
-
-        // The Dragonfly SDK buffers the body, which holds the range alone.
-        #[cfg(feature = "dragonfly")]
-        if let Body::Bytes(bytes) = &self.body {
-            if bytes.len() as u64 != expected.end() - expected.start() + 1 {
-                return Err(err(format!(
-                    "body of {} bytes mismatches Content-Range {content_range}",
-                    bytes.len()
-                )));
-            }
+        if content_range.range != range.to_range(content_range.complete_length) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Content-Range {content_range} mismatches requested range {range}"),
+            ));
         }
 
         Ok(())
@@ -111,7 +137,7 @@ impl Response {
 
     /// Reads the body as a UTF-8 string.
     pub(crate) async fn text(self) -> io::Result<String> {
-        let bytes = match self.body {
+        let bytes: Bytes = match self.body {
             #[cfg(feature = "dragonfly")]
             Body::Bytes(bytes) => bytes,
             Body::Stream(mut reader) => {
@@ -186,11 +212,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_range_accepts_a_206_or_a_dragonfly_200() {
+    fn validate_range_accepts_only_a_206() {
         let test_cases = vec![
             (StatusCode::PARTIAL_CONTENT, Source::Origin, true),
             (StatusCode::PARTIAL_CONTENT, Source::Dragonfly, true),
-            (StatusCode::OK, Source::Dragonfly, true),
+            (StatusCode::OK, Source::Dragonfly, false),
             (StatusCode::OK, Source::Origin, false),
             (StatusCode::OK, Source::Fallback, false),
             (StatusCode::NO_CONTENT, Source::Origin, false),
@@ -216,30 +242,30 @@ mod tests {
     #[test]
     fn validate_range_requires_the_content_range_to_name_the_range() {
         let test_cases = vec![
-            (StatusCode::PARTIAL_CONTENT, Some("bytes 2-5/8"), true),
-            (StatusCode::PARTIAL_CONTENT, Some("bytes 1-4/8"), false),
-            (StatusCode::PARTIAL_CONTENT, Some("bytes 2-5/*"), false),
-            (StatusCode::PARTIAL_CONTENT, None, true),
-            (StatusCode::OK, Some("bytes 2-5/8"), true),
-            (StatusCode::OK, Some("bytes 0-7/8"), false),
-            (StatusCode::OK, None, false),
+            (Source::Origin, Some("bytes 2-5/8"), true),
+            (Source::Origin, Some("bytes 1-4/8"), false),
+            (Source::Origin, Some("bytes 2-5/*"), false),
+            (Source::Origin, None, true),
+            (Source::Dragonfly, Some("bytes 2-5/8"), true),
+            (Source::Dragonfly, Some("bytes 1-4/8"), false),
+            (Source::Dragonfly, None, false),
         ];
 
-        for (status, content_range, expected) in test_cases {
+        for (source, content_range, expected) in test_cases {
             let mut headers = HeaderMap::new();
             if let Some(value) = content_range {
                 headers.insert(CONTENT_RANGE, value.parse().unwrap());
             }
             let response = Response {
-                status,
+                status: StatusCode::PARTIAL_CONTENT,
                 headers,
                 body: Body::Stream(Box::new(io::Cursor::new(b"abcd".to_vec()))),
-                source: Source::Dragonfly,
+                source,
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
                 expected,
-                "{status} {content_range:?}"
+                "{source:?} {content_range:?}"
             );
         }
     }

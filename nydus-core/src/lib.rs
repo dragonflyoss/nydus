@@ -287,10 +287,10 @@ impl NydusCore {
         &self.bootstrap
     }
 
-    /// Wait until the blob backend is ready to serve, returning the error
-    /// that failed it; see [`Backend::ready`].
-    pub fn ready(&self) -> Result<()> {
-        self.backend.ready().context("blob backend failed")
+    /// Return the blob backend this core reads through, whose
+    /// [`Backend::ready`] waits for what it connects in the background.
+    pub fn backend(&self) -> &Arc<dyn Backend> {
+        &self.backend
     }
 
     /// Return the metrics of this core alone: every backend read, cache fill

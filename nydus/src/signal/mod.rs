@@ -1,13 +1,13 @@
 //! Termination-signal registration and graceful-shutdown threads for frontends.
 
 use nydus_error::{Context, Error, Result};
-use signal_hook::consts::{signal::SIGHUP, signal::SIGTERM, TERM_SIGNALS};
+use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use signal_hook::flag;
 use signal_hook::iterator::Handle;
 pub use signal_hook::iterator::Signals;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 /// Register the termination signals and return the iterator the signal
 /// thread will drain. Called first in the daemon startup preamble: the first
@@ -91,52 +91,6 @@ pub fn spawn_signal_thread(
     Ok(SignalThread {
         name: name.to_string(),
         handle,
-        thread,
-    })
-}
-
-/// A running thread waiting for the blob backend, spawned by
-/// [`spawn_ready_thread`].
-pub struct ReadyThread {
-    name: String,
-    thread: std::thread::JoinHandle<Result<()>>,
-}
-
-/// Implement the join for ReadyThread.
-impl ReadyThread {
-    /// Join the thread, returning the error the blob backend failed with.
-    pub fn join(self) -> Result<()> {
-        self.thread
-            .join()
-            .map_err(|_| Error::Runtime(format!("{} ready thread panicked", self.name)))?
-    }
-}
-
-/// Spawn the thread waiting on `ready` for the blob backend, which connects
-/// in the background so the daemon mounts without waiting on it. A backend
-/// that fails raises SIGTERM, so the daemon stops through the graceful
-/// shutdown of its signal thread as for a termination signal, and
-/// [`ReadyThread::join`] hands the failure back as the daemon's error.
-pub fn spawn_ready_thread(
-    name: &str,
-    ready: impl FnOnce() -> Result<()> + Send + 'static,
-) -> Result<ReadyThread> {
-    let thread = std::thread::Builder::new()
-        .name(format!("nydus_{name}_ready"))
-        .spawn(move || {
-            let result = ready();
-            if let Err(err) = &result {
-                error!("{}, stopping the daemon", err.report());
-                if let Err(err) = signal_hook::low_level::raise(SIGTERM) {
-                    error!("failed to raise SIGTERM: {err}");
-                }
-            }
-            result
-        })
-        .with_context(|| format!("failed to spawn {name} ready thread"))?;
-
-    Ok(ReadyThread {
-        name: name.to_string(),
         thread,
     })
 }

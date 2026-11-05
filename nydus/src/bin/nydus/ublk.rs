@@ -146,6 +146,7 @@ impl UblkCommand {
     /// its path, and serves I/O until a termination signal stops it.
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         let core = Arc::new(UblkCore::new(&self.bootstrap, config)?);
+        let backend = core.core().backend().clone();
         info!(
             "serving {} as a {} byte block device",
             self.bootstrap.display(),
@@ -161,10 +162,6 @@ impl UblkCommand {
         };
         let metrics = core.core().metrics().clone();
         let ondemand_recorder = core.core().ondemand_recorder().clone();
-        let ready = {
-            let core = core.core().clone();
-            move || core.ready()
-        };
         let service = UblkService::new(core, &options)?;
         println!("{}", service.dev_path());
 
@@ -186,7 +183,6 @@ impl UblkCommand {
         let signal_thread = signal::spawn_signal_thread("ublk", signals, move || {
             handle.stop();
         })?;
-        let ready_thread = signal::spawn_ready_thread("ublk", ready)?;
 
         let result = service.run();
         service.delete();
@@ -195,7 +191,7 @@ impl UblkCommand {
         }
 
         signal_thread.shutdown()?;
-        ready_thread.join()?;
+        backend.ready()?;
         result
     }
 }

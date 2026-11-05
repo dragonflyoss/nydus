@@ -250,15 +250,7 @@ impl FuseCommand {
             .as_ref()
             .map(|config| CacheOptions::from(&config.storage))
             .unwrap_or_default();
-        let ready = {
-            let backend = backend.clone();
-            move || {
-                backend.map_or(Ok(()), |backend| {
-                    backend.ready().context("blob backend failed")
-                })
-            }
-        };
-        let reader = match (&self.blob, &self.bootstrap, backend) {
+        let reader = match (&self.blob, &self.bootstrap, backend.clone()) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
             (Some(blob), None, _) => ErofsReader::open_blob(
@@ -310,7 +302,6 @@ impl FuseCommand {
             ondemand_recorder,
         )?;
         let session = startup.start(fs, &config, shutdown)?;
-        let ready_thread = signal::spawn_ready_thread("fuse", ready)?;
 
         let mut prefetch_stop = None;
         if prefetch_scope == PrefetchScope::None {
@@ -345,7 +336,9 @@ impl FuseCommand {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        ready_thread.join()?;
+        if let Some(backend) = &backend {
+            backend.ready()?;
+        }
         result
     }
 }

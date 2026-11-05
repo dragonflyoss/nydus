@@ -50,7 +50,7 @@ impl FromStr for Range {
     fn from_str(value: &str) -> io::Result<Self> {
         value
             .strip_prefix("bytes=")
-            .and_then(|spec| spec.split_once('-'))
+            .and_then(|range_set| range_set.split_once('-'))
             .and_then(|(first, last)| match first {
                 "" => Some(Range::Suffix(last.parse().ok()?)),
                 first => Some(Range::Bounded(first.parse().ok()?..=last.parse().ok()?)),
@@ -96,9 +96,9 @@ impl FromStr for ContentRange {
     fn from_str(value: &str) -> io::Result<Self> {
         value
             .strip_prefix("bytes ")
-            .and_then(|spec| {
-                let (range, complete_length) = spec.split_once('/')?;
-                let (first, last) = range.split_once('-')?;
+            .and_then(|range_resp| {
+                let (incl_range, complete_length) = range_resp.split_once('/')?;
+                let (first, last) = incl_range.split_once('-')?;
                 Some((
                     first.parse::<u64>().ok()?,
                     last.parse::<u64>().ok()?,
@@ -151,8 +151,8 @@ mod tests {
             ("items=2-5", None),
         ];
 
-        for (value, expected) in test_cases {
-            assert_eq!(value.parse::<Range>().ok(), expected, "{value}");
+        for (header, expected) in test_cases {
+            assert_eq!(header.parse::<Range>().ok(), expected, "{header}");
         }
     }
 
@@ -196,12 +196,12 @@ mod tests {
             ("bytes 2-5/18446744073709551616", None),
         ];
 
-        for (value, expected) in test_cases {
-            let content_range = value
+        for (header, expected) in test_cases {
+            let content_range = header
                 .parse::<ContentRange>()
                 .ok()
                 .map(|content_range| (content_range.range, content_range.complete_length));
-            assert_eq!(content_range, expected, "{value}");
+            assert_eq!(content_range, expected, "{header}");
         }
     }
 }

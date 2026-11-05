@@ -26,10 +26,15 @@ use super::rt::Runtime;
 use super::Transport;
 use crate::Source;
 
+/// A seed peer client a read waits for, set once its background connect to
+/// the scheduler finishes.
+type SeedPeerClient = Arc<SetOnce<Result<Proxy, Error>>>;
+
 /// The Dragonfly SDK transport: a blob `GET` rides the SDK to the seed peers
 /// named by the scheduler, one client per read kind on the backend's
-/// runtime, each connecting to the scheduler in the background so building
-/// the transport never delays a mount.
+/// runtime. Both connect to the scheduler in the background so building the
+/// transport never delays a mount, and a failed connect stops the process
+/// with SIGTERM, since a daemon configured with Dragonfly fails without it.
 ///
 /// ```text
 /// GET ──▶ wait for the client ──▶ seed peer ──▶ 2xx / 3xx / 4xx ──────▶ handed back as is
@@ -44,11 +49,11 @@ pub(crate) struct Dragonfly {
     /// The seed peer client of on-demand reads, retrying on the next seed
     /// peer after an exponential backoff, a `429` included since another seed
     /// peer may not be rate limited.
-    ondemand_client: Arc<SetOnce<io::Result<Proxy>>>,
+    ondemand_client: SeedPeerClient,
 
     /// The seed peer client of prefetch reads, never retrying at once: a
     /// failed prefetch is sent once more after the retry interval instead.
-    prefetch_client: Arc<SetOnce<io::Result<Proxy>>>,
+    prefetch_client: SeedPeerClient,
 
     /// The rate-limited client an on-demand read falls back to the origin
     /// through when the seed peers cannot serve it, the registry's `http`
@@ -66,9 +71,10 @@ pub(crate) struct Dragonfly {
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Creates the transport, each seed peer client connecting to the
-    /// configured scheduler on `runtime`, with the fallback client built
-    /// from the registry's `http` settings under `fallback_rate_limit`.
+    /// Creates the transport, the seed peer clients connecting to the
+    /// configured scheduler on `runtime` in the background, with the fallback
+    /// client built from the registry's `http` settings under
+    /// `fallback_rate_limit`.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers; a failed prefetch read is sent once more after
@@ -79,13 +85,15 @@ impl Dragonfly {
         prefetch_retry_interval: Duration,
         runtime: &Runtime,
     ) -> io::Result<Self> {
+        let (ondemand_client, prefetch_client) = Self::clients(
+            runtime,
+            config.scheduler_endpoint.clone(),
+            config.max_retries as u8,
+        );
+
         Ok(Self {
-            ondemand_client: Self::client(
-                runtime,
-                config.scheduler_endpoint.clone(),
-                config.max_retries as u8,
-            ),
-            prefetch_client: Self::client(runtime, config.scheduler_endpoint, 0),
+            ondemand_client,
+            prefetch_client,
             fallback_http_client: Http::new(
                 http.request_timeout,
                 http.max_retries,
@@ -104,48 +112,69 @@ impl Dragonfly {
         })
     }
 
-    /// Creates a seed peer client on the runtime in the background, so the
-    /// scheduler is reached from the runtime's netns without the caller
-    /// waiting on it, retrying `max_retries` times across seed peers with a
-    /// jittered exponential backoff.
-    fn client(
+    /// Creates the on-demand and prefetch seed peer clients without waiting
+    /// for them to connect: a task on `runtime` connects them to the
+    /// scheduler in the background, from the runtime's netns, and reads wait
+    /// on the clients until it does. Both retry across seed peers with a
+    /// jittered exponential backoff, the on-demand one `max_retries` times and
+    /// the prefetch one never. Either failing raises SIGTERM once, since a
+    /// second one forces the daemon out before it unmounts.
+    fn clients(
         runtime: &Runtime,
         scheduler_endpoint: String,
         max_retries: u8,
-    ) -> Arc<SetOnce<io::Result<Proxy>>> {
-        let client = Arc::new(SetOnce::new());
+    ) -> (SeedPeerClient, SeedPeerClient) {
+        let ondemand_client = Arc::new(SetOnce::new());
+        let prefetch_client = Arc::new(SetOnce::new());
 
-        // Build the client on the runtime, so the reads waiting on it never
-        // block the caller.
         runtime.spawn({
-            let client = client.clone();
+            let ondemand_client = ondemand_client.clone();
+            let prefetch_client = prefetch_client.clone();
             async move {
-                let result = Proxy::builder()
-                    .scheduler_endpoint(scheduler_endpoint)
-                    .max_retries(max_retries)
-                    .backoff(ExponentialBuilder::default().with_jitter())
-                    .build()
-                    .await
-                    .map_err(|err| {
-                        io::Error::other(format!("failed to build dragonfly client: {err}"))
-                    });
+                let (ondemand, prefetch) = tokio::join!(
+                    Proxy::builder()
+                        .scheduler_endpoint(scheduler_endpoint.clone())
+                        .max_retries(max_retries)
+                        .backoff(ExponentialBuilder::default().with_jitter())
+                        .build(),
+                    Proxy::builder()
+                        .scheduler_endpoint(scheduler_endpoint)
+                        .max_retries(0)
+                        .backoff(ExponentialBuilder::default().with_jitter())
+                        .build(),
+                );
 
-                if client.set(result).is_err() {
-                    error!("dragonfly client is built twice");
+                if let Err(err) = ondemand.as_ref().and(prefetch.as_ref()) {
+                    error!("dragonfly client failed, stopping the process: {err}");
+
+                    // SAFETY: raise only delivers SIGTERM to this thread, whose
+                    // handler the daemon registered for its graceful shutdown.
+                    if unsafe { libc::raise(libc::SIGTERM) } != 0 {
+                        error!("failed to raise SIGTERM: {}", io::Error::last_os_error());
+                    }
+                }
+
+                if ondemand_client.set(ondemand).is_err() {
+                    error!("dragonfly on-demand client is built twice");
+                }
+
+                if prefetch_client.set(prefetch).is_err() {
+                    error!("dragonfly prefetch client is built twice");
                 }
             }
         });
-        client
+
+        (ondemand_client, prefetch_client)
     }
 
     /// Waits for `client` to connect to the scheduler, returning the error
     /// that failed it.
-    async fn wait(client: &SetOnce<io::Result<Proxy>>) -> io::Result<&Proxy> {
+    async fn wait(client: &SeedPeerClient) -> io::Result<&Proxy> {
         client
             .wait()
             .await
             .as_ref()
-            .map_err(|err| io::Error::new(err.kind(), err.to_string()))
+            .map_err(|err| io::Error::other(format!("failed to build dragonfly client: {err}")))
     }
 }
 

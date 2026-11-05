@@ -185,10 +185,6 @@ impl NbdCommand {
             }
             signal_service.stop();
         })?;
-        let ready_thread = signal::spawn_ready_thread("nbd", {
-            let core = core.core().clone();
-            move || core.ready()
-        })?;
 
         let outcome = if let Some(mp) = mountpoint {
             // `NBD_DO_IT` blocks its thread, so run it on a dedicated one and
@@ -252,7 +248,7 @@ impl NbdCommand {
         }
 
         signal_thread.shutdown()?;
-        ready_thread.join()?;
+        core.core().backend().ready()?;
         outcome
     }
 }

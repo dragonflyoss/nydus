@@ -293,6 +293,7 @@ impl Client {
                     response.validate_range(range)?;
                     return Ok(response);
                 }
+
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -302,10 +303,12 @@ impl Client {
         let response = self
             .execute(headers.clone(), |headers| transport.get(&url, headers))
             .await?;
+
         if response.status.is_success() {
             response.validate_range(range)?;
             return Ok(response);
         }
+
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
         }
@@ -352,6 +355,7 @@ impl Client {
         let response = self
             .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
             .await?;
+
         if response.status.is_success() {
             response.validate_range(range)?;
             return Ok(response);
@@ -1004,7 +1008,9 @@ mod tests {
 
     #[cfg(feature = "dragonfly")]
     #[test]
-    fn unreachable_scheduler_fails_ready_while_ondemand_reads_fall_back() {
+    fn unreachable_scheduler_raises_sigterm_while_ondemand_reads_fall_back() {
+        let terminated = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone()).unwrap();
         let scheduler = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -1029,6 +1035,7 @@ mod tests {
             .unwrap();
 
         assert!(registry.ready().is_err());
+        assert!(terminated.load(Ordering::SeqCst));
         assert_eq!(&buf, b"abcd");
         assert!(registry
             .prefetch_range_into(&TEST_BLOB_ID, 0, &mut buf)

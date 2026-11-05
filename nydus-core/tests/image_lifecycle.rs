@@ -1,11 +1,8 @@
-//! Two cores over identical blobs still own independent telemetry and
-//! tracing, and cache metrics unregister when their owning core disappears.
-
 mod common;
 
 use std::sync::Arc;
 
-use common::{Image, FILE_NAME};
+use common::{Image, CHUNK_SIZE, FILE_NAME};
 use nydus_core::NydusCore;
 
 fn cached_bytes(core: &NydusCore) -> f64 {
@@ -43,26 +40,28 @@ fn read_group(core: &NydusCore, image: &Image, group: usize) {
 }
 
 #[test]
-fn per_image_metrics_trace_and_drop_are_isolated_even_for_identical_blobs() {
+fn new_gives_each_core_its_own_metrics_and_trace_for_identical_blobs() {
     let image = Image::build();
     let first_dir = image.dir.path().join("first");
     let second_dir = image.dir.path().join("second");
     let first = image.core(&first_dir, &["fetch_size: 0"]);
     let second = image.core(&second_dir, &["fetch_size: 0"]);
+
+    read_group(&first, &image, 2);
+    read_group(&first, &image, 2);
+    read_group(&second, &image, 4);
     assert!(!Arc::ptr_eq(first.metrics(), second.metrics()));
     assert!(!Arc::ptr_eq(
         first.ondemand_recorder(),
         second.ondemand_recorder()
     ));
-    read_group(&first, &image, 2);
-    read_group(&first, &image, 2);
-    read_group(&second, &image, 4);
     assert_eq!(first.ondemand_snapshot().entries.len(), 1);
     assert_eq!(first.ondemand_snapshot().entries[0].chunk_group_index, 2);
     assert_eq!(second.ondemand_snapshot().entries.len(), 1);
     assert_eq!(second.ondemand_snapshot().entries[0].chunk_group_index, 4);
-    assert_eq!(cached_bytes(&first), f64::from(common::CHUNK_SIZE));
-    assert_eq!(cached_bytes(&second), f64::from(common::CHUNK_SIZE));
+    assert_eq!(cached_bytes(&first), f64::from(CHUNK_SIZE));
+    assert_eq!(cached_bytes(&second), f64::from(CHUNK_SIZE));
+
     let old_metrics = first.metrics().clone();
     let old_trace = Arc::downgrade(first.ondemand_recorder());
     drop(first);
@@ -74,11 +73,12 @@ fn per_image_metrics_trace_and_drop_are_isolated_even_for_identical_blobs() {
         .any(|family| family.get_name() == "nydus_cache_bytes"));
     read_group(&second, &image, 1);
     assert_eq!(second.ondemand_snapshot().entries.len(), 2);
-    assert_eq!(cached_bytes(&second), f64::from(2 * common::CHUNK_SIZE));
+    assert_eq!(cached_bytes(&second), f64::from(2 * CHUNK_SIZE));
+
     let reopened = image.core(&first_dir, &["fetch_size: 0"]);
     assert!(reopened.ondemand_snapshot().entries.is_empty());
     read_group(&reopened, &image, 2);
     assert_eq!(reopened.ondemand_snapshot().entries.len(), 1);
-    assert_eq!(cached_bytes(&reopened), f64::from(common::CHUNK_SIZE));
+    assert_eq!(cached_bytes(&reopened), f64::from(CHUNK_SIZE));
     assert_eq!(second.ondemand_snapshot().entries.len(), 2);
 }
