@@ -224,7 +224,7 @@ pub(crate) struct RateLimit {
 impl RateLimit {
     /// Creates a limit of `request_rate_limit` requests per `interval`, both
     /// at least one.
-    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
+    #[cfg(feature = "dragonfly")]
     pub(crate) fn new(request_rate_limit: u64, interval: Duration) -> Self {
         Self {
             limiter: RateLimiter::builder()
@@ -289,6 +289,7 @@ mod tests {
         assert!(start.elapsed() < retry_interval);
     }
 
+    #[cfg(feature = "dragonfly")]
     #[test]
     fn new_accepts_an_optional_rate_limit() {
         let tls = TlsConfig::default();
@@ -314,6 +315,7 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(feature = "dragonfly")]
     #[test]
     fn new_fills_a_fair_bucket_to_the_limit() {
         let limit = RateLimit::new(10, Duration::from_millis(100));

@@ -31,7 +31,7 @@ use self::auth::{Authorizer, Challenge};
 #[cfg(feature = "dragonfly")]
 use self::dragonfly::Dragonfly;
 use self::http::Http;
-use self::range::GetRange;
+use self::range::Range;
 use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
@@ -280,7 +280,7 @@ impl Client {
     async fn read_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
-        range: &GetRange,
+        range: &Range,
     ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
         let mut headers = HeaderMap::new();
@@ -330,7 +330,7 @@ impl Client {
     async fn prefetch_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
-        range: &GetRange,
+        range: &Range,
     ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
         let mut headers = HeaderMap::new();
@@ -379,7 +379,7 @@ impl Client {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
         let response = self
-            .read_range(blob_id, &GetRange::Suffix(BlobFooter::SIZE as u64))
+            .read_range(blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
             .await?;
         let footer_offset =
             BlobFooter::calculate_offset_by_blob_size(response.content_range()?.complete_length)
@@ -399,7 +399,7 @@ impl Client {
         let blob_metadata_bytes = self
             .read_range(
                 blob_id,
-                &GetRange::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
+                &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
             )
             .await?
             .bytes(blob_metadata_size)
@@ -416,7 +416,7 @@ impl Client {
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
         let response = self
-            .prefetch_range(blob_id, &GetRange::Suffix(BlobFooter::SIZE as u64))
+            .prefetch_range(blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
             .await?;
         let footer_offset =
             BlobFooter::calculate_offset_by_blob_size(response.content_range()?.complete_length)
@@ -436,7 +436,7 @@ impl Client {
         let blob_metadata_bytes = self
             .prefetch_range(
                 blob_id,
-                &GetRange::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
+                &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
             )
             .await?
             .bytes(blob_metadata_size)
@@ -493,7 +493,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let length = buf.len();
         let result = self.runtime.block_on_worker(async move {
-            let range = GetRange::Bounded(offset..=(offset + length as u64).saturating_sub(1));
+            let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
             let response = client.read_range(&blob_id, &range).await?;
             let source = response.source;
             Ok((response.bytes(length).await?, source))
@@ -532,7 +532,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let length = buf.len();
         let result = self.runtime.block_on_worker(async move {
-            let range = GetRange::Bounded(offset..=(offset + length as u64).saturating_sub(1));
+            let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
             let response = client.prefetch_range(&blob_id, &range).await?;
             let source = response.source;
             Ok((response.bytes(length).await?, source))
@@ -564,7 +564,6 @@ mod tests {
     use super::range::ContentRange;
     use super::response::Body;
     use super::*;
-    use bytes::Bytes;
     use nydus_config::HttpConfig;
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
@@ -625,13 +624,13 @@ mod tests {
                 Scripted::Body(body) => Ok(Response {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers: HeaderMap::new(),
-                    body: Body::Bytes(body.into()),
+                    body: Body::Stream(Box::new(io::Cursor::new(body))),
                     source: Source::Dragonfly,
                 }),
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
-                    body: Body::Bytes(Bytes::new()),
+                    body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
                     source: Source::Dragonfly,
                 }),
             }
@@ -676,7 +675,7 @@ mod tests {
                 return Ok(Response {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers: HeaderMap::new(),
-                    body: Body::Bytes(Bytes::from_static(b"ok")),
+                    body: Body::Stream(Box::new(io::Cursor::new(b"ok".to_vec()))),
                     source: Source::Dragonfly,
                 });
             }
@@ -689,7 +688,7 @@ mod tests {
             Ok(Response {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
-                body: Body::Bytes(Bytes::new()),
+                body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
                 source: Source::Dragonfly,
             })
         }
@@ -749,12 +748,7 @@ mod tests {
                 .lines()
                 .find_map(|line| line.strip_prefix("range: "))
                 .filter(|_| status.starts_with("206"))
-                .map(|value| {
-                    value
-                        .parse::<GetRange>()
-                        .unwrap()
-                        .to_range(blob.len() as u64)
-                });
+                .map(|value| value.parse::<Range>().unwrap().to_range(blob.len() as u64));
             let (content_range, body) = match range {
                 Some(range) => (
                     format!(
@@ -829,7 +823,7 @@ mod tests {
     fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Source> {
         registry.runtime.tokio().block_on(async {
             let client = &registry.client;
-            let range = GetRange::Bounded(0..=buf.len() as u64 - 1);
+            let range = Range::Bounded(0..=buf.len() as u64 - 1);
             let response = match kind {
                 ReadKind::Ondemand => client.read_range(&TEST_BLOB_ID, &range).await?,
                 ReadKind::Prefetch => client.prefetch_range(&TEST_BLOB_ID, &range).await?,

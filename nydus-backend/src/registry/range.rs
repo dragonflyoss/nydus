@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 /// The byte range a blob `GET` asks for, sent as the `Range` header.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GetRange {
+pub(crate) enum Range {
     /// The bytes from the first to the last, both included.
     Bounded(RangeInclusive<u64>),
 
@@ -17,32 +17,32 @@ pub(crate) enum GetRange {
 }
 
 /// Implements the requested byte range.
-impl GetRange {
+impl Range {
     /// Returns the bytes the range selects of a blob `complete_length` long:
     /// a suffix counts back from the end, and a range past the end stops at
     /// the last byte, refer to RFC 9110 Section 14.1.2.
     pub(crate) fn to_range(&self, complete_length: u64) -> RangeInclusive<u64> {
         let last = complete_length.saturating_sub(1);
         match self {
-            GetRange::Bounded(range) => *range.start()..=(*range.end()).min(last),
-            GetRange::Suffix(length) => complete_length.saturating_sub(*length)..=last,
+            Range::Bounded(range) => *range.start()..=(*range.end()).min(last),
+            Range::Suffix(length) => complete_length.saturating_sub(*length)..=last,
         }
     }
 }
 
 /// Implements Display as the `Range` header value.
-impl fmt::Display for GetRange {
+impl fmt::Display for Range {
     /// Formats the range as `bytes=first-last` or `bytes=-length`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GetRange::Bounded(range) => write!(f, "bytes={}-{}", range.start(), range.end()),
-            GetRange::Suffix(length) => write!(f, "bytes=-{length}"),
+            Range::Bounded(range) => write!(f, "bytes={}-{}", range.start(), range.end()),
+            Range::Suffix(length) => write!(f, "bytes=-{length}"),
         }
     }
 }
 
 /// Implements FromStr for the `Range` header value.
-impl FromStr for GetRange {
+impl FromStr for Range {
     type Err = io::Error;
 
     /// Parses `bytes=first-last` or `bytes=-length`, the two forms the range
@@ -52,8 +52,8 @@ impl FromStr for GetRange {
             .strip_prefix("bytes=")
             .and_then(|spec| spec.split_once('-'))
             .and_then(|(first, last)| match first {
-                "" => Some(GetRange::Suffix(last.parse().ok()?)),
-                first => Some(GetRange::Bounded(first.parse().ok()?..=last.parse().ok()?)),
+                "" => Some(Range::Suffix(last.parse().ok()?)),
+                first => Some(Range::Bounded(first.parse().ok()?..=last.parse().ok()?)),
             })
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("invalid Range {value}"))
@@ -124,11 +124,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_range_to_string_formats_the_range_header() {
+    fn range_to_string_formats_the_range_header() {
         let test_cases = vec![
-            (GetRange::Bounded(0..=0), "bytes=0-0"),
-            (GetRange::Bounded(2..=5), "bytes=2-5"),
-            (GetRange::Suffix(64), "bytes=-64"),
+            (Range::Bounded(0..=0), "bytes=0-0"),
+            (Range::Bounded(2..=5), "bytes=2-5"),
+            (Range::Suffix(64), "bytes=-64"),
         ];
 
         for (range, expected) in test_cases {
@@ -137,11 +137,11 @@ mod tests {
     }
 
     #[test]
-    fn get_range_from_str_parses_a_bounded_or_suffix_range() {
+    fn range_from_str_parses_a_bounded_or_suffix_range() {
         let test_cases = vec![
-            ("bytes=0-0", Some(GetRange::Bounded(0..=0))),
-            ("bytes=2-5", Some(GetRange::Bounded(2..=5))),
-            ("bytes=-64", Some(GetRange::Suffix(64))),
+            ("bytes=0-0", Some(Range::Bounded(0..=0))),
+            ("bytes=2-5", Some(Range::Bounded(2..=5))),
+            ("bytes=-64", Some(Range::Suffix(64))),
             ("bytes=2-", None),
             ("bytes=-", None),
             ("bytes=2-5,6-7", None),
@@ -152,19 +152,19 @@ mod tests {
         ];
 
         for (value, expected) in test_cases {
-            assert_eq!(value.parse::<GetRange>().ok(), expected, "{value}");
+            assert_eq!(value.parse::<Range>().ok(), expected, "{value}");
         }
     }
 
     #[test]
-    fn get_range_to_range_resolves_against_the_complete_length() {
+    fn range_to_range_resolves_against_the_complete_length() {
         let test_cases = vec![
-            (GetRange::Bounded(2..=5), 8, 2..=5),
-            (GetRange::Bounded(2..=9), 8, 2..=7),
-            (GetRange::Bounded(0..=0), 1, 0..=0),
-            (GetRange::Suffix(4), 8, 4..=7),
-            (GetRange::Suffix(8), 8, 0..=7),
-            (GetRange::Suffix(9), 8, 0..=7),
+            (Range::Bounded(2..=5), 8, 2..=5),
+            (Range::Bounded(2..=9), 8, 2..=7),
+            (Range::Bounded(0..=0), 1, 0..=0),
+            (Range::Suffix(4), 8, 4..=7),
+            (Range::Suffix(8), 8, 0..=7),
+            (Range::Suffix(9), 8, 0..=7),
         ];
 
         for (range, complete_length, expected) in test_cases {

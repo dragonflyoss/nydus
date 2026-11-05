@@ -7,7 +7,7 @@ use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::range::{ContentRange, GetRange};
+use super::range::{ContentRange, Range};
 use crate::Source;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
@@ -33,7 +33,7 @@ pub(crate) enum Body {
 
     /// A body already in memory: the one the Dragonfly SDK read whole, so a
     /// seed peer failing mid-body was retried before the answer got here.
-    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
+    #[cfg(feature = "dragonfly")]
     Bytes(Bytes),
 }
 
@@ -48,7 +48,7 @@ impl Response {
     /// Dragonfly 1.3 answers a partial download with a `200` and the exact
     /// `Content-Range`, so a seed peer's `200` goes through the same checks;
     /// an origin's `200` is the whole blob and never does.
-    pub(crate) fn validate_range(&self, range: &GetRange) -> io::Result<()> {
+    pub(crate) fn validate_range(&self, range: &Range) -> io::Result<()> {
         let err = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
 
         match (self.status, self.source) {
@@ -72,6 +72,7 @@ impl Response {
         }
 
         // The Dragonfly SDK buffers the body, which holds the range alone.
+        #[cfg(feature = "dragonfly")]
         if let Body::Bytes(bytes) = &self.body {
             if bytes.len() as u64 != expected.end() - expected.start() + 1 {
                 return Err(err(format!(
@@ -89,6 +90,7 @@ impl Response {
     /// over without a copy.
     pub(crate) async fn bytes(self, length: usize) -> io::Result<Bytes> {
         let bytes = match self.body {
+            #[cfg(feature = "dragonfly")]
             Body::Bytes(bytes) => bytes,
             Body::Stream(mut reader) => {
                 let mut buf = BytesMut::zeroed(length);
@@ -110,6 +112,7 @@ impl Response {
     /// Reads the body as a UTF-8 string.
     pub(crate) async fn text(self) -> io::Result<String> {
         let bytes = match self.body {
+            #[cfg(feature = "dragonfly")]
             Body::Bytes(bytes) => bytes,
             Body::Stream(mut reader) => {
                 let mut buf = Vec::new();
@@ -120,36 +123,6 @@ impl Response {
 
         String::from_utf8(bytes.into())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
-    }
-
-    /// Consumes a response of a status the request did not expect into an
-    /// error naming the status, the body as the rest of the message.
-    ///
-    /// The status is the error, so a body that cannot be read only blanks
-    /// the message.
-    pub(crate) async fn into_io_error(self) -> io::Error {
-        let status = self.status;
-        let body = self.text().await.unwrap_or_default();
-        io::Error::other(format!("unexpected status {status}: {body}"))
-    }
-
-    /// Returns whether an on-demand read falls back to the origin: the seed
-    /// peers failed to serve it with a `429`, `5xx` or `408`. Every other
-    /// status is the registry's definitive answer.
-    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
-    pub(crate) fn needs_fallback(&self) -> bool {
-        self.status.is_server_error()
-            || self.status == StatusCode::REQUEST_TIMEOUT
-            || self.status == StatusCode::TOO_MANY_REQUESTS
-    }
-
-    /// Returns whether a prefetch read is sent once more hours later: the
-    /// transport failed to serve it with a `429`, `5xx` or `408`. Every other
-    /// status is the registry's definitive answer.
-    pub(crate) fn needs_retry(&self) -> bool {
-        self.status.is_server_error()
-            || self.status == StatusCode::REQUEST_TIMEOUT
-            || self.status == StatusCode::TOO_MANY_REQUESTS
     }
 
     /// Returns the `Location` a redirect points at.
@@ -173,6 +146,36 @@ impl Response {
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Range"))?
             .parse()
+    }
+
+    /// Consumes a response of a status the request did not expect into an
+    /// error naming the status, the body as the rest of the message.
+    ///
+    /// The status is the error, so a body that cannot be read only blanks
+    /// the message.
+    pub(crate) async fn into_io_error(self) -> io::Error {
+        let status = self.status;
+        let body = self.text().await.unwrap_or_default();
+        io::Error::other(format!("unexpected status {status}: {body}"))
+    }
+
+    /// Returns whether an on-demand read falls back to the origin: the seed
+    /// peers failed to serve it with a `429`, `5xx` or `408`. Every other
+    /// status is the registry's definitive answer.
+    #[cfg(feature = "dragonfly")]
+    pub(crate) fn needs_fallback(&self) -> bool {
+        self.status.is_server_error()
+            || self.status == StatusCode::REQUEST_TIMEOUT
+            || self.status == StatusCode::TOO_MANY_REQUESTS
+    }
+
+    /// Returns whether a prefetch read is sent once more hours later: the
+    /// transport failed to serve it with a `429`, `5xx` or `408`. Every other
+    /// status is the registry's definitive answer.
+    pub(crate) fn needs_retry(&self) -> bool {
+        self.status.is_server_error()
+            || self.status == StatusCode::REQUEST_TIMEOUT
+            || self.status == StatusCode::TOO_MANY_REQUESTS
     }
 }
 
@@ -199,11 +202,11 @@ mod tests {
             let response = Response {
                 status,
                 headers,
-                body: Body::Bytes(Bytes::from_static(b"abcd")),
+                body: Body::Stream(Box::new(io::Cursor::new(b"abcd".to_vec()))),
                 source,
             };
             assert_eq!(
-                response.validate_range(&GetRange::Bounded(2..=5)).is_ok(),
+                response.validate_range(&Range::Bounded(2..=5)).is_ok(),
                 expected,
                 "{status} {source:?}"
             );
@@ -230,17 +233,18 @@ mod tests {
             let response = Response {
                 status,
                 headers,
-                body: Body::Bytes(Bytes::from_static(b"abcd")),
+                body: Body::Stream(Box::new(io::Cursor::new(b"abcd".to_vec()))),
                 source: Source::Dragonfly,
             };
             assert_eq!(
-                response.validate_range(&GetRange::Bounded(2..=5)).is_ok(),
+                response.validate_range(&Range::Bounded(2..=5)).is_ok(),
                 expected,
                 "{status} {content_range:?}"
             );
         }
     }
 
+    #[cfg(feature = "dragonfly")]
     #[test]
     fn validate_range_requires_a_buffered_body_as_long_as_the_range() {
         let test_cases = vec![
@@ -263,7 +267,7 @@ mod tests {
                 source: Source::Dragonfly,
             };
             assert_eq!(
-                response.validate_range(&GetRange::Bounded(2..=5)).is_ok(),
+                response.validate_range(&Range::Bounded(2..=5)).is_ok(),
                 expected
             );
         }
@@ -291,52 +295,53 @@ mod tests {
             let response = Response {
                 status,
                 headers: HeaderMap::new(),
-                body: Body::Bytes(Bytes::new()),
+                body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
                 source: Source::Origin,
             };
+            #[cfg(feature = "dragonfly")]
             assert_eq!(response.needs_fallback(), expected, "{status}");
             assert_eq!(response.needs_retry(), expected, "{status}");
         }
     }
 
     #[tokio::test]
-    async fn bytes_reads_exactly_len_from_either_body() {
-        let test_cases: Vec<(Body, fn(io::Result<Bytes>))> = vec![
-            (Body::Bytes(Bytes::from_static(b"abcd")), |result| {
-                assert_eq!(result.unwrap(), "abcd");
+    async fn bytes_reads_exactly_len_from_a_streaming_body() {
+        let test_cases: Vec<(&[u8], fn(io::Result<Bytes>))> = vec![
+            (b"abcd", |result| assert_eq!(result.unwrap(), "abcd")),
+            (b"abcdef", |result| assert_eq!(result.unwrap(), "abcd")),
+            (b"ab", |result| {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof)
             }),
-            (Body::Bytes(Bytes::from_static(b"abcdef")), |result| {
-                assert_eq!(result.unwrap(), "abcd");
-            }),
-            (Body::Bytes(Bytes::from_static(b"ab")), |result| {
-                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-            }),
-            (
-                Body::Stream(Box::new(io::Cursor::new(b"abcd".to_vec()))),
-                |result| {
-                    assert_eq!(result.unwrap(), "abcd");
-                },
-            ),
-            (
-                Body::Stream(Box::new(io::Cursor::new(b"abcdef".to_vec()))),
-                |result| {
-                    assert_eq!(result.unwrap(), "abcd");
-                },
-            ),
-            (
-                Body::Stream(Box::new(io::Cursor::new(b"ab".to_vec()))),
-                |result| {
-                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-                },
-            ),
         ];
 
         for (body, assert_fn) in test_cases {
             let response = Response {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
-                body,
+                body: Body::Stream(Box::new(io::Cursor::new(body.to_vec()))),
                 source: Source::Origin,
+            };
+            assert_fn(response.bytes(4).await);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[tokio::test]
+    async fn bytes_reads_exactly_len_from_a_buffered_body() {
+        let test_cases: Vec<(&'static [u8], fn(io::Result<Bytes>))> = vec![
+            (b"abcd", |result| assert_eq!(result.unwrap(), "abcd")),
+            (b"abcdef", |result| assert_eq!(result.unwrap(), "abcd")),
+            (b"ab", |result| {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof)
+            }),
+        ];
+
+        for (body, assert_fn) in test_cases {
+            let response = Response {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Body::Bytes(Bytes::from_static(body)),
+                source: Source::Dragonfly,
             };
             assert_fn(response.bytes(4).await);
         }

@@ -20,7 +20,7 @@ use dragonfly_client_request::{ExponentialBuilder, GetRequest, Proxy, Request as
 use nydus_config::{DragonflyConfig, HttpConfig};
 
 use super::http::{Http, RateLimit};
-use super::range::GetRange;
+use super::range::Range;
 use super::response::{Body, Response};
 use super::rt::Runtime;
 use super::Transport;
@@ -170,7 +170,7 @@ impl Transport for Dragonfly {
         let range = headers
             .get(RANGE)
             .and_then(|value| value.to_str().ok())
-            .map(str::parse::<GetRange>)
+            .map(str::parse::<Range>)
             .transpose()?;
         let request = GetRequest {
             url: url.to_string(),

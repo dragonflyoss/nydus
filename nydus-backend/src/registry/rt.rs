@@ -82,7 +82,7 @@ impl Runtime {
     }
 
     /// Runs `future` on a thread of the runtime in the background.
-    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
+    #[cfg(feature = "dragonfly")]
     pub(crate) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         self.runtime.spawn(future);
     }
@@ -131,6 +131,7 @@ mod tests {
                     if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
                         return Err(io::Error::last_os_error());
                     }
+
                     Netns::new(std::fs::File::open("/proc/thread-self/ns/net")?.into())
                 })
                 .join()
