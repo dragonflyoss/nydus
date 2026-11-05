@@ -248,7 +248,6 @@ impl NbdCommand {
         }
 
         signal_thread.shutdown()?;
-        core.core().backend().ready()?;
         outcome
     }
 }

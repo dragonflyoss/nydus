@@ -70,11 +70,6 @@ impl UffdCore {
         Ok(Self { core, device_size })
     }
 
-    /// Borrow the underlying core.
-    pub fn core(&self) -> &Arc<NydusCore> {
-        &self.core
-    }
-
     pub fn device_size(&self) -> u64 {
         self.device_size
     }

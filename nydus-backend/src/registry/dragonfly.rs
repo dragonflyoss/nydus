@@ -26,15 +26,12 @@ use super::rt::Runtime;
 use super::Transport;
 use crate::Source;
 
-/// A seed peer client a read waits for, set once its background connect to
-/// the scheduler finishes.
-type SeedPeerClient = Arc<SetOnce<Result<Proxy, Error>>>;
-
 /// The Dragonfly SDK transport: a blob `GET` rides the SDK to the seed peers
 /// named by the scheduler, one client per read kind on the backend's
 /// runtime. Both connect to the scheduler in the background so building the
-/// transport never delays a mount, and a failed connect stops the process
-/// with SIGTERM, since a daemon configured with Dragonfly fails without it.
+/// transport never delays a mount; a read waits for the connect, which the
+/// SDK bounds with its scheduler request timeout, and when it fails an
+/// on-demand read falls back to the origin and a prefetch read fails.
 ///
 /// ```text
 /// GET ──▶ wait for the client ──▶ seed peer ──▶ 2xx / 3xx / 4xx ──────▶ handed back as is
@@ -42,18 +39,18 @@ type SeedPeerClient = Arc<SetOnce<Result<Proxy, Error>>>;
 ///           │                      ├─ on-demand ─▶ next seed peer, max_retries times ─▶ origin
 ///           │                      └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more ─▶ error
 ///           │                                    └─ transport failure ──────────▶ error
-///           ├─ on-demand ─▶ origin, rate limited
+///           ├─ on-demand ─▶ origin
 ///           └─ prefetch ──▶ error
 /// ```
 pub(crate) struct Dragonfly {
     /// The seed peer client of on-demand reads, retrying on the next seed
     /// peer after an exponential backoff, a `429` included since another seed
     /// peer may not be rate limited.
-    ondemand_client: SeedPeerClient,
+    ondemand_client: Arc<SetOnce<Result<Proxy, Error>>>,
 
     /// The seed peer client of prefetch reads, never retrying at once: a
     /// failed prefetch is sent once more after the retry interval instead.
-    prefetch_client: SeedPeerClient,
+    prefetch_client: Arc<SetOnce<Result<Proxy, Error>>>,
 
     /// The rate-limited client an on-demand read falls back to the origin
     /// through when the seed peers cannot serve it, the registry's `http`
@@ -117,13 +114,16 @@ impl Dragonfly {
     /// scheduler in the background, from the runtime's netns, and reads wait
     /// on the clients until it does. Both retry across seed peers with a
     /// jittered exponential backoff, the on-demand one `max_retries` times and
-    /// the prefetch one never. Either failing raises SIGTERM once, since a
-    /// second one forces the daemon out before it unmounts.
+    /// the prefetch one never.
+    #[allow(clippy::type_complexity)]
     fn clients(
         runtime: &Runtime,
         scheduler_endpoint: String,
         max_retries: u8,
-    ) -> (SeedPeerClient, SeedPeerClient) {
+    ) -> (
+        Arc<SetOnce<Result<Proxy, Error>>>,
+        Arc<SetOnce<Result<Proxy, Error>>>,
+    ) {
         let ondemand_client = Arc::new(SetOnce::new());
         let prefetch_client = Arc::new(SetOnce::new());
 
@@ -144,16 +144,6 @@ impl Dragonfly {
                         .build(),
                 );
 
-                if let Err(err) = ondemand.as_ref().and(prefetch.as_ref()) {
-                    error!("dragonfly client failed, stopping the process: {err}");
-
-                    // SAFETY: raise only delivers SIGTERM to this thread, whose
-                    // handler the daemon registered for its graceful shutdown.
-                    if unsafe { libc::raise(libc::SIGTERM) } != 0 {
-                        error!("failed to raise SIGTERM: {}", io::Error::last_os_error());
-                    }
-                }
-
                 if ondemand_client.set(ondemand).is_err() {
                     error!("dragonfly on-demand client is built twice");
                 }
@@ -169,7 +159,7 @@ impl Dragonfly {
 
     /// Waits for `client` to connect to the scheduler, returning the error
     /// that failed it.
-    async fn wait(client: &SeedPeerClient) -> io::Result<&Proxy> {
+    async fn wait(client: &SetOnce<Result<Proxy, Error>>) -> io::Result<&Proxy> {
         client
             .wait()
             .await
@@ -181,26 +171,12 @@ impl Dragonfly {
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl Transport for Dragonfly {
-    /// Waits for both seed peer clients to connect to the scheduler,
-    /// returning the error that failed either.
-    async fn ready(&self) -> io::Result<()> {
-        Self::wait(&self.ondemand_client).await?;
-        Self::wait(&self.prefetch_client).await?;
-        Ok(())
-    }
-
     /// Fetches `url` through the on-demand client at `Level6`, the SDK's
-    /// default priority, going back to the origin on a `429`, `5xx`, `408` or
-    /// transport failure its retries did not cure. An SDK error carrying an
-    /// HTTP status becomes a [`Response`], settled by status like an origin
-    /// answer.
+    /// default priority, going back to the origin when the client failed to
+    /// connect, or on a `429`, `5xx`, `408` or transport failure its retries
+    /// did not cure. An SDK error carrying an HTTP status becomes a
+    /// [`Response`], settled by status like an origin answer.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        // Keep the requested range to validate the seed peer's answer.
-        let range = headers
-            .get(RANGE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::parse::<Range>)
-            .transpose()?;
         let request = GetRequest {
             url: url.to_string(),
             header: headers.clone(),
@@ -209,12 +185,12 @@ impl Transport for Dragonfly {
             ..Default::default()
         };
 
-        // Wait for the seed peer client, going back to the origin when it
-        // failed to connect to the scheduler.
+        // Wait until the seed peer client has connected to the scheduler,
+        // falling back to the origin when it failed to.
         let client = match Self::wait(&self.ondemand_client).await {
             Ok(client) => client,
             Err(err) => {
-                warn!("dragonfly client is unavailable, falling back to the origin: {err}");
+                warn!("dragonfly request failed, falling back to the origin: {err}");
                 return self.fallback_http_client.get(url, headers).await;
             }
         };
@@ -265,6 +241,12 @@ impl Transport for Dragonfly {
 
         // Treat an answer outside the requested range as a failure, so the
         // origin serves the read instead.
+        let range = headers
+            .get(RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::parse::<Range>)
+            .transpose()?;
+
         let result = match (result, &range) {
             (Ok(response), Some(range)) if response.status.is_success() => {
                 response.validate_range(range).map(|()| response)
@@ -310,8 +292,6 @@ impl Transport for Dragonfly {
             ..Default::default()
         };
 
-        // Wait for the seed peer client, failing at once when it failed to
-        // connect to the scheduler.
         let client = Self::wait(&self.prefetch_client).await?;
         let mut retried = false;
         loop {

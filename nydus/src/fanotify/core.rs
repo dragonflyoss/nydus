@@ -190,11 +190,6 @@ impl FanotifyCore {
         })
     }
 
-    /// Borrow the underlying core.
-    pub fn core(&self) -> &Arc<NydusCore> {
-        &self.core
-    }
-
     /// The blob devices, in device-table order (the order they must be passed as
     /// EROFS `-o device=` options).
     pub fn devices(&self) -> &[BlobDevice] {

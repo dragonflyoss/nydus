@@ -146,7 +146,6 @@ impl UblkCommand {
     /// its path, and serves I/O until a termination signal stops it.
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         let core = Arc::new(UblkCore::new(&self.bootstrap, config)?);
-        let backend = core.core().backend().clone();
         info!(
             "serving {} as a {} byte block device",
             self.bootstrap.display(),
@@ -191,7 +190,6 @@ impl UblkCommand {
         }
 
         signal_thread.shutdown()?;
-        backend.ready()?;
         result
     }
 }

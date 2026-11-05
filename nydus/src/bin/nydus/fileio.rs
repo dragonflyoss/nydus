@@ -230,7 +230,6 @@ impl FileioCommand {
             server.stop();
         }
         signal_thread.shutdown()?;
-        flat.core().backend().ready()?;
         Ok(())
     }
 }

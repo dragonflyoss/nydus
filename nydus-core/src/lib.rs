@@ -287,12 +287,6 @@ impl NydusCore {
         &self.bootstrap
     }
 
-    /// Return the blob backend this core reads through, whose
-    /// [`Backend::ready`] waits for what it connects in the background.
-    pub fn backend(&self) -> &Arc<dyn Backend> {
-        &self.backend
-    }
-
     /// Return the metrics of this core alone: every backend read, cache fill
     /// and prefetch of it, counters an embedder reads directly or gathers
     /// from the registry for its own stats endpoint.

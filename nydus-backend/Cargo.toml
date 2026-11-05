@@ -78,7 +78,6 @@ url = { version = "2", optional = true }
 nydus-test-utils = { path = "../nydus-test-utils" }
 rcgen = "0.13"
 serde_yaml = "0.9"
-signal-hook = "0.3"
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }

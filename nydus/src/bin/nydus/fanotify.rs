@@ -238,7 +238,6 @@ impl FanotifyCommand {
         drop(fan_fd);
 
         signal_thread.shutdown()?;
-        core.core().backend().ready()?;
 
         outcome
     }

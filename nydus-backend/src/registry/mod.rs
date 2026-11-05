@@ -51,12 +51,6 @@ trait Transport: Send + Sync {
     /// configured prefetch retry interval when it answered `429`, `5xx` or
     /// `408`; a transport failure fails the read at once.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
-
-    /// Waits until the transport is ready to send, returning the error that
-    /// failed it.
-    async fn ready(&self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 /// A blob backend over an OCI registry: the synchronous [`Backend`] face of
@@ -455,14 +449,6 @@ impl Backend for Registry {
     /// Returns the metrics of the image.
     fn metrics(&self) -> &Arc<Metrics> {
         &self.metrics
-    }
-
-    /// Waits until the transport is ready, the Dragonfly seed peer clients
-    /// connecting to the scheduler in the background.
-    fn ready(&self) -> io::Result<()> {
-        let client = self.client.clone();
-        self.runtime
-            .block_on_worker(async move { client.transport().ready().await })
     }
 
     /// Recovers the blob's metadata from the registry for an on-demand read.
@@ -1008,9 +994,7 @@ mod tests {
 
     #[cfg(feature = "dragonfly")]
     #[test]
-    fn unreachable_scheduler_raises_sigterm_while_ondemand_reads_fall_back() {
-        let terminated = Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone()).unwrap();
+    fn unreachable_scheduler_falls_back_to_the_origin_only_for_ondemand_reads() {
         let scheduler = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -1030,16 +1014,12 @@ mod tests {
         .unwrap();
 
         let mut buf = [0u8; 4];
-        registry
-            .read_range_into(&TEST_BLOB_ID, 0, &mut buf)
-            .unwrap();
+        let ondemand = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        let prefetch = read(&registry, ReadKind::Prefetch, &mut [0u8; 4]);
 
-        assert!(registry.ready().is_err());
-        assert!(terminated.load(Ordering::SeqCst));
+        assert_eq!(ondemand, Source::Fallback);
         assert_eq!(&buf, b"abcd");
-        assert!(registry
-            .prefetch_range_into(&TEST_BLOB_ID, 0, &mut buf)
-            .is_err());
+        assert!(prefetch.is_err());
         assert_eq!(origin.hits(), 1);
     }
 
