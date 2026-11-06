@@ -2,6 +2,11 @@ use clap::{Parser, Subcommand};
 use nydus::error::Result;
 use nydus_config::{default_log_dir, VersionValueParser, NAME};
 
+// musl's malloc serializes every allocation on one lock, which the many
+// backend and FUSE threads contend on.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub use nydus::api_server;
 pub mod build;
 pub mod check;
