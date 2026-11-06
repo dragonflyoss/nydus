@@ -21,8 +21,8 @@ use nydus_telemetry::metrics::WriteKind;
 
 use super::chunk_group_lock::ChunkGroupLocks;
 use super::{
-    cached_chunk_group_is_intact, plan_prefetch_batches, validate_decoded_chunk_group,
-    write_failure_reason, BlobCache, CacheOptions, ChunkGroupBuffers,
+    cached_chunk_group_is_intact, decode_chunk_group, plan_prefetch_batches, stream_chunk_groups,
+    validate_decoded_chunk_group, write_failure_reason, BlobCache, CacheOptions, ChunkGroupBuffers,
 };
 
 #[derive(Clone)]
@@ -389,7 +389,7 @@ impl LocalBlobCache {
             if let Some(flight) = inflight.get(&first) {
                 let flight = flight.clone();
                 drop(inflight);
-                return flight.wait();
+                return self.settle(first, flight.wait());
             }
             let window = self.plan_chunk_group_window(first, &inflight)?;
             let flight = Arc::new(Flight::new());
@@ -444,7 +444,17 @@ impl LocalBlobCache {
 
         // complete() is idempotent: the guard's Drop then no-ops.
         flight.complete(&result);
-        result
+        self.settle(first, result)
+    }
+
+    /// The outcome of a window fill for the reader of group `first`: a fill
+    /// streams the window group by group, so one that failed may still have
+    /// published `first` before it broke off, and that reader is served.
+    fn settle(&self, first: usize, result: io::Result<()>) -> io::Result<()> {
+        match result {
+            Err(_) if self.chunk_group_ready(first).unwrap_or(false) => Ok(()),
+            result => result,
+        }
     }
 
     /// `groups` without the published groups at either end, so a window
@@ -480,67 +490,9 @@ impl LocalBlobCache {
         Ok(())
     }
 
-    /// One backend read for the encoded payloads of the groups of `window`
-    /// into `buffers`: the encoded bytes, a decode scratch the size of the
-    /// group span (no group's payload is larger), and the data-region offset
-    /// the encoded bytes start at.
-    fn fetch_window<'b>(
-        &self,
-        window: &Range<usize>,
-        kind: ReadKind,
-        buffers: &'b mut ChunkGroupBuffers,
-    ) -> io::Result<(&'b mut [u8], &'b mut [u8], u64)> {
-        let head = self.chunk_group(window.start);
-        let tail = self.chunk_group(window.end - 1);
-        let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
-            .map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize")
-        })?;
-        let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
-        let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
-        match kind {
-            ReadKind::Ondemand => {
-                self.backend
-                    .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?
-            }
-            ReadKind::Prefetch => self.backend.prefetch_range_into(
-                &self.blob_id,
-                head.compressed_offset(),
-                encoded,
-            )?,
-        }
-        Ok((encoded, decoded, head.compressed_offset()))
-    }
-
-    /// Decode and validate `group` out of a fetched window whose encoded
-    /// bytes start at data-region offset `base`; a stored-plain group
-    /// borrows the window, a compressed one decodes into `decoded`.
-    fn decode_group<'p>(
-        &self,
-        group: &BlobMetadataChunkGroupExtent,
-        base: u64,
-        encoded: &'p [u8],
-        decoded: &'p mut [u8],
-    ) -> io::Result<&'p [u8]> {
-        let start = (group.compressed_offset() - base) as usize;
-        let end = start + group.compressed_size() as usize;
-        let payload: &[u8] = if group.is_uncompressed(&self.blob_metadata) {
-            &encoded[start..end]
-        } else {
-            let out = &mut decoded[..u64::from(group.uncompressed_size()) as usize];
-            super::decode_chunk_group_into(
-                self.blob_metadata.compressor(),
-                &encoded[start..end],
-                out,
-            )?;
-            out
-        };
-        validate_decoded_chunk_group(group, payload, self.options.skip_verify_checksums)?;
-        Ok(payload)
-    }
-
-    /// One backend read for the groups of `window`, then decode, validate,
-    /// write and publish each group that is still missing.
+    /// One backend read for the groups of `window`, streamed: each group
+    /// still missing is decoded, validated, written and published as soon as
+    /// its bytes are in, before the next one arrives.
     fn fill_chunk_group_window(
         &self,
         window: Range<usize>,
@@ -548,18 +500,28 @@ impl LocalBlobCache {
         buffers: &mut ChunkGroupBuffers,
         cache_file: &File,
     ) -> io::Result<()> {
-        let (encoded, decoded, base) = self.fetch_window(&window, kind, buffers)?;
         let metrics = &self.backend.metrics().cache;
-        for index in window {
+        let (scratch, decoded) = buffers.split();
+        stream_chunk_groups(
+            self.backend.as_ref(),
+            &self.blob_id,
+            &self.blob_metadata,
+            window,
+            kind,
+            scratch,
             // Another process may have filled a group of the window since
             // it was planned; the leader's own group was re-checked under
             // the claim, so this only costs a bit test.
-            if self.chunk_group_ready(index)? {
-                continue;
-            }
-            let group = self.chunk_group(index);
-            self.decode_group(&group, base, encoded, decoded)
-                .and_then(|payload| self.write_chunk_group(&group, payload, cache_file))
+            &|index| !self.chunk_group_ready(index).unwrap_or(false),
+            &mut |group, encoded| {
+                decode_chunk_group(
+                    &self.blob_metadata,
+                    group,
+                    encoded,
+                    decoded,
+                    self.options.skip_verify_checksums,
+                )
+                .and_then(|payload| self.write_chunk_group(group, payload, cache_file))
                 .inspect(|()| {
                     metrics.collect_write_finished_metrics(
                         kind.into(),
@@ -568,14 +530,16 @@ impl LocalBlobCache {
                 })
                 .inspect_err(|err| {
                     metrics.collect_write_failure_metrics(kind.into(), write_failure_reason(err))
-                })?;
-        }
+                })
+            },
+        )?;
         Ok(())
     }
 
-    /// Fetch one ondemand-blob batch, trimmed at the groups `skip` accepts,
-    /// and hand every decoded group to `cb`. A group that fails to decode
-    /// or validate is logged and skipped; `cb` errors abort the stream.
+    /// Stream one ondemand-blob batch, trimmed at the groups `skip` accepts,
+    /// and hand every decoded group to `cb` as soon as it is in. A group that
+    /// fails to decode or validate is logged and skipped; `cb` errors abort
+    /// the stream.
     fn stream_ondemand_blob_batch(
         &self,
         batch: Range<usize>,
@@ -594,16 +558,24 @@ impl LocalBlobCache {
         if start == end {
             return Ok((0, 0));
         }
-        let (encoded, decoded, base) =
-            self.fetch_window(&(start..end), ReadKind::Prefetch, buffers)?;
         let mut failed = 0;
-        for index in start..end {
-            let group = self.chunk_group(index);
-            if skip(&group) {
-                continue;
-            }
-            match self.decode_group(&group, base, encoded, decoded) {
-                Ok(payload) => cb(&group, payload)?,
+        let (scratch, decoded) = buffers.split();
+        let bytes = stream_chunk_groups(
+            self.backend.as_ref(),
+            &self.blob_id,
+            &self.blob_metadata,
+            start..end,
+            ReadKind::Prefetch,
+            scratch,
+            &|index| !skip(&self.chunk_group(index)),
+            &mut |group, encoded| match decode_chunk_group(
+                &self.blob_metadata,
+                group,
+                encoded,
+                decoded,
+                self.options.skip_verify_checksums,
+            ) {
+                Ok(payload) => cb(group, payload),
                 Err(err) => {
                     failed += 1;
                     self.backend.metrics().cache.collect_write_failure_metrics(
@@ -611,19 +583,22 @@ impl LocalBlobCache {
                         write_failure_reason(&err),
                     );
                     warn!(
-                        "skipping redirect chunk group {index} of blob {}: {err}",
+                        "skipping redirect chunk group {} of blob {}: {err}",
+                        group.index(),
                         self.blob_index
                     );
+                    Ok(())
                 }
-            }
-        }
-        Ok((encoded.len() as u64, failed))
+            },
+        )?;
+        Ok((bytes, failed))
     }
 
     /// Run `job` over `batches` in blob order, sequentially or through a
-    /// pool of `workers` threads each owning its fetch buffers; the deadline
-    /// is checked before every batch and the first error stops every worker
-    /// after its current batch.
+    /// pool of `workers` threads; the deadline is checked before every batch
+    /// and the first error stops every worker after its current batch. Each
+    /// batch gets fresh buffers, freed when it is done, so a worker holds the
+    /// group in hand rather than the largest it has seen.
     fn run_batches(
         &self,
         batches: &[Range<usize>],
@@ -632,10 +607,9 @@ impl LocalBlobCache {
         job: &(dyn Fn(&Range<usize>, &mut ChunkGroupBuffers) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         if workers <= 1 || batches.len() == 1 {
-            let mut buffers = ChunkGroupBuffers::default();
             for batch in batches {
                 super::check_prefetch_deadline(deadline)?;
-                job(batch, &mut buffers)?;
+                job(batch, &mut ChunkGroupBuffers::default())?;
             }
             return Ok(());
         }
@@ -643,23 +617,20 @@ impl LocalBlobCache {
         let failure: Mutex<Option<io::Error>> = Mutex::new(None);
         thread::scope(|scope| {
             for _ in 0..workers.min(batches.len()) {
-                scope.spawn(|| {
-                    let mut buffers = ChunkGroupBuffers::default();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= batches.len() {
-                            break;
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= batches.len() {
+                        break;
+                    }
+                    let result = super::check_prefetch_deadline(deadline)
+                        .and_then(|()| job(&batches[index], &mut ChunkGroupBuffers::default()));
+                    if let Err(err) = result {
+                        let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                        if slot.is_none() {
+                            *slot = Some(err);
                         }
-                        let result = super::check_prefetch_deadline(deadline)
-                            .and_then(|()| job(&batches[index], &mut buffers));
-                        if let Err(err) = result {
-                            let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
-                            if slot.is_none() {
-                                *slot = Some(err);
-                            }
-                            next.store(batches.len(), Ordering::Relaxed);
-                            break;
-                        }
+                        next.store(batches.len(), Ordering::Relaxed);
+                        break;
                     }
                 });
             }
@@ -789,14 +760,15 @@ impl BlobCache for LocalBlobCache {
         // never blocks on-demand reads. The chunk group map is atomic and
         // `set_ready` is idempotent, so racing with a read at worst decodes
         // the same group twice into identical bytes at the same cache offset.
-        // Batches follow the on-demand fetch size so both paths issue
-        // backend reads of the same size; a zero fetch size reads group by
-        // group. With several workers the first batches are single groups,
-        // so the head of a blob lands in the first round trip instead of
-        // behind a full batch.
+        // Batches follow the prefetch batch size, independent of the
+        // on-demand fetch size; a zero batch size reads group by group. With
+        // several workers the first batches are single groups, so the head
+        // of a blob lands in the first round trip instead of behind a full
+        // batch.
         let workers = workers.max(1);
         let ramp = if workers > 1 { workers } else { 0 };
-        let batches = plan_prefetch_batches(&self.blob_metadata, self.options.fetch_size, ramp);
+        let batches =
+            plan_prefetch_batches(&self.blob_metadata, self.options.prefetch_batch_size, ramp);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
             self.prefetch_batch(batch.clone(), buffers, cache_file.as_ref())
         })?;
@@ -926,13 +898,15 @@ impl BlobCache for LocalBlobCache {
         if self.blob_metadata.chunk_group_count() == 0 {
             return Ok((0, 0));
         }
-        // Same batching as a blob's own prefetch: fetch-size batches with a
-        // single-group ramp at the head, so the workload's first reads land
-        // in the first round trip. Batches made entirely of groups the
-        // sources already hold are trimmed away before any backend read.
+        // Same batching as a blob's own prefetch: prefetch-batch-size
+        // batches with a single-group ramp at the head, so the workload's
+        // first reads land in the first round trip. Batches made entirely of
+        // groups the sources already hold are trimmed away before any backend
+        // read.
         let workers = workers.max(1);
         let ramp = if workers > 1 { workers } else { 0 };
-        let batches = plan_prefetch_batches(&self.blob_metadata, self.options.fetch_size, ramp);
+        let batches =
+            plan_prefetch_batches(&self.blob_metadata, self.options.prefetch_batch_size, ramp);
         let bytes = AtomicU64::new(0);
         let failed = AtomicU64::new(0);
         self.run_batches(&batches, workers, deadline, &|batch, buffers| {
@@ -1331,6 +1305,16 @@ mod tests {
         }
     }
 
+    /// Options prefetching in batches of `prefetch_batch_size` compressed
+    /// bytes, on-demand reads covering `fetch_size`.
+    fn batches(prefetch_batch_size: u64, fetch_size: u64) -> CacheOptions {
+        CacheOptions {
+            fetch_size,
+            prefetch_batch_size,
+            ..CacheOptions::default()
+        }
+    }
+
     /// Chunk groups as lists of chunks.
     type Groups = Vec<Vec<Vec<u8>>>;
 
@@ -1533,6 +1517,7 @@ mod tests {
             CacheOptions {
                 skip_verify_checksums: true,
                 fetch_size: 0,
+                ..CacheOptions::default()
             },
         );
         unchecked.read_at(2 * 16384, &mut buf).unwrap();
@@ -1541,8 +1526,9 @@ mod tests {
         assert!(cached.is_chunk_group_ready(2));
     }
 
-    /// Prefetch fills the whole blob in window-sized batches and skips the
-    /// groups other readers already published.
+    /// Prefetch fills the whole blob in batches of the prefetch batch size,
+    /// whatever the on-demand fetch size, and skips the groups other readers
+    /// already published.
     #[test]
     fn prefetch_fills_in_batches_and_skips_ready_groups() {
         let backend_dir = tempdir().unwrap();
@@ -1553,7 +1539,12 @@ mod tests {
             .save_in(backend_dir.path());
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(0));
+        let cached = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend.clone(),
+            batches(0, 0),
+        );
 
         let mut buf = vec![0u8; 16];
         cached.read_at(2 * 16384, &mut buf).unwrap();
@@ -1567,17 +1558,31 @@ mod tests {
         cached.prefetch_all(1, None).unwrap();
         assert_eq!(backend.reads(), 4);
 
-        // A generous window prefetches a cold blob in one read.
+        // A generous batch prefetches a cold blob in one read, however
+        // little an on-demand read covers.
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
         let cached = open(
             full_blob_id,
             cache_dir.path(),
             backend.clone(),
-            fetch(1 << 20),
+            batches(1 << 20, 0),
         );
         cached.prefetch_all(1, None).unwrap();
         assert_eq!(backend.reads(), 1);
+        assert!(cached.is_all_ready());
+
+        // A generous on-demand fetch size leaves single-group batches alone.
+        let cache_dir = tempdir().unwrap();
+        let backend = CountingBackend::new(backend_dir.path());
+        let cached = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend.clone(),
+            batches(0, 1 << 20),
+        );
+        cached.prefetch_all(1, None).unwrap();
+        assert_eq!(backend.reads(), 4);
         assert!(cached.is_all_ready());
 
         // A worker pool ramps with single-group batches (one read each for
@@ -1585,7 +1590,12 @@ mod tests {
         // still leaves the blob fully and correctly cached.
         let cache_dir = tempdir().unwrap();
         let backend = CountingBackend::new(backend_dir.path());
-        let cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(8192));
+        let cached = open(
+            full_blob_id,
+            cache_dir.path(),
+            backend.clone(),
+            batches(8192, 0),
+        );
         cached.prefetch_all(2, None).unwrap();
         assert_eq!(backend.reads(), 3, "2 ramp reads + 1 window of 2 groups");
         assert!(cached.is_all_ready());
@@ -1873,6 +1883,84 @@ mod tests {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner.read_range_into(blob_id, offset, dst)
         }
+    }
+
+    /// A backend whose range reads break off once `limit` bytes are out.
+    struct BreakingBackend {
+        inner: Local,
+        limit: AtomicU64,
+    }
+
+    impl Backend for BreakingBackend {
+        fn metrics(&self) -> &Arc<Metrics> {
+            self.inner.metrics()
+        }
+
+        fn read_blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+        ) -> io::Result<BlobMetadata> {
+            self.inner.read_blob_metadata(blob_id)
+        }
+
+        fn read_range_into(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            dst: &mut [u8],
+        ) -> io::Result<()> {
+            self.inner.read_range_into(blob_id, offset, dst)
+        }
+
+        fn read_range_with(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            len: u64,
+            kind: ReadKind,
+            sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+        ) -> io::Result<()> {
+            let limit = self.limit.load(Ordering::SeqCst).min(len);
+            self.inner
+                .read_range_with(blob_id, offset, limit, kind, sink)?;
+            Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"))
+        }
+    }
+
+    /// A window fill that breaks off after the missed group still serves
+    /// its reader, and only its reader.
+    #[test]
+    fn a_window_breaking_off_after_the_missed_group_serves_it() {
+        let backend_dir = tempdir().unwrap();
+        let (data, meta, _, image) = groups_blob();
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let backend = Arc::new(BreakingBackend {
+            inner: Local::new(backend_dir.path().to_path_buf(), Arc::new(Metrics::new())),
+            limit: AtomicU64::new(meta.chunk_group(0).unwrap().compressed_size().into()),
+        });
+        let cache_dir = tempdir().unwrap();
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone() as Arc<dyn Backend>,
+            fetch(1 << 20),
+        )
+        .unwrap();
+
+        let mut buf = vec![0u8; 100];
+        cached.read_at(10, &mut buf).unwrap();
+        assert_eq!(buf, image[10..110]);
+        assert!(cached.is_chunk_group_ready(0));
+        assert!(!cached.is_chunk_group_ready(1));
+
+        backend.limit.store(10, Ordering::SeqCst);
+        let err = cached.read_at(16384 + 10, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(!cached.is_chunk_group_ready(1));
     }
 
     #[test]
@@ -2631,6 +2719,7 @@ mod tests {
         CacheOptions {
             skip_verify_checksums,
             fetch_size: 0,
+            ..CacheOptions::default()
         }
     }
 

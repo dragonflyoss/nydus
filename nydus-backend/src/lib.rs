@@ -132,6 +132,32 @@ pub trait Backend: Send + Sync {
     ) -> io::Result<()> {
         self.read_range_into(blob_id, offset, buf)
     }
+
+    /// Streams the `len` blob bytes from `offset` for a `kind` read into
+    /// `sink`, in order and in pieces of any size, as they arrive. A `sink`
+    /// error stops the read and is returned as is.
+    ///
+    /// The caller holds only the piece in hand, so a reader can decode and
+    /// cache what has arrived before the rest of a large range comes in. The
+    /// default reads the whole range into one buffer, for a backend with no
+    /// cheaper way to stream.
+    fn read_range_with(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        len: u64,
+        kind: ReadKind,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let len = usize::try_from(len)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "blob range exceeds usize"))?;
+        let mut buf = vec![0u8; len];
+        match kind {
+            ReadKind::Ondemand => self.read_range_into(blob_id, offset, &mut buf)?,
+            ReadKind::Prefetch => self.prefetch_range_into(blob_id, offset, &mut buf)?,
+        }
+        sink(&buf)
+    }
 }
 
 /// Implements the blob backend construction.

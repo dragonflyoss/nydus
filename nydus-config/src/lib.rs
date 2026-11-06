@@ -442,6 +442,16 @@ pub struct PrefetchConfig {
     /// one, otherwise all blobs.
     #[serde(default)]
     pub scope: PrefetchScope,
+
+    /// Compressed bytes one prefetch backend read covers, whole chunk groups
+    /// back to back, independent of `storage.fetch_size`. Zero reads group by
+    /// group. Default 2 MiB.
+    #[serde(default = "default_prefetch_batch_size")]
+    pub batch_size: u64,
+}
+
+fn default_prefetch_batch_size() -> u64 {
+    2 * 1024 * 1024
 }
 
 /// The scope of blob prefetch: which blobs it pulls.
@@ -482,6 +492,7 @@ impl Default for PrefetchConfig {
             request_timeout: default_prefetch_request_timeout(),
             retry_interval: default_prefetch_retry_interval(),
             scope: PrefetchScope::default(),
+            batch_size: default_prefetch_batch_size(),
         }
     }
 }
@@ -849,12 +860,14 @@ backend:
 concurrent_blob_count: 8
 request_timeout: 2m
 scope: all
+batch_size: 8388608
 "#;
 
         let prefetch: PrefetchConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(prefetch.concurrent_blob_count, 8);
         assert_eq!(prefetch.request_timeout, Duration::from_secs(120));
         assert_eq!(prefetch.scope, PrefetchScope::All);
+        assert_eq!(prefetch.batch_size, 8 * 1024 * 1024);
     }
 
     #[test]
@@ -866,6 +879,7 @@ scope: all
         );
         assert_eq!(prefetch.request_timeout, default_prefetch_request_timeout());
         assert_eq!(prefetch.scope, PrefetchScope::Auto);
+        assert_eq!(prefetch.batch_size, 2 * 1024 * 1024);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-use super::{decode_chunk_group_into, validate_decoded_chunk_group, BlobCache, ChunkGroupBuffer};
+use super::{decode_chunk_group, stream_chunk_groups, BlobCache, ChunkGroupBuffer};
 
 /// Decoded bytes the diskless caches of one blob set keep in memory.
 const DECODED_GROUP_CACHE_BYTES: usize = 32 << 20;
@@ -202,49 +202,49 @@ impl BlobCache for RemoteBlobCache {
         };
 
         // The missed groups lie between two table indexes, so one read covers
-        // them all (and any cached group in between, which is not decoded
-        // again); then each decodes into a buffer of its own that the cache
-        // keeps.
-        let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
-            .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "chunk group range exceeds usize",
-            )
-        })?;
-        let mut encoded = ChunkGroupBuffer::default();
-        let encoded = encoded.resize(encoded_len)?;
-        self.backend
-            .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?;
-
-        for group in &missed {
-            let start = (group.compressed_offset() - head.compressed_offset()) as usize;
-            let stop = start + group.compressed_size() as usize;
-            let len = group.uncompressed_size() as usize;
-            let mut decoded = ChunkGroupBuffer::default();
-            let payload: &[u8] = if group.is_uncompressed(meta) {
-                &encoded[start..stop]
-            } else {
-                let out = decoded.resize(len)?;
-                decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
-                out
-            };
-            validate_decoded_chunk_group(group, payload, self.skip_verify_checksums)?;
-            copy_group_chunks(meta, group, payload, offset, dst)?;
-            if !self.decoded_groups.admits(len) {
-                continue;
-            }
-            if group.is_uncompressed(meta) {
-                decoded.resize(len)?.copy_from_slice(&encoded[start..stop]);
-            }
-            self.decoded_groups.insert(
-                (self.blob_id, group.index()),
-                DecodedGroup {
-                    buffer: decoded,
-                    len,
-                },
-            );
-        }
+        // them all (and any cached group in between, which is skipped over),
+        // streamed: each missed group is decoded into a buffer of its own
+        // that the cache keeps as soon as its bytes are in.
+        let mut scratch = ChunkGroupBuffer::default();
+        stream_chunk_groups(
+            self.backend.as_ref(),
+            &self.blob_id,
+            meta,
+            head.index() as usize..tail.index() as usize + 1,
+            ReadKind::Ondemand,
+            &mut scratch,
+            &|index| {
+                missed
+                    .binary_search_by_key(&(index as u32), |group| group.index())
+                    .is_ok()
+            },
+            &mut |group, encoded| {
+                let len = group.uncompressed_size() as usize;
+                let mut decoded = ChunkGroupBuffer::default();
+                let payload = decode_chunk_group(
+                    meta,
+                    group,
+                    encoded,
+                    &mut decoded,
+                    self.skip_verify_checksums,
+                )?;
+                copy_group_chunks(meta, group, payload, offset, dst)?;
+                if !self.decoded_groups.admits(len) {
+                    return Ok(());
+                }
+                if group.is_uncompressed(meta) {
+                    decoded.resize(len)?.copy_from_slice(encoded);
+                }
+                self.decoded_groups.insert(
+                    (self.blob_id, group.index()),
+                    DecodedGroup {
+                        buffer: decoded,
+                        len,
+                    },
+                );
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 

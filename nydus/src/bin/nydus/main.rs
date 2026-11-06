@@ -7,6 +7,47 @@ use nydus_config::{default_log_dir, VersionValueParser, NAME};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// A mimalloc option the mount services change.
+struct MiOption {
+    /// Its entry in mimalloc v3's `mi_option_t`; the bindings name no
+    /// constants for these.
+    id: libmimalloc_sys::mi_option_t,
+
+    /// mimalloc's own default, which proves `id` still names the option
+    /// before it is changed.
+    default: std::ffi::c_long,
+
+    /// The environment variable that takes precedence.
+    env: &'static str,
+
+    /// The value of the mount services.
+    value: std::ffi::c_long,
+}
+
+/// The mimalloc options of the mount services, whose memory comes in bursts
+/// of chunk group buffers and network pieces.
+const DAEMON_MI_OPTIONS: [MiOption; 2] = [
+    // `purge_delay` (ms): freed pages go back to the OS at once rather than
+    // a second later, which kept a burst resident long after it was gone.
+    MiOption {
+        id: 15,
+        default: 1000,
+        env: "MIMALLOC_PURGE_DELAY",
+        value: 0,
+    },
+    // `arena_max_object_size` (KiB): objects over 4 MiB, mimalloc's largest
+    // page, are mapped from the OS instead of carved from an arena. fuser
+    // zeroes a 16 MiB request buffer per FUSE thread, and mimalloc writes
+    // those zeros over arena memory it cannot prove clean, making the whole
+    // buffer resident; fresh OS pages are zero and stay untouched.
+    MiOption {
+        id: 45,
+        default: 2 * 1024 * 1024,
+        env: "MIMALLOC_ARENA_MAX_OBJECT_SIZE",
+        value: 4 * 1024,
+    },
+];
+
 pub use nydus::api_server;
 pub mod build;
 pub mod check;
@@ -211,6 +252,8 @@ fn main() -> std::process::ExitCode {
 
     if args.command.is_daemon() {
         tune_daemon_allocator();
+        disable_transparent_huge_pages();
+        tune_mimalloc();
     }
 
     // Execute the command.
@@ -283,6 +326,46 @@ fn tune_daemon_allocator() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn tune_daemon_allocator() {}
 
+/// Keeps the kernel from backing the mount services with transparent huge
+/// pages: where they are `always` on, a huge page makes a whole 2 MiB resident
+/// for a few small allocations or the head of a chunk group buffer, roughly
+/// doubling the daemon's anonymous memory. mimalloc does this itself only
+/// when told through `MIMALLOC_ALLOW_THP=0`; its `no_thp` build merely stops
+/// it asking for huge pages. An explicit `MIMALLOC_ALLOW_THP` takes
+/// precedence.
+#[cfg(target_os = "linux")]
+fn disable_transparent_huge_pages() {
+    if std::env::var_os("MIMALLOC_ALLOW_THP").is_some() {
+        return;
+    }
+    // SAFETY: PR_SET_THP_DISABLE only sets a flag of this process; a kernel
+    // without it fails the call, which leaves huge pages as they were.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disable_transparent_huge_pages() {}
+
+/// Applies [`DAEMON_MI_OPTIONS`] in the mount services, each unless its
+/// environment variable is set. Must run before other threads exist, as
+/// mimalloc options are not thread safe.
+fn tune_mimalloc() {
+    for option in &DAEMON_MI_OPTIONS {
+        if std::env::var_os(option.env).is_some() {
+            continue;
+        }
+        // SAFETY: no other thread runs yet, and an option is only changed
+        // while it holds mimalloc's own default, so the id names it.
+        unsafe {
+            if libmimalloc_sys::mi_option_get(option.id) == option.default {
+                libmimalloc_sys::mi_option_set(option.id, option.value);
+            }
+        }
+    }
+}
+
 /// Returns the default worker parallelism: the available CPU count clamped to
 /// `[min, max]`.
 pub fn default_parallelism(min: usize, max: usize) -> usize {
@@ -290,4 +373,35 @@ pub fn default_parallelism(min: usize, max: usize) -> usize {
         .map(|n| n.get())
         .unwrap_or(min)
         .clamp(min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transparent_huge_pages_are_disabled_for_the_process() {
+        if std::env::var_os("MIMALLOC_ALLOW_THP").is_some() {
+            return;
+        }
+        disable_transparent_huge_pages();
+        // SAFETY: PR_GET_THP_DISABLE only reads a flag of this process.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
+            1
+        );
+    }
+
+    #[test]
+    fn daemon_mimalloc_option_ids_name_their_options() {
+        for option in &DAEMON_MI_OPTIONS {
+            if std::env::var_os(option.env).is_some() {
+                continue;
+            }
+            // SAFETY: reading an option has no preconditions.
+            let value = unsafe { libmimalloc_sys::mi_option_get(option.id) };
+            assert_eq!(value, option.default, "{}", option.env);
+        }
+    }
 }
