@@ -435,11 +435,21 @@ mod tests {
             return;
         }
 
+        // A supported kernel version may still be built without on-demand support.
+        if let Ok(config) = procfs::kernel_config() {
+            if config.get("CONFIG_CACHEFILES_ONDEMAND") != Some(&procfs::ConfigSetting::Yes) {
+                println!(
+                    "Skip test_initialize_fscache_service, CONFIG_CACHEFILES_ONDEMAND is not enabled"
+                );
+                return;
+            }
+        }
+
         let tmp_dir = TempDir::new().unwrap();
         let dir = tmp_dir.as_path().to_str().unwrap();
-        assert!(service_controller
+        service_controller
             .initialize_fscache_service(None, 1, dir, None)
-            .is_ok());
+            .expect("Failed to initialize fscache service");
 
         assert_eq!(service_controller.id(), Some(String::from("id")));
         assert_eq!(
