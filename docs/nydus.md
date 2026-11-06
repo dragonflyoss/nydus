@@ -1155,6 +1155,9 @@ Fields:
 	for the trade-off.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
+- `prefetch.batch_size` (default `2097152`, 2 MiB) is how many compressed
+	bytes one prefetch backend read covers, whole chunk groups back to back,
+	independent of `storage.fetch_size`; `0` reads group by group.
 - `prefetch.request_timeout` (default `1h`) bounds how long prefetching one
 	whole blob may take, while `http.request_timeout` bounds each backend
 	request within it; `0s` disables the bound. A blob that exceeds it is
@@ -2344,10 +2347,11 @@ A miss does not fetch its group alone. The cache splits the **compressed**
 data region into cells of `storage.fetch_size` bytes (default 2 MiB) and,
 on a miss, issues one range read for every group whose compressed range
 overlaps the missed group's cell — trimmed at groups that are already cached
-or already being fetched — then decodes each group as it comes and publishes
-it. The fetch size is a runtime choice, independent of the image's chunk
-size; groups tile the data region back to back, so a fetch is always one
-contiguous range, and because it is measured in compressed bytes it bounds
+or already being fetched — then streams it, decoding and publishing each
+group as soon as its bytes are in, before the next one arrives. The fetch
+size is a runtime choice, independent of the image's chunk size; groups
+tile the data region back to back, so a fetch is always one contiguous
+range, and because it is measured in compressed bytes it bounds
 the transfer rather than the decoded span. The fetch size sets the
 request/byte trade-off: the blobs compress several-fold, so a fetch of `W`
 compressed bytes decodes to a multiple of `W` in the cache, and every extra
@@ -2357,7 +2361,8 @@ links; smaller fetches transfer fewer unused bytes and help on
 bandwidth-bound links and small disks. The 2 MiB default takes about a third
 of the requests off the previous chunk-group format for a moderate byte and
 cache cost, where 4 MiB roughly doubles the cache. Deployments that are short
-on bandwidth or disk should lower `fetch_size`; latency-bound ones can
+on bandwidth or disk should lower `fetch_size`, down to `0` over Dragonfly
+seed peers, where a request costs about a millisecond; latency-bound ones can
 raise it. Optimized images (see [Optimize](#optimize)) sidestep the trade-off:
 their ondemand blob is prefetched whole into the source caches, so the fetch
 size only governs the residual misses.
@@ -2463,20 +2468,23 @@ turns it on); the config's `prefetch` block also sizes the worker pool. See
 Per-blob prefetch streams chunk groups into the cache:
 
 - Prefetch reads the data region in batches of consecutive chunk groups
-	whose compressed bytes add up to `storage.fetch_size` (default 2 MiB),
-	so prefetch and on-demand reads issue backend requests of the same size;
-	a zero fetch size reads group by group.
-- For each batch it issues a single contiguous backend range read, then
-	decodes each contained chunk group (plain copy, zstd or LZ4), validates
-	the group's length and CRC32C, writes the decoded bytes to the cache file
-	at the chunks' padded blocks, and marks the group ready in the group map.
+	whose compressed bytes add up to `prefetch.batch_size` (default 2 MiB),
+	independent of the on-demand `storage.fetch_size`; a zero batch size
+	reads group by group.
+- For each batch it issues a single contiguous backend range read and
+	streams it: as soon as a chunk group's bytes are in, it decodes the group
+	(plain copy, zstd or LZ4), validates its length and CRC32C, writes the
+	decoded bytes to the cache file at the chunks' padded blocks and marks
+	the group ready in the group map, before the next group arrives. A worker
+	thus holds one group, not the batch, and frees its buffers after every
+	batch.
 - A priority blob's batches are fetched by up to
 	`prefetch.concurrent_blob_count` workers (default 10), handed out in blob
 	order; the first batches are single groups (a "ramp") so the head of an
 	ondemand blob — the workload's first reads — lands within one round trip
 	while the rest streams in full batches. Blobs pulled by the phase-2 pool
 	use one worker each.
-- Prefetch uses its own decode buffer and takes no group locks. The group map
+- Prefetch uses its own decode buffers and takes no group locks. The group map
 	bits are updated atomically and `set_ready` is idempotent, so racing with a
 	FUSE read at worst decodes the same group twice into identical bytes at the
 	same offset. This keeps prefetch fully decoupled from, and non-blocking to,

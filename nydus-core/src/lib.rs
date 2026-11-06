@@ -145,7 +145,7 @@ impl NydusCore {
         let prefetch_concurrent_blob_count = config.prefetch.concurrent_blob_count;
         let prefetch_scope = config.prefetch.scope;
         let prefetch_timeout = config.prefetch.request_timeout;
-        let cache_options = CacheOptions::from(&config.storage);
+        let cache_options = CacheOptions::from(&config);
         let backend = <dyn Backend>::new(
             &config.backend,
             &config.prefetch,
