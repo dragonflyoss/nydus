@@ -31,6 +31,7 @@ cli = [
   "dep:anstyle",
   "dep:bytesize",
   "dep:clap",
+  "dep:libmimalloc-sys",
   "dep:mimalloc",
   "dep:signal-hook",
   "dep:tabled",
@@ -74,10 +75,11 @@ httparse = { version = "1", optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = { workspace = true }
+libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"], optional = true }
 libublk = { version = "0.4", default-features = false, optional = true }
 flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 memmap2 = { workspace = true }
-mimalloc = { version = "0.1.52", default-features = false, optional = true }
+mimalloc = { version = "0.1.52", default-features = false, features = ["no_thp"], optional = true }
 nydus-backend = { version = "3.0.0-beta.3", path = "../nydus-backend" }
 nydus-config = { version = "3.0.0-beta.3", path = "../nydus-config" }
 nydus-error = { version = "3.0.0-beta.3", path = "../nydus-error" }

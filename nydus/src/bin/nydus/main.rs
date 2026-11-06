@@ -7,6 +7,18 @@ use nydus_config::{default_log_dir, VersionValueParser, NAME};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// mimalloc's `mi_option_purge_delay`, entry 15 of its `mi_option_t`; the
+/// bindings name no constant for it.
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+/// mimalloc's own purge delay in milliseconds, which proves
+/// [`MI_OPTION_PURGE_DELAY`] still names that option before it is changed.
+const MI_DEFAULT_PURGE_DELAY_MS: std::ffi::c_long = 1000;
+
+/// The purge delay of the mount services in milliseconds: freed pages go
+/// back to the OS at once.
+const DAEMON_PURGE_DELAY_MS: std::ffi::c_long = 0;
+
 pub use nydus::api_server;
 pub mod build;
 pub mod check;
@@ -211,6 +223,8 @@ fn main() -> std::process::ExitCode {
 
     if args.command.is_daemon() {
         tune_daemon_allocator();
+        disable_transparent_huge_pages();
+        tune_mimalloc();
     }
 
     // Execute the command.
@@ -283,6 +297,47 @@ fn tune_daemon_allocator() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn tune_daemon_allocator() {}
 
+/// Keeps the kernel from backing the mount services with transparent huge
+/// pages: where they are `always` on, a huge page makes a whole 2 MiB resident
+/// for a few small allocations or the head of a chunk group buffer, roughly
+/// doubling the daemon's anonymous memory. mimalloc does this itself only
+/// when told through `MIMALLOC_ALLOW_THP=0`; its `no_thp` build merely stops
+/// it asking for huge pages. An explicit `MIMALLOC_ALLOW_THP` takes
+/// precedence.
+#[cfg(target_os = "linux")]
+fn disable_transparent_huge_pages() {
+    if std::env::var_os("MIMALLOC_ALLOW_THP").is_some() {
+        return;
+    }
+    // SAFETY: PR_SET_THP_DISABLE only sets a flag of this process; a kernel
+    // without it fails the call, which leaves huge pages as they were.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disable_transparent_huge_pages() {}
+
+/// Has mimalloc return freed pages to the OS at once in the mount services,
+/// instead of a second later: their memory comes in bursts of chunk group
+/// buffers and network pieces, and the delay keeps a burst resident long
+/// after it is gone. An explicit `MIMALLOC_PURGE_DELAY` takes precedence.
+/// Must run before other threads exist, as mimalloc options are not thread
+/// safe.
+fn tune_mimalloc() {
+    if std::env::var_os("MIMALLOC_PURGE_DELAY").is_some() {
+        return;
+    }
+    // SAFETY: no other thread runs yet, and the option is only changed when
+    // it holds mimalloc's own purge delay, so the id names that option.
+    unsafe {
+        if libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY) == MI_DEFAULT_PURGE_DELAY_MS {
+            libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, DAEMON_PURGE_DELAY_MS);
+        }
+    }
+}
+
 /// Returns the default worker parallelism: the available CPU count clamped to
 /// `[min, max]`.
 pub fn default_parallelism(min: usize, max: usize) -> usize {
@@ -290,4 +345,33 @@ pub fn default_parallelism(min: usize, max: usize) -> usize {
         .map(|n| n.get())
         .unwrap_or(min)
         .clamp(min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transparent_huge_pages_are_disabled_for_the_process() {
+        if std::env::var_os("MIMALLOC_ALLOW_THP").is_some() {
+            return;
+        }
+        disable_transparent_huge_pages();
+        // SAFETY: PR_GET_THP_DISABLE only reads a flag of this process.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
+            1
+        );
+    }
+
+    #[test]
+    fn purge_delay_option_id_names_mimallocs_purge_delay() {
+        if std::env::var_os("MIMALLOC_PURGE_DELAY").is_some() {
+            return;
+        }
+        // SAFETY: reading an option has no preconditions.
+        let delay = unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY) };
+        assert_eq!(delay, MI_DEFAULT_PURGE_DELAY_MS);
+    }
 }
