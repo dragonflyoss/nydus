@@ -1,0 +1,15 @@
+# The build context of Dockerfile is the repository root. Keep VCS data and
+# build, test and coverage outputs out of it. nydus/src/bin is source, so bin
+# dirs are excluded by path, not by **/bin.
+.git
+**/target
+nydus-snapshotter/bin
+nydusify/nydusify
+coverage
+coverage-tools
+.test-tmp
+lcov.info
+**/*.out
+**/*.profraw
+**/*.test
+**/node_modules

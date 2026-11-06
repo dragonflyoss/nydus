@@ -1329,6 +1329,16 @@ recorded, hit or miss, so the record names what was read rather than what a
 fetch pulled. The blob index is the device id from the bootstrap device
 table. The record feeds `nydus optimize` / `nydusify optimize`.
 
+`PUT /api/v1/backend/auth` with the JSON body `{"auth": "<base64 user:pass>"}`
+replaces the registry backend's basic credentials, the value the config's
+`auth` carries, and drops cached bearer tokens, so expiring credentials rotate
+without a restart. It answers `204`, or a `{"message": "..."}` body with `400`
+for a malformed body or credential, `403` when the peer's UID differs from the
+daemon's, `404` without a registry backend, `405` with `Allow: PUT` for any
+other method, `408` when the body takes over 5 seconds, `413` for a body over
+64 KiB, and `500` when the backend fails otherwise. The credential is never
+echoed.
+
 Each completed backend request is also logged at `debug` level after it returns,
 carrying the request source, transport, method, URL, request headers, response
 status and headers (or an error), and the wall-clock duration.

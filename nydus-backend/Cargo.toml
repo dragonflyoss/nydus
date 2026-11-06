@@ -12,6 +12,7 @@ readme = "README.md"
 default = []
 # Container image registry backend (OCI distribution).
 registry = [
+  "dep:base64",
   "dep:serde",
   "dep:serde_json",
   "dep:tracing",
@@ -40,6 +41,7 @@ dragonfly = [
 
 [dependencies]
 async-trait = { version = "0.1", optional = true }
+base64 = { version = "0.22", optional = true }
 bytes = { version = "1", optional = true }
 dragonfly-api = { version = "2.3", optional = true }
 dragonfly-client-request = { version = "=1.10.1", optional = true }

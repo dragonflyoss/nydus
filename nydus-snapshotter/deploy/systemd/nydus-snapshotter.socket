@@ -1,0 +1,18 @@
+# systemd holds the gRPC socket containerd dials, so it exists before the
+# snapshotter runs and connections queue across a snapshotter restart, as
+# soci-snapshotter.socket does. The service takes it with activation.Listeners.
+
+[Unit]
+Description=nydus snapshotter gRPC socket
+Documentation=https://github.com/dragonflyoss/nydus/blob/main/docs/snapshotter.md
+
+[Socket]
+ListenStream=/run/containerd-nydus-v3/containerd-nydus-grpc.sock
+# Only root (containerd) may connect.
+SocketMode=0600
+# Created only when missing; the directory also holds daemon API sockets and
+# rendered daemon configs carrying registry credentials.
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

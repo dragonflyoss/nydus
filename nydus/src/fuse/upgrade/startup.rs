@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use fuser::Config;
+use nydus_backend::Backend;
 use nydus_core::{Metrics, OndemandRecorder};
 use nydus_error::{Context, Error, Result};
 use uuid::Uuid;
@@ -36,6 +37,7 @@ impl Startup {
         image_digest: Option<&[u8]>,
         metrics: Arc<Metrics>,
         ondemand: Arc<OndemandRecorder>,
+        backend: Option<Arc<dyn Backend>>,
     ) -> Result<Self> {
         let mountpoint = normalize_mountpoint(mountpoint)?;
         let mountpoint_id = mountpoint.to_str().ok_or_else(|| {
@@ -58,6 +60,7 @@ impl Startup {
                 api_socket: api_socket.map(|path| path.components().collect()),
                 metrics,
                 ondemand,
+                backend,
             },
         })
     }
@@ -292,23 +295,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent");
         assert_eq!(
-            Startup::new(&absent, None, None, metrics(), ondemand())
+            Startup::new(&absent, None, None, metrics(), ondemand(), None)
                 .unwrap()
                 .mountpoint,
             absent
         );
         assert!(normalize_mountpoint(&dir.path().join("../other")).is_err());
         for mountpoint in ["/", "/run", "/run/nydus", "/run/nydus/fuse"] {
-            assert!(
-                Startup::new(Path::new(mountpoint), None, None, metrics(), ondemand()).is_err()
-            );
+            assert!(Startup::new(
+                Path::new(mountpoint),
+                None,
+                None,
+                metrics(),
+                ondemand(),
+                None
+            )
+            .is_err());
         }
         assert!(Startup::new(
             dir.path(),
             Some(dir.path().join("api.sock")),
             Some(&[0; 32]),
             metrics(),
-            ondemand()
+            ondemand(),
+            None,
         )
         .is_err());
     }
@@ -328,6 +338,7 @@ mod tests {
                 Some(&[0; 32]),
                 metrics(),
                 ondemand(),
+                None,
             )
             .unwrap();
             startup.coordinator.state_base = state.clone();

@@ -3,9 +3,12 @@
 
 use std::io;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use http_auth::ChallengeParser;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::Deserialize;
@@ -223,11 +226,16 @@ impl FetchTokenResponse {
 /// The authentication state of one registry: the configured basic
 /// credentials and the answer to the last challenge.
 pub(crate) struct Authorizer {
-    /// The configured credentials, `None` for an anonymous registry.
-    basic: Option<Authorization>,
+    /// The configured credentials, `None` for an anonymous registry, replaced
+    /// by [`Authorizer::set_basic`].
+    basic: RwLock<Option<Authorization>>,
 
     /// The answer to the last challenge, kept until it expires.
     authorization: RwLock<Option<Authorization>>,
+
+    /// The number of times [`Authorizer::set_basic`] replaced `basic`, so a
+    /// handshake that read the credentials it replaced keeps nothing.
+    generation: AtomicU64,
 
     /// The lock one handshake holds while it answers a challenge, so a burst
     /// of challenged requests fetches one token and the rest reuse it.
@@ -243,10 +251,38 @@ impl Authorizer {
     /// backend is built rather than on the first read.
     pub(crate) fn new(basic: Option<&str>) -> io::Result<Self> {
         Ok(Self {
-            basic: basic.map(Authorization::basic).transpose()?,
+            basic: RwLock::new(basic.map(Authorization::basic).transpose()?),
             authorization: RwLock::new(None),
+            generation: AtomicU64::new(0),
             handshake: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Replaces the basic credentials with `encoded`, a `base64(user:pass)`,
+    /// and forgets the kept answer so the next challenge is answered with
+    /// them.
+    ///
+    /// Rejects with `InvalidInput`, never echoing `encoded`, a value that is
+    /// not standard base64 or does not decode to `user:pass`. A handshake
+    /// already in flight keeps nothing it answered with the old credentials.
+    pub(crate) fn set_basic(&self, encoded: &str) -> io::Result<()> {
+        if !STANDARD
+            .decode(encoded)
+            .is_ok_and(|decoded| decoded.contains(&b':'))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "auth is not base64 of user:pass",
+            ));
+        }
+
+        // Bump the generation after the credentials are replaced and before
+        // the kept answer is forgotten, so a handshake either sees the bump
+        // under the answer's lock or has its answer forgotten here.
+        *self.basic.write().unwrap() = Some(Authorization::basic(encoded)?);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *self.authorization.write().unwrap() = None;
+        Ok(())
     }
 
     /// Adds the `Authorization` header to `headers` when a challenge has been
@@ -282,7 +318,9 @@ impl Authorizer {
     /// realm through `http`.
     ///
     /// One handshake runs at a time; one that finds a valid answer already
-    /// kept, left by the handshake it waited for, reuses it.
+    /// kept, left by the handshake it waited for, reuses it. An answer to
+    /// credentials [`Authorizer::set_basic`] replaced meanwhile is dropped,
+    /// so the next challenge is answered with the new ones.
     pub(crate) async fn authenticate(&self, http: &Http, challenge: Challenge) -> io::Result<()> {
         let _handshake = self.handshake.lock().await;
         if self
@@ -295,8 +333,9 @@ impl Authorizer {
             return Ok(());
         }
 
+        let generation = self.generation.load(Ordering::SeqCst);
         let authorization = match challenge {
-            Challenge::Basic => self.basic.clone().ok_or_else(|| {
+            Challenge::Basic => self.basic.read().unwrap().clone().ok_or_else(|| {
                 io::Error::other("registry requires basic-auth credentials".to_string())
             })?,
             Challenge::Bearer {
@@ -306,7 +345,11 @@ impl Authorizer {
             } => self.fetch_token(http, &realm, &service, &scope).await?,
         };
 
-        *self.authorization.write().unwrap() = Some(authorization);
+        let mut kept = self.authorization.write().unwrap();
+        if self.generation.load(Ordering::SeqCst) == generation {
+            *kept = Some(authorization);
+        }
+
         Ok(())
     }
 
@@ -331,7 +374,7 @@ impl Authorizer {
         );
 
         let mut headers = HeaderMap::new();
-        if let Some(basic) = &self.basic {
+        if let Some(basic) = self.basic.read().unwrap().as_ref() {
             headers.insert(AUTHORIZATION, basic.value().clone());
         }
 
@@ -563,6 +606,157 @@ mod tests {
         let mut headers = HeaderMap::new();
         authorizer.authorize(&mut headers);
         assert_eq!(headers[AUTHORIZATION], "Bearer abc");
+    }
+
+    #[test]
+    fn set_basic_replaces_base64_user_pass_and_drops_the_kept_token() {
+        let test_cases = vec![
+            ("Ym9iOmh1bnRlcjI=", None, None, "Basic Ym9iOmh1bnRlcjI="),
+            ("Ym9iOg==", None, None, "Basic Ym9iOg=="),
+            (
+                "Ym9i",
+                Some(io::ErrorKind::InvalidInput),
+                Some("Bearer xyz"),
+                "Basic YWxpY2U6c2VjcmV0",
+            ),
+            (
+                "Ym9iOmh1bnRlcjI",
+                Some(io::ErrorKind::InvalidInput),
+                Some("Bearer xyz"),
+                "Basic YWxpY2U6c2VjcmV0",
+            ),
+            (
+                "bob:hunter2",
+                Some(io::ErrorKind::InvalidInput),
+                Some("Bearer xyz"),
+                "Basic YWxpY2U6c2VjcmV0",
+            ),
+            (
+                "",
+                Some(io::ErrorKind::InvalidInput),
+                Some("Bearer xyz"),
+                "Basic YWxpY2U6c2VjcmV0",
+            ),
+        ];
+
+        for (encoded, err, header, basic) in test_cases {
+            let authorizer = Authorizer::new(Some("YWxpY2U6c2VjcmV0")).unwrap();
+            *authorizer.authorization.write().unwrap() =
+                Some(Authorization::bearer("xyz", Duration::from_secs(3600)).unwrap());
+
+            assert_eq!(
+                authorizer.set_basic(encoded).err().map(|err| err.kind()),
+                err,
+                "{encoded}"
+            );
+            let mut headers = HeaderMap::new();
+            authorizer.authorize(&mut headers);
+            assert_eq!(
+                headers.get(AUTHORIZATION),
+                header.map(HeaderValue::from_static).as_ref(),
+                "{encoded}"
+            );
+            assert_eq!(
+                authorizer.basic.read().unwrap().as_ref().unwrap().value(),
+                basic,
+                "{encoded}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_answers_a_basic_challenge_with_the_replaced_credentials() {
+        let http = Http::new(
+            Duration::from_secs(5),
+            3,
+            None,
+            &TlsConfig::default(),
+            Duration::from_secs(1),
+            None,
+            Source::Origin,
+        )
+        .unwrap();
+        let test_cases = vec![
+            (None, "Basic Ym9iOmh1bnRlcjI="),
+            (Some("YWxpY2U6c2VjcmV0"), "Basic Ym9iOmh1bnRlcjI="),
+        ];
+
+        for (basic, expected) in test_cases {
+            let authorizer = Authorizer::new(basic).unwrap();
+            authorizer.set_basic("Ym9iOmh1bnRlcjI=").unwrap();
+            authorizer
+                .authenticate(&http, Challenge::Basic)
+                .await
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            authorizer.authorize(&mut headers);
+            assert_eq!(headers[AUTHORIZATION], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_keeps_no_token_fetched_before_set_basic() {
+        let http = Http::new(
+            Duration::from_secs(5),
+            3,
+            None,
+            &TlsConfig::default(),
+            Duration::from_secs(1),
+            None,
+            Source::Origin,
+        )
+        .unwrap();
+        let test_cases = vec![(None, Some("Bearer abc")), (Some("Ym9iOmh1bnRlcjI="), None)];
+
+        for (basic, expected) in test_cases {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let realm = format!("http://{}/token", listener.local_addr().unwrap());
+            let fetched = std::sync::Arc::new(tokio::sync::Notify::new());
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let notify = fetched.clone();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                notify.notify_one();
+                released.recv().unwrap();
+                let body = r#"{"token":"abc","expires_in":300}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let authorizer = Authorizer::new(Some("YWxpY2U6c2VjcmV0")).unwrap();
+            let challenge = Challenge::Bearer {
+                realm,
+                service: String::new(),
+                scope: String::new(),
+            };
+
+            let (result, ()) = tokio::join!(authorizer.authenticate(&http, challenge), async {
+                fetched.notified().await;
+                if let Some(basic) = basic {
+                    authorizer.set_basic(basic).unwrap();
+                }
+                release.send(()).unwrap();
+            });
+
+            assert!(result.is_ok());
+            let mut headers = HeaderMap::new();
+            authorizer.authorize(&mut headers);
+            assert_eq!(
+                headers.get(AUTHORIZATION),
+                expected.map(HeaderValue::from_static).as_ref(),
+                "{basic:?}"
+            );
+        }
     }
 
     #[test]

@@ -250,7 +250,7 @@ impl FuseCommand {
             .as_ref()
             .map(|config| CacheOptions::from(&config.storage))
             .unwrap_or_default();
-        let reader = match (&self.blob, &self.bootstrap, backend) {
+        let reader = match (&self.blob, &self.bootstrap, backend.clone()) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
             (Some(blob), None, _) => ErofsReader::open_blob(
@@ -300,6 +300,7 @@ impl FuseCommand {
             image_digest.as_ref().map(|digest| digest.as_slice()),
             reader.metrics().clone(),
             ondemand_recorder,
+            backend,
         )?;
         let session = startup.start(fs, &config, shutdown)?;
 

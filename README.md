@@ -326,6 +326,7 @@ nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountp
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [docs/nydus.md](docs/nydus.md)       | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`                 |
 | [docs/upgrade.md](docs/upgrade.md) | FUSE hot upgrade: usage, startup selection, ownership, and the handoff protocol |
+| [docs/snapshotter.md](docs/snapshotter.md) | containerd snapshotter: image detection, per-image daemons under systemd, cgroup layout, credentials, cache GC, paths, and known limitations |
 | [docs/uffd.md](docs/uffd.md)         | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem          |
 | [docs/ublk.md](docs/ublk.md)         | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths         |
 | [docs/erofs.md](docs/erofs.md)       | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                            |

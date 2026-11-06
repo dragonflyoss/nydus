@@ -441,6 +441,12 @@ impl Backend for Registry {
         &self.metrics
     }
 
+    /// Replaces the registry credentials, the next challenge answered with
+    /// them.
+    fn set_auth(&self, auth: &str) -> io::Result<()> {
+        self.client.authorizer.set_basic(auth)
+    }
+
     /// Recovers the blob's metadata from the registry for an on-demand read.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let client = self.client.clone();

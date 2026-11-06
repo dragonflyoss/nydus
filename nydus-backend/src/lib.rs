@@ -132,6 +132,19 @@ pub trait Backend: Send + Sync {
     ) -> io::Result<()> {
         self.read_range_into(blob_id, offset, buf)
     }
+
+    /// Replaces the backend's basic credentials with `auth`, a
+    /// `base64(user:pass)` like the registry config's `auth`, dropping the
+    /// tokens the old ones produced.
+    ///
+    /// Rejects a malformed `auth` with `InvalidInput`. Backends without
+    /// credentials report `Unsupported`.
+    fn set_auth(&self, _auth: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no credentials",
+        ))
+    }
 }
 
 /// Implements the blob backend construction.
