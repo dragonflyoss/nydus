@@ -2311,7 +2311,6 @@ dependencies = [
  "nydus-test-utils",
  "sha2 0.10.9",
  "tempfile",
- "tokio",
  "tracing",
  "xattr",
  "zstd",
@@ -2395,7 +2394,6 @@ dependencies = [
  "nydus-telemetry",
  "sha2 0.10.9",
  "tempfile",
- "tokio",
  "zstd",
 ]
 

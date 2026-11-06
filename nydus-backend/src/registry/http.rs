@@ -159,6 +159,39 @@ impl Transport for Http {
         result
     }
 
+    /// Like [`Transport::get`], the body streamed.
+    async fn get_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let start = Instant::now();
+        let result = self
+            .client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: Body::Stream(Box::new(StreamReader::new(
+                    response.bytes_stream().map_err(io::Error::other),
+                ))),
+                source: self.source,
+            })
+            .map_err(io::Error::other);
+
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (ondemand) from the origin returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (ondemand) from the origin failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+        result
+    }
+
     /// Sends the `GET` of a prefetch read, the body left streaming, sending
     /// a `429`, `5xx` or `408` once more after the retry interval and failing
     /// a transport failure at once.
@@ -209,9 +242,7 @@ impl Transport for Http {
         }
     }
 
-    /// Sends the `GET` of a prefetch read like [`Transport::prefetch`], the
-    /// body streamed to the caller, sending a `429`, `5xx` or `408` once more
-    /// after the retry interval and failing a transport failure at once.
+    /// Like [`Transport::prefetch`], the body streamed.
     async fn prefetch_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let mut retried = false;
         loop {

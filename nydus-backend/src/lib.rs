@@ -30,6 +30,9 @@ pub(crate) use registry::Registry;
 pub use nydus_config::ReadKind;
 pub use nydus_telemetry::metrics::Source;
 
+/// A boxed [`AsyncRead`] of blob bytes, which any executor can poll.
+pub type Reader = Box<dyn AsyncRead + Send + Unpin>;
+
 /// A raw EROFS device backed by the range
 /// `[data_offset, data_offset + data_size)` of a local file.
 #[derive(Debug, Clone)]
@@ -124,20 +127,22 @@ pub trait Backend: Send + Sync {
         buf: &mut [u8],
     ) -> io::Result<()>;
 
-    /// Returns a reader of the `length` blob bytes from `offset` for a
-    /// prefetch read of the ondemand blob: one request, its body read as the
-    /// caller consumes it, so the caller holds only the bytes it is reading
-    /// rather than the whole fetch-size batch. Every other read keeps
-    /// [`Backend::read_range_into`] and [`Backend::prefetch_range_into`].
-    ///
-    /// Any executor can poll the reader: a backend whose reader needs a
-    /// runtime enters it on every poll.
+    /// Returns a reader of `length` blob bytes from `offset` for an on-demand
+    /// chunk group fetch, streamed in one request.
+    fn read_range_into_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<Reader>;
+
+    /// Like [`Backend::read_range_into_reader`], for a prefetch read.
     fn prefetch_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: u64,
-    ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>>;
+    ) -> io::Result<Reader>;
 
     /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
     fn prefetch_range_into(

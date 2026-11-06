@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::chunk_group_map::{current_boot_tag, ChunkGroupMap};
 use crate::ondemand::OndemandRecorder;
-use nydus_backend::{Backend, ReadKind};
+use nydus_backend::{Backend, ReadKind, Reader};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -481,67 +481,60 @@ impl LocalBlobCache {
         Ok(())
     }
 
-    /// One backend read for the encoded payloads of the groups of `window`
-    /// into `buffers`: the encoded bytes, a decode scratch the size of the
-    /// group span (no group's payload is larger), and the data-region offset
-    /// the encoded bytes start at.
+    /// Opens one backend read of the groups of `window`, with `buffers`
+    /// sized for one group: the largest encoded group and a decode scratch.
     fn fetch_window<'b>(
         &self,
         window: &Range<usize>,
         kind: ReadKind,
         buffers: &'b mut ChunkGroupBuffers,
-    ) -> io::Result<(&'b mut [u8], &'b mut [u8], u64)> {
+    ) -> io::Result<(Reader, &'b mut [u8], &'b mut [u8])> {
         let head = self.chunk_group(window.start);
-        let tail = self.chunk_group(window.end - 1);
-        let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
-            .map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize")
-        })?;
+        let length =
+            self.chunk_group(window.end - 1).compressed_range().end - head.compressed_offset();
+        let encoded_len = window
+            .clone()
+            .map(|index| self.chunk_group(index).compressed_size() as usize)
+            .max()
+            .unwrap_or_default();
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
         let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
-        match kind {
-            ReadKind::Ondemand => {
-                self.backend
-                    .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?
-            }
-            ReadKind::Prefetch => self.backend.prefetch_range_into(
+        let reader = match kind {
+            ReadKind::Ondemand => self.backend.read_range_into_reader(
                 &self.blob_id,
                 head.compressed_offset(),
-                encoded,
+                length,
             )?,
-        }
-        Ok((encoded, decoded, head.compressed_offset()))
+            ReadKind::Prefetch => self.backend.prefetch_range_into_reader(
+                &self.blob_id,
+                head.compressed_offset(),
+                length,
+            )?,
+        };
+        Ok((reader, encoded, decoded))
     }
 
-    /// Decode and validate `group` out of a fetched window whose encoded
-    /// bytes start at data-region offset `base`; a stored-plain group
-    /// borrows the window, a compressed one decodes into `decoded`.
+    /// Decode and validate `group` out of its `encoded` bytes, into
+    /// `decoded` when compressed.
     fn decode_group<'p>(
         &self,
         group: &BlobMetadataChunkGroupExtent,
-        base: u64,
         encoded: &'p [u8],
         decoded: &'p mut [u8],
     ) -> io::Result<&'p [u8]> {
-        let start = (group.compressed_offset() - base) as usize;
-        let end = start + group.compressed_size() as usize;
         let payload: &[u8] = if group.is_uncompressed(&self.blob_metadata) {
-            &encoded[start..end]
+            encoded
         } else {
             let out = &mut decoded[..u64::from(group.uncompressed_size()) as usize];
-            super::decode_chunk_group_into(
-                self.blob_metadata.compressor(),
-                &encoded[start..end],
-                out,
-            )?;
+            super::decode_chunk_group_into(self.blob_metadata.compressor(), encoded, out)?;
             out
         };
         validate_decoded_chunk_group(group, payload, self.options.skip_verify_checksums)?;
         Ok(payload)
     }
 
-    /// One backend read for the groups of `window`, then decode, validate,
-    /// write and publish each group that is still missing.
+    /// One backend read for the groups of `window`, taken one group at a time
+    /// to decode, validate, write and publish each group still missing.
     fn fill_chunk_group_window(
         &self,
         window: Range<usize>,
@@ -549,17 +542,21 @@ impl LocalBlobCache {
         buffers: &mut ChunkGroupBuffers,
         cache_file: &File,
     ) -> io::Result<()> {
-        let (encoded, decoded, base) = self.fetch_window(&window, kind, buffers)?;
+        let (mut reader, encoded, decoded) = self.fetch_window(&window, kind, buffers)?;
         let metrics = &self.backend.metrics().cache;
         for index in window {
+            // Groups are back to back, so even a ready group is read past.
+            let group = self.chunk_group(index);
+            let encoded = &mut encoded[..group.compressed_size() as usize];
+            futures::executor::block_on(reader.read_exact(encoded))?;
+
             // Another process may have filled a group of the window since
             // it was planned; the leader's own group was re-checked under
             // the claim, so this only costs a bit test.
             if self.chunk_group_ready(index)? {
                 continue;
             }
-            let group = self.chunk_group(index);
-            self.decode_group(&group, base, encoded, decoded)
+            self.decode_group(&group, encoded, decoded)
                 .and_then(|payload| self.write_chunk_group(&group, payload, cache_file))
                 .inspect(|()| {
                     metrics.collect_write_finished_metrics(
@@ -575,11 +572,8 @@ impl LocalBlobCache {
     }
 
     /// Fetch one ondemand-blob batch, trimmed at the groups `skip` accepts,
-    /// and hand every decoded group to `cb`. The batch is one backend read
-    /// whose groups are taken off its reader one at a time, so a worker holds
-    /// one group rather than the whole fetch-size batch. A group that fails
-    /// to decode or validate is logged and skipped; `cb` errors abort the
-    /// stream.
+    /// and hand every decoded group to `cb`. A group that fails to decode
+    /// or validate is logged and skipped; `cb` errors abort the stream.
     fn stream_ondemand_blob_batch(
         &self,
         batch: Range<usize>,
@@ -598,30 +592,20 @@ impl LocalBlobCache {
         if start == end {
             return Ok((0, 0));
         }
-        let head = self.chunk_group(start);
-        let length = self.chunk_group(end - 1).compressed_range().end - head.compressed_offset();
-        let encoded_len = (start..end)
-            .map(|index| self.chunk_group(index).compressed_size() as usize)
-            .max()
-            .unwrap_or_default();
-        let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
-        let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
-        let mut reader = self.backend.prefetch_range_into_reader(
-            &self.blob_id,
-            head.compressed_offset(),
-            length,
-        )?;
+        let length = self.chunk_group(end - 1).compressed_range().end
+            - self.chunk_group(start).compressed_offset();
+        let (mut reader, encoded, decoded) =
+            self.fetch_window(&(start..end), ReadKind::Prefetch, buffers)?;
         let mut failed = 0;
         for index in start..end {
-            // Groups are back to back, so each one's bytes follow the last
-            // and a skipped group is still read past.
+            // Groups are back to back, so even a skipped group is read past.
             let group = self.chunk_group(index);
             let encoded = &mut encoded[..group.compressed_size() as usize];
             futures::executor::block_on(reader.read_exact(encoded))?;
             if skip(&group) {
                 continue;
             }
-            match self.decode_group(&group, group.compressed_offset(), encoded, decoded) {
+            match self.decode_group(&group, encoded, decoded) {
                 Ok(payload) => cb(&group, payload)?,
                 Err(err) => {
                     failed += 1;
@@ -780,6 +764,10 @@ impl LocalBlobCache {
             let start = index;
             while index < groups.end && !self.chunk_group_ready(index)? {
                 index += 1;
+            }
+            // Another reader published `start` between the two checks.
+            if index == start {
+                continue;
             }
             self.fill_chunk_group_window(start..index, kind, buffers, cache_file)?;
             fetched = true;
@@ -1851,9 +1839,8 @@ mod tests {
         batch.flush().unwrap();
     }
 
-    /// Wraps a real backend and counts data-range reads, a streamed
-    /// ondemand-blob batch counting once, so tests can assert that
-    /// cross-process sharing (group map + prefetch lock + batch skip)
+    /// Wraps a real backend and counts data-range reads, so tests can assert
+    /// that cross-process sharing (group map + prefetch lock + batch skip)
     /// actually eliminates duplicate backend traffic.
     struct CountingBackend {
         inner: Local,
@@ -1895,20 +1882,30 @@ mod tests {
             self.inner.read_range_into(blob_id, offset, dst)
         }
 
+        fn read_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<Reader> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.read_range_into_reader(blob_id, offset, length)
+        }
+
         fn prefetch_range_into_reader(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>> {
+        ) -> io::Result<Reader> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner
                 .prefetch_range_into_reader(blob_id, offset, length)
         }
     }
 
-    /// A backend serving data only through `prefetch_range_into_reader`,
-    /// recording the largest single read taken off its readers.
+    /// A backend serving data only through its range readers, recording
+    /// their largest read.
     struct StreamingBackend {
         inner: Local,
         range_readers: AtomicUsize,
@@ -1916,7 +1913,7 @@ mod tests {
     }
 
     struct RecordingReader {
-        inner: Box<dyn AsyncRead + Send + Unpin>,
+        inner: Reader,
         largest_read: Arc<AtomicUsize>,
     }
 
@@ -1951,8 +1948,21 @@ mod tests {
             _dst: &mut [u8],
         ) -> io::Result<()> {
             Err(io::Error::other(
-                "ondemand blob reads go through prefetch_range_into_reader",
+                "chunk group fetches go through the range readers",
             ))
+        }
+
+        fn read_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<Reader> {
+            self.range_readers.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(RecordingReader {
+                inner: self.inner.read_range_into_reader(blob_id, offset, length)?,
+                largest_read: self.largest_read.clone(),
+            }))
         }
 
         fn prefetch_range_into_reader(
@@ -1960,7 +1970,7 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>> {
+        ) -> io::Result<Reader> {
             self.range_readers.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(RecordingReader {
                 inner: self
@@ -1971,8 +1981,45 @@ mod tests {
         }
     }
 
-    /// An ondemand blob batch streams through one `prefetch_range_into_reader`,
-    /// taking one group's encoded bytes off the reader at a time.
+    /// An on-demand miss reads its window through one reader, one group at
+    /// a time.
+    #[test]
+    fn ondemand_windows_stream_one_group_at_a_time() {
+        let backend_dir = tempdir().unwrap();
+        let (data, meta, _, image) = groups_blob();
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let backend = Arc::new(StreamingBackend {
+            inner: Local::new(backend_dir.path().to_path_buf(), Arc::new(Metrics::new())),
+            range_readers: AtomicUsize::new(0),
+            largest_read: Arc::new(AtomicUsize::new(0)),
+        });
+        let cache_dir = tempdir().unwrap();
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone() as Arc<dyn Backend>,
+            fetch(1 << 20),
+        )
+        .unwrap();
+
+        let mut all = vec![0u8; image.len()];
+        cached.read_at(0, &mut all).unwrap();
+
+        assert_eq!(all, image);
+        assert_eq!(backend.range_readers.load(Ordering::SeqCst), 1);
+        let largest_group = (0..meta.chunk_group_count())
+            .map(|index| meta.chunk_group(index).unwrap().compressed_size() as usize)
+            .max()
+            .unwrap();
+        assert_eq!(backend.largest_read.load(Ordering::SeqCst), largest_group);
+        assert!(largest_group < data.len());
+    }
+
+    /// An ondemand blob batch reads through one reader, one group at a time.
     #[test]
     fn ondemand_blob_batches_stream_one_group_at_a_time() {
         use nydus_format::blob::{

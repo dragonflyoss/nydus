@@ -10,7 +10,7 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::runtime::{Builder, Handle};
 use tracing::{error, info};
 
-use crate::Netns;
+use crate::{Netns, Reader};
 
 /// The runtime a registry backend runs its requests on, on-demand and
 /// prefetch reads alike.
@@ -84,9 +84,8 @@ impl Runtime {
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))?
     }
 
-    /// Wraps `body`, streaming on the runtime, into a [`RuntimeReader`] any
-    /// executor can poll.
-    pub(crate) fn reader(&self, body: Box<dyn AsyncRead + Send + Unpin>) -> RuntimeReader {
+    /// Wraps `body`, streaming on the runtime, in a [`RuntimeReader`].
+    pub(crate) fn reader(&self, body: Reader) -> RuntimeReader {
         RuntimeReader {
             body,
             handle: self.runtime.handle().clone(),
@@ -101,12 +100,10 @@ impl Runtime {
     }
 }
 
-/// A body streaming on the runtime, polled inside the runtime's context so
-/// its timers and the tokio calls of its poll resolve whichever executor
-/// polls it; the connection behind it keeps running on the runtime's workers.
+/// A body polled inside its runtime's context, so any executor can drive it.
 pub(crate) struct RuntimeReader {
     /// The body.
-    body: Box<dyn AsyncRead + Send + Unpin>,
+    body: Reader,
 
     /// The handle of the runtime the body streams on.
     handle: Handle,

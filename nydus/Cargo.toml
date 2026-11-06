@@ -117,4 +117,3 @@ xattr = { workspace = true }
 base64 = "0.22"
 nydus-test-utils = { path = "../nydus-test-utils" }
 tempfile = { workspace = true }
-tokio = { workspace = true }

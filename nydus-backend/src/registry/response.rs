@@ -7,7 +7,7 @@ use reqwest::header::{HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::Source;
+use crate::{Reader, Source};
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
 /// and headers up front, plus the body.
@@ -43,8 +43,7 @@ impl Response {
     pub(crate) fn require_partial(self, range: &str) -> io::Result<Self> {
         // Dragonfly 1.3 returns 200 for a partial download but supplies the
         // exact Content-Range. Do not extend this exception to origin servers.
-        // A streamed body is measured by its Content-Length, which the HTTP
-        // framing holds it to.
+        // A streamed body is checked by its Content-Length.
         if self.status == StatusCode::OK && self.source == Source::Dragonfly {
             let decimal = |value: &str| {
                 if value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -102,9 +101,8 @@ impl Response {
         Ok(self)
     }
 
-    /// Returns the body as a reader, a body already in memory read back from
-    /// it.
-    pub(crate) fn into_reader(self) -> Box<dyn AsyncRead + Send + Unpin> {
+    /// Returns the body as a reader.
+    pub(crate) fn into_reader(self) -> Reader {
         match self.body {
             Body::Stream(reader) => reader,
             Body::Bytes(bytes) => Box::new(io::Cursor::new(bytes)),

@@ -17,7 +17,6 @@ use std::time::Instant;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
-use tokio::io::AsyncRead;
 use url::Url;
 
 use nydus_config::{PrefetchConfig, RegistryConfig};
@@ -25,7 +24,7 @@ use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
 
-use crate::{Backend, Netns, ReadKind, Source};
+use crate::{Backend, Netns, ReadKind, Reader, Source};
 
 use self::auth::{Authorizer, Challenge};
 #[cfg(feature = "dragonfly")]
@@ -40,22 +39,22 @@ pub use self::rt::Runtime;
 ///
 /// One call spends the transport's own retries and hands back a settled
 /// answer, a Dragonfly body already buffered so a mid-stream failure surfaces
-/// here rather than while the caller consumes it; only the body of
-/// [`Transport::prefetch_stream`] streams, its failure surfacing as it is
-/// read.
+/// here rather than while the caller consumes it; the `*_stream` methods
+/// stream the body instead.
 #[async_trait]
 trait Transport: Send + Sync {
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
+
+    /// Like [`Transport::get`], the body streamed rather than buffered.
+    async fn get_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
     /// Sends the `GET` of a background prefetch read, once more after the
     /// configured prefetch retry interval when it answered `429`, `5xx` or
     /// `408`; a transport failure fails the read at once.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
-    /// Sends the `GET` of a background prefetch read like
-    /// [`Transport::prefetch`], its body streamed to the caller rather than
-    /// buffered.
+    /// Like [`Transport::prefetch`], the body streamed rather than buffered.
     async fn prefetch_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
@@ -317,6 +316,49 @@ impl Client {
         Ok(redirected)
     }
 
+    /// Like [`Client::read_range`], the body streamed from the transport.
+    async fn read_range_stream(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        range: &str,
+    ) -> io::Result<Response> {
+        let hex = hex::encode(blob_id);
+        let mut headers = HeaderMap::new();
+        headers.insert(RANGE, range.parse().map_err(io::Error::other)?);
+        let transport = self.transport();
+        if let Some(redirect) = self.redirects.get(&hex) {
+            let response = transport.get_stream(&redirect, headers.clone()).await?;
+            match response.status {
+                status if status.is_success() => return response.require_partial(range),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
+                _ => return Err(response.into_io_error().await),
+            }
+        }
+
+        let url = self.blob_url(&hex);
+        let response = self
+            .execute(headers.clone(), |headers| {
+                transport.get_stream(&url, headers)
+            })
+            .await?;
+        if response.status.is_success() {
+            return response.require_partial(range);
+        }
+        if !response.status.is_redirection() {
+            return Err(response.into_io_error().await);
+        }
+
+        let location = response.location()?;
+        let redirected = transport.get_stream(&location, headers).await?;
+        if !redirected.status.is_success() {
+            return Err(redirected.into_io_error().await);
+        }
+        let redirected = redirected.require_partial(range)?;
+
+        self.redirects.insert(&hex, location);
+        Ok(redirected)
+    }
+
     /// Fetches the `range` of a blob, a `Range` header value, for a prefetch
     /// read and returns the successful response, its body still to be read.
     ///
@@ -363,13 +405,7 @@ impl Client {
         Ok(redirected)
     }
 
-    /// Fetches the `range` of a blob, a `Range` header value, for a prefetch
-    /// read like [`Client::prefetch_range`], the successful response's body
-    /// streamed from the transport.
-    ///
-    /// The read goes through the cached redirect when there is one, a `401`
-    /// or `403` evicting it, and otherwise through the blob URL, caching the
-    /// redirect it answers with.
+    /// Like [`Client::prefetch_range`], the body streamed from the transport.
     async fn prefetch_range_stream(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -561,16 +597,49 @@ impl Backend for Registry {
         }
     }
 
-    /// Returns the body of one range `GET` for a prefetch read, streamed as
-    /// the caller reads it and polled inside the backend's runtime whichever
-    /// executor drives it, recording the read's metrics once the `GET` is
-    /// answered.
+    /// Returns the streamed body of one range `GET` for an on-demand read,
+    /// recording the read's metrics once it is answered.
+    fn read_range_into_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<Reader> {
+        let start = Instant::now();
+        let client = self.client.clone();
+        let blob_id = *blob_id;
+        let result = self.runtime.block_on_worker(async move {
+            let range = format!("bytes={offset}-{}", (offset + length).saturating_sub(1));
+            client.read_range_stream(&blob_id, &range).await
+        });
+
+        match result {
+            Ok(response) => {
+                self.metrics.backend.collect_read_finished_metrics(
+                    ReadKind::Ondemand,
+                    response.source,
+                    length,
+                    start.elapsed(),
+                );
+                Ok(Box::new(self.runtime.reader(response.into_reader())))
+            }
+            Err(err) => {
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source());
+                Err(err)
+            }
+        }
+    }
+
+    /// Returns the streamed body of one range `GET` for a prefetch read,
+    /// recording the read's metrics once it is answered.
     fn prefetch_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: u64,
-    ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>> {
+    ) -> io::Result<Reader> {
         let start = Instant::now();
         let client = self.client.clone();
         let blob_id = *blob_id;
@@ -663,6 +732,10 @@ mod tests {
             (**self).get(url, headers).await
         }
 
+        async fn get_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+            (**self).get_stream(url, headers).await
+        }
+
         async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
             (**self).prefetch(url, headers).await
         }
@@ -737,6 +810,10 @@ mod tests {
             self.play(&headers)
         }
 
+        async fn get_stream(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.play(&headers)
+        }
+
         async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.play(&headers)
         }
@@ -795,6 +872,10 @@ mod tests {
     #[async_trait]
     impl Transport for AuthGate {
         async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.answer(headers).await
+        }
+
+        async fn get_stream(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
         }
 
@@ -895,26 +976,30 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_range_into_reader_streams_the_body_of_one_range_get() {
+    fn range_into_readers_stream_the_body_of_one_range_get() {
         use tokio::io::AsyncReadExt;
 
         let blob: Vec<u8> = (0..64).collect();
-        let origin = OriginStub::serve("500 Internal Server Error", Vec::new());
-        let transport = ScriptedTransport::new([Scripted::Body(
-            StatusCode::PARTIAL_CONTENT,
-            blob[16..48].to_vec(),
-        )]);
-        let registry = scripted_registry(origin.addr, None, transport.clone());
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            let origin = OriginStub::serve("500 Internal Server Error", Vec::new());
+            let transport = ScriptedTransport::new([Scripted::Body(
+                StatusCode::PARTIAL_CONTENT,
+                blob[16..48].to_vec(),
+            )]);
+            let registry = scripted_registry(origin.addr, None, transport.clone());
 
-        let mut reader = registry
-            .prefetch_range_into_reader(&TEST_BLOB_ID, 16, 32)
+            let mut reader = match kind {
+                ReadKind::Ondemand => registry.read_range_into_reader(&TEST_BLOB_ID, 16, 32),
+                ReadKind::Prefetch => registry.prefetch_range_into_reader(&TEST_BLOB_ID, 16, 32),
+            }
             .unwrap();
-        let mut buf = vec![0u8; 32];
-        futures::executor::block_on(reader.read_exact(&mut buf)).unwrap();
+            let mut buf = vec![0u8; 32];
+            futures::executor::block_on(reader.read_exact(&mut buf)).unwrap();
 
-        assert_eq!(buf, blob[16..48]);
-        assert_eq!(transport.ranges(), ["bytes=16-47"]);
-        assert_eq!(origin.hits(), 0);
+            assert_eq!(buf, blob[16..48], "{kind:?}");
+            assert_eq!(transport.ranges(), ["bytes=16-47"], "{kind:?}");
+            assert_eq!(origin.hits(), 0, "{kind:?}");
+        }
     }
 
     #[test]

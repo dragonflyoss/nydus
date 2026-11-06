@@ -226,6 +226,105 @@ impl Transport for Dragonfly {
         self.fallback_http_client.get(url, headers).await
     }
 
+    /// Like [`Transport::get`], the body streamed through the SDK's `get`; a
+    /// mid-body failure is neither retried nor sent to the origin.
+    async fn get_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let request = GetRequest {
+            url: url.to_string(),
+            header: headers.clone(),
+            priority: Some(Priority::Level6 as i32),
+            timeout: self.request_timeout,
+            ..Default::default()
+        };
+
+        let start = Instant::now();
+        let response = match self.client(&self.ondemand_client, self.max_retries).await {
+            Ok(client) => client.get(&request).await,
+            Err(err) => Err(err),
+        };
+        let result = match response {
+            Ok(response) => Ok(Response {
+                status: response.status_code.unwrap_or(StatusCode::OK),
+                headers: response.header,
+                body: Body::Stream(Box::new(StreamReader::new(
+                    response
+                        .body
+                        .unwrap_or_else(|| Box::new(futures::stream::empty()))
+                        .map_err(io::Error::other),
+                ))),
+                source: Source::Dragonfly,
+            }),
+            Err(Error::ProxyError(ProxyError {
+                status_code: Some(status),
+                header,
+                message,
+            }))
+            | Err(Error::BackendError(BackendError {
+                status_code: Some(status),
+                header,
+                message,
+            }))
+            | Err(Error::DfdaemonError(DfdaemonError {
+                status_code: Some(status),
+                header,
+                message,
+            })) => Ok(Response {
+                status,
+                headers: header
+                    .into_iter()
+                    .filter_map(|(name, value)| {
+                        Some((
+                            HeaderName::from_bytes(name.as_bytes()).ok()?,
+                            HeaderValue::from_str(&value).ok()?,
+                        ))
+                    })
+                    .collect(),
+                body: Body::Bytes(message.unwrap_or_default().into()),
+                source: Source::Dragonfly,
+            }),
+            Err(Error::RequestTimeout(message)) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("dragonfly request timed out: {message}"),
+            )),
+            Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
+        };
+
+        let result = match result {
+            Ok(response) if response.status.is_success() && headers.contains_key(RANGE) => {
+                let range = headers
+                    .get(RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .expect("range header was checked above");
+                response.require_partial(range)
+            }
+            other => other,
+        };
+
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (ondemand) through dragonfly returned {} in {:?}",
+                response.status,
+                start.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (ondemand) through dragonfly failed in {:?}: {err}",
+                start.elapsed()
+            ),
+        }
+
+        // Serve a definitive answer; fall back to the origin on anything else.
+        let err = match result {
+            Ok(response) if response.needs_fallback() => response.into_io_error().await,
+            Ok(response) => return Ok(response),
+            Err(err) => err,
+        };
+        warn!("dragonfly request failed, falling back to the origin: {err}");
+
+        // The fallback client logs the outcome and its duration itself; the
+        // backend records the read's metrics once, whichever client failed.
+        self.fallback_http_client.get_stream(url, headers).await
+    }
+
     /// Fetches `url` through the prefetch client at `Level3`, so a normal
     /// peer goes back to source ahead of it, sending a `429`, `5xx` or `408`
     /// once more after the retry interval and failing a transport failure at once, never
@@ -317,8 +416,8 @@ impl Transport for Dragonfly {
         }
     }
 
-    /// Fetches `url` like [`Transport::prefetch`], the body streamed from the
-    /// seed peer through the SDK's `get`.
+    /// Like [`Transport::prefetch`], the body streamed through the SDK's
+    /// `get`.
     async fn prefetch_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),

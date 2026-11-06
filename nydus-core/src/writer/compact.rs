@@ -74,12 +74,21 @@ impl Backend for RepackBackend<'_> {
         self.inner.read_range_into(blob_id, offset, buf)
     }
 
+    fn read_range_into_reader(
+        &self,
+        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> std::io::Result<nydus_backend::Reader> {
+        self.inner.read_range_into_reader(blob_id, offset, length)
+    }
+
     fn prefetch_range_into_reader(
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         offset: u64,
         length: u64,
-    ) -> std::io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+    ) -> std::io::Result<nydus_backend::Reader> {
         self.inner
             .prefetch_range_into_reader(blob_id, offset, length)
     }
@@ -664,12 +673,26 @@ mod tests {
             self.local.read_range_into(id, offset, buf)
         }
 
+        fn read_range_into_reader(
+            &self,
+            id: &[u8; EROFS_BLOB_ID_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<nydus_backend::Reader> {
+            self.largest_read
+                .fetch_max(length as usize, Ordering::Relaxed);
+            if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_after {
+                return Err(io::Error::other("injected compact read failure"));
+            }
+            self.local.read_range_into_reader(id, offset, length)
+        }
+
         fn prefetch_range_into_reader(
             &self,
             id: &[u8; EROFS_BLOB_ID_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+        ) -> io::Result<nydus_backend::Reader> {
             self.largest_read
                 .fetch_max(length as usize, Ordering::Relaxed);
             if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_after {

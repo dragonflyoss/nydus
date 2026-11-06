@@ -344,12 +344,25 @@ mod tests {
             self.inner.read_range_into(blob_id, offset, dst)
         }
 
+        fn read_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<nydus_backend::Reader> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.failures {
+                return Err((self.error)());
+            }
+            self.inner.read_range_into_reader(blob_id, offset, length)
+        }
+
         fn prefetch_range_into_reader(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+        ) -> io::Result<nydus_backend::Reader> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
@@ -477,12 +490,22 @@ mod tests {
             self.inner.read_range_into(blob_id, offset, dst)
         }
 
+        fn read_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<nydus_backend::Reader> {
+            self.reads.lock().unwrap().push(*blob_id);
+            self.inner.read_range_into_reader(blob_id, offset, length)
+        }
+
         fn prefetch_range_into_reader(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+        ) -> io::Result<nydus_backend::Reader> {
             self.reads.lock().unwrap().push(*blob_id);
             self.inner
                 .prefetch_range_into_reader(blob_id, offset, length)

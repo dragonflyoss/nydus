@@ -428,14 +428,32 @@ impl Backend for FaultBackend {
         self.read(blob_id, offset, dst, ReadKind::Ondemand)
     }
 
-    /// Serves the range from memory with the faults of one prefetch read,
-    /// the same call [`Backend::prefetch_range_into`] admits and records.
+    /// Serves the range from memory, faulted like [`Backend::read_range_into`].
+    fn read_range_into_reader(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        length: u64,
+    ) -> io::Result<nydus_backend::Reader> {
+        let length = usize::try_from(length).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "blob range length exceeds usize",
+            )
+        })?;
+        let mut buf = vec![0; length];
+        self.read(blob_id, offset, &mut buf, ReadKind::Ondemand)?;
+        Ok(Box::new(io::Cursor::new(buf)))
+    }
+
+    /// Serves the range from memory, faulted like
+    /// [`Backend::prefetch_range_into`].
     fn prefetch_range_into_reader(
         &self,
         blob_id: &BlobId,
         offset: u64,
         length: u64,
-    ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+    ) -> io::Result<nydus_backend::Reader> {
         let length = usize::try_from(length).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,

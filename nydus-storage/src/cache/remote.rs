@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
+use tokio::io::AsyncReadExt;
 
 use super::{decode_chunk_group_into, validate_decoded_chunk_group, BlobCache, ChunkGroupBuffer};
 
@@ -205,37 +206,53 @@ impl BlobCache for RemoteBlobCache {
         // them all (and any cached group in between, which is not decoded
         // again); then each decodes into a buffer of its own that the cache
         // keeps.
-        let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
-            .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "chunk group range exceeds usize",
-            )
-        })?;
+        let groups = head.index() as usize..=tail.index() as usize;
+        let encoded_len = groups
+            .clone()
+            .map(|index| {
+                meta.chunk_group(index)
+                    .expect("group within the table")
+                    .compressed_size() as usize
+            })
+            .max()
+            .unwrap_or_default();
         let mut encoded = ChunkGroupBuffer::default();
         let encoded = encoded.resize(encoded_len)?;
-        self.backend
-            .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?;
+        let mut reader = self.backend.read_range_into_reader(
+            &self.blob_id,
+            head.compressed_offset(),
+            tail.compressed_range().end - head.compressed_offset(),
+        )?;
 
-        for group in &missed {
-            let start = (group.compressed_offset() - head.compressed_offset()) as usize;
-            let stop = start + group.compressed_size() as usize;
+        let mut missed = missed.iter().peekable();
+        for index in groups {
+            // Groups are back to back, so even a cached group is read past.
+            let group = meta.chunk_group(index).expect("group within the table");
+            let encoded = &mut encoded[..group.compressed_size() as usize];
+            futures::executor::block_on(reader.read_exact(encoded))?;
+            if missed
+                .next_if(|missed| missed.index() == group.index())
+                .is_none()
+            {
+                continue;
+            }
+
             let len = group.uncompressed_size() as usize;
             let mut decoded = ChunkGroupBuffer::default();
             let payload: &[u8] = if group.is_uncompressed(meta) {
-                &encoded[start..stop]
+                encoded
             } else {
                 let out = decoded.resize(len)?;
-                decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
+                decode_chunk_group_into(meta.compressor(), encoded, out)?;
                 out
             };
-            validate_decoded_chunk_group(group, payload, self.skip_verify_checksums)?;
-            copy_group_chunks(meta, group, payload, offset, dst)?;
+            validate_decoded_chunk_group(&group, payload, self.skip_verify_checksums)?;
+            copy_group_chunks(meta, &group, payload, offset, dst)?;
             if !self.decoded_groups.admits(len) {
                 continue;
             }
             if group.is_uncompressed(meta) {
-                decoded.resize(len)?.copy_from_slice(&encoded[start..stop]);
+                decoded.resize(len)?.copy_from_slice(encoded);
             }
             self.decoded_groups.insert(
                 (self.blob_id, group.index()),
@@ -322,12 +339,28 @@ mod tests {
             Ok(())
         }
 
+        fn read_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<nydus_backend::Reader> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if !self.corrupt_next.swap(false, Ordering::SeqCst) {
+                return self.inner.read_range_into_reader(blob_id, offset, length);
+            }
+            let mut buf = vec![0; length as usize];
+            self.inner.read_range_into(blob_id, offset, &mut buf)?;
+            buf[0] ^= 0xff;
+            Ok(Box::new(io::Cursor::new(buf)))
+        }
+
         fn prefetch_range_into_reader(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+        ) -> io::Result<nydus_backend::Reader> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner
                 .prefetch_range_into_reader(blob_id, offset, length)

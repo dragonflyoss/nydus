@@ -16,7 +16,7 @@ use nydus_format::utils::{sha256_reader, SHA256_DIGEST_SIZE};
 use nydus_telemetry::metrics::Metrics;
 use tokio::io::{AsyncRead, ReadBuf};
 
-use crate::{Backend, RawDeviceFile, ReadKind, Source};
+use crate::{Backend, RawDeviceFile, ReadKind, Reader, Source};
 
 /// An open full blob file, its footer locating the data and blob metadata
 /// regions inside it.
@@ -337,35 +337,40 @@ impl Backend for Local {
             })
     }
 
-    /// Returns a reader of the data region from `offset` for a prefetch
-    /// read, each read of it a positional read of the file, recording the
-    /// read's metrics once the range is checked.
+    /// Returns a reader of the data region for an on-demand read.
+    fn read_range_into_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<Reader> {
+        let start = Instant::now();
+        self.file_range_reader(blob_id, offset, length)
+            .inspect(|_| {
+                self.metrics.backend.collect_read_finished_metrics(
+                    ReadKind::Ondemand,
+                    Source::Local,
+                    length,
+                    start.elapsed(),
+                )
+            })
+            .inspect_err(|_| {
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::Ondemand, Source::Local)
+            })
+            .map(|reader| Box::new(reader) as Reader)
+    }
+
+    /// Returns a reader of the data region for a prefetch read.
     fn prefetch_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: u64,
-    ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>> {
+    ) -> io::Result<Reader> {
         let start = Instant::now();
-        self.full_blob(blob_id)
-            .and_then(|full_blob| {
-                let end = offset.checked_add(length).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
-                })?;
-                if end > full_blob.footer.compressed_data_size() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "backend range read exceeds data region",
-                    ));
-                }
-
-                let data_offset = full_blob.footer.compressed_data_offset();
-                Ok(Box::new(FileRangeReader {
-                    file: full_blob.file.clone(),
-                    offset: data_offset + offset,
-                    end: data_offset + end,
-                }) as Box<dyn AsyncRead + Send + Unpin>)
-            })
+        self.file_range_reader(blob_id, offset, length)
             .inspect(|_| {
                 self.metrics.backend.collect_read_finished_metrics(
                     ReadKind::Prefetch,
@@ -379,11 +384,41 @@ impl Backend for Local {
                     .backend
                     .collect_read_failure_metrics(ReadKind::Prefetch, Source::Local)
             })
+            .map(|reader| Box::new(reader) as Reader)
     }
 }
 
-/// A reader of a range of a local file, every read a positional read that
-/// never waits, so it is polled without a runtime.
+/// Implements the range readers of the local backend.
+impl Local {
+    /// Returns a reader of `length` bytes of the data region from `offset`,
+    /// rejecting a range past its end.
+    fn file_range_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<FileRangeReader> {
+        let full_blob = self.full_blob(blob_id)?;
+        let end = offset.checked_add(length).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
+        })?;
+        if end > full_blob.footer.compressed_data_size() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "backend range read exceeds data region",
+            ));
+        }
+
+        let data_offset = full_blob.footer.compressed_data_offset();
+        Ok(FileRangeReader {
+            file: full_blob.file.clone(),
+            offset: data_offset + offset,
+            end: data_offset + end,
+        })
+    }
+}
+
+/// A reader of a file range by positional reads, which never wait.
 struct FileRangeReader {
     /// The open file.
     file: Arc<File>,
@@ -460,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prefetch_range_into_reader_reads_the_range_of_the_data_region() {
+    async fn range_into_readers_read_the_range_of_the_data_region() {
         use tokio::io::AsyncReadExt;
 
         let dir = tempdir().unwrap();
@@ -470,21 +505,25 @@ mod tests {
             .save_in(dir.path());
         let backend = Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new()));
 
-        let mut data = Vec::new();
-        backend
-            .prefetch_range_into_reader(&full_blob_id, 100, 1000)
-            .unwrap()
-            .read_to_end(&mut data)
-            .await
-            .unwrap();
+        for prefetch in [false, true] {
+            let reader = |offset, length| {
+                if prefetch {
+                    backend.prefetch_range_into_reader(&full_blob_id, offset, length)
+                } else {
+                    backend.read_range_into_reader(&full_blob_id, offset, length)
+                }
+            };
+            let mut data = Vec::new();
+            reader(100, 1000)
+                .unwrap()
+                .read_to_end(&mut data)
+                .await
+                .unwrap();
 
-        assert_eq!(data, payload[100..1100]);
-        assert!(backend
-            .prefetch_range_into_reader(&full_blob_id, 4000, 97)
-            .is_err());
-        assert!(backend
-            .prefetch_range_into_reader(&full_blob_id, u64::MAX, 1)
-            .is_err());
+            assert_eq!(data, payload[100..1100], "prefetch={prefetch}");
+            assert!(reader(4000, 97).is_err(), "prefetch={prefetch}");
+            assert!(reader(u64::MAX, 1).is_err(), "prefetch={prefetch}");
+        }
     }
 
     #[test]
