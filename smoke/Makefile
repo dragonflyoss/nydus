@@ -2,6 +2,8 @@ PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
 GOPROXY ?=
 TESTS ?= .*
 GO_TEST_BUILD_FLAGS ?=
+# CI already invokes make as root with the required test environment.
+SUDO ?= $(if $(filter 0,$(shell id -u)),,sudo -E)
 
 ifdef GOPROXY
 PROXY := GOPROXY=${GOPROXY}
@@ -19,21 +21,21 @@ build:
 test: build
 	golangci-lint run --timeout=5m
 	$(CARGO_COV_FLAGS) \
-		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
+		   $(SUDO) ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
 
 # PERFORMANCE_TEST_MODE=fs-version-5 \
 # PERFORMANCE_TEST_IMAGE=wordpress:latest \
 # make test-performance
 test-performance: build
 	$(CARGO_COV_FLAGS) PERFORMANCE_TEST=True \
-		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestPerformance
+		   $(SUDO) ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestPerformance
 
 # BENCHMARK_TEST_IMAGE=wordpress:6.1.1 \
 # BENCHMARK_MODE=fs-version-6 \
 # make test-benchmark
 test-benchmark: build
 	$(CARGO_COV_FLAGS) BENCHMARK_TEST=True \
-		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestBenchmark
+		   $(SUDO) ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestBenchmark
 
 # WORK_DIR=/tmp \
 # NYDUS_STABLE_VERSION=v2.2.3 \
@@ -57,4 +59,4 @@ test-compatibility: build
 # NEW_NYDUSD_BINARY_PATH=target/release/nydusd
 test-takeover: build
 	$(CARGO_COV_FLAGS) TAKEOVER_TEST=true \
-		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestTakeover
+		   $(SUDO) ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestTakeover
