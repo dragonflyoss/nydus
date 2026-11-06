@@ -509,11 +509,11 @@ with kernel read-ahead disabled, so coalescing cannot turn it into a single GET.
   subsequent polls without waiting behind reads; otherwise a Go process
   reading the mount and serving its registry can deadlock its network loop.
 - Metrics use `nydus_*` names and labels. `Metrics.Sum` selects labels
-  independently of their ordering. Successful backend reads identify
-  `source="dragonfly"` or `source="fallback"`; failed reads identify the
-  configured transport, so a failed fallback is counted under Dragonfly,
-  not under a separate fallback-error counter. Retry/fallback decisions
-  are checked through requests and logs, not removed per-attempt counters.
+  independently of their ordering. Backend reads identify the configured
+  transport, so every read of a Dragonfly mount counts under
+  `source="dragonfly"`, an origin fallback included. Retry/fallback
+  decisions are checked through requests and logs ("falling back to the
+  origin"), not through per-attempt counters.
 - Labeled counters may be absent before the first event. Positive control
   reads and cache gauges keep a renamed metric from turning an assertion
   into a vacuous zero-equals-zero check.

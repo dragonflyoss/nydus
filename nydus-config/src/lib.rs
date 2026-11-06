@@ -65,12 +65,12 @@ pub fn default_prefetch_concurrent_blob_count() -> usize {
     10
 }
 
-/// Returns the default timeout of prefetching one blob. Generous, because a
-/// blob prefetch downloads every chunk group of the blob in the background; the
-/// bound only exists to unwedge a stalled blob.
+/// Returns the default timeout of each prefetch request. Longer than an
+/// on-demand request's, because a batch may be fetch-size large and is
+/// decoded and written while its body streams.
 #[inline]
 pub fn default_prefetch_request_timeout() -> Duration {
-    Duration::from_secs(60 * 60)
+    Duration::from_secs(10)
 }
 
 /// Returns the default interval before a failed prefetch read is sent once
@@ -198,9 +198,9 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
-    /// The timeout of a request to the origin registry (connect + read), e.g.
-    /// `5s` or `1m`, greater than zero. A request fetches one chunk group, so
-    /// this bounds a single chunk group download.
+    /// The timeout of an on-demand request to the origin registry (connect +
+    /// read), e.g. `5s` or `1m`, greater than zero; prefetch requests use
+    /// `prefetch.request_timeout`.
     #[serde(
         default = "default_registry_http_request_timeout",
         with = "humantime_serde"
@@ -345,9 +345,9 @@ pub struct DragonflyConfig {
     /// `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
     pub scheduler_endpoint: String,
 
-    /// The timeout of each attempt of a request through the seed peers, e.g.
-    /// `5s` or `1m`. A request fetches one chunk group, so this bounds a
-    /// single chunk group download from a seed peer.
+    /// The timeout of each attempt of an on-demand request through the seed
+    /// peers, e.g. `5s` or `1m`; prefetch requests use
+    /// `prefetch.request_timeout`.
     #[serde(
         default = "default_registry_dragonfly_request_timeout",
         with = "humantime_serde"
@@ -425,9 +425,9 @@ pub struct PrefetchConfig {
     #[serde(default = "default_prefetch_concurrent_blob_count")]
     pub concurrent_blob_count: usize,
 
-    /// The timeout of prefetching one whole blob, e.g. `1h`, while
-    /// `http.request_timeout` bounds each chunk group request within it; `0s`
-    /// disables the bound.
+    /// The timeout of each prefetch request through the origin or
+    /// Dragonfly, e.g. `10s`, greater than zero, covering the whole body
+    /// while it is decoded and written.
     #[serde(default = "default_prefetch_request_timeout", with = "humantime_serde")]
     pub request_timeout: Duration,
 
@@ -538,6 +538,12 @@ impl Config {
         if self.prefetch.concurrent_blob_count == 0 {
             return Err(Error::InvalidConfig(
                 "prefetch.concurrent_blob_count must be at least 1".to_string(),
+            ));
+        }
+
+        if self.prefetch.request_timeout.is_zero() {
+            return Err(Error::InvalidConfig(
+                "prefetch.request_timeout must be greater than 0s".to_string(),
             ));
         }
 
@@ -1054,6 +1060,28 @@ prefetch:
         assert_eq!(
             err.to_string(),
             "prefetch.concurrent_blob_count must be at least 1"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_prefetch_request_timeout() {
+        let yaml = r#"
+backend:
+  type: local
+  config:
+    dir: /blobs
+prefetch:
+  request_timeout: 0s
+"#;
+
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "prefetch.request_timeout must be greater than 0s"
+        );
+        assert_eq!(
+            PrefetchConfig::default().request_timeout,
+            Duration::from_secs(10)
         );
     }
 

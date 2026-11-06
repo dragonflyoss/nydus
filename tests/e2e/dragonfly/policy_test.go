@@ -81,9 +81,9 @@ func TestSeedPeerErrors(t *testing.T) {
 			metrics := m.API.Metrics(t)
 
 			if tc.fallback {
-				assert.Positive(t, metrics.Sum("nydus_backend_read_total", `source="fallback"`))
+				assert.Contains(t, m.Daemon.FileLog(), "falling back to the origin")
 			} else {
-				if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `source="fallback"`)) {
+				if !assert.NotContains(t, m.Daemon.FileLog(), "falling back to the origin") {
 					t.FailNow()
 				}
 				if tc.status == http.StatusTooManyRequests {

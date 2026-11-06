@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
@@ -298,16 +298,8 @@ impl BlobCaches {
     /// Prefetch every chunk group of the blob identified by `blob_index`.
     /// An ondemand blob is streamed group by group into the
     /// source blobs' caches instead of filling its own. Up to `workers`
-    /// batches are fetched concurrently. A non-zero `timeout` bounds the
-    /// whole blob's prefetch; on expiry the prefetch aborts with
-    /// [`io::ErrorKind::TimedOut`].
-    pub fn prefetch_blob(
-        &self,
-        blob_index: u16,
-        workers: usize,
-        timeout: Duration,
-    ) -> io::Result<()> {
-        let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
+    /// batches are fetched concurrently.
+    pub fn prefetch_blob(&self, blob_index: u16, workers: usize) -> io::Result<()> {
         let cache = self.cache(blob_index, ReadKind::Prefetch)?;
         // Serialize prefetch of the same blob across processes sharing the
         // cache directory: with many identical instances cold-starting on one
@@ -318,7 +310,7 @@ impl BlobCaches {
         // until this function returns.
         let _prefetch_lock = cache.prefetch_lock();
         if !cache.is_ondemand() {
-            return cache.prefetch_all(workers, deadline);
+            return cache.prefetch_all(workers);
         }
         // Time the ondemand blob prefetch and report how many source groups
         // it warmed versus skipped, so operators can tell whether the warmup
@@ -326,14 +318,8 @@ impl BlobCaches {
         let start = Instant::now();
         let filled = AtomicU64::new(0);
         let skipped = AtomicU64::new(0);
-        let result = self.prefetch_ondemand_blob(
-            blob_index,
-            cache.as_ref(),
-            workers,
-            deadline,
-            &filled,
-            &skipped,
-        );
+        let result =
+            self.prefetch_ondemand_blob(blob_index, cache.as_ref(), workers, &filled, &skipped);
         let (bytes, failed) = match &result {
             Ok(streamed) => *streamed,
             Err(_) => (0, 0),
@@ -364,7 +350,6 @@ impl BlobCaches {
         blob_index: u16,
         cache: &dyn BlobCache,
         workers: usize,
-        deadline: Option<Instant>,
         filled: &AtomicU64,
         skipped: &AtomicU64,
     ) -> io::Result<(u64, u64)> {
@@ -396,7 +381,7 @@ impl BlobCaches {
                 _ => false,
             }
         };
-        cache.for_each_ondemand_blob_chunk_group(workers, deadline, &skip, &|group, payload| {
+        cache.for_each_ondemand_blob_chunk_group(workers, &skip, &|group, payload| {
             let (Some(redirect), Some(source)) = (group.redirect(), source_of(group)) else {
                 skipped.fetch_add(1, Ordering::Relaxed);
                 self.metrics.cache.collect_write_failure_metrics(

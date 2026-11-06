@@ -539,11 +539,9 @@ pub enum Source {
     /// An HTTP forward proxy in front of the origin.
     Proxy,
 
-    /// The Dragonfly seed peers.
+    /// The Dragonfly seed peers, the origin fallback of a read they could not
+    /// serve included.
     Dragonfly,
-
-    /// The origin registry, reached after Dragonfly could not serve the read.
-    Fallback,
 }
 
 /// Implements the Display trait.
@@ -555,7 +553,6 @@ impl fmt::Display for Source {
             Source::Origin => write!(f, "origin"),
             Source::Proxy => write!(f, "proxy"),
             Source::Dragonfly => write!(f, "dragonfly"),
-            Source::Fallback => write!(f, "fallback"),
         }
     }
 }
@@ -709,7 +706,6 @@ mod tests {
             (ReadKind::Ondemand, Source::Proxy),
             (ReadKind::Prefetch, Source::Proxy),
             (ReadKind::Ondemand, Source::Dragonfly),
-            (ReadKind::Ondemand, Source::Fallback),
         ];
 
         for (kind, source) in test_cases {
@@ -761,7 +757,6 @@ mod tests {
             ("origin", Source::Origin.to_string()),
             ("proxy", Source::Proxy.to_string()),
             ("dragonfly", Source::Dragonfly.to_string()),
-            ("fallback", Source::Fallback.to_string()),
             ("decode", WriteFailureReason::Decode.to_string()),
             ("checksum", WriteFailureReason::Checksum.to_string()),
             ("io", WriteFailureReason::Io.to_string()),

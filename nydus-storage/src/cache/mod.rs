@@ -8,7 +8,6 @@ use std::io;
 use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use nydus_config::StorageConfig;
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent, BlobMetadataCompressor};
@@ -55,19 +54,6 @@ impl From<&StorageConfig> for CacheOptions {
     }
 }
 
-/// Fail with [`io::ErrorKind::TimedOut`] once a blob-level prefetch deadline
-/// has passed. Checked between batches, so the overshoot is bounded by one
-/// backend request (itself bounded by the HTTP timeout).
-pub(crate) fn check_prefetch_deadline(deadline: Option<Instant>) -> io::Result<()> {
-    match deadline {
-        Some(deadline) if Instant::now() >= deadline => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "blob prefetch timed out",
-        )),
-        _ => Ok(()),
-    }
-}
-
 pub use caches::BlobCaches;
 pub use local::LocalBlobCache;
 pub use raw::RawDeviceBlobCache;
@@ -95,9 +81,8 @@ pub trait BlobCache: Send + Sync {
 
     /// Fetch, decode, validate, cache, and mark ready every chunk group of
     /// this blob. Used by blob-level prefetch after a filesystem is mounted.
-    /// Up to `workers` batches are fetched concurrently. Aborts with
-    /// [`io::ErrorKind::TimedOut`] when `deadline` passes between batches.
-    fn prefetch_all(&self, workers: usize, deadline: Option<Instant>) -> io::Result<()>;
+    /// Up to `workers` batches are fetched concurrently.
+    fn prefetch_all(&self, workers: usize) -> io::Result<()>;
 
     /// Create (or open) this blob's cache data file sized to the padded
     /// uncompressed address space and return its path. The file mirrors the
@@ -169,7 +154,6 @@ pub trait BlobCache: Send + Sync {
     fn for_each_ondemand_blob_chunk_group(
         &self,
         _workers: usize,
-        _deadline: Option<Instant>,
         _skip: &(dyn Fn(&BlobMetadataChunkGroupExtent) -> bool + Sync),
         _cb: &(dyn Fn(&BlobMetadataChunkGroupExtent, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<(u64, u64)> {

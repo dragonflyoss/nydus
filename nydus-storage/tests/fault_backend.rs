@@ -258,7 +258,7 @@ fn prefetch_reads_are_tagged_and_report_errors() {
     backend
         .inject(FaultRule::read(Fault::Error(io::ErrorKind::TimedOut)).on_kind(ReadKind::Prefetch));
 
-    let err = cached.prefetch_all(1, None).unwrap_err();
+    let err = cached.prefetch_all(1).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
     assert!(!cached.is_all_ready());
     assert_eq!(
@@ -267,7 +267,7 @@ fn prefetch_reads_are_tagged_and_report_errors() {
     );
 
     backend.clear_faults();
-    cached.prefetch_all(2, None).unwrap();
+    cached.prefetch_all(2).unwrap();
     assert!(cached.is_all_ready());
     assert_eq!(
         read(&cached, 0..blob.image.len() as u64).unwrap(),

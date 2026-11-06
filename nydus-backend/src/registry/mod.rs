@@ -86,6 +86,11 @@ pub(crate) struct Registry {
 
     /// The metrics of the image the backend serves.
     metrics: Arc<Metrics>,
+
+    /// Where reads are fetched from, the `source` label of every read: the
+    /// seed peers when Dragonfly is configured, otherwise the HTTP proxy when
+    /// one is set, otherwise the origin.
+    source: Source,
 }
 
 /// The client of one repository on one registry, behind an [`Arc`] so a read
@@ -157,13 +162,16 @@ impl Registry {
             config.http.proxy.as_ref(),
             &config.http.tls,
             prefetch.retry_interval,
+            prefetch.request_timeout,
             None,
-            if config.http.proxy.is_some() {
-                Source::Proxy
-            } else {
-                Source::Origin
-            },
         )?;
+        let source = if config.dragonfly.is_some() {
+            Source::Dragonfly
+        } else if config.http.proxy.is_some() {
+            Source::Proxy
+        } else {
+            Source::Origin
+        };
 
         #[cfg(feature = "dragonfly")]
         let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
@@ -171,7 +179,7 @@ impl Registry {
                 dragonfly,
                 &config.http,
                 prefetch.retry_interval,
-                &runtime,
+                prefetch.request_timeout,
             )?)),
             None => None,
         };
@@ -190,23 +198,13 @@ impl Registry {
             }),
             runtime,
             metrics,
+            source,
         })
     }
 }
 
 /// Implements the registry requests.
 impl Client {
-    /// Returns where reads are fetched from when nothing else is known, the
-    /// `source` label of a failed read: the seed peers when Dragonfly is
-    /// configured, otherwise wherever the HTTP client reaches.
-    fn source(&self) -> Source {
-        if self.dragonfly.is_some() {
-            Source::Dragonfly
-        } else {
-            self.http.source()
-        }
-    }
-
     /// Returns the URL of the blob with hex digest `hex`, the distribution
     /// API path appended to the registry address, a path of its own kept as
     /// the prefix.
@@ -288,7 +286,7 @@ impl Client {
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.get(&redirect, headers.clone()).await?;
             match response.status {
-                status if status.is_success() => return response.require_partial(range),
+                status if status.is_success() => return response.require_partial(),
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -299,7 +297,7 @@ impl Client {
             .execute(headers.clone(), |headers| transport.get(&url, headers))
             .await?;
         if response.status.is_success() {
-            return response.require_partial(range);
+            return response.require_partial();
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -310,7 +308,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
-        let redirected = redirected.require_partial(range)?;
+        let redirected = redirected.require_partial()?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -329,7 +327,7 @@ impl Client {
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.get_stream(&redirect, headers.clone()).await?;
             match response.status {
-                status if status.is_success() => return response.require_partial(range),
+                status if status.is_success() => return response.require_partial(),
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -342,7 +340,7 @@ impl Client {
             })
             .await?;
         if response.status.is_success() {
-            return response.require_partial(range);
+            return response.require_partial();
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -353,7 +351,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
-        let redirected = redirected.require_partial(range)?;
+        let redirected = redirected.require_partial()?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -377,7 +375,7 @@ impl Client {
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.prefetch(&redirect, headers.clone()).await?;
             match response.status {
-                status if status.is_success() => return response.require_partial(range),
+                status if status.is_success() => return response.require_partial(),
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -388,7 +386,7 @@ impl Client {
             .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
             .await?;
         if response.status.is_success() {
-            return response.require_partial(range);
+            return response.require_partial();
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -399,7 +397,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
-        let redirected = redirected.require_partial(range)?;
+        let redirected = redirected.require_partial()?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -420,7 +418,7 @@ impl Client {
                 .prefetch_stream(&redirect, headers.clone())
                 .await?;
             match response.status {
-                status if status.is_success() => return response.require_partial(range),
+                status if status.is_success() => return response.require_partial(),
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -433,7 +431,7 @@ impl Client {
             })
             .await?;
         if response.status.is_success() {
-            return response.require_partial(range);
+            return response.require_partial();
         }
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
@@ -444,7 +442,7 @@ impl Client {
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
         }
-        let redirected = redirected.require_partial(range)?;
+        let redirected = redirected.require_partial()?;
 
         self.redirects.insert(&hex, location);
         Ok(redirected)
@@ -573,15 +571,14 @@ impl Backend for Registry {
                 (offset + length as u64).saturating_sub(1)
             );
             let response = client.read_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
+            response.bytes(length).await
         });
 
         match result {
-            Ok((bytes, source)) => {
+            Ok(bytes) => {
                 self.metrics.backend.collect_read_finished_metrics(
                     ReadKind::Ondemand,
-                    source,
+                    self.source,
                     length as u64,
                     start.elapsed(),
                 );
@@ -591,21 +588,20 @@ impl Backend for Registry {
             Err(err) => {
                 self.metrics
                     .backend
-                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source());
+                    .collect_read_failure_metrics(ReadKind::Ondemand, self.source);
                 Err(err)
             }
         }
     }
 
-    /// Returns the streamed body of one range `GET` for an on-demand read,
-    /// recording the read's metrics once it is answered.
+    /// Returns the streamed body of one range `GET` for an on-demand read and
+    /// where it is answered from.
     fn read_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: u64,
-    ) -> io::Result<Reader> {
-        let start = Instant::now();
+    ) -> io::Result<(Reader, Source)> {
         let client = self.client.clone();
         let blob_id = *blob_id;
         let result = self.runtime.block_on_worker(async move {
@@ -614,33 +610,27 @@ impl Backend for Registry {
         });
 
         match result {
-            Ok(response) => {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Ondemand,
-                    response.source,
-                    length,
-                    start.elapsed(),
-                );
-                Ok(Box::new(self.runtime.reader(response.into_reader())))
-            }
+            Ok(response) => Ok((
+                Box::new(self.runtime.reader(response.into_reader())),
+                self.source,
+            )),
             Err(err) => {
                 self.metrics
                     .backend
-                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source());
+                    .collect_read_failure_metrics(ReadKind::Ondemand, self.source);
                 Err(err)
             }
         }
     }
 
-    /// Returns the streamed body of one range `GET` for a prefetch read,
-    /// recording the read's metrics once it is answered.
+    /// Returns the streamed body of one range `GET` for a prefetch read and
+    /// where it is answered from.
     fn prefetch_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: u64,
-    ) -> io::Result<Reader> {
-        let start = Instant::now();
+    ) -> io::Result<(Reader, Source)> {
         let client = self.client.clone();
         let blob_id = *blob_id;
         let result = self.runtime.block_on_worker(async move {
@@ -649,19 +639,14 @@ impl Backend for Registry {
         });
 
         match result {
-            Ok(response) => {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Prefetch,
-                    response.source,
-                    length,
-                    start.elapsed(),
-                );
-                Ok(Box::new(self.runtime.reader(response.into_reader())))
-            }
+            Ok(response) => Ok((
+                Box::new(self.runtime.reader(response.into_reader())),
+                self.source,
+            )),
             Err(err) => {
                 self.metrics
                     .backend
-                    .collect_read_failure_metrics(ReadKind::Prefetch, self.client.source());
+                    .collect_read_failure_metrics(ReadKind::Prefetch, self.source);
                 Err(err)
             }
         }
@@ -685,15 +670,14 @@ impl Backend for Registry {
                 (offset + length as u64).saturating_sub(1)
             );
             let response = client.prefetch_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
+            response.bytes(length).await
         });
 
         match result {
-            Ok((bytes, source)) => {
+            Ok(bytes) => {
                 self.metrics.backend.collect_read_finished_metrics(
                     ReadKind::Prefetch,
-                    source,
+                    self.source,
                     length as u64,
                     start.elapsed(),
                 );
@@ -703,7 +687,7 @@ impl Backend for Registry {
             Err(err) => {
                 self.metrics
                     .backend
-                    .collect_read_failure_metrics(ReadKind::Prefetch, self.client.source());
+                    .collect_read_failure_metrics(ReadKind::Prefetch, self.source);
                 Err(err)
             }
         }
@@ -792,13 +776,11 @@ mod tests {
                     status,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(body.into()),
-                    source: Source::Dragonfly,
                 }),
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
                     body: Body::Bytes(Bytes::new()),
-                    source: Source::Dragonfly,
                 }),
             }
         }
@@ -851,7 +833,6 @@ mod tests {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers: HeaderMap::new(),
                     body: Body::Bytes(Bytes::from_static(b"ok")),
-                    source: Source::Dragonfly,
                 });
             }
             self.challenges.fetch_add(1, Ordering::SeqCst);
@@ -864,7 +845,6 @@ mod tests {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
                 body: Body::Bytes(Bytes::new()),
-                source: Source::Dragonfly,
             })
         }
     }
@@ -950,18 +930,19 @@ mod tests {
                     None,
                     &http.tls,
                     PrefetchConfig::default().retry_interval,
+                    PrefetchConfig::default().request_timeout,
                     None,
-                    Source::Origin,
                 )
                 .unwrap(),
                 dragonfly: Some(Box::new(transport)),
             }),
             runtime: Arc::new(Runtime::new(None).unwrap()),
             metrics: Arc::new(Metrics::new()),
+            source: Source::Dragonfly,
         }
     }
 
-    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Source> {
+    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<()> {
         registry.runtime.tokio().block_on(async {
             let client = &registry.client;
             let range = format!("bytes=0-{}", buf.len() - 1);
@@ -969,9 +950,8 @@ mod tests {
                 ReadKind::Ondemand => client.read_range(&TEST_BLOB_ID, &range).await?,
                 ReadKind::Prefetch => client.prefetch_range(&TEST_BLOB_ID, &range).await?,
             };
-            let source = response.source;
             buf.copy_from_slice(&response.bytes(buf.len()).await?);
-            Ok(source)
+            Ok(())
         })
     }
 
@@ -988,11 +968,12 @@ mod tests {
             )]);
             let registry = scripted_registry(origin.addr, None, transport.clone());
 
-            let mut reader = match kind {
+            let (mut reader, source) = match kind {
                 ReadKind::Ondemand => registry.read_range_into_reader(&TEST_BLOB_ID, 16, 32),
                 ReadKind::Prefetch => registry.prefetch_range_into_reader(&TEST_BLOB_ID, 16, 32),
             }
             .unwrap();
+            assert_eq!(source, Source::Dragonfly, "{kind:?}");
             let mut buf = vec![0u8; 32];
             futures::executor::block_on(reader.read_exact(&mut buf)).unwrap();
 
@@ -1150,7 +1131,7 @@ auth: YWxpY2U6c2VjcmV0
             "https://registry.example.com/"
         );
         assert!(registry.client.dragonfly.is_none());
-        assert_eq!(registry.client.source(), Source::Origin);
+        assert_eq!(registry.source, Source::Origin);
     }
 
     #[test]
@@ -1301,9 +1282,8 @@ auth: YWxpY2U6c2VjcmV0
             .insert(&hex, "http://cdn.example.com/signed".to_string());
 
         let mut buf = vec![0u8; body.len()];
-        let source = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
 
-        assert_eq!(source, Source::Dragonfly);
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);

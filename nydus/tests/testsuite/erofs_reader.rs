@@ -723,7 +723,7 @@ impl Backend for CountingBackend {
         blob_id: &[u8; 32],
         offset: u64,
         length: u64,
-    ) -> io::Result<nydus_backend::Reader> {
+    ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
@@ -736,7 +736,7 @@ impl Backend for CountingBackend {
         blob_id: &[u8; 32],
         offset: u64,
         length: u64,
-    ) -> io::Result<nydus_backend::Reader> {
+    ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
@@ -1032,10 +1032,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         }
         assert_eq!(reader.blob_infos().unwrap().len(), 2);
         assert_eq!(reader.read_prefetch_order()[0], 2);
-        reader
-            .blob_caches()
-            .prefetch_blob(2, 2, std::time::Duration::from_secs(10))
-            .unwrap();
+        reader.blob_caches().prefetch_blob(2, 2).unwrap();
         backend.fail_next.store(true, Ordering::Relaxed);
         let root_nid = reader.superblock().root_nid();
         let root = reader.inode(root_nid).unwrap();
@@ -1179,10 +1176,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
             CacheOptions::default(),
         )
         .unwrap();
-        reader
-            .blob_caches()
-            .prefetch_blob(3, 2, std::time::Duration::from_secs(10))
-            .unwrap();
+        reader.blob_caches().prefetch_blob(3, 2).unwrap();
         backend.fail_next.store(true, Ordering::Relaxed);
         for (name, content) in &files {
             let nid = z_fixture_nid(&reader, name.as_bytes());

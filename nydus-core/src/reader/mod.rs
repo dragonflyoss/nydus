@@ -424,15 +424,9 @@ impl ErofsReader {
     }
 
     /// Prefetch every chunk group of the blob identified by `blob_index`
-    /// with up to `workers` concurrent batch fetches. A non-zero `timeout`
-    /// bounds the whole blob's prefetch.
-    pub fn prefetch_blob(
-        &self,
-        blob_index: u16,
-        workers: usize,
-        timeout: std::time::Duration,
-    ) -> io::Result<()> {
-        self.blobs.prefetch_blob(blob_index, workers, timeout)
+    /// with up to `workers` concurrent batch fetches.
+    pub fn prefetch_blob(&self, blob_index: u16, workers: usize) -> io::Result<()> {
+        self.blobs.prefetch_blob(blob_index, workers)
     }
 
     /// Build the blob prefetch plan: blobs listed in the root prefetch xattr (in

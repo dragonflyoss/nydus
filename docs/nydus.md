@@ -1155,10 +1155,10 @@ Fields:
 	for the trade-off.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
-- `prefetch.request_timeout` (default `1h`) bounds how long prefetching one
-	whole blob may take, while `http.request_timeout` bounds each backend
-	request within it; `0s` disables the bound. A blob that exceeds it is
-	aborted with a warning and prefetch moves on.
+- `prefetch.request_timeout` (default `10s`, greater than zero) is the
+	timeout of each prefetch request through the origin or Dragonfly. It
+	covers the whole body while it is decoded and written, so raise it with a
+	large `storage.fetch_size`.
 - `prefetch.scope` (default `auto`) selects which blobs to pull. `none`
 	disables prefetch; `ondemand` prefetches only the "ondemand" ondemand blob
 	`nydus optimize` emits (if any), landing the access-ordered hot set in the
@@ -1233,8 +1233,9 @@ Fields under `backend.config`:
 - `http` (optional, defaults apply): the HTTP client settings of every
 	request to the origin registry — timeouts, retries, and TLS trust — the
 	reads a Dragonfly backend falls back to the origin with included.
-	- `request_timeout` (default `5s`): the timeout of a request to the origin
-		registry in humantime format (e.g. `5s`, `1m`), greater than zero. Kept
+	- `request_timeout` (default `5s`): the timeout of an on-demand request to
+		the origin registry in humantime format (e.g. `5s`, `1m`), greater than
+		zero; prefetch requests use `prefetch.request_timeout`. Kept
 		short because a read holds the
 		chunk group's cross-process fetch claim for its whole duration, and what
 		queues up behind that claim are reader threads in the other instances
@@ -1263,8 +1264,9 @@ Fields under `backend.config`:
 	to the origin registry through `http`. Only available when the
 	binary is built with the `dragonfly` feature; a build without it rejects
 	the block when the config is loaded. Omit to talk to the origin directly.
-	Each read is counted under the `source` that served it, `dragonfly` for
-	the seed peers and `fallback` for the origin (see [Metrics](#metrics)).
+	Every read is counted under `source="dragonfly"`, one that fell back to
+	the origin included; the fallback shows in the logs (see
+	[Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
 	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times
@@ -1287,8 +1289,9 @@ Fields under `backend.config`:
 
 	- `scheduler_endpoint` (required): the Dragonfly scheduler service address
 		with the scheme, e.g. `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
-	- `request_timeout` (default `5s`): the timeout of each attempt of a
-		request through the seed peers, one chunk group per request.
+	- `request_timeout` (default `5s`): the timeout of each attempt of an
+		on-demand request through the seed peers; prefetch requests use
+		`prefetch.request_timeout`.
 	- `max_retries` (default `1`, at most `3`): Dragonfly retries of an
 		on-demand read on a transient failure, each on the next seed peer after
 		an exponential backoff. Prefetch reads never retry.
@@ -1368,19 +1371,18 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 | Label | Meaning | Values |
 | --- | --- | --- |
 | `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `redirect` |
-| `source` | where the backend read its bytes | `local`, `origin`, `proxy`, `dragonfly`, `fallback` |
+| `source` | where the backend read its bytes | `local`, `origin`, `proxy`, `dragonfly` |
 | `reason` | why the cache write failed | `decode`, `checksum`, `io`, `unknown_source` |
 | `status` | whether the image bytes are in the local cache | `cached`, `uncached` |
 | `operation` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
 
 `source` is `local` for the local directory backend, `origin` for the
 registry backend reading the origin registry itself, `proxy` for it reading
-through an HTTP forward proxy (`http.proxy`), `dragonfly` for it reading the
-Dragonfly seed peers, and `fallback` for a read Dragonfly could not serve
-that went back to the origin through `http` under
-`dragonfly.fallback_rate_limit`. A failed read counts once, under the source
-it would have read from: `dragonfly` on a Dragonfly daemon, whether the seed
-peers or the origin fallback failed last; the cause is in the logs.
+through an HTTP forward proxy (`http.proxy`), and `dragonfly` for it reading
+through Dragonfly, a read the seed peers could not serve that went back to
+the origin through `http` under `dragonfly.fallback_rate_limit` included;
+that fallback is logged as `falling back to the origin`. A failed read counts
+once, under the same source; the cause is in the logs.
 
 Backend (`nydus_backend_*`):
 

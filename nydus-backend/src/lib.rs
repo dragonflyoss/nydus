@@ -60,7 +60,8 @@ pub struct RawDeviceFile {
 ///        └─ Dragonfly   the seed peers, back to the origin when they cannot serve
 /// ```
 ///
-/// Every implementation records its own read metrics. The `prefetch_*`
+/// Every implementation records its own read metrics, except that a range
+/// reader's caller records it once the whole range is read. The `prefetch_*`
 /// defaults forward to the on-demand methods for a backend that serves both
 /// reads alike.
 pub trait Backend: Send + Sync {
@@ -128,21 +129,14 @@ pub trait Backend: Send + Sync {
     ) -> io::Result<()>;
 
     /// Returns a reader of `length` blob bytes from `offset` for an on-demand
-    /// chunk group fetch, streamed in one request.
+    /// chunk group fetch, streamed in one request, and where it is answered
+    /// from.
     fn read_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: u64,
-    ) -> io::Result<Reader>;
-
-    /// Like [`Backend::read_range_into_reader`], for a prefetch read.
-    fn prefetch_range_into_reader(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        offset: u64,
-        length: u64,
-    ) -> io::Result<Reader>;
+    ) -> io::Result<(Reader, Source)>;
 
     /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
     fn prefetch_range_into(
@@ -153,6 +147,14 @@ pub trait Backend: Send + Sync {
     ) -> io::Result<()> {
         self.read_range_into(blob_id, offset, buf)
     }
+
+    /// Like [`Backend::read_range_into_reader`], for a prefetch read.
+    fn prefetch_range_into_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<(Reader, Source)>;
 }
 
 /// Implements the blob backend construction.

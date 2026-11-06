@@ -21,7 +21,6 @@ use nydus_config::{ProxyConfig, TlsConfig};
 
 use super::response::{Body, Response};
 use super::Transport;
-use crate::Source;
 
 /// An HTTP client talking straight to the origin registry, every attempt
 /// claiming a [`RateLimit`] slot first when built with one.
@@ -43,30 +42,31 @@ pub(crate) struct Http {
     /// more, the configured interval up to twice that.
     prefetch_retry_interval: RangeInclusive<Duration>,
 
-    /// Where the client's answers come from, the `source` label of its reads.
-    source: Source,
+    /// The timeout of each prefetch request.
+    prefetch_request_timeout: Duration,
 }
 
 /// Implements the origin HTTP client.
 impl Http {
     /// Creates a client timing every request out after `request_timeout`,
-    /// retrying it `max_retries` times, reaching the origin through `proxy`
-    /// when one is given and trusting it as `tls` says, sending a failed
-    /// prefetch read once more after `prefetch_retry_interval` and every
-    /// attempt claiming a slot from `rate_limit` first when one is given;
-    /// its answers are labelled `source`.
+    /// a prefetch one after `prefetch_request_timeout`, retrying it
+    /// `max_retries` times, reaching the origin through `proxy` when one is
+    /// given and trusting it as `tls` says, sending a failed prefetch read
+    /// once more after `prefetch_retry_interval` and every attempt claiming a
+    /// slot from `rate_limit` first when one is given.
     ///
     /// Redirects are returned rather than followed so the caller can cache
     /// the signed URL a blob `GET` is redirected to; names are resolved by
     /// hickory, which honours record TTLs.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         request_timeout: Duration,
         max_retries: u32,
         proxy: Option<&ProxyConfig>,
         tls: &TlsConfig,
         prefetch_retry_interval: Duration,
+        prefetch_request_timeout: Duration,
         rate_limit: Option<RateLimit>,
-        source: Source,
     ) -> io::Result<Self> {
         // Other workspace dependencies may also enable reqwest's native TLS.
         let mut builder = Client::builder()
@@ -112,13 +112,8 @@ impl Http {
             client: client.build(),
             prefetch_retry_interval: prefetch_retry_interval
                 ..=prefetch_retry_interval.saturating_mul(2),
-            source,
+            prefetch_request_timeout,
         })
-    }
-
-    /// Returns where the client's answers come from.
-    pub(crate) fn source(&self) -> Source {
-        self.source
     }
 }
 
@@ -141,7 +136,6 @@ impl Transport for Http {
                 body: Body::Stream(Box::new(StreamReader::new(
                     response.bytes_stream().map_err(io::Error::other),
                 ))),
-                source: self.source,
             })
             .map_err(io::Error::other);
 
@@ -174,7 +168,6 @@ impl Transport for Http {
                 body: Body::Stream(Box::new(StreamReader::new(
                     response.bytes_stream().map_err(io::Error::other),
                 ))),
-                source: self.source,
             })
             .map_err(io::Error::other);
 
@@ -203,6 +196,7 @@ impl Transport for Http {
                 .client
                 .get(url)
                 .headers(headers.clone())
+                .timeout(self.prefetch_request_timeout)
                 .send()
                 .await
                 .map(|response| Response {
@@ -211,7 +205,6 @@ impl Transport for Http {
                     body: Body::Stream(Box::new(StreamReader::new(
                         response.bytes_stream().map_err(io::Error::other),
                     ))),
-                    source: self.source,
                 })
                 .map_err(io::Error::other);
 
@@ -251,6 +244,7 @@ impl Transport for Http {
                 .client
                 .get(url)
                 .headers(headers.clone())
+                .timeout(self.prefetch_request_timeout)
                 .send()
                 .await
                 .map(|response| Response {
@@ -259,7 +253,6 @@ impl Transport for Http {
                     body: Body::Stream(Box::new(StreamReader::new(
                         response.bytes_stream().map_err(io::Error::other),
                     ))),
-                    source: self.source,
                 })
                 .map_err(io::Error::other);
 
@@ -351,14 +344,42 @@ mod tests {
             None,
             &TlsConfig::default(),
             retry_interval,
+            Duration::from_secs(10),
             None,
-            Source::Origin,
         )
         .unwrap();
 
         let start = Instant::now();
         assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
         assert!(start.elapsed() < retry_interval);
+    }
+
+    #[tokio::test]
+    async fn prefetch_requests_time_out_after_the_prefetch_request_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        let http = Http::new(
+            Duration::from_secs(5),
+            0,
+            None,
+            &TlsConfig::default(),
+            Duration::from_secs(60 * 60),
+            Duration::from_millis(200),
+            None,
+        )
+        .unwrap();
+
+        for stream in [false, true] {
+            let start = Instant::now();
+            let result = if stream {
+                http.prefetch_stream(&url, HeaderMap::new()).await
+            } else {
+                http.prefetch(&url, HeaderMap::new()).await
+            };
+            assert!(result.is_err(), "stream={stream}");
+            assert!(start.elapsed() < Duration::from_secs(5), "stream={stream}");
+        }
+        drop(listener);
     }
 
     #[test]
@@ -370,8 +391,8 @@ mod tests {
             None,
             &tls,
             Duration::from_secs(1),
+            Duration::from_secs(10),
             None,
-            Source::Origin,
         )
         .is_ok());
         assert!(Http::new(
@@ -380,8 +401,8 @@ mod tests {
             None,
             &tls,
             Duration::from_secs(1),
+            Duration::from_secs(10),
             Some(RateLimit::new(10, Duration::from_secs(1))),
-            Source::Origin,
         )
         .is_ok());
     }
@@ -459,8 +480,8 @@ mod tests {
                     ca_cert,
                 },
                 Duration::from_secs(1),
+                Duration::from_secs(10),
                 None,
-                Source::Origin,
             )
             .unwrap();
             let result = http.client.get(&url).send().await;

@@ -122,7 +122,7 @@ func TestOutageRecovery(t *testing.T) {
 		}
 
 		assert.GreaterOrEqual(t, elapsed, time.Duration(gets-1)*800*time.Millisecond)
-		assert.Positive(t, limited.API.Metrics(t).Sum("nydus_backend_read_total", `source="fallback"`))
+		assert.Contains(t, limited.Daemon.FileLog(), "falling back to the origin")
 	})
 
 	c.stop(t, "scheduler")

@@ -53,6 +53,6 @@ func TestServedFromSeedPeerCache(t *testing.T) {
 		t.FailNow()
 	}
 
-	assert.Zero(t, second.API.Metrics(t).Sum("nydus_backend_read_total", `source="fallback"`))
+	assert.NotContains(t, second.Daemon.FileLog(), "falling back to the origin")
 	assert.Zero(t, origin.Faults.Hits())
 }

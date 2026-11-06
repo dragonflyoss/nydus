@@ -7,7 +7,7 @@ use reqwest::header::{HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::{Reader, Source};
+use crate::Reader;
 
 /// A response from the origin registry or a Dragonfly seed peer: the status
 /// and headers up front, plus the body.
@@ -20,9 +20,6 @@ pub(crate) struct Response {
 
     /// The body.
     pub(crate) body: Body,
-
-    /// Where the answer was fetched from, the `source` label of the read.
-    pub(crate) source: Source,
 }
 
 /// The body of a response.
@@ -38,13 +35,14 @@ pub(crate) enum Body {
 
 /// Implements the response.
 impl Response {
-    /// Rejects a successful whole-blob answer before its bytes can be used
-    /// at the requested range's offset.
-    pub(crate) fn require_partial(self, range: &str) -> io::Result<Self> {
-        // Dragonfly 1.3 returns 200 for a partial download but supplies the
-        // exact Content-Range. Do not extend this exception to origin servers.
-        // A streamed body is checked by its Content-Length.
-        if self.status == StatusCode::OK && self.source == Source::Dragonfly {
+    /// Marks a Dragonfly answer to `range` as the partial content it is:
+    /// Dragonfly 1.3 returns `200` for a partial download but supplies the
+    /// exact `Content-Range`, the body measured by its length when buffered
+    /// and its `Content-Length` when streamed. Any other answer is returned
+    /// as it is; never apply this to an origin answer.
+    #[cfg_attr(not(feature = "dragonfly"), allow(dead_code))]
+    pub(crate) fn dragonfly_partial(mut self, range: &str) -> Self {
+        if self.status == StatusCode::OK {
             let decimal = |value: &str| {
                 if value.bytes().all(|byte| byte.is_ascii_digit()) {
                     value.parse::<u64>().ok()
@@ -85,10 +83,17 @@ impl Response {
                     && requested == Some((start, end))
                     && length == Some(end - start + 1)
                 {
-                    return Ok(self);
+                    self.status = StatusCode::PARTIAL_CONTENT;
                 }
             }
         }
+        self
+    }
+
+    /// Rejects an answer other than `206 Partial Content`, such as a
+    /// successful whole-blob answer, before its bytes can be used at the
+    /// requested range's offset.
+    pub(crate) fn require_partial(self) -> io::Result<Self> {
         if self.status != StatusCode::PARTIAL_CONTENT {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -299,7 +304,7 @@ mod tests {
                 true,
             ),
         ] {
-            for source in [Source::Dragonfly, Source::Origin] {
+            for dragonfly in [true, false] {
                 for streaming in [false, true] {
                     let mut headers = HeaderMap::new();
                     if let Some(value) = content_range {
@@ -311,18 +316,22 @@ mod tests {
                     } else {
                         Body::Bytes(bytes)
                     };
-                    let result = Response {
+                    let response = Response {
                         status: StatusCode::OK,
                         headers,
                         body,
-                        source,
+                    };
+                    let result = if dragonfly {
+                        response.dragonfly_partial(range)
+                    } else {
+                        response
                     }
-                    .require_partial(range);
-                    let expected = accepted && source == Source::Dragonfly && !streaming;
+                    .require_partial();
+                    let expected = accepted && dragonfly && !streaming;
                     assert_eq!(
                         result.is_ok(),
                         expected,
-                        "{source:?} {streaming} {range} {content_range:?}"
+                        "{dragonfly} {streaming} {range} {content_range:?}"
                     );
                     match result {
                         Ok(response) => {
@@ -357,35 +366,31 @@ mod tests {
                 status: StatusCode::OK,
                 headers,
                 body: Body::Stream(Box::new(io::Cursor::new(vec![42; 4]))),
-                source: Source::Dragonfly,
             }
-            .require_partial("bytes=2-5");
+            .dragonfly_partial("bytes=2-5")
+            .require_partial();
             assert_eq!(result.is_ok(), accepted, "{content_length:?}");
         }
     }
 
     #[test]
     fn require_partial_preserves_206_and_rejects_other_statuses() {
-        for source in [Source::Origin, Source::Dragonfly] {
-            for status in [
-                StatusCode::PARTIAL_CONTENT,
-                StatusCode::NO_CONTENT,
-                StatusCode::TEMPORARY_REDIRECT,
-                StatusCode::RANGE_NOT_SATISFIABLE,
-            ] {
-                let result = Response {
-                    status,
-                    source,
-                    headers: HeaderMap::new(),
-                    body: Body::Bytes(Bytes::from_static(b"range")),
-                }
-                .require_partial("bytes=0-4");
-                assert_eq!(result.is_ok(), status == StatusCode::PARTIAL_CONTENT);
-                if let Ok(response) = result {
-                    assert_eq!(response.status, status);
-                    assert_eq!(response.source, source);
-                    assert!(matches!(response.body, Body::Bytes(bytes) if bytes == "range"));
-                }
+        for status in [
+            StatusCode::PARTIAL_CONTENT,
+            StatusCode::NO_CONTENT,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::RANGE_NOT_SATISFIABLE,
+        ] {
+            let result = Response {
+                status,
+                headers: HeaderMap::new(),
+                body: Body::Bytes(Bytes::from_static(b"range")),
+            }
+            .require_partial();
+            assert_eq!(result.is_ok(), status == StatusCode::PARTIAL_CONTENT);
+            if let Ok(response) = result {
+                assert_eq!(response.status, status);
+                assert!(matches!(response.body, Body::Bytes(bytes) if bytes == "range"));
             }
         }
     }
@@ -413,7 +418,6 @@ mod tests {
                 status,
                 headers: HeaderMap::new(),
                 body: Body::Bytes(Bytes::new()),
-                source: Source::Origin,
             };
             assert_eq!(response.needs_fallback(), expected, "{status}");
             assert_eq!(response.needs_retry(), expected, "{status}");
@@ -457,7 +461,6 @@ mod tests {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
                 body,
-                source: Source::Origin,
             };
             assert_fn(response.bytes(4).await);
         }
@@ -469,7 +472,6 @@ mod tests {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
             body: Body::Stream(Box::new(io::Cursor::new(b"no such blob".to_vec()))),
-            source: Source::Origin,
         };
         assert_eq!(
             response.into_io_error().await.to_string(),

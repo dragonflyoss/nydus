@@ -33,8 +33,9 @@ backend:
     # timeouts, retries, and TLS trust, the reads Dragonfly falls back to the
     # origin with included. The whole block and every field are optional.
     http:
-      # Timeout of a request to the origin registry (connect + read), e.g.
-      # `5s` or `1m`, greater than zero. Default: 5s. Kept short because a
+      # Timeout of an on-demand request to the origin registry (connect +
+      # read), e.g. `5s` or `1m`, greater than zero; prefetch requests use
+      # `prefetch.request_timeout`. Default: 5s. Kept short because a
       # read holds its chunk group's fetch claim for its whole duration, and
       # the readers waiting behind that claim are FUSE worker threads.
       request_timeout: 5s
@@ -78,8 +79,9 @@ backend:
     #   # The Dragonfly scheduler service address with the scheme.
     #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
     #
-    #   # Timeout of each attempt of a request through the seed peers, e.g.
-    #   # `5s` or `1m`. Default: 5s.
+    #   # Timeout of each attempt of an on-demand request through the seed
+    #   # peers, e.g. `5s` or `1m`; prefetch requests use
+    #   # `prefetch.request_timeout`. Default: 5s.
     #   request_timeout: 5s
     #
     #   # Retries of an on-demand read on a transient failure (timeout,
@@ -118,10 +120,10 @@ storage:
 prefetch:
   # Number of concurrently prefetched blobs.
   concurrent_blob_count: 10
-  # Timeout of prefetching one whole blob, e.g. `1h`, while
-  # `http.request_timeout` bounds each backend request within it. `0s`
-  # disables the bound. Default: 1h.
-  request_timeout: 1h
+  # Timeout of each prefetch request through the origin or Dragonfly,
+  # covering the whole body while it is decoded and written; raise it with
+  # a large `storage.fetch_size`. Greater than zero. Default: 10s.
+  request_timeout: 10s
   # Which blobs to pull: `none` disables prefetch; `ondemand` prefetches
   # only the "ondemand" blob produced by `nydus optimize`, which holds the
   # recorded hot set in access order, without pulling the whole image; `all`

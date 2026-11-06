@@ -63,7 +63,6 @@ fn stop_before_spawn_does_not_even_open_priority_metadata() {
             },
             1,
             scope,
-            Duration::from_secs(1),
         );
         prefetcher.stop_flag().store(true, Ordering::Relaxed);
         prefetcher.spawn().unwrap().join().unwrap();
@@ -85,7 +84,6 @@ fn stop_during_delayed_read_finishes_only_inflight_blob_and_releases_workers() {
         },
         1,
         PrefetchScope::All,
-        Duration::from_secs(1),
     );
     let stop = prefetcher.stop_flag();
     let handle = prefetcher.spawn().unwrap();
@@ -122,7 +120,6 @@ fn stop_during_priority_metadata_skips_remaining_priority_blobs() {
         },
         1,
         PrefetchScope::All,
-        Duration::from_secs(1),
     );
     let stop = prefetcher.stop_flag();
     let handle = prefetcher.spawn().unwrap();
@@ -155,7 +152,6 @@ fn stopped_priority_scan_joins_delayed_metadata_openers() {
         },
         2,
         PrefetchScope::Ondemand,
-        Duration::from_secs(1),
     );
     let stop = prefetcher.stop_flag();
     let handle = prefetcher.spawn().unwrap();

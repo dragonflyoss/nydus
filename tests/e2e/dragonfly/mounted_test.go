@@ -56,12 +56,7 @@ func (m mounted) readData(t testing.TB) error {
 
 func (m mounted) expectNoDirectOrigin(t *testing.T) {
 	t.Helper()
-	metrics := m.API.Metrics(t)
-	if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `source="fallback"`)) {
-		t.FailNow()
-	}
-
-	assert.Zero(t, metrics.Sum("nydus_backend_read_total", `source="origin"`))
+	assert.Zero(t, m.API.Metrics(t).Sum("nydus_backend_read_total", `source="origin"`))
 	assert.NotContains(t, m.Daemon.FileLog(), "falling back to the origin")
 }
 

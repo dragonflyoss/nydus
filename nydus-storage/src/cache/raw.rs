@@ -10,7 +10,6 @@ use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use nydus_backend::{Backend, RawDeviceFile};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -53,7 +52,7 @@ impl BlobCache for RawDeviceBlobCache {
     }
 
     /// A raw device holds no chunk groups to warm.
-    fn prefetch_all(&self, _workers: usize, _deadline: Option<Instant>) -> io::Result<()> {
+    fn prefetch_all(&self, _workers: usize) -> io::Result<()> {
         Ok(())
     }
 
@@ -130,7 +129,7 @@ mod tests {
         assert_eq!(out, &payload[4000..4100]);
         cache.read_at(0, &mut []).unwrap();
         assert!(cache.read_at(8192 - 50, &mut out).is_err());
-        cache.prefetch_all(1, None).unwrap();
+        cache.prefetch_all(1).unwrap();
         assert!(!cache.is_ondemand());
 
         assert!(cache.is_all_ready());
@@ -197,7 +196,7 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.0.read_range_into_reader(blob_id, offset, length)
         }
 
@@ -206,7 +205,7 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.0.prefetch_range_into_reader(blob_id, offset, length)
         }
     }

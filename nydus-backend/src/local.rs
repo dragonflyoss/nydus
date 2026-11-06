@@ -297,6 +297,22 @@ impl Backend for Local {
             })
     }
 
+    /// Returns a reader of the data region for an on-demand read.
+    fn read_range_into_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<(Reader, Source)> {
+        self.file_range_reader(blob_id, offset, length)
+            .inspect_err(|_| {
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::Ondemand, Source::Local)
+            })
+            .map(|reader| (Box::new(reader) as Reader, Source::Local))
+    }
+
     /// Fills `buf` from the data region for a prefetch read, recording the
     /// read's metrics.
     fn prefetch_range_into(
@@ -337,54 +353,20 @@ impl Backend for Local {
             })
     }
 
-    /// Returns a reader of the data region for an on-demand read.
-    fn read_range_into_reader(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        offset: u64,
-        length: u64,
-    ) -> io::Result<Reader> {
-        let start = Instant::now();
-        self.file_range_reader(blob_id, offset, length)
-            .inspect(|_| {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Ondemand,
-                    Source::Local,
-                    length,
-                    start.elapsed(),
-                )
-            })
-            .inspect_err(|_| {
-                self.metrics
-                    .backend
-                    .collect_read_failure_metrics(ReadKind::Ondemand, Source::Local)
-            })
-            .map(|reader| Box::new(reader) as Reader)
-    }
-
     /// Returns a reader of the data region for a prefetch read.
     fn prefetch_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         length: u64,
-    ) -> io::Result<Reader> {
-        let start = Instant::now();
+    ) -> io::Result<(Reader, Source)> {
         self.file_range_reader(blob_id, offset, length)
-            .inspect(|_| {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Prefetch,
-                    Source::Local,
-                    length,
-                    start.elapsed(),
-                )
-            })
             .inspect_err(|_| {
                 self.metrics
                     .backend
                     .collect_read_failure_metrics(ReadKind::Prefetch, Source::Local)
             })
-            .map(|reader| Box::new(reader) as Reader)
+            .map(|reader| (Box::new(reader) as Reader, Source::Local))
     }
 }
 
@@ -516,6 +498,7 @@ mod tests {
             let mut data = Vec::new();
             reader(100, 1000)
                 .unwrap()
+                .0
                 .read_to_end(&mut data)
                 .await
                 .unwrap();

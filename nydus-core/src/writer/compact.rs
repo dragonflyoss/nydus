@@ -79,7 +79,7 @@ impl Backend for RepackBackend<'_> {
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         offset: u64,
         length: u64,
-    ) -> std::io::Result<nydus_backend::Reader> {
+    ) -> std::io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
         self.inner.read_range_into_reader(blob_id, offset, length)
     }
 
@@ -88,7 +88,7 @@ impl Backend for RepackBackend<'_> {
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         offset: u64,
         length: u64,
-    ) -> std::io::Result<nydus_backend::Reader> {
+    ) -> std::io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
         self.inner
             .prefetch_range_into_reader(blob_id, offset, length)
     }
@@ -678,7 +678,7 @@ mod tests {
             id: &[u8; EROFS_BLOB_ID_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.largest_read
                 .fetch_max(length as usize, Ordering::Relaxed);
             if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_after {
@@ -692,7 +692,7 @@ mod tests {
             id: &[u8; EROFS_BLOB_ID_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.largest_read
                 .fetch_max(length as usize, Ordering::Relaxed);
             if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_after {

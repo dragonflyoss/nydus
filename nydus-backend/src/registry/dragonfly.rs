@@ -22,9 +22,7 @@ use nydus_config::{DragonflyConfig, HttpConfig};
 
 use super::http::{Http, RateLimit};
 use super::response::{Body, Response};
-use super::rt::Runtime;
 use super::Transport;
-use crate::Source;
 
 /// The Dragonfly SDK transport: a blob `GET` rides the SDK to the seed peers
 /// named by the scheduler, one client per read kind on the backend's
@@ -61,22 +59,26 @@ pub(crate) struct Dragonfly {
 
     /// The timeout of each attempt of a request.
     request_timeout: Duration,
+
+    /// The timeout of each prefetch request.
+    prefetch_request_timeout: Duration,
 }
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Creates the transport, each seed peer client connecting to the
-    /// configured scheduler on `runtime`, with the fallback client built
-    /// from the registry's `http` settings under `fallback_rate_limit`.
+    /// Creates the transport, its seed peer clients built on first use, with
+    /// the fallback client built from the registry's `http` settings under
+    /// `fallback_rate_limit`.
     ///
     /// Only the on-demand client retries, `max_retries` times across seed
     /// peers; a failed prefetch read is sent once more after
-    /// `prefetch_retry_interval`.
+    /// `prefetch_retry_interval`, each prefetch request timing out after
+    /// `prefetch_request_timeout`.
     pub(crate) fn new(
         config: DragonflyConfig,
         http: &HttpConfig,
         prefetch_retry_interval: Duration,
-        _runtime: &Runtime,
+        prefetch_request_timeout: Duration,
     ) -> io::Result<Self> {
         Ok(Self {
             ondemand_client: OnceCell::new(),
@@ -89,13 +91,14 @@ impl Dragonfly {
                 http.proxy.as_ref(),
                 &http.tls,
                 prefetch_retry_interval,
+                prefetch_request_timeout,
                 Some(RateLimit::new(
                     config.fallback_rate_limit,
                     Duration::from_secs(1),
                 )),
-                Source::Fallback,
             )?,
             request_timeout: config.request_timeout,
+            prefetch_request_timeout,
             prefetch_retry_interval: prefetch_retry_interval
                 ..=prefetch_retry_interval.saturating_mul(2),
         })
@@ -153,7 +156,6 @@ impl Transport for Dragonfly {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
                 body: Body::Bytes(body.freeze()),
-                source: Source::Dragonfly,
             }),
             Err(Error::ProxyError(ProxyError {
                 status_code: Some(status),
@@ -181,7 +183,6 @@ impl Transport for Dragonfly {
                     })
                     .collect(),
                 body: Body::Bytes(message.unwrap_or_default().into()),
-                source: Source::Dragonfly,
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -196,7 +197,7 @@ impl Transport for Dragonfly {
                     .get(RANGE)
                     .and_then(|value| value.to_str().ok())
                     .expect("range header was checked above");
-                response.require_partial(range)
+                response.dragonfly_partial(range).require_partial()
             }
             other => other,
         };
@@ -252,7 +253,6 @@ impl Transport for Dragonfly {
                         .unwrap_or_else(|| Box::new(futures::stream::empty()))
                         .map_err(io::Error::other),
                 ))),
-                source: Source::Dragonfly,
             }),
             Err(Error::ProxyError(ProxyError {
                 status_code: Some(status),
@@ -280,7 +280,6 @@ impl Transport for Dragonfly {
                     })
                     .collect(),
                 body: Body::Bytes(message.unwrap_or_default().into()),
-                source: Source::Dragonfly,
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -295,7 +294,7 @@ impl Transport for Dragonfly {
                     .get(RANGE)
                     .and_then(|value| value.to_str().ok())
                     .expect("range header was checked above");
-                response.require_partial(range)
+                response.dragonfly_partial(range).require_partial()
             }
             other => other,
         };
@@ -334,7 +333,7 @@ impl Transport for Dragonfly {
             url: url.to_string(),
             header: headers,
             priority: Some(Priority::Level3 as i32),
-            timeout: self.request_timeout,
+            timeout: self.prefetch_request_timeout,
             ..Default::default()
         };
 
@@ -351,7 +350,6 @@ impl Transport for Dragonfly {
                     status: response.status_code.unwrap_or(StatusCode::OK),
                     headers: response.header,
                     body: Body::Bytes(body.freeze()),
-                    source: Source::Dragonfly,
                 }),
                 Err(Error::ProxyError(ProxyError {
                     status_code: Some(status),
@@ -379,7 +377,6 @@ impl Transport for Dragonfly {
                         })
                         .collect(),
                     body: Body::Bytes(message.unwrap_or_default().into()),
-                    source: Source::Dragonfly,
                 }),
                 Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -387,6 +384,16 @@ impl Transport for Dragonfly {
                 )),
                 Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
             };
+            let result = result.map(|response| {
+                match request
+                    .header
+                    .get(RANGE)
+                    .and_then(|value| value.to_str().ok())
+                {
+                    Some(range) => response.dragonfly_partial(range),
+                    None => response,
+                }
+            });
 
             match &result {
                 Ok(response) => debug!(
@@ -423,7 +430,7 @@ impl Transport for Dragonfly {
             url: url.to_string(),
             header: headers,
             priority: Some(Priority::Level3 as i32),
-            timeout: self.request_timeout,
+            timeout: self.prefetch_request_timeout,
             ..Default::default()
         };
 
@@ -444,7 +451,6 @@ impl Transport for Dragonfly {
                             .unwrap_or_else(|| Box::new(futures::stream::empty()))
                             .map_err(io::Error::other),
                     ))),
-                    source: Source::Dragonfly,
                 }),
                 Err(Error::ProxyError(ProxyError {
                     status_code: Some(status),
@@ -472,7 +478,6 @@ impl Transport for Dragonfly {
                         })
                         .collect(),
                     body: Body::Bytes(message.unwrap_or_default().into()),
-                    source: Source::Dragonfly,
                 }),
                 Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -480,6 +485,16 @@ impl Transport for Dragonfly {
                 )),
                 Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
             };
+            let result = result.map(|response| {
+                match request
+                    .header
+                    .get(RANGE)
+                    .and_then(|value| value.to_str().ok())
+                {
+                    Some(range) => response.dragonfly_partial(range),
+                    None => response,
+                }
+            });
 
             match &result {
                 Ok(response) => debug!(

@@ -434,7 +434,7 @@ impl Backend for FaultBackend {
         blob_id: &BlobId,
         offset: u64,
         length: u64,
-    ) -> io::Result<nydus_backend::Reader> {
+    ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
         let length = usize::try_from(length).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -443,7 +443,7 @@ impl Backend for FaultBackend {
         })?;
         let mut buf = vec![0; length];
         self.read(blob_id, offset, &mut buf, ReadKind::Ondemand)?;
-        Ok(Box::new(io::Cursor::new(buf)))
+        Ok((Box::new(io::Cursor::new(buf)), nydus_backend::Source::Local))
     }
 
     /// Serves the range from memory, faulted like
@@ -453,7 +453,7 @@ impl Backend for FaultBackend {
         blob_id: &BlobId,
         offset: u64,
         length: u64,
-    ) -> io::Result<nydus_backend::Reader> {
+    ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
         let length = usize::try_from(length).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -462,7 +462,7 @@ impl Backend for FaultBackend {
         })?;
         let mut buf = vec![0; length];
         self.read(blob_id, offset, &mut buf, ReadKind::Prefetch)?;
-        Ok(Box::new(io::Cursor::new(buf)))
+        Ok((Box::new(io::Cursor::new(buf)), nydus_backend::Source::Local))
     }
 
     fn prefetch_range_into(&self, blob_id: &BlobId, offset: u64, dst: &mut [u8]) -> io::Result<()> {

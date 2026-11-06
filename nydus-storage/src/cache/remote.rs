@@ -12,11 +12,13 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use tokio::io::AsyncReadExt;
+use tracing::warn;
 
 use super::{decode_chunk_group_into, validate_decoded_chunk_group, BlobCache, ChunkGroupBuffer};
 
@@ -218,18 +220,35 @@ impl BlobCache for RemoteBlobCache {
             .unwrap_or_default();
         let mut encoded = ChunkGroupBuffer::default();
         let encoded = encoded.resize(encoded_len)?;
-        let mut reader = self.backend.read_range_into_reader(
-            &self.blob_id,
-            head.compressed_offset(),
-            tail.compressed_range().end - head.compressed_offset(),
-        )?;
+        let requested = Instant::now();
+        let length = tail.compressed_range().end - head.compressed_offset();
+        let (mut reader, mut source) =
+            self.backend
+                .read_range_into_reader(&self.blob_id, head.compressed_offset(), length)?;
+        let mut retried = false;
 
         let mut missed = missed.iter().peekable();
         for index in groups {
             // Groups are back to back, so even a cached group is read past.
             let group = meta.chunk_group(index).expect("group within the table");
             let encoded = &mut encoded[..group.compressed_size() as usize];
-            futures::executor::block_on(reader.read_exact(encoded))?;
+            if let Err(err) = futures::executor::block_on(reader.read_exact(encoded)) {
+                // The body broke mid-stream; request the rest once more.
+                if retried {
+                    return Err(err);
+                }
+                warn!(
+                    "chunk group {index} of blob {} broke mid-stream, requesting the rest once more: {err}",
+                    hex::encode(self.blob_id)
+                );
+                (reader, source) = self.backend.read_range_into_reader(
+                    &self.blob_id,
+                    group.compressed_offset(),
+                    tail.compressed_range().end - group.compressed_offset(),
+                )?;
+                retried = true;
+                futures::executor::block_on(reader.read_exact(encoded))?;
+            }
             if missed
                 .next_if(|missed| missed.index() == group.index())
                 .is_none()
@@ -262,14 +281,14 @@ impl BlobCache for RemoteBlobCache {
                 },
             );
         }
+        self.backend
+            .metrics()
+            .backend
+            .collect_read_finished_metrics(ReadKind::Ondemand, source, length, requested.elapsed());
         Ok(())
     }
 
-    fn prefetch_all(
-        &self,
-        _workers: usize,
-        _deadline: Option<std::time::Instant>,
-    ) -> io::Result<()> {
+    fn prefetch_all(&self, _workers: usize) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "prefetch requires a storage directory: diskless reads have no cache to warm",
@@ -297,6 +316,7 @@ mod tests {
         inner: Local,
         reads: AtomicUsize,
         corrupt_next: AtomicBool,
+        breaks: AtomicUsize,
     }
 
     impl Counting {
@@ -305,6 +325,7 @@ mod tests {
                 inner: Local::new(dir.to_path_buf(), Arc::new(Metrics::new())),
                 reads: AtomicUsize::new(0),
                 corrupt_next: AtomicBool::new(false),
+                breaks: AtomicUsize::new(0),
             })
         }
 
@@ -344,15 +365,24 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if self
+                .breaks
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                let (reader, source) =
+                    self.inner.read_range_into_reader(blob_id, offset, length)?;
+                return Ok((Box::new(reader.take(length / 2).chain(Broken)), source));
+            }
             if !self.corrupt_next.swap(false, Ordering::SeqCst) {
                 return self.inner.read_range_into_reader(blob_id, offset, length);
             }
             let mut buf = vec![0; length as usize];
             self.inner.read_range_into(blob_id, offset, &mut buf)?;
             buf[0] ^= 0xff;
-            Ok(Box::new(io::Cursor::new(buf)))
+            Ok((Box::new(io::Cursor::new(buf)), nydus_backend::Source::Local))
         }
 
         fn prefetch_range_into_reader(
@@ -360,10 +390,22 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner
                 .prefetch_range_into_reader(blob_id, offset, length)
+        }
+    }
+
+    struct Broken;
+
+    impl tokio::io::AsyncRead for Broken {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
         }
     }
 
@@ -522,7 +564,7 @@ mod tests {
             io::ErrorKind::Unsupported
         );
         assert_eq!(
-            remote.prefetch_all(1, None).unwrap_err().kind(),
+            remote.prefetch_all(1).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
         assert!(!remote.is_ondemand());
@@ -662,6 +704,29 @@ mod tests {
         let state = cache.state.lock().unwrap();
         assert_eq!(state.entries.len(), 4);
         assert_eq!(state.bytes, 32 * 1024);
+    }
+
+    #[test]
+    fn a_body_broken_mid_stream_is_requested_once_more() {
+        for (breaks, ok) in [(1, true), (2, false)] {
+            let dir = tempdir().unwrap();
+            let groups = groups(3);
+            let (remote, backend) = open_counting(
+                dir.path(),
+                BlobMetadataCompressor::None,
+                &groups,
+                Arc::default(),
+            );
+            backend.breaks.store(breaks, Ordering::SeqCst);
+            let image = uncompressed_data(&groups);
+            let mut buf = vec![0u8; image.len()];
+
+            assert_eq!(remote.read_at(0, &mut buf).is_ok(), ok, "breaks={breaks}");
+            assert_eq!(backend.reads(), 2, "breaks={breaks}");
+            if ok {
+                assert_eq!(buf, image);
+            }
+        }
     }
 
     #[test]

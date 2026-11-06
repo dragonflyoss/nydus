@@ -5,9 +5,7 @@ use nydus::fuse::upgrade::Startup;
 use nydus::fuse::ErofsFs;
 use nydus::signal;
 use nydus_backend::{Backend, Local};
-use nydus_config::{
-    default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, Config, PrefetchScope,
-};
+use nydus_config::{default_prefetch_concurrent_blob_count, Config, PrefetchScope};
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
 use nydus_telemetry::logging::init_tracing;
@@ -185,31 +183,25 @@ impl FuseCommand {
                 .and_then(|config| config.storage.dir.clone())
         };
 
-        let (prefetch_scope, prefetch_concurrent_blob_count, prefetch_timeout) =
-            match storage_config.as_ref() {
-                Some(config) => {
-                    // `--prefetch` forces prefetch on when the config disables it.
-                    let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        config.prefetch.scope
-                    };
-                    (
-                        scope,
-                        config.prefetch.concurrent_blob_count,
-                        config.prefetch.request_timeout,
-                    )
-                }
-                None => (
-                    if self.prefetch {
-                        PrefetchScope::default()
-                    } else {
-                        PrefetchScope::None
-                    },
-                    default_prefetch_concurrent_blob_count(),
-                    default_prefetch_request_timeout(),
-                ),
-            };
+        let (prefetch_scope, prefetch_concurrent_blob_count) = match storage_config.as_ref() {
+            Some(config) => {
+                // `--prefetch` forces prefetch on when the config disables it.
+                let scope = if config.prefetch.scope == PrefetchScope::None && self.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    config.prefetch.scope
+                };
+                (scope, config.prefetch.concurrent_blob_count)
+            }
+            None => (
+                if self.prefetch {
+                    PrefetchScope::default()
+                } else {
+                    PrefetchScope::None
+                },
+                default_prefetch_concurrent_blob_count(),
+            ),
+        };
 
         // Build the blob backend. A direct `--blob <path>` is self-contained and
         // needs no backend. Otherwise a `--bootstrap` is served by either an
@@ -314,7 +306,6 @@ impl FuseCommand {
                 reader.prefetch_plan(),
                 prefetch_concurrent_blob_count,
                 prefetch_scope,
-                prefetch_timeout,
             );
             let stop = prefetcher.stop_flag();
             match prefetcher.spawn() {

@@ -6,7 +6,6 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use tracing::{info, warn};
 
@@ -40,8 +39,6 @@ pub struct BlobPrefetcher {
     rest: Vec<u16>,
     threads: usize,
     scope: PrefetchScope,
-    /// Per-blob prefetch timeout; `0s` disables the bound.
-    timeout: Duration,
     /// Cooperative stop flag: once raised, no new prefetch work is started.
     stop: Arc<AtomicBool>,
 }
@@ -64,7 +61,6 @@ impl BlobPrefetcher {
         plan: PrefetchPlan,
         threads: usize,
         scope: PrefetchScope,
-        timeout: Duration,
     ) -> Self {
         Self {
             caches,
@@ -72,7 +68,6 @@ impl BlobPrefetcher {
             rest: plan.rest,
             threads: threads.max(1),
             scope,
-            timeout,
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -215,10 +210,7 @@ impl BlobPrefetcher {
                 break;
             }
             let metrics = &self.caches.metrics().storage;
-            match self
-                .caches
-                .prefetch_blob(blob_index, self.threads, self.timeout)
-            {
+            match self.caches.prefetch_blob(blob_index, self.threads) {
                 Ok(()) => {
                     metrics.collect_prefetch_task_finished_metrics();
                     info!("prefetched priority blob {}", blob_index)
@@ -239,7 +231,6 @@ impl BlobPrefetcher {
         if !self.stopped() && scope == PrefetchScope::All && !self.rest.is_empty() {
             let worker_count = self.threads.min(self.rest.len());
             let queue = Arc::new(Mutex::new(std::mem::take(&mut self.rest)));
-            let timeout = self.timeout;
             let mut handles = Vec::with_capacity(worker_count);
             for _ in 0..worker_count {
                 let blobs = self.caches.clone();
@@ -259,7 +250,7 @@ impl BlobPrefetcher {
                             break;
                         };
                         let metrics = &blobs.metrics().storage;
-                        match blobs.prefetch_blob(blob_index, 1, timeout) {
+                        match blobs.prefetch_blob(blob_index, 1) {
                             Ok(()) => {
                                 metrics.collect_prefetch_task_finished_metrics();
                                 info!("prefetched blob {}", blob_index)
@@ -349,7 +340,7 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
@@ -362,7 +353,7 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
@@ -401,7 +392,6 @@ mod tests {
             },
             1,
             PrefetchScope::All,
-            Duration::ZERO,
         )
     }
 
@@ -495,7 +485,7 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.reads.lock().unwrap().push(*blob_id);
             self.inner.read_range_into_reader(blob_id, offset, length)
         }
@@ -505,7 +495,7 @@ mod tests {
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             length: u64,
-        ) -> io::Result<nydus_backend::Reader> {
+        ) -> io::Result<(nydus_backend::Reader, nydus_backend::Source)> {
             self.reads.lock().unwrap().push(*blob_id);
             self.inner
                 .prefetch_range_into_reader(blob_id, offset, length)
@@ -552,7 +542,7 @@ mod tests {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let (backend, caches, ids) = plain_and_ondemand_blobs(backend_dir.path(), cache_dir.path());
-        BlobPrefetcher::new(caches, plan, 2, scope, Duration::ZERO).run();
+        BlobPrefetcher::new(caches, plan, 2, scope).run();
         let mut order = Vec::new();
         for read in backend.reads.lock().unwrap().iter() {
             let index = if *read == ids[0] { 1 } else { 2 };
