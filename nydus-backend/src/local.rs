@@ -15,6 +15,9 @@ use nydus_telemetry::metrics::Metrics;
 
 use crate::{Backend, RawDeviceFile, ReadKind, Source};
 
+/// The most bytes [`Local::read_range_with`] reads before handing them on.
+const STREAM_PIECE_SIZE: u64 = 256 * 1024;
+
 /// An open full blob file, its footer locating the data and blob metadata
 /// regions inside it.
 #[derive(Debug)]
@@ -332,6 +335,60 @@ impl Backend for Local {
                     .backend
                     .collect_read_failure_metrics(ReadKind::Prefetch, Source::Local)
             })
+    }
+
+    /// Streams the range from the data region in pieces read into one
+    /// scratch buffer of at most [`STREAM_PIECE_SIZE`], recording the read's
+    /// metrics once; a `sink` error is the caller's, not a backend failure.
+    fn read_range_with(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        len: u64,
+        kind: ReadKind,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let start = Instant::now();
+        let fail = |err: io::Error| {
+            self.metrics
+                .backend
+                .collect_read_failure_metrics(kind, Source::Local);
+            err
+        };
+        let full_blob = self.full_blob(blob_id).map_err(fail)?;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
+            })
+            .map_err(fail)?;
+        if end > full_blob.footer.compressed_data_size() {
+            return Err(fail(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "backend range read exceeds data region",
+            )));
+        }
+
+        let base = full_blob.footer.compressed_data_offset();
+        let mut scratch = vec![0u8; len.min(STREAM_PIECE_SIZE) as usize];
+        let mut pos = offset;
+        while pos < end {
+            let piece = &mut scratch[..(end - pos).min(STREAM_PIECE_SIZE) as usize];
+            full_blob
+                .file
+                .read_exact_at(piece, base + pos)
+                .map_err(fail)?;
+            sink(piece)?;
+            pos += piece.len() as u64;
+        }
+
+        self.metrics.backend.collect_read_finished_metrics(
+            kind,
+            Source::Local,
+            len,
+            start.elapsed(),
+        );
+        Ok(())
     }
 }
 

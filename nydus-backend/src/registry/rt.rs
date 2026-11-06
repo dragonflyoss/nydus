@@ -5,6 +5,7 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::runtime::Builder;
+use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::Netns;
@@ -76,8 +77,25 @@ impl Runtime {
     where
         T: Send + 'static,
     {
+        self.wait(self.runtime.spawn(future))
+    }
+
+    /// Runs `future` on a thread of the runtime without waiting for it.
+    pub(crate) fn spawn<T>(
+        &self,
+        future: impl Future<Output = io::Result<T>> + Send + 'static,
+    ) -> JoinHandle<io::Result<T>>
+    where
+        T: Send + 'static,
+    {
+        self.runtime.spawn(future)
+    }
+
+    /// Waits for a task [`Self::spawn`] started, a task that panics or is
+    /// cancelled failing like the I/O it ran.
+    pub(crate) fn wait<T>(&self, task: JoinHandle<io::Result<T>>) -> io::Result<T> {
         self.runtime
-            .block_on(self.runtime.spawn(future))
+            .block_on(task)
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))?
     }
 
