@@ -83,10 +83,6 @@ impl Backend for RepackBackend<'_> {
         self.inner
             .prefetch_range_into_reader(blob_id, offset, length)
     }
-
-    fn runtime(&self) -> Option<&tokio::runtime::Handle> {
-        self.inner.runtime()
-    }
 }
 
 // Field order keeps this key at 16 bytes rather than a padded tuple.

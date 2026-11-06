@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
 use crate::chunk_group_map::{current_boot_tag, ChunkGroupMap};
@@ -617,7 +617,7 @@ impl LocalBlobCache {
             // and a skipped group is still read past.
             let group = self.chunk_group(index);
             let encoded = &mut encoded[..group.compressed_size() as usize];
-            read_exact_from(self.backend.as_ref(), &mut *reader, encoded)?;
+            futures::executor::block_on(reader.read_exact(encoded))?;
             if skip(&group) {
                 continue;
             }
@@ -1327,21 +1327,6 @@ impl<'a> ScatterBatch<'a> {
     }
 }
 
-/// Fills `buf` from `reader`, a reader of `backend`, polled on the backend's
-/// runtime when it has one and on the calling thread otherwise.
-fn read_exact_from(
-    backend: &dyn Backend,
-    reader: &mut (dyn AsyncRead + Send + Unpin),
-    buf: &mut [u8],
-) -> io::Result<()> {
-    let read = reader.read_exact(buf);
-    match backend.runtime() {
-        Some(runtime) => runtime.block_on(read),
-        None => futures::executor::block_on(read),
-    }?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::BlobCaches;
@@ -1357,6 +1342,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use tempfile::tempdir;
+    use tokio::io::AsyncRead;
 
     fn fetch(fetch_size: u64) -> CacheOptions {
         CacheOptions {

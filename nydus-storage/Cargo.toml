@@ -22,7 +22,7 @@ prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "rt"] }
+tokio = { workspace = true, features = ["io-util"] }
 tracing = { workspace = true }
 xattr = { workspace = true }
 zstd = "0.13"

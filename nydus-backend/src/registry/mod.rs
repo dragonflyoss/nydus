@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
 use tokio::io::AsyncRead;
-use tokio::runtime::Handle;
 use url::Url;
 
 use nydus_config::{PrefetchConfig, RegistryConfig};
@@ -501,12 +500,6 @@ impl Backend for Registry {
         &self.metrics
     }
 
-    /// Returns the runtime the bodies of [`Backend::prefetch_range_into_reader`]
-    /// are polled on.
-    fn runtime(&self) -> Option<&Handle> {
-        Some(self.runtime.handle())
-    }
-
     /// Recovers the blob's metadata from the registry for an on-demand read.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
@@ -569,8 +562,9 @@ impl Backend for Registry {
     }
 
     /// Returns the body of one range `GET` for a prefetch read, streamed as
-    /// the caller reads it on [`Backend::runtime`], recording the read's
-    /// metrics once the `GET` is answered.
+    /// the caller reads it and polled inside the backend's runtime whichever
+    /// executor drives it, recording the read's metrics once the `GET` is
+    /// answered.
     fn prefetch_range_into_reader(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -593,7 +587,7 @@ impl Backend for Registry {
                     length,
                     start.elapsed(),
                 );
-                Ok(response.into_reader())
+                Ok(Box::new(self.runtime.reader(response.into_reader())))
             }
             Err(err) => {
                 self.metrics
@@ -916,11 +910,7 @@ mod tests {
             .prefetch_range_into_reader(&TEST_BLOB_ID, 16, 32)
             .unwrap();
         let mut buf = vec![0u8; 32];
-        registry
-            .runtime()
-            .unwrap()
-            .block_on(reader.read_exact(&mut buf))
-            .unwrap();
+        futures::executor::block_on(reader.read_exact(&mut buf)).unwrap();
 
         assert_eq!(buf, blob[16..48]);
         assert_eq!(transport.ranges(), ["bytes=16-47"]);

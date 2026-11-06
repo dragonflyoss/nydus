@@ -2,9 +2,12 @@
 
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use tokio::runtime::Builder;
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio::runtime::{Builder, Handle};
 use tracing::{error, info};
 
 use crate::Netns;
@@ -81,10 +84,13 @@ impl Runtime {
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))?
     }
 
-    /// Returns the handle of the runtime, which a caller polls a streamed
-    /// body on so its I/O and timers are driven.
-    pub(crate) fn handle(&self) -> &tokio::runtime::Handle {
-        self.runtime.handle()
+    /// Wraps `body`, streaming on the runtime, into a [`RuntimeReader`] any
+    /// executor can poll.
+    pub(crate) fn reader(&self, body: Box<dyn AsyncRead + Send + Unpin>) -> RuntimeReader {
+        RuntimeReader {
+            body,
+            handle: self.runtime.handle().clone(),
+        }
     }
 
     /// Returns the tokio runtime itself, for tests that poll a future on the
@@ -95,9 +101,73 @@ impl Runtime {
     }
 }
 
+/// A body streaming on the runtime, polled inside the runtime's context so
+/// its timers and the tokio calls of its poll resolve whichever executor
+/// polls it; the connection behind it keeps running on the runtime's workers.
+pub(crate) struct RuntimeReader {
+    /// The body.
+    body: Box<dyn AsyncRead + Send + Unpin>,
+
+    /// The handle of the runtime the body streams on.
+    handle: Handle,
+}
+
+/// Implements the read of the body inside the runtime.
+impl AsyncRead for RuntimeReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let _guard = this.handle.enter();
+        Pin::new(&mut this.body).poll_read(cx, buf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NeedsRuntime {
+        done: bool,
+    }
+
+    impl AsyncRead for NeedsRuntime {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Handle::try_current().map_err(io::Error::other)?;
+            if !self.done {
+                buf.put_slice(b"ok");
+                self.done = true;
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn reader_polls_its_body_inside_the_runtime_on_any_executor() {
+        use tokio::io::AsyncReadExt;
+
+        let runtime = Runtime::new(None).unwrap();
+        let mut body = Vec::new();
+        futures::executor::block_on(
+            runtime
+                .reader(Box::new(NeedsRuntime { done: false }))
+                .read_to_end(&mut body),
+        )
+        .unwrap();
+        assert_eq!(body, b"ok");
+
+        let mut body = Vec::new();
+        assert!(
+            futures::executor::block_on(NeedsRuntime { done: false }.read_to_end(&mut body))
+                .is_err()
+        );
+    }
 
     #[test]
     fn new_builds_a_runtime_in_the_inherited_netns() {

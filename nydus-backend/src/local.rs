@@ -479,7 +479,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(data, payload[100..1100]);
-        assert!(backend.runtime().is_none());
         assert!(backend
             .prefetch_range_into_reader(&full_blob_id, 4000, 97)
             .is_err());
