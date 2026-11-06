@@ -785,7 +785,7 @@ jobs:
     - name: Performance Test
       run: |
         export PERFORMANCE_TEST_MODE=${{ matrix.mode }}
-        sudo -E make smoke-performance
+        sudo env "PATH=${PATH}" "PERFORMANCE_TEST_MODE=${PERFORMANCE_TEST_MODE}" make smoke-performance
 
   takeover-test:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
@@ -809,4 +809,4 @@ jobs:
     - name: Takeover Test
       run: |
         export NEW_NYDUSD_BINARY_PATH=target/release/nydusd
-        sudo -E make smoke-takeover
+        sudo env "PATH=${PATH}" "NEW_NYDUSD_BINARY_PATH=${NEW_NYDUSD_BINARY_PATH}" make smoke-takeover
