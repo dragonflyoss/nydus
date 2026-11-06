@@ -44,6 +44,8 @@ ZIPFILE="protoc-${PROTOC_VERSION}-${SYSTEM}-${PROTOC_ARCH}.zip"
 URL="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${ZIPFILE}"
 
 echo "Installing protoc ${PROTOC_VERSION} for ${SYSTEM}-${PROTOC_ARCH}"
-curl -sLO "$URL"
-sudo unzip -o "$ZIPFILE" -d /usr/local
-rm "$ZIPFILE"
+DOWNLOAD_DIR=$(mktemp -d)
+trap 'rm -rf "$DOWNLOAD_DIR"' EXIT
+curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+    --output "$DOWNLOAD_DIR/$ZIPFILE" "$URL"
+sudo unzip -o "$DOWNLOAD_DIR/$ZIPFILE" -d /usr/local

@@ -186,13 +186,16 @@ impl Blob {
         let mut inflate_buf = Vec::new();
         let mut header = blob_ctx.blob_meta_header;
         if let Some(ref zran) = ctx.blob_zran_generator {
-            let (inflate_data, inflate_count) = zran.lock().unwrap().to_vec()?;
-            header.set_ci_zran_count(inflate_count);
-            header.set_ci_zran_offset(ci_data.len() as u64);
-            header.set_ci_zran_size(inflate_data.len() as u64);
+            // Deduplication may leave contexts unreferenced. Remap a copy of the final
+            // chunk table so repeated serialization still uses the original indices.
+            let meta = zran.lock().unwrap().to_blob_meta(blob_meta_info)?;
+            let chunk_data = meta.chunks.as_byte_slice();
+            header.set_ci_zran_count(meta.inflate_count);
+            header.set_ci_zran_offset(chunk_data.len() as u64);
+            header.set_ci_zran_size(meta.inflate_data.len() as u64);
             header.set_ci_zran(true);
             header.set_separate_blob(true);
-            inflate_buf = [ci_data, &inflate_data].concat();
+            inflate_buf = [chunk_data, &meta.inflate_data].concat();
             ci_data = &inflate_buf;
         } else if let Some(ref batch) = ctx.blob_batch_generator {
             let (inflate_data, inflate_count) = batch.lock().unwrap().to_vec()?;
