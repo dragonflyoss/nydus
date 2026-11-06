@@ -191,6 +191,15 @@ mod tests {
         ) -> io::Result<()> {
             self.0.read_range_into(blob_id, offset, dst)
         }
+
+        fn prefetch_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+            self.0.prefetch_range_into_reader(blob_id, offset, length)
+        }
     }
 
     #[test]

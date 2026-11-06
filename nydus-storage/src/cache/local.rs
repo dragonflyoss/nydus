@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{info, warn};
 
 use crate::chunk_group_map::{current_boot_tag, ChunkGroupMap};
@@ -574,8 +575,11 @@ impl LocalBlobCache {
     }
 
     /// Fetch one ondemand-blob batch, trimmed at the groups `skip` accepts,
-    /// and hand every decoded group to `cb`. A group that fails to decode
-    /// or validate is logged and skipped; `cb` errors abort the stream.
+    /// and hand every decoded group to `cb`. The batch is one backend read
+    /// whose groups are taken off its reader one at a time, so a worker holds
+    /// one group rather than the whole fetch-size batch. A group that fails
+    /// to decode or validate is logged and skipped; `cb` errors abort the
+    /// stream.
     fn stream_ondemand_blob_batch(
         &self,
         batch: Range<usize>,
@@ -594,15 +598,30 @@ impl LocalBlobCache {
         if start == end {
             return Ok((0, 0));
         }
-        let (encoded, decoded, base) =
-            self.fetch_window(&(start..end), ReadKind::Prefetch, buffers)?;
+        let head = self.chunk_group(start);
+        let length = self.chunk_group(end - 1).compressed_range().end - head.compressed_offset();
+        let encoded_len = (start..end)
+            .map(|index| self.chunk_group(index).compressed_size() as usize)
+            .max()
+            .unwrap_or_default();
+        let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
+        let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
+        let mut reader = self.backend.prefetch_range_into_reader(
+            &self.blob_id,
+            head.compressed_offset(),
+            length,
+        )?;
         let mut failed = 0;
         for index in start..end {
+            // Groups are back to back, so each one's bytes follow the last
+            // and a skipped group is still read past.
             let group = self.chunk_group(index);
+            let encoded = &mut encoded[..group.compressed_size() as usize];
+            read_exact_from(self.backend.as_ref(), &mut *reader, encoded)?;
             if skip(&group) {
                 continue;
             }
-            match self.decode_group(&group, base, encoded, decoded) {
+            match self.decode_group(&group, group.compressed_offset(), encoded, decoded) {
                 Ok(payload) => cb(&group, payload)?,
                 Err(err) => {
                     failed += 1;
@@ -617,7 +636,7 @@ impl LocalBlobCache {
                 }
             }
         }
-        Ok((encoded.len() as u64, failed))
+        Ok((length, failed))
     }
 
     /// Run `job` over `batches` in blob order, sequentially or through a
@@ -1308,6 +1327,21 @@ impl<'a> ScatterBatch<'a> {
     }
 }
 
+/// Fills `buf` from `reader`, a reader of `backend`, polled on the backend's
+/// runtime when it has one and on the calling thread otherwise.
+fn read_exact_from(
+    backend: &dyn Backend,
+    reader: &mut (dyn AsyncRead + Send + Unpin),
+    buf: &mut [u8],
+) -> io::Result<()> {
+    let read = reader.read_exact(buf);
+    match backend.runtime() {
+        Some(runtime) => runtime.block_on(read),
+        None => futures::executor::block_on(read),
+    }?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::BlobCaches;
@@ -1831,8 +1865,9 @@ mod tests {
         batch.flush().unwrap();
     }
 
-    /// Wraps a real backend and counts data-range reads, so tests can assert
-    /// that cross-process sharing (group map + prefetch lock + batch skip)
+    /// Wraps a real backend and counts data-range reads, a streamed
+    /// ondemand-blob batch counting once, so tests can assert that
+    /// cross-process sharing (group map + prefetch lock + batch skip)
     /// actually eliminates duplicate backend traffic.
     struct CountingBackend {
         inner: Local,
@@ -1873,6 +1908,152 @@ mod tests {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.inner.read_range_into(blob_id, offset, dst)
         }
+
+        fn prefetch_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .prefetch_range_into_reader(blob_id, offset, length)
+        }
+    }
+
+    /// A backend serving data only through `prefetch_range_into_reader`,
+    /// recording the largest single read taken off its readers.
+    struct StreamingBackend {
+        inner: Local,
+        range_readers: AtomicUsize,
+        largest_read: Arc<AtomicUsize>,
+    }
+
+    struct RecordingReader {
+        inner: Box<dyn AsyncRead + Send + Unpin>,
+        largest_read: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for RecordingReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            self.largest_read
+                .fetch_max(buf.remaining(), Ordering::SeqCst);
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl Backend for StreamingBackend {
+        fn metrics(&self) -> &Arc<Metrics> {
+            self.inner.metrics()
+        }
+
+        fn read_blob_metadata(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+        ) -> io::Result<BlobMetadata> {
+            self.inner.read_blob_metadata(blob_id)
+        }
+
+        fn read_range_into(
+            &self,
+            _blob_id: &[u8; SHA256_DIGEST_SIZE],
+            _offset: u64,
+            _dst: &mut [u8],
+        ) -> io::Result<()> {
+            Err(io::Error::other(
+                "ondemand blob reads go through prefetch_range_into_reader",
+            ))
+        }
+
+        fn prefetch_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>> {
+            self.range_readers.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(RecordingReader {
+                inner: self
+                    .inner
+                    .prefetch_range_into_reader(blob_id, offset, length)?,
+                largest_read: self.largest_read.clone(),
+            }))
+        }
+    }
+
+    /// An ondemand blob batch streams through one `prefetch_range_into_reader`,
+    /// taking one group's encoded bytes off the reader at a time.
+    #[test]
+    fn ondemand_blob_batches_stream_one_group_at_a_time() {
+        use nydus_format::blob::{
+            BlobMetadataChunkGroup, BlobMetadataChunkGroupRedirect, BlobMetadataChunkLength,
+        };
+
+        let groups: Vec<Vec<u8>> = (1..=3u8).map(|byte| vec![byte; 4096]).collect();
+        let mut chunk_groups: Vec<_> = groups
+            .iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                BlobMetadataChunkGroup::new(
+                    index as u64 * 4096,
+                    index as u32,
+                    index as u32,
+                    4096,
+                    crc32c::crc32c(payload),
+                )
+            })
+            .collect();
+        chunk_groups.push(BlobMetadataChunkGroup::new(3 * 4096, 3, 3, 0, 0));
+        let meta = BlobMetadata::new(
+            1,
+            1,
+            BlobMetadataCompressor::None,
+            None,
+            chunk_groups,
+            vec![BlobMetadataChunkLength::new(4096); 3],
+            Vec::new(),
+            (0..3)
+                .map(|index| BlobMetadataChunkGroupRedirect::new(1, index).unwrap())
+                .collect(),
+        )
+        .unwrap();
+        let data = groups.concat();
+        let backend_dir = tempdir().unwrap();
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let backend = Arc::new(StreamingBackend {
+            inner: Local::new(backend_dir.path().to_path_buf(), Arc::new(Metrics::new())),
+            range_readers: AtomicUsize::new(0),
+            largest_read: Arc::new(AtomicUsize::new(0)),
+        });
+        let cache_dir = tempdir().unwrap();
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone() as Arc<dyn Backend>,
+            fetch(1 << 20),
+        )
+        .unwrap();
+
+        let payloads = Mutex::new(Vec::new());
+        let streamed = cached
+            .for_each_ondemand_blob_chunk_group(1, None, &|_| false, &|_, payload| {
+                payloads.lock().unwrap().push(payload.to_vec());
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(streamed, (data.len() as u64, 0));
+        assert_eq!(payloads.into_inner().unwrap(), groups);
+        assert_eq!(backend.range_readers.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.largest_read.load(Ordering::SeqCst), 4096);
     }
 
     #[test]

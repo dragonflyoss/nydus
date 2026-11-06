@@ -2311,6 +2311,7 @@ dependencies = [
  "nydus-test-utils",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "tracing",
  "xattr",
  "zstd",
@@ -2347,6 +2348,7 @@ name = "nydus-storage"
 version = "3.0.0-beta.3"
 dependencies = [
  "crc32c",
+ "futures",
  "hex",
  "libc",
  "lz4_flex",
@@ -2361,6 +2363,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "tracing",
  "xattr",
  "zstd",
@@ -2392,6 +2395,7 @@ dependencies = [
  "nydus-telemetry",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "zstd",
 ]
 

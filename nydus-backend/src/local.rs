@@ -6,12 +6,15 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::{sha256_reader, SHA256_DIGEST_SIZE};
 use nydus_telemetry::metrics::Metrics;
+use tokio::io::{AsyncRead, ReadBuf};
 
 use crate::{Backend, RawDeviceFile, ReadKind, Source};
 
@@ -333,6 +336,91 @@ impl Backend for Local {
                     .collect_read_failure_metrics(ReadKind::Prefetch, Source::Local)
             })
     }
+
+    /// Returns a reader of the data region from `offset` for a prefetch
+    /// read, each read of it a positional read of the file, recording the
+    /// read's metrics once the range is checked.
+    fn prefetch_range_into_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>> {
+        let start = Instant::now();
+        self.full_blob(blob_id)
+            .and_then(|full_blob| {
+                let end = offset.checked_add(length).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
+                })?;
+                if end > full_blob.footer.compressed_data_size() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "backend range read exceeds data region",
+                    ));
+                }
+
+                let data_offset = full_blob.footer.compressed_data_offset();
+                Ok(Box::new(FileRangeReader {
+                    file: full_blob.file.clone(),
+                    offset: data_offset + offset,
+                    end: data_offset + end,
+                }) as Box<dyn AsyncRead + Send + Unpin>)
+            })
+            .inspect(|_| {
+                self.metrics.backend.collect_read_finished_metrics(
+                    ReadKind::Prefetch,
+                    Source::Local,
+                    length,
+                    start.elapsed(),
+                )
+            })
+            .inspect_err(|_| {
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::Prefetch, Source::Local)
+            })
+    }
+}
+
+/// A reader of a range of a local file, every read a positional read that
+/// never waits, so it is polled without a runtime.
+struct FileRangeReader {
+    /// The open file.
+    file: Arc<File>,
+
+    /// The file offset of the next byte to read.
+    offset: u64,
+
+    /// The file offset the range ends at, exclusive.
+    end: u64,
+}
+
+/// Implements the read of the range off the file.
+impl AsyncRead for FileRangeReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let length = buf
+            .remaining()
+            .min(usize::try_from(this.end - this.offset).unwrap_or(usize::MAX));
+        loop {
+            match this
+                .file
+                .read_at(buf.initialize_unfilled_to(length), this.offset)
+            {
+                Ok(n) => {
+                    buf.advance(n);
+                    this.offset += n as u64;
+                    return Poll::Ready(Ok(()));
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Poll::Ready(Err(err)),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +457,35 @@ mod tests {
             assert_eq!(data, payload, "sidecar={sidecar}");
             assert!(backend.read_blob_metadata(&data_blob_id).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn prefetch_range_into_reader_reads_the_range_of_the_data_region() {
+        use tokio::io::AsyncReadExt;
+
+        let dir = tempdir().unwrap();
+        let payload: Vec<u8> = (0..4096).map(|i| i as u8).collect();
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&single_chunk_group(&payload))
+            .save_in(dir.path());
+        let backend = Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new()));
+
+        let mut data = Vec::new();
+        backend
+            .prefetch_range_into_reader(&full_blob_id, 100, 1000)
+            .unwrap()
+            .read_to_end(&mut data)
+            .await
+            .unwrap();
+
+        assert_eq!(data, payload[100..1100]);
+        assert!(backend.runtime().is_none());
+        assert!(backend
+            .prefetch_range_into_reader(&full_blob_id, 4000, 97)
+            .is_err());
+        assert!(backend
+            .prefetch_range_into_reader(&full_blob_id, u64::MAX, 1)
+            .is_err());
     }
 
     #[test]

@@ -19,6 +19,8 @@ use nydus_config::{BackendConfig, PrefetchConfig};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
+use tokio::io::AsyncRead;
+use tokio::runtime::Handle;
 
 pub use local::Local;
 pub use netns::{Netns, NetnsId};
@@ -63,6 +65,13 @@ pub trait Backend: Send + Sync {
     /// Returns the metrics of the image the backend serves, which its reads
     /// and the caches, prefetcher and filesystem above it record into.
     fn metrics(&self) -> &Arc<Metrics>;
+
+    /// Returns the runtime the readers of [`Backend::prefetch_range_into_reader`]
+    /// are polled on, `None` when they never wait on the network. A backend
+    /// wrapping another forwards it along with the readers.
+    fn runtime(&self) -> Option<&Handle> {
+        None
+    }
 
     /// Returns the full blob digest of `blob_id`, the digest the blob's cache
     /// files are named by.
@@ -122,6 +131,20 @@ pub trait Backend: Send + Sync {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()>;
+
+    /// Returns a reader of the `length` blob bytes from `offset` for a
+    /// prefetch read of the ondemand blob: one request, its body read as the
+    /// caller consumes it, so the caller holds only the bytes it is reading
+    /// rather than the whole fetch-size batch. Every other read keeps
+    /// [`Backend::read_range_into`] and [`Backend::prefetch_range_into`].
+    ///
+    /// The reader is polled on [`Backend::runtime`] when the backend has one.
+    fn prefetch_range_into_reader(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<Box<dyn AsyncRead + Send + Unpin>>;
 
     /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
     fn prefetch_range_into(

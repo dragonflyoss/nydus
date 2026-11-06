@@ -73,6 +73,20 @@ impl Backend for RepackBackend<'_> {
     ) -> std::io::Result<()> {
         self.inner.read_range_into(blob_id, offset, buf)
     }
+
+    fn prefetch_range_into_reader(
+        &self,
+        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        offset: u64,
+        length: u64,
+    ) -> std::io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+        self.inner
+            .prefetch_range_into_reader(blob_id, offset, length)
+    }
+
+    fn runtime(&self) -> Option<&tokio::runtime::Handle> {
+        self.inner.runtime()
+    }
 }
 
 // Field order keeps this key at 16 bytes rather than a padded tuple.
@@ -652,6 +666,20 @@ mod tests {
                 return Err(io::Error::other("injected compact read failure"));
             }
             self.local.read_range_into(id, offset, buf)
+        }
+
+        fn prefetch_range_into_reader(
+            &self,
+            id: &[u8; EROFS_BLOB_ID_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+            self.largest_read
+                .fetch_max(length as usize, Ordering::Relaxed);
+            if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_after {
+                return Err(io::Error::other("injected compact read failure"));
+            }
+            self.local.prefetch_range_into_reader(id, offset, length)
         }
     }
 

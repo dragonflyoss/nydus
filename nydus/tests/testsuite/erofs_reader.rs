@@ -717,6 +717,20 @@ impl Backend for CountingBackend {
         }
         self.local.read_range_into(blob_id, offset, dst)
     }
+
+    fn prefetch_range_into_reader(
+        &self,
+        blob_id: &[u8; 32],
+        offset: u64,
+        length: u64,
+    ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        if self.fail_next.swap(false, Ordering::Relaxed) {
+            return Err(io::Error::other("injected read failure"));
+        }
+        self.local
+            .prefetch_range_into_reader(blob_id, offset, length)
+    }
 }
 
 #[test]

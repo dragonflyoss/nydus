@@ -208,6 +208,56 @@ impl Transport for Http {
             retried = true;
         }
     }
+
+    /// Sends the `GET` of a prefetch read like [`Transport::prefetch`], the
+    /// body streamed to the caller, sending a `429`, `5xx` or `408` once more
+    /// after the retry interval and failing a transport failure at once.
+    async fn prefetch_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let mut retried = false;
+        loop {
+            let start = Instant::now();
+            let result = self
+                .client
+                .get(url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map(|response| Response {
+                    status: response.status(),
+                    headers: response.headers().clone(),
+                    body: Body::Stream(Box::new(StreamReader::new(
+                        response.bytes_stream().map_err(io::Error::other),
+                    ))),
+                    source: self.source,
+                })
+                .map_err(io::Error::other);
+
+            match &result {
+                Ok(response) => debug!(
+                    "GET {url} (prefetch) from the origin returned {} in {:?}",
+                    response.status,
+                    start.elapsed()
+                ),
+                Err(err) => debug!(
+                    "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                    start.elapsed()
+                ),
+            }
+
+            // Serve a definitive answer, or the second transient one.
+            let response = result?;
+            if !response.needs_retry() || retried {
+                return Ok(response);
+            }
+
+            // Retry once after a random interval in the configured window.
+            let err = response.into_io_error().await;
+            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
+            warn!("origin request failed, retrying in {delay:?}: {err}");
+            tokio::time::sleep(delay).await;
+            retried = true;
+        }
+    }
 }
 
 /// A fair leaky bucket handing out one slot per request, the limiter dfdaemon

@@ -321,6 +321,17 @@ mod tests {
             }
             Ok(())
         }
+
+        fn prefetch_range_into_reader(
+            &self,
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            length: u64,
+        ) -> io::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .prefetch_range_into_reader(blob_id, offset, length)
+        }
     }
 
     /// `count` groups of two 4 KiB chunks each (8 KiB decoded), every chunk

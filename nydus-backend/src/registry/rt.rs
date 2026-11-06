@@ -81,6 +81,12 @@ impl Runtime {
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))?
     }
 
+    /// Returns the handle of the runtime, which a caller polls a streamed
+    /// body on so its I/O and timers are driven.
+    pub(crate) fn handle(&self) -> &tokio::runtime::Handle {
+        self.runtime.handle()
+    }
+
     /// Returns the tokio runtime itself, for tests that poll a future on the
     /// calling thread.
     #[cfg(test)]

@@ -3,7 +3,7 @@
 use std::io;
 
 use bytes::{Bytes, BytesMut};
-use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
+use reqwest::header::{HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -43,6 +43,8 @@ impl Response {
     pub(crate) fn require_partial(self, range: &str) -> io::Result<Self> {
         // Dragonfly 1.3 returns 200 for a partial download but supplies the
         // exact Content-Range. Do not extend this exception to origin servers.
+        // A streamed body is measured by its Content-Length, which the HTTP
+        // framing holds it to.
         if self.status == StatusCode::OK && self.source == Source::Dragonfly {
             let decimal = |value: &str| {
                 if value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -71,10 +73,18 @@ impl Response {
                         Some((decimal(first)?, decimal(last)?))
                     }
                 });
+                let length = match &self.body {
+                    Body::Bytes(bytes) => Some(bytes.len() as u64),
+                    Body::Stream(_) => self
+                        .headers
+                        .get(CONTENT_LENGTH)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(decimal),
+                };
                 if start <= end
                     && end < total
                     && requested == Some((start, end))
-                    && matches!(&self.body, Body::Bytes(bytes) if bytes.len() as u64 == end - start + 1)
+                    && length == Some(end - start + 1)
                 {
                     return Ok(self);
                 }
@@ -90,6 +100,15 @@ impl Response {
             ));
         }
         Ok(self)
+    }
+
+    /// Returns the body as a reader, a body already in memory read back from
+    /// it.
+    pub(crate) fn into_reader(self) -> Box<dyn AsyncRead + Send + Unpin> {
+        match self.body {
+            Body::Stream(reader) => reader,
+            Body::Bytes(bytes) => Box::new(io::Cursor::new(bytes)),
+        }
     }
 
     /// Reads exactly `length` bytes of the body, a shorter body being an
@@ -320,6 +339,30 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn require_partial_dragonfly_200_stream_requires_its_content_length() {
+        for (content_length, accepted) in [
+            (Some("4"), true),
+            (Some("8"), false),
+            (Some("+4"), false),
+            (None, false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_RANGE, "bytes 2-5/8".parse().unwrap());
+            if let Some(value) = content_length {
+                headers.insert(CONTENT_LENGTH, value.parse().unwrap());
+            }
+            let result = Response {
+                status: StatusCode::OK,
+                headers,
+                body: Body::Stream(Box::new(io::Cursor::new(vec![42; 4]))),
+                source: Source::Dragonfly,
+            }
+            .require_partial("bytes=2-5");
+            assert_eq!(result.is_ok(), accepted, "{content_length:?}");
         }
     }
 

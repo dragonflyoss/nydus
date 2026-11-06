@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
+use futures::TryStreamExt;
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use reqwest::StatusCode;
 use tokio::sync::OnceCell;
+use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 use dragonfly_api::common::v2::Priority;
@@ -142,11 +144,11 @@ impl Transport for Dragonfly {
 
         let start = Instant::now();
         let mut body = BytesMut::new();
-        let fetched = match self.client(&self.ondemand_client, self.max_retries).await {
+        let response = match self.client(&self.ondemand_client, self.max_retries).await {
             Ok(client) => client.get_into(&request, &mut body).await,
             Err(err) => Err(err),
         };
-        let result = match fetched {
+        let result = match response {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
@@ -241,15 +243,108 @@ impl Transport for Dragonfly {
         loop {
             let start = Instant::now();
             let mut body = BytesMut::new();
-            let fetched = match self.client(&self.prefetch_client, 0).await {
+            let response = match self.client(&self.prefetch_client, 0).await {
                 Ok(client) => client.get_into(&request, &mut body).await,
                 Err(err) => Err(err),
             };
-            let result = match fetched {
+            let result = match response {
                 Ok(response) => Ok(Response {
                     status: response.status_code.unwrap_or(StatusCode::OK),
                     headers: response.header,
                     body: Body::Bytes(body.freeze()),
+                    source: Source::Dragonfly,
+                }),
+                Err(Error::ProxyError(ProxyError {
+                    status_code: Some(status),
+                    header,
+                    message,
+                }))
+                | Err(Error::BackendError(BackendError {
+                    status_code: Some(status),
+                    header,
+                    message,
+                }))
+                | Err(Error::DfdaemonError(DfdaemonError {
+                    status_code: Some(status),
+                    header,
+                    message,
+                })) => Ok(Response {
+                    status,
+                    headers: header
+                        .into_iter()
+                        .filter_map(|(name, value)| {
+                            Some((
+                                HeaderName::from_bytes(name.as_bytes()).ok()?,
+                                HeaderValue::from_str(&value).ok()?,
+                            ))
+                        })
+                        .collect(),
+                    body: Body::Bytes(message.unwrap_or_default().into()),
+                    source: Source::Dragonfly,
+                }),
+                Err(Error::RequestTimeout(message)) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("dragonfly request timed out: {message}"),
+                )),
+                Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
+            };
+
+            match &result {
+                Ok(response) => debug!(
+                    "GET {url} (prefetch) through dragonfly returned {} in {:?}",
+                    response.status,
+                    start.elapsed()
+                ),
+                Err(err) => debug!(
+                    "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
+                    start.elapsed()
+                ),
+            }
+
+            // Serve a definitive answer, or the second transient one, as a
+            // prefetch never falls back to the origin.
+            let response = result?;
+            if !response.needs_retry() || retried {
+                return Ok(response);
+            }
+
+            // Retry once after a random interval in the configured window.
+            let err = response.into_io_error().await;
+            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
+            warn!("dragonfly request failed, retrying in {delay:?}: {err}");
+            tokio::time::sleep(delay).await;
+            retried = true;
+        }
+    }
+
+    /// Fetches `url` like [`Transport::prefetch`], the body streamed from the
+    /// seed peer through the SDK's `get`.
+    async fn prefetch_stream(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let request = GetRequest {
+            url: url.to_string(),
+            header: headers,
+            priority: Some(Priority::Level3 as i32),
+            timeout: self.request_timeout,
+            ..Default::default()
+        };
+
+        let mut retried = false;
+        loop {
+            let start = Instant::now();
+            let response = match self.client(&self.prefetch_client, 0).await {
+                Ok(client) => client.get(&request).await,
+                Err(err) => Err(err),
+            };
+            let result = match response {
+                Ok(response) => Ok(Response {
+                    status: response.status_code.unwrap_or(StatusCode::OK),
+                    headers: response.header,
+                    body: Body::Stream(Box::new(StreamReader::new(
+                        response
+                            .body
+                            .unwrap_or_else(|| Box::new(futures::stream::empty()))
+                            .map_err(io::Error::other),
+                    ))),
                     source: Source::Dragonfly,
                 }),
                 Err(Error::ProxyError(ProxyError {
