@@ -194,40 +194,38 @@ mod tests {
     }
 
     #[test]
-    fn contention_timeout_does_not_disable_later_acquisitions() {
+    fn acquire_times_out_under_contention_without_disabling_later_claims() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.flight.lock");
         let peer = ChunkGroupLocks::new(path.clone());
         let locks = ChunkGroupLocks::new(path);
-        let claim = peer.acquire(3..4).expect("peer claims group 3");
+        let claim = peer.acquire(3..4).unwrap();
 
         let started = Instant::now();
-        assert!(locks.acquire(3..4).is_none());
-        assert!(started.elapsed() >= Duration::from_secs(2));
-        assert!(started.elapsed() < Duration::from_secs(5));
-        drop(locks.acquire(4..5).expect("uncontended groups still lock"));
+        let contended = locks.acquire(3..4);
+        let elapsed = started.elapsed();
+
+        assert!(contended.is_none());
+        assert!(elapsed >= Duration::from_secs(2));
+        assert!(elapsed < Duration::from_secs(5));
+        drop(locks.acquire(4..5).unwrap());
 
         drop(claim);
-        let reclaimed = locks.acquire(3..4).expect("claim after contention clears");
-        assert!(
-            matches!(
-                set_lock(
-                    peer.file().unwrap(),
-                    &(3..4),
-                    libc::F_WRLCK as libc::c_short,
-                    libc::F_OFD_SETLK,
-                )
-                .unwrap_err()
-                .raw_os_error(),
-                Some(libc::EAGAIN | libc::EACCES)
-            ),
-            "the recovered claim must exclude a peer"
-        );
+        let reclaimed = locks.acquire(3..4).unwrap();
+        let err = set_lock(
+            peer.file().unwrap(),
+            &(3..4),
+            libc::F_WRLCK as libc::c_short,
+            libc::F_OFD_SETLK,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err.raw_os_error(),
+            Some(libc::EAGAIN | libc::EACCES)
+        ));
         drop(reclaimed);
-        drop(
-            peer.acquire(3..4)
-                .expect("recovered claim releases normally"),
-        );
+        drop(peer.acquire(3..4).unwrap());
     }
 
     #[test]

@@ -2034,8 +2034,10 @@ mod tests {
     }
 
     #[test]
-    fn stale_group_map_reset_timeout_is_retryable() {
-        for skip_verify_checksums in [true, false] {
+    fn open_times_out_on_a_held_reset_lock_and_resets_the_stale_group_map_on_retry() {
+        let test_cases = vec![true, false];
+
+        for skip_verify_checksums in test_cases {
             let backend_dir = tempdir().unwrap();
             let cache_dir = tempdir().unwrap();
             let payload = vec![0x3du8; 4096];
@@ -2058,7 +2060,6 @@ mod tests {
             let data_path = cached.cache_data_path.clone();
             drop(cached);
             fs::remove_file(&data_path).unwrap();
-
             let map_path = cache_dir
                 .path()
                 .join(format!("{}.group.map", hex::encode(full_blob_id)));
@@ -2068,37 +2069,64 @@ mod tests {
                 .write(true)
                 .open(&map_path)
                 .unwrap();
-            assert_eq!(
-                unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-                0
-            );
+            // SAFETY: `lock` keeps the descriptor open for the duration of the call.
+            let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(locked, 0);
+
             let started = Instant::now();
             let err =
                 LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone(), options)
                     .err()
-                    .expect("the held reset lock must fail the first open");
-            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-            assert!(started.elapsed() >= Duration::from_secs(2));
-            let data_missing_after_timeout = !data_path.exists();
-            drop(lock);
+                    .unwrap();
+            let elapsed = started.elapsed();
 
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::TimedOut,
+                "skip_verify_checksums={skip_verify_checksums}"
+            );
+            assert!(
+                elapsed >= Duration::from_secs(2),
+                "skip_verify_checksums={skip_verify_checksums}"
+            );
+            assert!(
+                !data_path.exists(),
+                "skip_verify_checksums={skip_verify_checksums}"
+            );
+
+            drop(lock);
             let retry = open(full_blob_id, cache_dir.path(), backend.clone(), options);
-            let cold = !retry.is_chunk_group_ready(0) && !retry.chunk_group_map.is_all_ready();
+
+            assert!(
+                !retry.is_chunk_group_ready(0),
+                "skip_verify_checksums={skip_verify_checksums}"
+            );
+            assert!(
+                !retry.chunk_group_map.is_all_ready(),
+                "skip_verify_checksums={skip_verify_checksums}"
+            );
             buf.fill(0);
             retry.read_at(0, &mut buf).unwrap();
-            assert_eq!(buf, payload[..32], "retry must not read sparse zeros");
-            assert!(cold, "retry must reset the orphaned ready bits");
-            assert!(
-                data_missing_after_timeout,
-                "failed reset must not create data"
+            assert_eq!(
+                buf,
+                payload[..32],
+                "skip_verify_checksums={skip_verify_checksums}"
             );
-            assert_eq!(backend.reads(), 2, "retry must refill from the backend");
-            assert_eq!(fs::metadata(map_path).unwrap().ino(), map_inode);
+            assert_eq!(
+                backend.reads(),
+                2,
+                "skip_verify_checksums={skip_verify_checksums}"
+            );
+            assert_eq!(
+                fs::metadata(&map_path).unwrap().ino(),
+                map_inode,
+                "skip_verify_checksums={skip_verify_checksums}"
+            );
         }
     }
 
     #[test]
-    fn stale_group_map_waiter_preserves_a_peers_replacement() {
+    fn open_waiting_on_the_reset_lock_keeps_a_peers_replacement() {
         use std::sync::mpsc;
 
         let backend_dir = tempdir().unwrap();
@@ -2149,13 +2177,13 @@ mod tests {
             peer_map.set_ready(0).unwrap();
             let data_inode = fs::metadata(&data_path).unwrap().ino();
             drop(guard);
-
             let reopened = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
-            assert!(reopened.is_chunk_group_ready(0), "peer's fill must survive");
+
+            assert!(reopened.is_chunk_group_ready(0));
             assert!(reopened.chunk_group_map.is_all_ready());
             reopened.read_at(0, &mut buf).unwrap();
             assert_eq!(buf, payload[..32]);
-            assert_eq!(backend.reads(), 1, "peer's fill must not be fetched again");
+            assert_eq!(backend.reads(), 1);
             assert_eq!(fs::metadata(&data_path).unwrap().ino(), data_inode);
         });
     }

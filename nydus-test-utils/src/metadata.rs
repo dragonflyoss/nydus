@@ -151,17 +151,29 @@ pub fn single_chunk_group_ondemand(payload: &[u8], source_blob_index: u16) -> Bl
     .unwrap()
 }
 
-/// A copy claiming a wrong CRC32C for `group`, with the other entries kept.
+/// Returns a copy of `blob_metadata` claiming a wrong CRC32C for `group`,
+/// with the other entries kept.
+///
+/// # Panics
+///
+/// When `blob_metadata` is ondemand or upper, or `group` is out of range.
 pub fn with_wrong_chunk_group_checksum(blob_metadata: &BlobMetadata, group: usize) -> BlobMetadata {
     rebuild(blob_metadata, group, true, false)
 }
 
-/// A copy claiming a wrong digest for `group`, with the other entries kept.
-/// The blob meta must have digests.
+/// Returns a copy of `blob_metadata` claiming a wrong digest for `group`,
+/// with the other entries kept.
+///
+/// # Panics
+///
+/// When `blob_metadata` is ondemand or upper or has no digests, or `group`
+/// is out of range.
 pub fn with_wrong_chunk_group_digest(blob_metadata: &BlobMetadata, group: usize) -> BlobMetadata {
     rebuild(blob_metadata, group, false, true)
 }
 
+/// Rebuilds the plain `blob_metadata` entry by entry, flipping the CRC32C or
+/// the digest of `group` as asked.
 fn rebuild(
     blob_metadata: &BlobMetadata,
     group: usize,
@@ -173,6 +185,7 @@ fn rebuild(
         "only a plain blob meta can be rebuilt"
     );
     assert!(group < blob_metadata.chunk_group_count());
+
     let digester = blob_metadata.digester().unwrap();
     let mut digests: Vec<_> = blob_metadata.chunk_group_digests().collect();
     if wrong_digest {
@@ -223,7 +236,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrong_chunk_group_checksum_changes_only_that_checksum() {
+    fn with_wrong_chunk_group_checksum_changes_only_that_checksum() {
         let chunk_groups = vec![vec![vec![0x11; 4096]], vec![vec![0x22; 4096]]];
         let (_, blob_metadata) = from_chunk_groups(
             BlobMetadataCompressor::Zstd,
@@ -231,7 +244,9 @@ mod tests {
             &chunk_groups,
             Some(BlobMetadataDigester::Blake3),
         );
+
         let tampered = with_wrong_chunk_group_checksum(&blob_metadata, 1);
+
         assert_eq!(
             tampered.chunk_group_digest(0),
             blob_metadata.chunk_group_digest(0)
@@ -255,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_chunk_group_digest_changes_only_that_digest() {
+    fn with_wrong_chunk_group_digest_changes_only_that_digest() {
         let chunk_groups = vec![vec![vec![0x11; 4096]], vec![vec![0x22; 4096]]];
         let (_, blob_metadata) = from_chunk_groups(
             BlobMetadataCompressor::Zstd,
@@ -263,7 +278,9 @@ mod tests {
             &chunk_groups,
             Some(BlobMetadataDigester::Blake3),
         );
+
         let tampered = with_wrong_chunk_group_digest(&blob_metadata, 1);
+
         assert_eq!(
             tampered.chunk_group_digest(0),
             blob_metadata.chunk_group_digest(0)
