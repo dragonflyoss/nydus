@@ -17,7 +17,7 @@ import (
 )
 
 // Duration is a time.Duration decoded from a Go duration string such as
-// "10s", as containerd's tomlext.Duration.
+// "10s".
 type Duration time.Duration
 
 // UnmarshalText decodes a duration string.

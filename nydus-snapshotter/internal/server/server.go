@@ -283,7 +283,7 @@ func (s *Server) reload(ctx context.Context, next *config.Config) {
 
 	merged, restartOnly := s.cfg.Merge(next)
 	if restartOnly {
-		log.G(ctx).Warn("config changes outside [cgroup] and [nydusd.dragonfly] apply after a restart")
+		log.G(ctx).Warn("config changes outside cgroup and nydusd.dragonfly apply after a restart")
 	}
 
 	if err := s.fileSystem.Reload(ctx, merged); err != nil {

@@ -425,71 +425,77 @@ systemd cgroup driver does. `CPUQuota` is not a D-Bus property;
 
 ## Configuration
 
-`/etc/nydus-v3/config.toml`, decoded with `go-toml/v2` as containerd does:
-strict (`DisallowUnknownFields`) at start, while a reload that fails logs a
-warning and keeps the running config. Keys are snake_case. Durations use a
-`UnmarshalText` type (`"10s"`); sizes use `docker/go-units` (`"1GiB"`).
-`Validate()` runs after defaults are applied. The `[cgroup]` and
-`[nydusd.dragonfly]` tables are reloaded by polling the file and comparing bytes,
-as Dragonfly does (`cmd/dependency`), which survives ConfigMap symlink swaps. A
-dragonfly change applies to newly started daemons; other changes log a warning
-and need a restart.
+`/etc/nydus-v3/config.yaml`, decoded with `gopkg.in/yaml.v3` as the Dragonfly
+components and the nydus daemon config are: strict (`KnownFields`) at start,
+while a reload that fails logs a warning and keeps the running config. Keys are
+snake_case, as in nydus-config. Durations use a `UnmarshalText` type (`10s`);
+sizes use `docker/go-units` (`1GiB`). `Validate()` runs after defaults are
+applied. The `cgroup` and `nydusd.dragonfly` sections are reloaded by polling
+the file and comparing bytes, as Dragonfly does (`cmd/dependency`), which
+survives ConfigMap symlink swaps. A dragonfly change applies to newly started
+daemons; other changes log a warning and need a restart.
 
-```toml
-version = 1
-root = "/var/lib/containerd-nydus-v3"
-address = "/run/containerd-nydus-v3/containerd-nydus-grpc.sock"
+```yaml
+version: 1
+root: /var/lib/containerd-nydus-v3
+address: /run/containerd-nydus-v3/containerd-nydus-grpc.sock
 
-[log]
-level = "info"
+log:
+  level: info
 
-[metrics]
-address = "127.0.0.1:4010"         # /metrics, /livez, /readyz
+metrics:
+  # /metrics, /livez and /readyz, empty to disable.
+  address: 127.0.0.1:4010
 
-[registry]
-config_path = "/etc/nydus-v3/certs.d"
+registry:
+  config_path: /etc/nydus-v3/certs.d
 
-[auth.docker_config]
-path = ""                          # empty: kubelet's search order
+auth:
+  docker_config:
+    # Empty follows kubelet's search order.
+    path: ''
+  kubesecret:
+    enable: false
+    kubeconfig: /run/containerd-nydus-v3/kubernetes/kubeconfig
+    label_selector: ''
 
-[auth.kubesecret]
-enable = false
-kubeconfig = "/run/containerd-nydus-v3/kubernetes/kubeconfig"
-label_selector = ""
+nydusd:
+  driver: fuse
+  binary: /opt/nydus-v3/bin/current/nydus
+  template: /etc/nydus-v3/nydusd.template.yaml
+  log_dir: /var/log/nydus-v3/nydusd
+  mount_timeout: 10s
+  prefetch_scope: auto
+  # Copied into backend.config.dragonfly when scheduler_endpoint is set.
+  dragonfly:
+    scheduler_endpoint: ''
+    request_timeout: 5s
+    max_retries: 1
+    fallback_rate_limit: 1
 
-[nydusd]
-driver = "fuse"
-binary = "/opt/nydus-v3/bin/current/nydus"
-template = "/etc/nydus-v3/nydusd.template.yaml"
-log_dir = "/var/log/nydus-v3/nydusd"
-mount_timeout = "10s"
-prefetch_scope = "auto"
+cgroup:
+  slice: system-nydus-v3.slice
+  # On system-nydus.slice.
+  memory_max: 8GiB
+  memory_high: 6GiB
+  cpu_quota: 400%
+  daemon:
+    memory_high: 1GiB
+    cpu_quota: 100%
 
-[nydusd.dragonfly]                 # copied into backend.config.dragonfly when set
-scheduler_endpoint = ""
-request_timeout = "5s"
-max_retries = 1
-fallback_rate_limit = 1
-
-[cgroup]
-slice = "system-nydus-v3.slice"
-memory_max = "8GiB"                # on system-nydus.slice
-memory_high = "6GiB"
-cpu_quota = "400%"
-
-[cgroup.daemon]
-memory_high = "1GiB"
-cpu_quota = "100%"
-
-[gc]
-interval = "15m"
-
-[gc.policy]
-blob_ttl = "720h"
-disk_threshold = "0"               # 0: the whole filesystem
-disk_high_threshold_percent = 80
-disk_low_threshold_percent = 60
+gc:
+  interval: 15m
+  policy:
+    blob_ttl: 720h
+    # 0 is the whole filesystem.
+    disk_threshold: '0'
+    disk_high_threshold_percent: 80
+    disk_low_threshold_percent: 60
 ```
+
+`registry.config_path` is a containerd certs.d directory, read with containerd's
+lookup and its [hosts.toml](https://github.com/containerd/containerd/blob/main/docs/hosts.md)
+format, so it can share the files containerd uses.
 
 `Validate()` also checks that each daemon API socket path stays under the
 108-byte `sun_path` limit; the default is 101 bytes.
@@ -523,7 +529,7 @@ in:
 | `backend.config.repository` | Image reference path (`library/` for docker.io official images) |
 | `backend.config.auth` | Keyring |
 | `backend.config.http.tls` | `hosts.toml`: `skip_verify`, CA files concatenated into one PEM; `client` certificates are rejected (unsupported by nydus); `[host]` mirrors are ignored |
-| `backend.config.dragonfly` | `[nydusd.dragonfly]` (requires a `nydus` built with the `dragonfly` feature, as release builds are) |
+| `backend.config.dragonfly` | `nydusd.dragonfly` (requires a `nydus` built with the `dragonfly` feature, as release builds are) |
 | `prefetch.scope` | See [Prefetch](#prefetch) |
 
 ## Paths
@@ -532,7 +538,7 @@ in:
 | --- | --- | --- |
 | `/usr/local/bin/nydus-snapshotter` | Snapshotter binary | Installer → systemd |
 | `/etc/systemd/system/nydus-snapshotter.{service,socket}` | Snapshotter units | Installer → systemd |
-| `/etc/nydus-v3/config.toml` | Snapshotter config | Installer (from ConfigMap) → snapshotter |
+| `/etc/nydus-v3/config.yaml` | Snapshotter config | Installer (from ConfigMap) → snapshotter |
 | `/etc/nydus-v3/nydusd.template.yaml` | nydusd config template | Installer (from ConfigMap) → snapshotter |
 | `/etc/nydus-v3/certs.d/<host>/hosts.toml` | Registry TLS and scheme | Installer → snapshotter |
 | `/run/containerd-nydus-v3/kubernetes/{kubeconfig,token,ca.crt}` | API access for kubesecret | Installer → snapshotter |
@@ -579,11 +585,11 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
   `privileged`, `tolerations: [{operator: Exists}]`, with the host root at
   `/host` and `/run/dbus` and `/run/systemd` mounted at their own paths. It
   needs no host PID namespace: D-Bus authorizes root by uid.
-  - Runs `nydus-snapshotter install`: validates `config.toml`, the template and
+  - Runs `nydus-snapshotter install`: validates `config.yaml`, the template and
     every `hosts.toml`, copies binaries, units and config from its image and
     ConfigMap to the host, then `EnableUnitFiles` over D-Bus. Only a change the
     snapshotter reads at start restarts it: its binary, its unit files or
-    `config.toml`; a socket change restarts the socket too. A new `nydus` lands
+    `config.yaml`; a socket change restarts the socket too. A new `nydus` lands
     in its own version directory behind the `current` link, read per daemon
     start. The units due a restart are recorded on tmpfs before any file is
     written, so a run that dies midway is finished by the next. Host paths
@@ -592,7 +598,7 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
   - Stays running to keep `/run/containerd-nydus-v3/kubernetes/token` in sync with its
     projected service account token (mounted only with kubesecret enabled), and
     to copy ConfigMap changes to the host without a restart: the snapshotter
-    reloads `[cgroup]` and `[nydusd.dragonfly]` itself and reads the template
+    reloads `cgroup` and `nydusd.dragonfly` itself and reads the template
     and `certs.d` per daemon start; other keys apply on its next restart.
   - Has no `preStop` uninstall: deleting the Pod must never remove the
     snapshotter. Uninstalling is an explicit operation.
@@ -684,7 +690,7 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
   against its diff ID, as with every remote snapshotter, so an image claiming
   another image's layer chain IDs as nydus layers makes that image fail on the
   node until the claiming image and its snapshots are removed.
-- **Dragonfly peers see the registry credential.** With `[nydusd.dragonfly]`
+- **Dragonfly peers see the registry credential.** With `nydusd.dragonfly`
   set, requests carry the `Authorization` header through the seed peers; use a
   trusted, TLS-protected Dragonfly cluster.
 - **Changing `root` or `run_dir`** while daemons run loses track of them, as

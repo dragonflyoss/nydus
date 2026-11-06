@@ -1,0 +1,62 @@
+# Config schema version.
+version: 1
+# Root of snapshots, the blob cache and daemon instances.
+root: /var/lib/containerd-nydus-v3
+# gRPC socket containerd connects to.
+address: /run/containerd-nydus-v3/containerd-nydus-grpc.sock
+
+log:
+  # One of trace, debug, info, warn or error.
+  level: info
+
+metrics:
+  # Address of /metrics, /livez and /readyz, empty to disable.
+  address: 127.0.0.1:4010
+
+registry:
+  # containerd certs.d directory of <host>/hosts.toml and docker-style certificates.
+  config_path: /etc/nydus-v3/certs.d
+
+auth:
+  docker_config:
+    # Docker config.json with registry credentials, empty for kubelet's search order.
+    path: ''
+  kubesecret:
+    # Read credentials from kubernetes.io/dockerconfigjson secrets.
+    enable: false
+    kubeconfig: /run/containerd-nydus-v3/kubernetes/kubeconfig
+    label_selector: ''
+
+nydusd:
+  driver: fuse
+  binary: /opt/nydus-v3/bin/current/nydus
+  template: /etc/nydus-v3/nydusd.template.yaml
+  log_dir: /var/log/nydus-v3/nydusd
+  mount_timeout: 10s
+  # One of none, ondemand, all or auto.
+  prefetch_scope: auto
+  # Copied into backend.config.dragonfly of each daemon when scheduler_endpoint is set.
+  dragonfly:
+    scheduler_endpoint: ''
+    request_timeout: 5s
+    max_retries: 1
+    fallback_rate_limit: 1
+
+cgroup:
+  slice: system-nydus-v3.slice
+  # Total of every daemon, on system-nydus.slice.
+  memory_max: 8GiB
+  memory_high: 6GiB
+  cpu_quota: 400%
+  daemon:
+    memory_high: 1GiB
+    cpu_quota: 100%
+
+gc:
+  interval: 15m
+  policy:
+    blob_ttl: 720h
+    # Capacity the disk thresholds apply to, 0 for the whole filesystem.
+    disk_threshold: '0'
+    disk_high_threshold_percent: 80
+    disk_low_threshold_percent: 60

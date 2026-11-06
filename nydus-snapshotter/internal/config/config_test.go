@@ -25,7 +25,7 @@ func TestConfig_Load(t *testing.T) {
 	}{
 		{
 			name: "load full config",
-			path: "testdata/config.toml",
+			path: "testdata/config.yaml",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -44,7 +44,7 @@ func TestConfig_Load(t *testing.T) {
 		},
 		{
 			name: "missing file uses defaults",
-			path: "testdata/missing.toml",
+			path: "testdata/missing.yaml",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -78,91 +78,91 @@ func TestConfig_Parse(t *testing.T) {
 		},
 		{
 			name: "unknown key",
-			data: "[nydusd]\nunknown = 1\n",
+			data: "nydusd:\n  unknown: 1\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "decode config")
 			},
 		},
 		{
 			name: "unsupported version",
-			data: "version = 2\n",
+			data: "version: 2\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "unsupported config version 2")
 			},
 		},
 		{
 			name: "relative root",
-			data: "root = \"var/lib\"\n",
+			data: "root: \"var/lib\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "root must be an absolute path")
 			},
 		},
 		{
 			name: "unsupported driver",
-			data: "[nydusd]\ndriver = \"ublk\"\n",
+			data: "nydusd:\n  driver: \"ublk\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "unsupported nydusd.driver")
 			},
 		},
 		{
 			name: "invalid prefetch scope",
-			data: "[nydusd]\nprefetch_scope = \"some\"\n",
+			data: "nydusd:\n  prefetch_scope: \"some\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "invalid nydusd.prefetch_scope")
 			},
 		},
 		{
 			name: "invalid duration",
-			data: "[nydusd]\nmount_timeout = \"soon\"\n",
+			data: "nydusd:\n  mount_timeout: \"soon\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "parse duration")
 			},
 		},
 		{
 			name: "invalid size",
-			data: "[cgroup]\nmemory_max = \"lots\"\n",
+			data: "cgroup:\n  memory_max: \"lots\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "parse size")
 			},
 		},
 		{
 			name: "cpu quota without percent sign",
-			data: "[cgroup]\ncpu_quota = \"400\"\n",
+			data: "cgroup:\n  cpu_quota: \"400\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "missing %")
 			},
 		},
 		{
 			name: "slice without suffix",
-			data: "[cgroup]\nslice = \"nydus\"\n",
+			data: "cgroup:\n  slice: \"nydus\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "invalid cgroup.slice")
 			},
 		},
 		{
 			name: "low watermark above high",
-			data: "[gc.policy]\ndisk_high_threshold_percent = 50\ndisk_low_threshold_percent = 70\n",
+			data: "gc:\n  policy:\n    disk_high_threshold_percent: 50\n    disk_low_threshold_percent: 70\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "invalid gc.policy thresholds")
 			},
 		},
 		{
 			name: "invalid label selector",
-			data: "[auth.kubesecret]\nlabel_selector = \"a in (\"\n",
+			data: "auth:\n  kubesecret:\n    label_selector: \"a in (\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "invalid auth.kubesecret.label_selector")
 			},
 		},
 		{
 			name: "dragonfly retries over the limit",
-			data: "[nydusd.dragonfly]\nscheduler_endpoint = \"http://scheduler:8002\"\nrequest_timeout = \"5s\"\nmax_retries = 4\nfallback_rate_limit = 1\n",
+			data: "nydusd:\n  dragonfly:\n    scheduler_endpoint: \"http://scheduler:8002\"\n    request_timeout: \"5s\"\n    max_retries: 4\n    fallback_rate_limit: 1\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "nydusd.dragonfly.max_retries")
 			},
 		},
 		{
 			name: "scheduler endpoint alone takes nydus's dragonfly defaults",
-			data: "[nydusd.dragonfly]\nscheduler_endpoint = \"http://scheduler:8002\"\n",
+			data: "nydusd:\n  dragonfly:\n    scheduler_endpoint: \"http://scheduler:8002\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -173,21 +173,21 @@ func TestConfig_Parse(t *testing.T) {
 		},
 		{
 			name: "percent out of range",
-			data: "[cgroup]\ncpu_quota = \"1844674407370956%\"\n",
+			data: "cgroup:\n  cpu_quota: \"1844674407370956%\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "out of range")
 			},
 		},
 		{
 			name: "relative docker config path",
-			data: "[auth.docker_config]\npath = \"config.json\"\n",
+			data: "auth:\n  docker_config:\n    path: \"config.json\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "auth.docker_config.path must be an absolute path")
 			},
 		},
 		{
 			name: "socket path over sun_path",
-			data: "run_dir = \"/run/" + strings.Repeat("x", 40) + "\"\n",
+			data: "run_dir: /run/" + strings.Repeat("x", 40) + "\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.ErrorContains(t, err, "byte limit")
 			},
@@ -236,7 +236,7 @@ func TestWatcher_Run(t *testing.T) {
 	}{
 		{
 			name:   "reload a changed config",
-			update: "[cgroup]\nmemory_max = \"4GiB\"\n",
+			update: "cgroup:\n  memory_max: \"4GiB\"\n",
 			expect: func(t *testing.T, reloaded <-chan *Config) {
 				assert := assert.New(t)
 				select {
@@ -249,7 +249,7 @@ func TestWatcher_Run(t *testing.T) {
 		},
 		{
 			name:   "keep the running config on an invalid change",
-			update: "[cgroup]\nmemory_max = \"lots\"\n",
+			update: "cgroup:\n  memory_max: \"lots\"\n",
 			expect: func(t *testing.T, reloaded <-chan *Config) {
 				select {
 				case <-reloaded:
@@ -260,7 +260,7 @@ func TestWatcher_Run(t *testing.T) {
 		},
 		{
 			name:   "ignore a rewrite of the running config",
-			update: "version = 1\n\n",
+			update: "version: 1\n\n",
 			expect: func(t *testing.T, reloaded <-chan *Config) {
 				select {
 				case <-reloaded:
@@ -273,7 +273,7 @@ func TestWatcher_Run(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.toml")
+			path := filepath.Join(t.TempDir(), "config.yaml")
 			tmp := path + ".tmp"
 			assert.NoError(t, os.WriteFile(tmp, []byte(tc.update), 0o644))
 			reloaded := make(chan *Config, 1)

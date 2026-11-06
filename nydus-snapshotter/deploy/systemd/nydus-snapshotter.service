@@ -15,7 +15,7 @@ Before=containerd.service
 # As containerd.service: READY=1 is sent once gRPC serves, so containerd,
 # ordered after this unit, starts against a ready snapshotter.
 Type=notify
-ExecStart=/usr/local/bin/nydus-snapshotter --config /etc/nydus-v3/config.toml
+ExecStart=/usr/local/bin/nydus-snapshotter --config /etc/nydus-v3/config.yaml
 Restart=always
 # As containerd.service; 5s keeps a crash loop under the default start limit
 # (5 starts in 10s), so systemd never gives up on the unit.

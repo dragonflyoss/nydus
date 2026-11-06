@@ -32,7 +32,7 @@ var (
 
 	mockCA = "ca"
 
-	mockKubeSecretConfig = "version = 1\n[auth.kubesecret]\nenable = true\n"
+	mockKubeSecretConfig = "version: 1\nauth:\n  kubesecret:\n    enable: true\n"
 
 	mockServiceRestart = serviceUnit + "\n"
 )
@@ -92,7 +92,7 @@ func TestInstaller_Run(t *testing.T) {
 		},
 		{
 			name:    "sync the kubeconfig with kubesecret",
-			payload: map[string]string{"config/config.toml": mockKubeSecretConfig},
+			payload: map[string]string{"config/config.yaml": mockKubeSecretConfig},
 			mock: func(m *mocks.MockManagerMockRecorder, cancel context.CancelFunc) {
 				gomock.InOrder(
 					m.EnableUnitFiles(gomock.Any(), []string{socketUnit, serviceUnit}).Return(nil).Times(1),
@@ -148,7 +148,7 @@ func TestInstaller_install(t *testing.T) {
 				assert.NoError(err)
 				assertFile(t, hostPath(t, cfg, snapshotterBinary), readFile(t, cfg.payload("bin/nydus-snapshotter")), 0o755)
 				assertFile(t, hostPath(t, cfg, "/opt/nydus-v3/bin/"+mockVersion+"/nydus"), readFile(t, cfg.payload("bin/nydus")), 0o755)
-				assertFile(t, hostPath(t, cfg, config.DefaultPath), readFile(t, "../../deploy/nydus-snapshotter/config.toml"), 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultPath), readFile(t, "../../deploy/nydus-snapshotter/config.yaml"), 0o644)
 				assertFile(t, hostPath(t, cfg, config.DefaultNydusdTemplate), readFile(t, "../../deploy/nydus-snapshotter/nydusd.template.yaml"), 0o644)
 				assertFile(t, hostPath(t, cfg, "/etc/systemd/system/"+socketUnit), readFile(t, "../../deploy/systemd/"+socketUnit), 0o644)
 				assertFile(t, hostPath(t, cfg, "/etc/systemd/system/"+serviceUnit), readFile(t, "../../deploy/systemd/"+serviceUnit), 0o644)
@@ -196,7 +196,7 @@ func TestInstaller_install(t *testing.T) {
 			name: "restart the service when the config changes",
 			prepare: func(t *testing.T, cfg *Config) {
 				installed(t, cfg)
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.toml": "version = 1\n[log]\nlevel = \"debug\"\n"})
+				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "version: 1\nlog:\n  level: \"debug\"\n"})
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {
 				gomock.InOrder(
@@ -207,7 +207,7 @@ func TestInstaller_install(t *testing.T) {
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert.NoError(t, err)
-				assertFile(t, hostPath(t, cfg, config.DefaultPath), "version = 1\n[log]\nlevel = \"debug\"\n", 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultPath), "version: 1\nlog:\n  level: \"debug\"\n", 0o644)
 			},
 		},
 		{
@@ -411,7 +411,7 @@ func TestInstaller_install(t *testing.T) {
 		{
 			name: "invalid config",
 			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.toml": "version = 2\n"})
+				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "version: 2\n"})
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {},
 			expect: func(t *testing.T, cfg *Config, err error) {
@@ -553,7 +553,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			name: "skip without kubesecret",
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.toml": readFile(t, "../../deploy/nydus-snapshotter/config.toml")})
+				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": readFile(t, "../../deploy/nydus-snapshotter/config.yaml")})
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
@@ -580,7 +580,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			t.Setenv("KUBERNETES_SERVICE_HOST", tc.host)
 			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
 			cfg := newConfig(t)
-			writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.toml": mockKubeSecretConfig})
+			writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": mockKubeSecretConfig})
 			tc.prepare(t, cfg)
 
 			tc.expect(t, cfg, New(cfg, nil).syncKubeconfig())
@@ -596,12 +596,12 @@ func TestInstaller_syncConfig(t *testing.T) {
 	}{
 		{
 			name:   "copy a changed config without restarting",
-			update: map[string]string{"config/config.toml": "version = 1\n[cgroup]\nmemory_max = \"4GiB\"\n"},
+			update: map[string]string{"config/config.yaml": "version: 1\ncgroup:\n  memory_max: \"4GiB\"\n"},
 			expect: func(t *testing.T, cfg *Config, changed []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Equal([]string{config.DefaultPath}, changed)
-				assertFile(t, hostPath(t, cfg, config.DefaultPath), "version = 1\n[cgroup]\nmemory_max = \"4GiB\"\n", 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultPath), "version: 1\ncgroup:\n  memory_max: \"4GiB\"\n", 0o644)
 				assertFile(t, hostPath(t, cfg, restartPending), mockServiceRestart, 0o644)
 			},
 		},
@@ -626,11 +626,11 @@ func TestInstaller_syncConfig(t *testing.T) {
 		},
 		{
 			name:   "keep the host config when the new one is invalid",
-			update: map[string]string{"config/config.toml": "version = 2\n"},
+			update: map[string]string{"config/config.yaml": "version: 2\n"},
 			expect: func(t *testing.T, cfg *Config, changed []string, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "unsupported config version 2")
-				assertFile(t, hostPath(t, cfg, config.DefaultPath), readFile(t, "../../deploy/nydus-snapshotter/config.toml"), 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultPath), readFile(t, "../../deploy/nydus-snapshotter/config.yaml"), 0o644)
 			},
 		},
 	}
@@ -673,7 +673,7 @@ func newConfig(t *testing.T) *Config {
 		"bin/nydus-snapshotter":                          "nydus-snapshotter",
 		"systemd/" + socketUnit:                          readFile(t, "../../deploy/systemd/"+socketUnit),
 		"systemd/" + serviceUnit:                         readFile(t, "../../deploy/systemd/"+serviceUnit),
-		"config/config.toml":                             readFile(t, "../../deploy/nydus-snapshotter/config.toml"),
+		"config/config.yaml":                             readFile(t, "../../deploy/nydus-snapshotter/config.yaml"),
 		"config/nydusd.template.yaml":                    readFile(t, "../../deploy/nydus-snapshotter/nydusd.template.yaml"),
 		"config/certs.d/registry.example.com/hosts.toml": mockHostsTOML,
 	})

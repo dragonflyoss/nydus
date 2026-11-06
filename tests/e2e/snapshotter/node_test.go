@@ -64,7 +64,7 @@ func newNode(t *testing.T) *node {
 		parentSlice: "system-nyduse2e" + id + ".slice",
 	}
 	n.root = filepath.Join(n.dir, "snapshotter")
-	n.config = filepath.Join(n.dir, "config.toml")
+	n.config = filepath.Join(n.dir, "config.yaml")
 	n.dockerConfig = filepath.Join(n.dir, "docker", "config.json")
 	namespace := "nydus-e2e-" + id
 	t.Cleanup(func() { n.teardown(t, namespace) })
@@ -133,30 +133,25 @@ func (n *node) writeConfig(t *testing.T) {
 		t.FailNow()
 	}
 
-	config := fmt.Sprintf(`version = 1
-root = %q
-address = %q
-run_dir = %q
-
-[log]
-level = "debug"
-
-[metrics]
-address = ""
-
-[registry]
-config_path = %q
-
-[auth.docker_config]
-path = %q
-
-[nydusd]
-binary = %q
-template = %q
-log_dir = %q
-
-[cgroup]
-slice = %q
+	config := fmt.Sprintf(`version: 1
+root: %q
+address: %q
+run_dir: %q
+log:
+  level: debug
+metrics:
+  address: ''
+registry:
+  config_path: %q
+auth:
+  docker_config:
+    path: %q
+nydusd:
+  binary: %q
+  template: %q
+  log_dir: %q
+cgroup:
+  slice: %q
 `, n.root, n.snapshotterAddress(), n.runDir, filepath.Join(n.dir, "certs.d"), n.dockerConfig, nydus,
 		filepath.Join(repo, "nydus-snapshotter", "deploy", "nydus-snapshotter", "nydusd.template.yaml"),
 		n.daemonLogDir(), n.slice)

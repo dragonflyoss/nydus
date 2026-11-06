@@ -5,13 +5,15 @@
  */
 
 // Package config defines the snapshotter configuration, its defaults and
-// validation, decoded from TOML the way containerd decodes its own config.
+// validation, decoded strictly from YAML with the snake_case keys of the
+// nydus daemon config.
 package config
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,8 +21,8 @@ import (
 	"time"
 
 	"github.com/containerd/log"
-	"github.com/pelletier/go-toml/v2"
 	"github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -29,7 +31,7 @@ const (
 	Version = 1
 
 	// DefaultPath is the default config file path.
-	DefaultPath = "/etc/nydus-v3/config.toml"
+	DefaultPath = "/etc/nydus-v3/config.yaml"
 
 	// DefaultRoot is the default root directory of snapshots, the cache and
 	// daemon instances.
@@ -119,143 +121,143 @@ var PrefetchScopes = []string{"none", "ondemand", "all", "auto"}
 // Config is the snapshotter config.
 type Config struct {
 	// Version is the schema version, refer to containerd's config version.
-	Version int `toml:"version"`
+	Version int `yaml:"version"`
 
 	// Root is the root directory of snapshots, the cache and instances.
-	Root string `toml:"root"`
+	Root string `yaml:"root"`
 
 	// Address is the gRPC socket path containerd connects to.
-	Address string `toml:"address"`
+	Address string `yaml:"address"`
 
 	// RunDir holds daemon API sockets and rendered configs on tmpfs.
-	RunDir string `toml:"run_dir"`
+	RunDir string `yaml:"run_dir"`
 
 	// Log is the logging config.
-	Log LogConfig `toml:"log"`
+	Log LogConfig `yaml:"log"`
 
 	// Metrics is the metrics and health server config.
-	Metrics MetricsConfig `toml:"metrics"`
+	Metrics MetricsConfig `yaml:"metrics"`
 
 	// Registry is the registry host config.
-	Registry RegistryConfig `toml:"registry"`
+	Registry RegistryConfig `yaml:"registry"`
 
 	// Auth is the registry credential config.
-	Auth AuthConfig `toml:"auth"`
+	Auth AuthConfig `yaml:"auth"`
 
 	// Nydusd is the daemon config.
-	Nydusd NydusdConfig `toml:"nydusd"`
+	Nydusd NydusdConfig `yaml:"nydusd"`
 
 	// Cgroup is the daemon resource config.
-	Cgroup CgroupConfig `toml:"cgroup"`
+	Cgroup CgroupConfig `yaml:"cgroup"`
 
 	// GC is the blob cache GC config.
-	GC GCConfig `toml:"gc"`
+	GC GCConfig `yaml:"gc"`
 }
 
 // LogConfig is the logging config.
 type LogConfig struct {
 	// Level is the log level: trace, debug, info, warn or error.
-	Level string `toml:"level"`
+	Level string `yaml:"level"`
 }
 
 // MetricsConfig is the metrics and health server config.
 type MetricsConfig struct {
 	// Address is the listen address of /metrics, /livez and /readyz, empty to
 	// disable.
-	Address string `toml:"address"`
+	Address string `yaml:"address"`
 }
 
 // RegistryConfig is the registry host config.
 type RegistryConfig struct {
 	// ConfigPath is the certs.d directory holding <host>/hosts.toml.
-	ConfigPath string `toml:"config_path"`
+	ConfigPath string `yaml:"config_path"`
 }
 
 // AuthConfig is the registry credential config.
 type AuthConfig struct {
 	// DockerConfig is the docker config.json source, always on.
-	DockerConfig DockerConfigAuthConfig `toml:"docker_config"`
+	DockerConfig DockerConfigAuthConfig `yaml:"docker_config"`
 
 	// KubeSecret is the Kubernetes secret source, optional.
-	KubeSecret KubeSecretAuthConfig `toml:"kubesecret"`
+	KubeSecret KubeSecretAuthConfig `yaml:"kubesecret"`
 }
 
 // DockerConfigAuthConfig is the docker config.json source.
 type DockerConfigAuthConfig struct {
 	// Path is the config.json path, empty for kubelet's search order.
-	Path string `toml:"path"`
+	Path string `yaml:"path"`
 }
 
 // KubeSecretAuthConfig is the Kubernetes secret source.
 type KubeSecretAuthConfig struct {
 	// Enable turns on the secret informer.
-	Enable bool `toml:"enable"`
+	Enable bool `yaml:"enable"`
 
 	// Kubeconfig is the kubeconfig path, empty for in-cluster config.
-	Kubeconfig string `toml:"kubeconfig"`
+	Kubeconfig string `yaml:"kubeconfig"`
 
 	// LabelSelector narrows the watched secrets.
-	LabelSelector string `toml:"label_selector"`
+	LabelSelector string `yaml:"label_selector"`
 }
 
 // NydusdConfig is the daemon config.
 type NydusdConfig struct {
 	// Driver is the mount driver, only fuse today.
-	Driver string `toml:"driver"`
+	Driver string `yaml:"driver"`
 
 	// Binary is the nydus binary; symlinks are resolved when a daemon starts
 	// so an upgrade never changes a running unit.
-	Binary string `toml:"binary"`
+	Binary string `yaml:"binary"`
 
 	// Template is the nydus-config YAML shared by all daemons.
-	Template string `toml:"template"`
+	Template string `yaml:"template"`
 
 	// LogDir is the parent of per-daemon log dirs.
-	LogDir string `toml:"log_dir"`
+	LogDir string `yaml:"log_dir"`
 
 	// MountTimeout bounds a daemon start, a unit job and a mount wait.
-	MountTimeout Duration `toml:"mount_timeout"`
+	MountTimeout Duration `yaml:"mount_timeout"`
 
 	// PrefetchScope is the default prefetch scope, overridden per image by
 	// the nydus-prefetch label.
-	PrefetchScope string `toml:"prefetch_scope"`
+	PrefetchScope string `yaml:"prefetch_scope"`
 
 	// Dragonfly is copied into backend.config.dragonfly when set.
-	Dragonfly DragonflyConfig `toml:"dragonfly"`
+	Dragonfly DragonflyConfig `yaml:"dragonfly"`
 }
 
 // DragonflyConfig mirrors nydus-config's backend.config.dragonfly.
 type DragonflyConfig struct {
 	// SchedulerEndpoint is the Dragonfly scheduler address, empty to disable.
-	SchedulerEndpoint string `toml:"scheduler_endpoint" yaml:"scheduler_endpoint"`
+	SchedulerEndpoint string `yaml:"scheduler_endpoint"`
 
 	// RequestTimeout is the timeout of each request through seed peers.
-	RequestTimeout Duration `toml:"request_timeout" yaml:"request_timeout"`
+	RequestTimeout Duration `yaml:"request_timeout"`
 
 	// MaxRetries is the retry count of an on-demand read; 0 is rendered, so
 	// it never falls back to nydus's default.
-	MaxRetries int `toml:"max_retries" yaml:"max_retries"`
+	MaxRetries int `yaml:"max_retries"`
 
 	// FallbackRateLimit is the origin fallback rate in requests per second.
-	FallbackRateLimit int `toml:"fallback_rate_limit" yaml:"fallback_rate_limit"`
+	FallbackRateLimit int `yaml:"fallback_rate_limit"`
 }
 
 // CgroupConfig is the daemon resource config.
 type CgroupConfig struct {
 	// Slice is the slice daemons run in; its parent holds the total budget.
-	Slice string `toml:"slice"`
+	Slice string `yaml:"slice"`
 
 	// MemoryMax is the total memory.max of all daemons, 0 for no limit.
-	MemoryMax Size `toml:"memory_max"`
+	MemoryMax Size `yaml:"memory_max"`
 
 	// MemoryHigh is the total memory.high of all daemons, 0 for no limit.
-	MemoryHigh Size `toml:"memory_high"`
+	MemoryHigh Size `yaml:"memory_high"`
 
 	// CPUQuota is the total CPU quota of all daemons, 0 for no limit.
-	CPUQuota Percent `toml:"cpu_quota"`
+	CPUQuota Percent `yaml:"cpu_quota"`
 
 	// Daemon is the per-daemon budget.
-	Daemon DaemonCgroupConfig `toml:"daemon"`
+	Daemon DaemonCgroupConfig `yaml:"daemon"`
 }
 
 // ParentSlice returns the slice holding the total budget, the parent of the
@@ -274,35 +276,35 @@ func (c *CgroupConfig) ParentSlice() string {
 // DaemonCgroupConfig is the per-daemon resource config.
 type DaemonCgroupConfig struct {
 	// MemoryHigh is the per-daemon memory.high, 0 for no limit.
-	MemoryHigh Size `toml:"memory_high"`
+	MemoryHigh Size `yaml:"memory_high"`
 
 	// CPUQuota is the per-daemon CPU quota, 0 for no limit.
-	CPUQuota Percent `toml:"cpu_quota"`
+	CPUQuota Percent `yaml:"cpu_quota"`
 }
 
 // GCConfig is the blob cache GC config, refer to dfdaemon's gc config.
 type GCConfig struct {
 	// Interval is the GC interval.
-	Interval Duration `toml:"interval"`
+	Interval Duration `yaml:"interval"`
 
 	// Policy is the eviction policy.
-	Policy GCPolicyConfig `toml:"policy"`
+	Policy GCPolicyConfig `yaml:"policy"`
 }
 
 // GCPolicyConfig is the blob cache eviction policy.
 type GCPolicyConfig struct {
 	// BlobTTL evicts blobs unused for longer.
-	BlobTTL Duration `toml:"blob_ttl"`
+	BlobTTL Duration `yaml:"blob_ttl"`
 
 	// DiskThreshold is the capacity the percentages apply to, 0 for the
 	// whole filesystem.
-	DiskThreshold Size `toml:"disk_threshold"`
+	DiskThreshold Size `yaml:"disk_threshold"`
 
 	// DiskHighThresholdPercent starts watermark eviction.
-	DiskHighThresholdPercent int `toml:"disk_high_threshold_percent"`
+	DiskHighThresholdPercent int `yaml:"disk_high_threshold_percent"`
 
 	// DiskLowThresholdPercent stops watermark eviction.
-	DiskLowThresholdPercent int `toml:"disk_low_threshold_percent"`
+	DiskLowThresholdPercent int `yaml:"disk_low_threshold_percent"`
 }
 
 // New returns a config holding the defaults.
@@ -371,12 +373,13 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Parse decodes strictly and validates a TOML config over the defaults.
+// Parse decodes strictly and validates a YAML config over the defaults. An
+// empty document keeps the defaults.
 func Parse(data []byte) (*Config, error) {
 	cfg := New()
-	decoder := toml.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
 

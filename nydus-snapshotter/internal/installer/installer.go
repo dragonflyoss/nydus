@@ -81,7 +81,7 @@ const (
 	payloadSnapshotterBinary = "bin/nydus-snapshotter"
 
 	// payloadConfigFile is the snapshotter config in the payload.
-	payloadConfigFile = "config/config.toml"
+	payloadConfigFile = "config/config.yaml"
 
 	// payloadTemplateFile is the nydusd config template in the payload.
 	payloadTemplateFile = "config/nydusd.template.yaml"
@@ -184,8 +184,8 @@ func New(cfg *Config, manager systemd.Manager) *Installer {
 // Run syncs the Kubernetes credentials, installs the payload and restarts the
 // snapshotter when anything it reads at start changed, then keeps the
 // credentials and the config in sync until ctx is done. A synced config is
-// not followed by a restart: the snapshotter reloads [cgroup] and
-// [nydusd.dragonfly] itself and reads the template and certs.d per daemon
+// not followed by a restart: the snapshotter reloads cgroup and
+// nydusd.dragonfly itself and reads the template and certs.d per daemon
 // start; other keys apply on its next restart. It never stops daemons, edits
 // containerd's config or uninstalls.
 func (i *Installer) Run(ctx context.Context) error {
@@ -309,7 +309,7 @@ func (i *Installer) install(ctx context.Context) error {
 }
 
 // syncConfig copies the config files onto the host without restarting the
-// snapshotter and reports the files it changed. A changed config.toml leaves
+// snapshotter and reports the files it changed. A changed config.yaml leaves
 // the service pending a restart, so keys the snapshotter cannot reload apply
 // on the next install, the rollout the ConfigMap checksum triggers, even
 // though the new Pod then finds the host config already in place.
@@ -324,7 +324,7 @@ func (i *Installer) syncConfig(ctx context.Context) ([]string, error) {
 
 // configFiles returns the config files of the payload, validated before
 // anything touches the host so a broken ConfigMap leaves the running
-// snapshotter alone: config.toml, the nydusd template and certs.d when
+// snapshotter alone: config.yaml, the nydusd template and certs.d when
 // present.
 func (i *Installer) configFiles() ([]payloadFile, error) {
 	_, data, err := i.payloadConfig()
@@ -374,7 +374,7 @@ func (i *Installer) configFiles() ([]payloadFile, error) {
 	return files, nil
 }
 
-// payloadConfig returns the validated config.toml of the payload and its
+// payloadConfig returns the validated config.yaml of the payload and its
 // content.
 func (i *Installer) payloadConfig() (*config.Config, []byte, error) {
 	data, err := os.ReadFile(i.cfg.payload(payloadConfigFile))
