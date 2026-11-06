@@ -103,6 +103,22 @@ e2e-dragonfly: PKG = ./dragonfly/...
 e2e-dragonfly: e2e
 .PHONY: e2e-dragonfly
 
+build-snapshotter:
+	$(MAKE) -C nydus-snapshotter build GO_BUILD_FLAGS='$(COVERAGE_GO_BUILD)'
+.PHONY: build-snapshotter
+
+test-snapshotter:
+	$(if $(filter 1,$(COVERAGE)),mkdir -p "$(COVERAGE_DIR)",)
+	cd nydus-snapshotter && $(GO) test -exec "$(SUDO) -E env PATH=$$PATH" -race -count=1 \
+		$(if $(filter 1,$(COVERAGE)),-coverpkg=./... -coverprofile="$(COVERAGE_DIR)/go-snapshotter-unit.out") ./...
+.PHONY: test-snapshotter
+
+# Needs a systemd host and NYDUS_E2E_CONTAINERD; runc comes from NYDUS_E2E_RUNC or PATH.
+e2e-snapshotter: FEATURES = $(E2E_FEATURES)
+e2e-snapshotter: build-ci build-nydusify build-snapshotter
+	$(MAKE) e2e-run PKG=./snapshotter/...
+.PHONY: e2e-snapshotter
+
 e2e-compatibility: FEATURES = $(E2E_FEATURES)
 e2e-compatibility: build-ci build-nydusify
 	mkdir -p $(BASELINE_DIR)

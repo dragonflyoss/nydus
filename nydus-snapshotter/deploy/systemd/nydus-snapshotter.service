@@ -1,0 +1,32 @@
+# The snapshotter runs on the host, never in a Pod: with nydus as containerd's
+# snapshotter, a Pod's own rootfs would need the snapshotter to start.
+
+[Unit]
+Description=nydus snapshotter for containerd
+Documentation=https://github.com/dragonflyoss/nydus/blob/main/docs/snapshotter.md
+# The gRPC listener comes from the socket unit; restarting the socket restarts
+# the service too.
+Requires=nydus-snapshotter.socket
+After=network.target nydus-snapshotter.socket
+# containerd resolves its snapshotters at start.
+Before=containerd.service
+
+[Service]
+# As containerd.service: READY=1 is sent once gRPC serves, so containerd,
+# ordered after this unit, starts against a ready snapshotter.
+Type=notify
+ExecStart=/usr/local/bin/nydus-snapshotter --config /etc/nydus-v3/config.toml
+Restart=always
+# As containerd.service; 5s keeps a crash loop under the default start limit
+# (5 starts in 10s), so systemd never gives up on the unit.
+RestartSec=5
+OOMScoreAdjust=-999
+LimitNOFILE=1048576
+# No core dumps: the snapshotter's memory holds registry credentials.
+LimitCORE=0
+# Daemons are transient units in system-nydus-v3.slice, never in this cgroup,
+# so the default KillMode=control-group stops only the snapshotter.
+Delegate=no
+
+[Install]
+WantedBy=multi-user.target

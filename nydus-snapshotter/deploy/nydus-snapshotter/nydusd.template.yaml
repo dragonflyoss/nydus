@@ -1,0 +1,10 @@
+storage:
+  dir: /var/lib/containerd-nydus-v3/cache
+prefetch:
+  concurrent_blob_count: 10
+backend:
+  type: registry
+  config:
+    http:
+      request_timeout: 5s
+      max_retries: 3

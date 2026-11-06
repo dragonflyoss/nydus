@@ -2,6 +2,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use nydus_backend::Backend;
 use nydus_core::{Metrics, OndemandRecorder};
 use nydus_error::{Context, Error, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -84,6 +85,8 @@ pub struct Startup<I> {
     /// Served at `/metrics` and `/trace` on the API socket alongside control.
     pub metrics: Arc<Metrics>,
     pub ondemand: Arc<OndemandRecorder>,
+    /// Answers the credential route on the API socket; `None` without a backend.
+    pub backend: Option<Arc<dyn Backend>>,
 }
 
 impl<I: Identity> Startup<I> {
@@ -154,6 +157,7 @@ impl<I: Identity> Startup<I> {
                     F::control(&session),
                     self.metrics,
                     self.ondemand,
+                    self.backend,
                 ) {
                     Ok(control) => Some(control),
                     Err(err) if kind == Kind::Upgrade => {
@@ -593,9 +597,15 @@ mod tests {
             ..Default::default()
         };
         *source.owner.lock().unwrap() = Some(owner);
-        let source_server =
-            ControlServer::start(&path, info.clone(), source.clone(), metrics(), ondemand())
-                .unwrap();
+        let source_server = ControlServer::start(
+            &path,
+            info.clone(),
+            source.clone(),
+            metrics(),
+            ondemand(),
+            None,
+        )
+        .unwrap();
         let running = Startup {
             info,
             api_socket: Some(path.clone()),
@@ -603,6 +613,7 @@ mod tests {
             holder: None,
             metrics: metrics(),
             ondemand: ondemand(),
+            backend: None,
         }
         .start(backend)
         .unwrap();
@@ -652,9 +663,15 @@ mod tests {
             ..Default::default()
         };
         *source.owner.lock().unwrap() = Some(owner);
-        let _source_server =
-            ControlServer::start(&path, info.clone(), source.clone(), metrics(), ondemand())
-                .unwrap();
+        let _source_server = ControlServer::start(
+            &path,
+            info.clone(),
+            source.clone(),
+            metrics(),
+            ondemand(),
+            None,
+        )
+        .unwrap();
         let result = Startup {
             info,
             api_socket: Some(path),
@@ -662,6 +679,7 @@ mod tests {
             holder: None,
             metrics: metrics(),
             ondemand: ondemand(),
+            backend: None,
         }
         .start(backend);
         assert!(result.is_err());
@@ -696,6 +714,7 @@ mod tests {
                 holder: None,
                 metrics: metrics(),
                 ondemand: ondemand(),
+                backend: None,
             }
             .start(backend);
             if fail_recovery || fail_activation {
@@ -731,6 +750,7 @@ mod tests {
             holder: None,
             metrics: metrics(),
             ondemand: ondemand(),
+            backend: None,
         }
         .start(backend)
         .unwrap();
@@ -757,6 +777,7 @@ mod tests {
             holder: Some(dir.path().join("holder.sock")),
             metrics: metrics(),
             ondemand: ondemand(),
+            backend: None,
         }
         .start(frontend::<true>(&dir.path().join("state/session"), false));
         assert!(result.is_err());
@@ -812,6 +833,7 @@ mod tests {
                 holder: Some(socket),
                 metrics: metrics(),
                 ondemand: ondemand(),
+                backend: None,
             }
             .start(backend);
             if retained {

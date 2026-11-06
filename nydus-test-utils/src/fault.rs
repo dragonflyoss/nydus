@@ -8,8 +8,8 @@
 //! Faults are [`FaultRule`]s injected at any time; each call applies the
 //! first rule that matches it, and every call is logged as a [`ReadCall`].
 //!
-//! Only reads and blob meta lookups pass through the rules. Cache keys and
-//! raw device resolution go straight to the wrapped backend.
+//! Only reads and blob meta lookups pass through the rules. Cache keys, raw
+//! device resolution and credentials go straight to the wrapped backend.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -431,6 +431,16 @@ impl Backend for FaultBackend {
     fn prefetch_range_into(&self, blob_id: &BlobId, offset: u64, dst: &mut [u8]) -> io::Result<()> {
         self.read(blob_id, offset, dst, ReadKind::Prefetch)
     }
+
+    fn set_auth(&self, auth: &str) -> io::Result<()> {
+        match &self.source {
+            Source::Wrapped(inner) => inner.set_auth(auth),
+            Source::Memory(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "backend has no credentials",
+            )),
+        }
+    }
 }
 
 impl FaultBackend {
@@ -646,6 +656,52 @@ mod tests {
         // Only the call that was served reached the wrapped backend.
         assert_eq!(inner.read_calls(), 1);
         assert_eq!(backend.read_calls(), 2);
+    }
+
+    #[test]
+    fn set_auth_reaches_only_a_wrapped_backend() {
+        struct Credentialed(Mutex<Option<String>>, Arc<Metrics>);
+
+        impl Backend for Credentialed {
+            fn metrics(&self) -> &Arc<Metrics> {
+                &self.1
+            }
+
+            fn read_blob_metadata(&self, blob_id: &BlobId) -> io::Result<BlobMetadata> {
+                Err(unknown_blob(blob_id))
+            }
+
+            fn read_range_into(&self, blob_id: &BlobId, _: u64, _: &mut [u8]) -> io::Result<()> {
+                Err(unknown_blob(blob_id))
+            }
+
+            fn set_auth(&self, auth: &str) -> io::Result<()> {
+                *self.0.lock().unwrap() = Some(auth.to_string());
+                Ok(())
+            }
+        }
+
+        let inner = Arc::new(Credentialed(Mutex::default(), Arc::new(Metrics::new())));
+        let test_cases = vec![
+            (
+                FaultBackend::wrap(inner.clone()),
+                None,
+                Some("Ym9iOmh1bnRlcjI="),
+            ),
+            (backend(), Some(io::ErrorKind::Unsupported), None),
+        ];
+
+        for (backend, err, auth) in test_cases {
+            *inner.0.lock().unwrap() = None;
+            assert_eq!(
+                backend
+                    .set_auth("Ym9iOmh1bnRlcjI=")
+                    .err()
+                    .map(|err| err.kind()),
+                err
+            );
+            assert_eq!(inner.0.lock().unwrap().as_deref(), auth);
+        }
     }
 
     #[test]

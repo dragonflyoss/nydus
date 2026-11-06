@@ -27,6 +27,7 @@ fn stop_immediately_after_start_never_loses_shutdown_notification() {
             &format!("unix://{}", path.display()),
             Arc::new(Metrics::new()),
             Arc::new(OndemandRecorder::default()),
+            None,
         )
         .unwrap();
         stop(server);

@@ -10,6 +10,7 @@ make e2e PKG=./conformance/...         # one suite
 make e2e PKG='./build/... ./export/...' E2E_RUN=TestMerge
 CI=1 make e2e-ga                       # every GA suite but dragonfly and compatibility
 make e2e-experimental                  # nbd, fanotify, ublk, uffd
+NYDUS_E2E_CONTAINERD=/usr/bin/containerd make e2e-snapshotter   # systemd host
 ```
 
 The targets build `nydus` with `--profile ci` and point the tests at it
@@ -34,6 +35,7 @@ and run through `sudo -E`.
 | `soak/`                     | Long parallel reads and mount cycles leak no fd, thread, mount or process.                                                              |
 | `dragonfly/`                | Reads through Dragonfly P2P, and fallback to the origin when it fails.                                                                  |
 | `registry/`                 | Origin reads, Basic/Bearer auth, redirects, HTTP retries/proxies, TLS trust and prefetch retries. |
+| `snapshotter/`              | nydus-snapshotter behind a real containerd (1.6, 2.x) and runc: blobs never pulled, nydus and OCI containers side by side, shared daemons stopped after GC, daemon kill and snapshotter restart, prefetch label, private registry, unlabelled pulls refused. |
 | `experimental/<transport>/` | The nbd, fanotify and ublk adapters and their transport specifics; the uffd page-fault protocol.                                        |
 | `bench/`                    | Go benchmarks (`BenchmarkMount/<mode>`); they run only with `-bench`, as `make benchmark` does.                                                                    |
 
@@ -69,8 +71,8 @@ package is a GA E2E suite: a two-minute row of the `e2e.yml` matrix on PRs, and
 the one-hour run in `e2e-nightly.yml` next to the huge sparse tar corpus.
 `e2e-experimental.yml` runs only the experimental transports with its own build.
 
-Workflows are split by test type, as in dragonfly: `ci.yml` runs the Rust and
-nydusify unit/integration tests, `e2e.yml` the GA E2E matrix, `e2e-<variant>.yml`
+Workflows are split by test type, as in dragonfly: `ci.yml` runs the Rust,
+nydusify and nydus-snapshotter unit/integration tests, `e2e.yml` the GA E2E matrix, `e2e-<variant>.yml`
 one variant each, `fuzz.yml` the fuzz targets. Each triggers on push and pull
 requests by itself; nothing is called from `ci.yml`.
 
@@ -116,7 +118,7 @@ requests by itself; nothing is called from `ci.yml`.
 | Check | Coverage |
 | --- | --- |
 | `Lint / Lint` | Formatting/Clippy; golangci-lint over both Go modules, `manual`-tagged files included |
-| `CI / Test`, `CI / Test Nydusify` | Workspace unit/integration tests; nydusify unit/integration tests against the real builder |
+| `CI / Test`, `CI / Test Nydusify`, `CI / Test Snapshotter` | Workspace unit/integration tests; nydusify unit/integration tests against the real builder; nydus-snapshotter unit tests as root, generated files checked |
 | `E2E Test / Build` | Shared GA binaries and coverage tools |
 | `E2E Test / e2e (image-tools)` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
 | `E2E Test / e2e (fuse)`, `e2e (fileio-*)` | One complete FUSE conformance run; Fileio semantics and two data-layout groups |
@@ -125,7 +127,9 @@ requests by itself; nothing is called from `ci.yml`.
 | `E2E Test With Experimental Transports / test (*)` | One shared experimental-feature build and four transports |
 | `Fuzz / Fuzz` | One two-target fuzz job |
 | `E2E Test With Compatibility / Test` | Historical and current images read by the current and the released reader |
+| `E2E Test With Snapshotter / Build`, `test (*)` | nydus-snapshotter behind containerd 1.6 and 2.x on the runner's systemd |
 | `codecov/project/rust`, `codecov/project/go` | Codecov's union of every flag for the commit; each fails below 90% |
+| `codecov/project/snapshotter` | The same union for `nydus-snapshotter/`; fails when its coverage drops |
 
 Checks follow the dragonfly workflows: single-word job names, and matrix jobs
 named `<job> (<matrix key>)`. Display labels do not
@@ -301,6 +305,9 @@ opt-in heavy tests carry `//go:build manual` in the package they test:
 | `NYDUS_E2E_COMPATIBILITY_VERSIONS` | Space-separated versions that must be present. |
 | `NYDUS_E2E_FUSE_PREDECESSOR` | Older hot-upgrade-capable nydus for the continuity suite. |
 | `NYDUS_E2E_DRAGONFLY_SCHEDULER` | Dragonfly scheduler address for the dragonfly suite. |
+| `NYDUS_SNAPSHOTTER_BIN` | nydus-snapshotter under test (default the in-tree `nydus-snapshotter/bin/nydus-snapshotter`). |
+| `NYDUS_E2E_CONTAINERD` | containerd binary the snapshotter suite runs, 1.6 or 2.x; without it the suite skips locally and fails under CI. |
+| `NYDUS_E2E_RUNC` | runc binary of the snapshotter suite's containers (default `runc` on PATH). |
 | `NYDUS_E2E_SOAK_DURATION` | Soak duration per workload (default 30s). |
 | `NYDUS_E2E_SOAK_CYCLES` | Mount cycles per soak workload (default 6). |
 | `NYDUS_E2E_SOAK_RSS_MIB` | Optional peak RSS growth budget in MiB. |

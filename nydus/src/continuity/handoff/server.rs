@@ -4,6 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use nydus_backend::Backend;
 use nydus_core::{Metrics, OndemandRecorder};
 use nydus_error::{Context, Error, Result};
 use tracing::{info, warn};
@@ -37,13 +38,15 @@ pub(crate) struct ControlServer {
 
 impl ControlServer {
     /// The caller holds startup serialization through binding and publication.
-    /// `metrics` and the `ondemand` record back `/metrics` and `/trace` on the same listener.
+    /// `metrics` and the `ondemand` record back `/metrics` and `/trace` on the same listener,
+    /// and `backend` the credential route.
     pub(crate) fn start<S: SessionControl>(
         path: &Path,
         info: S::Identity,
         session: S,
         metrics: Arc<Metrics>,
         ondemand: Arc<OndemandRecorder>,
+        backend: Option<Arc<dyn Backend>>,
     ) -> Result<Self> {
         let listener = match bind_listener(path) {
             Ok(listener) => listener,
@@ -58,13 +61,14 @@ impl ControlServer {
                 handle_connection(stream, buffered, &info, &session, &handler_path)
             }),
         };
-        let api = match ApiServer::from_listener(listener, Some(control), metrics, ondemand) {
-            Ok(api) => api,
-            Err(err) => {
-                remove_socket(path);
-                return Err(err).context("failed to start the control apiserver");
-            }
-        };
+        let api =
+            match ApiServer::from_listener(listener, Some(control), metrics, ondemand, backend) {
+                Ok(api) => api,
+                Err(err) => {
+                    remove_socket(path);
+                    return Err(err).context("failed to start the control apiserver");
+                }
+            };
         info!("control apiserver listening on unix://{}", path.display());
         Ok(Self {
             api: Some(api),
@@ -350,9 +354,15 @@ mod tests {
             let path = dir.path().join("api.sock");
             let info = LiveInfo::new();
             let session = TestSession::<false>::default();
-            let server =
-                ControlServer::start(&path, info.clone(), session.clone(), metrics(), ondemand())
-                    .unwrap();
+            let server = ControlServer::start(
+                &path,
+                info.clone(),
+                session.clone(),
+                metrics(),
+                ondemand(),
+                None,
+            )
+            .unwrap();
             let mut stream = connect(&path, &info);
             assert!(matches!(
                 read_frame_until::<Response<LiveInfo>>(&mut stream, test_deadline()).unwrap(),
@@ -404,9 +414,15 @@ mod tests {
                 fail_release,
                 ..Default::default()
             };
-            let server =
-                ControlServer::start(&path, info.clone(), session.clone(), metrics(), ondemand())
-                    .unwrap();
+            let server = ControlServer::start(
+                &path,
+                info.clone(),
+                session.clone(),
+                metrics(),
+                ondemand(),
+                None,
+            )
+            .unwrap();
             let mut stream = connect(&path, &info);
             let response =
                 read_frame_until::<Response<KernelInfo>>(&mut stream, test_deadline()).unwrap();
@@ -433,6 +449,7 @@ mod tests {
             TestSession::<false>::default(),
             metrics(),
             ondemand(),
+            None,
         )
         .unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
@@ -482,6 +499,7 @@ mod tests {
             session.clone(),
             metrics(),
             ondemand(),
+            None,
         )
         .unwrap();
         for frame in [
@@ -527,6 +545,7 @@ mod tests {
                 TestSession::<false>::default(),
                 metrics(),
                 ondemand(),
+                None,
             )
         };
         let dir = tempfile::tempdir().unwrap();

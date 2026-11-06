@@ -303,6 +303,12 @@ impl NydusCore {
         &self.ondemand_recorder
     }
 
+    /// Return the blob backend serving this core, e.g. to replace its
+    /// registry credentials.
+    pub fn backend(&self) -> &Arc<dyn Backend> {
+        &self.backend
+    }
+
     /// Return the size of the flattened device view.
     pub fn flat_size(&self) -> u64 {
         self.address_layout.size()

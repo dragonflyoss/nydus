@@ -207,6 +207,7 @@ impl FileioCommand {
                 address,
                 flat.core().metrics().clone(),
                 flat.core().ondemand_recorder().clone(),
+                Some(flat.core().backend().clone()),
             ) {
                 Ok(server) => Some(server),
                 Err(err) => {
