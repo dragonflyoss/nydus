@@ -161,6 +161,17 @@ impl ConfigV2 {
         ))
     }
 
+    /// Get the UID/GID mapping `(internal, external, range)` if configured.
+    ///
+    /// Returns `None` when no mapping is configured or the range is zero, in which
+    /// case the FUSE VFS layer performs no ownership remapping.
+    pub fn get_id_mapping(&self) -> Option<(u32, u32, u32)> {
+        self.rafs
+            .as_ref()
+            .and_then(|rafs| rafs.id_mapping)
+            .filter(|(_, _, range)| *range != 0)
+    }
+
     /// Get configuration information for RAFS filesystem.
     pub fn get_rafs_config(&self) -> Result<&RafsConfigV2> {
         self.rafs.as_ref().ok_or_else(|| {
@@ -849,6 +860,9 @@ pub struct RafsConfigV2 {
     /// Filesystem prefetching configuration.
     #[serde(default)]
     pub prefetch: PrefetchConfigV2,
+    /// UID/GID mapping for user namespace support, `(internal, external, range)`.
+    #[serde(default)]
+    pub id_mapping: Option<(u32, u32, u32)>,
 }
 
 impl RafsConfigV2 {
@@ -1381,6 +1395,9 @@ struct RafsConfig {
     // ZERO value means, amplifying user io is not enabled.
     #[serde(rename = "amplify_io", default = "default_user_io_batch_size")]
     pub user_io_batch_size: usize,
+    /// UID/GID mapping for user namespace support, `(internal, external, range)`.
+    #[serde(default)]
+    pub id_mapping: Option<(u32, u32, u32)>,
 }
 
 impl TryFrom<RafsConfig> for ConfigV2 {
@@ -1398,6 +1415,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             access_pattern: v.access_pattern,
             latest_read_files: v.latest_read_files,
             prefetch: v.fs_prefetch.into(),
+            id_mapping: v.id_mapping,
         };
         if !cache.prefetch.enable && rafs.prefetch.enable {
             cache.prefetch = rafs.prefetch.clone();
@@ -2681,6 +2699,52 @@ mod tests {
         "#;
         let cfg: ConfigV2 = toml::from_str(content).unwrap();
         assert!(!cfg.is_fs_cache());
+    }
+
+    #[test]
+    fn test_rafs_id_mapping_parse_and_get() {
+        // v2 TOML: id_mapping is a 3-element array under [rafs].
+        let content = r#"version=2
+        [rafs]
+        mode = "direct"
+        id_mapping = [0, 100000, 65536]
+        "#;
+        let cfg: ConfigV2 = toml::from_str(content).unwrap();
+        assert!(cfg.validate());
+        assert_eq!(cfg.get_id_mapping(), Some((0, 100000, 65536)));
+
+        // Absent id_mapping -> None.
+        let content = r#"version=2
+        [rafs]
+        mode = "direct"
+        "#;
+        let cfg: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(cfg.get_id_mapping(), None);
+
+        // range == 0 is treated as disabled.
+        let content = r#"version=2
+        [rafs]
+        mode = "direct"
+        id_mapping = [0, 100000, 0]
+        "#;
+        let cfg: ConfigV2 = toml::from_str(content).unwrap();
+        assert!(cfg.validate());
+        assert_eq!(cfg.get_id_mapping(), None);
+    }
+
+    #[test]
+    fn test_rafs_id_mapping_v1_json() {
+        // Legacy v1 RafsConfig JSON (as emitted by nydus-snapshotter) carries
+        // id_mapping at top level and must survive the TryFrom<RafsConfig> conversion.
+        let content = r#"{
+            "device": {
+                "backend": { "type": "localfs", "config": { "dir": "/tmp" } }
+            },
+            "mode": "direct",
+            "id_mapping": [0, 100000, 65536]
+        }"#;
+        let cfg = ConfigV2::from_str(content).unwrap();
+        assert_eq!(cfg.get_id_mapping(), Some((0, 100000, 65536)));
     }
 
     #[test]
