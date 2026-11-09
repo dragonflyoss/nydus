@@ -3282,6 +3282,7 @@ Flags:
 | `--source-insecure`, `--target-insecure` | `false` | Skip TLS verification independently for the selected source/target registry. |
 | `--source-plain-http`, `--target-plain-http` | `false` | Use plain HTTP independently for the selected source/target registry. |
 | `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. Forwarded to the `nydus build`/`merge` subprocesses. |
+| `--dragonfly-scheduler` | empty | Global flag (also `NYDUSIFY_DRAGONFLY_SCHEDULER`), placed before the subcommand. Dragonfly scheduler endpoint, e.g. `http://127.0.0.1:8002`. Registry manifest and blob GETs (manifest, config, bootstrap layer, ...) go through the Dragonfly Go SDK like the Rust backend's on-demand reads: priority Level6 and one retry on the next seed peer after a jittered exponential backoff. A seed peer answer with a definitive status (the `401` auth challenge, a `404`) is settled as is; a `5xx`, `408`, `429`, timeout or connection failure falls back to the origin. The `HEAD` that resolves a digest-addressed manifest is answered through Dragonfly too. The generated `nydus fuse` config gets `backend.config.dragonfly.scheduler_endpoint` (check, mount, optimize) so on-demand reads use the Rust SDK. Pushes are not affected. |
 
 Notes:
 

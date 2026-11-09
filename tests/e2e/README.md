@@ -121,7 +121,7 @@ requests by itself; nothing is called from `ci.yml`.
 | `E2E Test / e2e (image-tools)` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
 | `E2E Test / e2e (fuse)`, `e2e (fileio-*)` | One complete FUSE conformance run; Fileio semantics and two data-layout groups |
 | `E2E Test / e2e (storage-*)`, `e2e (soak)` | Isolated fault recovery, cache smoke and the two-minute stability soak |
-| `E2E Test With Dragonfly / Test` | Real Dragonfly services, seed-cache reads and origin fallback in one cluster |
+| `E2E Test With Dragonfly / Test` | Real Dragonfly services, seed-cache reads, origin fallback and `nydusify --dragonfly-scheduler` in one cluster |
 | `E2E Test With Experimental Transports / test (*)` | One shared experimental-feature build and four transports |
 | `Fuzz / Fuzz` | One two-target fuzz job |
 | `E2E Test With Compatibility / Test` | Historical and current images read by the current and the released reader |
