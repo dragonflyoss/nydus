@@ -9,8 +9,9 @@ repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [features]
-# Serves the `dragonfly` block of a registry backend; a build without it
-# ignores the block. Enabled by `nydus-backend/dragonfly`.
+# Accepts the `dragonfly` block of a registry backend; a build without it
+# rejects the block when the configuration is loaded. Enabled by
+# `nydus-backend/dragonfly`.
 dragonfly = []
 
 [dependencies]

@@ -37,10 +37,8 @@ pub(crate) enum Body {
 
 /// Implements the response.
 impl Response {
-    /// Validates that a `206` carries exactly `range`, refer to RFC 9110
-    /// Section 15.3.7.
-    ///
-    /// An origin may omit `Content-Range`; a seed peer must send it.
+    /// Validates that a `206` names exactly `range` in its `Content-Range`,
+    /// refer to RFC 9110 Section 15.3.7.1.
     pub(crate) fn validate_range(&self, range: &Range) -> io::Result<()> {
         if self.status != StatusCode::PARTIAL_CONTENT {
             return Err(io::Error::new(
@@ -50,10 +48,6 @@ impl Response {
                     self.status
                 ),
             ));
-        }
-
-        if self.source != Source::Dragonfly && !self.headers.contains_key(CONTENT_RANGE) {
-            return Ok(());
         }
 
         let content_range = self.content_range()?;
@@ -206,7 +200,7 @@ mod tests {
             (Source::Origin, Some("bytes 2-5/8"), true),
             (Source::Origin, Some("bytes 1-4/8"), false),
             (Source::Origin, Some("bytes 2-5/*"), false),
-            (Source::Origin, None, true),
+            (Source::Origin, None, false),
             (Source::Dragonfly, Some("bytes 2-5/8"), true),
             (Source::Dragonfly, Some("bytes 1-4/8"), false),
             (Source::Dragonfly, None, false),

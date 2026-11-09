@@ -1,10 +1,10 @@
 //! The Dragonfly seed peer resolver, shared by the processes on a host.
 
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
@@ -17,16 +17,18 @@ use dragonfly_api::common::v2::Host;
 use dragonfly_client_request::{SchedulerClient, SeedPeer};
 
 /// Resolves the seed peers of a scheduler like a gRPC resolver, sharing them
-/// through a cache file.
+/// through a cache file that is replaced with `rename(2)`, so a reader never
+/// waits for a writer.
 ///
 /// ```text
-/// read, LOCK_SH ─┬─ fresh ─────────────────────────────────────────────────▶ seed peers
-///                └─ expired ─▶ LOCK_EX ─┬─ taken ─▶ list from the scheduler ─▶ rewrite ─▶ seed peers
-///                                       └─ held by another process ─▶ wait, read again
+/// read ─┬─ fresh ─────────────────────────────────────────────────────────▶ seed peers
+///       └─ expired ─▶ LOCK_EX ─┬─ taken ─▶ list ─▶ write .tmp ─▶ rename ─▶ seed peers
+///                              └─ held by another process ─┬─ expired seed peers ─▶ serve them
+///                                                          └─ none ─▶ wait, read again
 /// ```
 ///
-/// A half-written cache file counts as expired; a process that cannot open it
-/// lists alone.
+/// A listing that fails or finds no seed peer keeps the cached ones and is
+/// retried sooner; a process that cannot use the cache file lists alone.
 pub(crate) struct SeedPeerResolver {
     /// The scheduler endpoint.
     scheduler_endpoint: String,
@@ -49,11 +51,12 @@ impl SeedPeerResolver {
     /// The timeout of each scheduler request.
     const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// The time to wait for another process listing, longer than a listing
-    /// takes: two [`Self::LIST_TIMEOUT`]s plus the SDK's 3s health checks.
+    /// The longest a listing takes, DNS resolution included, and so the time
+    /// to wait for another process listing: two [`Self::LIST_TIMEOUT`]s plus
+    /// the SDK's 3s health checks.
     const WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 
-    /// The interval between reads while another process holds the lock.
+    /// The interval between reads while another process lists.
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
     /// Creates the resolver of `scheduler_endpoint`, caching in `dir`.
@@ -73,76 +76,87 @@ impl SeedPeerResolver {
         tokio::pin!(wait_timeout);
 
         loop {
-            let result = match self.read() {
-                Ok(Some(cached)) if cached.is_fresh() => Ok(cached),
-                Ok(_) => self.refresh().await,
-                Err(err) => Err(err),
-            };
+            let err = match self.read() {
+                Ok(Some(cached)) if cached.is_fresh() => return Ok(cached),
+                Ok(cached) => match self.refresh().await {
+                    Ok(refreshed) => return Ok(refreshed),
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        // Serve the expired seed peers while another process
+                        // lists them, reading again after a retry interval.
+                        if let Some(cached) = cached {
+                            return Ok(SeedPeerState {
+                                next_refresh_at: SystemTime::now() + Self::RETRY_INTERVAL,
+                                ..cached
+                            });
+                        }
 
-            match result {
-                Ok(cached) => return Ok(cached),
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    tokio::select! {
-                        _ = tokio::time::sleep(Self::POLL_INTERVAL) => {}
-                        _ = &mut wait_timeout => {
-                            warn!(
-                                "timed out waiting for another process to list dragonfly seed peers through {}, listing them alone",
-                                self.path.display()
-                            );
-                            return self.list().await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(Self::POLL_INTERVAL) => continue,
+                            _ = &mut wait_timeout => {
+                                warn!(
+                                    "timed out waiting for another process to list dragonfly seed peers through {}, listing them alone",
+                                    self.path.display()
+                                );
+                                return self.list().await;
+                            }
                         }
                     }
-                }
-                Err(err) => {
-                    if self.unshared.swap(true, Ordering::Relaxed) {
-                        debug!(
-                            "dragonfly seed peers not shared through {}, listing them alone: {err}",
-                            self.path.display()
-                        );
-                    } else {
-                        warn!(
-                            "dragonfly seed peers not shared through {}, listing them alone: {err}",
-                            self.path.display()
-                        );
-                    }
-                    return self.list().await;
-                }
+                    Err(err) => err,
+                },
+                Err(err) => err,
+            };
+
+            if self.unshared.swap(true, Ordering::Relaxed) {
+                debug!(
+                    "dragonfly seed peers not shared through {}, listing them alone: {err}",
+                    self.path.display()
+                );
+            } else {
+                warn!(
+                    "dragonfly seed peers not shared through {}, listing them alone: {err}",
+                    self.path.display()
+                );
             }
+            return self.list().await;
         }
     }
 
-    /// Reads the cache file under a shared lock, `None` when missing or invalid.
+    /// Reads the cache file, `None` when missing, invalid or for another
+    /// scheduler.
     fn read(&self) -> io::Result<Option<SeedPeerState>> {
-        let mut file = match self.open(OpenOptions::new().read(true)) {
+        let mut file = match Self::open(&self.path, OpenOptions::new().read(true)) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err),
         };
 
-        Self::try_lock_shared(&file)?;
-        self.parse(&mut file)
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(serde_json::from_slice::<SeedPeerState>(&bytes)
+            .ok()
+            .filter(|cached| cached.scheduler_endpoint == self.scheduler_endpoint))
     }
 
-    /// Lists the seed peers into the cache file under an exclusive lock.
+    /// Lists the seed peers into the cache file, holding the lock file.
     async fn refresh(&self) -> io::Result<SeedPeerState> {
-        let mut file = self.open(
+        let lock = Self::open(
+            &self.path.with_extension("json.lock"),
             OpenOptions::new()
-                .read(true)
                 .write(true)
                 .create(true)
                 .truncate(false)
                 .mode(0o600),
         )?;
-        Self::try_lock(&file)?;
+        Self::try_lock(&lock)?;
 
         // Return what another process refreshed meanwhile.
-        let cached = self.parse(&mut file)?;
+        let cached = self.read()?;
         if let Some(cached) = cached.as_ref().filter(|cached| cached.is_fresh()) {
             return Ok(cached.clone());
         }
 
         // Keep the cached seed peers when listing fails, retrying sooner.
-        let listed = self.list().await.unwrap_or_else(|err| {
+        let refreshed = self.list().await.unwrap_or_else(|err| {
             error!("{err}, retrying in {:?}", Self::RETRY_INTERVAL);
             SeedPeerState {
                 scheduler_endpoint: self.scheduler_endpoint.clone(),
@@ -151,12 +165,22 @@ impl SeedPeerResolver {
             }
         });
 
-        // Serve the listing even when the write fails.
-        serde_json::to_vec(&listed)
+        // Replace the cache file at once, serving the seed peers even when
+        // sharing them fails.
+        let tmp_path = self.path.with_extension("json.tmp");
+        serde_json::to_vec(&refreshed)
             .map_err(io::Error::from)
             .and_then(|bytes| {
-                file.set_len(0)?;
-                file.write_all_at(&bytes, 0)
+                Self::open(
+                    &tmp_path,
+                    OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600),
+                )?
+                .write_all(&bytes)?;
+                fs::rename(&tmp_path, &self.path)
             })
             .unwrap_or_else(|err| {
                 warn!(
@@ -165,24 +189,48 @@ impl SeedPeerResolver {
                 )
             });
 
-        Ok(listed)
+        Ok(refreshed)
     }
 
-    /// Lists the seed peers from the scheduler.
+    /// Lists the seed peers from the scheduler, failing when it lists none
+    /// or takes longer than [`Self::WAIT_TIMEOUT`].
     async fn list(&self) -> io::Result<SeedPeerState> {
-        let seed_peers = async {
+        let result = tokio::time::timeout(Self::WAIT_TIMEOUT, async {
             SchedulerClient::new(&self.scheduler_endpoint, Self::LIST_TIMEOUT)
                 .await?
                 .list_seed_peers()
                 .await
-        }
-        .await
-        .map_err(|err| {
-            io::Error::other(format!(
-                "failed to list dragonfly seed peers from {}: {err}",
-                self.scheduler_endpoint
-            ))
-        })?;
+        })
+        .await;
+
+        let seed_peers = match result {
+            Ok(Ok(seed_peers)) if !seed_peers.is_empty() => seed_peers,
+            Ok(Ok(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "failed to list dragonfly seed peers from {}: none listed",
+                        self.scheduler_endpoint
+                    ),
+                ))
+            }
+            Ok(Err(err)) => {
+                return Err(io::Error::other(format!(
+                    "failed to list dragonfly seed peers from {}: {err}",
+                    self.scheduler_endpoint
+                )))
+            }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "failed to list dragonfly seed peers from {} within {:?}",
+                        self.scheduler_endpoint,
+                        Self::WAIT_TIMEOUT
+                    ),
+                ))
+            }
+        };
 
         Ok(SeedPeerState {
             scheduler_endpoint: self.scheduler_endpoint.clone(),
@@ -191,40 +239,19 @@ impl SeedPeerResolver {
         })
     }
 
-    /// Opens the cache file, refusing symlinks, FIFOs and non-regular files.
-    fn open(&self, options: &mut OpenOptions) -> io::Result<File> {
+    /// Opens `path`, refusing symlinks, FIFOs and non-regular files.
+    fn open(path: &Path, options: &mut OpenOptions) -> io::Result<File> {
         let file = options
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&self.path)?;
+            .open(path)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{} is not a regular file", self.path.display()),
+                format!("{} is not a regular file", path.display()),
             ));
         }
 
         Ok(file)
-    }
-
-    /// Parses the cached seed peers, `None` when invalid or for another
-    /// scheduler.
-    fn parse(&self, file: &mut File) -> io::Result<Option<SeedPeerState>> {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(serde_json::from_slice::<SeedPeerState>(&bytes)
-            .ok()
-            .filter(|cached| cached.scheduler_endpoint == self.scheduler_endpoint))
-    }
-
-    /// Takes a shared lock without waiting, like `File::try_lock_shared` in
-    /// Rust 1.89.
-    fn try_lock_shared(file: &File) -> io::Result<()> {
-        // SAFETY: flock takes no pointers.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(())
     }
 
     /// Takes an exclusive lock without waiting, like `File::try_lock` in Rust
@@ -357,6 +384,17 @@ mod tests {
             proxy_port: 4001,
             healthy: true,
         }
+    }
+
+    fn lock_file(seed_peer_resolver: &SeedPeerResolver) -> File {
+        let lock = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(seed_peer_resolver.path.with_extension("json.lock"))
+            .unwrap();
+        SeedPeerResolver::try_lock(&lock).unwrap();
+        lock
     }
 
     fn seed_peer_state(scheduler_endpoint: &str, next_refresh_at: SystemTime) -> SeedPeerState {
@@ -505,6 +543,7 @@ mod tests {
                 & 0o777,
             0o600
         );
+        assert!(!seed_peer_resolver.path.with_extension("json.tmp").exists());
     }
 
     #[tokio::test]
@@ -573,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn read_fails_while_another_process_rewrites_the_cache_file() {
+    fn read_serves_the_cache_file_while_another_process_lists() {
         let dir = tempdir().unwrap();
         let seed_peer_resolver = SeedPeerResolver::new(dir.path(), SCHEDULER_ENDPOINT.to_string());
         let fresh = seed_peer_state(
@@ -585,38 +624,51 @@ mod tests {
             serde_json::to_vec(&fresh).unwrap(),
         )
         .unwrap();
-        let holder = File::open(&seed_peer_resolver.path).unwrap();
-        SeedPeerResolver::try_lock(&holder).unwrap();
+        let lock = lock_file(&seed_peer_resolver);
 
-        let err = seed_peer_resolver.read().unwrap_err();
-
-        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(seed_peer_resolver.read().unwrap(), Some(fresh));
+        drop(lock);
     }
 
     #[tokio::test]
-    async fn resolve_waits_for_another_process_refreshing_the_cache_file() {
+    async fn resolve_serves_the_expired_seed_peers_while_another_process_lists() {
+        let dir = tempdir().unwrap();
+        let seed_peer_resolver = SeedPeerResolver::new(dir.path(), SCHEDULER_ENDPOINT.to_string());
+        let expired = seed_peer_state(SCHEDULER_ENDPOINT, SystemTime::now());
+        fs::write(
+            &seed_peer_resolver.path,
+            serde_json::to_vec(&expired).unwrap(),
+        )
+        .unwrap();
+        let lock = lock_file(&seed_peer_resolver);
+
+        let resolved_at = SystemTime::now();
+        let resolved = seed_peer_resolver.resolve().await.unwrap();
+
+        assert_eq!(resolved.seed_peers, expired.seed_peers);
+        assert!(resolved.next_refresh_at >= resolved_at + SeedPeerResolver::RETRY_INTERVAL);
+        assert!(resolved.next_refresh_at <= SystemTime::now() + SeedPeerResolver::RETRY_INTERVAL);
+        assert_eq!(seed_peer_resolver.read().unwrap(), Some(expired));
+        drop(lock);
+    }
+
+    #[tokio::test]
+    async fn resolve_waits_for_another_process_listing_without_a_cache_file() {
         let dir = tempdir().unwrap();
         let seed_peer_resolver = SeedPeerResolver::new(dir.path(), SCHEDULER_ENDPOINT.to_string());
         let refreshed = seed_peer_state(
             SCHEDULER_ENDPOINT,
             SystemTime::now() + Duration::from_secs(20),
         );
-        let holder = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&seed_peer_resolver.path)
-            .unwrap();
-        SeedPeerResolver::try_lock(&holder).unwrap();
+        let lock = lock_file(&seed_peer_resolver);
 
         let refreshing = std::thread::spawn({
+            let path = seed_peer_resolver.path.clone();
             let refreshed = refreshed.clone();
             move || {
                 std::thread::sleep(Duration::from_millis(300));
-                holder
-                    .write_all_at(&serde_json::to_vec(&refreshed).unwrap(), 0)
-                    .unwrap();
+                fs::write(path, serde_json::to_vec(&refreshed).unwrap()).unwrap();
+                drop(lock);
             }
         });
         let resolved = seed_peer_resolver.resolve().await.unwrap();

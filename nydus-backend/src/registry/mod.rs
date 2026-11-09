@@ -147,14 +147,7 @@ impl Registry {
 
         let dragonfly: Option<Box<dyn Transport>> = match &registry.dragonfly {
             #[cfg(feature = "dragonfly")]
-            Some(dragonfly) => Some(Box::new(Dragonfly::new(
-                dragonfly.clone(),
-                &registry.http,
-                config.prefetch.retry_interval,
-                &config.runtime_dir,
-                config.runtime_dir_mode,
-                &runtime,
-            )?)),
+            Some(_) => Some(Box::new(Dragonfly::new(config, &runtime)?)),
             _ => None,
         };
 
@@ -521,6 +514,8 @@ impl Backend for Registry {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::range::ContentRange;
     use super::response::Body;
     use super::*;
@@ -682,23 +677,27 @@ mod tests {
 
     struct OriginStub {
         addr: SocketAddr,
-        hits: Arc<AtomicU32>,
+        requests: Arc<Mutex<Vec<String>>>,
     }
 
     impl OriginStub {
-        fn serve(status: &'static str, body: Vec<u8>) -> OriginStub {
-            OriginStub::serve_on(TcpListener::bind("127.0.0.1:0").unwrap(), status, body)
+        fn serve(statuses: &'static [&'static str], body: Vec<u8>) -> OriginStub {
+            OriginStub::serve_on(TcpListener::bind("127.0.0.1:0").unwrap(), statuses, body)
         }
 
-        fn serve_on(listener: TcpListener, status: &'static str, body: Vec<u8>) -> OriginStub {
+        fn serve_on(
+            listener: TcpListener,
+            statuses: &'static [&'static str],
+            body: Vec<u8>,
+        ) -> OriginStub {
             let addr = listener.local_addr().unwrap();
-            let hits = Arc::new(AtomicU32::new(0));
-            let hits_in_thread = hits.clone();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let requests_in_thread = requests.clone();
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { break };
                     let body = body.clone();
-                    let hits = hits_in_thread.clone();
+                    let requests = requests_in_thread.clone();
                     thread::spawn(move || {
                         use std::io::{Read, Write};
                         let mut buf = Vec::new();
@@ -709,13 +708,17 @@ mod tests {
                                 _ => return,
                             }
                         }
-                        hits.fetch_add(1, Ordering::SeqCst);
-                        let request = String::from_utf8_lossy(&buf);
+                        let request = String::from_utf8_lossy(&buf).into_owned();
+                        let status = {
+                            let mut requests = requests.lock().unwrap();
+                            requests.push(request.clone());
+                            statuses[(requests.len() - 1).min(statuses.len() - 1)]
+                        };
                         let _ = stream.write_all(&OriginStub::respond(status, &request, &body));
                     });
                 }
             });
-            OriginStub { addr, hits }
+            OriginStub { addr, requests }
         }
 
         fn respond(status: &str, request: &str, blob: &[u8]) -> Vec<u8> {
@@ -753,7 +756,21 @@ mod tests {
         }
 
         fn hits(&self) -> u32 {
-            self.hits.load(Ordering::SeqCst)
+            self.requests.lock().unwrap().len() as u32
+        }
+
+        fn ranges(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|request| {
+                    request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("range: "))
+                        .map(str::to_string)
+                })
+                .collect()
         }
     }
 
@@ -817,7 +834,7 @@ mod tests {
             .with_blob_metadata(&blob_metadata)
             .save_in(dir.path());
         let blob = fs::read(dir.path().join(hex::encode(full_blob_id))).unwrap();
-        let origin = OriginStub::serve("206 Partial Content", blob);
+        let origin = OriginStub::serve(&["206 Partial Content"], blob);
         let registry = origin_registry(origin.addr, None);
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
@@ -862,21 +879,33 @@ mod tests {
         })
         .join()
         .unwrap();
-        let origin = OriginStub::serve_on(listener, "206 Partial Content", b"abcd".to_vec());
+        let dir = tempdir().unwrap();
+        let payload = vec![0x9au8; 4096];
+        let blob_metadata = single_chunk_group(&payload);
+        let full_blob_id = FullBlob::new(&payload)
+            .with_blob_metadata(&blob_metadata)
+            .save_in(dir.path());
+        let blob = fs::read(dir.path().join(hex::encode(full_blob_id))).unwrap();
+        let origin = OriginStub::serve_on(listener, &["206 Partial Content"], blob);
         let registry = origin_registry(origin.addr, Some(netns));
 
-        let mut ondemand = [0u8; 4];
-        let mut prefetch = [0u8; 4];
-        registry
-            .read_range_into(&TEST_BLOB_ID, 0, &mut ondemand)
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            let blob_metadata = match kind {
+                ReadKind::Ondemand => registry.read_blob_metadata(&full_blob_id),
+                ReadKind::Prefetch => registry.prefetch_blob_metadata(&full_blob_id),
+            }
             .unwrap();
-        registry
-            .prefetch_range_into(&TEST_BLOB_ID, 0, &mut prefetch)
+            let mut data = vec![0u8; 16];
+            match kind {
+                ReadKind::Ondemand => registry.read_range_into(&full_blob_id, 17, &mut data),
+                ReadKind::Prefetch => registry.prefetch_range_into(&full_blob_id, 17, &mut data),
+            }
             .unwrap();
 
-        assert_eq!(&ondemand, b"abcd");
-        assert_eq!(&prefetch, b"abcd");
-        assert_eq!(origin.hits(), 2);
+            assert_eq!(blob_metadata.chunk_group_count(), 1);
+            assert_eq!(data, payload[17..33]);
+        }
+        assert_eq!(origin.hits(), 6);
         assert_eq!(
             escaped.accept().unwrap_err().kind(),
             io::ErrorKind::WouldBlock
@@ -885,22 +914,27 @@ mod tests {
 
     #[test]
     fn whole_blob_answers_from_the_origin_are_rejected_for_both_read_kinds() {
-        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
-            let origin = OriginStub::serve("200 OK", (0..64).collect());
-            let registry = origin_registry(origin.addr, None);
+        let origin = OriginStub::serve(&["200 OK"], (0..64).collect());
+        let registry = origin_registry(origin.addr, None);
 
-            let mut buf = vec![0u8; 4];
-            let err = read(&registry, kind, &mut buf).unwrap_err();
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            let mut buf = [0u8; 4];
+            let err = match kind {
+                ReadKind::Ondemand => registry.read_range_into(&TEST_BLOB_ID, 16, &mut buf),
+                ReadKind::Prefetch => registry.prefetch_range_into(&TEST_BLOB_ID, 16, &mut buf),
+            }
+            .unwrap_err();
 
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(origin.hits(), 1);
+            assert_eq!(buf, [0u8; 4]);
         }
+        assert_eq!(origin.hits(), 2);
     }
 
     #[test]
     fn whole_blob_answers_from_dragonfly_are_rejected_for_both_read_kinds() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
-            let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport =
                 ScriptedTransport::new(vec![Scripted::Status(StatusCode::OK, HeaderMap::new())]);
             let registry = scripted_registry(origin.addr, None, transport.clone());
@@ -917,7 +951,7 @@ mod tests {
     #[test]
     fn whole_blob_redirected_answers_are_rejected_and_not_cached() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
-            let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let mut redirect = HeaderMap::new();
             redirect.insert(LOCATION, "http://cdn.example.com/signed".parse().unwrap());
             let transport = ScriptedTransport::new(vec![
@@ -942,7 +976,7 @@ mod tests {
     #[test]
     fn whole_blob_cached_redirect_answers_are_rejected() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
-            let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport =
                 ScriptedTransport::new(vec![Scripted::Status(StatusCode::OK, HeaderMap::new())]);
             let registry = scripted_registry(origin.addr, None, transport.clone());
@@ -963,9 +997,9 @@ mod tests {
     #[test]
     fn unreachable_scheduler_falls_back_to_the_origin_only_for_ondemand_reads() {
         let runtime_dir = tempdir().unwrap();
-        let origin = OriginStub::serve("206 Partial Content", b"abcd".to_vec());
+        let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
         let config: Config = serde_yaml::from_str(&format!(
-            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\nprefetch:\n  request_timeout: 100ms\n",
             runtime_dir.path().display(),
             origin.addr
         ))
@@ -978,7 +1012,7 @@ mod tests {
 
         assert_eq!(ondemand, Source::Fallback);
         assert_eq!(&buf, b"abcd");
-        assert_eq!(prefetch.unwrap_err().kind(), io::ErrorKind::NotConnected);
+        assert_eq!(prefetch.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_eq!(origin.hits(), 1);
     }
 
@@ -987,7 +1021,7 @@ mod tests {
     fn ondemand_reads_fall_back_within_the_request_timeout_while_the_scheduler_hangs() {
         let runtime_dir = tempdir().unwrap();
         let scheduler = TcpListener::bind("127.0.0.1:0").unwrap();
-        let origin = OriginStub::serve("206 Partial Content", b"abcd".to_vec());
+        let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
         let config: Config = serde_yaml::from_str(&format!(
             "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://{}\n      request_timeout: 100ms\n",
             runtime_dir.path().display(),
@@ -1065,7 +1099,7 @@ backend:
                 StatusCode::NOT_FOUND,
                 StatusCode::UNPROCESSABLE_ENTITY,
             ] {
-                let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+                let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
                 let transport =
                     ScriptedTransport::new(vec![Scripted::Status(terminal, HeaderMap::new())]);
                 let registry = scripted_registry(origin.addr, None, transport.clone());
@@ -1082,7 +1116,7 @@ backend:
 
     #[test]
     fn origin_transient_failure_fails_an_ondemand_read_at_once() {
-        let origin = OriginStub::serve("503 Service Unavailable", b"busy".to_vec());
+        let origin = OriginStub::serve(&["503 Service Unavailable"], b"busy".to_vec());
         let config: Config = serde_yaml::from_str(&format!(
             "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\n",
             origin.addr
@@ -1099,26 +1133,41 @@ backend:
 
     #[test]
     fn origin_transient_failure_retries_a_prefetch_read_once() {
-        let origin = OriginStub::serve("503 Service Unavailable", b"busy".to_vec());
-        let config: Config = serde_yaml::from_str(&format!(
-            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 10ms\n",
-            origin.addr
-        ))
-        .unwrap();
-        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let test_cases: Vec<(&'static [&'static str], fn(io::Result<()>, [u8; 4]))> = vec![
+            (
+                &["503 Service Unavailable", "206 Partial Content"],
+                |result, buf| {
+                    result.unwrap();
+                    assert_eq!(&buf, b"abcd");
+                },
+            ),
+            (&["503 Service Unavailable"], |result, _| {
+                assert!(result.unwrap_err().to_string().contains("503"));
+            }),
+        ];
 
-        let mut buf = vec![0u8; 4];
-        let err = read(&registry, ReadKind::Prefetch, &mut buf).unwrap_err();
+        for (statuses, expect) in test_cases {
+            let origin = OriginStub::serve(statuses, b"abcd".to_vec());
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 10ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
-        assert!(err.to_string().contains("503"));
-        assert_eq!(origin.hits(), 2);
+            let mut buf = [0u8; 4];
+            let result = registry.prefetch_range_into(&TEST_BLOB_ID, 0, &mut buf);
+
+            expect(result, buf);
+            assert_eq!(origin.ranges(), ["bytes=0-3", "bytes=0-3"]);
+        }
     }
 
     #[test]
     fn unauthorized_answer_triggers_the_auth_handshake() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let body = b"authorized".to_vec();
-            let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let mut challenge = HeaderMap::new();
             challenge.insert(
                 WWW_AUTHENTICATE,
@@ -1146,7 +1195,7 @@ backend:
     #[test]
     fn read_blob_metadata_fetches_the_footer_through_the_transport() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
-            let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport = ScriptedTransport::new(vec![Scripted::Status(
                 StatusCode::NOT_FOUND,
                 HeaderMap::new(),
@@ -1200,7 +1249,7 @@ backend:
     #[test]
     fn cached_redirect_reads_ride_dragonfly() {
         let body = b"redirected".to_vec();
-        let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+        let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
         let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
         let registry = scripted_registry(origin.addr, None, transport.clone());
         let hex = hex::encode(TEST_BLOB_ID);
@@ -1221,7 +1270,7 @@ backend:
     #[test]
     fn forbidden_cached_redirect_is_evicted_and_re_resolved() {
         let body = b"fresh".to_vec();
-        let origin = OriginStub::serve("206 Partial Content", b"unused".to_vec());
+        let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
         let transport = ScriptedTransport::new(vec![
             Scripted::Status(StatusCode::FORBIDDEN, HeaderMap::new()),
             Scripted::Body(body.clone()),

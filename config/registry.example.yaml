@@ -15,10 +15,6 @@
 # Default: /run/nydus.
 # runtime_dir: /run/nydus
 
-# Mode, masked by the umask, Dragonfly creates the runtime directory and its
-# `dragonfly` subdirectory with, as a YAML octal. Default: 0o755.
-# runtime_dir_mode: 0o755
-
 backend:
   type: registry
   config:

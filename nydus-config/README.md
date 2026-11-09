@@ -17,7 +17,7 @@ the binary's default directories.
 
 | Feature | Description |
 | --- | --- |
-| `dragonfly` | Serves the `dragonfly` block of a registry backend. Enabled by `nydus-backend/dragonfly`; a build without it ignores the block. |
+| `dragonfly` | Accepts the `dragonfly` block of a registry backend. Enabled by `nydus-backend/dragonfly`; a build without it rejects the block when the configuration is loaded. |
 
 ## License
 

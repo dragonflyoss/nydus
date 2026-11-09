@@ -6,7 +6,6 @@ use std::fs::DirBuilder;
 use std::io;
 use std::ops::RangeInclusive;
 use std::os::unix::fs::DirBuilderExt;
-use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -23,7 +22,7 @@ use dragonfly_client_request::{
     ExponentialBuilder, GetRequest, ProxyWithSeedPeers, RequestWithSeedPeers as _,
 };
 
-use nydus_config::{DragonflyConfig, HttpConfig};
+use nydus_config::{BackendConfig, Config};
 
 use super::http::{Http, RateLimit};
 use super::range::Range;
@@ -43,7 +42,7 @@ use self::seed_peer_resolver::SeedPeerResolver;
 ///           │                      └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more ─▶ error
 ///           │                                    └─ transport failure ──────────▶ error
 ///           ├─ on-demand ─▶ origin
-///           └─ prefetch ──▶ error
+///           └─ prefetch ──▶ wait for a seed peer, within the prefetch request timeout
 /// ```
 pub(crate) struct Dragonfly {
     /// The seed peer client of on-demand reads, retrying on the next seed peer.
@@ -65,20 +64,27 @@ pub(crate) struct Dragonfly {
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Creates the transport, sharing the seed peers under
-    /// `<runtime_dir>/dragonfly`.
-    pub(crate) fn new(
-        config: DragonflyConfig,
-        http: &HttpConfig,
-        prefetch_retry_interval: Duration,
-        runtime_dir: &Path,
-        runtime_dir_mode: u32,
-        runtime: &Runtime,
-    ) -> io::Result<Self> {
-        let dir = runtime_dir.join("dragonfly");
+    /// Creates the transport the registry backend of `config` configures,
+    /// sharing the seed peers under `<runtime_dir>/dragonfly`.
+    pub(crate) fn new(config: &Config, runtime: &Runtime) -> io::Result<Self> {
+        let (http, dragonfly) = match &config.backend {
+            BackendConfig::Registry(registry) => registry
+                .dragonfly
+                .as_ref()
+                .map(|dragonfly| (&registry.http, dragonfly)),
+            BackendConfig::Local(_) => None,
+        }
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "backend has no dragonfly configuration",
+            )
+        })?;
+
+        let dir = config.runtime_dir.join("dragonfly");
         DirBuilder::new()
             .recursive(true)
-            .mode(runtime_dir_mode)
+            .mode(0o755)
             .create(&dir)
             .map_err(|err| {
                 io::Error::new(
@@ -92,9 +98,10 @@ impl Dragonfly {
 
         let (ondemand_client, prefetch_client) = SeedPeerClient::clients(
             runtime,
-            SeedPeerResolver::new(&dir, config.scheduler_endpoint.into()),
-            config.max_retries as u8,
-            config.request_timeout,
+            SeedPeerResolver::new(&dir, dragonfly.scheduler_endpoint.to_string()),
+            dragonfly.max_retries as u8,
+            dragonfly.request_timeout,
+            config.prefetch.request_timeout,
         );
         Ok(Self {
             ondemand_client,
@@ -104,16 +111,16 @@ impl Dragonfly {
                 http.max_retries,
                 http.proxy.as_ref(),
                 &http.tls,
-                prefetch_retry_interval,
+                config.prefetch.retry_interval,
                 Some(RateLimit::new(
-                    config.fallback_rate_limit,
+                    dragonfly.fallback_rate_limit,
                     Duration::from_secs(1),
                 )),
                 Source::Fallback,
             )?,
-            request_timeout: config.request_timeout,
-            prefetch_retry_interval: prefetch_retry_interval
-                ..=prefetch_retry_interval.saturating_mul(2),
+            request_timeout: dragonfly.request_timeout,
+            prefetch_retry_interval: config.prefetch.retry_interval
+                ..=config.prefetch.retry_interval.saturating_mul(2),
         })
     }
 }
@@ -319,29 +326,33 @@ enum ConnectivityState {
 /// A client of the seed peers like gRPC's `ClientConn`.
 ///
 /// ```text
-/// Connecting ──┬─ seed peers ───────────────────────────────▶ Ready ──▶ seed peers updated at every resolution
-///              └─ none, build or listing failure ──▶ TransientFailure
+/// Connecting ──┬─ seed peers ─────────────────────▶ Ready ──▶ seed peers updated at every resolution
+///              └─ none, or a build or listing failure ──▶ TransientFailure
 /// TransientFailure ── seed peers at a later resolution ──▶ Ready
-/// Ready ── the scheduler lists none ──▶ TransientFailure
-/// Ready ── listing alone fails ──▶ Ready with the seed peers known so far
+/// Ready ── none, or a listing failure ──▶ Ready with the seed peers known so far
 /// ```
 struct SeedPeerClient {
     /// The connectivity state the resolve task publishes.
     state: watch::Receiver<ConnectivityState>,
 
-    /// The longest wait for the first resolution, unbounded when `None`.
-    ready_timeout: Option<Duration>,
+    /// The longest wait for the proxy.
+    ready_timeout: Duration,
+
+    /// Whether to wait through `TransientFailure` until `Ready` rather than
+    /// fail fast, like grpc-go's `WaitForReady` call option.
+    wait_for_ready: bool,
 }
 
 /// Implements the seed peer client.
 impl SeedPeerClient {
-    /// Creates the on-demand and prefetch clients, sharing one resolve task on
-    /// `runtime`.
+    /// Creates the on-demand client, failing fast without a seed peer, and the
+    /// prefetch client, waiting for one, sharing one resolve task on `runtime`.
     fn clients(
         runtime: &Runtime,
         seed_peer_resolver: SeedPeerResolver,
         max_retries: u8,
-        ready_timeout: Duration,
+        ondemand_ready_timeout: Duration,
+        prefetch_ready_timeout: Duration,
     ) -> (Self, Self) {
         let (ondemand_tx, ondemand_rx) = watch::channel(ConnectivityState::Connecting);
         let (prefetch_tx, prefetch_rx) = watch::channel(ConnectivityState::Connecting);
@@ -351,15 +362,22 @@ impl SeedPeerClient {
                 (prefetch_tx, 0, None),
             ];
             loop {
-                let next_refresh_at = match seed_peer_resolver.resolve().await {
-                    Ok(resolved) => {
-                        let seed_peers = resolved.seed_peers();
+                let resolved = seed_peer_resolver.resolve().await.and_then(|resolved| {
+                    let seed_peers = resolved.seed_peers();
+                    if seed_peers.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "no dragonfly seed peer resolved",
+                        ));
+                    }
+
+                    Ok((seed_peers, resolved.next_refresh_at))
+                });
+
+                let next_refresh_at = match resolved {
+                    Ok((seed_peers, next_refresh_at)) => {
                         for (tx, max_retries, proxy) in &mut clients {
-                            if seed_peers.is_empty() {
-                                // Serve no seed peer once the scheduler lists none.
-                                *proxy = None;
-                                tx.send_replace(ConnectivityState::TransientFailure);
-                            } else if let Some(proxy) = proxy.as_ref() {
+                            if let Some(proxy) = proxy.as_ref() {
                                 proxy.update_seed_peers(seed_peers.clone()).await;
                             } else {
                                 match ProxyWithSeedPeers::builder()
@@ -383,7 +401,7 @@ impl SeedPeerClient {
                             }
                         }
 
-                        resolved.next_refresh_at
+                        next_refresh_at
                     }
                     Err(err) => {
                         error!("{err}, retrying in {:?}", SeedPeerResolver::RETRY_INTERVAL);
@@ -412,30 +430,35 @@ impl SeedPeerClient {
         (
             Self {
                 state: ondemand_rx,
-                ready_timeout: Some(ready_timeout),
+                ready_timeout: ondemand_ready_timeout,
+                wait_for_ready: false,
             },
             Self {
                 state: prefetch_rx,
-                ready_timeout: None,
+                ready_timeout: prefetch_ready_timeout,
+                wait_for_ready: true,
             },
         )
     }
 
-    /// Returns the proxy after the first resolution, failing on timeout or
-    /// without a seed peer.
+    /// Returns the proxy once the seed peers are resolved, failing on timeout,
+    /// or at once without a seed peer unless waiting for ready.
     async fn ready(&self) -> io::Result<ProxyWithSeedPeers> {
         let mut rx = self.state.clone();
-        let loaded = rx.wait_for(|state| !matches!(state, ConnectivityState::Connecting));
-        let state = match self.ready_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, loaded).await.map_err(|_| {
+        let resolved = rx.wait_for(|state| match state {
+            ConnectivityState::Connecting => false,
+            ConnectivityState::Ready(_) => true,
+            ConnectivityState::TransientFailure => !self.wait_for_ready,
+        });
+        let state = tokio::time::timeout(self.ready_timeout, resolved)
+            .await
+            .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("dragonfly seed peers not loaded within {timeout:?}"),
+                    format!("dragonfly proxy not ready within {:?}", self.ready_timeout),
                 )
-            })?,
-            None => loaded.await,
-        }
-        .map_err(|_| io::Error::other("dragonfly seed peer resolve task is gone"))?;
+            })?
+            .map_err(|_| io::Error::other("dragonfly seed peer resolve task is gone"))?;
 
         match &*state {
             ConnectivityState::Ready(proxy) => Ok(proxy.clone()),
@@ -450,10 +473,12 @@ impl SeedPeerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_config::default_runtime_dir_mode;
+    use dragonfly_api::common::v2::Host;
+    use dragonfly_client_request::SeedPeer;
     use serde_json::json;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn seed_peers() -> serde_json::Value {
@@ -466,6 +491,14 @@ mod tests {
             "proxy_port": 1,
             "healthy": true,
         }])
+    }
+
+    fn dragonfly_config(runtime_dir: &Path) -> Config {
+        serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+            runtime_dir.display()
+        ))
+        .unwrap()
     }
 
     fn write_cache_file(dir: &Path, seed_peers: serde_json::Value, due_in: Duration) {
@@ -484,26 +517,18 @@ mod tests {
     }
 
     #[test]
-    fn new_creates_the_runtime_directory_with_its_mode() {
+    fn new_creates_the_runtime_directory_unwritable_by_others() {
         let dir = tempdir().unwrap();
         let runtime_dir = dir.path().join("run");
-        let config: DragonflyConfig =
-            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:1\n").unwrap();
         let runtime = Runtime::new(None).unwrap();
 
-        Dragonfly::new(
-            config,
-            &HttpConfig::default(),
-            Duration::from_secs(1),
-            &runtime_dir,
-            0o700,
-            &runtime,
-        )
-        .unwrap();
+        Dragonfly::new(&dragonfly_config(&runtime_dir), &runtime).unwrap();
 
-        let metadata = fs::metadata(runtime_dir.join("dragonfly")).unwrap();
-        assert!(metadata.is_dir());
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        for dir in [runtime_dir.clone(), runtime_dir.join("dragonfly")] {
+            let metadata = fs::metadata(dir).unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!(metadata.permissions().mode() & 0o022, 0);
+        }
     }
 
     #[test]
@@ -511,29 +536,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let runtime_dir = dir.path().join("run");
         fs::write(&runtime_dir, b"").unwrap();
-        let config: DragonflyConfig =
-            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:1\n").unwrap();
         let runtime = Runtime::new(None).unwrap();
 
-        let err = Dragonfly::new(
-            config,
-            &HttpConfig::default(),
-            Duration::from_secs(1),
-            &runtime_dir,
-            default_runtime_dir_mode(),
-            &runtime,
-        )
-        .err()
-        .unwrap();
+        let err = Dragonfly::new(&dragonfly_config(&runtime_dir), &runtime)
+            .err()
+            .unwrap();
 
         assert!(err.to_string().contains("dragonfly runtime directory"));
     }
 
     #[test]
     fn clients_serve_the_seed_peers_of_the_first_load() {
-        let test_cases = vec![(seed_peers(), true), (json!([]), false)];
+        let test_cases = vec![
+            (seed_peers(), Ok(()), Ok(())),
+            (
+                json!([]),
+                Err(io::ErrorKind::NotConnected),
+                Err(io::ErrorKind::TimedOut),
+            ),
+        ];
 
-        for (seed_peers, ready) in test_cases {
+        for (seed_peers, ondemand_ready, prefetch_ready) in test_cases {
             let dir = tempdir().unwrap();
             write_cache_file(dir.path(), seed_peers, Duration::from_secs(20));
 
@@ -543,72 +566,59 @@ mod tests {
                 SeedPeerResolver::new(dir.path(), "http://127.0.0.1:1/".to_string()),
                 0,
                 Duration::from_secs(5),
+                Duration::from_millis(100),
             );
 
             assert_eq!(
-                runtime.tokio().block_on(ondemand_client.ready()).is_ok(),
-                ready
-            );
-            assert_eq!(
-                runtime.tokio().block_on(prefetch_client.ready()).is_ok(),
-                ready
-            );
-        }
-    }
-
-    #[test]
-    fn clients_drop_the_seed_peers_once_the_scheduler_lists_none() {
-        let dir = tempdir().unwrap();
-        write_cache_file(dir.path(), seed_peers(), Duration::from_secs(2));
-        let runtime = Runtime::new(None).unwrap();
-        let (ondemand_client, prefetch_client) = SeedPeerClient::clients(
-            &runtime,
-            SeedPeerResolver::new(dir.path(), "http://127.0.0.1:1/".to_string()),
-            0,
-            Duration::from_secs(5),
-        );
-        assert!(runtime.tokio().block_on(ondemand_client.ready()).is_ok());
-
-        write_cache_file(dir.path(), json!([]), Duration::from_secs(20));
-
-        for client in [ondemand_client, prefetch_client] {
-            let mut state = client.state.clone();
-            runtime
-                .tokio()
-                .block_on(async {
-                    tokio::time::timeout(
-                        Duration::from_secs(10),
-                        state
-                            .wait_for(|state| matches!(state, ConnectivityState::TransientFailure)),
-                    )
-                    .await
-                    .unwrap()
+                runtime
+                    .tokio()
+                    .block_on(ondemand_client.ready())
                     .map(|_| ())
-                })
-                .unwrap();
+                    .map_err(|err| err.kind()),
+                ondemand_ready
+            );
+            assert_eq!(
+                runtime
+                    .tokio()
+                    .block_on(prefetch_client.ready())
+                    .map(|_| ())
+                    .map_err(|err| err.kind()),
+                prefetch_ready
+            );
         }
     }
 
     #[test]
-    fn clients_keep_the_seed_peers_when_listing_alone_fails() {
-        let dir = tempdir().unwrap();
-        write_cache_file(dir.path(), seed_peers(), Duration::from_secs(2));
-        let runtime = Runtime::new(None).unwrap();
-        let (ondemand_client, prefetch_client) = SeedPeerClient::clients(
-            &runtime,
-            SeedPeerResolver::new(dir.path(), "http://127.0.0.1:1/".to_string()),
-            0,
-            Duration::from_secs(5),
-        );
-        assert!(runtime.tokio().block_on(ondemand_client.ready()).is_ok());
+    fn clients_keep_the_seed_peers_when_none_resolve() {
+        let test_cases: Vec<fn(&Path)> = vec![
+            |dir| write_cache_file(dir, json!([]), Duration::from_secs(20)),
+            |dir| fs::remove_file(dir.join("e87f700bacfeed52.v1.json")).unwrap(),
+            |dir| {
+                let cache_file = dir.join("e87f700bacfeed52.v1.json");
+                fs::remove_file(&cache_file).unwrap();
+                fs::create_dir(&cache_file).unwrap();
+            },
+        ];
 
-        let cache_file = dir.path().join("e87f700bacfeed52.v1.json");
-        fs::remove_file(&cache_file).unwrap();
-        fs::create_dir(&cache_file).unwrap();
-        std::thread::sleep(Duration::from_secs(4));
+        for lose_seed_peers in test_cases {
+            let dir = tempdir().unwrap();
+            write_cache_file(dir.path(), seed_peers(), Duration::from_secs(1));
+            let runtime = Runtime::new(None).unwrap();
+            let (ondemand_client, prefetch_client) = SeedPeerClient::clients(
+                &runtime,
+                SeedPeerResolver::new(dir.path(), "http://127.0.0.1:1/".to_string()),
+                0,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            );
+            assert!(runtime.tokio().block_on(ondemand_client.ready()).is_ok());
 
-        assert!(runtime.tokio().block_on(ondemand_client.ready()).is_ok());
-        assert!(runtime.tokio().block_on(prefetch_client.ready()).is_ok());
+            lose_seed_peers(dir.path());
+            std::thread::sleep(Duration::from_secs(3));
+
+            assert!(runtime.tokio().block_on(ondemand_client.ready()).is_ok());
+            assert!(runtime.tokio().block_on(prefetch_client.ready()).is_ok());
+        }
     }
 
     #[tokio::test]
@@ -616,7 +626,8 @@ mod tests {
         let (tx, rx) = watch::channel(ConnectivityState::Connecting);
         let proxy = SeedPeerClient {
             state: rx,
-            ready_timeout: None,
+            ready_timeout: Duration::from_secs(60),
+            wait_for_ready: false,
         };
         let ready = proxy.ready();
         tokio::pin!(ready);
@@ -634,7 +645,8 @@ mod tests {
         let (_tx, rx) = watch::channel(ConnectivityState::TransientFailure);
         let proxy = SeedPeerClient {
             state: rx,
-            ready_timeout: None,
+            ready_timeout: Duration::from_secs(60),
+            wait_for_ready: false,
         };
 
         let err = proxy.ready().await.err().unwrap();
@@ -643,16 +655,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_fails_once_the_first_load_outlasts_the_ready_timeout() {
-        let (_tx, rx) = watch::channel(ConnectivityState::Connecting);
+    async fn ready_fails_once_the_proxy_outlasts_the_ready_timeout() {
+        let test_cases = vec![
+            (ConnectivityState::Connecting, false),
+            (ConnectivityState::TransientFailure, true),
+        ];
+
+        for (state, wait_for_ready) in test_cases {
+            let (_tx, rx) = watch::channel(state);
+            let proxy = SeedPeerClient {
+                state: rx,
+                ready_timeout: Duration::from_millis(10),
+                wait_for_ready,
+            };
+
+            let err = proxy.ready().await.err().unwrap();
+
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_waits_through_a_transient_failure_when_waiting_for_ready() {
+        let (tx, rx) = watch::channel(ConnectivityState::TransientFailure);
         let proxy = SeedPeerClient {
             state: rx,
-            ready_timeout: Some(Duration::from_millis(10)),
+            ready_timeout: Duration::from_secs(60),
+            wait_for_ready: true,
         };
+        let ready = proxy.ready();
+        tokio::pin!(ready);
 
-        let err = proxy.ready().await.err().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut ready)
+            .await
+            .is_err());
 
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        tx.send_replace(ConnectivityState::Ready(
+            ProxyWithSeedPeers::builder()
+                .seed_peers(vec![SeedPeer {
+                    host: Host {
+                        name: "seed-peer-0".to_string(),
+                        ip: "127.0.0.1".to_string(),
+                        port: 1,
+                        proxy_port: 1,
+                        ..Default::default()
+                    },
+                    healthy: true,
+                }])
+                .build()
+                .await
+                .unwrap(),
+        ));
+        assert!(ready.await.is_ok());
     }
 
     #[tokio::test]
@@ -660,7 +714,8 @@ mod tests {
         let (_, rx) = watch::channel(ConnectivityState::Connecting);
         let proxy = SeedPeerClient {
             state: rx,
-            ready_timeout: None,
+            ready_timeout: Duration::from_secs(60),
+            wait_for_ready: false,
         };
 
         let err = proxy.ready().await.err().unwrap();

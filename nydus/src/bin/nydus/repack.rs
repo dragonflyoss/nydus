@@ -1,8 +1,8 @@
 use clap::Parser;
 use nydus::error::{Error, Result};
 use nydus_config::{
-    default_runtime_dir, default_runtime_dir_mode, BackendConfig, Config, LocalConfig,
-    PrefetchConfig, PrefetchScope, StorageConfig,
+    default_runtime_dir, BackendConfig, Config, LocalConfig, PrefetchConfig, PrefetchScope,
+    StorageConfig,
 };
 use nydus_core::{IncrementalWriterOptions, NydusCore, RepackResult};
 use nydus_format::blob::BlobMetadataCompressor;
@@ -78,7 +78,6 @@ fn report(phase: &str, result: &RepackResult) -> Result<()> {
 fn local_core(bootstrap: &Path, blobs: &Path, output: &Path) -> Result<NydusCore> {
     let config = Config {
         runtime_dir: default_runtime_dir(),
-        runtime_dir_mode: default_runtime_dir_mode(),
         backend: BackendConfig::Local(LocalConfig {
             dir: blobs.to_path_buf(),
         }),

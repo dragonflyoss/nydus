@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use url::Url;
-use validator::{Validate, ValidationErrors};
+use validator::{Validate, ValidationError, ValidationErrors};
 
 /// The name of the package.
 pub const NAME: &str = "nydus";
@@ -49,12 +49,6 @@ pub fn default_log_dir() -> PathBuf {
 #[inline]
 pub fn default_runtime_dir() -> PathBuf {
     PathBuf::from("/run/nydus/")
-}
-
-/// Returns the default mode of the runtime directory for nydus.
-#[inline]
-pub fn default_runtime_dir_mode() -> u32 {
-    0o755
 }
 
 /// Returns the default timeout of a request to the origin registry. Kept
@@ -219,8 +213,9 @@ pub struct RegistryConfig {
 
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
-    /// hitting the origin registry directly; a build without the `dragonfly`
-    /// feature ignores it.
+    /// hitting the origin registry directly. Parsed unconditionally so a
+    /// build without the `dragonfly` feature rejects the block loudly when
+    /// the configuration is loaded instead of silently ignoring it.
     #[serde(default)]
     #[validate(nested)]
     pub dragonfly: Option<DragonflyConfig>,
@@ -237,6 +232,7 @@ pub struct HttpConfig {
         default = "default_registry_http_request_timeout",
         with = "humantime_serde"
     )]
+    #[validate(custom(function = "Self::validate_request_timeout"))]
     pub request_timeout: Duration,
 
     /// The maximum number of retry attempts per request, applied by the HTTP
@@ -264,6 +260,21 @@ pub struct ProxyConfig {
     /// `http://127.0.0.1:65001`. Requests keep their original upstream URL,
     /// so a proxy like a Dragonfly `dfdaemon` knows what to back-source.
     pub addr: String,
+}
+
+/// Implement HttpConfig.
+impl HttpConfig {
+    /// Validates the request timeout is greater than zero.
+    fn validate_request_timeout(
+        request_timeout: &Duration,
+    ) -> std::result::Result<(), ValidationError> {
+        if request_timeout.is_zero() {
+            return Err(ValidationError::new("zero_duration")
+                .with_message("must be greater than 0s".into()));
+        }
+
+        Ok(())
+    }
 }
 
 /// Implement Default for HttpConfig.
@@ -374,6 +385,7 @@ impl TlsConfig {
 pub struct DragonflyConfig {
     /// The Dragonfly scheduler service address with the scheme, e.g.
     /// `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
+    #[validate(custom(function = "Self::validate_scheduler_endpoint"))]
     pub scheduler_endpoint: Url,
 
     /// The timeout of each attempt of a request through the seed peers, e.g.
@@ -403,6 +415,20 @@ pub struct DragonflyConfig {
     #[serde(default = "default_registry_dragonfly_fallback_rate_limit")]
     #[validate(range(min = 1))]
     pub fallback_rate_limit: u64,
+}
+
+/// Implement DragonflyConfig.
+impl DragonflyConfig {
+    /// Validates the build has the `dragonfly` feature the scheduler endpoint
+    /// needs.
+    fn validate_scheduler_endpoint(_: &Url) -> std::result::Result<(), ValidationError> {
+        if cfg!(feature = "dragonfly") {
+            return Ok(());
+        }
+
+        Err(ValidationError::new("feature_disabled")
+            .with_message("requires a build with the `dragonfly` feature".into()))
+    }
 }
 
 /// The storage configuration: where downloaded blob data is kept.
@@ -538,13 +564,6 @@ pub struct Config {
     #[serde(default = "default_runtime_dir")]
     pub runtime_dir: PathBuf,
 
-    /// The mode, masked by the umask, Dragonfly creates the runtime directory
-    /// and its `dragonfly` subdirectory with, `0o755` by default, written as a
-    /// YAML octal.
-    #[serde(default = "default_runtime_dir_mode")]
-    #[validate(range(max = 0o777))]
-    pub runtime_dir_mode: u32,
-
     /// The backend configuration: where blob data is fetched from.
     #[validate(nested)]
     pub backend: BackendConfig,
@@ -664,7 +683,6 @@ mod tests {
         assert_eq!(config.prefetch.scope, PrefetchScope::All);
 
         assert_eq!(config.runtime_dir, Path::new("/var/run/nydus"));
-        assert_eq!(config.runtime_dir_mode, 0o700);
     }
 
     #[test]
@@ -868,7 +886,7 @@ backend:
     }
 
     #[test]
-    fn runtime_dir_and_its_mode_default_when_omitted() {
+    fn runtime_dir_defaults_when_omitted() {
         let yaml = r#"
 backend:
   type: local
@@ -878,7 +896,6 @@ backend:
 
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.runtime_dir, default_runtime_dir());
-        assert_eq!(config.runtime_dir_mode, default_runtime_dir_mode());
     }
 
     #[test]
@@ -1018,6 +1035,10 @@ storage:
     fn validate_rejects_out_of_range_fields() {
         let config: Config =
             serde_yaml::from_str("backend:\n  type: local\n  config:\n    dir: /blobs\n").unwrap();
+        let registry: BackendConfig = serde_yaml::from_str(
+            "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: library/ubuntu\n  http:\n    request_timeout: 0s\n",
+        )
+        .unwrap();
 
         let test_cases: Vec<(
             Box<dyn Validate>,
@@ -1026,22 +1047,22 @@ storage:
             (Box::new(config.clone()), |result| assert!(result.is_ok())),
             (
                 Box::new(Config {
-                    runtime_dir_mode: 755,
+                    backend: registry,
                     ..config.clone()
                 }),
                 |result| {
                     let err = result.unwrap_err().to_string();
-                    assert!(err.starts_with("runtime_dir_mode: Validation error: range"));
+                    assert_eq!(err, "backend.http.request_timeout: must be greater than 0s");
                 },
             ),
             (
-                Box::new(Config {
-                    runtime_dir_mode: 0o1777,
-                    ..config.clone()
+                Box::new(HttpConfig {
+                    request_timeout: Duration::ZERO,
+                    ..Default::default()
                 }),
                 |result| {
                     let err = result.unwrap_err().to_string();
-                    assert!(err.starts_with("runtime_dir_mode: Validation error: range"));
+                    assert_eq!(err, "request_timeout: must be greater than 0s");
                 },
             ),
             (
@@ -1104,6 +1125,22 @@ storage:
 
         for (config, expect) in test_cases {
             expect(config.validate());
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_dragonfly_block_without_the_feature() {
+        let dragonfly: DragonflyConfig =
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:8002\n").unwrap();
+
+        let result = dragonfly.validate();
+
+        assert_eq!(result.is_ok(), cfg!(feature = "dragonfly"));
+        if let Err(err) = result {
+            assert_eq!(
+                err.to_string(),
+                "scheduler_endpoint: requires a build with the `dragonfly` feature"
+            );
         }
     }
 
