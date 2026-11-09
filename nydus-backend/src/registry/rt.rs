@@ -9,15 +9,10 @@ use tracing::{error, info};
 
 use crate::Netns;
 
-/// The runtime a registry backend runs its requests on, on-demand and
-/// prefetch reads alike.
+/// The tokio runtime a registry backend runs every request on.
 ///
-/// A tokio runtime's threads inherit the network namespace of whoever built
-/// it, where the registry must be reached from the host's when a VMM embeds
-/// this crate. [`Runtime::new`] pins them to a namespace, and
-/// [`Runtime::block_on_worker`] runs every request on them, since a future
-/// polled on the caller would still open its socket in the caller's
-/// namespace. The thread counts are tokio's defaults.
+/// Its threads enter the configured network namespace, so requests run on them
+/// through [`Runtime::block_on_worker`], never on the caller's thread.
 #[derive(Debug)]
 pub struct Runtime {
     /// The tokio runtime.
@@ -26,12 +21,8 @@ pub struct Runtime {
 
 /// Implements the backend runtime.
 impl Runtime {
-    /// Creates a runtime, every thread of it entering `netns` before it does
-    /// any work.
-    ///
-    /// A namespace is probed on a scratch thread first, so an unusable
-    /// descriptor or a missing privilege fails here rather than on a runtime
-    /// thread.
+    /// Creates a runtime whose threads enter `netns` first, probed here so an
+    /// unusable one fails early.
     pub fn new(netns: Option<Netns>) -> io::Result<Self> {
         let netns = match netns {
             Some(netns) => {
@@ -53,10 +44,8 @@ impl Runtime {
                 if let Err(err) = netns.enter() {
                     error!("nydus-backend runtime thread cannot enter the configured netns: {err}");
 
-                    // Abort the thread rather than leave it in the wrong
-                    // namespace, where it would silently route registry
-                    // traffic. The probe above entered this exact
-                    // descriptor, so this is unreachable in practice.
+                    // Abort rather than route registry traffic from the wrong
+                    // namespace.
                     panic!("nydus-backend runtime thread cannot enter the configured netns: {err}");
                 }
             });
@@ -67,8 +56,7 @@ impl Runtime {
         Ok(Self { runtime })
     }
 
-    /// Runs `future` on a thread of the runtime and waits for its result, a
-    /// task that panics or is cancelled failing like the I/O it ran.
+    /// Runs `future` on a runtime thread and waits for its result.
     pub(crate) fn block_on_worker<T>(
         &self,
         future: impl Future<Output = io::Result<T>> + Send + 'static,
@@ -110,7 +98,7 @@ mod tests {
     fn new_rejects_a_namespace_that_cannot_be_entered() {
         let netns = Netns::new(tempfile::tempfile().unwrap().into()).unwrap();
         let err = Runtime::new(Some(netns)).unwrap_err();
-        assert!(err.to_string().contains("netns"), "{err}");
+        assert!(err.to_string().contains("netns"));
     }
 
     #[cfg(target_os = "linux")]

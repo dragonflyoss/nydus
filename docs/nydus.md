@@ -1115,6 +1115,20 @@ prefetch:
 
 Fields:
 
+- `runtime_dir` (default `/run/nydus`) is the absolute runtime directory
+	holding the state shared between the nydus processes on the host, each
+	component in
+	a subdirectory of its own: `dragonfly` holds the Dragonfly seed peer
+	cache files (see [Registry backend](#registry-backend)) and `fuse` the
+	FUSE hot upgrade ownership state (see [upgrade](upgrade.md)), so an old
+	and a new daemon hand a mount over only under the same `runtime_dir`.
+- `runtime_dir_mode` (default `0o755`, systemd's `RuntimeDirectoryMode=`
+	default) is the mode, masked by the umask, the Dragonfly backend creates
+	the runtime directory and its `dragonfly` subdirectory with; directories
+	created otherwise, such as for the FUSE hot upgrade state, keep the umask
+	default. Write it as a YAML octal `0o755`: a bare `0755` is a string and
+	`755` a decimal, and anything beyond the permission bits `0o777` is
+	rejected at load time.
 - `backend.type` selects the blob backend, either `local` or `registry`.
 	- `local`: `config.dir` is the directory holding nydus blob files
 		(equivalent to `--blob-dir`).
@@ -1261,8 +1275,8 @@ Fields under `backend.config`:
 	priority hint (`6` for on-demand reads, `3` for prefetch) plus the
 	configured `request_timeout` per attempt; auth token fetches go directly
 	to the origin registry through `http`. Only available when the
-	binary is built with the `dragonfly` feature; a build without it rejects
-	the block when the config is loaded. Omit to talk to the origin directly.
+	binary is built with the `dragonfly` feature; a build without it ignores
+	the block. Omit to talk to the origin directly.
 	Each read is counted under the `source` that served it, `dragonfly` for
 	the seed peers and `fallback` for the origin (see [Metrics](#metrics)).
 
@@ -1287,6 +1301,8 @@ Fields under `backend.config`:
 
 	- `scheduler_endpoint` (required): the Dragonfly scheduler service address
 		with the scheme, e.g. `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
+		It is parsed as a URL, so spellings of one address, such as with a
+		trailing `/` or an uppercase host, share one seed peer cache file.
 	- `request_timeout` (default `5s`): the timeout of each attempt of a
 		request through the seed peers, one chunk group per request.
 	- `max_retries` (default `1`, at most `3`): Dragonfly retries of an
@@ -1302,6 +1318,23 @@ Fields under `backend.config`:
 		direct path of a plain registry and the auth token fetches never are.
 		On-demand group singleflight already dedupes concurrent readers per
 		group, so the limiter queues at most one leader per cold group.
+
+	The seed peers are shared between the nydus processes on the host
+	through cache files in the `dragonfly` subdirectory of the top-level
+	`runtime_dir`. Whichever process finds a cache file expired lists the
+	seed peers from the scheduler and checks their health under the cache
+	file's lock, every 60s, retrying a failed listing after 10s, and the
+	others read them, so the scheduler and the seed peers see one listing
+	and one round of health checks per host instead of one per process. A
+	seed peer failing its health check stays on the consistent hash ring,
+	so a blob is still read from its replica seed peers only: from the
+	healthy one when the other fails, and when both do, an on-demand read
+	goes to the origin while a prefetch read fails. An on-demand read waits
+	for the first listing at most `request_timeout` before going to the
+	origin. nydus creates the subdirectory with `runtime_dir_mode` at
+	startup and fails to start when it cannot. A process that cannot open the
+	cache file, such as one running as another user, lists the seed peers on
+	its own.
 
 ## Metrics
 

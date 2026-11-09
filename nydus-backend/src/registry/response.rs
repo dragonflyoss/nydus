@@ -10,8 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use super::range::{ContentRange, Range};
 use crate::Source;
 
-/// A response from the origin registry or a Dragonfly seed peer: the status
-/// and headers up front, plus the body.
+/// A response from the origin or a Dragonfly seed peer.
 pub(crate) struct Response {
     /// The HTTP status.
     pub(crate) status: StatusCode,
@@ -31,61 +30,18 @@ pub(crate) enum Body {
     /// A body still streaming from the origin.
     Stream(Box<dyn AsyncRead + Send + Unpin>),
 
-    /// A body already in memory: the one the Dragonfly SDK read whole, so a
-    /// seed peer failing mid-body was retried before the answer got here.
+    /// A body already in memory, read whole by the Dragonfly SDK.
     #[cfg(feature = "dragonfly")]
     Bytes(Bytes),
 }
 
 /// Implements the response.
 impl Response {
-    /// Validates that the answer to a `range` read carries exactly that range,
-    /// since the server may ignore the `Range` header or transfer a range
-    /// different from the requested one, which is described by the
-    /// `Content-Range` header, refer to RFC 9110 Section 15.3.7. Only a `206`
-    /// passes: a `200` is the whole blob.
+    /// Validates that a `206` carries exactly `range`, refer to RFC 9110
+    /// Section 15.3.7.
     ///
-    /// An origin's `206` without a `Content-Range` is taken as the range it
-    /// answers. A Dragonfly seed peer always names the range in its
-    /// `Content-Range`, and its body, buffered by the SDK, holds that range
-    /// alone.
+    /// An origin may omit `Content-Range`; a seed peer must send it.
     pub(crate) fn validate_range(&self, range: &Range) -> io::Result<()> {
-        if self.source == Source::Dragonfly {
-            if self.status != StatusCode::PARTIAL_CONTENT {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "expected 206 Partial Content for range {range}, got {}",
-                        self.status
-                    ),
-                ));
-            }
-
-            let content_range = self.content_range()?;
-            let expected = range.to_range(content_range.complete_length);
-            if content_range.range != expected {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Content-Range {content_range} mismatches requested range {range}"),
-                ));
-            }
-
-            #[cfg(feature = "dragonfly")]
-            if let Body::Bytes(bytes) = &self.body {
-                if bytes.len() as u64 != expected.end() - expected.start() + 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "body of {} bytes mismatches Content-Range {content_range}",
-                            bytes.len()
-                        ),
-                    ));
-                }
-            }
-
-            return Ok(());
-        }
-
         if self.status != StatusCode::PARTIAL_CONTENT {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -96,24 +52,36 @@ impl Response {
             ));
         }
 
-        if !self.headers.contains_key(CONTENT_RANGE) {
+        if self.source != Source::Dragonfly && !self.headers.contains_key(CONTENT_RANGE) {
             return Ok(());
         }
 
         let content_range = self.content_range()?;
-        if content_range.range != range.to_range(content_range.complete_length) {
+        let expected = range.satisfiable_range(content_range.complete_length);
+        if content_range.range != expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Content-Range {content_range} mismatches requested range {range}"),
             ));
         }
 
+        #[cfg(feature = "dragonfly")]
+        if let Body::Bytes(bytes) = &self.body {
+            if bytes.len() as u64 != expected.end() - expected.start() + 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "body of {} bytes mismatches Content-Range {content_range}",
+                        bytes.len()
+                    ),
+                ));
+            }
+        }
+
         Ok(())
     }
 
-    /// Reads exactly `length` bytes of the body, a shorter body being an
-    /// [`io::ErrorKind::UnexpectedEof`]. A body already in memory is handed
-    /// over without a copy.
+    /// Reads exactly `length` bytes of the body, without a copy when in memory.
     pub(crate) async fn bytes(self, length: usize) -> io::Result<Bytes> {
         let bytes = match self.body {
             #[cfg(feature = "dragonfly")]
@@ -174,20 +142,15 @@ impl Response {
             .parse()
     }
 
-    /// Consumes a response of a status the request did not expect into an
-    /// error naming the status, the body as the rest of the message.
-    ///
-    /// The status is the error, so a body that cannot be read only blanks
-    /// the message.
+    /// Converts an unexpected response into an error of its status and body.
     pub(crate) async fn into_io_error(self) -> io::Error {
         let status = self.status;
         let body = self.text().await.unwrap_or_default();
         io::Error::other(format!("unexpected status {status}: {body}"))
     }
 
-    /// Returns whether an on-demand read falls back to the origin: the seed
-    /// peers failed to serve it with a `429`, `5xx` or `408`. Every other
-    /// status is the registry's definitive answer.
+    /// Returns whether an on-demand read falls back to the origin, on a `429`,
+    /// `5xx` or `408`.
     #[cfg(feature = "dragonfly")]
     pub(crate) fn needs_fallback(&self) -> bool {
         self.status.is_server_error()
@@ -195,9 +158,8 @@ impl Response {
             || self.status == StatusCode::TOO_MANY_REQUESTS
     }
 
-    /// Returns whether a prefetch read is sent once more hours later: the
-    /// transport failed to serve it with a `429`, `5xx` or `408`. Every other
-    /// status is the registry's definitive answer.
+    /// Returns whether a prefetch read is sent once more, on a `429`, `5xx` or
+    /// `408`.
     pub(crate) fn needs_retry(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT
@@ -233,8 +195,7 @@ mod tests {
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
-                expected,
-                "{status} {source:?}"
+                expected
             );
         }
     }
@@ -264,8 +225,7 @@ mod tests {
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
-                expected,
-                "{source:?} {content_range:?}"
+                expected
             );
         }
     }
@@ -325,8 +285,8 @@ mod tests {
                 source: Source::Origin,
             };
             #[cfg(feature = "dragonfly")]
-            assert_eq!(response.needs_fallback(), expected, "{status}");
-            assert_eq!(response.needs_retry(), expected, "{status}");
+            assert_eq!(response.needs_fallback(), expected);
+            assert_eq!(response.needs_retry(), expected);
         }
     }
 

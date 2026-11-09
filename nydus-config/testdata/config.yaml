@@ -1,6 +1,9 @@
 # A full-featured nydus storage configuration exercising every field, loaded
 # verbatim by the `load_config_file_correctly` unit test.
 
+runtime_dir: /var/run/nydus
+runtime_dir_mode: 0o700
+
 backend:
   type: registry
   config:

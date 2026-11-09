@@ -46,7 +46,7 @@ fn build_nbd_core() -> (TempDir, Arc<NbdCore>, Vec<u8>) {
     let bootstrap = output.standalone_bootstrap.unwrap();
     let path = dir.path().join("image.boot");
     fs::write(&path, &bootstrap).unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}/cache\nprefetch:\n  scope: none\n",
         dir.path().display(),
         dir.path().display(),

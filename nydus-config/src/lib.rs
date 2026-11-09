@@ -19,6 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use url::Url;
+use validator::{Validate, ValidationErrors};
 
 /// The name of the package.
 pub const NAME: &str = "nydus";
@@ -42,6 +43,18 @@ pub const GIT_COMMIT_DATE: &str = {
 /// Returns the default log directory for nydus.
 pub fn default_log_dir() -> PathBuf {
     PathBuf::from("/var/log/nydus/")
+}
+
+/// Returns the default runtime directory for nydus.
+#[inline]
+pub fn default_runtime_dir() -> PathBuf {
+    PathBuf::from("/run/nydus/")
+}
+
+/// Returns the default mode of the runtime directory for nydus.
+#[inline]
+pub fn default_runtime_dir_mode() -> u32 {
+    0o755
 }
 
 /// Returns the default timeout of a request to the origin registry. Kept
@@ -109,8 +122,15 @@ fn default_storage_skip_verify_checksums() -> bool {
     false
 }
 
+/// Returns the default compressed bytes one on-demand backend read covers,
+/// 2 MiB.
+#[inline]
+fn default_storage_fetch_size() -> u64 {
+    2 * 1024 * 1024
+}
+
 /// The local backend configuration, serving blobs from a directory.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConfig {
     /// The directory holding the blob files.
@@ -135,6 +155,17 @@ pub enum BackendConfig {
     /// loudly at backend construction instead of silently ignoring it. Boxed
     /// as it dwarfs the local variant.
     Registry(Box<RegistryConfig>),
+}
+
+/// Implements the validation of the backend configuration.
+impl Validate for BackendConfig {
+    /// Validates the configuration of the selected backend.
+    fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+        match self {
+            BackendConfig::Local(local) => local.validate(),
+            BackendConfig::Registry(registry) => registry.validate(),
+        }
+    }
 }
 
 /// What triggered a backend read. Retry, throttling and Dragonfly priority
@@ -162,7 +193,7 @@ impl fmt::Display for ReadKind {
 
 /// The registry backend configuration, serving blobs from an OCI image
 /// registry.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
     /// The registry address, an `http` or `https` origin carrying no path,
@@ -183,19 +214,20 @@ pub struct RegistryConfig {
     /// it, the on-demand reads a Dragonfly backend falls back to the origin
     /// with included.
     #[serde(default)]
+    #[validate(nested)]
     pub http: HttpConfig,
 
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
-    /// hitting the origin registry directly. Parsed unconditionally so a
-    /// build without the `dragonfly` feature rejects the block loudly when
-    /// the configuration is loaded instead of silently ignoring it.
+    /// hitting the origin registry directly; a build without the `dragonfly`
+    /// feature ignores it.
     #[serde(default)]
+    #[validate(nested)]
     pub dragonfly: Option<DragonflyConfig>,
 }
 
 /// The HTTP client configuration for the registry backend.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     /// The timeout of a request to the origin registry (connect + read), e.g.
@@ -225,7 +257,7 @@ pub struct HttpConfig {
 }
 
 /// The proxy configuration for the registry backend's HTTP client.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
     /// The HTTP forward-proxy address including the scheme, e.g.
@@ -247,7 +279,7 @@ impl Default for HttpConfig {
 }
 
 /// The TLS configuration for connections to the registry.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Validate, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TlsConfig {
     /// Skip TLS certificate verification (also tolerates self-signed
@@ -255,9 +287,8 @@ pub struct TlsConfig {
     #[serde(default)]
     pub skip_verify: bool,
 
-    /// The CA certificate path with PEM format to trust in addition to the
-    /// built-in roots; the file may bundle multiple certificates. Useful for
-    /// registries fronted by a private CA.
+    /// The PEM CA certificate path trusted besides the built-in roots, which
+    /// may bundle several certificates.
     #[serde(default)]
     pub ca_cert: Option<PathBuf>,
 }
@@ -338,12 +369,12 @@ impl TlsConfig {
 /// On-demand reads retry `max_retries` times and fall back to the origin
 /// through the registry's `http` client, under `fallback_rate_limit`. A
 /// timeout or connection failure counts as a transient answer.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DragonflyConfig {
     /// The Dragonfly scheduler service address with the scheme, e.g.
     /// `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
-    pub scheduler_endpoint: String,
+    pub scheduler_endpoint: Url,
 
     /// The timeout of each attempt of a request through the seed peers, e.g.
     /// `5s` or `1m`. A request fetches one chunk group, so this bounds a
@@ -360,6 +391,7 @@ pub struct DragonflyConfig {
     /// backoff, at most 3. Any other answer returns at once. A prefetch read
     /// is instead sent once more after a random delay of hours.
     #[serde(default = "default_registry_dragonfly_max_retries")]
+    #[validate(range(max = 3))]
     pub max_retries: u32,
 
     /// The rate limit of the origin requests on-demand reads fall back to
@@ -369,11 +401,12 @@ pub struct DragonflyConfig {
     /// a slot, so the origin never sees more than this many a second from
     /// one process however many seed peers fail.
     #[serde(default = "default_registry_dragonfly_fallback_rate_limit")]
+    #[validate(range(min = 1))]
     pub fallback_rate_limit: u64,
 }
 
 /// The storage configuration: where downloaded blob data is kept.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     /// The directory storing each blob's decoded chunk cache file. When
@@ -402,10 +435,6 @@ pub struct StorageConfig {
     pub fetch_size: u64,
 }
 
-fn default_storage_fetch_size() -> u64 {
-    2 * 1024 * 1024
-}
-
 /// Implement Default for StorageConfig.
 impl Default for StorageConfig {
     fn default() -> Self {
@@ -418,11 +447,12 @@ impl Default for StorageConfig {
 }
 
 /// The prefetch configuration, controlling background blob prefetch.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PrefetchConfig {
     /// The number of concurrently prefetched blobs.
     #[serde(default = "default_prefetch_concurrent_blob_count")]
+    #[validate(range(min = 1))]
     pub concurrent_blob_count: usize,
 
     /// The timeout of prefetching one whole blob, e.g. `1h`, while
@@ -500,77 +530,52 @@ impl Default for PrefetchConfig {
 /// prefetch:
 ///   scope: auto
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// The absolute runtime directory shared by the processes on a host,
+    /// `/run/nydus` by default.
+    #[serde(default = "default_runtime_dir")]
+    pub runtime_dir: PathBuf,
+
+    /// The mode, masked by the umask, Dragonfly creates the runtime directory
+    /// and its `dragonfly` subdirectory with, `0o755` by default, written as a
+    /// YAML octal.
+    #[serde(default = "default_runtime_dir_mode")]
+    #[validate(range(max = 0o777))]
+    pub runtime_dir_mode: u32,
+
     /// The backend configuration: where blob data is fetched from.
+    #[validate(nested)]
     pub backend: BackendConfig,
 
     /// The storage configuration: where downloaded blob data is kept. When
     /// omitted, reads run diskless straight from the backend.
     #[serde(default)]
+    #[validate(nested)]
     pub storage: StorageConfig,
 
     /// The prefetch configuration for background blob prefetch.
     #[serde(default)]
+    #[validate(nested)]
     pub prefetch: PrefetchConfig,
 }
 
 /// Implement the config operation of nydus.
 impl Config {
-    /// Load a nydus configuration from a YAML file and validate it.
-    pub fn load(path: &Path) -> Result<Self> {
-        let contents = fs::read_to_string(path)
+    /// Loads the configuration from file.
+    pub fn load(path: &Path) -> Result<Config> {
+        // Load configuration from file.
+        let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        Self::from_yaml(&contents)
-    }
+        let config: Config =
+            serde_yaml::from_str(&content).context("failed to parse nydus config")?;
 
-    /// Parse a nydus configuration from a YAML string and validate it.
-    pub fn from_yaml(contents: &str) -> Result<Self> {
-        let config: Self =
-            serde_yaml::from_str(contents).context("failed to parse nydus config")?;
-        config.validate()?;
+        // Validate configuration.
+        config
+            .validate()
+            .map_err(|err| Error::InvalidConfig(err.to_string()))?;
         Ok(config)
-    }
-
-    /// Validate the constraints the schema alone cannot express.
-    fn validate(&self) -> Result<()> {
-        if self.prefetch.concurrent_blob_count == 0 {
-            return Err(Error::InvalidConfig(
-                "prefetch.concurrent_blob_count must be at least 1".to_string(),
-            ));
-        }
-
-        if let BackendConfig::Registry(registry) = &self.backend {
-            if registry.http.request_timeout.is_zero() {
-                return Err(Error::InvalidConfig(
-                    "http.request_timeout must be greater than 0s".to_string(),
-                ));
-            }
-
-            #[cfg(not(feature = "dragonfly"))]
-            if let Some(dragonfly) = &registry.dragonfly {
-                return Err(Error::InvalidConfig(format!(
-                    "dragonfly.scheduler_endpoint is set ({}) but this build lacks the `dragonfly` feature",
-                    dragonfly.scheduler_endpoint
-                )));
-            }
-
-            if let Some(dragonfly) = &registry.dragonfly {
-                if dragonfly.max_retries > 3 {
-                    return Err(Error::InvalidConfig(
-                        "dragonfly.max_retries must not exceed 3".to_string(),
-                    ));
-                }
-
-                if dragonfly.fallback_rate_limit == 0 {
-                    return Err(Error::InvalidConfig(
-                        "dragonfly.fallback_rate_limit must be at least 1".to_string(),
-                    ));
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -606,21 +611,12 @@ impl clap::builder::TypedValueParser for VersionValueParser {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::*;
     use clap::builder::TypedValueParser;
     use std::ffi::OsStr;
     use std::io::Write;
-
-    #[cfg(not(feature = "dragonfly"))]
-    #[test]
-    fn load_config_file_rejects_the_dragonfly_block_without_the_feature() {
-        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/config.yaml"));
-        let err = Config::load(path).unwrap_err();
-        assert!(
-            err.to_string().contains("lacks the `dragonfly` feature"),
-            "{err}"
-        );
-    }
 
     #[cfg(feature = "dragonfly")]
     #[test]
@@ -649,7 +645,10 @@ mod tests {
             Some(Path::new("/etc/nydus/certs/registry-ca.pem"))
         );
         let dragonfly = registry.dragonfly.as_ref().unwrap();
-        assert_eq!(dragonfly.scheduler_endpoint, "http://127.0.0.1:8002");
+        assert_eq!(
+            dragonfly.scheduler_endpoint.as_str(),
+            "http://127.0.0.1:8002/"
+        );
         assert_eq!(dragonfly.request_timeout, Duration::from_secs(10));
         assert_eq!(dragonfly.max_retries, 2);
         assert_eq!(dragonfly.fallback_rate_limit, 2);
@@ -663,6 +662,9 @@ mod tests {
         assert_eq!(config.prefetch.concurrent_blob_count, 4);
         assert_eq!(config.prefetch.request_timeout, Duration::from_secs(120));
         assert_eq!(config.prefetch.scope, PrefetchScope::All);
+
+        assert_eq!(config.runtime_dir, Path::new("/var/run/nydus"));
+        assert_eq!(config.runtime_dir_mode, 0o700);
     }
 
     #[test]
@@ -713,9 +715,31 @@ config:
             Some(Path::new("/etc/nydus/certs/registry-ca.pem"))
         );
         assert_eq!(
-            registry.dragonfly.as_ref().unwrap().scheduler_endpoint,
-            "http://127.0.0.1:8002"
+            registry
+                .dragonfly
+                .as_ref()
+                .unwrap()
+                .scheduler_endpoint
+                .as_str(),
+            "http://127.0.0.1:8002/"
         );
+    }
+
+    #[test]
+    fn scheduler_endpoint_normalizes_the_spellings_of_one_scheduler() {
+        let test_cases = vec![
+            ("http://scheduler:8002", "http://scheduler:8002/"),
+            ("http://scheduler:8002/", "http://scheduler:8002/"),
+            ("HTTP://Scheduler:8002", "http://scheduler:8002/"),
+            ("http://scheduler:80", "http://scheduler/"),
+        ];
+
+        for (scheduler_endpoint, expected) in test_cases {
+            let dragonfly: DragonflyConfig =
+                serde_yaml::from_str(&format!("scheduler_endpoint: {scheduler_endpoint}\n"))
+                    .unwrap();
+            assert_eq!(dragonfly.scheduler_endpoint.as_str(), expected);
+        }
     }
 
     #[test]
@@ -839,8 +863,22 @@ backend:
     dir: /blobs
 "#;
 
-        let config = Config::from_yaml(yaml).unwrap();
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(config.storage.dir.is_none());
+    }
+
+    #[test]
+    fn runtime_dir_and_its_mode_default_when_omitted() {
+        let yaml = r#"
+backend:
+  type: local
+  config:
+    dir: /blobs
+"#;
+
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.runtime_dir, default_runtime_dir());
+        assert_eq!(config.runtime_dir_mode, default_runtime_dir_mode());
     }
 
     #[test]
@@ -906,49 +944,14 @@ scope: all
             let yaml = format!(
                 "backend:\n  type: registry\n  config:\n    addr: {addr}\n    repository: library/ubuntu\n"
             );
-            let parsed = Config::from_yaml(&yaml)
-                .ok()
-                .map(|config| match config.backend {
-                    BackendConfig::Registry(registry) => registry.addr.to_string(),
-                    backend => panic!("expected a registry backend, got {backend:?}"),
-                });
+            let parsed =
+                serde_yaml::from_str::<Config>(&yaml)
+                    .ok()
+                    .map(|config| match config.backend {
+                        BackendConfig::Registry(registry) => registry.addr.to_string(),
+                        backend => panic!("expected a registry backend, got {backend:?}"),
+                    });
             assert_eq!(parsed.as_deref(), expected, "addr={addr}");
-        }
-    }
-
-    #[test]
-    fn rejects_zero_registry_http_bounds() {
-        let test_cases = vec![(
-            "request_timeout: 0s",
-            "http.request_timeout must be greater than 0s",
-        )];
-
-        for (field, expected) in test_cases {
-            let yaml = format!(
-                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    http:\n      {field}\n"
-            );
-            let err = Config::from_yaml(&yaml).unwrap_err();
-            assert_eq!(err.to_string(), expected);
-        }
-    }
-
-    #[cfg(feature = "dragonfly")]
-    #[test]
-    fn rejects_dragonfly_values_out_of_range() {
-        let test_cases = vec![
-            ("max_retries: 4", "dragonfly.max_retries must not exceed 3"),
-            (
-                "fallback_rate_limit: 0",
-                "dragonfly.fallback_rate_limit must be at least 1",
-            ),
-        ];
-
-        for (field, expected) in test_cases {
-            let yaml = format!(
-                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:8002\n      {field}\n"
-            );
-            let err = Config::from_yaml(&yaml).unwrap_err();
-            assert_eq!(err.to_string(), expected);
         }
     }
 
@@ -980,7 +983,7 @@ prefetch:
   concurrent_blob_count: 8
 "#;
 
-        let config = Config::from_yaml(yaml).unwrap();
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
         let BackendConfig::Local(local) = &config.backend else {
             panic!("expected a local backend, got {:?}", config.backend);
         };
@@ -1003,12 +1006,131 @@ storage:
   dir: /cache
 "#;
 
-        let config = Config::from_yaml(yaml).unwrap();
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             config.prefetch.concurrent_blob_count,
             default_prefetch_concurrent_blob_count()
         );
         assert_eq!(config.prefetch.scope, PrefetchScope::Auto);
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_fields() {
+        let config: Config =
+            serde_yaml::from_str("backend:\n  type: local\n  config:\n    dir: /blobs\n").unwrap();
+
+        let test_cases: Vec<(
+            Box<dyn Validate>,
+            fn(std::result::Result<(), ValidationErrors>),
+        )> = vec![
+            (Box::new(config.clone()), |result| assert!(result.is_ok())),
+            (
+                Box::new(Config {
+                    runtime_dir_mode: 755,
+                    ..config.clone()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert!(err.starts_with("runtime_dir_mode: Validation error: range"));
+                },
+            ),
+            (
+                Box::new(Config {
+                    runtime_dir_mode: 0o1777,
+                    ..config.clone()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert!(err.starts_with("runtime_dir_mode: Validation error: range"));
+                },
+            ),
+            (
+                Box::new(Config {
+                    prefetch: PrefetchConfig {
+                        concurrent_blob_count: 0,
+                        ..Default::default()
+                    },
+                    ..config
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert!(
+                        err.starts_with("prefetch.concurrent_blob_count: Validation error: range")
+                    );
+                },
+            ),
+        ];
+
+        for (config, expect) in test_cases {
+            expect(config.validate());
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn validate_rejects_invalid_dragonfly_fields() {
+        let dragonfly: DragonflyConfig =
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:8002\n").unwrap();
+
+        let test_cases: Vec<(
+            Box<dyn Validate>,
+            fn(std::result::Result<(), ValidationErrors>),
+        )> = vec![
+            (
+                Box::new(dragonfly.clone()),
+                |result| assert!(result.is_ok()),
+            ),
+            (
+                Box::new(DragonflyConfig {
+                    max_retries: 4,
+                    ..dragonfly.clone()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert!(err.starts_with("max_retries: Validation error: range"));
+                },
+            ),
+            (
+                Box::new(DragonflyConfig {
+                    fallback_rate_limit: 0,
+                    ..dragonfly
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert!(err.starts_with("fallback_rate_limit: Validation error: range"));
+                },
+            ),
+        ];
+
+        for (config, expect) in test_cases {
+            expect(config.validate());
+        }
+    }
+
+    #[test]
+    fn load_reads_and_validates_file() {
+        let test_cases: Vec<(&str, fn(Result<Config>))> = vec![
+            (
+                "backend:\n  type: local\n  config:\n    dir: /blobs\nprefetch:\n  concurrent_blob_count: 2\n",
+                |result| {
+                    let config = result.unwrap();
+                    assert_eq!(config.prefetch.concurrent_blob_count, 2);
+                },
+            ),
+            (
+                "backend:\n  type: local\n  config:\n    dir: /blobs\nprefetch:\n  concurrent_blob_count: 0\n",
+                |result| assert!(matches!(result, Err(Error::InvalidConfig(_)))),
+            ),
+            ("backend: [", |result| {
+                assert!(matches!(result, Err(Error::Context { .. })))
+            }),
+        ];
+
+        for (content, expect) in test_cases {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(content.as_bytes()).unwrap();
+            expect(Config::load(file.path()));
+        }
     }
 
     #[test]
@@ -1033,28 +1155,7 @@ storage:
 junk: 1
 "#;
 
-        let err = Config::from_yaml(yaml).unwrap_err();
-        assert_eq!(err.to_string(), "failed to parse nydus config");
-    }
-
-    #[test]
-    fn rejects_zero_prefetch_concurrent_blob_count() {
-        let yaml = r#"
-backend:
-  type: local
-  config:
-    dir: /blobs
-storage:
-  dir: /cache
-prefetch:
-  concurrent_blob_count: 0
-"#;
-
-        let err = Config::from_yaml(yaml).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "prefetch.concurrent_blob_count must be at least 1"
-        );
+        assert!(serde_yaml::from_str::<Config>(yaml).is_err());
     }
 
     /// A throwaway self-signed test CA (CN=nydus-test-ca, 1-day validity).

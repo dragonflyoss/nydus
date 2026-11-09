@@ -221,7 +221,7 @@ fn build_test_image_full(
     let bootstrap = root.join("bootstrap");
     fs::write(&bootstrap, &bootstrap_bytes).unwrap();
 
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         blob_dir.display(),
         root.join("cache").display(),
@@ -475,7 +475,7 @@ fn flat_ranges_leave_unrelated_blobs_unopened() {
     .unwrap();
     let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
     let infos = reader.blob_infos().unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         store.display(),
         dir.path().join("cache").display(),
@@ -524,7 +524,7 @@ fn core_maps_local_native_layers_without_a_cache() {
             .unwrap(),
     )
     .unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nprefetch:\n  scope: none\n",
         store.display(),
     ))
@@ -795,7 +795,7 @@ fn build_sparse_core(dir: &Path) -> (NydusCore, Vec<u8>) {
     let data: Vec<_> = (0..block).map(|i| (i % 251) as u8).collect();
     writer.write_at(Path::new("sparse"), block, &data).unwrap();
     writer.commit().unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         dir.display(),
         dir.join("cache").display(),
@@ -946,7 +946,7 @@ fn build_special_file_cores(dir: &Path) -> (NydusCore, NydusCore) {
         true,
     )
     .unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         dir.display(),
         dir.join("cache").display(),

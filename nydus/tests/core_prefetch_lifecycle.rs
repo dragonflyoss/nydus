@@ -164,7 +164,7 @@ fn drop_during_a_prefetch_retry_releases_the_image_without_starting_another_blob
             fs::read(output.join(&upper_blob_id)).unwrap(),
             retry_succeeds,
         );
-        let config = Config::from_yaml(&format!(
+        let config = serde_yaml::from_str::<Config>(&format!(
             "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: test/image\n    http:\n      request_timeout: 2s\n      max_retries: 0\nstorage:\n  dir: {}\nprefetch:\n  scope: all\n  concurrent_blob_count: 1\n  retry_interval: 50ms\n  request_timeout: 2s\n",
             origin.addr,
             image.dir.path().join("cache").display(),

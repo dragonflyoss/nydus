@@ -89,7 +89,7 @@ fn incremental_writer_options_match_build_defaults() {
 }
 
 fn local_config(blob_dir: &Path, cache_dir: &Path) -> Config {
-    Config::from_yaml(&format!(
+    serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         blob_dir.display(),
         cache_dir.display(),
@@ -658,15 +658,25 @@ fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
         (
             blob.file_name().unwrap(),
             libc::EISDIR,
-            "failed to rename blob",
+            Some("failed to rename blob"),
             vec![],
         ),
-        (sidecar.file_name().unwrap(), libc::EISDIR, "", vec![&blob]),
-        (sidecar.file_name().unwrap(), libc::ENOSPC, "", vec![&blob]),
+        (
+            sidecar.file_name().unwrap(),
+            libc::EISDIR,
+            None,
+            vec![&blob],
+        ),
+        (
+            sidecar.file_name().unwrap(),
+            libc::ENOSPC,
+            None,
+            vec![&blob],
+        ),
         (
             OsStr::new("image.boot"),
             libc::EISDIR,
-            "failed to publish bootstrap",
+            Some("failed to publish bootstrap"),
             vec![&blob, &sidecar],
         ),
     ];
@@ -682,7 +692,9 @@ fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
 
         let err = stage(output.path()).commit().unwrap_err();
 
-        assert!(err.to_string().contains(context), "{err}");
+        if let Some(context) = context {
+            assert!(err.to_string().contains(context), "{err}");
+        }
         assert_eq!(err.io_error().unwrap().raw_os_error(), Some(errno), "{err}");
         assert_no_temporary_blob(output.path());
         assert!(!output.path().join("image.boot").is_file(), "{err}");

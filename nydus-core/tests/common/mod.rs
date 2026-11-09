@@ -99,7 +99,7 @@ impl Image {
 
     pub fn core(&self, cache_dir: &Path, storage: &[&str]) -> NydusCore {
         let storage: String = storage.iter().map(|line| format!("  {line}\n")).collect();
-        let config = Config::from_yaml(&format!(
+        let config = serde_yaml::from_str::<Config>(&format!(
             "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\n{storage}prefetch:\n  scope: none\n",
             self.blob_dir.display(),
             cache_dir.display(),

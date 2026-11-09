@@ -17,8 +17,7 @@ use super::Transport;
 /// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
-/// The margin before its expiry within which a token counts as expired, so a
-/// request in flight never arrives with one that has just lapsed.
+/// The margin before expiry within which a token counts as expired.
 const TOKEN_EXPIRY_LEEWAY: Duration = Duration::from_secs(20);
 
 /// The challenge a registry sends in `WWW-Authenticate`.
@@ -45,12 +44,7 @@ pub(crate) enum Challenge {
 impl FromStr for Challenge {
     type Err = io::Error;
 
-    /// Parses the challenge list in `value` and picks the one to answer: a
-    /// `Bearer` when there is one, since a token server also serves anonymous
-    /// pulls, otherwise a `Basic`.
-    ///
-    /// Rejects a malformed list, one with neither scheme, and a `Bearer`
-    /// without a realm.
+    /// Parses the challenges in `value`, preferring `Bearer` over `Basic`.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut has_basic = false;
         for challenge in ChallengeParser::new(value) {
@@ -108,8 +102,7 @@ enum Authorization {
     /// The configured basic credentials, which never expire.
     Basic(HeaderValue),
 
-    /// A bearer token from the token server, when it was fetched and how long
-    /// it lives.
+    /// A bearer token from the token server.
     Bearer {
         /// The `Bearer ...` header value.
         value: HeaderValue,
@@ -143,10 +136,6 @@ impl Authorization {
     }
 
     /// Parses `value` into a sensitive header value.
-    ///
-    /// Tokens come from the token server and basic credentials from the
-    /// config, so bytes a header cannot carry surface as an auth error
-    /// instead of a panic.
     fn header_value(value: &str) -> io::Result<HeaderValue> {
         let mut value: HeaderValue = value.parse().map_err(|_| {
             io::Error::other(
@@ -165,9 +154,8 @@ impl Authorization {
         }
     }
 
-    /// Returns whether the authorization is still good to send: basic
-    /// credentials always, a bearer token until it is within the leeway of
-    /// expiring.
+    /// Returns whether the authorization is still valid, a bearer token until
+    /// the leeway before it expires.
     fn is_valid(&self) -> bool {
         match self {
             Self::Basic(_) => true,
@@ -236,11 +224,8 @@ pub(crate) struct Authorizer {
 
 /// Implements the registry authorizer.
 impl Authorizer {
-    /// Creates an authorizer for a registry whose config carries `basic`, its
-    /// `base64(user:pass)`.
-    ///
-    /// The credentials are validated here so a bad value fails when the
-    /// backend is built rather than on the first read.
+    /// Creates an authorizer with the `base64(user:pass)` credentials `basic`,
+    /// validated here.
     pub(crate) fn new(basic: Option<&str>) -> io::Result<Self> {
         Ok(Self {
             basic: basic.map(Authorization::basic).transpose()?,
@@ -264,9 +249,8 @@ impl Authorizer {
         }
     }
 
-    /// Forgets the kept answer when it is `stale`, the one a request was just
-    /// refused with, so the next handshake fetches a new one. An answer another
-    /// handshake has replaced it with since is kept.
+    /// Forgets the kept answer when it is still `stale`, the one a request was
+    /// refused with.
     pub(crate) fn invalidate(&self, stale: &HeaderValue) {
         let mut authorization = self.authorization.write().unwrap();
         if authorization
@@ -277,12 +261,8 @@ impl Authorizer {
         }
     }
 
-    /// Answers `challenge` and keeps the answer for the requests that follow:
-    /// the configured basic credentials, or a bearer token fetched from the
-    /// realm through `http`.
-    ///
-    /// One handshake runs at a time; one that finds a valid answer already
-    /// kept, left by the handshake it waited for, reuses it.
+    /// Answers `challenge` with the basic credentials or a bearer token fetched
+    /// through `http`, one handshake at a time.
     pub(crate) async fn authenticate(&self, http: &Http, challenge: Challenge) -> io::Result<()> {
         let _handshake = self.handshake.lock().await;
         if self
@@ -310,11 +290,8 @@ impl Authorizer {
         Ok(())
     }
 
-    /// Fetches a bearer token from the realm, with the basic credentials when
-    /// the config has them.
-    ///
-    /// The request goes straight to the token server through `http`, never
-    /// through Dragonfly.
+    /// Fetches a bearer token from `realm` through `http`, never Dragonfly,
+    /// with the basic credentials when configured.
     async fn fetch_token(
         &self,
         http: &Http,

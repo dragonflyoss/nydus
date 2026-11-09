@@ -13,18 +13,13 @@
 
 use std::fmt::Debug;
 
-/// Classifies the outcome of a test pinned to known issue `id`, such as
-/// `"KI-5"`.
-///
-/// `correct` says whether `observed` is the behavior the issue expects,
-/// `reproduces` whether it is the documented bug. Under CI only correct,
-/// unambiguous behavior passes; otherwise only the reproduced bug passes.
+/// Classifies the outcome of a test pinned to known issue `id`, e.g. `"KI-5"`:
+/// under CI only the correct behavior passes, elsewhere only the bug.
 ///
 /// # Panics
 ///
-/// Under CI, when the outcome is not correct or also reproduces the bug.
-/// Otherwise, when the issue is fixed (`correct`), when the outcome is
-/// neither, or when the two classifiers overlap.
+/// When the outcome is not the one accepted, or `correct` and `reproduces`
+/// both hold.
 #[track_caller]
 pub fn assert_known_issue(id: &str, observed: impl Debug, correct: bool, reproduces: bool) {
     classify(
@@ -36,8 +31,7 @@ pub fn assert_known_issue(id: &str, observed: impl Debug, correct: bool, reprodu
     );
 }
 
-/// Classifies the outcome as [`assert_known_issue`] does, `strict` being
-/// whether it runs under CI.
+/// Classifies the outcome as [`assert_known_issue`] does, strictly under CI.
 #[track_caller]
 fn classify(id: &str, observed: impl Debug, correct: bool, reproduces: bool, strict: bool) {
     if strict {

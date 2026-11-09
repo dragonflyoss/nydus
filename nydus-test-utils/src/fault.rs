@@ -40,17 +40,14 @@ pub enum Fault {
     /// express.
     ErrorWith(ErrorFn),
 
-    /// Serves only the first `len` bytes of the read, zeroes the rest of the
-    /// buffer and reports success, as a backend that lost the tail of a
-    /// response. Matches only reads longer than `len`.
+    /// Serves only the first `len` bytes and zeroes the rest, matching reads
+    /// longer than `len`.
     ShortRead {
         /// The number of bytes served.
         len: usize,
     },
 
-    /// Flips bit `bit` of the byte at data region offset `offset` and reports
-    /// success, as a backend that served corrupted bytes. Matches only reads
-    /// covering `offset`.
+    /// Flips bit `bit` of the byte at `offset`, matching reads covering it.
     FlipBit {
         /// The data region offset of the byte to corrupt.
         offset: u64,
@@ -65,8 +62,7 @@ pub enum Fault {
 
 /// Implements the fault.
 impl Fault {
-    /// Fails with the error of an error fault or sleeps out a delay fault,
-    /// the part of a fault that applies before the call is served.
+    /// Applies the error or delay of the fault before the call is served.
     fn fail_or_delay(&self) -> io::Result<()> {
         match self {
             Fault::Error(kind) => Err(io::Error::new(*kind, "injected backend fault")),
@@ -107,10 +103,7 @@ enum Target {
     Metadata,
 }
 
-/// A fault and the calls it applies to.
-///
-/// A new rule matches every call of its target, without limit; the builder
-/// methods narrow it, and all the conditions given must hold.
+/// A fault and the calls it applies to, narrowed by the builder methods.
 #[derive(Clone, Debug)]
 pub struct FaultRule {
     /// The fault a matching call suffers.
@@ -143,9 +136,8 @@ impl FaultRule {
         Self::new(fault, Target::Read)
     }
 
-    /// Creates a rule for blob meta lookups ([`Backend::read_blob_metadata`]
-    /// and [`Backend::prefetch_blob_metadata`]). Only the error faults and
-    /// [`Fault::Delay`] apply to them.
+    /// Creates a rule for blob meta lookups, which suffer only error and delay
+    /// faults.
     pub fn metadata(fault: Fault) -> Self {
         Self::new(fault, Target::Metadata)
     }
@@ -207,8 +199,7 @@ impl FaultRule {
             return false;
         }
 
-        // Match a blob meta lookup, which has no range, kind or data, only
-        // without read conditions and with a fault it can suffer.
+        // Match a blob meta lookup only without read conditions.
         let Some((offset, len, kind)) = call.read else {
             return self.range.is_none()
                 && self.kind.is_none()
@@ -244,8 +235,7 @@ struct Call {
     /// The blob the call is for.
     blob_id: BlobId,
 
-    /// The `(offset, len, kind)` of a data read, unset for a blob meta
-    /// lookup.
+    /// The `(offset, len, kind)` of a data read, unset for a meta lookup.
     read: Option<(u64, usize, ReadKind)>,
 }
 
@@ -331,8 +321,7 @@ impl FaultBackend {
         }
     }
 
-    /// Creates a backend serving only the blobs added with
-    /// [`Self::with_blob`].
+    /// Creates a backend serving only blobs added with [`Self::with_blob`].
     pub fn in_memory() -> Self {
         Self {
             source: Source::Memory(HashMap::new()),
@@ -376,24 +365,22 @@ impl FaultBackend {
         self.state().rules.clear();
     }
 
-    /// Returns the number of data reads served so far, faulted ones included.
+    /// Returns the number of data reads, faulted ones included.
     pub fn read_calls(&self) -> usize {
         self.state().reads.len()
     }
 
-    /// Returns the number of blob meta lookups served so far, faulted ones
-    /// included.
+    /// Returns the number of blob meta lookups, faulted ones included.
     pub fn metadata_calls(&self) -> usize {
         self.state().metadata_calls
     }
 
-    /// Returns every data read so far, in call order.
+    /// Returns every data read in call order.
     pub fn reads(&self) -> Vec<ReadCall> {
         self.state().reads.clone()
     }
 
-    /// Returns the number of data reads so far that overlapped `range` of the
-    /// data region.
+    /// Returns the number of data reads overlapping `range`.
     pub fn reads_overlapping(&self, range: Range<u64>) -> usize {
         self.state()
             .reads
@@ -442,8 +429,7 @@ impl FaultBackend {
         fault
     }
 
-    /// Fills `buf` from the data region for a read of `kind`, after the fault
-    /// of the first matching rule.
+    /// Fills `buf` for a read of `kind`, faults applied.
     fn read(
         &self,
         blob_id: &BlobId,
@@ -508,8 +494,7 @@ impl Backend for FaultBackend {
         &self.metrics
     }
 
-    /// Returns the wrapped backend's full blob digest, `blob_id` itself in
-    /// memory.
+    /// Returns the full blob digest, `blob_id` itself in memory.
     fn full_blob_id(&self, blob_id: &BlobId) -> io::Result<BlobId> {
         match &self.source {
             Source::Wrapped(inner) => inner.full_blob_id(blob_id),
@@ -517,8 +502,7 @@ impl Backend for FaultBackend {
         }
     }
 
-    /// Reads the blob's metadata for an on-demand read, after the fault of the
-    /// first matching rule.
+    /// Reads the blob's metadata for an on-demand read, faults applied.
     fn read_blob_metadata(&self, blob_id: &BlobId) -> io::Result<BlobMetadata> {
         if let Some(fault) = self.admit(Call {
             target: Target::Metadata,
@@ -537,8 +521,7 @@ impl Backend for FaultBackend {
         }
     }
 
-    /// Reads the blob's metadata for a prefetch read, after the fault of the
-    /// first matching rule.
+    /// Reads the blob's metadata for a prefetch read, faults applied.
     fn prefetch_blob_metadata(&self, blob_id: &BlobId) -> io::Result<BlobMetadata> {
         if let Some(fault) = self.admit(Call {
             target: Target::Metadata,
@@ -557,8 +540,7 @@ impl Backend for FaultBackend {
         }
     }
 
-    /// Returns whether the wrapped backend's blob is a raw device, never in
-    /// memory.
+    /// Returns whether the blob is a raw device, never in memory.
     fn is_raw_device(&self, blob_id: &BlobId) -> io::Result<bool> {
         match &self.source {
             Source::Wrapped(inner) => inner.is_raw_device(blob_id),
@@ -574,14 +556,12 @@ impl Backend for FaultBackend {
         }
     }
 
-    /// Fills `buf` from the data region for an on-demand read, after the
-    /// fault of the first matching rule.
+    /// Fills `buf` for an on-demand read, faults applied.
     fn read_range_into(&self, blob_id: &BlobId, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.read(blob_id, offset, buf, ReadKind::Ondemand)
     }
 
-    /// Fills `buf` from the data region for a prefetch read, after the fault
-    /// of the first matching rule.
+    /// Fills `buf` for a prefetch read, faults applied.
     fn prefetch_range_into(&self, blob_id: &BlobId, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.read(blob_id, offset, buf, ReadKind::Prefetch)
     }
@@ -653,25 +633,21 @@ mod tests {
             FaultRule::read(Fault::Error(io::ErrorKind::TimedOut)).on_kind(ReadKind::Prefetch),
         );
         backend.inject(FaultRule::read(Fault::ShortRead { len: 3 }).on_call(4));
-        let test_cases: Vec<(
-            fn(&FaultBackend, u64, usize) -> io::Result<Vec<u8>>,
-            u64,
-            usize,
-            Result<Vec<u8>, io::ErrorKind>,
-        )> = vec![
-            (read, 0, 1000, Ok(blob_data(0, 1000))),
-            (read, 0, 1001, Err(io::ErrorKind::ConnectionReset)),
-            (read, 0, 1001, Ok(blob_data(0, 1001))),
-            (prefetch, 0, 10, Err(io::ErrorKind::TimedOut)),
-            (read, 10, 8, Ok([blob_data(10, 3), vec![0; 5]].concat())),
-        ];
 
-        for (read_fn, offset, len, expected) in test_cases {
-            assert_eq!(
-                read_fn(&backend, offset, len).map_err(|err| err.kind()),
-                expected
-            );
-        }
+        assert_eq!(read(&backend, 0, 1000).unwrap(), blob_data(0, 1000));
+        assert_eq!(
+            read(&backend, 0, 1001).unwrap_err().kind(),
+            io::ErrorKind::ConnectionReset
+        );
+        assert_eq!(read(&backend, 0, 1001).unwrap(), blob_data(0, 1001));
+        assert_eq!(
+            prefetch(&backend, 0, 10).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            read(&backend, 10, 8).unwrap(),
+            [blob_data(10, 3), vec![0; 5]].concat()
+        );
 
         let faulted: Vec<bool> = backend.reads().iter().map(|read| read.faulted).collect();
         assert_eq!(faulted, [false, true, false, true, true]);

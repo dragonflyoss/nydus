@@ -20,7 +20,7 @@ use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
 use url::Url;
 
-use nydus_config::{PrefetchConfig, RegistryConfig};
+use nydus_config::{BackendConfig, Config};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
@@ -36,41 +36,30 @@ use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
 
-/// The transport a blob `GET` rides on: the origin registry over HTTP, or the
-/// Dragonfly seed peers.
-///
-/// One call spends the transport's own retries and hands back a settled
-/// answer, a Dragonfly body already buffered so a mid-stream failure surfaces
-/// here rather than while the caller consumes it.
+/// The transport of blob `GET`s, the origin or the Dragonfly seed peers, each
+/// call returning after the transport's own retries.
 #[async_trait]
 trait Transport: Send + Sync {
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 
-    /// Sends the `GET` of a background prefetch read, once more after the
-    /// configured prefetch retry interval when it answered `429`, `5xx` or
-    /// `408`; a transport failure fails the read at once.
+    /// Sends the `GET` of a prefetch read, once more after the retry interval
+    /// on a `429`, `5xx` or `408`.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
 }
 
-/// A blob backend over an OCI registry: the synchronous [`Backend`] face of
-/// a [`Client`], which does the asynchronous work on the runtime.
-///
-/// Every read runs as a task on the runtime and the calling thread waits on
-/// its join handle, so the body flows into the read inside the worker pool,
-/// the connection is opened in the runtime's network namespace, and the
-/// caller is woken once, when the bytes are ready to copy out.
+/// The blob backend over an OCI registry, running the reads of [`Client`] on
+/// [`Runtime`] while the caller waits.
 ///
 /// ```text
 /// Registry
-///   ├─ Runtime            the tokio runtime of every read
-///   ├─ Metrics            the metrics of the image, every read recorded
+///   ├─ Runtime              the tokio runtime of every read
+///   ├─ Metrics              the metrics of the image
 ///   └─ Client
-///        ├─ Authorizer    the challenge and the token that answers it
-///        ├─ RedirectCache the signed URLs blob GETs were redirected to
-///        ├─ Http          the origin: token fetches, and blob GETs without Dragonfly
-///        └─ Dragonfly     the seed peers for blob GETs when configured, with a
-///                         rate-limited Http of its own back to the origin
+///        ├─ Authorizer      the challenge and the token that answers it
+///        ├─ RedirectCache   the signed URLs blob GETs were redirected to
+///        ├─ Http            the origin, token fetches included
+///        └─ Dragonfly       the seed peers, with a rate-limited Http back to the origin
 /// ```
 pub(crate) struct Registry {
     /// The registry client, shared with the task of each read.
@@ -83,12 +72,10 @@ pub(crate) struct Registry {
     metrics: Arc<Metrics>,
 }
 
-/// The client of one repository on one registry, behind an [`Arc`] so a read
-/// can run on the runtime while its caller waits.
+/// The client of one repository on one registry.
 ///
-/// The life of a blob's reads against a registry with bearer auth that
-/// redirects blob `GET`s to a CDN, every `GET` riding Dragonfly when it is
-/// configured and the origin otherwise, the token fetch the origin always:
+/// The reads of a blob from a registry with bearer auth that redirects blob
+/// `GET`s to a CDN:
 ///
 /// ```text
 /// the first read, read_range(blob_id, range)
@@ -124,61 +111,58 @@ struct Client {
     /// The direct client to the origin.
     http: Http,
 
-    /// The Dragonfly transport when configured, always `None` without the
-    /// `dragonfly` feature since the config is rejected.
+    /// The Dragonfly transport when configured.
     dragonfly: Option<Box<dyn Transport>>,
 }
 
 /// Implements the registry backend construction.
 impl Registry {
-    /// Creates a registry backend from its configuration, recording into
-    /// `metrics` and running on a runtime of its own, every thread of it
-    /// entering `netns` when one is given, its prefetch reads retried after
-    /// the interval the `prefetch` section sets.
-    ///
-    /// Every origin request goes through the `http` section: the blob
-    /// `GET`s and auth token fetches of a plain registry, and the auth token
-    /// fetches and rate-limited fallback reads of a Dragonfly one.
+    /// Creates a registry backend from the `backend` section of `config`.
     pub(crate) fn new(
-        config: RegistryConfig,
-        prefetch: &PrefetchConfig,
+        config: &Config,
         netns: Option<Netns>,
         metrics: Arc<Metrics>,
     ) -> io::Result<Self> {
+        let BackendConfig::Registry(registry) = &config.backend else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "backend is not a registry",
+            ));
+        };
+
         let runtime = Arc::new(Runtime::new(netns)?);
         let http = Http::new(
-            config.http.request_timeout,
-            config.http.max_retries,
-            config.http.proxy.as_ref(),
-            &config.http.tls,
-            prefetch.retry_interval,
+            registry.http.request_timeout,
+            registry.http.max_retries,
+            registry.http.proxy.as_ref(),
+            &registry.http.tls,
+            config.prefetch.retry_interval,
             None,
-            if config.http.proxy.is_some() {
+            if registry.http.proxy.is_some() {
                 Source::Proxy
             } else {
                 Source::Origin
             },
         )?;
 
-        #[cfg(feature = "dragonfly")]
-        let dragonfly: Option<Box<dyn Transport>> = match config.dragonfly {
+        let dragonfly: Option<Box<dyn Transport>> = match &registry.dragonfly {
+            #[cfg(feature = "dragonfly")]
             Some(dragonfly) => Some(Box::new(Dragonfly::new(
-                dragonfly,
-                &config.http,
-                prefetch.retry_interval,
+                dragonfly.clone(),
+                &registry.http,
+                config.prefetch.retry_interval,
+                &config.runtime_dir,
+                config.runtime_dir_mode,
                 &runtime,
             )?)),
-            None => None,
+            _ => None,
         };
-
-        #[cfg(not(feature = "dragonfly"))]
-        let dragonfly: Option<Box<dyn Transport>> = None;
 
         Ok(Self {
             client: Arc::new(Client {
-                addr: config.addr,
-                repository: config.repository,
-                authorizer: Authorizer::new(config.auth.as_deref())?,
+                addr: registry.addr.clone(),
+                repository: registry.repository.clone(),
+                authorizer: Authorizer::new(registry.auth.as_deref())?,
                 redirects: RedirectCache::new(),
                 http,
                 dragonfly,
@@ -191,9 +175,8 @@ impl Registry {
 
 /// Implements the registry requests.
 impl Client {
-    /// Returns where reads are fetched from when nothing else is known, the
-    /// `source` label of a failed read: the seed peers when Dragonfly is
-    /// configured, otherwise wherever the HTTP client reaches.
+    /// Returns the `source` label of a failed read: Dragonfly when configured,
+    /// otherwise the origin client's.
     fn source(&self) -> Source {
         if self.dragonfly.is_some() {
             Source::Dragonfly
@@ -202,9 +185,7 @@ impl Client {
         }
     }
 
-    /// Returns the URL of the blob with hex digest `hex`, the distribution
-    /// API path appended to the registry address, a path of its own kept as
-    /// the prefix.
+    /// Returns the URL of blob `hex`, `<addr>/v2/<repository>/blobs/sha256:<hex>`.
     fn blob_url(&self, hex: &str) -> String {
         format!(
             "{}/v2/{}/blobs/sha256:{hex}",
@@ -213,8 +194,7 @@ impl Client {
         )
     }
 
-    /// Returns the transport a blob `GET` rides: Dragonfly when it is
-    /// configured, otherwise the origin.
+    /// Returns the transport of blob `GET`s, Dragonfly when configured.
     fn transport(&self) -> &dyn Transport {
         match &self.dragonfly {
             Some(dragonfly) => dragonfly.as_ref(),
@@ -222,8 +202,8 @@ impl Client {
         }
     }
 
-    /// Executes `request` with `headers` carrying the kept token, answering
-    /// a `401` with the auth handshake and executing it again.
+    /// Executes `request` with the kept token, answering a `401` with the auth
+    /// handshake.
     ///
     /// ```text
     /// request with the kept token, none when it expired
@@ -265,12 +245,8 @@ impl Client {
         request(headers).await
     }
 
-    /// Fetches the `range` of a blob for an on-demand read and returns the
-    /// response carrying exactly that range, its body still to be read.
-    ///
-    /// The read goes through the cached redirect when there is one, a `401`
-    /// or `403` evicting it, and otherwise through the blob URL, caching the
-    /// redirect it answers with.
+    /// Fetches the `range` of a blob for an on-demand read, through the cached
+    /// redirect when there is one.
     async fn read_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -287,7 +263,6 @@ impl Client {
                     response.validate_range(range)?;
                     return Ok(response);
                 }
-
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
@@ -302,7 +277,6 @@ impl Client {
             response.validate_range(range)?;
             return Ok(response);
         }
-
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
         }
@@ -318,12 +292,8 @@ impl Client {
         Ok(redirected)
     }
 
-    /// Fetches the `range` of a blob for a prefetch read and returns the
-    /// response carrying exactly that range, its body still to be read.
-    ///
-    /// The read goes through the cached redirect when there is one, a `401`
-    /// or `403` evicting it, and otherwise through the blob URL, caching the
-    /// redirect it answers with.
+    /// Fetches the `range` of a blob for a prefetch read, through the cached
+    /// redirect when there is one.
     async fn prefetch_range(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -369,9 +339,12 @@ impl Client {
         Ok(redirected)
     }
 
-    /// Recovers a blob's metadata for an on-demand read: a suffix range
-    /// fetches the footer, the blob's fixed-size tail, its `Content-Range`
-    /// telling the blob's size, and the footer points at the metadata region.
+    /// Reads a blob's metadata for an on-demand read.
+    ///
+    /// ```text
+    /// GET bytes=-<footer size> ──▶ footer, Content-Range: bytes .../<blob size>
+    /// GET bytes=<blob meta range in the footer> ──▶ blob meta
+    /// ```
     async fn read_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -406,9 +379,8 @@ impl Client {
         BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
     }
 
-    /// Recovers a blob's metadata for a prefetch read: a suffix range
-    /// fetches the footer, the blob's fixed-size tail, its `Content-Range`
-    /// telling the blob's size, and the footer points at the metadata region.
+    /// Reads a blob's metadata for a prefetch read, like
+    /// [`Client::read_blob_metadata`].
     async fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -451,7 +423,7 @@ impl Backend for Registry {
         &self.metrics
     }
 
-    /// Recovers the blob's metadata from the registry for an on-demand read.
+    /// Reads the blob's metadata for an on-demand read.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
@@ -459,7 +431,7 @@ impl Backend for Registry {
             .block_on_worker(async move { client.read_blob_metadata(&blob_id).await })
     }
 
-    /// Recovers the blob's metadata from the registry for a prefetch read.
+    /// Reads the blob's metadata for a prefetch read.
     fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -470,8 +442,7 @@ impl Backend for Registry {
             .block_on_worker(async move { client.prefetch_blob_metadata(&blob_id).await })
     }
 
-    /// Fills `buf` with the blob bytes from `offset` for an on-demand read,
-    /// recording the read's metrics.
+    /// Fills `buf` with the blob bytes from `offset` for an on-demand read.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -509,8 +480,7 @@ impl Backend for Registry {
         }
     }
 
-    /// Fills `buf` with the blob bytes from `offset` for a prefetch read,
-    /// recording the read's metrics.
+    /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
     fn prefetch_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -554,7 +524,7 @@ mod tests {
     use super::range::ContentRange;
     use super::response::Body;
     use super::*;
-    use nydus_config::HttpConfig;
+    use nydus_config::{HttpConfig, PrefetchConfig};
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
     use reqwest::header::{CONTENT_RANGE, LOCATION};
@@ -753,7 +723,12 @@ mod tests {
                 .lines()
                 .find_map(|line| line.strip_prefix("range: "))
                 .filter(|_| status.starts_with("206"))
-                .map(|value| value.parse::<Range>().unwrap().to_range(blob.len() as u64));
+                .map(|value| {
+                    value
+                        .parse::<Range>()
+                        .unwrap()
+                        .satisfiable_range(blob.len() as u64)
+                });
             let (content_range, body) = match range {
                 Some(range) => (
                     format!(
@@ -812,17 +787,11 @@ mod tests {
     }
 
     fn origin_registry(addr: SocketAddr, netns: Option<Netns>) -> Registry {
-        let config: RegistryConfig = serde_yaml::from_str(&format!(
-            "addr: http://{addr}\nrepository: library/ubuntu\n"
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n"
         ))
         .unwrap();
-        Registry::new(
-            config,
-            &PrefetchConfig::default(),
-            netns,
-            Arc::new(Metrics::new()),
-        )
-        .unwrap()
+        Registry::new(&config, netns, Arc::new(Metrics::new())).unwrap()
     }
 
     fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Source> {
@@ -864,8 +833,8 @@ mod tests {
             }
             .unwrap();
 
-            assert_eq!(blob_metadata.chunk_group_count(), 1, "kind={kind:?}");
-            assert_eq!(data, payload[17..33], "kind={kind:?}");
+            assert_eq!(blob_metadata.chunk_group_count(), 1);
+            assert_eq!(data, payload[17..33]);
         }
         assert_eq!(origin.hits(), 6);
     }
@@ -874,9 +843,11 @@ mod tests {
     #[test]
     #[ignore = "requires CAP_SYS_ADMIN, CAP_NET_ADMIN and iproute2 to create a netns"]
     fn reads_reach_the_origin_only_inside_the_configured_netns() {
-        let (netns, listener) = thread::spawn(|| {
-            // SAFETY: unshare only affects this scratch thread, which exits
-            // right after; the descriptor keeps the namespace.
+        let escaped = TcpListener::bind("127.0.0.1:0").unwrap();
+        escaped.set_nonblocking(true).unwrap();
+        let port = escaped.local_addr().unwrap().port();
+        let (netns, listener) = thread::spawn(move || {
+            // SAFETY: unshare only affects this short-lived thread.
             assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWNET) }, 0);
             assert!(std::process::Command::new("ip")
                 .args(["link", "set", "lo", "up"])
@@ -886,25 +857,25 @@ mod tests {
             let file = fs::File::open("/proc/thread-self/ns/net").unwrap();
             (
                 Netns::new(file.into()).unwrap(),
-                TcpListener::bind("127.0.0.1:0").unwrap(),
+                TcpListener::bind(("127.0.0.1", port)).unwrap(),
             )
         })
         .join()
         .unwrap();
         let origin = OriginStub::serve_on(listener, "206 Partial Content", b"abcd".to_vec());
-        let escaped = TcpListener::bind(origin.addr).unwrap();
-        escaped.set_nonblocking(true).unwrap();
         let registry = origin_registry(origin.addr, Some(netns));
 
-        let mut buf = [0u8; 4];
+        let mut ondemand = [0u8; 4];
+        let mut prefetch = [0u8; 4];
         registry
-            .read_range_into(&TEST_BLOB_ID, 0, &mut buf)
+            .read_range_into(&TEST_BLOB_ID, 0, &mut ondemand)
             .unwrap();
         registry
-            .prefetch_range_into(&TEST_BLOB_ID, 0, &mut buf)
+            .prefetch_range_into(&TEST_BLOB_ID, 0, &mut prefetch)
             .unwrap();
 
-        assert_eq!(&buf, b"abcd");
+        assert_eq!(&ondemand, b"abcd");
+        assert_eq!(&prefetch, b"abcd");
         assert_eq!(origin.hits(), 2);
         assert_eq!(
             escaped.accept().unwrap_err().kind(),
@@ -921,12 +892,8 @@ mod tests {
             let mut buf = vec![0u8; 4];
             let err = read(&registry, kind, &mut buf).unwrap_err();
 
-            assert_eq!(
-                err.kind(),
-                io::ErrorKind::InvalidData,
-                "kind={kind:?}: {err}"
-            );
-            assert_eq!(origin.hits(), 1, "kind={kind:?}");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(origin.hits(), 1);
         }
     }
 
@@ -941,13 +908,9 @@ mod tests {
             let mut buf = vec![0u8; 4];
             let err = read(&registry, kind, &mut buf).unwrap_err();
 
-            assert_eq!(
-                err.kind(),
-                io::ErrorKind::InvalidData,
-                "kind={kind:?}: {err}"
-            );
-            assert_eq!(transport.calls(), 1, "kind={kind:?}");
-            assert_eq!(origin.hits(), 0, "kind={kind:?}");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(transport.calls(), 1);
+            assert_eq!(origin.hits(), 0);
         }
     }
 
@@ -966,20 +929,13 @@ mod tests {
             let mut buf = vec![0u8; 4];
             let err = read(&registry, kind, &mut buf).unwrap_err();
 
-            assert_eq!(
-                err.kind(),
-                io::ErrorKind::InvalidData,
-                "kind={kind:?}: {err}"
-            );
-            assert_eq!(transport.calls(), 2, "kind={kind:?}");
-            assert!(
-                registry
-                    .client
-                    .redirects
-                    .get(&hex::encode(TEST_BLOB_ID))
-                    .is_none(),
-                "kind={kind:?}"
-            );
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(transport.calls(), 2);
+            assert!(registry
+                .client
+                .redirects
+                .get(&hex::encode(TEST_BLOB_ID))
+                .is_none());
         }
     }
 
@@ -998,35 +954,23 @@ mod tests {
             let mut buf = vec![0u8; 4];
             let err = read(&registry, kind, &mut buf).unwrap_err();
 
-            assert_eq!(
-                err.kind(),
-                io::ErrorKind::InvalidData,
-                "kind={kind:?}: {err}"
-            );
-            assert_eq!(transport.calls(), 1, "kind={kind:?}");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(transport.calls(), 1);
         }
     }
 
     #[cfg(feature = "dragonfly")]
     #[test]
     fn unreachable_scheduler_falls_back_to_the_origin_only_for_ondemand_reads() {
-        let scheduler = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        let runtime_dir = tempdir().unwrap();
         let origin = OriginStub::serve("206 Partial Content", b"abcd".to_vec());
-        let config: RegistryConfig = serde_yaml::from_str(&format!(
-            "addr: http://{}\nrepository: library/ubuntu\ndragonfly:\n  scheduler_endpoint: http://{scheduler}\n",
+        let config: Config = serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+            runtime_dir.path().display(),
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(
-            config,
-            &PrefetchConfig::default(),
-            None,
-            Arc::new(Metrics::new()),
-        )
-        .unwrap();
+        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let mut buf = [0u8; 4];
         let ondemand = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
@@ -1034,8 +978,32 @@ mod tests {
 
         assert_eq!(ondemand, Source::Fallback);
         assert_eq!(&buf, b"abcd");
-        assert!(prefetch.is_err());
+        assert_eq!(prefetch.unwrap_err().kind(), io::ErrorKind::NotConnected);
         assert_eq!(origin.hits(), 1);
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn ondemand_reads_fall_back_within_the_request_timeout_while_the_scheduler_hangs() {
+        let runtime_dir = tempdir().unwrap();
+        let scheduler = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = OriginStub::serve("206 Partial Content", b"abcd".to_vec());
+        let config: Config = serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://{}\n      request_timeout: 100ms\n",
+            runtime_dir.path().display(),
+            origin.addr,
+            scheduler.local_addr().unwrap()
+        ))
+        .unwrap();
+        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+        let start = Instant::now();
+        let mut buf = [0u8; 4];
+        let ondemand = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+
+        assert_eq!(ondemand, Source::Fallback);
+        assert_eq!(&buf, b"abcd");
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -1060,35 +1028,27 @@ mod tests {
         ];
 
         for (addr, expected) in test_cases {
-            let config: RegistryConfig =
-                serde_yaml::from_str(&format!("addr: {addr}\nrepository: library/ubuntu\n"))
-                    .unwrap();
-            let registry = Registry::new(
-                config,
-                &PrefetchConfig::default(),
-                None,
-                Arc::new(Metrics::new()),
-            )
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: {addr}\n    repository: library/ubuntu\n"
+            ))
             .unwrap();
-            assert_eq!(registry.client.blob_url("abc123"), expected, "addr={addr}");
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            assert_eq!(registry.client.blob_url("abc123"), expected);
         }
     }
 
     #[test]
     fn new_builds_from_config() {
         let yaml = "
-addr: https://registry.example.com
-repository: library/ubuntu
-auth: YWxpY2U6c2VjcmV0
+backend:
+  type: registry
+  config:
+    addr: https://registry.example.com
+    repository: library/ubuntu
+    auth: YWxpY2U6c2VjcmV0
 ";
-        let config: RegistryConfig = serde_yaml::from_str(yaml).unwrap();
-        let registry = Registry::new(
-            config,
-            &PrefetchConfig::default(),
-            None,
-            Arc::new(Metrics::new()),
-        )
-        .unwrap();
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
@@ -1113,12 +1073,9 @@ auth: YWxpY2U6c2VjcmV0
                 let mut buf = vec![0u8; 4];
                 let err = read(&registry, kind, &mut buf).unwrap_err();
 
-                assert!(
-                    err.to_string().contains(terminal.as_str()),
-                    "kind={kind:?} status={terminal}: {err}"
-                );
-                assert_eq!(transport.calls(), 1, "kind={kind:?} status={terminal}");
-                assert_eq!(origin.hits(), 0, "kind={kind:?} status={terminal}");
+                assert!(err.to_string().contains(terminal.as_str()));
+                assert_eq!(transport.calls(), 1);
+                assert_eq!(origin.hits(), 0);
             }
         }
     }
@@ -1126,24 +1083,35 @@ auth: YWxpY2U6c2VjcmV0
     #[test]
     fn origin_transient_failure_fails_an_ondemand_read_at_once() {
         let origin = OriginStub::serve("503 Service Unavailable", b"busy".to_vec());
-        let config: RegistryConfig = serde_yaml::from_str(&format!(
-            "addr: http://{}\nrepository: library/ubuntu\nhttp:\n  max_retries: 0\n",
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\n",
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(
-            config,
-            &PrefetchConfig::default(),
-            None,
-            Arc::new(Metrics::new()),
-        )
-        .unwrap();
+        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let mut buf = vec![0u8; 4];
         let err = read(&registry, ReadKind::Ondemand, &mut buf).unwrap_err();
 
-        assert!(err.to_string().contains("503"), "{err}");
+        assert!(err.to_string().contains("503"));
         assert_eq!(origin.hits(), 1);
+    }
+
+    #[test]
+    fn origin_transient_failure_retries_a_prefetch_read_once() {
+        let origin = OriginStub::serve("503 Service Unavailable", b"busy".to_vec());
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 10ms\n",
+            origin.addr
+        ))
+        .unwrap();
+        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+        let mut buf = vec![0u8; 4];
+        let err = read(&registry, ReadKind::Prefetch, &mut buf).unwrap_err();
+
+        assert!(err.to_string().contains("503"));
+        assert_eq!(origin.hits(), 2);
     }
 
     #[test]
@@ -1166,9 +1134,9 @@ auth: YWxpY2U6c2VjcmV0
             let mut buf = vec![0u8; body.len()];
             read(&registry, kind, &mut buf).unwrap();
 
-            assert_eq!(buf, body, "kind={kind:?}");
-            assert_eq!(transport.calls(), 2, "kind={kind:?}");
-            assert_eq!(origin.hits(), 0, "kind={kind:?}");
+            assert_eq!(buf, body);
+            assert_eq!(transport.calls(), 2);
+            assert_eq!(origin.hits(), 0);
             let mut authorized = HeaderMap::new();
             registry.client.authorizer.authorize(&mut authorized);
             assert_eq!(authorized[AUTHORIZATION], "Basic YWxpY2U6c2VjcmV0");
@@ -1191,9 +1159,9 @@ auth: YWxpY2U6c2VjcmV0
             }
             .unwrap_err();
 
-            assert!(err.to_string().contains("404"), "kind={kind:?}: {err}");
-            assert_eq!(origin.hits(), 0, "kind={kind:?}");
-            assert_eq!(transport.calls(), 1, "kind={kind:?}");
+            assert!(err.to_string().contains("404"));
+            assert_eq!(origin.hits(), 0);
+            assert_eq!(transport.calls(), 1);
         }
     }
 

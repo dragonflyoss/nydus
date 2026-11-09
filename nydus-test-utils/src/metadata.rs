@@ -151,8 +151,7 @@ pub fn single_chunk_group_ondemand(payload: &[u8], source_blob_index: u16) -> Bl
     .unwrap()
 }
 
-/// Returns a copy of `blob_metadata` claiming a wrong CRC32C for `group`,
-/// with the other entries kept.
+/// Returns `blob_metadata` with a wrong CRC32C for `group`.
 ///
 /// # Panics
 ///
@@ -161,8 +160,7 @@ pub fn with_wrong_chunk_group_checksum(blob_metadata: &BlobMetadata, group: usiz
     rebuild(blob_metadata, group, true, false)
 }
 
-/// Returns a copy of `blob_metadata` claiming a wrong digest for `group`,
-/// with the other entries kept.
+/// Returns `blob_metadata` with a wrong digest for `group`.
 ///
 /// # Panics
 ///
@@ -172,8 +170,7 @@ pub fn with_wrong_chunk_group_digest(blob_metadata: &BlobMetadata, group: usize)
     rebuild(blob_metadata, group, false, true)
 }
 
-/// Rebuilds the plain `blob_metadata` entry by entry, flipping the CRC32C or
-/// the digest of `group` as asked.
+/// Rebuilds `blob_metadata`, flipping the CRC32C or digest of `group`.
 fn rebuild(
     blob_metadata: &BlobMetadata,
     group: usize,

@@ -1,27 +1,26 @@
-//! The byte ranges of a blob `GET`: the one a read asks for in `Range`, and
-//! the one an answer names in `Content-Range`, refer to RFC 9110 Section 14.
+//! The `Range` and `Content-Range` of a blob `GET`, refer to RFC 9110 Section
+//! 14.
 
 use std::fmt;
 use std::io;
 use std::ops::RangeInclusive;
 use std::str::FromStr;
 
-/// The byte range a blob `GET` asks for, sent as the `Range` header.
+/// The byte range of the `Range` header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Range {
-    /// The bytes from the first to the last, both included.
+    /// The bytes from first to last, inclusive.
     Bounded(RangeInclusive<u64>),
 
-    /// The last bytes of a blob of unknown size, this many of them.
+    /// The last bytes, this many of them.
     Suffix(u64),
 }
 
 /// Implements the requested byte range.
 impl Range {
-    /// Returns the bytes the range selects of a blob `complete_length` long:
-    /// a suffix counts back from the end, and a range past the end stops at
-    /// the last byte, refer to RFC 9110 Section 14.1.2.
-    pub(crate) fn to_range(&self, complete_length: u64) -> RangeInclusive<u64> {
+    /// Returns the satisfiable range in a blob `complete_length` long, refer
+    /// to RFC 9110 Section 14.1.2.
+    pub(crate) fn satisfiable_range(&self, complete_length: u64) -> RangeInclusive<u64> {
         let last = complete_length.saturating_sub(1);
         match self {
             Range::Bounded(range) => *range.start()..=(*range.end()).min(last),
@@ -45,15 +44,18 @@ impl fmt::Display for Range {
 impl FromStr for Range {
     type Err = io::Error;
 
-    /// Parses `bytes=first-last` or `bytes=-length`, the two forms the range
-    /// is formatted as.
+    /// Parses `bytes=first-last` or `bytes=-length` of digits alone.
     fn from_str(value: &str) -> io::Result<Self> {
         value
             .strip_prefix("bytes=")
-            .and_then(|range_set| range_set.split_once('-'))
-            .and_then(|(first, last)| match first {
-                "" => Some(Range::Suffix(last.parse().ok()?)),
-                first => Some(Range::Bounded(first.parse().ok()?..=last.parse().ok()?)),
+            .filter(|range_set| {
+                range_set
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'-')
+            })
+            .and_then(|range_set| match range_set.split_once('-')? {
+                ("", length) => Some(Range::Suffix(length.parse().ok()?)),
+                (first, last) => Some(Range::Bounded(first.parse().ok()?..=last.parse().ok()?)),
             })
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("invalid Range {value}"))
@@ -61,10 +63,10 @@ impl FromStr for Range {
     }
 }
 
-/// The byte range an answer carries, read from the `Content-Range` header.
+/// The byte range of the `Content-Range` header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContentRange {
-    /// The bytes the body holds, both ends included.
+    /// The bytes the body holds, inclusive.
     pub(crate) range: RangeInclusive<u64>,
 
     /// The length of the whole blob.
@@ -89,26 +91,27 @@ impl fmt::Display for ContentRange {
 impl FromStr for ContentRange {
     type Err = io::Error;
 
-    /// Parses `bytes first-last/complete-length`, rejecting an unknown `*`
-    /// length and the invalid ranges a recipient must not recombine: a last
-    /// byte before the first, or a complete length not past the last, refer
-    /// to RFC 9110 Section 14.4.
+    /// Parses `bytes first-last/complete-length` of digits alone, rejecting a
+    /// `*` length and invalid ranges, refer to RFC 9110 Section 14.4.
     fn from_str(value: &str) -> io::Result<Self> {
         value
             .strip_prefix("bytes ")
+            .filter(|range_resp| {
+                range_resp
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'/'))
+            })
             .and_then(|range_resp| {
                 let (incl_range, complete_length) = range_resp.split_once('/')?;
                 let (first, last) = incl_range.split_once('-')?;
-                Some((
-                    first.parse::<u64>().ok()?,
-                    last.parse::<u64>().ok()?,
-                    complete_length.parse::<u64>().ok()?,
-                ))
-            })
-            .filter(|(first, last, complete_length)| first <= last && last < complete_length)
-            .map(|(first, last, complete_length)| ContentRange {
-                range: first..=last,
-                complete_length,
+                let first = first.parse().ok()?;
+                let last = last.parse().ok()?;
+                let complete_length = complete_length.parse().ok()?;
+
+                (first <= last && last < complete_length).then_some(ContentRange {
+                    range: first..=last,
+                    complete_length,
+                })
             })
             .ok_or_else(|| {
                 io::Error::new(
@@ -147,17 +150,19 @@ mod tests {
             ("bytes=2-5,6-7", None),
             ("bytes=x-5", None),
             ("bytes=2-x", None),
+            ("bytes=+2-5", None),
+            ("bytes=2-+5", None),
             ("bytes=2", None),
             ("items=2-5", None),
         ];
 
         for (header, expected) in test_cases {
-            assert_eq!(header.parse::<Range>().ok(), expected, "{header}");
+            assert_eq!(header.parse::<Range>().ok(), expected);
         }
     }
 
     #[test]
-    fn range_to_range_resolves_against_the_complete_length() {
+    fn satisfiable_range_resolves_against_the_complete_length() {
         let test_cases = vec![
             (Range::Bounded(2..=5), 8, 2..=5),
             (Range::Bounded(2..=9), 8, 2..=7),
@@ -168,7 +173,7 @@ mod tests {
         ];
 
         for (range, complete_length, expected) in test_cases {
-            assert_eq!(range.to_range(complete_length), expected, "{range}");
+            assert_eq!(range.satisfiable_range(complete_length), expected);
         }
     }
 
@@ -189,6 +194,8 @@ mod tests {
             ("bytes x-5/8", None),
             ("bytes 2-x/8", None),
             ("bytes 2-5/x", None),
+            ("bytes +2-5/8", None),
+            ("bytes 2-5/+8", None),
             ("bytes 2-5/8/9", None),
             ("bytes 5-2/8", None),
             ("bytes 2-5/5", None),
@@ -201,7 +208,7 @@ mod tests {
                 .parse::<ContentRange>()
                 .ok()
                 .map(|content_range| (content_range.range, content_range.complete_length));
-            assert_eq!(content_range, expected, "{header}");
+            assert_eq!(content_range, expected);
         }
     }
 }

@@ -139,12 +139,18 @@ fn read_at_fails_the_whole_fetch_window_on_a_backend_error() {
     let blob = Blob::new(false);
     let backend = blob.backend();
     let cache_dir = tempdir().unwrap();
-    let options = CacheOptions {
+    let whole_blob_options = CacheOptions {
         fetch_size: 1 << 20,
         ..options()
     };
-    let cached =
-        LocalBlobCache::open(BLOB_ID, 1, cache_dir.path(), backend.clone(), options).unwrap();
+    let cached = LocalBlobCache::open(
+        BLOB_ID,
+        1,
+        cache_dir.path(),
+        backend.clone(),
+        whole_blob_options,
+    )
+    .unwrap();
     backend.inject(FaultRule::read(Fault::Error(io::ErrorKind::TimedOut)).times(1));
 
     let err = read(&cached, blob.logical(0)).unwrap_err();

@@ -61,6 +61,17 @@ fn new_gives_each_core_its_own_metrics_and_trace_for_identical_blobs() {
     assert_eq!(second.ondemand_snapshot().entries[0].chunk_group_index, 4);
     assert_eq!(cached_bytes(&first), f64::from(CHUNK_SIZE));
     assert_eq!(cached_bytes(&second), f64::from(CHUNK_SIZE));
+}
+
+#[test]
+fn drop_releases_the_core_state_and_leaves_the_others_counting() {
+    let image = Image::build();
+    let first_dir = image.dir.path().join("first");
+    let second_dir = image.dir.path().join("second");
+    let first = image.core(&first_dir, &["fetch_size: 0"]);
+    let second = image.core(&second_dir, &["fetch_size: 0"]);
+    read_group(&first, &image, 2);
+    read_group(&second, &image, 4);
 
     let old_metrics = first.metrics().clone();
     let old_trace = Arc::downgrade(first.ondemand_recorder());

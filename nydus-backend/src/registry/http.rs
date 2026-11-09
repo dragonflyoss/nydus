@@ -23,8 +23,7 @@ use super::response::{Body, Response};
 use super::Transport;
 use crate::Source;
 
-/// An HTTP client talking straight to the origin registry, every attempt
-/// claiming a [`RateLimit`] slot first when built with one.
+/// The HTTP client of the origin registry.
 ///
 /// ```text
 /// GET ──▶ origin ──▶ 2xx / 3xx / 4xx ────────────────────────────────▶ handed back as is
@@ -39,8 +38,7 @@ pub(crate) struct Http {
     /// The reqwest client behind the retry and rate limit middleware.
     client: ClientWithMiddleware,
 
-    /// The window of the random interval before a prefetch read is sent once
-    /// more, the configured interval up to twice that.
+    /// The random wait before a prefetch read is sent once more.
     prefetch_retry_interval: RangeInclusive<Duration>,
 
     /// Where the client's answers come from, the `source` label of its reads.
@@ -49,17 +47,8 @@ pub(crate) struct Http {
 
 /// Implements the origin HTTP client.
 impl Http {
-    /// Creates a client timing every request out after `request_timeout`,
-    /// retrying it `max_retries` times, reaching the origin through `proxy`
-    /// when one is given and trusting it as `tls` says, sending a failed
-    /// prefetch read once more after `prefetch_retry_interval` and every
-    /// attempt claiming a slot from `rate_limit` first when one is given;
-    /// its answers are labelled `source`.
-    ///
-    /// Redirects are returned rather than followed so the caller can cache
-    /// the signed URL a blob `GET` is redirected to; names are resolved by
-    /// hickory, which honours record TTLs. TLS always runs on rustls, whatever
-    /// TLS backend other crates turn on in reqwest.
+    /// Creates a client, through `proxy` and limited by `rate_limit` when
+    /// given.
     pub(crate) fn new(
         request_timeout: Duration,
         max_retries: u32,
@@ -69,6 +58,8 @@ impl Http {
         rate_limit: Option<RateLimit>,
         source: Source,
     ) -> io::Result<Self> {
+        // Return redirects so the caller caches them, and keep rustls even when
+        // another crate enables reqwest's `default-tls`.
         let mut builder = Client::builder()
             .use_rustls_tls()
             .redirect(Policy::none())
@@ -125,8 +116,7 @@ impl Http {
 /// Implements the blob transport over the origin HTTP client.
 #[async_trait]
 impl Transport for Http {
-    /// Sends the `GET` of an on-demand read to `url` with `headers`, the body
-    /// left streaming, and logs the outcome.
+    /// Sends the `GET` of an on-demand read, the body left streaming.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let start = Instant::now();
         let result = self
@@ -159,9 +149,7 @@ impl Transport for Http {
         result
     }
 
-    /// Sends the `GET` of a prefetch read, the body left streaming, sending
-    /// a `429`, `5xx` or `408` once more after the retry interval and failing
-    /// a transport failure at once.
+    /// Sends the `GET` of a prefetch read, the body left streaming.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let mut retried = false;
         loop {
@@ -210,11 +198,7 @@ impl Transport for Http {
     }
 }
 
-/// A fair leaky bucket handing out one slot per request, the limiter dfdaemon
-/// puts in front of its own proxy.
-///
-/// As a middleware it sits inside the retry middleware so every retry attempt
-/// waits for its own slot.
+/// A fair leaky bucket of one slot per attempt, inside the retry middleware.
 pub(crate) struct RateLimit {
     /// The request rate limiter.
     limiter: RateLimiter,
@@ -384,7 +368,7 @@ mod tests {
         ];
 
         let url = start_https_server(cert).await;
-        for (skip_verify, ca_cert, ok) in test_cases {
+        for (skip_verify, ca_cert, expected) in test_cases {
             let http = Http::new(
                 Duration::from_secs(5),
                 0,
@@ -398,7 +382,7 @@ mod tests {
                 Source::Origin,
             )
             .unwrap();
-            assert_eq!(http.get(&url, HeaderMap::new()).await.is_ok(), ok);
+            assert_eq!(http.get(&url, HeaderMap::new()).await.is_ok(), expected);
         }
     }
 }

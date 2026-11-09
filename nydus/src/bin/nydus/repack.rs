@@ -1,6 +1,9 @@
 use clap::Parser;
 use nydus::error::{Error, Result};
-use nydus_config::Config;
+use nydus_config::{
+    default_runtime_dir, default_runtime_dir_mode, BackendConfig, Config, LocalConfig,
+    PrefetchConfig, PrefetchScope, StorageConfig,
+};
 use nydus_core::{IncrementalWriterOptions, NydusCore, RepackResult};
 use nydus_format::blob::BlobMetadataCompressor;
 use std::io::{BufRead, Write};
@@ -73,11 +76,21 @@ fn report(phase: &str, result: &RepackResult) -> Result<()> {
 }
 
 fn local_core(bootstrap: &Path, blobs: &Path, output: &Path) -> Result<NydusCore> {
-    let config = Config::from_yaml(&format!(
-        "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
-        serde_json::to_string(blobs)?,
-        serde_json::to_string(&output.join("cache"))?,
-    ))?;
+    let config = Config {
+        runtime_dir: default_runtime_dir(),
+        runtime_dir_mode: default_runtime_dir_mode(),
+        backend: BackendConfig::Local(LocalConfig {
+            dir: blobs.to_path_buf(),
+        }),
+        storage: StorageConfig {
+            dir: Some(output.join("cache")),
+            ..Default::default()
+        },
+        prefetch: PrefetchConfig {
+            scope: PrefetchScope::None,
+            ..Default::default()
+        },
+    };
     NydusCore::new(bootstrap, config, None)
 }
 
