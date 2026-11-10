@@ -116,4 +116,5 @@ xattr = { workspace = true }
 [dev-dependencies]
 base64 = "0.22"
 nydus-test-utils = { path = "../nydus-test-utils" }
+serde_yaml = "0.9"
 tempfile = { workspace = true }

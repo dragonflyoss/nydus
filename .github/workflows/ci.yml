@@ -58,12 +58,12 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo llvm-cov --workspace --no-fail-fast \
             --features 'nydus/cli,nydus/fileio,nydus/dragonfly,nydus/nbd,nydus/ublk,nydus/fanotify,nydus/uffd,nydus-test-utils/fault-backend' \
-            --no-report
+            --no-report -- --include-ignored
 
       - name: Run dual TLS tests
         run: |
           cargo llvm-cov --no-report -p nydus-backend --features registry,reqwest/default-tls --lib -- \
-            registry::http::tests::tls_verification_and_custom_ca_are_preserved
+            registry::http::tests::new_trusts_the_ca_cert_or_skips_verification
 
       - name: Export coverage
         run: cargo llvm-cov report --lcov --output-path lcov.info

@@ -142,6 +142,24 @@ mod tests {
     }
 
     #[test]
+    fn protocol_constants_match_the_nbd_wire_values() {
+        let test_cases = vec![
+            (NBD_REQUEST_MAGIC, 0x2560_9513),
+            (NBD_CMD_READ, 0),
+            (NBD_CMD_WRITE, 1),
+            (NBD_CMD_DISC, 2),
+            (NBD_OK, 0),
+            (NBD_EIO, 5),
+            (NBD_EINVAL, 22),
+        ];
+
+        for (constant, expected) in test_cases {
+            assert_eq!(constant, expected);
+        }
+        assert_eq!(NBD_REQUEST_HEADER_SIZE, 28);
+    }
+
+    #[test]
     fn parses_valid_read_request() {
         let buf = encode_request(NBD_REQUEST_MAGIC, NBD_CMD_READ, 0xDEADBEEF, 4096, 8192);
         let req = Request::parse(&buf).unwrap();

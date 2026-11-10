@@ -9,15 +9,10 @@ use tracing::{error, info};
 
 use crate::Netns;
 
-/// The runtime a registry backend runs its requests on, on-demand and
-/// prefetch reads alike.
+/// The tokio runtime a registry backend runs every request on.
 ///
-/// A tokio runtime's threads inherit the network namespace of whoever built
-/// it, where the registry must be reached from the host's when a VMM embeds
-/// this crate. [`Runtime::new`] pins them to a namespace, and
-/// [`Runtime::block_on_worker`] runs every request on them, since a future
-/// polled on the caller would still open its socket in the caller's
-/// namespace. The thread counts are tokio's defaults.
+/// Its threads enter the configured network namespace, so requests run on them
+/// through [`Runtime::block_on_worker`], never on the caller's thread.
 #[derive(Debug)]
 pub struct Runtime {
     /// The tokio runtime.
@@ -26,12 +21,8 @@ pub struct Runtime {
 
 /// Implements the backend runtime.
 impl Runtime {
-    /// Creates a runtime, every thread of it entering `netns` before it does
-    /// any work.
-    ///
-    /// A namespace is probed on a scratch thread first, so an unusable
-    /// descriptor or a missing privilege fails here rather than on a runtime
-    /// thread.
+    /// Creates a runtime whose threads enter `netns` first, probed here so an
+    /// unusable one fails early.
     pub fn new(netns: Option<Netns>) -> io::Result<Self> {
         let netns = match netns {
             Some(netns) => {
@@ -53,10 +44,8 @@ impl Runtime {
                 if let Err(err) = netns.enter() {
                     error!("nydus-backend runtime thread cannot enter the configured netns: {err}");
 
-                    // Abort the thread rather than leave it in the wrong
-                    // namespace, where it would silently route registry
-                    // traffic. The probe above entered this exact
-                    // descriptor, so this is unreachable in practice.
+                    // Abort rather than route registry traffic from the wrong
+                    // namespace.
                     panic!("nydus-backend runtime thread cannot enter the configured netns: {err}");
                 }
             });
@@ -67,8 +56,7 @@ impl Runtime {
         Ok(Self { runtime })
     }
 
-    /// Runs `future` on a thread of the runtime and waits for its result, a
-    /// task that panics or is cancelled failing like the I/O it ran.
+    /// Runs `future` on a runtime thread and waits for its result.
     pub(crate) fn block_on_worker<T>(
         &self,
         future: impl Future<Output = io::Result<T>> + Send + 'static,
@@ -79,6 +67,12 @@ impl Runtime {
         self.runtime
             .block_on(self.runtime.spawn(future))
             .map_err(|err| io::Error::other(format!("backend runtime task failed: {err}")))?
+    }
+
+    /// Runs `future` on a thread of the runtime in the background.
+    #[cfg(feature = "dragonfly")]
+    pub(crate) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(future);
     }
 
     /// Returns the tokio runtime itself, for tests that poll a future on the
@@ -104,7 +98,7 @@ mod tests {
     fn new_rejects_a_namespace_that_cannot_be_entered() {
         let netns = Netns::new(tempfile::tempfile().unwrap().into()).unwrap();
         let err = Runtime::new(Some(netns)).unwrap_err();
-        assert!(err.to_string().contains("netns"), "{err}");
+        assert!(err.to_string().contains("netns"));
     }
 
     #[cfg(target_os = "linux")]
@@ -115,8 +109,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "requires CAP_SYS_ADMIN to create a netns"]
     fn only_worker_polls_run_in_the_configured_netns() {
-        let unshared = std::thread::scope(|scope| {
+        let netns = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     // SAFETY: unshare only affects this scratch thread, which
@@ -124,23 +119,13 @@ mod tests {
                     if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
                         return Err(io::Error::last_os_error());
                     }
+
                     Netns::new(std::fs::File::open("/proc/thread-self/ns/net")?.into())
                 })
                 .join()
                 .unwrap()
-        });
-        let netns = match unshared {
-            Ok(netns) => netns,
-            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "cannot create a required netns: {err}"
-                );
-                eprintln!("skipped: cannot create a netns ({err})");
-                return;
-            }
-            Err(err) => panic!("unshare(CLONE_NEWNET): {err}"),
-        };
+        })
+        .unwrap();
         let configured = netns.id();
         let caller = current_netns();
         assert_ne!(caller, configured);

@@ -2,11 +2,17 @@
 //! built through the nydus-core build helpers and served back through
 //! `NydusCore`.
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::HashMap;
+use std::ffi::{CString, OsStr};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 
 use crc32c::crc32c_append;
+use nydus::build::{build_image, build_image_from_tar_layer, BuildImageOptions, Image};
 use nydus_config::Config;
 use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
 use nydus_core::build::bootstrap::{
@@ -14,10 +20,15 @@ use nydus_core::build::bootstrap::{
 };
 use nydus_core::build::inode::{build_tree, resolve_chunk_addrs, set_root_prefetch_blobs_xattr};
 use nydus_core::ErofsReader;
-use nydus_core::{BlobId, FileType, NydusCore};
+use nydus_core::{
+    BlobId, CreateFileOptions, Extent, FileType, IncrementalWriter, IncrementalWriterOptions,
+    NydusCore,
+};
+use nydus_error::Error;
 use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
 use nydus_format::erofs::ErofsDeviceSlot;
 use nydus_format::erofs::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
+use nydus_storage::io::pread_exact;
 use nydus_test_utils::blob::FullBlob;
 use std::collections::HashSet;
 use std::fs;
@@ -210,7 +221,7 @@ fn build_test_image_full(
     let bootstrap = root.join("bootstrap");
     fs::write(&bootstrap, &bootstrap_bytes).unwrap();
 
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         blob_dir.display(),
         root.join("cache").display(),
@@ -464,7 +475,7 @@ fn flat_ranges_leave_unrelated_blobs_unopened() {
     .unwrap();
     let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
     let infos = reader.blob_infos().unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         store.display(),
         dir.path().join("cache").display(),
@@ -513,7 +524,7 @@ fn core_maps_local_native_layers_without_a_cache() {
             .unwrap(),
     )
     .unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nprefetch:\n  scope: none\n",
         store.display(),
     ))
@@ -767,132 +778,157 @@ fn core_static_filesystem_api_reads_metadata_and_data() {
     assert_eq!(blobs[0].id, blob_id);
 }
 
-#[test]
-fn node_sparse_ranges_preserve_offsets_without_downloading_holes() {
-    use nydus_core::writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions};
-    use nydus_core::Extent;
+const SPARSE_FILE_SIZE: u64 = 4 * EROFS_BLOCK_SIZE as u64 + 17;
 
-    let dir = tempdir().unwrap();
+fn build_sparse_core(dir: &Path) -> (NydusCore, Vec<u8>) {
     let block = EROFS_BLOCK_SIZE as u64;
-    let size = block * 4 + 17;
-    let mut options = IncrementalWriterOptions::new(dir.path().to_path_buf());
+    let mut options = IncrementalWriterOptions::new(dir.to_path_buf());
     options.chunk_size = EROFS_BLOCK_SIZE;
     let mut writer = IncrementalWriter::create(options).unwrap();
     writer
-        .create_file(Path::new("sparse"), size, CreateFileOptions::default())
+        .create_file(
+            Path::new("sparse"),
+            SPARSE_FILE_SIZE,
+            CreateFileOptions::default(),
+        )
         .unwrap();
     let data: Vec<_> = (0..block).map(|i| (i % 251) as u8).collect();
     writer.write_at(Path::new("sparse"), block, &data).unwrap();
     writer.commit().unwrap();
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
-        dir.path().display(), dir.path().join("cache").display(),
-    )).unwrap();
-    let core = NydusCore::new(&dir.path().join("image.boot"), config, None).unwrap();
-    let node = core.fs.open("sparse").unwrap();
-    let blobs = core.blobs.prepare_all().unwrap();
-    let blob_path = dir.path().join(blobs[0].id.to_string());
-    let hidden_blob = dir.path().join("unavailable");
-    fs::rename(&blob_path, &hidden_blob).unwrap();
-    let cold_cache = fs::read(&blobs[0].cache_path).unwrap();
-    let hole = |offset, len| Extent {
+        dir.display(),
+        dir.join("cache").display(),
+    ))
+    .unwrap();
+    let core = NydusCore::new(&dir.join("image.boot"), config, None).unwrap();
+    (core, data)
+}
+
+fn hole(core: &NydusCore, source_offset: u64, len: u64) -> Extent {
+    Extent {
         fd: core.zero_fd(),
         offset: 0,
         len,
-        source_offset: offset,
-    };
-    for (offset, len, expected) in [
-        (17, block - 17, vec![hole(17, block - 17)]),
+        source_offset,
+    }
+}
+
+#[test]
+fn fetch_ranges_and_probe_ranges_return_holes_without_downloading_the_blob() {
+    let dir = tempdir().unwrap();
+    let (core, _) = build_sparse_core(dir.path());
+    let block = EROFS_BLOCK_SIZE as u64;
+    let size = SPARSE_FILE_SIZE;
+    let node = core.fs.open("sparse").unwrap();
+    let blobs = core.blobs.prepare_all().unwrap();
+    fs::rename(
+        dir.path().join(blobs[0].id.to_string()),
+        dir.path().join("unavailable"),
+    )
+    .unwrap();
+    let cache = fs::read(&blobs[0].cache_path).unwrap();
+    let test_cases = vec![
+        (17, block - 17, vec![hole(&core, 17, block - 17)]),
         (
             2 * block + 9,
             size,
-            vec![hole(2 * block + 9, size - 2 * block - 9)],
+            vec![hole(&core, 2 * block + 9, size - 2 * block - 9)],
         ),
         (size, 10, vec![]),
         (1, 0, vec![]),
-    ] {
-        assert_eq!(node.fetch_ranges(offset, len).unwrap(), expected);
-        assert_eq!(node.probe_ranges(offset, len).unwrap(), expected);
+    ];
+
+    for (offset, len, expected) in test_cases {
+        assert_eq!(
+            node.fetch_ranges(offset, len).unwrap(),
+            expected,
+            "{offset} {len}"
+        );
+        assert_eq!(
+            node.probe_ranges(offset, len).unwrap(),
+            expected,
+            "{offset} {len}"
+        );
         node.fetch(offset, len).unwrap();
     }
-    let offset = block - 7;
-    let len = size - offset;
+
     assert_eq!(
-        node.probe_ranges(offset, len).unwrap(),
-        vec![hole(offset, 7), hole(2 * block, size - 2 * block)]
+        node.probe_ranges(block - 7, size - block + 7).unwrap(),
+        vec![
+            hole(&core, block - 7, 7),
+            hole(&core, 2 * block, size - 2 * block)
+        ]
     );
     assert!(core.ondemand_snapshot().entries.is_empty());
-    assert_eq!(fs::read(&blobs[0].cache_path).unwrap(), cold_cache);
-    for result in [
+    assert_eq!(fs::read(&blobs[0].cache_path).unwrap(), cache);
+}
+
+#[test]
+fn fetch_ranges_and_probe_ranges_reject_an_overflowing_range() {
+    let dir = tempdir().unwrap();
+    let (core, _) = build_sparse_core(dir.path());
+
+    let node = core.fs.open("sparse").unwrap();
+
+    assert!(matches!(
         node.fetch_ranges(1, u64::MAX),
+        Err(Error::Overflow(_))
+    ));
+    assert!(matches!(
         node.probe_ranges(1, u64::MAX),
-    ] {
-        assert!(matches!(result, Err(nydus_error::Error::Overflow(_))));
-    }
-    fs::rename(hidden_blob, blob_path).unwrap();
+        Err(Error::Overflow(_))
+    ));
+}
+
+#[test]
+fn fetch_ranges_maps_the_data_between_holes_at_its_file_offset() {
+    let dir = tempdir().unwrap();
+    let (core, data) = build_sparse_core(dir.path());
+    let block = EROFS_BLOCK_SIZE as u64;
+    let size = SPARSE_FILE_SIZE;
+    let node = core.fs.open("sparse").unwrap();
+    let offset = block - 7;
+    let len = size - offset;
+
     let ranges = node.fetch_ranges(offset, len).unwrap();
+
     assert_eq!(ranges.len(), 3);
-    assert_eq!(ranges[0], hole(offset, 7));
+    assert_eq!(ranges[0], hole(&core, offset, 7));
     assert_ne!(ranges[1].fd, core.zero_fd());
     assert_eq!(
         (ranges[1].offset, ranges[1].len, ranges[1].source_offset),
         (0, block, block)
     );
-    assert_eq!(ranges[2], hole(2 * block, size - 2 * block));
+    assert_eq!(ranges[2], hole(&core, 2 * block, size - 2 * block));
     assert_eq!(node.probe_ranges(offset, len).unwrap(), ranges);
     let mut actual = Vec::new();
     for range in ranges {
         let start = actual.len();
         actual.resize(start + range.len as usize, 0xff);
-        nydus_storage::io::pread_exact(range.fd, &mut actual[start..], range.offset).unwrap();
+        pread_exact(range.fd, &mut actual[start..], range.offset).unwrap();
     }
     let mut expected = vec![0; len as usize];
     expected[7..7 + data.len()].copy_from_slice(&data);
     assert_eq!(actual, expected);
 }
 
-#[test]
-fn node_rejects_parent_paths_non_utf8_and_special_file_operations() {
-    use nydus::build::{build_image, build_image_from_tar_layer, BuildImageOptions};
-    use nydus_error::Error;
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::net::UnixListener;
-
-    let dir = tempdir().unwrap();
-    let source = dir.path().join("source");
+fn build_special_file_cores(dir: &Path) -> (NydusCore, NydusCore) {
+    let source = dir.join("source");
     fs::create_dir(&source).unwrap();
     symlink("target", source.join("symlink")).unwrap();
     let _listener = UnixListener::bind(source.join("socket")).unwrap();
-    let fifo = std::ffi::CString::new(source.join("fifo").as_os_str().as_bytes()).unwrap();
+    let fifo = CString::new(source.join("fifo").as_os_str().as_bytes()).unwrap();
+    // SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    let options = BuildImageOptions::new(
-        source,
-        EROFS_BLOCK_SIZE,
-        BlobMetadataCompressor::None,
-        HashSet::new(),
-        true,
-    )
-    .unwrap();
-    let mut blob = Vec::new();
-    let image = build_image(&options, &mut blob).unwrap();
-    fs::write(dir.path().join(hex::encode(image.full_blob_digest)), blob).unwrap();
-    let bootstrap = dir.path().join("image.boot");
-    fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
-    let config = Config::from_yaml(&format!(
-        "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
-        dir.path().display(), dir.path().join("cache").display(),
-    ))
-    .unwrap();
-    let core = NydusCore::new(&bootstrap, config.clone(), None).unwrap();
-    // Tar members provide device nodes without requiring mknod privileges.
-    let layer = dir.path().join("devices.tar");
+    let layer = dir.join("devices.tar");
     let mut archive = tar::Builder::new(fs::File::create(&layer).unwrap());
-    for (name, kind, major, minor) in [
+    for (name, entry_type, major, minor) in [
         ("char", tar::EntryType::Char, 1, 3),
         ("block", tar::EntryType::Block, 8, 0),
     ] {
         let mut header = tar::Header::new_gnu();
-        header.set_entry_type(kind);
+        header.set_entry_type(entry_type);
         header.set_path(name).unwrap();
         header.set_size(0);
         header.set_mode(0o600);
@@ -902,20 +938,62 @@ fn node_rejects_parent_paths_non_utf8_and_special_file_operations() {
         archive.append(&header, &[][..]).unwrap();
     }
     archive.finish().unwrap();
+    let options = BuildImageOptions::new(
+        source,
+        EROFS_BLOCK_SIZE,
+        BlobMetadataCompressor::None,
+        HashSet::new(),
+        true,
+    )
+    .unwrap();
+    let config = serde_yaml::from_str::<Config>(&format!(
+        "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
+        dir.display(),
+        dir.join("cache").display(),
+    ))
+    .unwrap();
+    let open_core = |name: &str, image: Image, blob: Vec<u8>| {
+        fs::write(dir.join(hex::encode(image.full_blob_digest)), blob).unwrap();
+        let bootstrap = dir.join(name);
+        fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
+        NydusCore::new(&bootstrap, config.clone(), None).unwrap()
+    };
+
+    let mut blob = Vec::new();
+    let image = build_image(&options, &mut blob).unwrap();
+    let core = open_core("image.boot", image, blob);
     let mut blob = Vec::new();
     let image = build_image_from_tar_layer(&options, &layer, &mut blob).unwrap();
-    fs::write(dir.path().join(hex::encode(image.full_blob_digest)), blob).unwrap();
-    let bootstrap = dir.path().join("devices.boot");
-    fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
-    let devices = NydusCore::new(&bootstrap, config, None).unwrap();
-    for path in ["..", "/../symlink", "./../socket"] {
-        assert!(matches!(core.fs.open(path), Err(Error::Unsupported(_))));
+    (core, open_core("devices.boot", image, blob))
+}
+
+#[test]
+fn open_rejects_parent_and_non_utf8_paths() {
+    let dir = tempdir().unwrap();
+    let (core, _) = build_special_file_cores(dir.path());
+    let test_cases: Vec<(&[u8], fn(Error))> = vec![
+        (b"..", |err| assert!(matches!(err, Error::Unsupported(_)))),
+        (b"/../symlink", |err| {
+            assert!(matches!(err, Error::Unsupported(_)))
+        }),
+        (b"./../socket", |err| {
+            assert!(matches!(err, Error::Unsupported(_)))
+        }),
+        (b"invalid-\xff", |err| {
+            assert!(matches!(err, Error::InvalidParameter(_)))
+        }),
+    ];
+
+    for (path, assert_fn) in test_cases {
+        assert_fn(core.fs.open(OsStr::from_bytes(path)).err().unwrap());
     }
-    assert!(matches!(
-        core.fs.open(std::ffi::OsStr::from_bytes(b"invalid-\xff")),
-        Err(Error::InvalidParameter(_)),
-    ));
-    for (image, name, kind, rdev) in [
+}
+
+#[test]
+fn special_files_report_their_type_and_reject_data_operations() {
+    let dir = tempdir().unwrap();
+    let (core, devices) = build_special_file_cores(dir.path());
+    let test_cases = vec![
         (&core, "symlink", FileType::Symlink, 0),
         (&core, "fifo", FileType::Fifo, 0),
         (&core, "socket", FileType::Socket, 0),
@@ -931,43 +1009,76 @@ fn node_rejects_parent_paths_non_utf8_and_special_file_operations() {
             FileType::BlockDevice,
             libc::makedev(8, 0) as u32,
         ),
-    ] {
+    ];
+
+    for (image, name, file_type, rdev) in test_cases {
         let entries = image.fs.open("/").unwrap().read_dir().unwrap();
         let node = image.fs.open(name).unwrap();
-        assert_eq!(node.metadata().unwrap().file_type, kind);
-        assert_eq!(node.metadata().unwrap().rdev, rdev);
+        let metadata = node.metadata().unwrap();
+
+        assert_eq!(metadata.file_type, file_type, "{name}");
+        assert_eq!(metadata.rdev, rdev, "{name}");
         assert_eq!(
             entries
                 .iter()
                 .find(|entry| entry.name == name)
                 .unwrap()
                 .file_type,
-            kind
+            file_type,
+            "{name}"
         );
-        assert!(matches!(node.read(), Err(Error::InvalidParameter(_))));
-        assert!(matches!(
-            node.read_at(0, &mut [0]),
-            Err(Error::InvalidParameter(_))
-        ));
-        assert!(matches!(node.read_dir(), Err(Error::InvalidParameter(_))));
-        assert!(matches!(node.fetch(0, 1), Err(Error::InvalidParameter(_))));
+        assert!(
+            matches!(node.read(), Err(Error::InvalidParameter(_))),
+            "{name}"
+        );
+        assert!(
+            matches!(node.read_at(0, &mut [0]), Err(Error::InvalidParameter(_))),
+            "{name}"
+        );
+        assert!(
+            matches!(node.read_dir(), Err(Error::InvalidParameter(_))),
+            "{name}"
+        );
+        assert!(
+            matches!(node.fetch(0, 1), Err(Error::InvalidParameter(_))),
+            "{name}"
+        );
         for len in [0, 1] {
-            assert!(matches!(
-                node.fetch_ranges(0, len),
-                Err(Error::InvalidParameter(_))
-            ));
-            assert!(matches!(
-                node.probe_ranges(0, len),
-                Err(Error::InvalidParameter(_))
-            ));
+            assert!(
+                matches!(node.fetch_ranges(0, len), Err(Error::InvalidParameter(_))),
+                "{name}"
+            );
+            assert!(
+                matches!(node.probe_ranges(0, len), Err(Error::InvalidParameter(_))),
+                "{name}"
+            );
         }
-        assert_eq!(node.read_at(0, &mut []).unwrap(), 0);
+        assert_eq!(node.read_at(0, &mut []).unwrap(), 0, "{name}");
         node.fetch(0, 0).unwrap();
-        if kind == FileType::Symlink {
-            assert_eq!(node.read_link().unwrap(), b"target");
-        } else {
-            assert!(matches!(node.read_link(), Err(Error::InvalidParameter(_))));
-        }
+    }
+}
+
+#[test]
+fn read_link_reads_only_symlinks() {
+    let dir = tempdir().unwrap();
+    let (core, devices) = build_special_file_cores(dir.path());
+    let test_cases = vec![
+        (&core, "fifo"),
+        (&core, "socket"),
+        (&devices, "char"),
+        (&devices, "block"),
+    ];
+
+    assert_eq!(
+        core.fs.open("symlink").unwrap().read_link().unwrap(),
+        b"target"
+    );
+    for (image, name) in test_cases {
+        let node = image.fs.open(name).unwrap();
+        assert!(
+            matches!(node.read_link(), Err(Error::InvalidParameter(_))),
+            "{name}"
+        );
     }
 }
 

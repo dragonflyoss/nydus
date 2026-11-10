@@ -1,8 +1,5 @@
-//! Data-plane blob backends for nydus: local directory and OCI registry, with
-//! optional Dragonfly P2P reads.
-//!
-//! Every API here returns `io::Result` so the OS errno survives to the
-//! service edges; this crate never depends on the control-plane error type.
+//! The blob backends: a local directory, or an OCI registry with optional
+//! Dragonfly P2P reads. Every API returns `io::Result` to keep the OS errno.
 
 mod local;
 mod netns;
@@ -15,7 +12,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nydus_config::{BackendConfig, PrefetchConfig};
+use nydus_config::{BackendConfig, Config};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
@@ -46,38 +43,29 @@ pub struct RawDeviceFile {
     pub data_size: u64,
 }
 
-/// A blob backend resolves blob data and metadata by content digest.
+/// The blob backend, reading blob data and metadata by digest.
 ///
 /// ```text
 /// Backend
-///   ├─ Local      full blobs in a directory, named by their digest
-///   └─ Registry   an OCI registry, blob GETs over one transport
-///        ├─ Http        the origin, with the token fetches of both
-///        └─ Dragonfly   the seed peers, back to the origin when they cannot serve
+///   ├─ Local      full blobs in a directory, named by digest
+///   └─ Registry   an OCI registry
+///        ├─ Http        the origin
+///        └─ Dragonfly   the seed peers, falling back to the origin
 /// ```
-///
-/// Every implementation records its own read metrics. The `prefetch_*`
-/// defaults forward to the on-demand methods for a backend that serves both
-/// reads alike.
 pub trait Backend: Send + Sync {
-    /// Returns the metrics of the image the backend serves, which its reads
-    /// and the caches, prefetcher and filesystem above it record into.
+    /// Returns the metrics of the image, shared with the layers above.
     fn metrics(&self) -> &Arc<Metrics>;
 
-    /// Returns the full blob digest of `blob_id`, the digest the blob's cache
-    /// files are named by.
+    /// Returns the full blob digest of `blob_id`, which names the cache files.
     ///
-    /// A full blob file is `[data region][bootstrap][blob meta][footer]` and
-    /// has two digests: the digest of the whole file, which is the OCI layer
-    /// digest a registry serves it under and a merged bootstrap names it by,
-    /// and the digest of its data region alone. The bootstrap embedded in the
-    /// file itself was written before the file was complete, so it can only
-    /// name the blob by its data region digest. A `blob_id` is therefore the
-    /// full blob digest except when a self-contained full blob is mounted on
-    /// its own, and this maps either back to the full blob digest so the cache
-    /// files of a layer share one name however it was mounted. Two blobs built
-    /// from the same data with different blob meta share a data region digest
-    /// but not a full blob digest, which is why the latter names the cache.
+    /// ```text
+    /// [data region][bootstrap][blob meta][footer]
+    /// ├───────────────── full blob digest ──────┤  the OCI layer digest
+    /// ├─ data digest ┤                             how the embedded bootstrap names the blob
+    /// ```
+    ///
+    /// `blob_id` is the full blob digest, except for a self-contained full blob
+    /// mounted alone.
     fn full_blob_id(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -85,12 +73,8 @@ pub trait Backend: Send + Sync {
         Ok(*blob_id)
     }
 
-    /// Returns whether the blob is a raw EROFS device without blob meta, a
-    /// native `erofs-*` layer whose bytes are read as-is and never cached or
-    /// decoded by nydus.
-    ///
-    /// Backends that cannot serve such blobs report an error instead of
-    /// `Ok(true)`.
+    /// Returns whether the blob is a raw EROFS device, a native `erofs-*` layer
+    /// read as is, never cached or decoded.
     fn is_raw_device(&self, _blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<bool> {
         Ok(false)
     }
@@ -136,26 +120,17 @@ pub trait Backend: Send + Sync {
 
 /// Implements the blob backend construction.
 impl dyn Backend {
-    /// Creates the blob backend `config` describes, recording into
-    /// `metrics`, its prefetch reads following `prefetch`, a registry
-    /// backend reaching the registry from `netns` when one is given, the
-    /// caller's network namespace otherwise.
+    /// Creates the blob backend the `backend` section of `config` describes.
     #[cfg_attr(not(feature = "registry"), allow(unused_variables))]
     pub fn new(
-        config: &BackendConfig,
-        prefetch: &PrefetchConfig,
+        config: &Config,
         netns: Option<Netns>,
         metrics: Arc<Metrics>,
     ) -> io::Result<Arc<dyn Backend>> {
-        match config {
+        match &config.backend {
             BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone(), metrics))),
             #[cfg(feature = "registry")]
-            BackendConfig::Registry(registry) => Ok(Arc::new(Registry::new(
-                (**registry).clone(),
-                prefetch,
-                netns,
-                metrics,
-            )?)),
+            BackendConfig::Registry(_) => Ok(Arc::new(Registry::new(config, netns, metrics)?)),
             #[cfg(not(feature = "registry"))]
             BackendConfig::Registry(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -171,48 +146,31 @@ mod tests {
 
     #[test]
     fn new_builds_a_local_backend() {
-        let config: BackendConfig =
-            serde_yaml::from_str("type: local\nconfig:\n  dir: /blobs\n").unwrap();
-        assert!(<dyn Backend>::new(
-            &config,
-            &PrefetchConfig::default(),
-            None,
-            Arc::new(Metrics::new())
-        )
-        .is_ok());
+        let config: Config =
+            serde_yaml::from_str("backend:\n  type: local\n  config:\n    dir: /blobs\n").unwrap();
+        assert!(<dyn Backend>::new(&config, None, Arc::new(Metrics::new())).is_ok());
     }
 
     #[cfg(feature = "registry")]
     #[test]
     fn new_builds_a_registry_backend() {
-        let config: BackendConfig = serde_yaml::from_str(
-            "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
+        let config: Config = serde_yaml::from_str(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: a/b\n",
         )
         .unwrap();
-        assert!(<dyn Backend>::new(
-            &config,
-            &PrefetchConfig::default(),
-            None,
-            Arc::new(Metrics::new())
-        )
-        .is_ok());
+        assert!(<dyn Backend>::new(&config, None, Arc::new(Metrics::new())).is_ok());
     }
 
     #[cfg(not(feature = "registry"))]
     #[test]
     fn new_rejects_a_registry_backend_without_the_feature() {
-        let config: BackendConfig = serde_yaml::from_str(
-            "type: registry\nconfig:\n  addr: http://127.0.0.1:5000\n  repository: a/b\n",
+        let config: Config = serde_yaml::from_str(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: a/b\n",
         )
         .unwrap();
-        let err = <dyn Backend>::new(
-            &config,
-            &PrefetchConfig::default(),
-            None,
-            Arc::new(Metrics::new()),
-        )
-        .err()
-        .unwrap();
+        let err = <dyn Backend>::new(&config, None, Arc::new(Metrics::new()))
+            .err()
+            .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("registry"));
     }

@@ -1,14 +1,16 @@
-//! Generate a real incremental child for the cross-language E2E publisher.
-//! Usage: writer-fixture --bootstrap PATH --blob-dir DIR --output-dir DIR
-//! The parent must contain `changed` and `unchanged`; outputs use the writer's
-//! standard `image.boot`, digest-named upper blob, and metadata sidecar.
-
 use std::path::{Path, PathBuf};
 
 use nydus_config::Config;
 use nydus_core::{CreateFileOptions, IncrementalWriterOptions, NydusCore};
 
+/// Writes an incremental child of a parent holding `changed` and `unchanged`,
+/// for the cross-language e2e publisher.
+///
+/// ```text
+/// writer-fixture --bootstrap PATH --blob-dir DIR --output-dir DIR
+/// ```
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse the flags.
     let mut bootstrap = None;
     let mut blob_dir = None;
     let mut output_dir = None;
@@ -28,14 +30,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = bootstrap.ok_or("--bootstrap is required")?;
     let blob_dir = blob_dir.ok_or("--blob-dir is required")?;
     let output_dir = output_dir.ok_or("--output-dir is required")?;
+
+    // Open the parent, quoting paths as YAML strings.
     std::fs::create_dir_all(&output_dir)?;
-    // Quote paths as YAML strings, including spaces and embedded punctuation.
-    let config = Config::from_yaml(&format!(
+    let config = serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {:?}\nstorage:\n  dir: {:?}\nprefetch:\n  scope: none\n",
         blob_dir.to_str().ok_or("blob directory must be UTF-8")?,
         output_dir.join("cache").to_str().ok_or("output directory must be UTF-8")?,
     ))?;
     let core = NydusCore::new(&bootstrap, config, None)?;
+
+    // Write the child: keep `unchanged`, replace `changed`, create `created`.
     let mut writer = core.writer(IncrementalWriterOptions::new(output_dir))?;
     writer.open_file(Path::new("unchanged"))?;
     writer.replace_file(Path::new("changed"), b"child changed\n".to_vec())?;

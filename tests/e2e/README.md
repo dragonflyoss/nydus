@@ -220,7 +220,8 @@ Runners are GitHub-hosted Ubuntu (arm64 for arm64 release validation).
 GitHub Actions sets `CI=true`, and that one variable makes every suite
 strict: missing kernel capabilities/tools fail, they do not skip. Rust tests
 also require netns/setns and ptrace, and run privileged test executables
-without compiling as root. The Go suites carry no known-issue markers: a
+without compiling as root; netns tests are `#[ignore]` and run with
+`--include-ignored`. The Go suites carry no known-issue markers: a
 reproduced bug is a red check until it is fixed.
 
 Runner provisioning and the historical release binary remain external

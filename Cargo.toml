@@ -10,6 +10,8 @@ fuser = { git = "https://github.com/Zephyrcf/fuser.git", rev = "675d99605556c609
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env", "string"] }
 hex = "0.4"
+humantime-serde = "1"
+validator = { version = "0.20", features = ["derive"] }
 libc = "0.2"
 memmap2 = "0.9"
 prometheus = { version = "0.13", default-features = false }

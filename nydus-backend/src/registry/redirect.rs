@@ -17,9 +17,7 @@ struct RedirectEntry {
     created_at: Instant,
 }
 
-/// The redirect URLs of recently read blobs, keyed by blob hex digest.
-///
-/// Bounded and aged so a long-lived mount does not hoard expired links.
+/// The redirect URLs of recently read blobs, bounded and aged.
 pub(crate) struct RedirectCache {
     /// The redirects by blob hex digest, least recently used first out.
     redirects: Mutex<LruCache<String, RedirectEntry>>,
@@ -30,12 +28,8 @@ impl RedirectCache {
     /// The default capacity of the redirect cache.
     const DEFAULT_CAPACITY: usize = 1000;
 
-    /// The default time a redirect is trusted before the next read re-resolves
-    /// it.
-    ///
-    /// Signed CDN links expire on their own schedule, this only bounds how
-    /// stale a hit can be, an expired link is also evicted the moment it
-    /// answers `401` or `403`.
+    /// The default time a redirect is trusted, an expired link also evicted
+    /// once it answers `401` or `403`.
     const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
 
     /// Creates an empty cache.

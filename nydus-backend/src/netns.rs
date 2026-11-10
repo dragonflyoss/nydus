@@ -1,5 +1,4 @@
-//! A Linux network namespace the runtime's threads enter before they do any
-//! work, so sockets and DNS queries never depend on the caller's namespace.
+//! The Linux network namespace the runtime's threads enter.
 
 use std::fmt;
 use std::fs::File;
@@ -7,8 +6,8 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 
-/// The identity of a network namespace: the device and inode of its
-/// `/proc/<pid>/ns/net` file, which is what `setns` compares namespaces by.
+/// The identity of a network namespace, the device and inode of its `ns/net`
+/// file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetnsId {
     /// The device the namespace file lives on.
@@ -26,9 +25,7 @@ impl fmt::Display for NetnsId {
     }
 }
 
-/// A network namespace held open by a descriptor on its `/proc/<pid>/ns/net`
-/// file. Two values are equal when they name the same namespace, however
-/// they were opened.
+/// A network namespace held open by a descriptor on its `ns/net` file.
 #[derive(Debug)]
 pub struct Netns {
     /// The open namespace file, kept for as long as threads may enter it.
@@ -38,8 +35,7 @@ pub struct Netns {
     id: NetnsId,
 }
 
-/// Implements equality by namespace identity, however the descriptors were
-/// opened.
+/// Implements equality by namespace identity.
 impl PartialEq for Netns {
     /// Returns whether both values name the same namespace.
     fn eq(&self, other: &Self) -> bool {
@@ -53,9 +49,7 @@ impl Eq for Netns {}
 /// Implements the network namespace.
 impl Netns {
     /// Creates a namespace from an open descriptor on its `ns/net` file,
-    /// recording its identity.
-    ///
-    /// Entering it is not checked here, see [`probe`](Self::probe).
+    /// unchecked until [`probe`](Self::probe).
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
         let metadata = File::from(fd.try_clone()?).metadata()?;
         Ok(Self {
@@ -94,11 +88,8 @@ impl Netns {
         ))
     }
 
-    /// Verifies the namespace can be entered.
-    ///
-    /// The check runs on a scratch thread whose namespace change dies with
-    /// it, so an unusable descriptor or a missing privilege fails here rather
-    /// than inside a runtime thread.
+    /// Verifies the namespace can be entered, on a scratch thread that exits
+    /// right after.
     pub fn probe(&self) -> io::Result<()> {
         std::thread::scope(|scope| {
             scope
@@ -123,6 +114,6 @@ mod tests {
     fn probe_rejects_a_non_namespace_descriptor() {
         let netns = Netns::new(OwnedFd::from(tempfile::tempfile().unwrap())).unwrap();
         let err = netns.probe().unwrap_err();
-        assert!(err.to_string().contains("netns"), "{err}");
+        assert!(err.to_string().contains("netns"));
     }
 }

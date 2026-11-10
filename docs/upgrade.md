@@ -52,11 +52,13 @@ if an ancestor filesystem is unresponsive.
 
 ### Mount-scoped ownership state
 
-Every launch uses the same coordination paths, whether or not an API is configured:
+Every launch uses the same coordination paths under the config's
+`runtime_dir` (`/run/nydus` by default, or without `--config`), whether or not
+an API is configured, so the old and the new daemon must share it:
 
 ```text
-/run/nydus/fuse/<effective_uid>/<mount_hash>.lock
-/run/nydus/fuse/<effective_uid>/<mount_hash>.owner
+<runtime_dir>/fuse/<effective_uid>/<mount_hash>.lock
+<runtime_dir>/fuse/<effective_uid>/<mount_hash>.owner
 mount_hash = lowercase hex SHA256(resolved absolute mountpoint UTF-8 bytes)
 ```
 

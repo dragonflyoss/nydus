@@ -1,5 +1,4 @@
-//! The local directory backend: full blobs stored under their digest in one
-//! directory.
+//! The local backend, full blobs named by digest in one directory.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -15,16 +14,14 @@ use nydus_telemetry::metrics::Metrics;
 
 use crate::{Backend, RawDeviceFile, ReadKind, Source};
 
-/// An open full blob file, its footer locating the data and blob metadata
-/// regions inside it.
+/// An open full blob file and its footer.
 #[derive(Debug)]
 struct FullBlob {
     /// The path of the file.
     path: PathBuf,
 
-    /// The digest of the whole file, the full blob digest the blob's cache
-    /// files are named by. Trusted from the file name in a content-addressed
-    /// directory, hashed once from the file for a self-contained full blob.
+    /// The full blob digest, from the file name in a directory, hashed from
+    /// the file for a self-contained full blob.
     id: [u8; SHA256_DIGEST_SIZE],
 
     /// The validated footer, the layout of the file.
@@ -36,8 +33,7 @@ struct FullBlob {
 
 /// Implements the full blob file.
 impl FullBlob {
-    /// Opens the full blob at `path`, the whole file digesting to `id`, its
-    /// footer read and validated.
+    /// Opens the full blob at `path` and validates its footer.
     fn new(path: &Path, id: [u8; SHA256_DIGEST_SIZE]) -> io::Result<Self> {
         let footer = BlobFooter::from_blob_path(path).map_err(|err| {
             io::Error::other(format!("invalid nydus blob {}: {err}", path.display()))
@@ -67,8 +63,7 @@ pub struct Local {
 
 /// Implements the local directory backend.
 impl Local {
-    /// Creates a backend over the full blobs in `dir`, recording into
-    /// `metrics`.
+    /// Creates a backend over the full blobs in `dir`.
     pub fn new(dir: PathBuf, metrics: Arc<Metrics>) -> Self {
         Self {
             dir,
@@ -78,15 +73,10 @@ impl Local {
     }
 
     /// Creates a backend from the self-contained full blob at `path`, serving
-    /// `blob_id` from the file itself and any other blob from the file's
-    /// directory, recording into `metrics`.
+    /// other blobs from its directory.
     ///
-    /// `blob_id` comes from the bootstrap embedded in the file, which names
-    /// the blob by the digest of its data region rather than of the whole
-    /// file, see [`Backend::full_blob_id`]. This reads the file twice before
-    /// serving anything: once whole, for the full blob digest its cache files
-    /// are named by, and once over the data region, to verify it against
-    /// `blob_id`.
+    /// The file is read twice up front: whole, for its full blob digest, and
+    /// over the data region, to verify it against `blob_id`.
     pub fn from_full_blob(
         blob_id: [u8; SHA256_DIGEST_SIZE],
         path: &Path,
@@ -123,13 +113,10 @@ impl Local {
         Ok(backend)
     }
 
-    /// Returns the full blob of `blob_id`, opened from `dir/<hex>` on first
-    /// use.
+    /// Returns the full blob of `blob_id`, opened from `dir/<hex>` on first use.
     ///
-    /// The directory is content-addressed, so `blob_id` is the full blob
-    /// digest and the file name is trusted rather than the file hashed on
-    /// every daemon start, corruption being caught by the CRC over every chunk
-    /// group read.
+    /// The file name is trusted rather than hashed; the CRC of every chunk group
+    /// read catches corruption.
     fn full_blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<FullBlob>> {
         if let Some(full_blob) = self.full_blobs.read().unwrap().get(blob_id).cloned() {
             return Ok(full_blob);
@@ -215,8 +202,8 @@ impl Backend for Local {
         }))
     }
 
-    /// Reads the blob's metadata for an on-demand read from the sidecar file
-    /// when present, otherwise from the region embedded in the full blob.
+    /// Reads the blob's metadata for an on-demand read, from the sidecar file
+    /// when present.
     fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let full_blob = self.full_blob(blob_id)?;
         let blob_metadata_path = self.blob_metadata_path(&full_blob.path)?;
@@ -233,8 +220,8 @@ impl Backend for Local {
         BlobMetadata::from_bytes(buf).map_err(io::Error::other)
     }
 
-    /// Reads the blob's metadata for a prefetch read from the sidecar file
-    /// when present, otherwise from the region embedded in the full blob.
+    /// Reads the blob's metadata for a prefetch read, from the sidecar file
+    /// when present.
     fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -254,8 +241,7 @@ impl Backend for Local {
         BlobMetadata::from_bytes(buf).map_err(io::Error::other)
     }
 
-    /// Fills `buf` from the data region for an on-demand read, recording the
-    /// read's metrics.
+    /// Fills `buf` from the data region for an on-demand read.
     fn read_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -294,8 +280,7 @@ impl Backend for Local {
             })
     }
 
-    /// Fills `buf` from the data region for a prefetch read, recording the
-    /// read's metrics.
+    /// Fills `buf` from the data region for a prefetch read.
     fn prefetch_range_into(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -365,8 +350,8 @@ mod tests {
                 .read_range_into(&full_blob_id, 0, &mut data)
                 .unwrap();
 
-            assert_eq!(blob_metadata.chunk_count(), 1, "sidecar={sidecar}");
-            assert_eq!(data, payload, "sidecar={sidecar}");
+            assert_eq!(blob_metadata.chunk_count(), 1);
+            assert_eq!(data, payload);
             assert!(backend.read_blob_metadata(&data_blob_id).is_err());
         }
     }

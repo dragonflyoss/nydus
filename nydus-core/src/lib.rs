@@ -146,13 +146,8 @@ impl NydusCore {
         let prefetch_scope = config.prefetch.scope;
         let prefetch_timeout = config.prefetch.request_timeout;
         let cache_options = CacheOptions::from(&config.storage);
-        let backend = <dyn Backend>::new(
-            &config.backend,
-            &config.prefetch,
-            netns,
-            Arc::new(Metrics::new()),
-        )
-        .context("failed to build blob backend")?;
+        let backend = <dyn Backend>::new(&config, netns, Arc::new(Metrics::new()))
+            .context("failed to build blob backend")?;
         let cache_dir = config.storage.dir.clone();
         if let Some(cache_dir) = &cache_dir {
             std::fs::create_dir_all(cache_dir).with_context(|| {

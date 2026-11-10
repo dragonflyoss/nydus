@@ -152,13 +152,8 @@ impl OptimizeCommand {
 
         // Load the storage config.
         let storage_config = Config::load(&self.config)?;
-        let backend = <dyn Backend>::new(
-            &storage_config.backend,
-            &storage_config.prefetch,
-            None,
-            Arc::new(Metrics::new()),
-        )
-        .context("failed to build blob backend")?;
+        let backend = <dyn Backend>::new(&storage_config, None, Arc::new(Metrics::new()))
+            .context("failed to build blob backend")?;
 
         Ok((patterns, backend, storage_config.storage))
     }
