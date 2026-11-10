@@ -249,7 +249,7 @@ impl FuseCommand {
 
         let cache_options = storage_config
             .as_ref()
-            .map(|config| CacheOptions::from(&config.storage))
+            .map(CacheOptions::from)
             .unwrap_or_default();
         let reader = match (&self.blob, &self.bootstrap, backend) {
             // A self-contained full blob still wants the decoded-chunk-group

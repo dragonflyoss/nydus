@@ -18,9 +18,12 @@ use tempfile::tempdir;
 
 const BLOB_ID: [u8; 32] = [0x5a; 32];
 
+/// Options reading and prefetching group by group, so every backend read
+/// covers exactly one chunk group.
 fn options() -> CacheOptions {
     CacheOptions {
         fetch_size: 0,
+        prefetch_batch_size: 0,
         ..Default::default()
     }
 }
