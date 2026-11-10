@@ -123,9 +123,9 @@ storage:
 prefetch:
   # Number of concurrently prefetched blobs.
   concurrent_blob_count: 10
-  # Timeout of prefetching one whole blob, e.g. `1h`, while
-  # `http.request_timeout` bounds each backend request within it. `0s`
-  # disables the bound. Default: 1h.
+  # Timeout of prefetching one whole blob, e.g. `1h`, greater than zero,
+  # while `http.request_timeout` bounds each backend request within it.
+  # Default: 1h.
   request_timeout: 1h
   # Which blobs to pull: `none` disables prefetch; `ondemand` prefetches
   # only the "ondemand" blob produced by `nydus optimize`, which holds the

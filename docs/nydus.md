@@ -1162,10 +1162,10 @@ Fields:
 	for the trade-off.
 - `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
 	prefetched concurrently.
-- `prefetch.request_timeout` (default `1h`) bounds how long prefetching one
-	whole blob may take, while `http.request_timeout` bounds each backend
-	request within it; `0s` disables the bound. A blob that exceeds it is
-	aborted with a warning and prefetch moves on.
+- `prefetch.request_timeout` (default `1h`, greater than `0s`) bounds how
+	long prefetching one whole blob may take, while `http.request_timeout`
+	bounds each backend request within it. A blob that exceeds it is aborted
+	with a warning and prefetch moves on.
 - `prefetch.scope` (default `auto`) selects which blobs to pull. `none`
 	disables prefetch; `ondemand` prefetches only the "ondemand" ondemand blob
 	`nydus optimize` emits (if any), landing the access-ordered hot set in the

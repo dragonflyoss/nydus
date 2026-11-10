@@ -481,10 +481,11 @@ pub struct PrefetchConfig {
     #[validate(range(min = 1))]
     pub concurrent_blob_count: usize,
 
-    /// The timeout of prefetching one whole blob, e.g. `1h`, while
-    /// `http.request_timeout` bounds each chunk group request within it; `0s`
-    /// disables the bound.
+    /// The timeout of prefetching one whole blob, e.g. `1h`, greater than
+    /// zero, while `http.request_timeout` bounds each chunk group request
+    /// within it.
     #[serde(default = "default_prefetch_request_timeout", with = "humantime_serde")]
+    #[validate(custom(function = "Self::validate_request_timeout"))]
     pub request_timeout: Duration,
 
     /// The interval before a prefetch read answered with `429`, `5xx` or
@@ -528,6 +529,21 @@ pub enum PrefetchScope {
     /// [`All`]: PrefetchScope::All
     #[default]
     Auto,
+}
+
+/// Implement PrefetchConfig.
+impl PrefetchConfig {
+    /// Validates the request timeout is greater than zero.
+    fn validate_request_timeout(
+        request_timeout: &Duration,
+    ) -> std::result::Result<(), ValidationError> {
+        if request_timeout.is_zero() {
+            return Err(ValidationError::new("zero_duration")
+                .with_message("must be greater than 0s".into()));
+        }
+
+        Ok(())
+    }
 }
 
 /// Implement Default for PrefetchConfig.
@@ -1053,6 +1069,19 @@ storage:
                 |result| {
                     let err = result.unwrap_err().to_string();
                     assert_eq!(err, "backend.http.request_timeout: must be greater than 0s");
+                },
+            ),
+            (
+                Box::new(Config {
+                    prefetch: PrefetchConfig {
+                        request_timeout: Duration::ZERO,
+                        ..Default::default()
+                    },
+                    ..config.clone()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "prefetch.request_timeout: must be greater than 0s");
                 },
             ),
             (
