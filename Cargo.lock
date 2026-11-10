@@ -2373,6 +2373,7 @@ dependencies = [
  "crc32c",
  "hex",
  "libc",
+ "memmap2",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
