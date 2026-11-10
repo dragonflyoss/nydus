@@ -2412,29 +2412,50 @@ read and `nydus optimize` copies exactly those (see [Optimize](#optimize)).
 External blob reads always go through the blob_meta-aware cache abstraction;
 the runtime never reads external blob data by direct mmap offsets.
 
-On-demand and diskless group reads own their temporary input/output buffers.
-Buffers of at least 1 MiB use private anonymous mappings, which are unmapped
-when the buffer owner is dropped instead of remaining in allocator arenas.
-On Linux, mappings of at least 2 MiB also receive a best-effort transparent
-huge-page hint to reduce page faults during decoding. This neither requires
-reserved huge pages nor changes system-wide settings; allocation still works
-if the kernel cannot provide huge pages. The mapping lifetime is unchanged.
-Smaller buffers use ordinary vectors. Zstandard decodes directly into the
-declared-size output slice, and an unexpected decoded length remains an error.
-This changes temporary memory management, not the persistent data cache or
-fetch concurrency. Prefetch workers continue to reuse their fetch buffers.
+On-demand, prefetch and diskless group reads own their temporary buffers,
+one chunk group at a time. Buffers of at least 64 KiB use private anonymous
+mappings, which are unmapped when the buffer owner is dropped: their sizes
+follow the chunk groups and vary at random, and in the allocator's heap they
+would leave many partly used pages behind. Smaller buffers use ordinary
+vectors. A Zstandard group is decompressed as its bytes arrive from the
+network, straight into its declared-size output buffer, which doubles as the
+decoder's window, so its compressed bytes are never gathered; an unexpected
+decoded length remains an error. Stored-plain and LZ4 groups are gathered
+whole first, LZ4 block data having no streaming form. The decoded payload
+itself is still held until it is validated and written: the group's CRC32C
+covers it whole, and a fill may race another fill of the same group, so
+partial bytes are never written over the cache. Zstandard decompression
+contexts (about 100 KiB of tables, plus a block-sized input buffer for a
+streamed frame) are reused across groups, with at most two kept between
+uses. Prefetch workers take fresh buffers for every batch. This changes
+temporary memory management, not the persistent data cache or fetch
+concurrency.
 
-Three further measures keep the idle footprint of a mount service small. The
-standalone bootstrap is mapped with a read-ahead hint (`MADV_WILLNEED`) rather
-than pre-faulted, so the whole file is pulled into the page cache but only the
-metadata actually touched counts toward RSS. The asynchronous log writers queue
-at most 8192 lines each instead of the crate default of 128k, which alone
-pinned about 4 MiB per appender. On glibc, the `nydus` binary caps malloc at
-two arenas and fixes the mmap threshold at 512 KiB (trim threshold 1 MiB) for
-the long-running services only; build, check, merge, export and optimize keep
-the allocator defaults. Explicit `MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_`,
-`MALLOC_TRIM_THRESHOLD_` or `GLIBC_TUNABLES` in the environment disable this
-built-in tuning.
+Further measures keep the footprint of a mount service small. The standalone
+bootstrap is mapped with a read-ahead hint (`MADV_WILLNEED`) rather than
+pre-faulted, so the whole file is pulled into the page cache but only the
+metadata actually touched counts toward RSS. Blob meta sidecars in the cache
+directory are mapped the same way rather than read into memory. The
+asynchronous log writers queue at most 1024 lines each instead of the crate default of 128k: a queue
+is allocated and written whole at startup, 40 bytes a line. The `nydus`
+binary allocates with mimalloc, tuned for the long-running services only,
+from an `.init_array` constructor that runs before the first allocation (the
+runtime and the argument parser allocate before `main`, and mimalloc reserves
+its first arena under the settings of that moment): transparent huge pages
+are disabled for the process (`PR_SET_THP_DISABLE`),
+freed pages go back to the OS at once (`purge_delay` 0), objects over 4 MiB
+are mapped from the OS (`arena_max_object_size`), arenas are reserved
+64 MiB at a time (`arena_reserve`), and a backend runtime thread that runs
+out of work takes back the blocks its readers freed, full pages included,
+at most every 20 ms, rather than only when it allocates again. A `MIMALLOC_ALLOW_THP`,
+`MIMALLOC_PURGE_DELAY`, `MIMALLOC_ARENA_MAX_OBJECT_SIZE` or
+`MIMALLOC_ARENA_RESERVE` in the environment takes precedence over the
+matching setting. On glibc, the `nydus` binary also caps C malloc at two
+arenas and fixes its mmap threshold at 512 KiB (trim threshold 1 MiB) for
+the long-running services; build, check, merge, export and optimize keep the
+allocator defaults. Explicit `MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_`,
+`MALLOC_TRIM_THRESHOLD_` or `GLIBC_TUNABLES` in the environment disable that
+tuning.
 
 The local backend opens source blob files lazily when read IO is first issued and
 caches the file descriptor for later `pread` calls. The persistent local cache
