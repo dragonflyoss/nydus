@@ -16,8 +16,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::StreamExt;
 use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
+use tokio::sync::mpsc;
+use tracing::warn;
 use url::Url;
 
 use nydus_config::{BackendConfig, Config};
@@ -36,8 +40,17 @@ use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
 
+/// Pieces of a streamed range the network may run ahead of the reader by:
+/// the bound on the bytes a range read holds between the two.
+const STREAM_PIECES: usize = 8;
+
+/// Times a range read whose body broke off is sent again for the bytes still
+/// missing.
+const BODY_RESUMES: u32 = 2;
+
 /// The transport of blob `GET`s, the origin or the Dragonfly seed peers, each
-/// call returning after the transport's own retries.
+/// call returning after the transport's own retries, the body still
+/// streaming: a body that breaks off is resumed by [`Client::stream_range`].
 #[async_trait]
 trait Transport: Send + Sync {
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
@@ -332,6 +345,71 @@ impl Client {
         Ok(redirected)
     }
 
+    /// Streams `len` bytes of a blob from `offset` for a `kind` read into
+    /// `pieces`, piece by piece as they arrive, and returns where they came
+    /// from. A body that breaks off is asked for again from the first byte
+    /// still missing, at most [`BODY_RESUMES`] times; a reader that hangs up
+    /// ends the read early.
+    async fn stream_range(
+        &self,
+        blob_id: [u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        len: u64,
+        kind: ReadKind,
+        pieces: mpsc::Sender<Bytes>,
+    ) -> io::Result<Source> {
+        let end = offset + len;
+        let mut pos = offset;
+        let mut resumes = 0;
+        loop {
+            let range = Range::Bounded(pos..=end - 1);
+            let response = match kind {
+                ReadKind::Ondemand => self.read_range(&blob_id, &range).await?,
+                ReadKind::Prefetch => self.prefetch_range(&blob_id, &range).await?,
+            };
+            let source = response.source;
+            let mut body = response.into_stream();
+            let broke = loop {
+                match body.next().await {
+                    Some(Ok(piece)) => {
+                        if piece.len() as u64 > end - pos {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("registry returned more than the {len} bytes asked for"),
+                            ));
+                        }
+                        pos += piece.len() as u64;
+                        if !piece.is_empty() && pieces.send(piece).await.is_err() {
+                            return Ok(source);
+                        }
+                    }
+                    Some(Err(err)) => break err,
+                    None if pos == end => return Ok(source),
+                    None => {
+                        break io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "early eof: registry returned {} of {len} bytes",
+                                pos - offset
+                            ),
+                        )
+                    }
+                }
+            };
+            if pos == end {
+                return Ok(source);
+            }
+            if resumes == BODY_RESUMES {
+                return Err(broke);
+            }
+            resumes += 1;
+            warn!(
+                "blob {} body broke off at byte {pos} of {offset}..{end}, asking for the rest: {broke}",
+                hex::encode(blob_id)
+            );
+        }
+    }
+
     /// Reads a blob's metadata for an on-demand read.
     ///
     /// ```text
@@ -442,35 +520,7 @@ impl Backend for Registry {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
-        let start = Instant::now();
-        let client = self.client.clone();
-        let blob_id = *blob_id;
-        let length = buf.len();
-        let result = self.runtime.block_on_worker(async move {
-            let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
-            let response = client.read_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
-        });
-
-        match result {
-            Ok((bytes, source)) => {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Ondemand,
-                    source,
-                    length as u64,
-                    start.elapsed(),
-                );
-                buf.copy_from_slice(&bytes);
-                Ok(())
-            }
-            Err(err) => {
-                self.metrics
-                    .backend
-                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source());
-                Err(err)
-            }
-        }
+        self.read_into(blob_id, offset, buf, ReadKind::Ondemand)
     }
 
     /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
@@ -480,35 +530,90 @@ impl Backend for Registry {
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<()> {
+        self.read_into(blob_id, offset, buf, ReadKind::Prefetch)
+    }
+
+    /// Streams the range into `sink` as the body arrives, the network
+    /// running at most [`STREAM_PIECES`] pieces ahead, and records the read's
+    /// metrics; a `sink` error stops the read and is not the backend's.
+    fn read_range_with(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        len: u64,
+        kind: ReadKind,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        if offset.checked_add(len).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "blob range offset overflow",
+            ));
+        }
+
         let start = Instant::now();
+        let (pieces, mut received) = mpsc::channel(STREAM_PIECES);
         let client = self.client.clone();
         let blob_id = *blob_id;
-        let length = buf.len();
-        let result = self.runtime.block_on_worker(async move {
-            let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
-            let response = client.prefetch_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
+        let task = self.runtime.start(async move {
+            client
+                .stream_range(blob_id, offset, len, kind, pieces)
+                .await
         });
 
-        match result {
-            Ok((bytes, source)) => {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Prefetch,
-                    source,
-                    length as u64,
-                    start.elapsed(),
-                );
-                buf.copy_from_slice(&bytes);
-                Ok(())
-            }
-            Err(err) => {
-                self.metrics
-                    .backend
-                    .collect_read_failure_metrics(ReadKind::Prefetch, self.client.source());
-                Err(err)
+        let mut streamed = 0u64;
+        while let Some(piece) = received.blocking_recv() {
+            streamed += piece.len() as u64;
+            if let Err(err) = sink(&piece) {
+                task.abort();
+                return Err(err);
             }
         }
+
+        match self.runtime.wait(task) {
+            Ok(source) if streamed == len => {
+                self.metrics.backend.collect_read_finished_metrics(
+                    kind,
+                    source,
+                    len,
+                    start.elapsed(),
+                );
+                Ok(())
+            }
+            result => {
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(kind, self.client.source());
+                Err(result.err().unwrap_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("registry returned {streamed} of {len} bytes"),
+                    )
+                }))
+            }
+        }
+    }
+}
+
+/// Implements the buffered reads over the streamed one.
+impl Registry {
+    /// Fills `buf` with the blob bytes from `offset` for a `kind` read.
+    fn read_into(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        buf: &mut [u8],
+        kind: ReadKind,
+    ) -> io::Result<()> {
+        let mut filled = 0;
+        self.read_range_with(blob_id, offset, buf.len() as u64, kind, &mut |piece| {
+            buf[filled..filled + piece.len()].copy_from_slice(piece);
+            filled += piece.len();
+            Ok(())
+        })
     }
 }
 
@@ -591,14 +696,14 @@ mod tests {
                     Ok(Response {
                         status: StatusCode::PARTIAL_CONTENT,
                         headers,
-                        body: Body::Stream(Box::new(io::Cursor::new(body))),
+                        body: Body::streamed(body),
                         source: Source::Dragonfly,
                     })
                 }
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
-                    body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
+                    body: Body::streamed(Vec::new()),
                     source: Source::Dragonfly,
                 }),
             }
@@ -645,7 +750,7 @@ mod tests {
                 return Ok(Response {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers,
-                    body: Body::Stream(Box::new(io::Cursor::new(b"ok".to_vec()))),
+                    body: Body::streamed(b"ok".to_vec()),
                     source: Source::Dragonfly,
                 });
             }
@@ -658,7 +763,7 @@ mod tests {
             Ok(Response {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
-                body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
+                body: Body::streamed(Vec::new()),
                 source: Source::Dragonfly,
             })
         }
@@ -801,6 +906,146 @@ mod tests {
             runtime: Arc::new(Runtime::new(None).unwrap()),
             metrics: Arc::new(Metrics::new()),
         }
+    }
+
+    /// A transport serving the bytes `0..` of a 256-byte blob, each answer to
+    /// the requested range breaking off after `cut` bytes while cuts are left.
+    struct BreakingTransport {
+        cuts: Mutex<VecDeque<usize>>,
+        ranges: Mutex<Vec<String>>,
+    }
+
+    impl BreakingTransport {
+        fn new(cuts: impl IntoIterator<Item = usize>) -> Arc<BreakingTransport> {
+            Arc::new(BreakingTransport {
+                cuts: Mutex::new(cuts.into_iter().collect()),
+                ranges: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn ranges(&self) -> Vec<String> {
+            self.ranges.lock().unwrap().clone()
+        }
+
+        fn answer(&self, headers: &HeaderMap) -> io::Result<Response> {
+            let range = headers[RANGE].to_str().unwrap().to_string();
+            self.ranges.lock().unwrap().push(range.clone());
+            let Range::Bounded(bounds) = range.parse::<Range>().unwrap() else {
+                unreachable!("streamed reads ask for bounded ranges");
+            };
+            let bytes: Vec<u8> = (*bounds.start() as u8..=*bounds.end() as u8).collect();
+            let mut pieces: Vec<io::Result<Bytes>> = bytes
+                .chunks(2)
+                .map(|piece| Ok(Bytes::copy_from_slice(piece)))
+                .collect();
+            if let Some(cut) = self.cuts.lock().unwrap().pop_front() {
+                pieces.truncate(cut / 2);
+                pieces.push(Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset")));
+            }
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                CONTENT_RANGE,
+                format!("bytes {}-{}/256", bounds.start(), bounds.end())
+                    .parse()
+                    .unwrap(),
+            );
+            Ok(Response {
+                status: StatusCode::PARTIAL_CONTENT,
+                headers,
+                body: Body::Stream(futures::stream::iter(pieces).boxed()),
+                source: Source::Dragonfly,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Transport for Arc<BreakingTransport> {
+        async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.answer(&headers)
+        }
+
+        async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.answer(&headers)
+        }
+    }
+
+    /// The backend reads and bytes `registry` recorded for `kind`.
+    fn backend_reads(registry: &Registry, kind: ReadKind) -> (u64, u64) {
+        let sum = |name: &str| -> u64 {
+            registry
+                .metrics
+                .registry()
+                .gather()
+                .iter()
+                .filter(|family| family.get_name() == name)
+                .flat_map(|family| family.get_metric())
+                .filter(|metric| {
+                    metric.get_label().iter().any(|label| {
+                        label.get_name() == "type" && label.get_value() == kind.to_string()
+                    })
+                })
+                .map(|metric| metric.get_counter().get_value() as u64)
+                .sum()
+        };
+        (
+            sum("nydus_backend_read_total"),
+            sum("nydus_backend_read_bytes_total"),
+        )
+    }
+
+    #[test]
+    fn a_broken_body_is_resumed_from_the_first_missing_byte() {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            let transport = BreakingTransport::new([4, 2]);
+            let registry =
+                scripted_registry("127.0.0.1:9".parse().unwrap(), None, transport.clone());
+            let mut pieces = Vec::new();
+            registry
+                .read_range_with(&TEST_BLOB_ID, 16, 12, kind, &mut |piece| {
+                    pieces.push(piece.to_vec());
+                    Ok(())
+                })
+                .unwrap();
+
+            assert_eq!(pieces.concat(), (16..28).collect::<Vec<u8>>(), "{kind:?}");
+            assert_eq!(
+                transport.ranges(),
+                ["bytes=16-27", "bytes=20-27", "bytes=22-27"],
+                "{kind:?}"
+            );
+            assert_eq!(backend_reads(&registry, kind), (1, 12), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_breaking_off_past_the_resumes_fails_the_read() {
+        let transport = BreakingTransport::new([2, 2, 2]);
+        let registry = scripted_registry("127.0.0.1:9".parse().unwrap(), None, transport.clone());
+        let mut buf = [0u8; 8];
+
+        let err = registry
+            .read_range_into(&TEST_BLOB_ID, 0, &mut buf)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(transport.ranges().len(), 1 + BODY_RESUMES as usize);
+    }
+
+    #[test]
+    fn a_failing_sink_stops_the_read_with_its_error() {
+        let transport = BreakingTransport::new([]);
+        let registry = scripted_registry("127.0.0.1:9".parse().unwrap(), None, transport);
+        let mut calls = 0;
+
+        let err = registry
+            .read_range_with(&TEST_BLOB_ID, 0, 16, ReadKind::Ondemand, &mut |_| {
+                calls += 1;
+                Err(io::Error::new(io::ErrorKind::InvalidData, "bad group"))
+            })
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(calls, 1);
     }
 
     fn origin_registry(addr: SocketAddr, netns: Option<Netns>) -> Registry {

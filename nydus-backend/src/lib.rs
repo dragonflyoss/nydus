@@ -10,7 +10,7 @@ mod registry;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use nydus_config::{BackendConfig, Config};
 use nydus_format::blob::BlobMetadata;
@@ -25,6 +25,20 @@ pub(crate) use registry::Registry;
 
 pub use nydus_config::ReadKind;
 pub use nydus_telemetry::metrics::Source;
+
+/// The function a backend runtime thread runs each time it runs out of work.
+#[cfg_attr(not(feature = "registry"), allow(dead_code))]
+static RUNTIME_IDLE_HOOK: OnceLock<fn()> = OnceLock::new();
+
+/// Sets the function every backend runtime thread runs each time it runs out
+/// of work, before it parks. The thread allocated the network buffers its
+/// reads handed to their callers, who freed them; the nydus binary uses this
+/// to have its allocator take those blocks back, as it otherwise only does
+/// when the thread allocates again. Only the first call takes effect, and
+/// only for runtimes created after it.
+pub fn set_runtime_idle_hook(hook: fn()) {
+    let _ = RUNTIME_IDLE_HOOK.set(hook);
+}
 
 /// A raw EROFS device backed by the range
 /// `[data_offset, data_offset + data_size)` of a local file.
@@ -115,6 +129,32 @@ pub trait Backend: Send + Sync {
         buf: &mut [u8],
     ) -> io::Result<()> {
         self.read_range_into(blob_id, offset, buf)
+    }
+
+    /// Streams the `len` blob bytes from `offset` for a `kind` read into
+    /// `sink`, in order and in pieces of any size, as they arrive. A `sink`
+    /// error stops the read and is returned as is.
+    ///
+    /// The caller holds only the piece in hand, so a reader can decode and
+    /// cache what has arrived before the rest of a large range comes in. The
+    /// default reads the whole range into one buffer, for a backend with no
+    /// cheaper way to stream.
+    fn read_range_with(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        offset: u64,
+        len: u64,
+        kind: ReadKind,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let len = usize::try_from(len)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "blob range exceeds usize"))?;
+        let mut buf = vec![0u8; len];
+        match kind {
+            ReadKind::Ondemand => self.read_range_into(blob_id, offset, &mut buf)?,
+            ReadKind::Prefetch => self.prefetch_range_into(blob_id, offset, &mut buf)?,
+        }
+        sink(&buf)
     }
 }
 

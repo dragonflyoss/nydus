@@ -5,7 +5,7 @@ use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use http::Extensions;
 use leaky_bucket::RateLimiter;
 use rand::Rng;
@@ -14,7 +14,6 @@ use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Request};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 use nydus_config::{ProxyConfig, TlsConfig};
@@ -128,9 +127,7 @@ impl Transport for Http {
             .map(|response| Response {
                 status: response.status(),
                 headers: response.headers().clone(),
-                body: Body::Stream(Box::new(StreamReader::new(
-                    response.bytes_stream().map_err(io::Error::other),
-                ))),
+                body: Body::Stream(response.bytes_stream().map_err(io::Error::other).boxed()),
                 source: self.source,
             })
             .map_err(io::Error::other);
@@ -163,9 +160,7 @@ impl Transport for Http {
                 .map(|response| Response {
                     status: response.status(),
                     headers: response.headers().clone(),
-                    body: Body::Stream(Box::new(StreamReader::new(
-                        response.bytes_stream().map_err(io::Error::other),
-                    ))),
+                    body: Body::Stream(response.bytes_stream().map_err(io::Error::other).boxed()),
                     source: self.source,
                 })
                 .map_err(io::Error::other);

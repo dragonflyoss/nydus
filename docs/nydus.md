@@ -220,11 +220,19 @@ their sockets:
 
 | Pool | Size | Lifetime and work |
 | ---- | ---- | ----------------- |
-| Async workers | Tokio's default, one per CPU | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Async workers | One per CPU, at most 4 | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
 | Blocking workers | Tokio's default | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`) and released when idle. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
-Every registry backend runs on a runtime of its own with tokio's default
-thread counts, the way dragonfly-client builds its runtimes.
+Every registry backend runs on a runtime of its own. Its async workers only
+drive sockets and timers, so they are capped at 4 rather than tokio's one per
+CPU, which would grow with the host and add a stack and allocator state per
+thread; the blocking pool keeps tokio's default.
+A range read streams: the runtime hands the body to the caller piece by piece
+through a channel at most 8 pieces deep, from the origin and the Dragonfly
+seed peers alike, so the caller decodes and caches chunk groups as they arrive
+instead of holding the whole range. A body that breaks off is asked for again
+from the first byte still missing, at most twice, each request going through
+the transport's usual retries and fallback.
 `nydus_backend::Backend::new(config, prefetch, netns, metrics)` takes an
 optional network namespace every runtime thread enters, so an embedder's
 registry sockets are created in it regardless of the caller's, and the

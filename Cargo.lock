@@ -2309,7 +2309,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tracing",
  "url",
 ]
