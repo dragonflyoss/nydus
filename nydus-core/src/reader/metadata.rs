@@ -349,10 +349,18 @@ impl ErofsReader {
         Ok(slice.to_vec())
     }
 
-    /// Read symlink target (sync, mmap-only).
+    /// Read symlink target (sync, mmap-only). A target does not exceed one
+    /// block, so a longer `i_size` is rejected before any buffer is sized
+    /// from it.
     pub fn read_symlink(&self, nid: u64, inode: &ErofsInode<'_>) -> io::Result<Vec<u8>> {
-        let size = inode.size() as usize;
-        self.read_flat_data_vec(nid, inode, 0, size)
+        let size = inode.size();
+        if size > EROFS_BLOCK_SIZE as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("symlink target of {size} bytes exceeds one block"),
+            ));
+        }
+        self.read_flat_data_vec(nid, inode, 0, size as usize)
     }
 
     /// Read all inline xattr entries for an inode, in on-disk order.
@@ -417,7 +425,8 @@ impl ErofsReader {
 mod tests {
     use super::*;
     use nydus_format::erofs::{
-        ErofsInodeCompact, ErofsSuperblock, EROFS_FT_DIR, EROFS_FT_REG_FILE, EROFS_SUPER_OFFSET,
+        ErofsInodeCompact, ErofsInodeExtended, ErofsSuperblock, EROFS_FT_DIR, EROFS_FT_REG_FILE,
+        EROFS_SUPER_OFFSET,
     };
     use std::io::Write;
 
@@ -446,6 +455,31 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&bootstrap).unwrap();
         ErofsReader::open_metadata_only(file.path()).unwrap()
+    }
+
+    #[test]
+    fn read_symlink_rejects_a_target_longer_than_one_block() {
+        let reader = directory_reader(&[]);
+        for size in [EROFS_BLOCK_SIZE as u64 + 1, (1 << 46) + 1, u64::MAX] {
+            let symlink = ErofsInodeExtended::new(
+                EROFS_INODE_FLAT_INLINE,
+                0o120777,
+                0,
+                size,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+            );
+            let inode = ErofsInode::from_bytes(symlink.as_bytes()).unwrap();
+
+            let err = reader.read_symlink(0, &inode).unwrap_err();
+
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "size={size}");
+        }
     }
 
     #[test]
