@@ -307,13 +307,13 @@ func runConvert(c *cli.Context) error {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
 		platform = parsed
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	} else if multiSource || (artifactMode && len(parentImages) > 0) {
 		// Multiple inputs are merged into one single-platform manifest, so image
 		// inputs must be resolved to exactly one platform. Default to the host
 		// platform when --platform is not given.
 		logrus.Infof("merged image: defaulting to platform %s", platforms.Format(platform))
-		platformMC = platforms.Only(platform)
+		platformMC = platforms.OnlyStrict(platform)
 	}
 
 	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-")
@@ -696,7 +696,7 @@ func runCheck(c *cli.Context) error {
 		if err != nil {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	}
 
 	// Prepare the work directory. It holds checking scratch state and, for
@@ -802,7 +802,7 @@ func runMount(c *cli.Context) error {
 		if err != nil {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	}
 
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
@@ -912,7 +912,7 @@ func runOptimize(c *cli.Context) error {
 		if err != nil {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	}
 
 	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-optimize-")

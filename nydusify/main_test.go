@@ -66,9 +66,13 @@ func mockBlockedFile(t *testing.T) string {
 	return path
 }
 
-func mockOCIImage(t *testing.T, reg *registrytest.Registry, repo, tag string) {
+func mockOCIImage(t *testing.T, reg *registrytest.Registry, repo, tag string, archs ...string) {
+	if len(archs) == 0 {
+		archs = []string{"amd64", "arm64"}
+	}
+
 	index := ocispec.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageIndex}
-	for _, arch := range []string{"amd64", "arm64"} {
+	for _, arch := range archs {
 		var layer bytes.Buffer
 		tw := tar.NewWriter(&layer)
 		if err := tw.WriteHeader(&tar.Header{Name: "hello", Mode: 0o644, Uid: os.Getuid(), Gid: os.Getgid(), Size: int64(len(arch)), ModTime: time.Unix(1700000000, 0)}); err != nil {
@@ -995,6 +999,8 @@ func TestTotalLayerSize(t *testing.T) {
 func TestRunCheck(t *testing.T) {
 	blocked := mockBlockedFile(t)
 
+	var x86 *registrytest.Registry
+
 	tests := []struct {
 		name   string
 		args   func(t *testing.T, reg *registrytest.Registry, dir string) []string
@@ -1008,6 +1014,31 @@ func TestRunCheck(t *testing.T) {
 			expect: func(t *testing.T, _ string, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "at least one of --source or --target must be provided")
+			},
+		},
+		{
+			name: "pull only the requested platform",
+			args: func(t *testing.T, reg *registrytest.Registry, dir string) []string {
+				x86 = reg
+				mockOCIImage(t, reg, "x86", "v1", "386", "amd64")
+
+				return []string{"--target", reg.Ref("x86", "v1"), "--platform", "linux/amd64", "--work-dir", dir}
+			},
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				data, err := os.ReadFile(filepath.Join(dir, "target", "config.json"))
+				assert.NoError(err)
+				assert.Contains(string(data), `"architecture":"amd64"`)
+
+				var index ocispec.Index
+				x86.LoadJSON(t, "x86", "v1", &index)
+				assert.Equal("386", index.Manifests[0].Platform.Architecture)
+
+				for _, req := range x86.Requests() {
+					assert.NotContains(req.URL, index.Manifests[0].Digest.String())
+				}
 			},
 		},
 		{
