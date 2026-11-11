@@ -2027,10 +2027,20 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
     }
 }
 
+/// The longest name of a directory entry, Linux `NAME_MAX` and
+/// `EROFS_NAME_LEN`: the kernel rejects a directory holding a longer one.
+const NAME_MAX: usize = 255;
+
 fn normalize_relative_path(path: &Path) -> Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
+            Component::Normal(name) if name.len() > NAME_MAX => {
+                return Err(Error::InvalidParameter(format!(
+                    "path has a name longer than {NAME_MAX} bytes: {}",
+                    path.display()
+                )));
+            }
             Component::Normal(name) => normalized.push(name),
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
