@@ -1,6 +1,6 @@
 use rolling_file::*;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use tracing::{info, Level};
 pub use tracing_appender::non_blocking::WorkerGuard;
@@ -23,14 +23,38 @@ fn non_blocking<T: Write + Send + 'static>(writer: T) -> (NonBlocking, WorkerGua
 }
 
 /// Initializes the tracing system for the service, which logs to both stdout
-/// and hourly-rolling files under `log_dir`.
+/// and hourly-rolling files under `log_dir`, an error when the directory or
+/// the log file cannot be created.
 pub fn init_tracing(
     name: &str,
     log_dir: PathBuf,
     log_level: Level,
     log_max_files: usize,
     console: bool,
-) -> Vec<WorkerGuard> {
+) -> io::Result<Vec<WorkerGuard>> {
+    // Setup file appender first, the one step that can fail.
+    fs::create_dir_all(&log_dir).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to create log directory {}: {err}",
+                log_dir.display()
+            ),
+        )
+    })?;
+    let log_file = log_dir.join(name).with_extension("log");
+    let rolling_appender = BasicRollingFileAppender::new(
+        &log_file,
+        RollingConditionBasic::new().hourly(),
+        log_max_files,
+    )
+    .map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("failed to open log file {}: {err}", log_file.display()),
+        )
+    })?;
+
     let mut guards = vec![];
 
     // Setup stdout layer.
@@ -55,14 +79,6 @@ pub fn init_tracing(
         .with_filter(stdout_filter);
 
     // Setup file layer.
-    fs::create_dir_all(log_dir.clone()).expect("failed to create log directory");
-    let rolling_appender = BasicRollingFileAppender::new(
-        log_dir.join(name).with_extension("log"),
-        RollingConditionBasic::new().hourly(),
-        log_max_files,
-    )
-    .expect("failed to create rolling file appender");
-
     let (rolling_writer, rolling_writer_guard) = non_blocking(rolling_appender);
     guards.push(rolling_writer_guard);
 
@@ -94,7 +110,7 @@ pub fn init_tracing(
         log_level
     );
 
-    guards
+    Ok(guards)
 }
 
 /// Initializes the tracing system for command line tools, which logs to
@@ -151,10 +167,23 @@ mod tests {
         let log_dir = temp_dir.path().join("logs");
         assert!(!log_dir.exists());
 
-        let guards = init_tracing("test-service", log_dir.clone(), Level::INFO, 10, false);
+        let guards = init_tracing("test-service", log_dir.clone(), Level::INFO, 10, false).unwrap();
         assert!(log_dir.exists());
         assert!(log_dir.is_dir());
         assert!(!guards.is_empty());
         assert_eq!(guards.len(), 2);
+    }
+
+    #[test]
+    fn init_tracing_fails_when_the_log_dir_cannot_be_created() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let file = temp_dir.path().join("file");
+        fs::write(&file, b"").unwrap();
+
+        let err = init_tracing("test-service", file.join("logs"), Level::INFO, 10, false)
+            .err()
+            .unwrap();
+
+        assert!(err.to_string().contains("failed to create log directory"));
     }
 }

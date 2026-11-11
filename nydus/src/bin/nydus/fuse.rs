@@ -169,7 +169,7 @@ impl FuseCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-dir/--cache-dir override the backend/cache directories.

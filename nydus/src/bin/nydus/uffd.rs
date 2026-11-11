@@ -93,7 +93,7 @@ impl UffdCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
         // Load the storage config.
         let config = Config::load(&self.config)?;
