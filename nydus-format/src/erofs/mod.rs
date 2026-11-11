@@ -148,6 +148,64 @@ pub const Z_EROFS_FRAGMENT_INODE_FLAG: u64 = 1 << 63;
 /// physical block count instead of a head distance.
 pub const Z_EROFS_LI_D0_CBLKCNT: u16 = 1 << 11;
 
+/// One full z_erofs lcluster index (`z_erofs_lcluster_index`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZErofsLclusterIndex {
+    /// Lcluster type, one of `Z_EROFS_LCLUSTER_TYPE_*`.
+    pub kind: u16,
+    /// Offset into the lcluster where a HEAD/PLAIN extent starts.
+    pub clusterofs: u16,
+    /// `blkaddr` of a HEAD/PLAIN index; `delta[0] | delta[1] << 16` of a
+    /// NONHEAD one.
+    pub word: u32,
+}
+
+impl ZErofsLclusterIndex {
+    /// Parses the index at the start of `entry`.
+    pub fn parse(entry: &[u8]) -> Self {
+        let advise = u16::from_le_bytes([entry[0], entry[1]]);
+        Self {
+            kind: advise & Z_EROFS_LI_LCLUSTER_TYPE_MASK,
+            clusterofs: u16::from_le_bytes([entry[2], entry[3]]),
+            word: u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]),
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; Z_EROFS_LCLUSTER_INDEX_SIZE] {
+        let mut entry = [0u8; Z_EROFS_LCLUSTER_INDEX_SIZE];
+        entry[..2].copy_from_slice(&self.kind.to_le_bytes());
+        entry[2..4].copy_from_slice(&self.clusterofs.to_le_bytes());
+        entry[4..].copy_from_slice(&self.word.to_le_bytes());
+        entry
+    }
+
+    /// File offset where the extent of this HEAD/PLAIN index of lcluster
+    /// `lcn` starts.
+    pub fn extent_start(&self, lcn: usize) -> u64 {
+        lcn as u64 * u64::from(EROFS_BLOCK_SIZE) + u64::from(self.clusterofs)
+    }
+
+    /// Whether this index of lcluster `lcn` in a file of `file_size` bytes
+    /// addresses data. NONHEAD indexes do not, nor does the EOF index: the
+    /// PLAIN index at the EOF offset (block address 0) that closes a
+    /// compressed last pcluster ending inside an lcluster, as mkfs.erofs
+    /// writes it (`z_erofs_write_indexes_final`).
+    pub fn addresses_data(&self, lcn: usize, file_size: u64) -> bool {
+        self.kind != Z_EROFS_LCLUSTER_TYPE_NONHEAD && self.extent_start(lcn) < file_size
+    }
+
+    /// The last lcluster in `indexes` whose index addresses data; in a
+    /// tail-fragment inode it holds the high half of the fragment offset.
+    pub fn last_data(indexes: &[u8], file_size: u64) -> Option<usize> {
+        (0..indexes.len() / Z_EROFS_LCLUSTER_INDEX_SIZE)
+            .rev()
+            .find(|&lcn| {
+                Self::parse(&indexes[lcn * Z_EROFS_LCLUSTER_INDEX_SIZE..])
+                    .addresses_data(lcn, file_size)
+            })
+    }
+}
+
 /// LZ4 sliding-window upper bound recorded in the superblock.
 pub const Z_EROFS_LZ4_MAX_DISTANCE: u16 = 65535;
 
@@ -233,3 +291,37 @@ pub const NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"nydus.prefetch.blobs";
 /// Nydus internal xattr suffix marking an image built without xattrs
 /// (`trusted.nydus.no_xattr`).
 pub const NYDUS_XATTR_SUFFIX_NO_XATTR: &[u8] = b"nydus.no_xattr";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lcluster_index_round_trips_and_marks_the_eof_index_unaddressed() {
+        let block = u64::from(EROFS_BLOCK_SIZE);
+        let index = |kind, clusterofs, word| ZErofsLclusterIndex {
+            kind,
+            clusterofs,
+            word,
+        };
+        // HEAD1, NONHEAD, then the EOF index 5 bytes into lcluster 2.
+        let table = [
+            index(Z_EROFS_LCLUSTER_TYPE_HEAD1, 0, 100),
+            index(Z_EROFS_LCLUSTER_TYPE_NONHEAD, 0, 1 << 16 | 0x801),
+            index(Z_EROFS_LCLUSTER_TYPE_PLAIN, 5, 0),
+        ];
+        let bytes: Vec<u8> = table.iter().flat_map(|i| i.to_bytes()).collect();
+        let size = 2 * block + 5;
+        for (lcn, want) in table.iter().enumerate() {
+            let entry = &bytes[lcn * Z_EROFS_LCLUSTER_INDEX_SIZE..];
+            assert_eq!(ZErofsLclusterIndex::parse(entry), *want);
+        }
+        let addressed: Vec<bool> = (0..table.len())
+            .map(|lcn| table[lcn].addresses_data(lcn, size))
+            .collect();
+        assert_eq!(addressed, [true, false, false]);
+        assert_eq!(ZErofsLclusterIndex::last_data(&bytes, size), Some(0));
+        // Without the EOF index, a PLAIN index inside the file addresses data.
+        assert!(index(Z_EROFS_LCLUSTER_TYPE_PLAIN, 0, 102).addresses_data(2, size));
+    }
+}

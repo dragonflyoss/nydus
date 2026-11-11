@@ -9,10 +9,10 @@ use crate::build::inode::{
 };
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::{
-    ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
-    EROFS_FT_DIR, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET, Z_EROFS_ADVISE_FRAGMENT_PCLUSTER,
-    Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
-    Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
+    ErofsDeviceSlot, ErofsSuperblock, ZErofsComprCfgs, ZErofsLclusterIndex, EROFS_BLOCK_SIZE,
+    EROFS_DEVICESLOT_SIZE, EROFS_FT_DIR, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET,
+    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
+    Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
 use std::io::Write;
@@ -168,7 +168,8 @@ pub struct ZRelocation {
 impl ZRelocation {
     /// Rewrites a COMPRESSED_FULL inode tail (see
     /// `ErofsReader::read_z_inode_tail`): the fragment offset of a whole-file
-    /// fragment, else the block address of every HEAD/PLAIN lcluster index.
+    /// fragment, else the block address of every HEAD/PLAIN lcluster index
+    /// but an EOF one, which addresses no data.
     pub fn relocate_tail(&self, tail: &[u8], size: u64) -> Result<Vec<u8>> {
         let mut tail = tail.to_vec();
         if size > 0 && tail.len() == Z_EROFS_MAP_HEADER_SIZE {
@@ -190,13 +191,7 @@ impl ZRelocation {
         let advise = u16::from_le_bytes([tail[4], tail[5]]);
         let tail_fragment_head = if advise & Z_EROFS_ADVISE_FRAGMENT_PCLUSTER != 0 {
             let indexes = &tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
-            let count = indexes.len() / Z_EROFS_LCLUSTER_INDEX_SIZE;
-            let head = (0..count).rev().find(|&i| {
-                let e = &indexes[i * Z_EROFS_LCLUSTER_INDEX_SIZE..];
-                u16::from_le_bytes([e[0], e[1]]) & Z_EROFS_LI_LCLUSTER_TYPE_MASK
-                    != Z_EROFS_LCLUSTER_TYPE_NONHEAD
-            });
-            let Some(head) = head else {
+            let Some(head) = ZErofsLclusterIndex::last_data(indexes, size) else {
                 return Err(Error::InvalidImage(
                     "tail fragment inode without a head lcluster".to_string(),
                 ));
@@ -224,11 +219,11 @@ impl ZRelocation {
             if Some(i) == tail_fragment_head {
                 continue;
             }
-            let advise = u16::from_le_bytes([index[0], index[1]]);
-            if advise & Z_EROFS_LI_LCLUSTER_TYPE_MASK == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+            let lcluster = ZErofsLclusterIndex::parse(index);
+            if !lcluster.addresses_data(i, size) {
                 continue;
             }
-            let blkaddr = u32::from_le_bytes(index[4..8].try_into().expect("4-byte blkaddr"));
+            let blkaddr = lcluster.word;
             let relocated = (blkaddr as u64)
                 .checked_sub(self.old_mapped_blkaddr)
                 .ok_or_else(|| {

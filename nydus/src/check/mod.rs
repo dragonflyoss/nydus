@@ -9,12 +9,11 @@ use nydus_core::ErofsReader;
 use nydus_error::{Context, Error, Result};
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor};
 use nydus_format::erofs::{
-    ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV,
-    EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK,
-    EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
+    ErofsInode, ErofsSuperblock, ZErofsLclusterIndex, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
+    EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
+    EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
-    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
-    Z_EROFS_LI_LCLUSTER_TYPE_MASK, Z_EROFS_MAP_HEADER_SIZE,
+    Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_MAP_HEADER_SIZE,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -393,7 +392,7 @@ fn walk_inode(
                     if inode.size() > 0 && tail.len() == Z_EROFS_MAP_HEADER_SIZE {
                         stats.z_fragment_files += 1;
                     } else if tail.len() > Z_EROFS_MAP_HEADER_SIZE + 8 {
-                        account_z_pclusters(tail, stats, blobs);
+                        account_z_pclusters(tail, inode.size(), stats, blobs);
                     }
                 }
                 _ => {
@@ -423,26 +422,21 @@ fn walk_inode(
     Ok(())
 }
 
-/// Credits every HEAD/PLAIN lcluster index in `indexes` to the device whose
-/// mapped range contains its block address; addresses in no device are
-/// counted as out of range.
+/// Credits every lcluster index in `tail` that addresses data (see
+/// [`ZErofsLclusterIndex::addresses_data`]) to the device whose mapped range
+/// contains its block address; addresses in no device are counted as out of
+/// range.
 fn account_z_pclusters(
     tail: &[u8],
+    size: u64,
     stats: &mut ImageStats,
     blobs: &mut BTreeMap<u16, BlobSummary>,
 ) {
     let indexes = &tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
     // The last HEAD of a tail-fragment inode addresses the packed inode.
     let advise = u16::from_le_bytes([tail[4], tail[5]]);
-    let count = indexes.len() / Z_EROFS_LCLUSTER_INDEX_SIZE;
     let tail_fragment_head = (advise & Z_EROFS_ADVISE_FRAGMENT_PCLUSTER != 0)
-        .then(|| {
-            (0..count).rev().find(|&i| {
-                let e = &indexes[i * Z_EROFS_LCLUSTER_INDEX_SIZE..];
-                u16::from_le_bytes([e[0], e[1]]) & Z_EROFS_LI_LCLUSTER_TYPE_MASK
-                    != Z_EROFS_LCLUSTER_TYPE_NONHEAD
-            })
-        })
+        .then(|| ZErofsLclusterIndex::last_data(indexes, size))
         .flatten();
     for (i, index) in indexes
         .chunks_exact(Z_EROFS_LCLUSTER_INDEX_SIZE)
@@ -452,11 +446,11 @@ fn account_z_pclusters(
             stats.z_tail_fragment_files += 1;
             continue;
         }
-        let advise = u16::from_le_bytes([index[0], index[1]]);
-        if advise & Z_EROFS_LI_LCLUSTER_TYPE_MASK == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+        let lcluster = ZErofsLclusterIndex::parse(index);
+        if !lcluster.addresses_data(i, size) {
             continue;
         }
-        let blkaddr = u64::from(u32::from_le_bytes([index[4], index[5], index[6], index[7]]));
+        let blkaddr = u64::from(lcluster.word);
         let device = blobs.values_mut().find(|blob| {
             blkaddr >= blob.mapped_blkaddr && blkaddr < blob.mapped_blkaddr + blob.declared_blocks
         });
