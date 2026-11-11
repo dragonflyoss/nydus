@@ -1627,6 +1627,11 @@ Within the bootstrap region:
 - the metadata area starts at `superblock.meta_blkaddr` and contains inode
 	bodies, xattrs, chunk index arrays and directory data. This is block 1 for
 	up to 23 device slots; a larger device table occupies additional head blocks.
+- the first 32-byte slot of the metadata area stays empty, so the root inode
+	has nid 1 and no inode has nid 0. A kernel EROFS mount reports the nid as
+	`d_ino`, and glibc before 2.37 drops a `readdir` entry whose `d_ino` is 0:
+	with the root at nid 0, `.` and `..` of the root and `..` of its
+	subdirectories went missing from listings.
 - directories are laid out like `mkfs.erofs` does: the full 4KiB blocks of
 	dirent data go to the data area, and the partial last block is packed right
 	behind the inode header (`EROFS_INODE_FLAT_INLINE`, `i_size` is the exact

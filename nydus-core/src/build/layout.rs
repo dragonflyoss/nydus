@@ -37,6 +37,13 @@ impl Default for MetadataLayout {
 }
 
 impl MetadataLayout {
+    /// The metadata offset of the first inode. Slot 0 stays empty so that no
+    /// inode has nid 0, the root above all: the kernel reports the nid as
+    /// `d_ino`, and glibc before 2.37 drops a `readdir` entry whose `d_ino`
+    /// is 0, which hides `.` and `..` of the root and `..` of its
+    /// subdirectories.
+    const FIRST_INODE_OFFSET: usize = EROFS_SLOTSIZE as usize;
+
     pub(crate) fn new() -> Self {
         Self::with_meta_blkaddr(1)
     }
@@ -49,7 +56,7 @@ impl MetadataLayout {
         Self {
             buf: vec![0u8; head_size],
             head_size,
-            cursor: 0,
+            cursor: Self::FIRST_INODE_OFFSET,
             meta_blkaddr,
             size_only: false,
         }
@@ -62,7 +69,7 @@ impl MetadataLayout {
         Self {
             buf: Vec::new(),
             head_size: meta_blkaddr as usize * EROFS_BLOCK_SIZE as usize,
-            cursor: 0,
+            cursor: Self::FIRST_INODE_OFFSET,
             meta_blkaddr,
             size_only: true,
         }
