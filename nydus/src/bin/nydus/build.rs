@@ -202,17 +202,13 @@ impl Digester {
 
 fn parse_blob_id(s: &str) -> std::result::Result<[u8; EROFS_BLOB_ID_SIZE], String> {
     let s = s.strip_prefix("sha256:").unwrap_or(s);
-    if s.len() != EROFS_BLOB_ID_SIZE * 2 {
-        return Err(format!(
-            "blob id must be {} hex characters",
-            EROFS_BLOB_ID_SIZE * 2
-        ));
-    }
     let mut id = [0u8; EROFS_BLOB_ID_SIZE];
-    for (i, byte) in id.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .map_err(|_| "blob id must be hexadecimal".to_string())?;
-    }
+    hex::decode_to_slice(s, &mut id).map_err(|_| {
+        format!(
+            "blob id must be {} hexadecimal characters",
+            EROFS_BLOB_ID_SIZE * 2
+        )
+    })?;
     Ok(id)
 }
 
@@ -757,6 +753,22 @@ mod tests {
             err.to_string().contains("must point to different files"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parse_blob_id_accepts_only_64_hexadecimal_characters() {
+        let id = "ab".repeat(EROFS_BLOB_ID_SIZE);
+        let test_cases = vec![
+            (id.clone(), true),
+            (format!("sha256:{id}"), true),
+            (id[2..].to_string(), false),
+            ("+a".repeat(EROFS_BLOB_ID_SIZE), false),
+            (format!("a\u{e9}{}", "a".repeat(61)), false),
+        ];
+
+        for (value, ok) in test_cases {
+            assert_eq!(parse_blob_id(&value).is_ok(), ok, "{value}");
+        }
     }
 
     #[test]
