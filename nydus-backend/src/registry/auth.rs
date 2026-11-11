@@ -17,6 +17,11 @@ use super::Transport;
 /// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
+/// The shortest lifetime a bearer token is given, the minimum the
+/// distribution token spec lets a token server return: a shorter one would
+/// expire within the leeway and never be sent.
+const MIN_TOKEN_EXPIRATION: Duration = Duration::from_secs(60);
+
 /// The margin before expiry within which a token counts as expired.
 const TOKEN_EXPIRY_LEEWAY: Duration = Duration::from_secs(20);
 
@@ -202,8 +207,9 @@ impl FetchTokenResponse {
 
         Authorization::bearer(
             &token,
-            self.expires_in
-                .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs),
+            self.expires_in.map_or(DEFAULT_TOKEN_EXPIRATION, |seconds| {
+                Duration::from_secs(seconds).max(MIN_TOKEN_EXPIRATION)
+            }),
         )
     }
 }
@@ -573,7 +579,10 @@ mod tests {
                 assert!(authorization.is_valid());
             }),
             (r#"{"token":"abc","expires_in":1}"#, |authorization| {
-                assert!(!authorization.unwrap().is_valid());
+                assert!(authorization.unwrap().is_valid());
+            }),
+            (r#"{"token":"abc","expires_in":0}"#, |authorization| {
+                assert!(authorization.unwrap().is_valid());
             }),
             (r#"{"token":"","access_token":""}"#, |authorization| {
                 assert!(authorization.is_err());
