@@ -309,6 +309,35 @@ fn open_fails_on_a_blob_metadata_error_and_looks_it_up_again() {
 }
 
 #[test]
+fn open_fetches_the_blob_metadata_again_when_the_cached_one_is_invalid() {
+    let blob = Blob::new(false);
+    let backend = blob.backend();
+    let cache_dir = tempdir().unwrap();
+    drop(open_local(&backend, cache_dir.path()));
+    let sidecar = fs::read_dir(cache_dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(BlobMetadata::SUFFIX))
+        .unwrap();
+    let saved = fs::read(&sidecar).unwrap();
+    let mut flipped = saved.clone();
+    *flipped.last_mut().unwrap() ^= 0xff;
+
+    for (calls, invalid) in [(2, Vec::new()), (3, flipped)] {
+        fs::write(&sidecar, invalid).unwrap();
+
+        let cached = open_local(&backend, cache_dir.path());
+
+        assert_eq!(
+            read(&cached, blob.logical(0)).unwrap(),
+            blob.expected(blob.logical(0))
+        );
+        assert_eq!(backend.metadata_calls(), calls);
+        assert_eq!(fs::read(&sidecar).unwrap(), saved);
+    }
+}
+
+#[test]
 fn remote_read_at_rejects_faulted_groups_and_keeps_only_validated_ones() {
     let blob = Blob::new(true);
     let backend = blob.backend();
