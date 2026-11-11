@@ -26,6 +26,7 @@ use nydus_config::{BackendConfig, Config};
 
 use super::http::{Http, RateLimit};
 use super::range::Range;
+use super::redirect::without_query;
 use super::response::{Body, Response};
 use super::rt::Runtime;
 use super::Transport;
@@ -204,12 +205,14 @@ impl Transport for Dragonfly {
 
         match &result {
             Ok(response) => debug!(
-                "GET {url} (ondemand) through dragonfly returned {} in {:?}",
+                "GET {} (ondemand) through dragonfly returned {} in {:?}",
+                without_query(url),
                 response.status,
                 start.elapsed()
             ),
             Err(err) => debug!(
-                "GET {url} (ondemand) through dragonfly failed in {:?}: {err}",
+                "GET {} (ondemand) through dragonfly failed in {:?}: {err}",
+                without_query(url),
                 start.elapsed()
             ),
         }
@@ -284,12 +287,14 @@ impl Transport for Dragonfly {
 
             match &result {
                 Ok(response) => debug!(
-                    "GET {url} (prefetch) through dragonfly returned {} in {:?}",
+                    "GET {} (prefetch) through dragonfly returned {} in {:?}",
+                    without_query(url),
                     response.status,
                     start.elapsed()
                 ),
                 Err(err) => debug!(
-                    "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
+                    "GET {} (prefetch) through dragonfly failed in {:?}: {err}",
+                    without_query(url),
                     start.elapsed()
                 ),
             }

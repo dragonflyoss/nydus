@@ -1,5 +1,6 @@
 //! The direct HTTP transport to the origin registry.
 
+use std::fmt;
 use std::io;
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
@@ -16,9 +17,11 @@ use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
+use url::Url;
 
 use nydus_config::{ProxyConfig, TlsConfig};
 
+use super::redirect::without_query;
 use super::response::{Body, Response};
 use super::Transport;
 use crate::Source;
@@ -113,6 +116,60 @@ impl Http {
     }
 }
 
+/// The failure of a request and its causes, their messages naming the request
+/// URL without its query.
+#[derive(Debug)]
+struct RequestError {
+    /// The message of the error, the query removed.
+    message: String,
+
+    /// The cause of the error.
+    source: Option<Box<RequestError>>,
+}
+
+/// Implements the request error.
+impl RequestError {
+    /// Copies `err` and its cause chain, removing `query` from the messages.
+    fn new(err: &(dyn std::error::Error + 'static), query: &str) -> Self {
+        Self {
+            message: err.to_string().replace(query, ""),
+            source: err
+                .source()
+                .map(|source| Box::new(Self::new(source, query))),
+        }
+    }
+}
+
+/// Implements the message of the request error.
+impl fmt::Display for RequestError {
+    /// Writes the message.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Implements the cause chain of the request error.
+impl std::error::Error for RequestError {
+    /// Returns the cause of the error.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Converts the failure of the request to `url` into an I/O error that names
+/// the URL without its query.
+fn request_error(url: &str, err: reqwest_middleware::Error) -> io::Error {
+    let query = Url::parse(url)
+        .ok()
+        .and_then(|url| url.query().map(|query| format!("?{query}")));
+    match query {
+        Some(query) => io::Error::other(RequestError::new(&err, &query)),
+        None => io::Error::other(err),
+    }
+}
+
 /// Implements the blob transport over the origin HTTP client.
 #[async_trait]
 impl Transport for Http {
@@ -133,8 +190,9 @@ impl Transport for Http {
                 ))),
                 source: self.source,
             })
-            .map_err(io::Error::other);
+            .map_err(|err| request_error(url, err));
 
+        let url = without_query(url);
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) from the origin returned {} in {:?}",
@@ -168,16 +226,18 @@ impl Transport for Http {
                     ))),
                     source: self.source,
                 })
-                .map_err(io::Error::other);
+                .map_err(|err| request_error(url, err));
 
             match &result {
                 Ok(response) => debug!(
-                    "GET {url} (prefetch) from the origin returned {} in {:?}",
+                    "GET {} (prefetch) from the origin returned {} in {:?}",
+                    without_query(url),
                     response.status,
                     start.elapsed()
                 ),
                 Err(err) => debug!(
-                    "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                    "GET {} (prefetch) from the origin failed in {:?}: {err}",
+                    without_query(url),
                     start.elapsed()
                 ),
             }
@@ -269,8 +329,15 @@ mod tests {
         .unwrap();
 
         let start = Instant::now();
-        assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
+        let message = http
+            .prefetch(&format!("{url}?sig=secret"), HeaderMap::new())
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(start.elapsed() < retry_interval);
+        assert!(message.contains(&url), "{message}");
+        assert!(!message.contains("secret"), "{message}");
     }
 
     #[cfg(feature = "dragonfly")]

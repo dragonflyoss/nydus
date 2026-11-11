@@ -7,6 +7,12 @@ use std::time::{Duration, Instant};
 use lru::LruCache;
 use tracing::debug;
 
+/// Returns `url` without its query. The query of a redirect URL signs it, so
+/// one written to a log grants the blob to whoever reads the log.
+pub(crate) fn without_query(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(url, _)| url)
+}
+
 /// A cached redirect and when it was learned.
 #[derive(Debug, Clone)]
 struct RedirectEntry {
@@ -52,14 +58,17 @@ impl RedirectCache {
             return None;
         }
 
-        debug!("found cached redirect for blob {hex} -> {}", entry.url);
+        debug!(
+            "found cached redirect for blob {hex} -> {}",
+            without_query(&entry.url)
+        );
         Some(entry.url.clone())
     }
 
     /// Remembers `url` as the redirect of `hex`, evicting the least recently
     /// used blob when full.
     pub(crate) fn insert(&self, hex: &str, url: String) {
-        debug!("caching redirect for blob {hex} -> {url}");
+        debug!("caching redirect for blob {hex} -> {}", without_query(&url));
         self.redirects.lock().unwrap().put(
             hex.to_string(),
             RedirectEntry {
