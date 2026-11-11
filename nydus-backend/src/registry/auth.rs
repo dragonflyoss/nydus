@@ -17,11 +17,6 @@ use super::Transport;
 /// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
 
-/// The shortest lifetime a bearer token is given, the minimum the
-/// distribution token spec lets a token server return: a shorter one would
-/// expire within the leeway and never be sent.
-const MIN_TOKEN_EXPIRATION: Duration = Duration::from_secs(60);
-
 /// The margin before expiry within which a token counts as expired.
 const TOKEN_EXPIRY_LEEWAY: Duration = Duration::from_secs(20);
 
@@ -160,7 +155,8 @@ impl Authorization {
     }
 
     /// Returns whether the authorization is still valid, a bearer token until
-    /// the leeway before it expires.
+    /// the leeway before it expires. A token that lives no longer than the
+    /// leeway would never be sent, so it is valid for half its lifetime.
     fn is_valid(&self) -> bool {
         match self {
             Self::Basic(_) => true,
@@ -168,7 +164,14 @@ impl Authorization {
                 created_at,
                 expires_in,
                 ..
-            } => created_at.elapsed() + TOKEN_EXPIRY_LEEWAY < *expires_in,
+            } => {
+                let leeway = if *expires_in > TOKEN_EXPIRY_LEEWAY {
+                    TOKEN_EXPIRY_LEEWAY
+                } else {
+                    *expires_in / 2
+                };
+                created_at.elapsed() + leeway < *expires_in
+            }
         }
     }
 }
@@ -205,11 +208,12 @@ impl FetchTokenResponse {
             ));
         }
 
+        // Read a lifetime of 0 as none given, as the token spec does.
         Authorization::bearer(
             &token,
-            self.expires_in.map_or(DEFAULT_TOKEN_EXPIRATION, |seconds| {
-                Duration::from_secs(seconds).max(MIN_TOKEN_EXPIRATION)
-            }),
+            self.expires_in
+                .filter(|seconds| *seconds > 0)
+                .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs),
         )
     }
 }
@@ -424,20 +428,25 @@ mod tests {
 
     #[test]
     fn authorize_adds_the_header_until_the_token_nears_expiry() {
+        // A bearer token of `expires_in` seconds fetched `age` seconds ago.
+        let bearer = |expires_in: u64, age: u64| Authorization::Bearer {
+            value: HeaderValue::from_static("Bearer xyz"),
+            created_at: Instant::now() - Duration::from_secs(age),
+            expires_in: Duration::from_secs(expires_in),
+        };
         let test_cases = vec![
             (
                 Authorization::basic("YWxpY2U6c2VjcmV0").unwrap(),
                 Some("Basic YWxpY2U6c2VjcmV0"),
             ),
-            (
-                Authorization::bearer("xyz", Duration::from_secs(3600)).unwrap(),
-                Some("Bearer xyz"),
-            ),
-            (
-                Authorization::bearer("xyz", TOKEN_EXPIRY_LEEWAY).unwrap(),
-                None,
-            ),
-            (Authorization::bearer("xyz", Duration::ZERO).unwrap(), None),
+            (bearer(3600, 0), Some("Bearer xyz")),
+            (bearer(30, 9), Some("Bearer xyz")),
+            (bearer(30, 11), None),
+            (bearer(21, 2), None),
+            (bearer(20, 9), Some("Bearer xyz")),
+            (bearer(20, 11), None),
+            (bearer(1, 0), Some("Bearer xyz")),
+            (bearer(0, 0), None),
         ];
 
         for (authorization, expected) in test_cases {
