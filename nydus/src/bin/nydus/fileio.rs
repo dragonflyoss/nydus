@@ -130,7 +130,7 @@ impl FileioCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
         let config = Config::load(&self.config)?;
         self.run(signals, config)
