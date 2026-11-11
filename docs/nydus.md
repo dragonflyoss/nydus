@@ -795,8 +795,9 @@ Current implementation notes:
 	such: the incompat dump names `zero_padding`, `big_pcluster+compr_cfgs` and
 	`fragments`; the summary counts `Z_EROFS FILES`, `Z_EROFS FRAGMENT FILES`
 	and `Z_EROFS PCLUSTERS OUT OF RANGE` (HEAD/PLAIN lcluster addresses that no
-	device covers, always 0 for a sound image), and the packed inode is walked
-	too. Each device resolves to `<blob-dir>/<slot id>`, the layer's full blob
+	device covers, EOF indexes excluded, always 0 for a sound image), and the
+	packed inode is walked too. Each device resolves to
+	`<blob-dir>/<slot id>`, the layer's full blob
 	(`SLOT DIGEST KIND z_erofs_device`); it verifies when the footer's data
 	region spans the declared block count and the file's SHA256 equals the slot
 	id (a bare data file without a footer is accepted as well). `nydus check
@@ -2172,7 +2173,12 @@ Inside the layer data:
 	pcluster (`ZERO_PADDING`), and per-lcluster PLAIN blocks whenever a window
 	does not shrink by a block (the `mkfs.erofs` layout). Pclusters are packed
 	greedily with `LZ4_compress_destSize`: each consumes as much source as
-	fits into 64KiB of output, rounded down to whole lclusters.
+	fits into 64KiB of output, rounded down to whole lclusters. A compressed
+	last pcluster that ends inside an lcluster indexes only its whole
+	lclusters and is closed by a PLAIN index at the EOF offset with block
+	address 0, as `mkfs.erofs` writes it: kernels before 6.0 size the last
+	extent up to the next HEAD index and would otherwise fail to decompress
+	it.
 - Regular files of at most 64KiB are **fragments**: their bytes are appended
 	to one packed stream, compressed as it fills into the **packed inode** (a
 	regular compressed file outside the tree, referenced by the superblock's
@@ -2232,8 +2238,9 @@ bootstrap:
 
 - device `i + 1` is layer `i`'s blob, named by its SHA256 and placed back to
 	back in the mapped block space on 512KiB boundaries past the merged
-	bootstrap; every HEAD/PLAIN lcluster address in the copied inode tails is
-	shifted by the difference between the layer's and the merged mapping;
+	bootstrap; every HEAD/PLAIN lcluster address in the copied inode tails but
+	an EOF index's is shifted by the difference between the layer's and the
+	merged mapping;
 - OCI whiteouts are applied and the k-way path merge is the same as for
 	chunk-based layers;
 - the layers' packed inodes are concatenated into one (each is block padded by

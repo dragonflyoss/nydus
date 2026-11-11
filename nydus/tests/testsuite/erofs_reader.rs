@@ -218,6 +218,86 @@ fn read_z_fixture_range(
 }
 
 #[test]
+fn z_reader_reads_the_last_extent_with_or_without_an_eof_index() {
+    let index = |kind: u16, clusterofs: u16, word: u32| {
+        let mut e = kind.to_le_bytes().to_vec();
+        e.extend_from_slice(&clusterofs.to_le_bytes());
+        e.extend_from_slice(&word.to_le_bytes());
+        e
+    };
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
+        let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
+        let reader = ErofsReader::open_metadata_only(&dir.path().join("bootstrap")).unwrap();
+        let nid = z_fixture_nid(&reader, b"large");
+        let inode = reader.inode(nid).unwrap();
+        let size = inode.size();
+        assert_eq!(size, 73 * 4096 + 700);
+        let tail = reader.read_z_inode_tail(nid, &inode).unwrap();
+        let entry = |i: usize| {
+            tail[Z_EROFS_MAP_HEADER_SIZE + 8 + i * Z_EROFS_LCLUSTER_INDEX_SIZE..]
+                [..Z_EROFS_LCLUSTER_INDEX_SIZE]
+                .to_vec()
+        };
+        // The compressed last pcluster ends 700 bytes into lcluster 73.
+        assert_eq!(entry(73), index(Z_EROFS_LCLUSTER_TYPE_PLAIN, 700, 0));
+        let head = (0..73)
+            .rev()
+            .find(|&i| {
+                u16::from_le_bytes([entry(i)[0], entry(i)[1]]) & 3 != Z_EROFS_LCLUSTER_TYPE_NONHEAD
+            })
+            .unwrap();
+        assert_eq!(
+            u16::from_le_bytes([entry(head)[0], entry(head)[1]]),
+            Z_EROFS_LCLUSTER_TYPE_HEAD1
+        );
+
+        let ranges = [
+            (0, size),
+            (73 * 4096 - 10, 710),
+            (73 * 4096, 700),
+            (73 * 4096 + 100, 600),
+            (size - 1, 1),
+        ];
+        let check = |bootstrap: &[u8]| {
+            for (offset, len) in ranges {
+                assert_eq!(
+                    read_z_fixture_range(&dir, bootstrap, nid, offset, len as u32).unwrap(),
+                    vec![51; len as usize],
+                    "range {offset}+{len}"
+                );
+            }
+        };
+        check(&bootstrap);
+
+        // Builders before the EOF index spanned the last pcluster over
+        // lcluster 73 as a NONHEAD and wrote each NONHEAD's delta1 one
+        // short (0 on the last); such images still read back.
+        let delta0 = if 73 - head == 1 {
+            Z_EROFS_LI_D0_CBLKCNT | 1
+        } else {
+            (73 - head) as u16
+        };
+        let index_at = |lcn: usize| {
+            z_fixture_tail_offset(&reader, nid)
+                + Z_EROFS_MAP_HEADER_SIZE
+                + 8
+                + lcn * Z_EROFS_LCLUSTER_INDEX_SIZE
+        };
+        let at = index_at(73);
+        bootstrap[at..at + Z_EROFS_LCLUSTER_INDEX_SIZE].copy_from_slice(&index(
+            Z_EROFS_LCLUSTER_TYPE_NONHEAD,
+            0,
+            u32::from(delta0),
+        ));
+        for lcn in head + 1..73 {
+            let at = index_at(lcn) + 6;
+            bootstrap[at..at + 2].copy_from_slice(&((73 - lcn) as u16).to_le_bytes());
+        }
+        check(&bootstrap);
+    }
+}
+
+#[test]
 fn z_reader_rejects_plain_extent_larger_than_physical_block() {
     for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
         let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
@@ -306,12 +386,6 @@ fn z_reader_rejects_malformed_indexes_and_packed_nids() {
                 index_offset + 12,
                 2u16.to_le_bytes().to_vec(),
                 4096,
-            ),
-            (
-                "tail past indexes",
-                index_offset + 14,
-                u16::MAX.to_le_bytes().to_vec(),
-                0,
             ),
             (
                 "missing CBLKCNT",
@@ -505,12 +579,15 @@ fn z_reader_validates_tail_fragments_and_packed_recursion() {
                 if kind == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
                     let delta1 =
                         u16::from_le_bytes(bytes[entry + 6..entry + 8].try_into().unwrap());
-                    let distance = usize::from(delta1).min(last_cluster - cluster - 1) as u16;
+                    let distance = usize::from(delta1).min(last_cluster - cluster) as u16;
                     bytes[entry + 6..entry + 8].copy_from_slice(&distance.to_le_bytes());
                 }
             }
             bytes[tail_index..tail_index + 2]
                 .copy_from_slice(&Z_EROFS_LCLUSTER_TYPE_HEAD1.to_le_bytes());
+            // The fixture closes its last pcluster with an EOF index; the
+            // tail fragment head starts on its lcluster instead.
+            bytes[tail_index + 2..tail_index + 4].copy_from_slice(&0u16.to_le_bytes());
             bytes[tail_index + 4..tail_index + 8]
                 .copy_from_slice(&((fragment_offset >> 32) as u32).to_le_bytes());
             bytes

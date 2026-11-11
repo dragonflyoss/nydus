@@ -30,6 +30,10 @@ BASELINE_ARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 BASELINE_DIR = $(CURDIR)/.test-tmp/baseline/$(BASELINE_VERSION)
 BASELINE_NYDUS = $(BASELINE_DIR)/nydus-static/nydus
 COMPATIBILITY_DIR = $(CURDIR)/.test-tmp/compatibility
+# Images in a format BASELINE_VERSION cannot read, skipped when it reads the
+# current images; clear it once the baseline includes the change. z_erofs
+# EOF lcluster index: dragonflyoss/nydus#2223.
+FORWARD_INCOMPATIBLE = (tar-|merged-)?erofs-(lz4|zstd)
 E2E_ENV = NYDUS_BIN="$(NYDUS_BIN)" NYDUSIFY_BIN="$(NYDUSIFY_BIN)" NYDUS_WRITER_BIN="$(NYDUS_WRITER_BIN)" \
 	NYDUS_E2E_CACHE="$(NYDUS_E2E_CACHE)" TMPDIR="$(CURDIR)/.test-tmp" $(COVERAGE_RUN_ENV)
 
@@ -83,7 +87,8 @@ e2e-run:
 	$(if $(filter 1,$(COVERAGE)),mkdir -p "$(COVERAGE_DIR)/raw/rust" "$(COVERAGE_DIR)/raw/go",)
 	cd tests/e2e && $(E2E_ENV) $(GO) test -exec "$(SUDO) -E env PATH=$$PATH" -v -count $(E2E_COUNT) \
 		-timeout $(E2E_TIMEOUT) -parallel $(E2E_PARALLEL) $(if $(strip $(E2E_TAGS)),-tags '$(E2E_TAGS)',) \
-		$(if $(strip $(E2E_RUN)),-run '$(E2E_RUN)',) $(PKG) $(E2E_GO_TEST_ARGS)
+		$(if $(strip $(E2E_RUN)),-run '$(E2E_RUN)',) $(if $(strip $(E2E_SKIP)),-skip '$(E2E_SKIP)',) \
+		$(PKG) $(E2E_GO_TEST_ARGS)
 .PHONY: e2e-run
 
 e2e: FEATURES = $(E2E_FEATURES)
@@ -112,7 +117,8 @@ e2e-compatibility: build-ci build-nydusify
 	NYDUS_E2E_COMPATIBILITY_DIR=$(COMPATIBILITY_DIR)/current $(MAKE) e2e-run PKG=./compatibility/... E2E_RUN='^TestRead$$$$' E2E_GO_TEST_ARGS=-update E2E_TIMEOUT=10m
 	NYDUS_E2E_COMPATIBILITY_DIR=$(COMPATIBILITY_DIR)/historical NYDUS_E2E_COMPATIBILITY_VERSIONS=$(BASELINE_VERSION) $(MAKE) e2e-run PKG=./compatibility/... E2E_TIMEOUT=2m
 	NYDUS_E2E_COMPATIBILITY_DIR=$(COMPATIBILITY_DIR)/current $(MAKE) e2e-run PKG=./compatibility/... E2E_RUN='^TestRead$$$$' E2E_TIMEOUT=2m
-	NYDUS_E2E_COMPATIBILITY_DIR=$(COMPATIBILITY_DIR)/current $(MAKE) e2e-run PKG=./compatibility/... E2E_RUN='^TestRead$$$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$$$' E2E_TIMEOUT=2m NYDUS_BIN=$(BASELINE_NYDUS)
+	NYDUS_E2E_COMPATIBILITY_DIR=$(COMPATIBILITY_DIR)/current $(MAKE) e2e-run PKG=./compatibility/... E2E_RUN='^TestRead$$$$/[^/]+/[^/]+/^(Check|FUSE|Export)$$$$' \
+		E2E_SKIP='^TestRead$$$$/[^/]+/^$(FORWARD_INCOMPATIBLE)$$$$' E2E_TIMEOUT=2m NYDUS_BIN=$(BASELINE_NYDUS)
 .PHONY: e2e-compatibility
 
 e2e-experimental: FEATURES = $(EXPERIMENTAL_FEATURES)
