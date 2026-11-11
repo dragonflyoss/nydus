@@ -12,13 +12,14 @@ use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
-use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use reqwest_retry::{policies::ExponentialBackoff, RetryError, RetryTransientMiddleware};
 use tracing::{debug, warn};
 
 use nydus_config::{ProxyConfig, TlsConfig};
 
 use crate::Source;
 
+use crate::registry::redirect::without_query;
 use crate::registry::response::Response;
 
 use super::middleware::{CircuitBreaker, RateLimit};
@@ -119,7 +120,8 @@ impl Http {
         })
     }
 
-    /// Converts the reqwest answer to a `GET` into a response.
+    /// Converts the reqwest answer to a `GET` into a response, a failure
+    /// naming the request URL without its query.
     fn response(result: reqwest_middleware::Result<reqwest::Response>) -> io::Result<Response> {
         result
             .map(|response| Response {
@@ -128,7 +130,25 @@ impl Http {
                 body: response.bytes_stream().map_err(io::Error::other).boxed(),
                 fallback: Arc::default(),
             })
-            .map_err(io::Error::other)
+            .map_err(|mut err| {
+                // The retry middleware wraps the failure it gives up on.
+                let request = match &mut err {
+                    reqwest_middleware::Error::Middleware(wrapped) => {
+                        match wrapped.downcast_mut() {
+                            Some(RetryError::WithRetries { err, .. } | RetryError::Error(err)) => {
+                                Some(err)
+                            }
+                            None => None,
+                        }
+                    }
+                    err => Some(err),
+                };
+                if let Some(url) = request.and_then(|err| err.url_mut()) {
+                    url.set_query(None);
+                }
+
+                io::Error::other(err)
+            })
     }
 }
 
@@ -140,6 +160,7 @@ impl Fetcher for Http {
         let now = Instant::now();
         let result = Self::response(self.client.get(url).headers(headers).send().await);
 
+        let url = without_query(url);
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) from the origin returned {} in {:?}",
@@ -161,6 +182,7 @@ impl Fetcher for Http {
             let now = Instant::now();
             let result = Self::response(self.client.get(url).headers(headers.clone()).send().await);
 
+            let url = without_query(url);
             match &result {
                 Ok(response) => debug!(
                     "GET {url} (prefetch) from the origin returned {} in {:?}",
@@ -229,8 +251,41 @@ mod tests {
         .unwrap();
 
         let now = Instant::now();
-        assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
+        let message = http
+            .prefetch(&format!("{url}?sig=secret"), HeaderMap::new())
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(now.elapsed() < retry_interval);
+        assert!(message.contains(&url), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn response_drops_the_query_of_a_request_given_up_after_retries() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        drop(listener);
+        let err = Client::new()
+            .get(format!("{url}?sig=secret"))
+            .send()
+            .await
+            .unwrap_err();
+
+        let err = Http::response(Err(reqwest_middleware::Error::Middleware(
+            RetryError::WithRetries {
+                retries: 1,
+                err: err.into(),
+            }
+            .into(),
+        )))
+        .err()
+        .unwrap();
+
+        let chain = format!("{err:?}");
+        assert!(chain.contains(&url), "{chain}");
+        assert!(!chain.contains("secret"), "{chain}");
     }
 
     #[cfg(feature = "dragonfly")]

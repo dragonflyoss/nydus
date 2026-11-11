@@ -28,6 +28,7 @@ use nydus_config::{Config, DragonflyConfig};
 
 use crate::Source;
 
+use crate::registry::redirect::without_query;
 use crate::registry::response::Response;
 use crate::registry::rt::Runtime;
 
@@ -176,6 +177,7 @@ impl Fetcher for Dragonfly {
         let client = self.ondemand_client.ready().await?;
         let now = Instant::now();
         let result = Self::response(client.get(&request).await);
+        let url = without_query(url);
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) through dragonfly returned {} in {:?}",
@@ -207,6 +209,7 @@ impl Fetcher for Dragonfly {
             let now = Instant::now();
             let result = Self::response(client.get(&request).await);
 
+            let url = without_query(url);
             match &result {
                 Ok(response) => debug!(
                     "GET {url} (prefetch) through dragonfly returned {} in {:?}",
