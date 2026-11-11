@@ -545,9 +545,22 @@ impl ErofsReader {
         cache.write_data_to(absolute_offset, len, writer)
     }
 
-    pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {
-        (self.superblock().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64
-            + nid * EROFS_SLOTSIZE as u64) as usize
+    /// Returns the offset of the inode `nid` in the bootstrap, an error when
+    /// the nid of a damaged dirent or superblock places it past the address
+    /// space instead of wrapping onto another inode.
+    pub(crate) fn nid_to_offset(&self, nid: u64) -> io::Result<usize> {
+        nid.checked_mul(EROFS_SLOTSIZE as u64)
+            .and_then(|offset| {
+                offset
+                    .checked_add(self.superblock().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64)
+            })
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("inode offset of nid {nid} overflows"),
+                )
+            })
     }
 }
 

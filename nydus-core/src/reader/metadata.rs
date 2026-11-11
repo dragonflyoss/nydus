@@ -13,7 +13,7 @@ use super::{ErofsReader, RawDirEntry};
 impl ErofsReader {
     /// Get a zero-copy inode view from the mmap.
     pub fn inode(&self, nid: u64) -> io::Result<ErofsInode<'_>> {
-        self.inode_at(self.nid_to_offset(nid))
+        self.inode_at(self.nid_to_offset(nid)?)
     }
 
     /// Parse the inode starting at image byte `offset`.
@@ -274,7 +274,7 @@ impl ErofsReader {
 
                 if blocks_size == 0 {
                     // All data is inline (small file/dir)
-                    let inode_offset = self.nid_to_offset(nid);
+                    let inode_offset = self.nid_to_offset(nid)?;
                     let header_size = inode.header_size() + inode.xattr_size();
                     let data_offset = inode_offset + header_size + offset as usize;
                     self.mmap_slice(data_offset, size)
@@ -286,7 +286,7 @@ impl ErofsReader {
                     self.mmap_slice(data_offset, size)
                 } else if (offset as usize) >= blocks_size {
                     // All requested data is in the inline tail
-                    let inode_offset = self.nid_to_offset(nid);
+                    let inode_offset = self.nid_to_offset(nid)?;
                     let header_size = inode.header_size() + inode.xattr_size();
                     let inline_offset = offset as usize - blocks_size;
                     let data_offset = inode_offset + header_size + inline_offset;
@@ -335,7 +335,7 @@ impl ErofsReader {
 
                 // Read inline tail portion
                 let inline_read_size = size - block_read_size;
-                let inode_offset = self.nid_to_offset(nid);
+                let inode_offset = self.nid_to_offset(nid)?;
                 let header_size = inode.header_size() + inode.xattr_size();
                 let inline_data = self.mmap_slice(inode_offset + header_size, inline_read_size)?;
                 result.extend_from_slice(inline_data);
@@ -370,7 +370,7 @@ impl ErofsReader {
             return Ok(Vec::new());
         }
 
-        let inode_offset = self.nid_to_offset(nid);
+        let inode_offset = self.nid_to_offset(nid)?;
         let xattr_offset = inode_offset + inode.header_size();
         let xattr_data = self.mmap_slice(xattr_offset, xattr_size)?;
 
@@ -455,6 +455,16 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&bootstrap).unwrap();
         ErofsReader::open_metadata_only(file.path()).unwrap()
+    }
+
+    #[test]
+    fn inode_rejects_a_nid_whose_offset_overflows() {
+        let reader = directory_reader(&[]);
+        for nid in [1 << 59, u64::MAX / 32, u64::MAX] {
+            let err = reader.inode(nid).unwrap_err();
+
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "nid={nid}");
+        }
     }
 
     #[test]
