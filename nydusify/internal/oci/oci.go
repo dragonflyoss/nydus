@@ -51,10 +51,15 @@ func ResolveManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Des
 		return ocispec.Descriptor{}, errors.New("no manifest matches the requested platform")
 	}
 
-	// Prefer the platform the matcher considers most specific.
+	// Prefer the platform the matcher considers most specific, and a manifest
+	// naming a matching platform over one naming none.
 	best := candidates[0]
 	for _, c := range candidates[1:] {
-		if c.Platform != nil && best.Platform != nil && platformMC.Less(*c.Platform, *best.Platform) {
+		if c.Platform == nil {
+			continue
+		}
+
+		if best.Platform == nil || platformMC.Less(*c.Platform, *best.Platform) {
 			best = c
 		}
 	}
