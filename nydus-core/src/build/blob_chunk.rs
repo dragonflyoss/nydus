@@ -598,8 +598,7 @@ fn z_compress_segment(
     compressor: &mut ZCompressor,
 ) -> ZSegment {
     use nydus_format::erofs::{
-        Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
-        Z_EROFS_LI_D0_CBLKCNT,
+        Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT,
     };
     let block_size = EROFS_BLOCK_SIZE as usize;
     let mut data = Vec::with_capacity(src.len() / 2 + pcluster);
@@ -631,24 +630,21 @@ fn z_compress_segment(
         // Lcluster indexes for this pcluster. An incompressible window
         // becomes per-lcluster single-block PLAIN pclusters (the layout
         // mkfs.erofs emits); multi-block raw pclusters are avoided.
-        let mut push = |kind, clusterofs, word| {
-            let index = ZErofsLclusterIndex {
-                kind,
-                clusterofs,
-                word,
-            };
-            indexes.extend_from_slice(&index.to_bytes());
-        };
+        let mut push = |index: ZErofsLclusterIndex| indexes.extend_from_slice(index.as_bytes());
         if head_type == Z_EROFS_LCLUSTER_TYPE_PLAIN {
             for i in 0..lclusters {
-                push(Z_EROFS_LCLUSTER_TYPE_PLAIN, 0, rel_blk + i as u32);
+                push(ZErofsLclusterIndex::new(
+                    Z_EROFS_LCLUSTER_TYPE_PLAIN,
+                    0,
+                    rel_blk + i as u32,
+                ));
             }
         } else {
             // Only the final pcluster at EOF can end inside an lcluster.
             let whole = take / block_size;
             let eof_ofs = take % block_size;
             debug_assert!(eof_ofs == 0 || (at_eof && pos + take == src.len()));
-            push(head_type, 0, rel_blk);
+            push(ZErofsLclusterIndex::new(head_type, 0, rel_blk));
             for i in 1..whole {
                 let delta0 = if i == 1 {
                     Z_EROFS_LI_D0_CBLKCNT | cblkcnt
@@ -656,19 +652,15 @@ fn z_compress_segment(
                     i as u16
                 };
                 // delta[1]: the distance to the next HEAD/PLAIN index.
-                let delta1 = (whole - i) as u32;
-                push(
-                    Z_EROFS_LCLUSTER_TYPE_NONHEAD,
-                    0,
-                    u32::from(delta0) | delta1 << 16,
-                );
+                let delta1 = (whole - i) as u16;
+                push(ZErofsLclusterIndex::new_nonhead([delta0, delta1]));
             }
             if eof_ofs != 0 {
-                eof_index = Some(ZErofsLclusterIndex {
-                    kind: Z_EROFS_LCLUSTER_TYPE_PLAIN,
-                    clusterofs: eof_ofs as u16,
-                    word: 0,
-                });
+                eof_index = Some(ZErofsLclusterIndex::new(
+                    Z_EROFS_LCLUSTER_TYPE_PLAIN,
+                    eof_ofs as u16,
+                    0,
+                ));
             }
         }
 
@@ -1357,7 +1349,7 @@ impl<W: Write> BlobWriter<W> {
         };
         accum.tail.extend_from_slice(&segment.indexes);
         if let Some(eof_index) = segment.eof_index {
-            accum.tail.extend_from_slice(&eof_index.to_bytes());
+            accum.tail.extend_from_slice(eof_index.as_bytes());
         }
         accum.blocks += segment.phys_blocks as u64;
         if placement.at_eof && placement.target == ZTarget::File {

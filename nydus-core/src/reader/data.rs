@@ -153,6 +153,11 @@ impl ErofsReader {
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
+    fn lcluster_index_entry_at(index_bytes: &[u8], i: usize) -> io::Result<&ZErofsLclusterIndex> {
+        ZErofsLclusterIndex::from_bytes(&index_bytes[i * Z_EROFS_LCLUSTER_INDEX_SIZE..])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
     /// The raw inode tail of a z_erofs COMPRESSED_FULL inode: either the
     /// 8-byte whole-file fragment header (bit 63 set, rest = offset in the
     /// packed inode) or the map header, 8 reserved bytes and one full
@@ -425,9 +430,8 @@ impl ErofsReader {
         let file_size = inode.size();
         let indexes = &tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
         let nlclusters = indexes.len() / Z_EROFS_LCLUSTER_INDEX_SIZE;
-        let index_at =
-            |i: usize| ZErofsLclusterIndex::parse(&indexes[i * Z_EROFS_LCLUSTER_INDEX_SIZE..]);
-        let extent_start = |i: usize| index_at(i).extent_start(i);
+        let index_at = |i: usize| Self::lcluster_index_entry_at(indexes, i);
+        let extent_start = |i: usize| index_at(i).map(|index| index.extent_start(i));
         // Tail fragment: the last extent is served from the packed inode.
         let h_advise = u16::from_le_bytes(tail[4..6].try_into().unwrap());
         let algorithm = ZErofsCompressor::from_code(tail[6] & 0x0f)
@@ -443,10 +447,10 @@ impl ErofsReader {
                 io::Error::new(io::ErrorKind::InvalidData, "tail fragment without head")
             })?;
             let lo = u32::from_le_bytes(tail[..4].try_into().unwrap());
-            let frag_off = (u64::from(index_at(head).word) << 32) | u64::from(lo);
+            let frag_off = (u64::from(index_at(head)?.blkaddr()) << 32) | u64::from(lo);
             let (_, packed) = self.z_packed_inode()?;
             frag_off
-                .checked_add(file_size - extent_start(head))
+                .checked_add(file_size - extent_start(head)?)
                 .filter(|&end| end <= packed.size())
                 .ok_or_else(|| {
                     io::Error::new(
@@ -464,7 +468,9 @@ impl ErofsReader {
         // an lcluster before its HEAD/PLAIN extent's `clusterofs` belong to
         // the previous extent.
         let mut i = (offset / block) as usize;
-        if index_at(i).kind != Z_EROFS_LCLUSTER_TYPE_NONHEAD && offset < extent_start(i) {
+        if index_at(i)?.lcluster_type() != Z_EROFS_LCLUSTER_TYPE_NONHEAD
+            && offset < extent_start(i)?
+        {
             if i == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -473,8 +479,8 @@ impl ErofsReader {
             }
             i -= 1;
         }
-        while index_at(i).kind == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
-            let delta0 = index_at(i).word as u16;
+        while index_at(i)?.lcluster_type() == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+            let delta0 = index_at(i)?.delta()[0];
             let distance = if delta0 & Z_EROFS_LI_D0_CBLKCNT != 0 {
                 1
             } else {
@@ -501,19 +507,22 @@ impl ErofsReader {
             let mut bufs = cell.borrow_mut();
             let (compressed, decoded, zstd) = &mut *bufs;
             while i < nlclusters {
-                let logical_start = extent_start(i);
+                let logical_start = extent_start(i)?;
                 if logical_start >= end {
                     break;
                 }
-                let ZErofsLclusterIndex { kind, word, .. } = index_at(i);
+                let index = index_at(i)?;
+                let (kind, word) = (index.lcluster_type(), index.blkaddr());
                 // The pcluster runs to the next HEAD/PLAIN index; scanning
                 // reads any delta[1] encoding older builders wrote.
                 let mut j = i + 1;
-                while j < nlclusters && index_at(j).kind == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+                while j < nlclusters
+                    && index_at(j)?.lcluster_type() == Z_EROFS_LCLUSTER_TYPE_NONHEAD
+                {
                     j += 1;
                 }
                 let extent_end = if j < nlclusters {
-                    extent_start(j).min(file_size)
+                    extent_start(j)?.min(file_size)
                 } else {
                     file_size
                 };
@@ -537,7 +546,7 @@ impl ErofsReader {
                 let phys_blocks = match kind {
                     Z_EROFS_LCLUSTER_TYPE_PLAIN => 1usize,
                     Z_EROFS_LCLUSTER_TYPE_HEAD1 if j - i >= 2 => {
-                        let delta0 = index_at(i + 1).word as u16;
+                        let delta0 = index_at(i + 1)?.delta()[0];
                         if delta0 & Z_EROFS_LI_D0_CBLKCNT == 0 {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidData,

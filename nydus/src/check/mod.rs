@@ -392,7 +392,7 @@ fn walk_inode(
                     if inode.size() > 0 && tail.len() == Z_EROFS_MAP_HEADER_SIZE {
                         stats.z_fragment_files += 1;
                     } else if tail.len() > Z_EROFS_MAP_HEADER_SIZE + 8 {
-                        account_z_pclusters(tail, inode.size(), stats, blobs);
+                        account_z_pclusters(tail, inode.size(), stats, blobs)?;
                     }
                 }
                 _ => {
@@ -431,7 +431,7 @@ fn account_z_pclusters(
     size: u64,
     stats: &mut ImageStats,
     blobs: &mut BTreeMap<u16, BlobSummary>,
-) {
+) -> Result<()> {
     let indexes = &tail[Z_EROFS_MAP_HEADER_SIZE + 8..];
     // The last HEAD of a tail-fragment inode addresses the packed inode.
     let advise = u16::from_le_bytes([tail[4], tail[5]]);
@@ -446,11 +446,11 @@ fn account_z_pclusters(
             stats.z_tail_fragment_files += 1;
             continue;
         }
-        let lcluster = ZErofsLclusterIndex::parse(index);
+        let lcluster = ZErofsLclusterIndex::from_bytes(index)?;
         if !lcluster.addresses_data(i, size) {
             continue;
         }
-        let blkaddr = u64::from(lcluster.word);
+        let blkaddr = u64::from(lcluster.blkaddr());
         let device = blobs.values_mut().find(|blob| {
             blkaddr >= blob.mapped_blkaddr && blkaddr < blob.mapped_blkaddr + blob.declared_blocks
         });
@@ -462,6 +462,8 @@ fn account_z_pclusters(
             None => stats.z_pclusters_out_of_range += 1,
         }
     }
+
+    Ok(())
 }
 
 /// z_erofs layers are full blobs whose data region is the raw layer device,

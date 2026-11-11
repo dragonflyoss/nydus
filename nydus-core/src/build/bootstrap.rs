@@ -219,11 +219,11 @@ impl ZRelocation {
             if Some(i) == tail_fragment_head {
                 continue;
             }
-            let lcluster = ZErofsLclusterIndex::parse(index);
+            let lcluster = ZErofsLclusterIndex::from_bytes(index)?;
             if !lcluster.addresses_data(i, size) {
                 continue;
             }
-            let blkaddr = lcluster.word;
+            let blkaddr = lcluster.blkaddr();
             let relocated = (blkaddr as u64)
                 .checked_sub(self.old_mapped_blkaddr)
                 .ok_or_else(|| {

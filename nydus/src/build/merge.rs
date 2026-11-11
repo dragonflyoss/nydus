@@ -2153,8 +2153,8 @@ mod tests {
             .chunks_exact(8)
             .enumerate()
             .map(|(i, index)| {
-                let index = nydus_format::erofs::ZErofsLclusterIndex::parse(index);
-                index.addresses_data(i, size).then_some(index.word)
+                let index = nydus_format::erofs::ZErofsLclusterIndex::from_bytes(index).unwrap();
+                index.addresses_data(i, size).then_some(index.blkaddr())
             })
             .collect()
     }
