@@ -274,7 +274,7 @@ impl Client {
             return Err(response.into_io_error().await);
         }
 
-        let location = response.location()?;
+        let location = response.location(&url)?;
         let redirected = transport.get(&location, headers).await?;
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
@@ -321,7 +321,7 @@ impl Client {
             return Err(response.into_io_error().await);
         }
 
-        let location = response.location()?;
+        let location = response.location(&url)?;
         let redirected = transport.prefetch(&location, headers).await?;
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);

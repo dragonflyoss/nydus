@@ -6,6 +6,7 @@ use bytes::{Bytes, BytesMut};
 use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use url::Url;
 
 use super::range::{ContentRange, Range};
 use crate::Source;
@@ -113,12 +114,14 @@ impl Response {
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
-    /// Returns the `Location` a redirect points at.
-    pub(crate) fn location(&self) -> io::Result<String> {
+    /// Returns the URL a redirect of the request to `url` points at, a relative
+    /// `Location` resolved against `url`, refer to RFC 9110 Section 10.2.2.
+    pub(crate) fn location(&self, url: &str) -> io::Result<String> {
         self.headers
             .get(LOCATION)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
+            .and_then(|location| Url::parse(url).ok()?.join(location).ok())
+            .map(String::from)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -281,6 +284,45 @@ mod tests {
             #[cfg(feature = "dragonfly")]
             assert_eq!(response.needs_fallback(), expected);
             assert_eq!(response.needs_retry(), expected);
+        }
+    }
+
+    #[test]
+    fn location_resolves_a_relative_redirect_against_the_request_url() {
+        let url = "http://registry:5000/v2/library/ubuntu/blobs/sha256:00";
+        let test_cases = vec![
+            (
+                Some("https://cdn.example.com/signed?sig=s"),
+                Some("https://cdn.example.com/signed?sig=s"),
+            ),
+            (
+                Some("/storage/blob?sig=s"),
+                Some("http://registry:5000/storage/blob?sig=s"),
+            ),
+            (
+                Some("//cdn.example.com/signed"),
+                Some("http://cdn.example.com/signed"),
+            ),
+            (
+                Some("data/00"),
+                Some("http://registry:5000/v2/library/ubuntu/blobs/data/00"),
+            ),
+            (Some("http://[invalid"), None),
+            (None, None),
+        ];
+
+        for (location, expected) in test_cases {
+            let mut headers = HeaderMap::new();
+            if let Some(location) = location {
+                headers.insert(LOCATION, location.parse().unwrap());
+            }
+            let response = Response {
+                status: StatusCode::TEMPORARY_REDIRECT,
+                headers,
+                body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
+                source: Source::Origin,
+            };
+            assert_eq!(response.location(url).ok().as_deref(), expected);
         }
     }
 
