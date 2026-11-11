@@ -1152,6 +1152,9 @@ fn may_hold_data(file: &File, span: &Range<u64>) -> bool {
     (data as u64) < span.end
 }
 
+/// Loads the blob meta kept in the cache directory, fetching it from the
+/// backend when there is none or the kept one does not parse: a file a crash
+/// or the disk left empty or damaged is replaced, not failed on forever.
 fn load_or_fetch_blob_metadata(
     blob_id: [u8; SHA256_DIGEST_SIZE],
     cache_dir: &Path,
@@ -1159,23 +1162,31 @@ fn load_or_fetch_blob_metadata(
     backend: &Arc<dyn Backend>,
     kind: ReadKind,
 ) -> io::Result<BlobMetadata> {
-    if !blob_metadata_path.is_file() {
-        // `O_EXCL` creation keeps the name unique against other processes
-        // sharing this cache dir, and drops the file if we bail out early.
-        let tmp = tempfile::Builder::new()
-            .prefix(".blob-meta-")
-            .suffix(".tmp")
-            .tempfile_in(cache_dir)?;
-        let blob_metadata = match kind {
-            ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
-            ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
-        };
-        blob_metadata.save(tmp.path()).map_err(io::Error::other)?;
-        if let Err(err) = BlobMetadata::from_path(tmp.path()) {
-            return Err(io::Error::other(err));
+    if blob_metadata_path.is_file() {
+        match BlobMetadata::from_path(blob_metadata_path) {
+            Ok(blob_metadata) => return Ok(blob_metadata),
+            Err(err) => warn!(
+                "cached blob meta {} is invalid, fetching it again: {err}",
+                blob_metadata_path.display()
+            ),
         }
-        tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
     }
+
+    // `O_EXCL` creation keeps the name unique against other processes
+    // sharing this cache dir, and drops the file if we bail out early.
+    let tmp = tempfile::Builder::new()
+        .prefix(".blob-meta-")
+        .suffix(".tmp")
+        .tempfile_in(cache_dir)?;
+    let blob_metadata = match kind {
+        ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
+        ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
+    };
+    blob_metadata.save(tmp.path()).map_err(io::Error::other)?;
+    if let Err(err) = BlobMetadata::from_path(tmp.path()) {
+        return Err(io::Error::other(err));
+    }
+    tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
 
     BlobMetadata::from_path(blob_metadata_path).map_err(io::Error::other)
 }

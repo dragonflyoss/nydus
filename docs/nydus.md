@@ -2363,9 +2363,10 @@ When mounting with `--bootstrap + --blob-dir`:
 5. `--cache-dir` selects the persistent local cache; otherwise runtime creates a
 	temporary local cache for the mount lifetime.
 6. Before chunk lookup, check the cache directory for `<full_blob_digest>.blob.meta`.
-	If it is absent, download the standalone blob meta from the local backend into
-	the cache directory. The cache verifies the blob meta header crc32c before
-	mmaping the cached file and using its tables.
+	If it is absent, or the copy there no longer parses (a crash or the disk
+	left it empty or damaged), download the standalone blob meta from the local
+	backend into the cache directory, replacing the copy. The cache verifies the
+	blob meta header crc32c before mmaping the cached file and using its tables.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
 	layer names the chunk groups covering the requested range with one cell
 	table lookup per end, ensures each is fetched, decoded
