@@ -1479,7 +1479,8 @@ Filesystem (`nydus_fs_*`):
 
 - `nydus_fs_op_total{operation}`, `nydus_fs_op_failure_total{operation}` — FUSE
 	operations by op (`read`, `lookup`, `getattr`, ...), failed ones
-	included, and the failed ones alone.
+	included, and the failed ones alone. A `getxattr` of an attribute the
+	file does not carry (`ENODATA`) is not a failure.
 - `nydus_fs_op_duration_milliseconds{operation}` — duration histogram of the
 	successful FUSE operations by op.
 
