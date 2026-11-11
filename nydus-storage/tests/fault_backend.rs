@@ -275,6 +275,42 @@ fn prefetch_all_reports_backend_errors_without_blocking_ondemand_reads() {
 }
 
 #[test]
+fn prefetch_open_waiting_on_the_backend_does_not_block_an_ondemand_open() {
+    let blob = Blob::new(false);
+    let backend = blob.backend();
+    let cache_dir = tempdir().unwrap();
+    let caches = Arc::new(
+        BlobCaches::new(
+            [(1, BLOB_ID)],
+            backend.clone(),
+            Some(cache_dir.path()),
+            None,
+            options(),
+        )
+        .unwrap(),
+    );
+    let delay = Duration::from_secs(2);
+    backend.inject(FaultRule::metadata(Fault::Delay(delay)).times(1));
+    let prefetch = {
+        let caches = caches.clone();
+        thread::spawn(move || caches.cache(1, ReadKind::Prefetch))
+    };
+    while backend.metadata_calls() == 0 {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let start = Instant::now();
+    let cached = caches.cache(1, ReadKind::Ondemand).unwrap();
+
+    assert_eq!(
+        read(cached.as_ref(), blob.logical(0)).unwrap(),
+        blob.expected(blob.logical(0))
+    );
+    assert!(start.elapsed() < delay / 2);
+    assert!(Arc::ptr_eq(&prefetch.join().unwrap().unwrap(), &cached));
+}
+
+#[test]
 fn open_fails_on_a_blob_metadata_error_and_looks_it_up_again() {
     let blob = Blob::new(false);
     let backend = blob.backend();
