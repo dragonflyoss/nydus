@@ -129,6 +129,18 @@ func TestResolveManifest(t *testing.T) {
 			},
 		},
 		{
+			name: "matching platform wins over a manifest without platform",
+			root: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return mockIndex(t, cs, mockPlatformlessManifest, mockAMD64Manifest)
+			},
+			platform: platforms.OnlyStrict(mockAMD64Platform),
+			expect: func(t *testing.T, desc ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(mockAMD64Manifest.Digest, desc.Digest)
+			},
+		},
+		{
 			name: "non-manifest entries are skipped",
 			root: func(t *testing.T, cs content.Store) ocispec.Descriptor {
 				return mockIndex(t, cs, mockNestedIndex, mockARM64Manifest)
