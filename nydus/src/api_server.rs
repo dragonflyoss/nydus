@@ -37,6 +37,9 @@ pub struct ControlProtocol {
 /// The bound for reading request headers and completing an upgrade.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The wait after a failed accept before the next one.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
 /// Serves one upgraded control connection with its read-ahead bytes and
 /// returns whether the server should stop accepting.
 pub(crate) type ControlHandler = Arc<dyn Fn(StdUnixStream, Vec<u8>) -> Result<bool> + Send + Sync>;
@@ -199,7 +202,16 @@ async fn serve(
                         }
                     });
                 }
-                Err(err) => error!("apiserver accept error: {err}"),
+                Err(err) => {
+                    // Wait before accepting again: a failure such as EMFILE
+                    // lasts while the connection stays queued, and accepting
+                    // at once would spin and flood the log until it clears.
+                    error!("apiserver accept error: {err}");
+                    tokio::select! {
+                        _ = stopped.changed() => break,
+                        _ = tokio::time::sleep(ACCEPT_BACKOFF) => {}
+                    }
+                }
             }
         }
     }
