@@ -649,7 +649,8 @@ impl Filesystem for ErofsFs {
             return;
         }
 
-        m.fail();
+        // A probe for an attribute the file does not carry, `security.capability`
+        // on every exec for one, is an answer and not a failed operation.
         reply.error(Errno::ENODATA);
     }
 
