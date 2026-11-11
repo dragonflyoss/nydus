@@ -199,7 +199,7 @@ impl Client {
             return Ok(response);
         }
 
-        let location = response.location()?;
+        let location = response.location(&url)?;
         let redirected = fetcher.get(&location, headers).await?;
         if !redirected.status.is_success() {
             return Ok(redirected);
@@ -247,7 +247,7 @@ impl Client {
             return Err(response.into_io_error().await);
         }
 
-        let location = response.location()?;
+        let location = response.location(&url)?;
         let redirected = transport.prefetch(&location, headers).await?;
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
