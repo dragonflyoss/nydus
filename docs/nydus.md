@@ -2382,9 +2382,12 @@ A miss does not fetch its group alone. The cache splits the **compressed**
 data region into cells of `storage.fetch_size` bytes (default 2 MiB) and,
 on a miss, issues one range read for every group whose compressed range
 overlaps the missed group's cell — trimmed at groups that are already cached
-or already being fetched — then decodes each group as it comes and publishes
-it. The fetch size is a runtime choice, independent of the image's chunk
-size; groups tile the data region back to back, so a fetch is always one
+or already being fetched — and decodes each group while the rest of the read
+is still arriving, a zstd group as its own bytes arrive, then validates,
+writes and publishes it. A read that breaks off keeps the groups it already
+published, so the next one fetches only the rest. The fetch size is a
+runtime choice, independent of the image's chunk size; groups tile the data
+region back to back, so a fetch is always one
 contiguous range, and because it is measured in compressed bytes it bounds
 the transfer rather than the decoded span. The fetch size sets the
 request/byte trade-off: the blobs compress several-fold, so a fetch of `W`
@@ -2504,10 +2507,11 @@ Per-blob prefetch streams chunk groups into the cache:
 	whose compressed bytes add up to `storage.fetch_size` (default 2 MiB),
 	so prefetch and on-demand reads issue backend requests of the same size;
 	a zero fetch size reads group by group.
-- For each batch it issues a single contiguous backend range read, then
-	decodes each contained chunk group (plain copy, zstd or LZ4), validates
-	the group's length and CRC32C, writes the decoded bytes to the cache file
-	at the chunks' padded blocks, and marks the group ready in the group map.
+- For each batch it issues a single contiguous backend range read and, as
+	the bytes arrive, decodes each contained chunk group (plain copy, zstd or
+	LZ4), validates the group's length and CRC32C, writes the decoded bytes
+	to the cache file at the chunks' padded blocks, and marks the group ready
+	in the group map.
 - A priority blob's batches are fetched by up to
 	`prefetch.concurrent_blob_count` workers (default 10), handed out in blob
 	order; the first batches are single groups (a "ramp") so the head of an
