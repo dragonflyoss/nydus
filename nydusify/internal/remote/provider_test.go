@@ -13,6 +13,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +132,24 @@ func mockRangeRegistry(t *testing.T, upstreamRange string) (string, *atomic.Int3
 	return strings.TrimPrefix(registry.URL, "http://") + "/test:v1", transferred
 }
 
+// mockFlakyRegistry fronts the registry at host with a server that answers the
+// first GET of dgst with a 503, and returns its host:port.
+func mockFlakyRegistry(t *testing.T, host string, dgst digest.Digest) string {
+	t.Helper()
+	failed := &atomic.Bool{}
+	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: host})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, dgst.String()) && failed.CompareAndSwap(false, true) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return strings.TrimPrefix(server.URL, "http://")
+}
+
 func requestMethods(reg *registrytest.Registry, dgst digest.Digest) []string {
 	var methods []string
 	for _, req := range reg.Requests() {
@@ -223,6 +243,7 @@ func TestProvider_Pull(t *testing.T) {
 		ref    string
 		opt    PullOption
 		opts   []registrytest.Option
+		flaky  digest.Digest
 		expect func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error)
 	}{
 		{
@@ -296,6 +317,20 @@ func TestProvider_Pull(t *testing.T) {
 			},
 		},
 		{
+			name:  "retry a layer the registry answers with a transient status",
+			ref:   "repo/image:v1",
+			opt:   PullAll,
+			flaky: mockOCILayerDesc.Digest,
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				stored, err := content.ReadBlob(context.Background(), cs, mockOCILayerDesc)
+				assert.NoError(err)
+				assert.Equal(mockOCILayer, stored)
+				assert.Equal([]string{http.MethodGet}, requestMethods(reg, mockOCILayerDesc.Digest))
+			},
+		},
+		{
 			name: "corrupt manifest",
 			ref:  "repo/broken:v1",
 			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
@@ -339,7 +374,12 @@ func TestProvider_Pull(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			desc, err := provider.Pull(context.Background(), reg.Host+"/"+tc.ref, tc.opt, Source)
+			host := reg.Host
+			if tc.flaky != "" {
+				host = mockFlakyRegistry(t, reg.Host, tc.flaky)
+			}
+
+			desc, err := provider.Pull(context.Background(), host+"/"+tc.ref, tc.opt, Source)
 
 			tc.expect(t, reg, provider.ContentStore(), desc, err)
 		})
