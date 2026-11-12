@@ -46,7 +46,8 @@ backend:
 
       # Maximum number of retry attempts per request, applied by the HTTP
       # client's retry middleware on direct origin requests and on origin
-      # requests issued when Dragonfly cannot serve a read. A prefetch read
+      # requests issued when Dragonfly cannot serve a read, and as many more
+      # when the body of an answered read fails. A prefetch read
       # still failing after them is retried once hours later. Default: 3.
       max_retries: 3
 

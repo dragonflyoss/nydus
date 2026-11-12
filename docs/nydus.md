@@ -1251,7 +1251,9 @@ Fields under `backend.config`:
 		sharing the cache directory.
 	- `max_retries` (default `3`): maximum number of retry attempts per
 		request, applied with exponential backoff by the HTTP client's retry
-		middleware. A prefetch read still answered with a `429`, `5xx` or
+		middleware. A read whose answer arrived but whose body then fails, the
+		connection reset or `request_timeout` passed, is requested again as
+		many times. A prefetch read still answered with a `429`, `5xx` or
 		`408` after them is sent once more after `prefetch.retry_interval`,
 		like one Dragonfly answers so; an on-demand read, and a prefetch read
 		failing in transport, errors out.
