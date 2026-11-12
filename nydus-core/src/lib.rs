@@ -46,7 +46,10 @@ pub use nydus_storage::cache::CacheOptions;
 pub use nydus_storage::ondemand::OndemandRecorder;
 pub use nydus_telemetry::metrics::Metrics;
 pub use reader::ErofsReader;
-pub use writer::{CreateFileOptions, IncrementalWriter, IncrementalWriterOptions, RepackResult};
+pub use writer::{
+    encode_cache, ChunkGroupCache, CreateFileOptions, IncrementalWriter, IncrementalWriterOptions,
+    RepackResult,
+};
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
