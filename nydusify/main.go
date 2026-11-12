@@ -364,12 +364,17 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("converting image back to OCI format")
-		newDesc, err = pipeline.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, pipeline.ToOCIOption{
+		toOCI := pipeline.ToOCIOption{
 			BuilderPath: c.String("builder"),
 			WorkDir:     scratchDir,
 			Compressor:  compressor,
 			LogLevel:    c.String("log-level"),
-		})
+		}
+		if c.String("platform") != "" {
+			toOCI.PlatformMC = platformMC
+		}
+
+		newDesc, err = pipeline.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, toOCI)
 		if err != nil {
 			return errors.Wrap(err, "convert to oci")
 		}

@@ -24,6 +24,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
+	"github.com/containerd/platforms"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -397,6 +398,33 @@ func TestConvertToOCI(t *testing.T) {
 				}
 				assert.Equal([]string{"amd64", "arm64"}, architectures)
 				assert.Equal(originalPassthrough, passthrough)
+			},
+		},
+		{
+			name:    "convert only the requested platform of an index",
+			builder: true,
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return mockIndex(t, cs,
+					ocispec.Descriptor{
+						MediaType: ocispec.MediaTypeImageManifest,
+						Digest:    digest.FromString("platform that was not pulled"),
+						Platform:  &ocispec.Platform{OS: "linux", Architecture: "arm64"},
+					},
+					mockNydusPlatformManifest(t, cs, builder, "amd64", "zstd"),
+				)
+			},
+			opt: ToOCIOption{PlatformMC: platforms.OnlyStrict(ocispec.Platform{OS: "linux", Architecture: "amd64"})},
+			expect: func(t *testing.T, cs content.Store, opt ToOCIOption, source ocispec.Descriptor, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(ocispec.MediaTypeImageManifest, desc.MediaType)
+				assert.Equal("amd64", desc.Platform.Architecture)
+
+				manifest, _ := readManifest(t, cs, *desc)
+				assert.NotEmpty(manifest.Layers)
+				for _, layer := range manifest.Layers {
+					assert.Equal(ocispec.MediaTypeImageLayer, layer.MediaType)
+				}
 			},
 		},
 		{

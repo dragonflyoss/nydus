@@ -11,13 +11,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
+	"github.com/containerd/platforms"
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
@@ -38,6 +42,9 @@ type ToOCIOption struct {
 	Compressor string
 	// LogLevel is the log level passed to the nydus binary.
 	LogLevel string
+	// PlatformMC selects the manifests of an index to convert, the ones the
+	// source was pulled for; the others are dropped. Nil converts them all.
+	PlatformMC platforms.MatchComparer
 }
 
 // ConvertToOCI turns a nydus image back into a plain OCI image.
@@ -72,6 +79,21 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 		return nil, errors.Wrap(err, "read index json")
 	}
 
+	// Keep the manifests of the requested platform: the others were not
+	// pulled, so they can be neither inspected nor carried over.
+	if opt.PlatformMC != nil {
+		index.Manifests = slices.DeleteFunc(index.Manifests, func(manifest ocispec.Descriptor) bool {
+			return manifest.Platform != nil && !opt.PlatformMC.Match(*manifest.Platform)
+		})
+		if len(index.Manifests) == 0 {
+			return nil, errors.New("no manifest matches the requested platform")
+		}
+
+		maps.DeleteFunc(labels, func(key, _ string) bool {
+			return strings.HasPrefix(key, "containerd.io/gc.ref.content.m.")
+		})
+	}
+
 	for i, manifest := range index.Manifests {
 		// Non-nydus manifests carried by the index (e.g. buildkit
 		// attestation manifests with in-toto JSON layers) are passed
@@ -91,6 +113,12 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 		newDesc.Platform = stripNydusOSFeature(manifest.Platform)
 		index.Manifests[i] = *newDesc
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.m.%d", i)] = newDesc.Digest.String()
+	}
+
+	// One platform was asked for and one manifest is left: return it rather
+	// than an index of one, as the forward conversion does.
+	if opt.PlatformMC != nil && len(index.Manifests) == 1 {
+		return &index.Manifests[0], nil
 	}
 
 	return oci.WriteJSON(ctx, cs, index, desc, labels)
