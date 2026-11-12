@@ -91,7 +91,7 @@ impl RangeMap for IndexedChunkMap {
         &self,
         start_index: u32,
         count: u32,
-    ) -> Result<Option<Vec<u32>>> {
+    ) -> Result<Option<super::PendingRange<'_, u32>>> {
         if self.is_range_all_ready() {
             return Ok(None);
         }
@@ -109,7 +109,7 @@ impl RangeMap for IndexedChunkMap {
         if vec.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(vec))
+            Ok(Some(super::PendingRange::new(vec)))
         }
     }
 

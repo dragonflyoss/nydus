@@ -81,7 +81,7 @@ impl RangeMap for BlobRangeMap {
         &self,
         start: u64,
         count: u64,
-    ) -> Result<Option<Vec<u64>>> {
+    ) -> Result<Option<super::PendingRange<'_, u64>>> {
         if self.is_range_all_ready() {
             Ok(None)
         } else {
@@ -97,7 +97,7 @@ impl RangeMap for BlobRangeMap {
             if vec.is_empty() {
                 Ok(None)
             } else {
-                Ok(Some(vec))
+                Ok(Some(super::PendingRange::new(vec)))
             }
         }
     }
