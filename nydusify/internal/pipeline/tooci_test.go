@@ -736,6 +736,37 @@ func TestUnpackLayers(t *testing.T) {
 	}
 }
 
+func TestUnpackLayers_RepeatedBlob(t *testing.T) {
+	builder := os.Getenv("NYDUS_TEST_BUILDER")
+	if builder == "" {
+		t.Skip("set NYDUS_TEST_BUILDER to run reverse conversion tests")
+	}
+
+	procs := runtime.GOMAXPROCS(max(2, runtime.GOMAXPROCS(0)))
+	defer runtime.GOMAXPROCS(procs)
+
+	cs := mockStore(t)
+	blob := mockBuiltBlob(t, cs, nydus.PackOption{BuilderPath: builder}, "file", []byte("repeated layer"))
+	workDir := t.TempDir()
+
+	layers, err := unpackLayers(context.Background(), cs, []ocispec.Descriptor{blob, blob, blob},
+		ToOCIOption{BuilderPath: builder, WorkDir: workDir, Compressor: "oci-tar"})
+
+	assert := assert.New(t)
+	assert.NoError(err)
+	if !assert.Len(layers, 3) {
+		return
+	}
+
+	assert.NotEmpty(layers[0].diffID)
+	assert.Equal(layers[0], layers[1])
+	assert.Equal(layers[0], layers[2])
+
+	entries, err := os.ReadDir(workDir)
+	assert.NoError(err)
+	assert.Empty(entries)
+}
+
 func TestRewriteOCIConfig(t *testing.T) {
 	tests := []struct {
 		name          string

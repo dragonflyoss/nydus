@@ -232,12 +232,26 @@ func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descrip
 		return nil, err
 	}
 
+	// A layer repeated in the image is one blob: unpack it once and reuse the
+	// result, since its copies would stage the same scratch file and remove
+	// it under each other.
+	first := make(map[digest.Digest]int, len(blobs))
+	for i, blob := range blobs {
+		if _, ok := first[blob.Digest]; !ok {
+			first[blob.Digest] = i
+		}
+	}
+
 	unpacked := make([]unpackedLayer, len(blobs))
 	eg, egCtx := errgroup.WithContext(ctx)
 	// Concurrent layers each stage a full blob copy on disk, so the limit
 	// bounds scratch usage as well as CPU.
 	eg.SetLimit(min(runtime.GOMAXPROCS(0), len(blobs)))
 	for i, blob := range blobs {
+		if first[blob.Digest] != i {
+			continue
+		}
+
 		eg.Go(func() error {
 			desc, diffID, err := unpackLayer(egCtx, cs, blob, opt, algo)
 			if err != nil {
@@ -249,6 +263,10 @@ func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descrip
 	}
 	if err := eg.Wait(); err != nil {
 		return nil, err
+	}
+
+	for i, blob := range blobs {
+		unpacked[i] = unpacked[first[blob.Digest]]
 	}
 	return unpacked, nil
 }
