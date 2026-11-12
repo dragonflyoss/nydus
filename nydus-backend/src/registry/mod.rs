@@ -308,28 +308,42 @@ impl Client {
             }
         }
 
+        // A prefetch read that fails is sent once more after the retry
+        // interval, hours later, when the link the registry signed has
+        // expired: resolve the redirect once more when the link answers `401`
+        // or `403`.
         let url = self.blob_url(&hex);
-        let response = self
-            .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
-            .await?;
+        let mut resolved_again = false;
+        loop {
+            let response = self
+                .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
+                .await?;
 
-        if response.status.is_success() {
-            response.validate_range(range)?;
-            return Ok(response);
-        }
-        if !response.status.is_redirection() {
-            return Err(response.into_io_error().await);
-        }
+            if response.status.is_success() {
+                response.validate_range(range)?;
+                return Ok(response);
+            }
+            if !response.status.is_redirection() {
+                return Err(response.into_io_error().await);
+            }
 
-        let location = response.location(&url)?;
-        let redirected = transport.prefetch(&location, headers).await?;
-        if !redirected.status.is_success() {
-            return Err(redirected.into_io_error().await);
-        }
-        redirected.validate_range(range)?;
+            let location = response.location(&url)?;
+            let redirected = transport.prefetch(&location, headers.clone()).await?;
+            if redirected.status.is_success() {
+                redirected.validate_range(range)?;
+                self.redirects.insert(&hex, location);
+                return Ok(redirected);
+            }
 
-        self.redirects.insert(&hex, location);
-        Ok(redirected)
+            let expired = matches!(
+                redirected.status,
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            );
+            if !expired || resolved_again {
+                return Err(redirected.into_io_error().await);
+            }
+            resolved_again = true;
+        }
     }
 
     /// Reads a blob's metadata for an on-demand read.
@@ -1265,6 +1279,68 @@ backend:
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);
+    }
+
+    #[test]
+    fn prefetch_resolves_a_redirect_once_more_when_the_link_expired() {
+        let redirect = |link: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(LOCATION, link.parse().unwrap());
+            Scripted::Status(StatusCode::TEMPORARY_REDIRECT, headers)
+        };
+        let expired = || Scripted::Status(StatusCode::FORBIDDEN, HeaderMap::new());
+        let body = b"fresh".to_vec();
+        let test_cases: Vec<(ReadKind, Vec<Scripted>, Option<&str>)> = vec![
+            (
+                ReadKind::Prefetch,
+                vec![
+                    redirect("http://cdn.example.com/expired"),
+                    expired(),
+                    redirect("http://cdn.example.com/fresh"),
+                    Scripted::Body(body.clone()),
+                ],
+                Some("http://cdn.example.com/fresh"),
+            ),
+            (
+                ReadKind::Prefetch,
+                vec![
+                    redirect("http://cdn.example.com/expired"),
+                    expired(),
+                    redirect("http://cdn.example.com/expired"),
+                    expired(),
+                ],
+                None,
+            ),
+            (
+                ReadKind::Ondemand,
+                vec![redirect("http://cdn.example.com/expired"), expired()],
+                None,
+            ),
+        ];
+
+        for (kind, script, link) in test_cases {
+            let calls = script.len() as u32;
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
+            let transport = ScriptedTransport::new(script);
+            let registry = scripted_registry(origin.addr, None, transport.clone());
+
+            let mut buf = vec![0u8; body.len()];
+            let result = read(&registry, kind, &mut buf);
+
+            assert_eq!(result.is_ok(), link.is_some());
+            assert_eq!(transport.calls(), calls);
+            assert_eq!(
+                registry
+                    .client
+                    .redirects
+                    .get(&hex::encode(TEST_BLOB_ID))
+                    .as_deref(),
+                link
+            );
+            if link.is_some() {
+                assert_eq!(buf, body);
+            }
+        }
     }
 
     #[test]
