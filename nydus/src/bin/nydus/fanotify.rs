@@ -135,11 +135,11 @@ impl FanotifyCommand {
             self.console,
         )?;
 
-        // Load the storage config.
-        let config = Config::load(&self.config)?;
-
-        // Runs the fanotify service until shutdown.
-        self.run(signals, config)
+        // Load the storage config and run the fanotify service until shutdown.
+        let result = Config::load(&self.config)
+            .map_err(Into::into)
+            .and_then(|config| self.run(signals, config));
+        crate::log_failure("fanotify", result)
     }
 
     /// Runs the fanotify service: builds the core, spawns the event loop,
