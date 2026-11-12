@@ -335,8 +335,8 @@ impl Filesystem for ErofsFs {
         // keeps for the ttl, so repeats resolve in the dcache instead of one
         // FUSE round trip each. The image is immutable, so a miss holds
         // forever — and module resolution (Node's require walk, Python's
-        // sys.path probing) retries the same missing names constantly.
-        m.fail();
+        // sys.path probing) retries the same missing names constantly. A
+        // miss is an answer and not a failed operation.
         reply.entry(&EROFS_FUSE_TIMEOUT, &negative_attr(), Generation(0));
     }
 
