@@ -46,6 +46,10 @@ var (
 // EnableDragonfly routes the registry manifest and blob GETs of every
 // resolver built afterwards through the Dragonfly scheduler at endpoint. The
 // returned function releases the SDK proxy. An empty endpoint disables it.
+//
+// A scheduler that cannot be reached is not an error: the requests of this
+// process go to the origin, as the reads of a nydus daemon do, and the
+// endpoint is still reported to the daemons, which keep trying it.
 func EnableDragonfly(ctx context.Context, endpoint string) (func(), error) {
 	if endpoint == "" {
 		return func() {}, nil
@@ -54,10 +58,15 @@ func EnableDragonfly(ctx context.Context, endpoint string) (func(), error) {
 		request.WithProxyMaxRetries(dragonflyMaxRetries),
 		request.WithProxyBackoff(backoff.NewExponentialBackOff()),
 	)
-	if err != nil {
+	if errors.Is(err, request.ErrInvalidArgument) {
 		return nil, errors.Wrapf(err, "connect dragonfly scheduler %q", endpoint)
 	}
-	dragonflyEndpoint, dragonflyProxy = endpoint, proxy
+	dragonflyEndpoint = endpoint
+	if err != nil {
+		logrus.Warnf("dragonfly scheduler %q is unreachable, falling back to the origin: %v", endpoint, err)
+		return func() { dragonflyEndpoint = "" }, nil
+	}
+	dragonflyProxy = proxy
 	return func() {
 		dragonflyEndpoint, dragonflyProxy = "", nil
 		_ = proxy.Close()
