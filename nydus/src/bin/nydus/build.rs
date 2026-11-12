@@ -453,8 +453,7 @@ impl BuildCommand {
             blob_metadata_path: blob_metadata_path.as_deref(),
             bootstrap_path: self.bootstrap.as_deref(),
             native: options.native(),
-        });
-        Ok(())
+        })
     }
 
     /// Persists the blob metadata sidecar next to the full blob
@@ -599,7 +598,7 @@ struct BlobBuildSummary<'a> {
     native: Option<NativeLayout>,
 }
 
-fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
+fn print_blob_build_summary(summary: BlobBuildSummary<'_>) -> Result<()> {
     #[derive(Debug, Tabled)]
     #[tabled(rename_all = "UPPERCASE")]
     struct BlobRow {
@@ -697,7 +696,7 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) {
 
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    println!("{table}");
+    crate::print_line(&table)
 }
 
 #[cfg(test)]
