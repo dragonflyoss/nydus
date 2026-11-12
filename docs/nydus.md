@@ -3424,7 +3424,10 @@ vs nydus from the layer annotations), and runs the following rules in order
    - extended attributes (names and values, skipping the `system.*` namespace),
    - content (size + sha256) for regular files.
 
-   Missing, extra or mismatching entries fail the check.
+   Missing, extra or mismatching entries fail the check. An interrupted check
+   (`SIGINT`, `SIGTERM`) stops the comparison at the next entry, or at the
+   next read of the file being hashed, and then unmounts and removes what the
+   rule set up.
 
 The filesystem rule requires **root privileges** (both the FUSE mount and the
 OCI layer ownership replay need root) and is skipped automatically when only one

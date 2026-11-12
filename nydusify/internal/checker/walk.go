@@ -7,6 +7,7 @@
 package checker
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -35,11 +36,15 @@ type fsNode struct {
 // walkRootfs walks root and returns a map of relative path -> node metadata.
 // filepath.Walk uses Lstat, so symlinks are reported as symlinks and never
 // followed. Every entry (directories, regular files, symlinks, device nodes,
-// fifos and sockets) is recorded.
-func walkRootfs(root string) (map[string]fsNode, error) {
+// fifos and sockets) is recorded. The walk ends with the error of ctx once it
+// is done.
+func walkRootfs(ctx context.Context, root string) (map[string]fsNode, error) {
 	nodes := make(map[string]fsNode)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if path == root {
@@ -76,7 +81,7 @@ func walkRootfs(root string) (map[string]fsNode, error) {
 			// Symlink size is target-dependent across filesystems; ignore it.
 			node.size = 0
 		case info.Mode().IsRegular():
-			hash, err := hashFile(path)
+			hash, err := hashFile(ctx, path)
 			if err != nil {
 				return errors.Wrapf(err, "hash %s", rel)
 			}
@@ -91,17 +96,32 @@ func walkRootfs(root string) (map[string]fsNode, error) {
 	return nodes, nil
 }
 
-func hashFile(path string) (string, error) {
+// hashFile hashes the file at path, stopping between two reads once ctx is
+// done.
+func hashFile(ctx context.Context, path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, contextReader{ctx: ctx, Reader: f}); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// contextReader fails a read once ctx is done.
+type contextReader struct {
+	ctx context.Context
+	io.Reader
+}
+
+func (r contextReader) Read(data []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.Reader.Read(data)
 }
 
 // readXattrs lists and reads the extended attributes of path without following

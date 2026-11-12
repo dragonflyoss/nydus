@@ -75,11 +75,11 @@ func (r *filesystemRule) Validate(ctx context.Context) error {
 	}
 	defer cleanupTarget()
 
-	sourceNodes, err := walkRootfs(sourceRoot)
+	sourceNodes, err := walkRootfs(ctx, sourceRoot)
 	if err != nil {
 		return errors.Wrap(err, "walk source rootfs")
 	}
-	targetNodes, err := walkRootfs(targetRoot)
+	targetNodes, err := walkRootfs(ctx, targetRoot)
 	if err != nil {
 		return errors.Wrap(err, "walk target rootfs")
 	}
