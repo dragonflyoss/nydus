@@ -301,7 +301,7 @@ func buildImageConfig(base json.RawMessage, platform ocispec.Platform, diffIDs [
 		})
 	}
 
-	return patchImageConfig(base, diffIDs, func(_ []ocispec.History, _ bool) ([]ocispec.History, bool) {
+	return oci.PatchImageConfig(base, diffIDs, func(_ []ocispec.History, _ bool) ([]ocispec.History, bool) {
 		return history, true
 	})
 }

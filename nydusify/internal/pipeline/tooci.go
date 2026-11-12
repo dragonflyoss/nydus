@@ -350,7 +350,7 @@ func materializeBlob(ctx context.Context, cs content.Store, desc ocispec.Descrip
 // entries of the layers the reverse conversion removed, patching the raw JSON
 // so unrelated fields stay byte-for-byte intact.
 func rewriteOCIConfig(configJSON json.RawMessage, diffIDs []digest.Digest, droppedLayers int) (json.RawMessage, error) {
-	return patchImageConfig(configJSON, diffIDs, func(history []ocispec.History, present bool) ([]ocispec.History, bool) {
+	return oci.PatchImageConfig(configJSON, diffIDs, func(history []ocispec.History, present bool) ([]ocispec.History, bool) {
 		if !present {
 			return nil, false
 		}

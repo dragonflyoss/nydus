@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -755,12 +756,43 @@ func TestIngestDigestNamedBlobFile(t *testing.T) {
 func TestOptimizer_writeOptimizedImage(t *testing.T) {
 	tests := []struct {
 		name      string
+		config    string
+		rejected  bool
 		layers    []ocispec.Descriptor
 		diffIDs   []digest.Digest
 		ondemand  ocispec.Descriptor
 		bootstrap ocispec.Descriptor
 		expect    func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error)
 	}{
+		{
+			name:      "keep config fields the image spec does not name and empty ones",
+			config:    `{"architecture":"amd64","os":"linux","config":{"Cmd":[],"Labels":{},"Healthcheck":{"Test":["CMD","true"]}},"moby.buildkit.cache.v0":"e30=","history":[{"created_by":"source"}]}`,
+			layers:    []ocispec.Descriptor{mockDataLayer, mockOldBootstrapLayer},
+			diffIDs:   []digest.Digest{mockDiffID},
+			ondemand:  mockOndemandLayer,
+			bootstrap: mockBootstrapLayer,
+			expect: func(t *testing.T, cs content.Store, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				var manifest ocispec.Manifest
+				assert.NoError(oci.ReadJSON(context.Background(), cs, *desc, &manifest))
+				assert.Equal(ocispec.MediaTypeImageConfig, manifest.Config.MediaType)
+
+				var config map[string]json.RawMessage
+				assert.NoError(oci.ReadJSON(context.Background(), cs, manifest.Config, &config))
+				assert.JSONEq(`{"Cmd":[],"Labels":{},"Healthcheck":{"Test":["CMD","true"]}}`, string(config["config"]))
+				assert.JSONEq(`"e30="`, string(config["moby.buildkit.cache.v0"]))
+
+				var history []ocispec.History
+				assert.NoError(json.Unmarshal(config["history"], &history))
+				assert.Equal(mockOptimizedHistory, history)
+
+				var rootFS ocispec.RootFS
+				assert.NoError(json.Unmarshal(config["rootfs"], &rootFS))
+				assert.Equal([]digest.Digest{mockDataLayer.Digest, mockOndemandLayer.Digest, digest.FromString("bootstrap tar")}, rootFS.DiffIDs)
+			},
+		},
 		{
 			name:      "take diff id from layer annotation",
 			layers:    []ocispec.Descriptor{mockDataLayer, mockOldBootstrapLayer},
@@ -857,6 +889,7 @@ func TestOptimizer_writeOptimizedImage(t *testing.T) {
 		},
 		{
 			name:      "reject data layer without diff id",
+			rejected:  true,
 			layers:    []ocispec.Descriptor{mockDataLayerWithoutDiffID, mockOldBootstrapLayer},
 			ondemand:  mockOndemandLayer,
 			bootstrap: mockBootstrapLayer,
@@ -874,9 +907,10 @@ func TestOptimizer_writeOptimizedImage(t *testing.T) {
 			},
 		},
 		{
-			name:    "reject ondemand blob without diff id",
-			layers:  []ocispec.Descriptor{mockDataLayer, mockOldBootstrapLayer},
-			diffIDs: []digest.Digest{mockDiffID},
+			name:     "reject ondemand blob without diff id",
+			rejected: true,
+			layers:   []ocispec.Descriptor{mockDataLayer, mockOldBootstrapLayer},
+			diffIDs:  []digest.Digest{mockDiffID},
 			ondemand: ocispec.Descriptor{
 				MediaType: nydus.MediaTypeNydusBlob,
 				Digest:    mockOndemandLayer.Digest,
@@ -901,6 +935,7 @@ func TestOptimizer_writeOptimizedImage(t *testing.T) {
 		},
 		{
 			name:     "reject bootstrap without diff id",
+			rejected: true,
 			layers:   []ocispec.Descriptor{mockDataLayer, mockOldBootstrapLayer},
 			diffIDs:  []digest.Digest{mockDiffID},
 			ondemand: mockOndemandLayer,
@@ -924,6 +959,7 @@ func TestOptimizer_writeOptimizedImage(t *testing.T) {
 		},
 		{
 			name:      "reject bootstrap that is not the last layer",
+			rejected:  true,
 			layers:    []ocispec.Descriptor{mockOldBootstrapLayer, mockDataLayer},
 			diffIDs:   []digest.Digest{mockDiffID},
 			ondemand:  mockOndemandLayer,
@@ -951,12 +987,34 @@ func TestOptimizer_writeOptimizedImage(t *testing.T) {
 			}
 
 			config := mockImageConfig
+			if tc.config != "" {
+				config = ocispec.Image{}
+				if err := json.Unmarshal([]byte(tc.config), &config); err != nil {
+					t.Fatal(err)
+				}
+			}
 			config.RootFS = ocispec.RootFS{Type: "layers", DiffIDs: tc.diffIDs}
+
+			// The image's config as the store holds it: the raw source one,
+			// or the typed mock. A rejected image is refused before its
+			// config is read, and its cases assert an untouched store.
+			configDesc := &ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}
+			if !tc.rejected {
+				var stored any = config
+				if tc.config != "" {
+					stored = json.RawMessage(tc.config)
+				}
+				configDesc, err = oci.WriteJSON(context.Background(), provider.ContentStore(), stored, *configDesc, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
 			img := &nydusfs.Image{
 				Desc:   ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Platform: &mockPlatform},
 				Config: config,
 				Manifest: ocispec.Manifest{
-					Config:      ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig},
+					Config:      *configDesc,
 					Layers:      tc.layers,
 					Annotations: mockManifestAnnotations,
 				},

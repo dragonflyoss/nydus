@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package pipeline
+package oci
 
 import (
 	"encoding/json"
@@ -14,7 +14,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// patchImageConfig replaces only the `rootfs` diff ids of a raw image config
+// PatchImageConfig replaces only the `rootfs` diff ids of a raw image config
 // and lets historyFn rewrite the `history` field, keeping every other field
 // byte-for-byte intact.
 //
@@ -23,7 +23,7 @@ import (
 // absent and then decodes back as a nil slice). The nydus config would then no
 // longer be reflect.DeepEqual to the untouched source OCI config, and
 // `nydusify check` would fail the manifest config-consistency rule.
-func patchImageConfig(configJSON json.RawMessage, diffIDs []digest.Digest, historyFn func(history []ocispec.History, present bool) ([]ocispec.History, bool)) (json.RawMessage, error) {
+func PatchImageConfig(configJSON json.RawMessage, diffIDs []digest.Digest, historyFn func(history []ocispec.History, present bool) ([]ocispec.History, bool)) (json.RawMessage, error) {
 	var rawConfig map[string]json.RawMessage
 	if err := json.Unmarshal(configJSON, &rawConfig); err != nil {
 		return nil, errors.Wrap(err, "unmarshal image config")
