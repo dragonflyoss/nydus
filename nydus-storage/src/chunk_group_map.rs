@@ -163,7 +163,10 @@ impl ChunkGroupMap {
         let file_len = file.metadata()?.len();
         if file_len == 0 {
             // First creation. Racing creators run the same idempotent
-            // sequence: size the file, then write the identical header bytes.
+            // sequence: reserve the blocks, size the file, then write the
+            // identical header bytes. A reservation that fails leaves the
+            // file empty, so the next open creates it again.
+            reserve_blocks(&file, expected_len)?;
             file.set_len(expected_len)?;
             file.write_all_at(&header_bytes(chunk_group_count), 0)?;
         } else if file_len < expected_len {
@@ -454,6 +457,39 @@ impl ChunkGroupMap {
     }
 }
 
+/// Reserves the blocks of the first `len` bytes of `file` without changing its
+/// size. The ready bits are stored through a shared mapping, and a store that
+/// has to allocate its block on a full disk kills the process with `SIGBUS`
+/// instead of returning an error. A filesystem that cannot reserve keeps the
+/// file sparse.
+fn reserve_blocks(file: &File, len: u64) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    loop {
+        // SAFETY: fallocate takes no pointers.
+        let rc = unsafe {
+            libc::fallocate(
+                file.as_raw_fd(),
+                libc::FALLOC_FL_KEEP_SIZE,
+                0,
+                len as libc::off_t,
+            )
+        };
+        if rc == 0 {
+            break;
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EOPNOTSUPP | libc::ENOSYS) => break,
+            _ => return Err(err),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (file, len);
+
+    Ok(())
+}
+
 fn header_bytes(chunk_group_count: usize) -> [u8; CHUNK_GROUP_MAP_HEADER_SIZE] {
     let mut header = [0u8; CHUNK_GROUP_MAP_HEADER_SIZE];
     header[..8].copy_from_slice(&CHUNK_GROUP_MAP_MAGIC);
@@ -490,6 +526,29 @@ fn validate_range(first: usize, last: usize, chunk_group_count: usize) -> io::Re
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn group_map_reserves_its_blocks_at_creation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob.group.map");
+        let groups = 1_000_000;
+        let expected = (CHUNK_GROUP_MAP_HEADER_SIZE + groups / 8) as u64;
+
+        let map = ChunkGroupMap::open(&path, groups).unwrap();
+        map.set_ready(groups - 1).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), expected);
+
+        // Only a filesystem that reserves blocks can be held to it.
+        let probe = File::create(dir.path().join("probe")).unwrap();
+        reserve_blocks(&probe, expected).unwrap();
+        if probe.metadata().unwrap().blocks() * 512 >= expected {
+            assert!(meta.blocks() * 512 >= expected);
+        }
+    }
 
     #[test]
     fn group_map_persists_ready_bits() {

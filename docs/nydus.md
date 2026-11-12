@@ -2602,7 +2602,10 @@ word at 24 whose bit 0 is `ALL_READY` and the `boot_tag` at 28 naming the
 boot the bits belong to; the rest of the header page is
 reserved and zero. Readers require the file to be at least header plus
 bitmap long and ignore any bytes past the bitmap, which a newer writer may
-append behind a compat feature bit. The whole file is mapped `MAP_SHARED`
+append behind a compat feature bit. The blocks of the whole file are reserved
+when it is created, so a store through the mapping never has to allocate one:
+on a full disk such a store would end the process with `SIGBUS`. The whole
+file is mapped `MAP_SHARED`
 and every bit access goes through atomic operations (`Acquire` loads,
 `fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
 are immediately observed by every other process sharing the cache directory
