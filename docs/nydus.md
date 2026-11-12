@@ -3119,6 +3119,50 @@ For a different target repository, it first tries a registry-side blob mount;
 if that is unavailable, it downloads and uploads the parent blob. It then
 uploads local upper blobs and writes a new bootstrap layer, config and manifest.
 
+### Deferred Cache Capture
+
+VM checkpoints can defer compression and upload until after the VM resumes:
+
+1. `writer.commit_capture(cache)` sends decoded groups to a caller-provided
+   `ChunkGroupCache`, normally writing `capture.data`. It also writes the group
+   layout to `capture.json` (limited to 64 MiB) and a provisional `capture.boot`.
+   Capture performs no compression or payload hashing. Complete writes before
+   releasing mutable sources; capture does not guarantee fsync durability.
+   The provisional bootstrap cannot be mounted or used as a parent.
+2. `nydus_core::encode_cache()` encodes the sealed capture into a
+   caller-provided sink. The CLI exposes this as
+   `nydus encode-cache --cache <checkpoint>/capture.json`.
+   Decoded data and chunk addresses remain unchanged.
+3. `nydusify convert --cache` invokes the encoder and streams its output to
+   the registry without storing a compressed blob locally:
+
+       nydusify convert \
+         --cache ./checkpoint/capture.json \
+         --parent-image registry.example.com/vm/snapshot:v1 \
+         --target registry.example.com/vm/snapshot:v2
+
+Omit `--parent-image` for the first capture. Cache input cannot be combined with
+source/bootstrap/blob inputs. Encoding inherits the capture's compressor;
+cache input cannot be compacted during conversion.
+
+Publication produces `image.boot`, `<digest>.blob.meta`, an all-ready
+`<digest>.group.map` and `cache-result.json`. After successful OCI publication
+the result records the final image descriptor. Decoded data remains in
+`capture.data`. Manifest/config/bootstrap content remains under
+`<work-dir>/content` (default work directory: `<checkpoint>/.nydusify`).
+
+The checkpoint owner, not Nydus, imports completed data/meta/map into snapshotter
+and OCI metadata into containerd. Data blobs need not enter containerd content.
+Snapshotter syncs files before publishing ready state and uses same-filesystem
+hardlinks without overwriting existing cache files. Import failures do not
+invalidate successful publication; missing groups still use normal fetch. Imported
+files follow normal GC, so download-free restore is not guaranteed permanently.
+
+Run only one conversion per capture directory. Before a published image
+descriptor is recorded, failures can be retried with the sealed capture files
+unchanged. Already-published captures are rejected. The checkpoint owner cleans
+up incomplete outputs and releases producer files after publication/import.
+
 ## Merge Design
 
 The current merge pipeline is:
