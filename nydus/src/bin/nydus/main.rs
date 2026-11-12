@@ -223,6 +223,16 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Writes the error the `daemon` subcommand stops with to its log file, for
+/// the caller that still holds the log open: the error is otherwise printed
+/// only on stderr, which whoever starts a daemon in the background drops.
+fn log_failure(daemon: &str, result: Result<()>) -> Result<()> {
+    if let Err(err) = &result {
+        tracing::error!("nydus {daemon} failed: {}", err.report());
+    }
+    result
+}
+
 /// Prints the error and its cause chain in the cargo style — a colored
 /// `error:` line matching clap's own output, then the causes indented under
 /// `Caused by:` — instead of one run-on `a: b: c` line.
