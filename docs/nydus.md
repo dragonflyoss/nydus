@@ -3333,6 +3333,14 @@ Notes:
   timeout, which is retried as above. The time of a whole transfer is not
   limited. Uploads are not watched, since a registry may take minutes to answer
   the commit of a large blob.
+- `check`, `mount` and `optimize` hand the registry to a `nydus` process
+  through a generated config. That process does not read `HTTP_PROXY`,
+  `HTTPS_PROXY` and `NO_PROXY`, so the proxy these name for the registry, the
+  one the requests of `nydusify` itself go through, is written to
+  `backend.config.http.proxy.addr`. It then carries every registry request of
+  the process, the redirects of the registry included. A registry `NO_PROXY`
+  excludes, a loopback registry and a proxy that is not `http://` or
+  `https://` leave the config without a proxy.
 
 Examples:
 
