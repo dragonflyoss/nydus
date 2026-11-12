@@ -233,8 +233,14 @@ func tail(s string, n int) string {
 	return "...\n" + s[len(s)-n:]
 }
 
-// LogDir is where the daemon called name under dir keeps its file logs.
+// LogDir is where the daemon called name under dir keeps its file logs: next
+// to the console log, or under NYDUS_E2E_LOG_DIR when that is set, so the
+// logs outlive the test and CI can upload them.
 func LogDir(dir, name string) string {
+	if root := os.Getenv("NYDUS_E2E_LOG_DIR"); root != "" {
+		dir = filepath.Join(root, strings.TrimPrefix(dir, os.TempDir()))
+	}
+
 	return filepath.Join(dir, name+"-logs")
 }
 
