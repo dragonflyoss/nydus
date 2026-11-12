@@ -1,5 +1,6 @@
 mod caches;
 mod chunk_group_lock;
+mod decoded;
 pub mod local;
 pub mod raw;
 pub mod remote;
@@ -56,6 +57,8 @@ impl From<&StorageConfig> for CacheOptions {
         }
     }
 }
+
+pub use decoded::write_decoded_group;
 
 /// Fail with [`io::ErrorKind::TimedOut`] once a blob-level prefetch deadline
 /// has passed. Checked between batches, so the overshoot is bounded by one

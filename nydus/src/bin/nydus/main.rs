@@ -12,6 +12,7 @@ pub use nydus::api_server;
 mod allocator;
 pub mod build;
 pub mod check;
+pub mod encode_cache;
 pub mod export;
 #[cfg(feature = "fanotify")]
 pub mod fanotify;
@@ -72,6 +73,12 @@ pub enum Command {
         about = "Prune metadata and compact live blobs in one pass"
     )]
     Repack(repack::RepackCommand),
+
+    #[command(
+        name = "encode-cache",
+        about = "Encode a captured decoded cache without rewriting it"
+    )]
+    EncodeCache(encode_cache::EncodeCacheCommand),
 
     #[command(
         name = "export",
@@ -177,6 +184,7 @@ impl Command {
             self,
             Self::Build(_)
                 | Self::Repack(_)
+                | Self::EncodeCache(_)
                 | Self::Export(_)
                 | Self::Check(_)
                 | Self::Merge(_)
@@ -188,6 +196,7 @@ impl Command {
         match self {
             Self::Build(cmd) => cmd.execute(),
             Self::Repack(cmd) => cmd.execute(),
+            Self::EncodeCache(cmd) => cmd.execute(),
             Self::Export(cmd) => cmd.execute(),
             Self::Check(cmd) => cmd.execute(),
             Self::Merge(cmd) => cmd.execute(),
