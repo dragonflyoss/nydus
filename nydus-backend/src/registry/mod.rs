@@ -20,7 +20,7 @@ use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
 use url::Url;
 
-use nydus_config::{BackendConfig, Config};
+use nydus_config::{BackendConfig, Config, RedactedString};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
@@ -160,8 +160,8 @@ impl Registry {
                 addr: registry.addr.clone(),
                 repository: registry.repository.clone(),
                 authorizer: Authorizer::new(
-                    registry.auth.as_deref(),
-                    registry.registry_token.as_deref(),
+                    registry.auth.as_ref().map(RedactedString::expose),
+                    registry.registry_token.as_ref().map(RedactedString::expose),
                 )?,
                 redirects: RedirectCache::new(),
                 http,
