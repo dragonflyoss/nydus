@@ -3323,6 +3323,11 @@ Notes:
 - Image references are normalized like a container runtime: a bare name such as
   `mariadb` expands to `docker.io/library/mariadb:latest`, and a tagless
   reference defaults to `:latest`.
+- Registry requests that fail transiently are tried up to five times, waiting
+  longer before each new attempt: a connection failure or a `408`, `429`,
+  `500`, `502`, `503` or `504` answer while resolving, pulling or pushing. A
+  layer download that is tried again resumes after the bytes already stored.
+  The pulls of `check`, `mount` and `optimize` behave the same.
 
 Examples:
 

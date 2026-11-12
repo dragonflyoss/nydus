@@ -15,6 +15,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	dockerconfig "github.com/docker/cli/cli/config"
 	"github.com/pkg/errors"
 )
@@ -43,10 +44,27 @@ func newHTTPClient(skipTLSVerify bool) *http.Client {
 	}
 }
 
+// transientStatusTransport returns a GET or HEAD the registry answers with a
+// transient status as the typed error of that status. Containerd's fetcher
+// reports such an answer as an untyped error, which the pull retries could not
+// tell from a definitive one.
+type transientStatusTransport struct{ http.RoundTripper }
+
+func (t transientStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.RoundTripper.RoundTrip(req)
+	if err != nil || (req.Method != http.MethodGet && req.Method != http.MethodHead) ||
+		!isTransientPushError(remoteserrors.ErrUnexpectedStatus{StatusCode: resp.StatusCode}) {
+		return resp, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return nil, remoteserrors.NewUnexpectedStatusErr(resp)
+}
+
 // newRegistryClient builds the client of registry requests, routing manifest
 // and blob GETs through Dragonfly when it is enabled.
 func newRegistryClient(skipTLSVerify bool) *http.Client {
 	client := newHTTPClient(skipTLSVerify)
+	client.Transport = transientStatusTransport{client.Transport}
 	if dragonflyProxy != nil {
 		client.Transport = &dragonflyTransport{base: client.Transport, getter: dragonflyProxy}
 	}

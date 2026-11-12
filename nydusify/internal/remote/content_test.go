@@ -20,6 +20,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"testing/synctest"
 	"time"
 
@@ -119,18 +120,60 @@ func TestFetch(t *testing.T) {
 				assert.ErrorIs(err, errdefs.ErrNotFound)
 			},
 		},
+		{
+			name: "retry transient resolve failure",
+			ref:  mockRef,
+			resolver: mockResolver{
+				desc:      mockLayerDesc,
+				fetcher:   &mockFetcher{Reader: bytes.NewReader(mockLayer)},
+				onResolve: mockFailures(pushRetries-1, mockNetErr),
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+			},
+		},
+		{
+			name:     "give up on persistent resolve failure",
+			ref:      mockRef,
+			resolver: mockResolver{desc: mockLayerDesc, onResolve: mockFailures(pushRetries, mockNetErr)},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, mockNetErr)
+			},
+		},
+		{
+			name: "resume interrupted fetch",
+			ref:  mockRef,
+			resolver: mockResolver{desc: mockLargeLayerDesc, fetcher: &mockFetcher{onFetch: func(call int) (io.Reader, error) {
+				switch call {
+				case 1:
+					return nil, mockNetErr
+				case 2:
+					return io.MultiReader(bytes.NewReader(mockLargeLayer[:len(mockLargeLayer)/2]), iotest.ErrReader(mockNetErr)), nil
+				default:
+					return bytes.NewReader(mockLargeLayer), nil
+				}
+			}}},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store, err := local.NewStore(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				store, err := local.NewLabeledStore(t.TempDir(), newMemoryLabelStore())
+				if err != nil {
+					t.Fatal(err)
+				}
 
-			_, err = fetch(context.Background(), store, tc.resolver, tc.ref, platforms.All, PullAll)
+				_, err = fetch(context.Background(), store, tc.resolver, tc.ref, platforms.All, PullAll)
 
-			tc.expect(t, err)
+				tc.expect(t, err)
+			})
 		})
 	}
 }
@@ -729,6 +772,28 @@ func TestEnsureParentBlob(t *testing.T) {
 			},
 		},
 		{
+			name:   "retry transient parent download failure",
+			parent: "registry.test/ns/parent:v1",
+			target: "registry.test/ns/child:v1",
+			resolver: func(pusher *mockPusher, fetcher *mockFetcher) remotes.Resolver {
+				fetcher.onFetch = func(call int) (io.Reader, error) {
+					if call == 1 {
+						return nil, mockNetErr
+					}
+
+					return bytes.NewReader(mockParentBlob), nil
+				}
+
+				return mockResolver{pusher: pusher, fetcher: fetcher}
+			},
+			expect: func(t *testing.T, pusher *mockPusher, fetcher *mockFetcher, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(2, fetcher.calls)
+				assert.Equal([]mockUpload{{data: string(mockParentBlob), commits: 1, closes: 1}}, pusher.uploads())
+			},
+		},
+		{
 			name:    "downloaded parent cannot be opened",
 			parent:  "registry.test/ns/parent:v1",
 			target:  "registry.test/ns/child:v1",
@@ -776,17 +841,79 @@ func TestEnsureParentBlob(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			base, err := local.NewStore(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				base, err := local.NewStore(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
 
-			pusher := &mockPusher{pushErr: tc.pushErr, writeErr: tc.writeErr}
-			fetcher := &mockFetcher{Reader: bytes.NewReader(mockParentBlob)}
-			store := &mockContentStore{Store: base, data: mockParentBlob, openErr: tc.openErr}
-			err = ensureParentBlob(context.Background(), store, tc.resolver(pusher, fetcher), mockParentBlobDesc, tc.parent, tc.target)
+				pusher := &mockPusher{pushErr: tc.pushErr, writeErr: tc.writeErr}
+				fetcher := &mockFetcher{Reader: bytes.NewReader(mockParentBlob)}
+				store := &mockContentStore{Store: base, data: mockParentBlob, openErr: tc.openErr}
+				err = ensureParentBlob(context.Background(), store, tc.resolver(pusher, fetcher), mockParentBlobDesc, tc.parent, tc.target)
 
-			tc.expect(t, pusher, fetcher, err)
+				tc.expect(t, pusher, fetcher, err)
+			})
+		})
+	}
+}
+
+func TestRetryPull(t *testing.T) {
+	tests := []struct {
+		name   string
+		op     func() error
+		expect func(t *testing.T, cancel context.CancelFunc, done <-chan error)
+	}{
+		{
+			name: "retry until success",
+			op:   mockFailures(pushRetries-1, mockNetErr),
+			expect: func(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+				assert := assert.New(t)
+				start := time.Now()
+				assert.NoError(<-done)
+				assert.Equal(5*time.Second, time.Since(start))
+			},
+		},
+		{
+			name: "give up after the last attempt",
+			op:   mockFailures(pushRetries, mockNetErr),
+			expect: func(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+				assert := assert.New(t)
+				assert.ErrorIs(<-done, mockNetErr)
+			},
+		},
+		{
+			name: "return definitive failure at once",
+			op:   mockFailures(1, errdefs.ErrNotFound),
+			expect: func(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+				assert := assert.New(t)
+				start := time.Now()
+				assert.ErrorIs(<-done, errdefs.ErrNotFound)
+				assert.Zero(time.Since(start))
+			},
+		},
+		{
+			name: "stop waiting once canceled",
+			op:   mockFailures(1, mockNetErr),
+			expect: func(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+				assert := assert.New(t)
+				synctest.Wait()
+				cancel()
+				assert.ErrorIs(<-done, context.Canceled)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- retryPull(ctx, "mock", tc.op) }()
+
+				tc.expect(t, cancel, done)
+			})
 		})
 	}
 }
@@ -1436,10 +1563,27 @@ type mockResolver struct {
 	resolveErr error
 	fetcherErr error
 	pusherErr  error
+	onResolve  func() error
 }
 
 func (r mockResolver) Resolve(_ context.Context, ref string) (string, ocispec.Descriptor, error) {
+	if r.onResolve != nil {
+		return ref, r.desc, r.onResolve()
+	}
+
 	return ref, r.desc, r.resolveErr
+}
+
+// mockFailures returns a hook that fails with err the first n times it runs.
+func mockFailures(n int, err error) func() error {
+	return func() error {
+		if n == 0 {
+			return nil
+		}
+
+		n--
+		return err
+	}
 }
 
 func (r mockResolver) Fetcher(context.Context, string) (remotes.Fetcher, error) {
@@ -1452,13 +1596,20 @@ func (r mockResolver) Pusher(context.Context, string) (remotes.Pusher, error) {
 
 type mockFetcher struct {
 	io.Reader
-	err    error
-	calls  int
-	closes int
+	err     error
+	calls   int
+	closes  int
+	onFetch func(call int) (io.Reader, error)
 }
 
 func (f *mockFetcher) Fetch(context.Context, ocispec.Descriptor) (io.ReadCloser, error) {
 	f.calls++
+	if f.onFetch != nil {
+		reader, err := f.onFetch(f.calls)
+		f.Reader = reader
+		return f, err
+	}
+
 	return f, f.err
 }
 

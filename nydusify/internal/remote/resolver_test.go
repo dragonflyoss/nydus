@@ -8,10 +8,13 @@ package remote
 
 import (
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	dockerconfig "github.com/docker/cli/cli/config"
 	"github.com/stretchr/testify/assert"
 )
@@ -30,6 +33,81 @@ func mockDockerConfig(t *testing.T, config string) {
 	previous := dockerconfig.Dir()
 	dockerconfig.SetDir(dir)
 	t.Cleanup(func() { dockerconfig.SetDir(previous) })
+}
+
+func TestTransientStatusTransport_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		status int
+		expect func(t *testing.T, resp *http.Response, err error)
+	}{
+		{
+			name:   "transient status of a download",
+			method: http.MethodGet,
+			status: http.StatusServiceUnavailable,
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.Nil(resp)
+				var status remoteserrors.ErrUnexpectedStatus
+				assert.ErrorAs(err, &status)
+				assert.Equal(http.StatusServiceUnavailable, status.StatusCode)
+				assert.Equal("unavailable", string(status.Body))
+				assert.True(isTransientPushError(err))
+			},
+		},
+		{
+			name:   "transient status of a head",
+			method: http.MethodHead,
+			status: http.StatusTooManyRequests,
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.Nil(resp)
+				assert.True(isTransientPushError(err))
+			},
+		},
+		{
+			name:   "definitive status of a download",
+			method: http.MethodGet,
+			status: http.StatusNotFound,
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(http.StatusNotFound, resp.StatusCode)
+			},
+		},
+		{
+			name:   "transient status of an upload",
+			method: http.MethodPut,
+			status: http.StatusServiceUnavailable,
+			expect: func(t *testing.T, resp *http.Response, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(http.StatusServiceUnavailable, resp.StatusCode)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("unavailable"))
+			}))
+			defer server.Close()
+			req, err := http.NewRequest(tc.method, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			resp, err := transientStatusTransport{http.DefaultTransport}.RoundTrip(req)
+			if resp != nil {
+				defer func() { _ = resp.Body.Close() }()
+			}
+
+			tc.expect(t, resp, err)
+		})
+	}
 }
 
 func TestNewDockerConfigCredFunc(t *testing.T) {
