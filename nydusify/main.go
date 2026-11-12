@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -98,6 +99,10 @@ func convertCommand() *cli.Command {
 				Usage: "scratch directory for conversion (defaults to a temp dir)",
 			},
 			&cli.StringFlag{
+				Name:  "cache",
+				Usage: "decoded cache capture.json to finalize and stream to the target registry",
+			},
+			&cli.StringFlag{
 				Name:  "bootstrap",
 				Usage: "existing nydus bootstrap path to package as image.boot instead of building from --source",
 			},
@@ -121,6 +126,7 @@ func convertCommand() *cli.Command {
 				Name:  "compact-max-layers",
 				Usage: "compact all data blobs into one when artifact packaging exceeds this data-layer count (0 disables; bootstrap excluded)",
 			},
+
 			&cli.StringSliceFlag{
 				Name:  "parent-image",
 				Usage: "existing nydus image whose blobs are reused; cross-repository blobs are mounted or copied into the target repository",
@@ -259,11 +265,13 @@ func runConvert(c *cli.Context) error {
 	blobPaths := c.StringSlice("blob")
 	blobDir := c.String("blob-dir")
 	parentImages := c.StringSlice("parent-image")
+	var uploadedBlobs []pipeline.UploadedBlob
 	manifestAnnotations, err := parseManifestAnnotations(manifestAnnotationValues(c))
 	if err != nil {
 		return err
 	}
 	artifactMode, err := pipeline.ValidateConvertInputs(pipeline.ConvertInput{
+		CachePath:     c.String("cache"),
 		Sources:       sources,
 		BootstrapPath: bootstrapPath,
 		BlobPaths:     blobPaths,
@@ -284,6 +292,9 @@ func runConvert(c *cli.Context) error {
 	}
 	multiSource := len(sources) > 1
 
+	if c.String("cache") != "" && c.Uint("compact-max-layers") > 0 {
+		return errors.New("--cache cannot be combined with --compact-max-layers")
+	}
 	// The compressor picks the conversion direction, so reject unknown values
 	// instead of silently running the wrong one.
 	compressor := c.String("compressor")
@@ -321,6 +332,11 @@ func runConvert(c *cli.Context) error {
 		platformMC = platforms.OnlyStrict(platform)
 	}
 
+	if cache := c.String("cache"); cache != "" && c.String("work-dir") == "" {
+		if err := c.Set("work-dir", filepath.Join(filepath.Dir(cache), ".nydusify")); err != nil {
+			return err
+		}
+	}
 	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-")
 	if err != nil {
 		return err
@@ -417,6 +433,12 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("packaging nydus artifacts from bootstrap %s", bootstrapPath)
+		if cache := c.String("cache"); cache != "" {
+			bootstrapPath, uploadedBlobs, err = encodeCache(ctx, c.String("builder"), cache, len(parents) > 0, providerCacheUpload(provider, target))
+			if err != nil {
+				return err
+			}
+		}
 		artifact, err := pipeline.ConvertNydusArtifacts(ctx, provider.ContentStore(), pipeline.ArtifactOption{
 			BuilderPath:       c.String("builder"),
 			CompactMaxLayers:  c.Uint("compact-max-layers"),
@@ -433,6 +455,7 @@ func runConvert(c *cli.Context) error {
 			BootstrapPath:     bootstrapPath,
 			BlobPaths:         blobPaths,
 			BlobDir:           blobDir,
+			UploadedBlobs:     uploadedBlobs,
 			ParentImages:      parents,
 			AppendInBootstrap: appendFiles,
 			Annotations:       manifestAnnotations,
@@ -445,7 +468,7 @@ func runConvert(c *cli.Context) error {
 		externalBlobs = artifact.ExternalBlobs
 		localBlobs = artifact.LocalBlobs
 		// The common no-compaction case already has the final input bootstrap.
-		if path := c.String("output-bootstrap"); path != "" && (artifact.Pruned || artifact.Compacted || path != bootstrapPath) {
+		if path := c.String("output-bootstrap"); c.String("cache") != "" || path != "" && (artifact.Pruned || artifact.Compacted || path != bootstrapPath) {
 			outputBootstrap = artifact.BootstrapPath
 		}
 	} else if multiSource {
@@ -554,6 +577,9 @@ func runConvert(c *cli.Context) error {
 
 	for _, blob := range externalBlobs {
 		parent := parentBlobSources[blob.Digest]
+		if parent == "" {
+			continue
+		}
 		sameRepo, err := remote.SameRepository(parent, target)
 		if err != nil {
 			return err
@@ -601,12 +627,17 @@ func runConvert(c *cli.Context) error {
 		}
 	}
 
-	sourceLabel := strings.Join(sources, ", ")
-	if path := c.String("output-bootstrap"); path != "" && outputBootstrap != "" {
+	if cache := c.String("cache"); cache != "" {
+		if err := completeCachePublication(cache, outputBootstrap, c.String("output-bootstrap"), *newDesc); err != nil {
+			return errors.Wrap(err, "save cache publication result")
+		}
+	} else if path := c.String("output-bootstrap"); path != "" && outputBootstrap != "" {
 		if err := saveBootstrap(path, outputBootstrap); err != nil {
 			return errors.Wrap(err, "save published bootstrap")
 		}
 	}
+
+	sourceLabel := strings.Join(sources, ", ")
 	if artifactMode {
 		sourceLabel = bootstrapPath
 	}
