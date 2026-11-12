@@ -8,6 +8,7 @@ package checker
 
 import (
 	"archive/tar"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"os"
@@ -39,6 +40,18 @@ var (
 	}()
 
 	mockFuseFailure = "echo 'mock fuse failure' >&2\nexit 7\n"
+
+	mockFuseMountpoint = "while [ $# -gt 1 ]; do\nif [ \"$1\" = --mountpoint ]; then mnt=$2; fi\nshift\ndone\n"
+
+	// mockFuseUnmounts is a daemon that turns its mountpoint back into a
+	// plain directory when it is told to end, as an unmount would.
+	mockFuseUnmounts = mockFuseMountpoint +
+		"trap 'rm \"$mnt\"; mkdir \"$mnt\"; exit 0' TERM\n" +
+		"touch \"$(dirname \"$0\")/ready\"\nwhile :; do sleep 0.05; done\n"
+
+	// mockFuseVanishes is a daemon that dies and leaves a mountpoint that
+	// answers a stat with an error.
+	mockFuseVanishes = mockFuseMountpoint + "rmdir \"$mnt\"\n" + mockFuseFailure
 
 	mockAbsentImage = &nydusfs.Image{
 		Kind: nydusfs.KindOCI,
@@ -383,11 +396,61 @@ func TestFilesystemRule_mount(t *testing.T) {
 }
 
 func TestFilesystemRule_fuseMount(t *testing.T) {
+	// mockMounted makes the mountpoint look mounted before the daemon runs:
+	// a link to a directory on another device.
+	mockMounted := func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {
+		if err := os.Symlink("/proc", filepath.Join(dir, "mnt")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	tests := []struct {
-		name   string
-		setup  func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string)
-		expect func(t *testing.T, root, dir, mountpoint string, unmount func(), err error)
+		name    string
+		builder string
+		setup   func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string)
+		expect  func(t *testing.T, root, dir, mountpoint string, unmount func(), err error)
 	}{
+		{
+			name:  "unmount what a daemon that died left mounted",
+			setup: mockMounted,
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(filepath.Join(dir, "mnt"), mountpoint)
+				assert.Empty(mockUnmountCalls(t, root))
+				unmount()
+				assert.Equal("fusermount3 -u "+mountpoint+"\n", mockUnmountCalls(t, root))
+			},
+		},
+		{
+			name:    "unmount a mountpoint that answers with an error",
+			builder: mockFuseVanishes,
+			setup:   func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {},
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+				assert.Nil(unmount)
+				assert.Equal("fusermount3 -u "+filepath.Join(dir, "mnt")+"\n", mockUnmountCalls(t, root))
+			},
+		},
+		{
+			name:    "leave alone what the daemon unmounted",
+			builder: mockFuseUnmounts,
+			setup:   mockMounted,
+			expect: func(t *testing.T, root, dir, mountpoint string, unmount func(), err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Eventually(func() bool {
+					_, err := os.Stat(filepath.Join(root, "ready"))
+					return err == nil
+				}, 10*time.Second, 10*time.Millisecond)
+				unmount()
+				info, err := os.Lstat(mountpoint)
+				assert.NoError(err)
+				assert.True(info.IsDir())
+				assert.Empty(mockUnmountCalls(t, root))
+			},
+		},
 		{
 			name:  "serve chunk layers through registry config",
 			setup: func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {},
@@ -396,6 +459,8 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 				assert.ErrorContains(err, "mock fuse failure")
 				assert.Empty(mountpoint)
 				assert.Nil(unmount)
+				// Nothing was mounted, so there is nothing to unmount.
+				assert.Empty(mockUnmountCalls(t, root))
 				assert.Equal([]string{
 					"fuse",
 					"--bootstrap", filepath.Join(dir, "bootstrap", "image.boot"),
@@ -505,18 +570,37 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			rule, img := mockFilesystemRule(t, mockBuilder(t, root, mockFuseFailure))
+			rule, img := mockFilesystemRule(t, mockBuilder(t, root, cmp.Or(tc.builder, mockFuseFailure)))
 			dir := filepath.Join(root, "fuse")
-			if err := os.Mkdir(dir, 0o755); err != nil {
+			helpers := filepath.Join(root, "helpers")
+			for _, d := range []string{dir, helpers} {
+				if err := os.Mkdir(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			script := "#!/bin/sh\necho \"${0##*/} $*\" >> '" + filepath.Join(root, "calls") + "'\n"
+			if err := os.WriteFile(filepath.Join(helpers, "fusermount3"), []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
 
+			t.Setenv("PATH", helpers+string(os.PathListSeparator)+os.Getenv("PATH"))
 			tc.setup(t, &rule, img, dir)
 
 			mountpoint, unmount, err := rule.fuseMount(context.Background(), dir, remote.Source, img)
 			tc.expect(t, root, dir, mountpoint, unmount, err)
 		})
 	}
+}
+
+// mockUnmountCalls returns the calls of the unmount helper under root.
+func mockUnmountCalls(t *testing.T, root string) string {
+	calls, err := os.ReadFile(filepath.Join(root, "calls"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	return string(calls)
 }
 
 func TestWaitForMount(t *testing.T) {
