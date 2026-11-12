@@ -556,11 +556,13 @@ func runConvert(c *cli.Context) error {
 
 	if len(localBlobs) > 0 {
 		logrus.Infof("uploading %d local nydus artifact blob(s)", len(localBlobs))
-		var uploads errgroup.Group
+		// One failed upload fails the conversion: stop the others rather than
+		// let them run to the end for an image that will not be pushed.
+		uploads, uploadCtx := errgroup.WithContext(ctx)
 		for _, blob := range localBlobs {
 			blob := blob
 			uploads.Go(func() error {
-				if err := provider.PushBlobFile(ctx, blob.Path, blob.Descriptor, target); err != nil {
+				if err := provider.PushBlobFile(uploadCtx, blob.Path, blob.Descriptor, target); err != nil {
 					return errors.Wrapf(err, "push local artifact blob %s", blob.Descriptor.Digest)
 				}
 				return nil
