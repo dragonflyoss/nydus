@@ -13,8 +13,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,6 +68,43 @@ func mockBlockedFile(t *testing.T) string {
 	}
 
 	return path
+}
+
+// mockStallingRegistry starts a registry that answers 403 for the first blob
+// it is asked about and leaves the requests for every other blob unanswered.
+// It returns its host:port and a channel that reports, for each request left
+// unanswered, whether the client gave it up.
+func mockStallingRegistry(t *testing.T) (string, <-chan bool) {
+	var (
+		mu       sync.Mutex
+		rejected string
+	)
+
+	abandoned := make(chan bool, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, blob, _ := strings.Cut(r.URL.Path, "/blobs/")
+
+		mu.Lock()
+		if rejected == "" {
+			rejected = blob
+		}
+		reject := rejected == blob
+		mu.Unlock()
+
+		if !reject {
+			select {
+			case <-r.Context().Done():
+				abandoned <- true
+			case <-time.After(5 * time.Second):
+				abandoned <- false
+			}
+		}
+
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+
+	return strings.TrimPrefix(server.URL, "http://"), abandoned
 }
 
 func mockOCIImage(t *testing.T, reg *registrytest.Registry, repo, tag string, archs ...string) {
@@ -458,6 +499,8 @@ func TestParseManifestAnnotations(t *testing.T) {
 func TestRunConvert(t *testing.T) {
 	blocked := mockBlockedFile(t)
 
+	var abandoned <-chan bool
+
 	tests := []struct {
 		name   string
 		args   func(t *testing.T, reg *registrytest.Registry, dir string) []string
@@ -632,6 +675,31 @@ func TestRunConvert(t *testing.T) {
 			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "push local artifact blob")
+			},
+		},
+		{
+			name: "one rejected local blob cancels the upload of the others",
+			args: func(t *testing.T, reg *registrytest.Registry, _ string) []string {
+				mockNydusImage(t, reg, "base", "v1")
+				bootstrap := mockBootstrap(t, reg, "base", "v1")
+
+				var host string
+				host, abandoned = mockStallingRegistry(t)
+
+				return []string{"--builder", builderPath(t), "--bootstrap", bootstrap, "--blob-dir", filepath.Dir(bootstrap), "--target", host + "/local:v1"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "push local artifact blob")
+				assert.ErrorContains(err, "403 Forbidden")
+
+				// An upload that reached the registry was given up, not left
+				// to run out; one cancelled before its request leaves no report.
+				select {
+				case gaveUp := <-abandoned:
+					assert.True(gaveUp)
+				case <-time.After(time.Second):
+				}
 			},
 		},
 		{
