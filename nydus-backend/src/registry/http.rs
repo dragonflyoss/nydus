@@ -62,9 +62,14 @@ impl Http {
         source: Source,
     ) -> io::Result<Self> {
         // Return redirects so the caller caches them, and keep rustls even when
-        // another crate enables reqwest's `default-tls`.
+        // another crate enables reqwest's `default-tls`. Speak HTTP/1.1 even
+        // when another crate enables reqwest's `http2`: a request that times
+        // out closes its HTTP/1.1 connection, while an HTTP/2 connection the
+        // network dropped silently stays pooled, and every read fails on it
+        // until TCP gives up minutes later.
         let mut builder = Client::builder()
             .use_rustls_tls()
+            .http1_only()
             .redirect(Policy::none())
             .hickory_dns(true);
 
@@ -377,8 +382,12 @@ mod tests {
         assert!(limit.limiter.is_fair());
     }
 
-    async fn start_https_server(cert: CertifiedKey) -> String {
-        let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+    /// Starts an HTTPS server that offers HTTP/2 before HTTP/1.1 and answers
+    /// in HTTP/1.1, returning its URL and the protocol of each connection.
+    async fn start_https_server(
+        cert: CertifiedKey,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let mut config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_no_client_auth()
@@ -387,18 +396,23 @@ mod tests {
                 PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()).into(),
             )
             .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (protocols_tx, protocols) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let acceptor = acceptor.clone();
+                let protocols_tx = protocols_tx.clone();
                 tokio::spawn(async move {
                     let Ok(stream) = acceptor.accept(stream).await else {
                         return;
                     };
+                    let protocol = stream.get_ref().1.alpn_protocol().unwrap_or_default();
+                    let _ = protocols_tx.send(protocol.to_vec());
                     let mut stream = BufReader::new(stream);
                     let mut line = String::new();
                     while stream.read_line(&mut line).await.unwrap() > 2 {
@@ -415,7 +429,34 @@ mod tests {
             }
         });
 
-        format!("https://{addr}/")
+        (format!("https://{addr}/"), protocols)
+    }
+
+    #[tokio::test]
+    async fn new_speaks_http1_to_a_server_that_offers_http2() {
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let (url, mut protocols) = start_https_server(cert).await;
+        let http = Http::new(
+            Duration::from_secs(5),
+            0,
+            None,
+            &TlsConfig {
+                skip_verify: true,
+                ca_cert: None,
+            },
+            Duration::from_secs(1),
+            None,
+            Source::Origin,
+        )
+        .unwrap();
+
+        assert!(http
+            .get(&url, HeaderMap::new())
+            .await
+            .unwrap()
+            .status
+            .is_success());
+        assert_ne!(protocols.recv().await.unwrap(), b"h2");
     }
 
     #[tokio::test]
@@ -434,7 +475,7 @@ mod tests {
             (true, None, true),
         ];
 
-        let url = start_https_server(cert).await;
+        let (url, _protocols) = start_https_server(cert).await;
         for (skip_verify, ca_cert, expected) in test_cases {
             let http = Http::new(
                 Duration::from_secs(5),
