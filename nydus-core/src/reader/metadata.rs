@@ -363,7 +363,8 @@ impl ErofsReader {
         self.read_flat_data_vec(nid, inode, 0, size as usize)
     }
 
-    /// Read all inline xattr entries for an inode, in on-disk order.
+    /// Read all inline xattr entries for an inode, in on-disk order. An inode
+    /// that references shared xattrs is an error.
     pub fn read_xattrs(&self, nid: u64, inode: &ErofsInode<'_>) -> io::Result<Vec<XattrEntry>> {
         let xattr_size = inode.xattr_size();
         if xattr_size == 0 {
@@ -384,7 +385,18 @@ impl ErofsReader {
             return Ok(Vec::new());
         }
 
+        // The builder never shares an xattr. An image that does keeps the
+        // entry in the shared area, which is not read here: fail rather than
+        // answer without it, an ACL or a capability the file then lacks.
         let shared_count = xattr_data[4] as usize;
+        if shared_count != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "inode {nid} references {shared_count} shared xattrs, which are not supported"
+                ),
+            ));
+        }
         let entries_start = EROFS_XATTR_IBODY_HEADER_SIZE + shared_count * SHARED_XATTR_ID_SIZE;
         if entries_start >= xattr_data.len() {
             return Ok(Vec::new());
@@ -465,6 +477,33 @@ mod tests {
 
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "nid={nid}");
         }
+    }
+
+    #[test]
+    fn read_xattrs_rejects_an_inode_that_references_shared_xattrs() {
+        let block_size = EROFS_BLOCK_SIZE as usize;
+        let superblock = ErofsSuperblock::new(0, 0, 0, 1, 0, 2, 1, 0, 0, &[0u8; 16]).unwrap();
+        let mut bootstrap = vec![0u8; 2 * block_size];
+        let offset = EROFS_SUPER_OFFSET as usize;
+        bootstrap[offset..offset + superblock.as_bytes().len()]
+            .copy_from_slice(superblock.as_bytes());
+
+        // An xattr ibody of the 12-byte header, `h_shared_count` at byte 4,
+        // and one 4-byte shared id: an `i_xattr_icount` of 2.
+        let mut root =
+            ErofsInodeCompact::new(EROFS_INODE_FLAT_PLAIN, 0o040755, 2, 0, 0, 0, 0, 0, 0);
+        root.i_xattr_icount = 2u16.to_le_bytes();
+        let ibody = block_size + root.as_bytes().len();
+        bootstrap[block_size..ibody].copy_from_slice(root.as_bytes());
+        bootstrap[ibody + 4] = 1;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&bootstrap).unwrap();
+        let reader = ErofsReader::open_metadata_only(file.path()).unwrap();
+        let inode = reader.inode(0).unwrap();
+
+        let err = reader.read_xattrs(0, &inode).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
