@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -132,15 +133,15 @@ func mockRangeRegistry(t *testing.T, upstreamRange string) (string, *atomic.Int3
 	return strings.TrimPrefix(registry.URL, "http://") + "/test:v1", transferred
 }
 
-// mockFlakyRegistry fronts the registry at host with a server that answers the
-// first GET of dgst with a 503, and returns its host:port.
-func mockFlakyRegistry(t *testing.T, host string, dgst digest.Digest) string {
+// mockFlakyRegistry fronts the registry at host with a server that lets fail
+// answer the first GET of dgst, and returns its host:port.
+func mockFlakyRegistry(t *testing.T, host string, dgst digest.Digest, fail http.HandlerFunc) string {
 	t.Helper()
 	failed := &atomic.Bool{}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: host})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, dgst.String()) && failed.CompareAndSwap(false, true) {
-			w.WriteHeader(http.StatusServiceUnavailable)
+			fail(w, r)
 			return
 		}
 
@@ -243,7 +244,7 @@ func TestProvider_Pull(t *testing.T) {
 		ref    string
 		opt    PullOption
 		opts   []registrytest.Option
-		flaky  digest.Digest
+		fail   http.HandlerFunc
 		expect func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error)
 	}{
 		{
@@ -317,10 +318,31 @@ func TestProvider_Pull(t *testing.T) {
 			},
 		},
 		{
-			name:  "retry a layer the registry answers with a transient status",
-			ref:   "repo/image:v1",
-			opt:   PullAll,
-			flaky: mockOCILayerDesc.Digest,
+			name: "retry a layer the registry answers with a transient status",
+			ref:  "repo/image:v1",
+			opt:  PullAll,
+			fail: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			},
+			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				stored, err := content.ReadBlob(context.Background(), cs, mockOCILayerDesc)
+				assert.NoError(err)
+				assert.Equal(mockOCILayer, stored)
+				assert.Equal([]string{http.MethodGet}, requestMethods(reg, mockOCILayerDesc.Digest))
+			},
+		},
+		{
+			name: "resume a layer the registry stops sending",
+			ref:  "repo/image:v1",
+			opt:  PullAll,
+			fail: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", strconv.Itoa(len(mockOCILayer)))
+				_, _ = w.Write(mockOCILayer[:len(mockOCILayer)/2])
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			},
 			expect: func(t *testing.T, reg *registrytest.Registry, cs content.Store, desc ocispec.Descriptor, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -375,8 +397,9 @@ func TestProvider_Pull(t *testing.T) {
 			}
 
 			host := reg.Host
-			if tc.flaky != "" {
-				host = mockFlakyRegistry(t, reg.Host, tc.flaky)
+			if tc.fail != nil {
+				mockStallTimeout(t, 200*time.Millisecond)
+				host = mockFlakyRegistry(t, reg.Host, mockOCILayerDesc.Digest, tc.fail)
 			}
 
 			desc, err := provider.Pull(context.Background(), host+"/"+tc.ref, tc.opt, Source)
