@@ -201,10 +201,8 @@ impl BlobCache for RemoteBlobCache {
             return Ok(());
         };
 
-        // The missed groups lie between two table indexes, so one read covers
-        // them all (and any cached group in between, which is skipped); each
-        // is decoded as its bytes arrive, into a buffer of its own that the
-        // cache keeps, so the groups read before a stream breaks stay cached.
+        // One read covers the missed groups, each decoded as its bytes arrive
+        // into a buffer the cache keeps.
         let range = head.compressed_offset()..tail.compressed_range().end;
         let len = usize::try_from(range.end - range.start).map_err(|_| {
             io::Error::new(
@@ -235,7 +233,7 @@ impl BlobCache for RemoteBlobCache {
             );
         }
 
-        // Read the stream to its end, past the groups that were cached.
+        // Read the stream to its end.
         reader.skip_to(range.end)
     }
 

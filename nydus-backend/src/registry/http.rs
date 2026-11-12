@@ -100,8 +100,7 @@ impl Http {
         })
     }
 
-    /// Converts the reqwest answer to a `GET` into a response, the body left
-    /// streaming.
+    /// Converts the reqwest answer to a `GET` into a response.
     fn response(result: reqwest_middleware::Result<reqwest::Response>) -> io::Result<Response> {
         result
             .map(|response| Response {

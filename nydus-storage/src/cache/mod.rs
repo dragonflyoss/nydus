@@ -325,9 +325,7 @@ pub struct ChunkGroupBuffers {
 }
 
 impl ChunkGroupBuffers {
-    /// The buffer for encoded chunk groups, sized by its user, and the one
-    /// for decoded chunk groups sized to `decoded_len`, borrowed together so
-    /// a caller can decode from one into the other.
+    /// Returns the encoded buffer and the decoded one sized to `decoded_len`.
     pub(crate) fn split(
         &mut self,
         decoded_len: usize,
@@ -378,14 +376,13 @@ impl ChunkGroupBuffer {
     }
 }
 
-/// Reads the chunk groups of one backend read off its stream, in blob order,
-/// so that each is decoded while the rest of the read is still arriving.
+/// Reads the chunk groups of a backend read off its stream, in blob order.
 ///
 /// ```text
-/// stream ──▶ chunk ──┬─ zstd group ─────────────────────────▶ decoded as the chunks arrive
+/// stream ──▶ chunk ──┬─ zstd group ──────────────────▶ decoded as the chunks arrive
 ///                    └─ stored-plain or lz4 group
-///                         ├─ the chunk holds it whole ──▶ borrowed in place
-///                         └─ it spans chunks ───────────▶ copied to the scratch
+///                         ├─ within one chunk ──▶ borrowed
+///                         └─ spans chunks ──────▶ copied to the scratch
 /// ```
 pub(crate) struct ChunkGroupReader<'b> {
     /// The stream of the backend read.
@@ -394,8 +391,7 @@ pub(crate) struct ChunkGroupReader<'b> {
     /// The data-region offset of the next byte of the stream.
     offset: u64,
 
-    /// Holds a chunk group that spans chunks of the stream, allocated when
-    /// the first one does.
+    /// The buffer for a chunk group that spans chunks of the stream.
     scratch: &'b mut ChunkGroupBuffer,
 }
 
@@ -415,8 +411,7 @@ impl<'b> ChunkGroupReader<'b> {
     }
 
     /// Returns the encoded bytes of `group`, borrowed from the stream when
-    /// one chunk holds them all and copied to the scratch otherwise. The
-    /// groups are read in blob order.
+    /// one chunk holds them all.
     pub(crate) fn read(&mut self, group: &BlobMetadataChunkGroupExtent) -> io::Result<&[u8]> {
         self.skip_to(group.compressed_offset())?;
         let len = group.compressed_size() as usize;
@@ -430,10 +425,8 @@ impl<'b> ChunkGroupReader<'b> {
         Ok(encoded)
     }
 
-    /// Fills `decoded`, as long as the uncompressed bytes of `group`, with
-    /// them: a stored-plain group is copied, a zstd one is decoded while its
-    /// bytes arrive, and an lz4 one once they are read whole, its block
-    /// format taking no partial input.
+    /// Decodes `group` into `decoded`, which is as long as its uncompressed
+    /// bytes.
     pub(crate) fn decode_into(
         &mut self,
         blob_metadata: &BlobMetadata,
@@ -460,9 +453,7 @@ impl<'b> ChunkGroupReader<'b> {
         Ok(())
     }
 
-    /// Decodes `group`, a zstd frame, into `decoded` while its bytes arrive,
-    /// so that the decoding overlaps the transfer and the encoded bytes are
-    /// not copied.
+    /// Decodes `group`, a zstd frame, into `decoded` while its bytes arrive.
     fn decode_zstd_into(
         &mut self,
         group: &BlobMetadataChunkGroupExtent,
@@ -485,8 +476,7 @@ impl<'b> ChunkGroupReader<'b> {
                 ));
             }
 
-            // Decode the part of the chunk that belongs to the group, which
-            // the decoder takes whole unless the group outgrows `decoded`.
+            // Decode the part of the chunk that belongs to the group.
             let len = (chunk.len() as u64).min(end - self.offset) as usize;
             let mut input = InBuffer::around(&chunk[..len]);
             while input.pos() < len {
@@ -517,8 +507,7 @@ impl<'b> ChunkGroupReader<'b> {
         Ok(())
     }
 
-    /// Skips the stream forward to data-region `offset`, past the chunk
-    /// groups that are not read.
+    /// Skips the stream forward to data-region `offset`.
     pub(crate) fn skip_to(&mut self, offset: u64) -> io::Result<()> {
         while self.offset < offset {
             let available = self.reader.fill_buf()?.len() as u64;
@@ -890,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_group_reader_rejects_a_group_that_does_not_decode_to_its_size() {
+    fn chunk_group_reader_rejects_a_malformed_or_truncated_group() {
         let chunk_groups: Vec<Vec<Vec<u8>>> =
             vec![vec![(0..8192u32).map(|i| (i % 251) as u8).collect()]];
         let test_cases: Vec<(

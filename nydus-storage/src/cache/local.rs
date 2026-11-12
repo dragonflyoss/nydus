@@ -480,9 +480,8 @@ impl LocalBlobCache {
         Ok(())
     }
 
-    /// One backend read for the encoded payloads of the groups of `window`,
-    /// streamed group by group: the reader of its groups and a decode
-    /// scratch the size of the group span (no group's payload is larger).
+    /// One backend read for the groups of `window`: the reader of its groups
+    /// and a decode scratch the size of the group span.
     fn fetch_window<'b>(
         &self,
         window: &Range<usize>,
@@ -511,9 +510,8 @@ impl LocalBlobCache {
         ))
     }
 
-    /// Decode and validate `group` off the stream of its fetch window; a
-    /// stored-plain group borrows its bytes, a compressed one decodes into
-    /// `decoded`.
+    /// Decode and validate `group` off the stream; a stored-plain group
+    /// borrows its bytes, a compressed one decodes into `decoded`.
     fn decode_group<'p>(
         &self,
         group: &BlobMetadataChunkGroupExtent,
@@ -531,9 +529,8 @@ impl LocalBlobCache {
         Ok(payload)
     }
 
-    /// One backend read for the groups of `window`; each group that is still
-    /// missing is decoded, validated, written and published as its bytes
-    /// arrive, so the groups read before a stream breaks stay published.
+    /// One backend read for the groups of `window`; each missing group is
+    /// decoded, validated, written and published as its bytes arrive.
     fn fill_chunk_group_window(
         &self,
         window: Range<usize>,
@@ -555,9 +552,7 @@ impl LocalBlobCache {
             let payload = self
                 .decode_group(&group, &mut reader, decoded)
                 .inspect_err(|err| {
-                    // A stream that breaks is the failure of the backend
-                    // read, which counts it; a failed write is a group that
-                    // arrived malformed.
+                    // Only a malformed group is a failed write.
                     if err.kind() == io::ErrorKind::InvalidData {
                         metrics
                             .collect_write_failure_metrics(kind.into(), write_failure_reason(err))
@@ -575,7 +570,7 @@ impl LocalBlobCache {
                 })?;
         }
 
-        // Read the stream to its end, past the groups that were not read.
+        // Read the stream to its end.
         reader.skip_to(end)
     }
 
@@ -612,8 +607,7 @@ impl LocalBlobCache {
             }
             match self.decode_group(&group, &mut reader, decoded) {
                 Ok(payload) => cb(&group, payload)?,
-                // A group that arrived malformed is skipped; a stream that
-                // breaks ends the batch.
+                // Skip a malformed group.
                 Err(err) if err.kind() == io::ErrorKind::InvalidData => {
                     failed += 1;
                     self.backend.metrics().cache.collect_write_failure_metrics(
@@ -629,7 +623,7 @@ impl LocalBlobCache {
             }
         }
 
-        // Read the stream to its end, past the groups that were skipped.
+        // Read the stream to its end.
         reader.skip_to(range.end)?;
         Ok((range.end - range.start, failed))
     }

@@ -5,8 +5,7 @@ use std::io::{self, BufRead, Read};
 use bytes::{Buf, Bytes};
 use tokio::sync::mpsc;
 
-/// Reads a blob range from the chunks its read task sends, handing out each
-/// chunk without a copy.
+/// Reads a blob range from the chunks its read task sends.
 pub(crate) struct StreamReader {
     /// The chunks the read task sends, an error ending them.
     rx: mpsc::Receiver<io::Result<Bytes>>,
@@ -45,8 +44,8 @@ impl Read for StreamReader {
 
 /// Implements [BufRead] over the chunks, borrowing each in place.
 impl BufRead for StreamReader {
-    /// Returns the rest of the current chunk, waiting for the next non-empty
-    /// one when it is used up and returning nothing once the range ends.
+    /// Returns the rest of the current chunk, waiting for the next one when
+    /// it is used up.
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         while self.chunk.is_empty() {
             let Some(chunk) = self.rx.blocking_recv() else {

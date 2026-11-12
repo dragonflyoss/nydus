@@ -174,8 +174,7 @@ impl Registry {
 
 /// Implements the registry requests.
 impl Client {
-    /// Returns the `source` label of a failed read: Dragonfly when configured,
-    /// otherwise HTTP.
+    /// Returns the `source` label of the reads.
     fn source(&self) -> Source {
         if self.dragonfly.is_some() {
             Source::Dragonfly
@@ -441,8 +440,7 @@ impl Backend for Registry {
             .block_on_worker(async move { client.prefetch_blob_metadata(&blob_id).await })
     }
 
-    /// Reads `len` blob bytes from `offset` for an on-demand read, a task on the
-    /// runtime streaming the range to the returned reader.
+    /// Reads `len` blob bytes from `offset` for an on-demand read, streaming.
     fn read(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -499,8 +497,7 @@ impl Backend for Registry {
         Ok(Box::new(reader))
     }
 
-    /// Reads `len` blob bytes from `offset` for a prefetch read, a task on the
-    /// runtime streaming the range to the returned reader.
+    /// Reads `len` blob bytes from `offset` for a prefetch read, streaming.
     fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -1123,7 +1120,7 @@ mod tests {
                     b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\n\r\nab",
                 )
                 .unwrap();
-            thread::sleep(Duration::from_secs(60));
+            let _ = stream.read(&mut byte);
         });
         let config: Config = serde_yaml::from_str(&format!(
             "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_timeout: 60s\n"

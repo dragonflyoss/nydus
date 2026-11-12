@@ -124,8 +124,8 @@ impl Dragonfly {
         })
     }
 
-    /// Converts the SDK answer to a `GET` into a response, an SDK error
-    /// carrying an HTTP status becoming the answer it names.
+    /// Converts the SDK answer to a `GET` into a response, an SDK error with
+    /// an HTTP status included.
     fn response(result: dragonfly_client_request::Result<GetResponse>) -> io::Result<Response> {
         match result {
             Ok(response) => Ok(Response {
@@ -232,8 +232,7 @@ impl Transport for Dragonfly {
             ),
         }
 
-        // Serve a definitive answer, its body resumed by the SDK on the next
-        // seed peer when it breaks off; fall back to the origin on anything else.
+        // Serve a definitive answer, fall back to the origin on anything else.
         let err = match result {
             Ok(response) if response.needs_fallback() => response.into_io_error().await,
             Ok(response) => return Ok(response),

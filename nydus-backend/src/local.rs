@@ -316,8 +316,8 @@ impl Backend for Local {
     }
 }
 
-/// Reads a blob range with positional reads, leaving the offset of the shared
-/// file alone, and records the read metrics once when it is dropped.
+/// Reads a blob range with positional reads and records the read metrics
+/// when it is dropped.
 struct RangeReader {
     /// The open file.
     file: Arc<File>,
@@ -355,8 +355,7 @@ impl Read for RangeReader {
 
 /// Implements [Drop] by recording the read metrics once.
 impl Drop for RangeReader {
-    /// Records a finished read when the whole range was read, a failed one
-    /// otherwise.
+    /// Records a failed read unless the whole range was read.
     fn drop(&mut self) {
         if self.remaining > 0 {
             self.metrics

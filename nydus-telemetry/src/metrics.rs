@@ -532,12 +532,10 @@ pub enum Source {
     /// The local directory backend's blob files.
     Local,
 
-    /// The registry backend without Dragonfly, reading the origin directly
-    /// or through a forward proxy.
+    /// The registry backend without Dragonfly.
     Http,
 
-    /// The registry backend with Dragonfly, reading the seed peers and
-    /// falling back to the origin.
+    /// The registry backend with Dragonfly, origin fallbacks included.
     Dragonfly,
 }
 

@@ -34,7 +34,7 @@ impl TryFrom<ops::Range<u64>> for Range {
     type Error = io::Error;
 
     /// Converts `start..end` to the bytes from `start` to `end - 1`, rejecting
-    /// an empty range, which the `Range` header cannot name.
+    /// an empty range.
     fn try_from(range: ops::Range<u64>) -> io::Result<Self> {
         if range.is_empty() {
             return Err(io::Error::new(

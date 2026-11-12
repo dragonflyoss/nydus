@@ -52,8 +52,7 @@ impl Response {
         Ok(())
     }
 
-    /// Converts into the stream of the first `length` bytes of the body, failing
-    /// when the body ends before them.
+    /// Converts into the stream of the first `length` bytes of the body.
     pub(crate) fn bytes_stream(self, length: usize) -> impl Stream<Item = io::Result<Bytes>> {
         stream::try_unfold((self.body, 0), move |(mut body, offset)| async move {
             if offset == length {

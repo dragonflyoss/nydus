@@ -476,8 +476,7 @@ impl FaultBackend {
             }
         }
 
-        // Corrupt the bytes served for a short read, a truncated read or a
-        // flipped bit.
+        // Apply the fault to the bytes served.
         match fault {
             Some(Fault::ShortRead { len }) => buf[len..].fill(0),
             Some(Fault::Truncate { len }) => buf.truncate(len),
