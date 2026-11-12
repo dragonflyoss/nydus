@@ -12,10 +12,12 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,6 +32,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/sys/unix"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/internal/registrytest"
@@ -406,6 +409,59 @@ func TestManifestAnnotationValues(t *testing.T) {
 				},
 			}
 			if err := app.Run(append([]string{"nydusify"}, tc.args...)); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.expect(t, ctx)
+		})
+	}
+}
+
+func TestSetupCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		ignored bool
+		expect  func(t *testing.T, ctx context.Context)
+	}{
+		{
+			name: "hangup cancels the context",
+			expect: func(t *testing.T, ctx context.Context) {
+				assert := assert.New(t)
+				select {
+				case <-ctx.Done():
+				case <-time.After(10 * time.Second):
+					assert.Fail("the hangup did not cancel the context")
+				}
+			},
+		},
+		{
+			name:    "hangup stays ignored under nohup",
+			ignored: true,
+			expect: func(t *testing.T, ctx context.Context) {
+				assert := assert.New(t)
+				select {
+				case <-ctx.Done():
+					assert.Fail("the ignored hangup canceled the context")
+				case <-time.After(200 * time.Millisecond):
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if signal.Ignored(unix.SIGHUP) {
+				t.Skip("the tests were started with hangups ignored")
+			}
+
+			if tc.ignored {
+				signal.Ignore(unix.SIGHUP)
+				t.Cleanup(func() { signal.Reset(unix.SIGHUP) })
+			}
+
+			ctx, stop := setupCommand(cli.NewContext(mockApp(), flag.NewFlagSet("nydusify", flag.ContinueOnError), nil))
+			defer stop()
+			if err := unix.Kill(os.Getpid(), unix.SIGHUP); err != nil {
 				t.Fatal(err)
 			}
 
