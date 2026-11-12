@@ -3,6 +3,7 @@
 use std::fmt;
 use std::io;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -21,6 +22,7 @@ use url::Url;
 
 use nydus_config::{ProxyConfig, TlsConfig};
 
+use super::dns::Resolver;
 use super::redirect::without_query;
 use super::response::{Body, Response};
 use super::Transport;
@@ -71,7 +73,7 @@ impl Http {
             .use_rustls_tls()
             .http1_only()
             .redirect(Policy::none())
-            .hickory_dns(true);
+            .dns_resolver(Arc::new(Resolver::new()));
 
         builder = match proxy {
             Some(proxy) => builder.proxy(reqwest::Proxy::all(&proxy.addr).map_err(|err| {

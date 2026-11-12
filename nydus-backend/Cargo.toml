@@ -22,6 +22,7 @@ registry = [
   "dep:async-trait",
   "dep:bytes",
   "dep:futures",
+  "dep:hickory-resolver",
   "dep:http",
   "dep:http-auth",
   "dep:leaky-bucket",
@@ -48,6 +49,7 @@ dragonfly-api = { version = "2.3", optional = true }
 dragonfly-client-request = { version = "=1.11.0", optional = true }
 futures = { version = "0.3", optional = true }
 hex = { workspace = true }
+hickory-resolver = { version = "0.25", optional = true }
 http = { version = "1", optional = true }
 http-auth = { version = "0.1", default-features = false, optional = true }
 humantime-serde = { workspace = true, optional = true }
@@ -59,7 +61,6 @@ nydus-config = { version = "3.0.0-beta.3", path = "../nydus-config" }
 nydus-format = { version = "3.0.0-beta.3", path = "../nydus-format" }
 nydus-telemetry = { version = "3.0.0-beta.3", path = "../nydus-telemetry" }
 reqwest = { version = "0.12", default-features = false, features = [
-  "hickory-dns",
   "rustls-tls",
   "stream",
 ], optional = true }

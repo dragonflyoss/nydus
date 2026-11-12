@@ -220,7 +220,7 @@ their sockets:
 
 | Pool | Size | Lifetime and work |
 | ---- | ---- | ----------------- |
-| Async workers | Tokio's default, one per CPU | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Async workers | Tokio's default, one per CPU | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; the origin client resolves names with the system configuration and follows the changes of `/etc/resolv.conf` and `/etc/hosts`; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
 | Blocking workers | Tokio's default | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`) and released when idle. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
 Every registry backend runs on a runtime of its own with tokio's default

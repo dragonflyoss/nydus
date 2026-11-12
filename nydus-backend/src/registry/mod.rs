@@ -2,6 +2,7 @@
 //! served in byte ranges, over the origin or the Dragonfly seed peers.
 
 mod auth;
+mod dns;
 #[cfg(feature = "dragonfly")]
 mod dragonfly;
 mod http;

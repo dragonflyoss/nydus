@@ -2287,6 +2287,7 @@ dependencies = [
  "dragonfly-client-request",
  "futures",
  "hex",
+ "hickory-resolver",
  "http",
  "http-auth",
  "humantime-serde",
