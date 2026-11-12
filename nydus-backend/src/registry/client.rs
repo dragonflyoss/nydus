@@ -42,6 +42,10 @@ use super::transport::{Fetcher, Transport};
 /// a read once the token expired, or the registry refuses it
 ///   4. GET blob URL ──▶ 401 ──▶ the token is forgotten ────────────▶ step 2
 ///
+/// a prefetch read whose location is rejected, the link expired while the
+/// read waited to be sent once more
+///   5. GET the location ──▶ rejected ──────────────────────────────▶ step 4, once
+///
 /// a read through the proxy or Dragonfly whose body breaks off, see
 /// [`Response::resumable`]
 ///   the same steps from the origin, for the bytes left
@@ -233,28 +237,38 @@ impl Client {
             }
         }
 
+        // A prefetch read is sent once more after the retry interval, hours
+        // later, when the link the registry signed has expired: resolve the
+        // redirect once more then.
         let url = self.blob_url(&hex);
-        let response = self
-            .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
-            .await?;
+        let mut resolved_again = false;
+        loop {
+            let response = self
+                .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
+                .await?;
 
-        if response.status.is_success() {
-            response.validate_range(range)?;
-            return Ok(response);
+            if response.status.is_success() {
+                response.validate_range(range)?;
+                return Ok(response);
+            }
+
+            if !response.status.is_redirection() {
+                return Err(response.into_io_error().await);
+            }
+
+            let location = response.location(&url)?;
+            let redirected = transport.prefetch(&location, headers.clone()).await?;
+            if redirected.status.is_success() {
+                redirected.validate_range(range)?;
+                self.redirects.insert(&hex, location);
+                return Ok(redirected);
+            }
+
+            if !redirected.is_redirect_expired() || resolved_again {
+                return Err(redirected.into_io_error().await);
+            }
+
+            resolved_again = true;
         }
-
-        if !response.status.is_redirection() {
-            return Err(response.into_io_error().await);
-        }
-
-        let location = response.location(&url)?;
-        let redirected = transport.prefetch(&location, headers).await?;
-        if !redirected.status.is_success() {
-            return Err(redirected.into_io_error().await);
-        }
-
-        redirected.validate_range(range)?;
-        self.redirects.insert(&hex, location);
-        Ok(redirected)
     }
 }
