@@ -185,6 +185,31 @@ impl fmt::Display for ReadKind {
     }
 }
 
+/// A credential whose `Debug` output hides the value.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl std::ops::Deref for Secret {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
 /// The registry backend configuration, serving blobs from an OCI image
 /// registry.
 #[derive(Debug, Clone, Validate, Deserialize)]
@@ -201,7 +226,13 @@ pub struct RegistryConfig {
     /// The optional credentials: base64-encoded `username:password` for HTTP
     /// Basic auth (the value sent verbatim after `Basic `).
     #[serde(default)]
-    pub auth: Option<String>,
+    pub auth: Option<Secret>,
+
+    /// The optional bearer token (the value sent verbatim after `Bearer `),
+    /// sent before any challenge until the registry answers `401`. Keep
+    /// `auth` to fetch a replacement once the token expires.
+    #[serde(default)]
+    pub registry_token: Option<Secret>,
 
     /// The HTTP client configuration of requests to the origin registry:
     /// timeouts, retries, and TLS trust. Every origin request goes through
@@ -653,6 +684,25 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::Write;
 
+    #[test]
+    fn registry_debug_redacts_credentials() {
+        let config: RegistryConfig = serde_yaml::from_str(
+            "addr: https://registry.example\nrepository: library/ubuntu\nauth: basic-secret\nregistry_token: provided-secret\n",
+        )
+        .unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("basic-secret"));
+        assert!(!debug.contains("provided-secret"));
+        assert!(debug.contains("auth: Some(<redacted>)"));
+        assert!(debug.contains("registry_token: Some(<redacted>)"));
+        assert_eq!(format!("{:?}", config.auth), "Some(<redacted>)");
+        assert_eq!(format!("{:?}", config.registry_token), "Some(<redacted>)");
+        assert!(debug.contains("registry.example"));
+        assert!(debug.contains("library/ubuntu"));
+        assert_eq!(config.auth.as_deref(), Some("basic-secret"));
+        assert_eq!(config.registry_token.as_deref(), Some("provided-secret"));
+    }
+
     #[cfg(feature = "dragonfly")]
     #[test]
     fn load_config_file_correctly() {
@@ -668,6 +718,7 @@ mod tests {
             registry.auth.as_deref(),
             Some("dGVzdHVzZXI6dGVzdHBhc3N3b3Jk")
         );
+        assert_eq!(registry.registry_token.as_deref(), Some("bearer-token"));
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert_eq!(
@@ -724,6 +775,7 @@ config:
   addr: http://127.0.0.1:5000
   repository: library/ubuntu
   auth: YWxpY2U6c2VjcmV0
+  registry_token: bearer-token
   http:
     request_timeout: 30s
     max_retries: 5
@@ -741,6 +793,7 @@ config:
         assert_eq!(registry.addr.as_str(), "http://127.0.0.1:5000/");
         assert_eq!(registry.repository, "library/ubuntu");
         assert_eq!(registry.auth.as_deref(), Some("YWxpY2U6c2VjcmV0"));
+        assert_eq!(registry.registry_token.as_deref(), Some("bearer-token"));
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert!(registry.http.tls.skip_verify);
@@ -830,6 +883,7 @@ config:
         assert!(!registry.http.tls.skip_verify);
         assert!(registry.http.tls.ca_cert.is_none());
         assert!(registry.auth.is_none());
+        assert!(registry.registry_token.is_none());
         assert!(registry.dragonfly.is_none());
     }
 

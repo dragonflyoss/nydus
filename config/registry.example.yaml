@@ -34,6 +34,12 @@ backend:
     # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
 
+    # Optional bearer token, sent before any challenge until the registry
+    # answers 401. Keep `auth` above to fetch a replacement once the token
+    # expires.
+    #
+    # registry_token: <bearer-token>
+
     # HTTP client settings of every request to the origin registry:
     # timeouts, retries, and TLS trust, the reads Dragonfly falls back to the
     # origin with included. The whole block and every field are optional.
