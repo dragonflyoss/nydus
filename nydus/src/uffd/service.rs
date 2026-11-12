@@ -253,7 +253,15 @@ impl UffdConn {
                 self.send_ranges(None, &ranges).await?;
             }
             Request::Probe => {
-                let ranges = self.core.probe_ranges()?;
+                // Probing opens the caches of the blobs it names, which reads
+                // their blob meta from the backend when the cache directory
+                // lacks it, so it must not run on a runtime thread.
+                let core = self.core.clone();
+                let ranges = tokio::task::spawn_blocking(move || core.probe_ranges())
+                    .await
+                    .map_err(|err| {
+                        Error::Runtime(format!("uffd PROBE blocking task failed: {err}"))
+                    })??;
                 self.send_ranges(None, &ranges).await?;
             }
         }
@@ -289,8 +297,16 @@ impl UffdConn {
         }
 
         // Keep prefault synchronous until Connection guarantees serialized concurrent writes.
+        // It opens blob caches like a probe, so it runs off the runtime threads too.
         if prefault && policy == FaultPolicy::Zerocopy {
-            let ranges = self.core.prefault_ranges(&regions)?;
+            let core = self.core.clone();
+            let prefault_regions = regions.clone();
+            let ranges =
+                tokio::task::spawn_blocking(move || core.prefault_ranges(&prefault_regions))
+                    .await
+                    .map_err(|err| {
+                        Error::Runtime(format!("uffd prefault blocking task failed: {err}"))
+                    })??;
             self.send_ranges(Some(&regions), &ranges).await?;
         }
 
