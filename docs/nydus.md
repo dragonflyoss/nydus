@@ -3431,6 +3431,11 @@ OCI layer ownership replay need root) and is skipped automatically when only one
 of `--source`/`--target` is given. Running non-root fails fast with a clear
 message instead of silently timing out on the mount.
 
+When the rule ends, each `nydus fuse` daemon is told to stop and its scratch
+directory is removed. A daemon that died on its own, or that is killed for not
+stopping within ten seconds, leaves its mount behind; the rule then unmounts it
+through `fusermount3`, `fusermount` or `umount`, whichever works first.
+
 Flags:
 
 | Flag | Default | Description |
