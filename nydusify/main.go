@@ -485,6 +485,7 @@ func runConvert(c *cli.Context) error {
 			SourceDir:         source,
 			AppendInBootstrap: appendFiles,
 			Annotations:       manifestAnnotations,
+			Platform:          platform,
 		})
 		if err != nil {
 			return errors.Wrap(err, "convert local directory")

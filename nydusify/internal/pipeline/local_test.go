@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 
@@ -50,8 +49,8 @@ func TestConvertLocalDir(t *testing.T) {
 				assert.NoError(err)
 				assert.Len(blobs, 1)
 				assert.Equal(mockManifestAnnotations, manifest.Annotations)
-				assert.Equal(platforms.DefaultSpec().OS, config.OS)
-				assert.Equal(platforms.DefaultSpec().Architecture, config.Architecture)
+				assert.Equal("linux", config.OS)
+				assert.Equal("s390x", config.Architecture)
 				assert.Equal(mockAppendFileData, readBootstrap(t, cs, manifest)["image/append.json"])
 
 				for _, blob := range blobs {
@@ -110,6 +109,7 @@ func TestConvertLocalDir(t *testing.T) {
 				SourceDir:         source,
 				AppendInBootstrap: []string{filepath.Join(source, tc.appendFile)},
 				Annotations:       mockManifestAnnotations,
+				Platform:          ocispec.Platform{OS: "linux", Architecture: "s390x"},
 			})
 
 			tc.expect(t, cs, desc, err)
