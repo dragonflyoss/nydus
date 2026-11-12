@@ -178,9 +178,9 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 }
 
 // rewriteBootstrapConfig appends the bootstrap layer's diff id and history
-// entry to the source config (see patchImageConfig for the raw-JSON rationale).
+// entry to the source config (see oci.PatchImageConfig for the raw-JSON rationale).
 func rewriteBootstrapConfig(configJSON json.RawMessage, diffIDs []digest.Digest) (json.RawMessage, error) {
-	return patchImageConfig(configJSON, diffIDs, func(history []ocispec.History, _ bool) ([]ocispec.History, bool) {
+	return oci.PatchImageConfig(configJSON, diffIDs, func(history []ocispec.History, _ bool) ([]ocispec.History, bool) {
 		return append(history, ocispec.History{
 			CreatedBy: "Nydus Converter",
 			Comment:   "Nydus Bootstrap Layer",

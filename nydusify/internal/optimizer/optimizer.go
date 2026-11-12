@@ -302,12 +302,23 @@ func (o *Optimizer) writeOptimizedImage(ctx context.Context, cs content.Store, i
 	}
 	layers = append(layers, ondemandDesc, bootstrapDesc)
 
-	config := img.Config
-	config.RootFS.DiffIDs = diffIDs
-	config.History = append(config.History, ocispec.History{
-		CreatedBy: "Nydus Optimizer",
-		Comment:   "Nydus Ondemand Blob Layer",
+	// Patch the config as the image carries it: writing the parsed one back
+	// would drop the fields the image spec does not name (Healthcheck,
+	// Shell, ...) and the empty ones, which `nydusify check` then reports as
+	// a config that differs from the source.
+	rawConfig, err := content.ReadBlob(ctx, cs, img.Manifest.Config)
+	if err != nil {
+		return nil, errors.Wrap(err, "read image config")
+	}
+	config, err := oci.PatchImageConfig(rawConfig, diffIDs, func(history []ocispec.History, _ bool) ([]ocispec.History, bool) {
+		return append(history, ocispec.History{
+			CreatedBy: "Nydus Optimizer",
+			Comment:   "Nydus Ondemand Blob Layer",
+		}), true
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	configLabels := map[string]string{}
 	newConfigDesc, err := oci.WriteJSON(ctx, cs, config, img.Manifest.Config, configLabels)
