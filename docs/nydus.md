@@ -283,8 +283,7 @@ platforms, `fuser` supports only one request thread and rejects a larger
 
 ### Image layouts
 
-A nydus image exists in exactly two on-disk layouts, and the `--blob`,
-`--blob-dir` and `--bootstrap` flags map onto them across every subcommand:
+Nydus uses three on-disk layouts:
 
 - **Single-file image (`--blob`)** — one self-contained full blob:
 	`[data | bootstrap | blob meta | footer]`. Path-addressed: the consumer
@@ -300,12 +299,16 @@ A nydus image exists in exactly two on-disk layouts, and the `--blob`,
 	before its bootstrap exists: per-layer builds write blobs first and
 	`nydus merge` derives the merged bootstrap afterwards.
 
+- **Cache layout (`--cache-dir`)** — a provisional bootstrap, decoded
+  blob data, and a chunk group table. Use `nydus encode` to produce the
+  encoded blob and final bootstrap. The provisional bootstrap is not mountable.
+
 ### Build
 
 `nydus build <--blob <BLOB>|--blob-dir <BLOB_DIR>> [OPTIONS] <SOURCE>`
 
 The `nydus build` command builds a source into the nydus EROFS format, in
-either image layout: `--blob` writes the single-file image, `--blob-dir`
+either encoded image layout: `--blob` writes the single-file image, `--blob-dir`
 deposits the full blob into a store (see Image layouts above), and
 `--bootstrap` additionally emits the standalone metadata-only entry point.
 The source is a directory (`--source-type dir`, the default) or one OCI layer
@@ -3118,6 +3121,75 @@ parent manifest/config/bootstrap metadata and reuses its data blob descriptors.
 For a different target repository, it first tries a registry-side blob mount;
 if that is unavailable, it downloads and uploads the parent blob. It then
 uploads local upper blobs and writes a new bootstrap layer, config and manifest.
+
+### Deferred Cache Encoding
+
+A caller can write decoded data first and encode it later. The cache layout
+holds three immutable inputs:
+
+| File | Contents |
+| --- | --- |
+| `cache.boot` | Provisional bootstrap with a reserved zero-ID slot for the new blob |
+| `cache.data` | Decoded bytes arranged at their logical block offsets |
+| `cache.json` | Versioned chunk group table |
+
+`IncrementalWriter::commit_cache_to_dir()` writes all three files.
+`commit_cache(sink)` instead passes decoded groups to a caller-provided
+`ChunkGroupCache`; the caller must retain the bytes as `cache.data` and
+seal its block-aligned length. Neither commit path compresses, hashes
+payloads, or syncs files. The caller is responsible for crash durability.
+
+The table records `chunk_size`, `chunk_group_minimum_size`, `compressor`,
+`digester` (`blake3` or `none`), and `chunk_groups`, each with a
+`chunk_lengths` array. Logical block offsets and the new device slot
+are derived, not stored.
+
+`CacheLayout::open(dir)?.encode(writer, options)` validates and encodes a
+layout. The CLI writes the encoded blob to stdout:
+
+    nydus encode --cache-dir ./layout [--prune] [--compact-max-layers 2] \
+                 [--config reader.yaml] [--compressor none|zstd|lz4] > blob
+
+Without an override, the encoder uses the compressor recorded in
+`cache.json`. It writes `image.boot`, and for a newly encoded blob writes
+`<digest>.blob.data`, `<digest>.blob.meta`, and `<digest>.group.map`.
+Without compaction the decoded output is a hard link to `cache.data`; with
+compaction it is a new decoded file. A layout that only retains parent
+blobs can emit no new bytes.
+
+To stream the blob to a registry without retaining a compressed copy:
+
+    nydusify convert --cache-dir ./layout --work-dir ./publish \
+        --parent-image registry.example.com/ns/image:v1 \
+        --parent-cache-dir /var/lib/nydus/cache --prune \
+        --compact-max-layers 2 --target registry.example.com/ns/image:v2
+
+`--cache-dir` cannot be combined with `--source`, `--bootstrap`, `--blob`,
+`--blob-dir`, or an explicit `--compressor`. The parent flags are optional.
+Prune removes unreferenced devices without reading payloads. When the live
+blob count exceeds the compact limit, the normal reader reads parent data.
+Nydusify sets its `storage.dir` to `--parent-cache-dir` if provided, otherwise
+to a temporary cache. Shared cache misses fill the same directory.
+A local blob backend still needs parent blobs to inspect their footers.
+
+Only nydusify writes `image.json`, after successful image publication:
+`version: 1`, the OCI `image` descriptor, and optional `blob: {digest, size}`.
+The caller can then import the decoded files. Use an explicit `--work-dir`
+to retain `<work-dir>/content` for OCI metadata import; otherwise the
+temporary work directory is removed as for other convert modes. Its
+`oci-layout`, `index.json`, and manifest/config/bootstrap blobs do not
+include the streamed data blobs, which are available from the registry.
+
+Uploads buffer one chunk at a time, negotiate the registry's minimum chunk
+length, and use Content-Range. After an interrupted PATCH, the uploader queries
+the accepted offset and resends only the unaccepted part still in its buffer.
+On an uncertain final PUT, it checks whether the registry already has the blob
+before retrying.
+
+Run one conversion per layout directory. Retry unpublished failures using
+the unchanged input files. A layout with `image.json` is already published
+and will not be encoded again. Retries replace output inodes without
+truncating files that an existing cache may have hard-linked.
 
 ## Merge Design
 
