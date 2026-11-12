@@ -122,11 +122,11 @@ impl CheckCommand {
         if self.output == "json" {
             print_json_report(kind, path, &report)?;
         } else {
-            print_header(kind, path, &report);
-            print_superblock(&report.superblock);
-            print_summary(&report.stats, &report.blobs);
-            print_blobs(&report.blobs);
-            print_inline_across_blocks(&report.stats);
+            print_header(kind, path, &report)?;
+            print_superblock(&report.superblock)?;
+            print_summary(&report.stats, &report.blobs)?;
+            print_blobs(&report.blobs)?;
+            print_inline_across_blocks(&report.stats)?;
         }
 
         if !report.stats.inline_overflows.is_empty() {
@@ -209,11 +209,10 @@ fn print_json_report(kind: ImageKind, path: &Path, report: &CheckReport) -> Resu
         blobs,
     };
     serde_json::to_writer_pretty(std::io::stdout(), &json)?;
-    println!();
-    Ok(())
+    crate::print_line("")
 }
 
-fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) {
+fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) -> Result<()> {
     // Define the table struct for printing.
     #[derive(Debug, Tabled)]
     #[tabled(rename_all = "UPPERCASE")]
@@ -250,12 +249,12 @@ fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) {
     // Create a table and print it.
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    println!("Image");
-    println!("{table}");
-    println!();
+    crate::print_line("Image")?;
+    crate::print_line(&table)?;
+    crate::print_line("")
 }
 
-fn print_superblock(sb: &ErofsSuperblock) {
+fn print_superblock(sb: &ErofsSuperblock) -> Result<()> {
     // Define the table struct for printing.
     #[derive(Debug, Tabled)]
     #[tabled(rename_all = "UPPERCASE")]
@@ -349,16 +348,16 @@ fn print_superblock(sb: &ErofsSuperblock) {
     // Create a table and print it.
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    println!("Superblock");
-    println!("{table}");
-    println!();
+    crate::print_line("Superblock")?;
+    crate::print_line(&table)?;
+    crate::print_line("")
 }
 
 /// Print inodes whose inline tail crosses a metadata block. Only the first
 /// entries are listed because a builder bug tends to hit many inodes at once.
-fn print_inline_across_blocks(stats: &ImageStats) {
+fn print_inline_across_blocks(stats: &ImageStats) -> Result<()> {
     if stats.inline_overflows.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Define the table struct for printing.
@@ -397,19 +396,22 @@ fn print_inline_across_blocks(stats: &ImageStats) {
     table
         .with(Style::blank())
         .with(Modify::new(Rows::first()).with(Alignment::left()));
-    println!(
+    crate::print_line(format_args!(
         "Inline data across blocks ({} inode(s), block size {})",
         stats.inline_overflows.len(),
         EROFS_BLOCK_SIZE
-    );
-    println!("{table}");
+    ))?;
+    crate::print_line(&table)?;
     if stats.inline_overflows.len() > MAX_LISTED {
-        println!("  ... {} more", stats.inline_overflows.len() - MAX_LISTED);
+        crate::print_line(format_args!(
+            "  ... {} more",
+            stats.inline_overflows.len() - MAX_LISTED
+        ))?;
     }
-    println!();
+    crate::print_line("")
 }
 
-fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
+fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) -> Result<()> {
     // Define the table struct for printing.
     #[derive(Debug, Tabled)]
     #[tabled(rename_all = "UPPERCASE")]
@@ -500,17 +502,16 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
     // Create a table and print it.
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    println!("Summary");
-    println!("{table}");
-    println!();
+    crate::print_line("Summary")?;
+    crate::print_line(&table)?;
+    crate::print_line("")
 }
 
-fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
-    println!("Blobs");
+fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) -> Result<()> {
+    crate::print_line("Blobs")?;
     if blobs.is_empty() {
-        println!("  (no external blobs recorded in device table)");
-        println!();
-        return;
+        crate::print_line("  (no external blobs recorded in device table)")?;
+        return crate::print_line("");
     }
 
     // Define the table struct for printing.
@@ -618,9 +619,10 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         // Create a table and print it.
         let mut table = Table::kv(vec![row]);
         table.with(Style::blank());
-        println!("{table}");
-        println!();
+        crate::print_line(&table)?;
+        crate::print_line("")?;
     }
+    Ok(())
 }
 
 fn blob_type(blob: &BlobSummary) -> String {

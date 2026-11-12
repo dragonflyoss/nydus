@@ -245,8 +245,7 @@ impl OptimizeCommand {
         // Create a table and print it.
         let mut table = Table::kv(vec![row]);
         table.with(Style::blank());
-        println!("{table}");
-        Ok(())
+        crate::print_line(&table)
     }
 }
 

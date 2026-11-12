@@ -160,7 +160,10 @@ impl UblkCommand {
         let metrics = core.core().metrics().clone();
         let ondemand_recorder = core.core().ondemand_recorder().clone();
         let service = UblkService::new(core, &options)?;
-        println!("{}", service.dev_path());
+        if let Err(err) = crate::print_line(service.dev_path()) {
+            service.delete();
+            return Err(err);
+        }
 
         // Non-fatal like the fuse service: the device keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {

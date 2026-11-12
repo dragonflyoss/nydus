@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use nydus::error::Result;
+use nydus::error::{Context, Result};
 use nydus_config::{default_log_dir, VersionValueParser, NAME};
 
 // musl's malloc serializes every allocation on one lock, which the many
@@ -221,6 +221,15 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Writes `line` and a newline to stdout. A stdout that does not take the
+/// write, a closed pipe or a full disk, is an error the command ends with,
+/// where `println!` panics.
+fn print_line(line: impl std::fmt::Display) -> Result<()> {
+    use std::io::Write;
+
+    writeln!(std::io::stdout().lock(), "{line}").context("failed to write to stdout")
 }
 
 /// Writes the error the `daemon` subcommand stops with to its log file, for
