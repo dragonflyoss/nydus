@@ -585,6 +585,8 @@ tar entry per inode, streaming file data straight out of the blob:
 	`trusted.nydus.*` attributes are dropped: they only drive the nydus runtime.
 - Hard links reuse the first path visited. That entry is a regular file and
 	every later path for the same inode becomes a tar hard link pointing at it.
+- Symlink targets are written byte for byte, `.` components and repeated
+	slashes included.
 - Sockets cannot be represented in tar and are skipped with a warning.
 - OCI whiteouts need no special handling. The tar builder retains `.wh.*` markers
 	verbatim when it builds a layer, so they are ordinary inodes in the blob and
