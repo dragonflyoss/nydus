@@ -89,6 +89,9 @@ pub(crate) struct Registry {
 ///   5. GET the location, the signed CDN URL ───────────────────────▶ 206 bytes
 ///   6. cache the location for the blob, 10 minutes
 ///
+/// the first read with a `registry_token` in the config, kept as the token
+///   1. redirect cache ───────────────────────────────────────────▶ miss, step 4
+///
 /// the reads that follow
 ///   1. redirect cache ──▶ hit ──▶ GET the cached location ─────────▶ 206 bytes
 ///                                  └─ 401 / 403, the link expired ──▶ evicted, step 4
@@ -105,7 +108,8 @@ struct Client {
     /// The image repository, such as `library/ubuntu`.
     repository: String,
 
-    /// The credentials and the `Authorization` the last challenge produced.
+    /// The credentials and the `Authorization` kept from the config or the
+    /// last challenge.
     authorizer: Authorizer,
 
     /// The signed URLs blob `GET`s were redirected to, by blob hex digest.
@@ -161,7 +165,10 @@ impl Registry {
             client: Arc::new(Client {
                 addr: registry.addr.clone(),
                 repository: registry.repository.clone(),
-                authorizer: Authorizer::new(registry.auth.as_deref())?,
+                authorizer: Authorizer::new(
+                    registry.auth.as_deref(),
+                    registry.registry_token.as_deref(),
+                )?,
                 redirects: RedirectCache::new(),
                 http,
                 dragonfly,
@@ -623,6 +630,7 @@ mod tests {
     struct ScriptedTransport {
         script: Mutex<VecDeque<Scripted>>,
         calls: AtomicU32,
+        headers: Mutex<Vec<HeaderMap>>,
     }
 
     impl ScriptedTransport {
@@ -630,11 +638,16 @@ mod tests {
             Arc::new(ScriptedTransport {
                 script: Mutex::new(script.into_iter().collect()),
                 calls: AtomicU32::new(0),
+                headers: Mutex::new(Vec::new()),
             })
         }
 
         fn calls(&self) -> u32 {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn headers(&self) -> Vec<HeaderMap> {
+            self.headers.lock().unwrap().clone()
         }
 
         fn play(&self) -> io::Result<Response> {
@@ -677,11 +690,13 @@ mod tests {
 
     #[async_trait]
     impl Transport for ScriptedTransport {
-        async fn get(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
+        async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.headers.lock().unwrap().push(headers);
             self.play()
         }
 
-        async fn prefetch(&self, _url: &str, _headers: HeaderMap) -> io::Result<Response> {
+        async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+            self.headers.lock().unwrap().push(headers);
             self.play()
         }
     }
@@ -847,6 +862,7 @@ mod tests {
     fn scripted_registry(
         addr: SocketAddr,
         auth: Option<&str>,
+        registry_token: Option<&str>,
         transport: impl Transport + 'static,
     ) -> Registry {
         let http = HttpConfig::default();
@@ -854,7 +870,7 @@ mod tests {
             client: Arc::new(Client {
                 addr: format!("http://{addr}").parse().unwrap(),
                 repository: "library/ubuntu".to_string(),
-                authorizer: Authorizer::new(auth).unwrap(),
+                authorizer: Authorizer::new(auth, registry_token).unwrap(),
                 redirects: RedirectCache::new(),
                 http: Http::new(
                     http.request_timeout,
@@ -1008,7 +1024,7 @@ mod tests {
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport =
                 ScriptedTransport::new(vec![Scripted::Status(StatusCode::OK, HeaderMap::new())]);
-            let registry = scripted_registry(origin.addr, None, transport.clone());
+            let registry = scripted_registry(origin.addr, None, None, transport.clone());
 
             let mut buf = vec![0u8; 4];
             let err = read(&registry, kind, &mut buf).unwrap_err();
@@ -1029,7 +1045,7 @@ mod tests {
                 Scripted::Status(StatusCode::TEMPORARY_REDIRECT, redirect),
                 Scripted::Status(StatusCode::OK, HeaderMap::new()),
             ]);
-            let registry = scripted_registry(origin.addr, None, transport.clone());
+            let registry = scripted_registry(origin.addr, None, None, transport.clone());
 
             let mut buf = vec![0u8; 4];
             let err = read(&registry, kind, &mut buf).unwrap_err();
@@ -1050,7 +1066,7 @@ mod tests {
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport =
                 ScriptedTransport::new(vec![Scripted::Status(StatusCode::OK, HeaderMap::new())]);
-            let registry = scripted_registry(origin.addr, None, transport.clone());
+            let registry = scripted_registry(origin.addr, None, None, transport.clone());
             registry.client.redirects.insert(
                 &hex::encode(TEST_BLOB_ID),
                 "http://cdn.example.com/signed".to_string(),
@@ -1151,6 +1167,7 @@ backend:
     addr: https://registry.example.com
     repository: library/ubuntu
     auth: YWxpY2U6c2VjcmV0
+    registry_token: xyz
 ";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
@@ -1158,6 +1175,9 @@ backend:
             registry.client.addr.as_str(),
             "https://registry.example.com/"
         );
+        let mut headers = HeaderMap::new();
+        registry.client.authorizer.authorize(&mut headers);
+        assert_eq!(headers[AUTHORIZATION], "Bearer xyz");
         assert!(registry.client.dragonfly.is_none());
         assert_eq!(registry.client.source(), Source::Origin);
     }
@@ -1173,7 +1193,7 @@ backend:
                 let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
                 let transport =
                     ScriptedTransport::new(vec![Scripted::Status(terminal, HeaderMap::new())]);
-                let registry = scripted_registry(origin.addr, None, transport.clone());
+                let registry = scripted_registry(origin.addr, None, None, transport.clone());
 
                 let mut buf = vec![0u8; 4];
                 let err = read(&registry, kind, &mut buf).unwrap_err();
@@ -1316,8 +1336,12 @@ backend:
                 Scripted::Status(StatusCode::UNAUTHORIZED, challenge),
                 Scripted::Body(body.clone()),
             ]);
-            let registry =
-                scripted_registry(origin.addr, Some("YWxpY2U6c2VjcmV0"), transport.clone());
+            let registry = scripted_registry(
+                origin.addr,
+                Some("YWxpY2U6c2VjcmV0"),
+                None,
+                transport.clone(),
+            );
 
             let mut buf = vec![0u8; body.len()];
             read(&registry, kind, &mut buf).unwrap();
@@ -1332,6 +1356,78 @@ backend:
     }
 
     #[test]
+    fn configured_bearer_token_skips_the_auth_handshake() {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            let body = b"authorized".to_vec();
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
+            let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
+            let registry = scripted_registry(
+                origin.addr,
+                Some("YWxpY2U6c2VjcmV0"),
+                Some("xyz"),
+                transport.clone(),
+            );
+
+            let mut buf = vec![0u8; body.len()];
+            read(&registry, kind, &mut buf).unwrap();
+
+            assert_eq!(buf, body);
+            assert_eq!(origin.hits(), 0);
+            let headers = transport.headers();
+            assert_eq!(headers.len(), 1);
+            assert_eq!(headers[0][AUTHORIZATION], "Bearer xyz");
+        }
+    }
+
+    #[test]
+    fn refused_configured_bearer_token_is_replaced_through_the_auth_handshake() {
+        let test_cases: Vec<(fn(SocketAddr) -> String, &str, u32)> = vec![
+            (
+                |_| r#"Basic realm="registry""#.to_string(),
+                "Basic YWxpY2U6c2VjcmV0",
+                0,
+            ),
+            (
+                |addr| format!(r#"Bearer realm="http://{addr}/token",service="registry""#),
+                "Bearer abc",
+                1,
+            ),
+        ];
+
+        for (challenge, expected, fetches) in test_cases {
+            for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+                let body = b"authorized".to_vec();
+                let origin =
+                    OriginStub::serve(&["200 OK"], br#"{"token":"abc","expires_in":300}"#.to_vec());
+                let mut unauthorized = HeaderMap::new();
+                unauthorized.insert(WWW_AUTHENTICATE, challenge(origin.addr).parse().unwrap());
+                let transport = ScriptedTransport::new(vec![
+                    Scripted::Status(StatusCode::UNAUTHORIZED, unauthorized.clone()),
+                    Scripted::Status(StatusCode::UNAUTHORIZED, unauthorized),
+                    Scripted::Body(body.clone()),
+                ]);
+                let registry = scripted_registry(
+                    origin.addr,
+                    Some("YWxpY2U6c2VjcmV0"),
+                    Some("xyz"),
+                    transport.clone(),
+                );
+
+                let mut buf = vec![0u8; body.len()];
+                read(&registry, kind, &mut buf).unwrap();
+
+                assert_eq!(buf, body);
+                assert_eq!(origin.hits(), fetches);
+                let headers = transport.headers();
+                assert_eq!(headers.len(), 3);
+                assert_eq!(headers[0][AUTHORIZATION], "Bearer xyz");
+                assert_eq!(headers[1].get(AUTHORIZATION), None);
+                assert_eq!(headers[2][AUTHORIZATION], expected);
+            }
+        }
+    }
+
+    #[test]
     fn read_blob_metadata_fetches_the_footer_through_the_transport() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
@@ -1339,7 +1435,7 @@ backend:
                 StatusCode::NOT_FOUND,
                 HeaderMap::new(),
             )]);
-            let registry = scripted_registry(origin.addr, None, transport.clone());
+            let registry = scripted_registry(origin.addr, None, None, transport.clone());
 
             let err = match kind {
                 ReadKind::Ondemand => registry.read_blob_metadata(&TEST_BLOB_ID),
@@ -1363,6 +1459,7 @@ backend:
         let registry = Arc::new(scripted_registry(
             dead_addr,
             Some("YWxpY2U6c2VjcmV0"),
+            None,
             gate.clone(),
         ));
 
@@ -1390,7 +1487,7 @@ backend:
         let body = b"redirected".to_vec();
         let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
         let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
-        let registry = scripted_registry(origin.addr, None, transport.clone());
+        let registry = scripted_registry(origin.addr, None, None, transport.clone());
         let hex = hex::encode(TEST_BLOB_ID);
         registry
             .client
@@ -1447,7 +1544,7 @@ backend:
             let calls = script.len() as u32;
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport = ScriptedTransport::new(script);
-            let registry = scripted_registry(origin.addr, None, transport.clone());
+            let registry = scripted_registry(origin.addr, None, None, transport.clone());
 
             let mut buf = vec![0u8; body.len()];
             let result = read(&registry, kind, &mut buf);
@@ -1476,7 +1573,7 @@ backend:
             Scripted::Status(StatusCode::FORBIDDEN, HeaderMap::new()),
             Scripted::Body(body.clone()),
         ]);
-        let registry = scripted_registry(origin.addr, None, transport.clone());
+        let registry = scripted_registry(origin.addr, None, None, transport.clone());
         let hex = hex::encode(TEST_BLOB_ID);
         registry
             .client
