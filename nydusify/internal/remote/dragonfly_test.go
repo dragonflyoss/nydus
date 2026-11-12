@@ -157,6 +157,27 @@ func TestEnableDragonfly(t *testing.T) {
 		t.Fatal("an invalid endpoint must fail")
 	}
 
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreachable := "http://" + closed.Addr().String()
+	_ = closed.Close()
+	stop, err = EnableDragonfly(context.Background(), unreachable)
+	if err != nil {
+		t.Fatalf("an unreachable scheduler must not fail: %v", err)
+	}
+	if DragonflyEndpoint() != unreachable {
+		t.Fatalf("endpoint = %q, want %q for the daemons", DragonflyEndpoint(), unreachable)
+	}
+	if _, ok := newRegistryClient(false).Transport.(*dragonflyTransport); ok {
+		t.Fatal("the registry client must go straight to the origin while the scheduler is unreachable")
+	}
+	stop()
+	if DragonflyEndpoint() != "" {
+		t.Fatal("stop must forget the unreachable scheduler")
+	}
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
