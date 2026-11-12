@@ -76,9 +76,14 @@ func NewDockerConfigCredFunc() CredentialFunc {
 func NewResolver(insecure, plainHTTP bool, credFunc CredentialFunc) remotes.Resolver {
 	return newResolver(insecure, plainHTTP, credFunc, newRegistryClient(insecure))
 }
-
 func newResolver(insecure, plainHTTP bool, credFunc CredentialFunc, client *http.Client) remotes.Resolver {
-	registryHosts := docker.ConfigureDefaultRegistries(
+	return docker.NewResolver(docker.ResolverOptions{Hosts: registryHosts(insecure, plainHTTP, credFunc, client)})
+}
+func newRegistryHosts(insecure, plainHTTP bool, credFunc CredentialFunc) docker.RegistryHosts {
+	return registryHosts(insecure, plainHTTP, credFunc, newRegistryClient(insecure))
+}
+func registryHosts(insecure, plainHTTP bool, credFunc CredentialFunc, client *http.Client) docker.RegistryHosts {
+	return docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(
 			docker.NewDockerAuthorizer(
 				docker.WithAuthClient(newHTTPClient(insecure)),
@@ -90,7 +95,4 @@ func newResolver(insecure, plainHTTP bool, credFunc CredentialFunc, client *http
 			return plainHTTP, nil
 		}),
 	)
-	return docker.NewResolver(docker.ResolverOptions{
-		Hosts: registryHosts,
-	})
 }

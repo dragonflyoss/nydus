@@ -56,6 +56,9 @@ type ArtifactOption struct {
 	// lowercase sha256 hex digest. This matches nydus blob cache directories that
 	// store blobs by digest.
 	BlobDir string
+	// UploadedBlobs have already been pushed into the target repository.
+	// Their metadata sidecars are packed, but their data is never read here.
+	UploadedBlobs []UploadedBlob
 	// ParentImages are already-pulled nydus images whose data blobs are reused by
 	// descriptor only. Their data blobs are not read from the local content store.
 	ParentImages []ParentImageMetadata
@@ -66,6 +69,13 @@ type ArtifactOption struct {
 	Annotations map[string]string
 	// Platform is the single platform the output manifest targets.
 	Platform ocispec.Platform
+}
+
+// UploadedBlob describes a streamed Nydus data layer in the target repository.
+type UploadedBlob struct {
+	Digest       digest.Digest
+	Size         int64
+	MetadataPath string
 }
 
 // ParentImageMetadata is the metadata required to reuse an existing nydus image
@@ -171,6 +181,27 @@ func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOp
 			blobMetas = append(blobMetas, meta)
 			localBlobs = append(localBlobs, LocalBlob{Path: path, Descriptor: desc})
 		}
+		for _, uploaded := range opt.UploadedBlobs {
+			if err := uploaded.Digest.Validate(); err != nil || uploaded.Digest.Algorithm() != digest.SHA256 || uploaded.Size <= 0 {
+				return errors.Errorf("invalid uploaded nydus blob %s (size %d)", uploaded.Digest, uploaded.Size)
+			}
+			meta, err := os.ReadFile(uploaded.MetadataPath)
+			if err != nil {
+				return errors.Wrapf(err, "read uploaded blob metadata %q", uploaded.MetadataPath)
+			}
+			desc := ocispec.Descriptor{
+				MediaType: nydus.MediaTypeNydusBlob,
+				Digest:    uploaded.Digest,
+				Size:      uploaded.Size,
+				Annotations: map[string]string{
+					nydus.LayerAnnotationUncompressed: uploaded.Digest.String(),
+					nydus.LayerAnnotationNydusBlob:    "true",
+				},
+			}
+			blobDescs = append(blobDescs, desc)
+			blobMetas = append(blobMetas, nydus.BlobMetaFile{Name: uploaded.Digest.Encoded() + ".blob.meta", Data: meta})
+			externalBlobs = append(externalBlobs, desc)
+		}
 		// Preserve local data sources independently of which descriptors need upload.
 		if opt.Prune || opt.CompactMaxLayers > 0 {
 			compactPaths = make(map[digest.Digest]string, len(localBlobs))
@@ -196,7 +227,7 @@ func ConvertNydusArtifacts(ctx context.Context, cs content.Store, opt ArtifactOp
 	if opt.Prune || opt.CompactMaxLayers > 0 {
 		// The number of supplied blobs bounds the live count before pruning.
 		// Avoid starting a remote backend when compaction cannot trigger.
-		sourceBlobCount := len(blobPaths)
+		sourceBlobCount := len(blobPaths) + len(opt.UploadedBlobs)
 		for _, parent := range opt.ParentImages {
 			sourceBlobCount += len(parent.Blobs)
 		}
