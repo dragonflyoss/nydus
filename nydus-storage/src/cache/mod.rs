@@ -13,6 +13,7 @@ use std::time::Instant;
 use nydus_config::StorageConfig;
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent, BlobMetadataCompressor};
 use nydus_telemetry::metrics::WriteFailureReason;
+use tracing::debug;
 use zstd::stream::raw::{Decoder, InBuffer, Operation, OutBuffer};
 
 /// Default on-demand fetch size: the compressed bytes one backend read
@@ -391,21 +392,25 @@ pub(crate) struct ChunkGroupReader<'b> {
     /// The data-region offset of the next byte of the stream.
     offset: u64,
 
+    /// The data-region offset the stream ends at.
+    end: u64,
+
     /// The buffer for a chunk group that spans chunks of the stream.
     scratch: &'b mut ChunkGroupBuffer,
 }
 
 /// Implements the chunk group reader.
 impl<'b> ChunkGroupReader<'b> {
-    /// Creates a reader of a stream that starts at data-region `offset`.
+    /// Creates a reader of a stream that covers data-region `range`.
     pub(crate) fn new(
         reader: Box<dyn BufRead + Send>,
-        offset: u64,
+        range: Range<u64>,
         scratch: &'b mut ChunkGroupBuffer,
     ) -> Self {
         Self {
             reader,
-            offset,
+            offset: range.start,
+            end: range.end,
             scratch,
         }
     }
@@ -508,7 +513,7 @@ impl<'b> ChunkGroupReader<'b> {
     }
 
     /// Skips the stream forward to data-region `offset`.
-    pub(crate) fn skip_to(&mut self, offset: u64) -> io::Result<()> {
+    fn skip_to(&mut self, offset: u64) -> io::Result<()> {
         while self.offset < offset {
             let available = self.reader.fill_buf()?.len() as u64;
             if available == 0 {
@@ -527,6 +532,16 @@ impl<'b> ChunkGroupReader<'b> {
         }
 
         Ok(())
+    }
+}
+
+/// Implements [Drop] by reading the stream to its end.
+impl Drop for ChunkGroupReader<'_> {
+    /// Finishes the backend read, whatever became of its chunk groups.
+    fn drop(&mut self) {
+        if let Err(err) = self.skip_to(self.end) {
+            debug!("backend read ended before its range: {err}");
+        }
     }
 }
 
@@ -802,7 +817,8 @@ mod tests {
             }
             let chunk_ranges: Vec<_> = chunks.iter().map(|chunk| chunk.as_ptr_range()).collect();
             let mut scratch = ChunkGroupBuffer::default();
-            let mut reader = ChunkGroupReader::new(Box::new(Chunks(chunks)), 0, &mut scratch);
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
 
             for (index, borrowed) in groups {
                 let group = metadata.chunk_group(index).unwrap();
@@ -838,7 +854,8 @@ mod tests {
                 rest = tail;
             }
             let mut scratch = ChunkGroupBuffer::default();
-            let mut reader = ChunkGroupReader::new(Box::new(Chunks(chunks)), 0, &mut scratch);
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
 
             let group = metadata.chunk_group(index).unwrap();
             assert_eq!(
@@ -866,7 +883,8 @@ mod tests {
             let (data, metadata) = from_chunk_groups(compressor, 8192, &chunk_groups, None);
             let chunks = data.chunks(chunk_len).map(<[u8]>::to_vec).collect();
             let mut scratch = ChunkGroupBuffer::default();
-            let mut reader = ChunkGroupReader::new(Box::new(Chunks(chunks)), 0, &mut scratch);
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
 
             for (index, chunk_group) in chunk_groups.iter().enumerate() {
                 let group = metadata.chunk_group(index).unwrap();
@@ -949,7 +967,8 @@ mod tests {
             corrupt(&mut data);
             let chunks = data.chunks(7).map(<[u8]>::to_vec).collect();
             let mut scratch = ChunkGroupBuffer::default();
-            let mut reader = ChunkGroupReader::new(Box::new(Chunks(chunks)), 0, &mut scratch);
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
 
             let group = metadata.chunk_group(0).unwrap();
             let mut decoded = vec![0u8; decoded_len];

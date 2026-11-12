@@ -212,7 +212,7 @@ impl BlobCache for RemoteBlobCache {
         })?;
         let mut scratch = ChunkGroupBuffer::default();
         let stream = self.backend.read(&self.blob_id, range.start, len)?;
-        let mut reader = ChunkGroupReader::new(stream, range.start, &mut scratch);
+        let mut reader = ChunkGroupReader::new(stream, range, &mut scratch);
 
         for group in &missed {
             let len = group.uncompressed_size() as usize;
@@ -232,9 +232,7 @@ impl BlobCache for RemoteBlobCache {
                 },
             );
         }
-
-        // Read the stream to its end.
-        reader.skip_to(range.end)
+        Ok(())
     }
 
     fn prefetch_all(

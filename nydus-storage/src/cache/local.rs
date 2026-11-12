@@ -490,24 +490,16 @@ impl LocalBlobCache {
     ) -> io::Result<(ChunkGroupReader<'b>, &'b mut [u8])> {
         let head = self.chunk_group(window.start);
         let tail = self.chunk_group(window.end - 1);
-        let len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
+        let range = head.compressed_offset()..tail.compressed_range().end;
+        let len = usize::try_from(range.end - range.start)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize"))?;
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
         let (encoded, decoded) = buffers.split(decoded_len)?;
         let stream = match kind {
-            ReadKind::Ondemand => {
-                self.backend
-                    .read(&self.blob_id, head.compressed_offset(), len)?
-            }
-            ReadKind::Prefetch => {
-                self.backend
-                    .prefetch(&self.blob_id, head.compressed_offset(), len)?
-            }
+            ReadKind::Ondemand => self.backend.read(&self.blob_id, range.start, len)?,
+            ReadKind::Prefetch => self.backend.prefetch(&self.blob_id, range.start, len)?,
         };
-        Ok((
-            ChunkGroupReader::new(stream, head.compressed_offset(), encoded),
-            decoded,
-        ))
+        Ok((ChunkGroupReader::new(stream, range, encoded), decoded))
     }
 
     /// Decode and validate `group` off the stream; a stored-plain group
@@ -538,7 +530,6 @@ impl LocalBlobCache {
         buffers: &mut ChunkGroupBuffers,
         cache_file: &File,
     ) -> io::Result<()> {
-        let end = self.chunk_group(window.end - 1).compressed_range().end;
         let (mut reader, decoded) = self.fetch_window(&window, kind, buffers)?;
         let metrics = &self.backend.metrics().cache;
         for index in window {
@@ -569,9 +560,7 @@ impl LocalBlobCache {
                     metrics.collect_write_failure_metrics(kind.into(), write_failure_reason(err))
                 })?;
         }
-
-        // Read the stream to its end.
-        reader.skip_to(end)
+        Ok(())
     }
 
     /// Fetch one ondemand-blob batch, trimmed at the groups `skip` accepts,
@@ -622,9 +611,6 @@ impl LocalBlobCache {
                 Err(err) => return Err(err),
             }
         }
-
-        // Read the stream to its end.
-        reader.skip_to(range.end)?;
         Ok((range.end - range.start, failed))
     }
 
@@ -1479,6 +1465,44 @@ mod tests {
 
         assert_eq!(buf, image[..16]);
         assert_eq!(backend.read_calls(), 1);
+    }
+
+    #[test]
+    fn window_with_a_malformed_group_finishes_its_backend_read() {
+        let backend_dir = tempdir().unwrap();
+        let chunk_groups: Groups = (0..4u8).map(|group| vec![vec![group + 1; 16384]]).collect();
+        let (mut data, meta) =
+            from_chunk_groups(BlobMetadataCompressor::None, 16384, &chunk_groups, None);
+        data[meta.chunk_group(1).unwrap().compressed_offset() as usize] ^= 0xff;
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let cache_dir = tempdir().unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let backend = Arc::new(Local::new(
+            backend_dir.path().to_path_buf(),
+            metrics.clone(),
+        ));
+        let cached =
+            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend, fetch(1 << 20))
+                .unwrap();
+
+        let mut buf = vec![0u8; 16];
+        let err = cached.read_at(0, &mut buf).unwrap_err();
+        let failures: f64 = metrics
+            .registry()
+            .gather()
+            .iter()
+            .filter(|family| family.get_name() == "nydus_backend_read_failure_total")
+            .flat_map(|family| family.get_metric())
+            .map(|metric| metric.get_counter().get_value())
+            .sum();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(cached.is_chunk_group_ready(0));
+        assert!(!cached.is_chunk_group_ready(1));
+        assert_eq!(failures, 0.0);
     }
 
     /// The fetch size is measured in compressed bytes and aligned on the
