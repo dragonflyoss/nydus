@@ -17,6 +17,9 @@ use nydus_error::{Context, Error, Result};
 use super::core::{read_uffd_msg, UffdCore, UffdMsg};
 use super::proto::{Connection, FaultPolicy, Request, VmaRegion};
 
+/// The wait after a failed accept before the next one.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
 pub struct UffdService {
     core: Arc<UffdCore>,
     socket_path: PathBuf,
@@ -90,7 +93,20 @@ impl UffdService {
                 biased;
                 _ = shutdown.changed() => break,
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted.context("failed to accept uffd connection")?;
+                    let stream = match accepted {
+                        Ok((stream, _)) => stream,
+                        Err(err) => {
+                            // Keep the connections being served: a failure such
+                            // as EMFILE says nothing about them. Wait before
+                            // accepting again, it lasts while the peer stays queued.
+                            warn!("failed to accept uffd connection: {err}");
+                            tokio::select! {
+                                _ = shutdown.changed() => break,
+                                _ = tokio::time::sleep(ACCEPT_BACKOFF) => {}
+                            }
+                            continue;
+                        }
+                    };
                     let core = self.core.clone();
                     let conn_shutdown = self.shutdown.subscribe();
                     let stream = stream.into_std().context("failed to convert uffd stream to std")?;
