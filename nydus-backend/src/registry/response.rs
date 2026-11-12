@@ -3,12 +3,12 @@
 use std::io;
 
 use bytes::{Bytes, BytesMut};
+use futures::stream::{self, BoxStream};
+use futures::{Stream, TryStreamExt};
 use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::range::{ContentRange, Range};
-use crate::Source;
 
 /// A response from the origin or a Dragonfly seed peer.
 pub(crate) struct Response {
@@ -18,22 +18,12 @@ pub(crate) struct Response {
     /// The response headers.
     pub(crate) headers: HeaderMap,
 
-    /// The body.
+    /// The body, streaming in the chunks it arrives in.
     pub(crate) body: Body,
-
-    /// Where the answer was fetched from, the `source` label of the read.
-    pub(crate) source: Source,
 }
 
-/// The body of a response.
-pub(crate) enum Body {
-    /// A body still streaming from the origin.
-    Stream(Box<dyn AsyncRead + Send + Unpin>),
-
-    /// A body already in memory, read whole by the Dragonfly SDK.
-    #[cfg(feature = "dragonfly")]
-    Bytes(Bytes),
-}
+/// The body of a response, the chunks it arrives in.
+pub(crate) type Body = BoxStream<'static, io::Result<Bytes>>;
 
 /// Implements the response.
 impl Response {
@@ -59,58 +49,61 @@ impl Response {
             ));
         }
 
-        #[cfg(feature = "dragonfly")]
-        if let Body::Bytes(bytes) = &self.body {
-            if bytes.len() as u64 != expected.end() - expected.start() + 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "body of {} bytes mismatches Content-Range {content_range}",
-                        bytes.len()
-                    ),
-                ));
-            }
-        }
-
         Ok(())
     }
 
-    /// Reads exactly `length` bytes of the body, without a copy when in memory.
-    pub(crate) async fn bytes(self, length: usize) -> io::Result<Bytes> {
-        let bytes = match self.body {
-            #[cfg(feature = "dragonfly")]
-            Body::Bytes(bytes) => bytes,
-            Body::Stream(mut reader) => {
-                let mut buf = BytesMut::zeroed(length);
-                reader.read_exact(&mut buf).await?;
-                buf.freeze()
+    /// Converts into the stream of the first `length` bytes of the body, failing
+    /// when the body ends before them.
+    pub(crate) fn bytes_stream(self, length: usize) -> impl Stream<Item = io::Result<Bytes>> {
+        stream::try_unfold((self.body, 0), move |(mut body, offset)| async move {
+            if offset == length {
+                return Ok(None);
             }
-        };
 
-        if bytes.len() < length {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("registry returned {} bytes, expected {length}", bytes.len()),
-            ));
-        }
+            loop {
+                let Some(chunk) = body.try_next().await? else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("registry returned {offset} bytes, expected {length}"),
+                    ));
+                };
 
-        Ok(bytes.slice(..length))
+                let chunk = chunk.slice(..chunk.len().min(length - offset));
+                if chunk.is_empty() {
+                    continue;
+                }
+
+                let offset = offset + chunk.len();
+                return Ok(Some((chunk, (body, offset))));
+            }
+        })
+    }
+
+    /// Reads exactly `length` bytes of the body.
+    pub(crate) async fn bytes(self, length: usize) -> io::Result<Bytes> {
+        self.bytes_stream(length)
+            .try_fold(
+                BytesMut::with_capacity(length),
+                |mut bytes, chunk| async move {
+                    bytes.extend_from_slice(&chunk);
+                    Ok(bytes)
+                },
+            )
+            .await
+            .map(BytesMut::freeze)
     }
 
     /// Reads the body as a UTF-8 string.
     pub(crate) async fn text(self) -> io::Result<String> {
-        let bytes: Bytes = match self.body {
-            #[cfg(feature = "dragonfly")]
-            Body::Bytes(bytes) => bytes,
-            Body::Stream(mut reader) => {
-                let mut buf = Vec::new();
-                reader.read_to_end(&mut buf).await?;
-                buf.into()
-            }
-        };
+        let bytes: Vec<u8> = self
+            .body
+            .try_fold(Vec::new(), |mut bytes, chunk| async move {
+                bytes.extend_from_slice(&chunk);
+                Ok(bytes)
+            })
+            .await?;
 
-        String::from_utf8(bytes.into())
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+        String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
     /// Returns the `Location` a redirect points at.
@@ -166,26 +159,24 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::*;
+    use futures::stream::{self, StreamExt};
+    use std::future;
 
     #[test]
     fn validate_range_accepts_only_a_206() {
         let test_cases = vec![
-            (StatusCode::PARTIAL_CONTENT, Source::Origin, true),
-            (StatusCode::PARTIAL_CONTENT, Source::Dragonfly, true),
-            (StatusCode::OK, Source::Dragonfly, false),
-            (StatusCode::OK, Source::Origin, false),
-            (StatusCode::OK, Source::Fallback, false),
-            (StatusCode::NO_CONTENT, Source::Origin, false),
+            (StatusCode::PARTIAL_CONTENT, true),
+            (StatusCode::OK, false),
+            (StatusCode::NO_CONTENT, false),
         ];
 
-        for (status, source, expected) in test_cases {
+        for (status, expected) in test_cases {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_RANGE, "bytes 2-5/8".parse().unwrap());
             let response = Response {
                 status,
                 headers,
-                body: Body::Stream(Box::new(io::Cursor::new(b"abcd".to_vec()))),
-                source,
+                body: stream::iter([Ok(Bytes::from_static(b"abcd"))]).boxed(),
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
@@ -197,16 +188,13 @@ mod tests {
     #[test]
     fn validate_range_requires_the_content_range_to_name_the_range() {
         let test_cases = vec![
-            (Source::Origin, Some("bytes 2-5/8"), true),
-            (Source::Origin, Some("bytes 1-4/8"), false),
-            (Source::Origin, Some("bytes 2-5/*"), false),
-            (Source::Origin, None, false),
-            (Source::Dragonfly, Some("bytes 2-5/8"), true),
-            (Source::Dragonfly, Some("bytes 1-4/8"), false),
-            (Source::Dragonfly, None, false),
+            (Some("bytes 2-5/8"), true),
+            (Some("bytes 1-4/8"), false),
+            (Some("bytes 2-5/*"), false),
+            (None, false),
         ];
 
-        for (source, content_range, expected) in test_cases {
+        for (content_range, expected) in test_cases {
             let mut headers = HeaderMap::new();
             if let Some(value) = content_range {
                 headers.insert(CONTENT_RANGE, value.parse().unwrap());
@@ -214,37 +202,7 @@ mod tests {
             let response = Response {
                 status: StatusCode::PARTIAL_CONTENT,
                 headers,
-                body: Body::Stream(Box::new(io::Cursor::new(b"abcd".to_vec()))),
-                source,
-            };
-            assert_eq!(
-                response.validate_range(&Range::Bounded(2..=5)).is_ok(),
-                expected
-            );
-        }
-    }
-
-    #[cfg(feature = "dragonfly")]
-    #[test]
-    fn validate_range_requires_a_buffered_body_as_long_as_the_range() {
-        let test_cases = vec![
-            (Body::Bytes(Bytes::from_static(b"abcd")), true),
-            (Body::Bytes(Bytes::from_static(b"abc")), false),
-            (Body::Bytes(Bytes::from_static(b"abcde")), false),
-            (
-                Body::Stream(Box::new(io::Cursor::new(b"abc".to_vec()))),
-                true,
-            ),
-        ];
-
-        for (body, expected) in test_cases {
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_RANGE, "bytes 2-5/8".parse().unwrap());
-            let response = Response {
-                status: StatusCode::PARTIAL_CONTENT,
-                headers,
-                body,
-                source: Source::Dragonfly,
+                body: stream::iter([Ok(Bytes::from_static(b"abcd"))]).boxed(),
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
@@ -275,8 +233,7 @@ mod tests {
             let response = Response {
                 status,
                 headers: HeaderMap::new(),
-                body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
-                source: Source::Origin,
+                body: stream::empty().boxed(),
             };
             #[cfg(feature = "dragonfly")]
             assert_eq!(response.needs_fallback(), expected);
@@ -285,45 +242,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bytes_reads_exactly_len_from_a_streaming_body() {
-        let test_cases: Vec<(&[u8], fn(io::Result<Bytes>))> = vec![
-            (b"abcd", |result| assert_eq!(result.unwrap(), "abcd")),
-            (b"abcdef", |result| assert_eq!(result.unwrap(), "abcd")),
-            (b"ab", |result| {
+    async fn bytes_reads_exactly_len_across_chunks() {
+        let test_cases: Vec<(Vec<&'static [u8]>, fn(io::Result<Bytes>))> = vec![
+            (vec![b"abcd"], |result| assert_eq!(result.unwrap(), "abcd")),
+            (vec![b"abcdef"], |result| {
+                assert_eq!(result.unwrap(), "abcd")
+            }),
+            (vec![b"ab", b"c", b"def"], |result| {
+                assert_eq!(result.unwrap(), "abcd")
+            }),
+            (vec![b"ab"], |result| {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof)
+            }),
+            (vec![], |result| {
                 assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof)
             }),
         ];
 
-        for (body, assert_fn) in test_cases {
+        for (chunks, assert_fn) in test_cases {
             let response = Response {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
-                body: Body::Stream(Box::new(io::Cursor::new(body.to_vec()))),
-                source: Source::Origin,
+                body: stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Ok(Bytes::from_static(chunk))),
+                )
+                .boxed(),
             };
             assert_fn(response.bytes(4).await);
         }
     }
 
-    #[cfg(feature = "dragonfly")]
     #[tokio::test]
-    async fn bytes_reads_exactly_len_from_a_buffered_body() {
-        let test_cases: Vec<(&'static [u8], fn(io::Result<Bytes>))> = vec![
-            (b"abcd", |result| assert_eq!(result.unwrap(), "abcd")),
-            (b"abcdef", |result| assert_eq!(result.unwrap(), "abcd")),
-            (b"ab", |result| {
-                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof)
+    async fn bytes_stream_yields_the_chunks_until_the_length_or_an_error() {
+        let test_cases: Vec<(Vec<io::Result<&'static [u8]>>, fn(io::Result<()>, &[u8]))> = vec![
+            (vec![Ok(b"ab"), Ok(b"cd")], |result, bytes| {
+                result.unwrap();
+                assert_eq!(bytes, b"abcd");
+            }),
+            (vec![Ok(b"ab"), Ok(b""), Ok(b"cdef")], |result, bytes| {
+                result.unwrap();
+                assert_eq!(bytes, b"abcd");
+            }),
+            (
+                vec![Ok(b"ab"), Err(io::Error::other("connection reset"))],
+                |result, bytes| {
+                    assert_eq!(result.unwrap_err().to_string(), "connection reset");
+                    assert_eq!(bytes, b"ab");
+                },
+            ),
+            (vec![Ok(b"ab")], |result, bytes| {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+                assert_eq!(bytes, b"ab");
             }),
         ];
 
-        for (body, assert_fn) in test_cases {
+        for (chunks, expect) in test_cases {
             let response = Response {
-                status: StatusCode::OK,
+                status: StatusCode::PARTIAL_CONTENT,
                 headers: HeaderMap::new(),
-                body: Body::Bytes(Bytes::from_static(body)),
-                source: Source::Dragonfly,
+                body: stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| chunk.map(Bytes::from_static)),
+                )
+                .boxed(),
             };
-            assert_fn(response.bytes(4).await);
+
+            let mut bytes = Vec::new();
+            let result = response
+                .bytes_stream(4)
+                .try_for_each(|chunk| {
+                    bytes.extend_from_slice(&chunk);
+                    future::ready(Ok(()))
+                })
+                .await;
+
+            expect(result, &bytes);
         }
     }
 
@@ -332,8 +328,7 @@ mod tests {
         let response = Response {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
-            body: Body::Stream(Box::new(io::Cursor::new(b"no such blob".to_vec()))),
-            source: Source::Origin,
+            body: stream::iter([Ok(Bytes::from_static(b"no such blob"))]).boxed(),
         };
         assert_eq!(
             response.into_io_error().await.to_string(),

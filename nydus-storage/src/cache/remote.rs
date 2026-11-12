@@ -10,7 +10,7 @@
 //! the file-oriented [`BlobCache`] defaults.
 
 use std::collections::VecDeque;
-use std::io;
+use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 
 use nydus_backend::{Backend, ReadKind};
@@ -215,7 +215,8 @@ impl BlobCache for RemoteBlobCache {
         let mut encoded = ChunkGroupBuffer::default();
         let encoded = encoded.resize(encoded_len)?;
         self.backend
-            .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?;
+            .read(&self.blob_id, head.compressed_offset(), encoded.len())?
+            .read_exact(encoded)?;
 
         for group in &missed {
             let start = (group.compressed_offset() - head.compressed_offset()) as usize;
@@ -272,6 +273,7 @@ mod tests {
     use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::{uncompressed_data, FullBlob};
     use nydus_test_utils::metadata::from_chunk_groups;
+    use std::io::BufRead;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::tempdir;
 
@@ -308,18 +310,21 @@ mod tests {
             self.inner.read_blob_metadata(blob_id)
         }
 
-        fn read_range_into(
+        fn read(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
-            dst: &mut [u8],
-        ) -> io::Result<()> {
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst)?;
+            let mut buf = vec![0; len];
+            self.inner
+                .read(blob_id, offset, len)?
+                .read_exact(&mut buf)?;
             if self.corrupt_next.swap(false, Ordering::SeqCst) {
-                dst[0] ^= 0xff;
+                buf[0] ^= 0xff;
             }
-            Ok(())
+            Ok(Box::new(io::Cursor::new(buf)))
         }
     }
 

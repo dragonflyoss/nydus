@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,10 +19,14 @@ type mounted struct {
 
 func (m mounted) measure(t testing.TB, fn func()) delta {
 	t.Helper()
-	before := m.API.Metrics(t)
+	before, fallbacks := m.API.Metrics(t), m.fallbacks()
 	fn()
 
-	return delta{before: before, after: m.API.Metrics(t)}
+	return delta{before: before, after: m.API.Metrics(t), fallbacks: m.fallbacks() - fallbacks}
+}
+
+func (m mounted) fallbacks() int {
+	return strings.Count(m.Daemon.FileLog(), "falling back to the origin")
 }
 
 func (m mounted) within(t testing.TB, bound time.Duration, what string, fn func()) {
@@ -56,13 +61,7 @@ func (m mounted) readData(t testing.TB) error {
 
 func (m mounted) expectNoDirectOrigin(t *testing.T) {
 	t.Helper()
-	metrics := m.API.Metrics(t)
-	if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `source="fallback"`)) {
-		t.FailNow()
-	}
-
-	assert.Zero(t, metrics.Sum("nydus_backend_read_total", `source="origin"`))
-	assert.NotContains(t, m.Daemon.FileLog(), "falling back to the origin")
+	assert.Zero(t, m.fallbacks())
 }
 
 func (m mounted) waitPrefetch(t *testing.T) {

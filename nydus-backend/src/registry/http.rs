@@ -5,7 +5,7 @@ use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use http::Extensions;
 use leaky_bucket::RateLimiter;
 use rand::Rng;
@@ -14,14 +14,12 @@ use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Request};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 use nydus_config::{ProxyConfig, TlsConfig};
 
-use super::response::{Body, Response};
+use super::response::Response;
 use super::Transport;
-use crate::Source;
 
 /// The HTTP client of the origin registry.
 ///
@@ -40,9 +38,6 @@ pub(crate) struct Http {
 
     /// The random wait before a prefetch read is sent once more.
     prefetch_retry_interval: RangeInclusive<Duration>,
-
-    /// Where the client's answers come from, the `source` label of its reads.
-    source: Source,
 }
 
 /// Implements the origin HTTP client.
@@ -56,7 +51,6 @@ impl Http {
         tls: &TlsConfig,
         prefetch_retry_interval: Duration,
         rate_limit: Option<RateLimit>,
-        source: Source,
     ) -> io::Result<Self> {
         // Return redirects so the caller caches them, and keep rustls even when
         // another crate enables reqwest's `default-tls`.
@@ -103,13 +97,19 @@ impl Http {
             client: client.build(),
             prefetch_retry_interval: prefetch_retry_interval
                 ..=prefetch_retry_interval.saturating_mul(2),
-            source,
         })
     }
 
-    /// Returns where the client's answers come from.
-    pub(crate) fn source(&self) -> Source {
-        self.source
+    /// Converts the reqwest answer to a `GET` into a response, the body left
+    /// streaming.
+    fn response(result: reqwest_middleware::Result<reqwest::Response>) -> io::Result<Response> {
+        result
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: response.bytes_stream().map_err(io::Error::other).boxed(),
+            })
+            .map_err(io::Error::other)
     }
 }
 
@@ -118,32 +118,18 @@ impl Http {
 impl Transport for Http {
     /// Sends the `GET` of an on-demand read, the body left streaming.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        let start = Instant::now();
-        let result = self
-            .client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map(|response| Response {
-                status: response.status(),
-                headers: response.headers().clone(),
-                body: Body::Stream(Box::new(StreamReader::new(
-                    response.bytes_stream().map_err(io::Error::other),
-                ))),
-                source: self.source,
-            })
-            .map_err(io::Error::other);
+        let now = Instant::now();
+        let result = Self::response(self.client.get(url).headers(headers).send().await);
 
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) from the origin returned {} in {:?}",
                 response.status,
-                start.elapsed()
+                now.elapsed()
             ),
             Err(err) => debug!(
                 "GET {url} (ondemand) from the origin failed in {:?}: {err}",
-                start.elapsed()
+                now.elapsed()
             ),
         }
         result
@@ -153,32 +139,18 @@ impl Transport for Http {
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let mut retried = false;
         loop {
-            let start = Instant::now();
-            let result = self
-                .client
-                .get(url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map(|response| Response {
-                    status: response.status(),
-                    headers: response.headers().clone(),
-                    body: Body::Stream(Box::new(StreamReader::new(
-                        response.bytes_stream().map_err(io::Error::other),
-                    ))),
-                    source: self.source,
-                })
-                .map_err(io::Error::other);
+            let now = Instant::now();
+            let result = Self::response(self.client.get(url).headers(headers.clone()).send().await);
 
             match &result {
                 Ok(response) => debug!(
                     "GET {url} (prefetch) from the origin returned {} in {:?}",
                     response.status,
-                    start.elapsed()
+                    now.elapsed()
                 ),
                 Err(err) => debug!(
                     "GET {url} (prefetch) from the origin failed in {:?}: {err}",
-                    start.elapsed()
+                    now.elapsed()
                 ),
             }
 
@@ -264,13 +236,12 @@ mod tests {
             &TlsConfig::default(),
             retry_interval,
             None,
-            Source::Origin,
         )
         .unwrap();
 
-        let start = Instant::now();
+        let now = Instant::now();
         assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
-        assert!(start.elapsed() < retry_interval);
+        assert!(now.elapsed() < retry_interval);
     }
 
     #[cfg(feature = "dragonfly")]
@@ -284,7 +255,6 @@ mod tests {
             &tls,
             Duration::from_secs(1),
             None,
-            Source::Origin,
         )
         .is_ok());
         assert!(Http::new(
@@ -294,7 +264,6 @@ mod tests {
             &tls,
             Duration::from_secs(1),
             Some(RateLimit::new(10, Duration::from_secs(1))),
-            Source::Origin,
         )
         .is_ok());
     }
@@ -379,7 +348,6 @@ mod tests {
                 },
                 Duration::from_secs(1),
                 None,
-                Source::Origin,
             )
             .unwrap();
             assert_eq!(http.get(&url, HeaderMap::new()).await.is_ok(), expected);

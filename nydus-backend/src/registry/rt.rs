@@ -70,7 +70,6 @@ impl Runtime {
     }
 
     /// Runs `future` on a thread of the runtime in the background.
-    #[cfg(feature = "dragonfly")]
     pub(crate) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         self.runtime.spawn(future);
     }

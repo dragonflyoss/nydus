@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
@@ -501,14 +501,14 @@ impl LocalBlobCache {
         match kind {
             ReadKind::Ondemand => {
                 self.backend
-                    .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?
+                    .read(&self.blob_id, head.compressed_offset(), encoded.len())?
             }
-            ReadKind::Prefetch => self.backend.prefetch_range_into(
-                &self.blob_id,
-                head.compressed_offset(),
-                encoded,
-            )?,
+            ReadKind::Prefetch => {
+                self.backend
+                    .prefetch(&self.blob_id, head.compressed_offset(), encoded.len())?
+            }
         }
+        .read_exact(encoded)?;
         Ok((encoded, decoded, head.compressed_offset()))
     }
 
@@ -1320,6 +1320,7 @@ mod tests {
         from_chunk_groups, single_chunk_group, with_wrong_chunk_group_digest,
     };
     use sha2::{Digest, Sha256};
+    use std::io::BufRead;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use tempfile::tempdir;
@@ -1864,14 +1865,14 @@ mod tests {
             self.inner.read_blob_metadata(blob_id)
         }
 
-        fn read_range_into(
+        fn read(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
-            dst: &mut [u8],
-        ) -> io::Result<()> {
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst)
+            self.inner.read(blob_id, offset, len)
         }
     }
 

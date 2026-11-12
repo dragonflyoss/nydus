@@ -41,7 +41,7 @@ func TestRetry(t *testing.T) {
 				}
 
 				assert.Equal(t, 2, proxy.injected())
-				assert.Zero(t, m.backendFailures(t, "ondemand", "origin"))
+				assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 			},
 		},
 		{
@@ -88,17 +88,17 @@ func TestPrefetchRetry(t *testing.T) {
 	m.waitMetricSettled(t, "nydus_backend_read_total", `type="prefetch"`)
 	m.Daemon.WaitForLog(t, 10*time.Second, "retrying in")
 
-	if !assert.Positive(t, m.backendReads(t, "prefetch", "origin")) {
+	if !assert.Positive(t, m.backendReads(t, "prefetch", "http")) {
 		t.FailNow()
 	}
-	if !assert.Zero(t, m.backendReads(t, "ondemand", "origin")) {
+	if !assert.Zero(t, m.backendReads(t, "ondemand", "http")) {
 		t.FailNow()
 	}
 	if !assert.NoError(t, m.read(t, image, "data/size/08392705")) {
 		t.FailNow()
 	}
 
-	assert.Zero(t, m.backendReads(t, "ondemand", "origin"))
+	assert.Zero(t, m.backendReads(t, "ondemand", "http"))
 }
 
 func TestPrefetchStatus(t *testing.T) {
@@ -124,17 +124,17 @@ func TestPrefetchStatus(t *testing.T) {
 			proxy.inject(0, 0)
 			m.waitMetricSettled(t, "nydus_backend_read_total", `type="prefetch"`)
 
-			if !assert.Positive(t, m.backendReads(t, "prefetch", "origin")) {
+			if !assert.Positive(t, m.backendReads(t, "prefetch", "http")) {
 				t.FailNow()
 			}
-			if !assert.Zero(t, m.backendReads(t, "ondemand", "origin")) {
+			if !assert.Zero(t, m.backendReads(t, "ondemand", "http")) {
 				t.FailNow()
 			}
 			if !assert.NoError(t, m.read(t, image, "data/size/08392705")) {
 				t.FailNow()
 			}
 
-			assert.Zero(t, m.backendReads(t, "ondemand", "origin"))
+			assert.Zero(t, m.backendReads(t, "ondemand", "http"))
 		})
 	}
 }

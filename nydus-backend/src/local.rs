@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -241,17 +241,17 @@ impl Backend for Local {
         BlobMetadata::from_bytes(buf).map_err(io::Error::other)
     }
 
-    /// Fills `buf` from the data region for an on-demand read.
-    fn read_range_into(
+    /// Reads `len` bytes of the data region from `offset` for an on-demand read.
+    fn read(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        let start = Instant::now();
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        let now = Instant::now();
         self.full_blob(blob_id)
             .and_then(|full_blob| {
-                let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
+                let end = offset.checked_add(len as u64).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
                 })?;
                 if end > full_blob.footer.compressed_data_size() {
@@ -261,17 +261,15 @@ impl Backend for Local {
                     ));
                 }
 
-                full_blob
-                    .file
-                    .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
-            })
-            .inspect(|()| {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Ondemand,
-                    Source::Local,
-                    buf.len() as u64,
-                    start.elapsed(),
-                )
+                Ok(Box::new(BufReader::new(RangeReader {
+                    file: full_blob.file.clone(),
+                    offset: full_blob.footer.compressed_data_offset() + offset,
+                    remaining: len,
+                    len,
+                    kind: ReadKind::Ondemand,
+                    metrics: self.metrics.clone(),
+                    created_at: now,
+                })) as Box<dyn BufRead + Send>)
             })
             .inspect_err(|_| {
                 self.metrics
@@ -280,17 +278,17 @@ impl Backend for Local {
             })
     }
 
-    /// Fills `buf` from the data region for a prefetch read.
-    fn prefetch_range_into(
+    /// Reads `len` bytes of the data region from `offset` for a prefetch read.
+    fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        let start = Instant::now();
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        let now = Instant::now();
         self.full_blob(blob_id)
             .and_then(|full_blob| {
-                let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
+                let end = offset.checked_add(len as u64).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
                 })?;
                 if end > full_blob.footer.compressed_data_size() {
@@ -300,17 +298,15 @@ impl Backend for Local {
                     ));
                 }
 
-                full_blob
-                    .file
-                    .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
-            })
-            .inspect(|()| {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Prefetch,
-                    Source::Local,
-                    buf.len() as u64,
-                    start.elapsed(),
-                )
+                Ok(Box::new(BufReader::new(RangeReader {
+                    file: full_blob.file.clone(),
+                    offset: full_blob.footer.compressed_data_offset() + offset,
+                    remaining: len,
+                    len,
+                    kind: ReadKind::Prefetch,
+                    metrics: self.metrics.clone(),
+                    created_at: now,
+                })) as Box<dyn BufRead + Send>)
             })
             .inspect_err(|_| {
                 self.metrics
@@ -320,8 +316,68 @@ impl Backend for Local {
     }
 }
 
+/// Reads a blob range with positional reads, leaving the offset of the shared
+/// file alone, and records the read metrics once when it is dropped.
+struct RangeReader {
+    /// The open file.
+    file: Arc<File>,
+
+    /// The offset of the next read.
+    offset: u64,
+
+    /// The bytes of the range left to read.
+    remaining: usize,
+
+    /// The length of the range.
+    len: usize,
+
+    /// What triggered the read, the `type` label of its metrics.
+    kind: ReadKind,
+
+    /// The metrics of the image.
+    metrics: Arc<Metrics>,
+
+    /// The time when the reader was created.
+    created_at: Instant,
+}
+
+/// Implements [Read] by `pread(2)`.
+impl Read for RangeReader {
+    /// Reads the next bytes of the range into `buf`.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let len = buf.len().min(self.remaining);
+        let len = self.file.read_at(&mut buf[..len], self.offset)?;
+        self.offset += len as u64;
+        self.remaining -= len;
+        Ok(len)
+    }
+}
+
+/// Implements [Drop] by recording the read metrics once.
+impl Drop for RangeReader {
+    /// Records a finished read when the whole range was read, a failed one
+    /// otherwise.
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            self.metrics
+                .backend
+                .collect_read_failure_metrics(self.kind, Source::Local);
+            return;
+        }
+
+        self.metrics.backend.collect_read_finished_metrics(
+            self.kind,
+            Source::Local,
+            self.len as u64,
+            self.created_at.elapsed(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::*;
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
@@ -347,12 +403,56 @@ mod tests {
             let blob_metadata = backend.read_blob_metadata(&full_blob_id).unwrap();
             let mut data = vec![0u8; 4096];
             backend
-                .read_range_into(&full_blob_id, 0, &mut data)
+                .read(&full_blob_id, 0, data.len())
+                .unwrap()
+                .read_exact(&mut data)
                 .unwrap();
 
             assert_eq!(blob_metadata.chunk_count(), 1);
             assert_eq!(data, payload);
             assert!(backend.read_blob_metadata(&data_blob_id).is_err());
+        }
+    }
+
+    #[test]
+    fn read_records_its_metrics_once_whether_its_reader_finishes_or_drops() {
+        let test_cases: Vec<(fn(Box<dyn BufRead + Send>), f64, f64)> = vec![
+            (
+                |mut reader| {
+                    let mut data = Vec::new();
+                    reader.read_to_end(&mut data).unwrap();
+                    assert_eq!(data.len(), 4096);
+                },
+                0.0,
+                4096.0,
+            ),
+            (drop, 1.0, 0.0),
+        ];
+
+        for (consume, failures, bytes) in test_cases {
+            let dir = tempdir().unwrap();
+            let payload = vec![0xabu8; 4096];
+            let full_blob_id = FullBlob::new(&payload)
+                .with_blob_metadata(&single_chunk_group(&payload))
+                .save_in(dir.path());
+            let backend = Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new()));
+            let counter = |name: &str| -> f64 {
+                backend
+                    .metrics
+                    .registry()
+                    .gather()
+                    .iter()
+                    .filter(|family| family.get_name() == name)
+                    .flat_map(|family| family.get_metric())
+                    .map(|metric| metric.get_counter().get_value())
+                    .sum()
+            };
+
+            consume(backend.read(&full_blob_id, 0, 4096).unwrap());
+
+            assert_eq!(counter("nydus_backend_read_total"), 1.0);
+            assert_eq!(counter("nydus_backend_read_failure_total"), failures);
+            assert_eq!(counter("nydus_backend_read_bytes_total"), bytes);
         }
     }
 

@@ -55,7 +55,7 @@ func (p *prober) readBackend(t testing.TB) (delta, error) {
 			p.m.within(t, readTimeout, "a read", func() { err = p.read(t) })
 		})
 
-		if d.backend() {
+		if d.of(proxyReads) != 0 {
 			return d, err
 		}
 		if !assert.NoError(t, err) {

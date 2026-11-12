@@ -122,7 +122,7 @@ func TestOutageRecovery(t *testing.T) {
 		}
 
 		assert.GreaterOrEqual(t, elapsed, time.Duration(gets-1)*800*time.Millisecond)
-		assert.Positive(t, limited.API.Metrics(t).Sum("nydus_backend_read_total", `source="fallback"`))
+		assert.Positive(t, limited.API.Metrics(t).Sum("nydus_backend_read_total", `source="dragonfly"`))
 	})
 
 	c.stop(t, "scheduler")
@@ -185,7 +185,7 @@ func TestOutageRecovery(t *testing.T) {
 			}
 
 			batch := p.concurrentBatch(t)
-			if d.of(proxyReads) > 0 && batch.of(proxyReads) > 0 && batch.of(fallbackReads) == 0 {
+			if d.fallbacks == 0 && batch.of(proxyReads) > 0 && batch.fallbacks == 0 {
 				if !assert.Zero(t, d.of(proxyErrors)) {
 					t.FailNow()
 				}

@@ -44,7 +44,7 @@ func TestErrorCodePolicy(t *testing.T) {
 
 		issued, _ := auth.Counts()
 		assert.Equal(t, 1, issued)
-		assert.Zero(t, d.of(fallbackReads))
+		assert.Zero(t, d.fallbacks)
 		assert.NotZero(t, d.of(proxyReads))
 	})
 }
@@ -78,17 +78,10 @@ func TestSeedPeerErrors(t *testing.T) {
 			}
 
 			assert.Positive(t, origin.Faults.Hits())
-			metrics := m.API.Metrics(t)
+			assert.Equal(t, tc.fallback, m.fallbacks() > 0)
 
-			if tc.fallback {
-				assert.Positive(t, metrics.Sum("nydus_backend_read_total", `source="fallback"`))
-			} else {
-				if !assert.Zero(t, metrics.Sum("nydus_backend_read_total", `source="fallback"`)) {
-					t.FailNow()
-				}
-				if tc.status == http.StatusTooManyRequests {
-					assert.Positive(t, metrics.Sum("nydus_backend_read_total", `source="dragonfly"`))
-				}
+			if tc.status == http.StatusTooManyRequests {
+				assert.Positive(t, m.API.Metrics(t).Sum("nydus_backend_read_total", `source="dragonfly"`))
 			}
 		})
 	}

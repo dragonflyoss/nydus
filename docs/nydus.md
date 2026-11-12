@@ -1255,7 +1255,8 @@ Fields under `backend.config`:
 		middleware. A prefetch read still answered with a `429`, `5xx` or
 		`408` after them is sent once more after `prefetch.retry_interval`,
 		like one Dragonfly answers so; an on-demand read, and a prefetch read
-		failing in transport, errors out.
+		failing in transport, errors out. A body that breaks off fails the
+		read.
 	- `proxy` (optional): routes every registry request through an HTTP
 		forward proxy. Requests keep their original upstream URL, so a proxy
 		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
@@ -1274,8 +1275,9 @@ Fields under `backend.config`:
 	to the origin registry through `http`. Only available when the
 	binary is built with the `dragonfly` feature; a build without it rejects
 	the block when the config is loaded. Omit to talk to the origin directly.
-	Each read is counted under the `source` that served it, `dragonfly` for
-	the seed peers and `fallback` for the origin (see [Metrics](#metrics)).
+	Every read of a daemon with this block is counted under the `source`
+	`dragonfly`, the ones that fell back to the origin included (see
+	[Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
 	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times
@@ -1290,6 +1292,7 @@ Fields under `backend.config`:
 	| dfdaemon `507` (the seed peer has no room for the blob) | Sent once more after `prefetch.retry_interval`, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the fallback rate limit |
 	| `429` / `5xx` / `408` / dfdaemon `500` | Sent once more after `prefetch.retry_interval`, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the fallback rate limit |
 	| timeout / connection | Fails the read at once, no retry, no origin fallback | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the fallback rate limit |
+	| Body breaks off after a `206` | Fails the read, no retry, no origin fallback | Resumed by the SDK on the next seed peer for the bytes left, within the same `max_retries`; a seed peer that does not answer with exactly those bytes counts as a failed attempt. No origin fallback once the body started, the read fails when the retries run out |
 	| Origin fallback: `5xx` / `408` / `429` / transport error | n/a | Retried by the `http` client's retry middleware up to `http.max_retries` times, every attempt waiting for its own `fallback_rate_limit` slot |
 
 	Prefetch reads never fall back to the origin, so a Dragonfly outage
@@ -1401,29 +1404,25 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 | Label | Meaning | Values |
 | --- | --- | --- |
 | `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `redirect` |
-| `source` | where the backend read its bytes | `local`, `origin`, `proxy`, `dragonfly`, `fallback` |
+| `source` | what the backend reads its bytes through | `local`, `http`, `dragonfly` |
 | `reason` | why the cache write failed | `decode`, `checksum`, `io`, `unknown_source` |
 | `status` | whether the image bytes are in the local cache | `cached`, `uncached` |
 | `operation` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
 
-`source` is `local` for the local directory backend, `origin` for the
-registry backend reading the origin registry itself, `proxy` for it reading
-through an HTTP forward proxy (`http.proxy`), `dragonfly` for it reading the
-Dragonfly seed peers, and `fallback` for a read Dragonfly could not serve
-that went back to the origin through `http` under
-`dragonfly.fallback_rate_limit`. A failed read counts once, under the source
-it would have read from: `dragonfly` on a Dragonfly daemon, whether the seed
-peers or the origin fallback failed last; the cause is in the logs.
+`source` follows the backend configuration: `local` for the local directory
+backend, `http` for the registry backend reading the origin, directly or
+through `http.proxy`, and `dragonfly` for the registry backend with
+`dragonfly` configured. A Dragonfly daemon counts every read under
+`dragonfly`, whether the seed peers served it or it fell back to the origin
+under `dragonfly.fallback_rate_limit`; each fallback is in the logs as
+`dragonfly request failed, falling back to the origin`.
 
 Backend (`nydus_backend_*`):
 
 - `nydus_backend_read_total{type,source}`,
 	`nydus_backend_read_failure_total{type,source}` — backend range reads,
-	failed ones included, and the failed ones alone. On a Dragonfly daemon a
-	`fallback` read is an on-demand read that went back to the origin; it
-	counts once, however many rate-limited retry attempts it made. Watch the
-	`fallback` rate to confirm origin load stays shaped by
-	`dragonfly.fallback_rate_limit`.
+	failed ones included, and the failed ones alone. A read counts once,
+	however many seed peers it tried and whether it fell back to the origin.
 - `nydus_backend_read_bytes_total{type,source}` — compressed bytes the
 	successful reads returned.
 - `nydus_backend_read_duration_milliseconds{type,source}` — duration

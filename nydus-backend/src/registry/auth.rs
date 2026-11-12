@@ -350,7 +350,6 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::*;
-    use crate::Source;
     use nydus_config::TlsConfig;
 
     #[test]
@@ -519,7 +518,6 @@ mod tests {
             &TlsConfig::default(),
             Duration::from_secs(1),
             None,
-            Source::Origin,
         )
         .unwrap();
         let test_cases: Vec<(Option<&str>, fn(io::Result<()>, Option<HeaderValue>))> = vec![
@@ -580,7 +578,6 @@ mod tests {
             &TlsConfig::default(),
             Duration::from_secs(1),
             None,
-            Source::Origin,
         )
         .unwrap();
         let authorizer = Authorizer::new(None, None).unwrap();

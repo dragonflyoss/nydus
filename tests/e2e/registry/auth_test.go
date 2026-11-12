@@ -32,7 +32,7 @@ func TestBasicAuth(t *testing.T) {
 				}
 
 				assert.Greater(t, proxy.challengeCount(), challenges)
-				assert.Zero(t, m.backendFailures(t, "ondemand", "origin"))
+				assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 			},
 		},
 		{
@@ -78,7 +78,7 @@ func TestBearerAuth(t *testing.T) {
 	}
 
 	assert.Equal(t, challenges, proxy.challengeCount())
-	assert.Zero(t, m.backendFailures(t, "ondemand", "origin"))
+	assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 }
 
 func TestBearerRefresh(t *testing.T) {
@@ -108,7 +108,7 @@ func TestBearerRefresh(t *testing.T) {
 	}
 
 	assert.LessOrEqual(t, proxy.challengeCount()-challenges, 12)
-	assert.Zero(t, m.backendFailures(t, "ondemand", "origin"))
+	assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 }
 
 func TestBearerPrefetchRefresh(t *testing.T) {
@@ -141,14 +141,14 @@ func TestBearerPrefetchRefresh(t *testing.T) {
 
 	assert.LessOrEqual(t, proxy.challengeCount(), 16)
 
-	if !assert.Zero(t, m.backendFailures(t, "prefetch", "origin")) {
+	if !assert.Zero(t, m.backendFailures(t, "prefetch", "http")) {
 		t.FailNow()
 	}
 	if !assert.NoError(t, m.read(t, image, "data/size/08392705")) {
 		t.FailNow()
 	}
 
-	assert.Zero(t, m.backendReads(t, "ondemand", "origin"))
+	assert.Zero(t, m.backendReads(t, "ondemand", "http"))
 }
 
 func TestTokenServiceError(t *testing.T) {
