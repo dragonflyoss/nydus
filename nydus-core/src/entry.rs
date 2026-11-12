@@ -186,19 +186,35 @@ impl Node {
             .collect()
     }
 
-    /// Read the whole file.
+    /// Read the whole file. One read of the reader returns less than 4GiB,
+    /// so a larger file takes more than one.
     pub fn read(&self) -> Result<Vec<u8>> {
         let inode = self.inode()?;
-        self.read_inode(&inode, 0, u32::MAX)
+        let mut data = self.read_inode(&inode, 0, u32::MAX)?;
+        while (data.len() as u64) < inode.size() {
+            let more = self.read_inode(&inode, data.len() as u64, u32::MAX)?;
+            if more.is_empty() {
+                return Err(Error::InvalidImage(format!(
+                    "file inode {} ends at {} of its {} bytes",
+                    self.ino,
+                    data.len(),
+                    inode.size()
+                )));
+            }
+            data.extend_from_slice(&more);
+        }
+        Ok(data)
     }
 
-    /// Read file data at `offset` into `buf`, returning bytes read.
+    /// Read file data at `offset` into `buf`, returning bytes read: fewer
+    /// than `buf` holds at the end of the file, or when `buf` is 4GiB or more.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
         let inode = self.inode()?;
-        let data = self.read_inode(&inode, offset, buf.len() as u32)?;
+        let size = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let data = self.read_inode(&inode, offset, size)?;
         let n = data.len();
         buf[..n].copy_from_slice(&data);
         Ok(n)
