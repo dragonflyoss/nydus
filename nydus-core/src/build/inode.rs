@@ -676,7 +676,7 @@ impl<'a, W: Write> TreeNode<FsBuildContext<'a, W>> for FsTreeNode {
             mtime: self.meta.mtime() as u64,
             mtime_nsec: self.meta.mtime_nsec() as u32,
             nlink: self.meta.nlink() as u32,
-            xattrs: read_xattrs_from_path(&self.path),
+            xattrs: read_xattrs_from_path(&self.path)?,
         })
     }
 
@@ -1174,23 +1174,39 @@ fn write_erofs_xattr_ibody(buf: &mut [u8], offset: usize, xattrs: &[XattrEntry])
 }
 
 /// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
-fn read_xattrs_from_path(path: &Path) -> Vec<XattrEntry> {
+///
+/// A filesystem without xattrs has none, and an attribute removed between the
+/// listing and its read is left out. Any other failure is returned: an image
+/// built without the capability or ACL of a file is not the source tree.
+fn read_xattrs_from_path(path: &Path) -> Result<Vec<XattrEntry>> {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(names) = xattr::list(path) else {
-        return Vec::new();
+    let names = match xattr::list(path) {
+        Ok(names) => names,
+        Err(err) if err.raw_os_error() == Some(libc::ENOTSUP) => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to list xattrs of {}", path.display()))
+        }
     };
 
-    let mut xattrs: Vec<XattrEntry> = names
-        .filter_map(|name| {
-            let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
-            XattrEntry::new(name.as_bytes(), value)
-        })
-        .collect();
+    let mut xattrs = Vec::new();
+    for name in names {
+        let Some(value) = xattr::get(path, &name).with_context(|| {
+            format!(
+                "failed to read xattr {} of {}",
+                name.to_string_lossy(),
+                path.display()
+            )
+        })?
+        else {
+            continue;
+        };
+        xattrs.extend(XattrEntry::new(name.as_bytes(), value));
+    }
     // listxattr returns attributes in whatever order the source filesystem
     // stored them, which is the order they were set in. Sorting keeps the
     // bootstrap identical for two trees that differ only in that order.
     xattrs.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
-    xattrs
+    Ok(xattrs)
 }
 
 #[cfg(test)]
@@ -1544,6 +1560,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn read_xattrs_from_path_fails_when_the_xattrs_cannot_be_listed() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, b"data").unwrap();
+
+        assert!(read_xattrs_from_path(&file).is_ok());
+        let err = read_xattrs_from_path(&directory.path().join("missing")).unwrap_err();
+        assert!(err.report().to_string().contains("failed to list xattrs"));
     }
 
     #[test]
