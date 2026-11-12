@@ -9,6 +9,7 @@ backend:
     addr: http://127.0.0.1:5000
     repository: library/nydus-demo
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
+    registry_token: bearer-token
     http:
       request_timeout: 30s
       max_retries: 5

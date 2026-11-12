@@ -1238,6 +1238,9 @@ Fields under `backend.config`:
 	`library/ubuntu`.
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
 	Omit for anonymous / token-only registries.
+- `registry_token` (optional): bearer token sent before any challenge, until
+	the registry answers `401`; the auth handshake then fetches a replacement,
+	with `auth` when set.
 - `http` (optional, defaults apply): the HTTP client settings of every
 	request to the origin registry — timeouts, retries, and TLS trust — the
 	reads a Dragonfly backend falls back to the origin with included.

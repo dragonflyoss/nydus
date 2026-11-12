@@ -95,23 +95,24 @@ impl FromStr for Challenge {
     }
 }
 
-/// The header value that answers a challenge, marked sensitive so request
-/// logs redact it.
+/// The header value that authorizes a request, the configured bearer token
+/// or the answer to a challenge, marked sensitive so request logs redact it.
 #[derive(Debug, Clone)]
 enum Authorization {
     /// The configured basic credentials, which never expire.
     Basic(HeaderValue),
 
-    /// A bearer token from the token server.
+    /// A bearer token, the configured one or one from the token server.
     Bearer {
         /// The `Bearer ...` header value.
         value: HeaderValue,
 
-        /// The instant the token was fetched.
+        /// The instant the token was configured or fetched.
         created_at: Instant,
 
-        /// The lifetime the token server gave the token.
-        expires_in: Duration,
+        /// The lifetime the token server gave the token, `None` for the
+        /// configured token, whose expiry is unknown.
+        expires_in: Option<Duration>,
     },
 }
 
@@ -126,8 +127,8 @@ impl Authorization {
     }
 
     /// Creates a bearer authorization for `token` that expires `expires_in`
-    /// from now.
-    fn bearer(token: &str, expires_in: Duration) -> io::Result<Self> {
+    /// from now, `None` keeping it until a `401` invalidates it.
+    fn bearer(token: &str, expires_in: Option<Duration>) -> io::Result<Self> {
         Ok(Self::Bearer {
             value: Self::header_value(&format!("Bearer {token}"))?,
             created_at: Instant::now(),
@@ -155,7 +156,7 @@ impl Authorization {
     }
 
     /// Returns whether the authorization is still valid, a bearer token until
-    /// the leeway before it expires.
+    /// the leeway before it expires when its expiry is known.
     fn is_valid(&self) -> bool {
         match self {
             Self::Basic(_) => true,
@@ -163,7 +164,8 @@ impl Authorization {
                 created_at,
                 expires_in,
                 ..
-            } => created_at.elapsed() + TOKEN_EXPIRY_LEEWAY < *expires_in,
+            } => expires_in
+                .is_none_or(|expires_in| created_at.elapsed() + TOKEN_EXPIRY_LEEWAY < expires_in),
         }
     }
 }
@@ -202,19 +204,23 @@ impl FetchTokenResponse {
 
         Authorization::bearer(
             &token,
-            self.expires_in
-                .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs),
+            Some(
+                self.expires_in
+                    .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs),
+            ),
         )
     }
 }
 
 /// The authentication state of one registry: the configured basic
-/// credentials and the answer to the last challenge.
+/// credentials and the authorization requests are sent with.
 pub(crate) struct Authorizer {
-    /// The configured credentials, `None` for an anonymous registry.
+    /// The configured basic credentials, `None` when the config has no `auth`.
     basic: Option<Authorization>,
 
-    /// The answer to the last challenge, kept until it expires.
+    /// The authorization requests are sent with: the configured bearer token
+    /// at first, then the answer to the last challenge, kept until it expires
+    /// or a `401` invalidates it.
     authorization: RwLock<Option<Authorization>>,
 
     /// The lock one handshake holds while it answers a challenge, so a burst
@@ -224,18 +230,28 @@ pub(crate) struct Authorizer {
 
 /// Implements the registry authorizer.
 impl Authorizer {
-    /// Creates an authorizer with the `base64(user:pass)` credentials `basic`,
-    /// validated here.
-    pub(crate) fn new(basic: Option<&str>) -> io::Result<Self> {
+    /// Creates an authorizer with the `base64(user:pass)` credentials `basic`
+    /// and the bearer token `bearer`, both validated here. `bearer` is sent
+    /// before any challenge, `basic` answers the challenge once a `401`
+    /// invalidates it.
+    pub(crate) fn new(basic: Option<&str>, bearer: Option<&str>) -> io::Result<Self> {
+        if bearer.is_some_and(|token| token.trim().is_empty()) {
+            return Err(io::Error::other("registry bearer token is empty"));
+        }
+
         Ok(Self {
             basic: basic.map(Authorization::basic).transpose()?,
-            authorization: RwLock::new(None),
+            authorization: RwLock::new(
+                bearer
+                    .map(|token| Authorization::bearer(token, None))
+                    .transpose()?,
+            ),
             handshake: tokio::sync::Mutex::new(()),
         })
     }
 
-    /// Adds the `Authorization` header to `headers` when a challenge has been
-    /// answered and the answer has not expired.
+    /// Adds the `Authorization` header to `headers` when the configured bearer
+    /// token or the answer to a challenge is kept and still valid.
     pub(crate) fn authorize(&self, headers: &mut HeaderMap) {
         if let Some(value) = self
             .authorization
@@ -402,11 +418,49 @@ mod tests {
 
     #[test]
     fn new_rejects_credentials_a_header_cannot_carry() {
-        let test_cases = vec![("YWxpY2U6c2VjcmV0", true), ("bad\nvalue", false)];
+        let test_cases = vec![
+            (Some("YWxpY2U6c2VjcmV0"), None, true),
+            (Some("bad\nvalue"), None, false),
+            (None, Some("xyz"), true),
+            (None, Some("bad\nvalue"), false),
+        ];
 
-        for (basic, ok) in test_cases {
-            assert_eq!(Authorizer::new(Some(basic)).is_ok(), ok);
+        for (basic, bearer, ok) in test_cases {
+            assert_eq!(Authorizer::new(basic, bearer).is_ok(), ok);
         }
+    }
+
+    #[test]
+    fn new_rejects_an_empty_bearer_token() {
+        let test_cases = vec!["", "   "];
+
+        for bearer in test_cases {
+            assert!(Authorizer::new(None, Some(bearer)).is_err());
+        }
+    }
+
+    #[test]
+    fn new_keeps_rejected_credentials_out_of_the_error() {
+        let test_cases = vec![(Some("secret\nvalue"), None), (None, Some("secret\nvalue"))];
+
+        for (basic, bearer) in test_cases {
+            let err = Authorizer::new(basic, bearer).err().unwrap();
+            assert!(!err.to_string().contains("secret"), "{err}");
+        }
+    }
+
+    #[test]
+    fn new_keeps_the_configured_bearer_token_until_it_is_invalidated() {
+        let authorizer = Authorizer::new(Some("YWxpY2U6c2VjcmV0"), Some("xyz")).unwrap();
+        let mut headers = HeaderMap::new();
+        authorizer.authorize(&mut headers);
+        assert_eq!(headers[AUTHORIZATION], "Bearer xyz");
+        assert!(headers[AUTHORIZATION].is_sensitive());
+
+        authorizer.invalidate(&HeaderValue::from_static("Bearer xyz"));
+        let mut headers = HeaderMap::new();
+        authorizer.authorize(&mut headers);
+        assert_eq!(headers.get(AUTHORIZATION), None);
     }
 
     #[test]
@@ -424,18 +478,25 @@ mod tests {
                 Some("Basic YWxpY2U6c2VjcmV0"),
             ),
             (
-                Authorization::bearer("xyz", Duration::from_secs(3600)).unwrap(),
+                Authorization::bearer("xyz", None).unwrap(),
                 Some("Bearer xyz"),
             ),
             (
-                Authorization::bearer("xyz", TOKEN_EXPIRY_LEEWAY).unwrap(),
+                Authorization::bearer("xyz", Some(Duration::from_secs(3600))).unwrap(),
+                Some("Bearer xyz"),
+            ),
+            (
+                Authorization::bearer("xyz", Some(TOKEN_EXPIRY_LEEWAY)).unwrap(),
                 None,
             ),
-            (Authorization::bearer("xyz", Duration::ZERO).unwrap(), None),
+            (
+                Authorization::bearer("xyz", Some(Duration::ZERO)).unwrap(),
+                None,
+            ),
         ];
 
         for (authorization, expected) in test_cases {
-            let authorizer = Authorizer::new(None).unwrap();
+            let authorizer = Authorizer::new(None, None).unwrap();
             let mut headers = HeaderMap::new();
             authorizer.authorize(&mut headers);
             assert_eq!(headers.get(AUTHORIZATION), None);
@@ -473,7 +534,7 @@ mod tests {
         ];
 
         for (basic, assert_fn) in test_cases {
-            let authorizer = Authorizer::new(basic).unwrap();
+            let authorizer = Authorizer::new(basic, None).unwrap();
             let result = authorizer.authenticate(&http, Challenge::Basic).await;
             let mut headers = HeaderMap::new();
             authorizer.authorize(&mut headers);
@@ -522,7 +583,7 @@ mod tests {
             Source::Origin,
         )
         .unwrap();
-        let authorizer = Authorizer::new(None).unwrap();
+        let authorizer = Authorizer::new(None, None).unwrap();
         let challenge = || Challenge::Bearer {
             realm: realm.clone(),
             service: String::new(),
@@ -544,9 +605,9 @@ mod tests {
 
     #[test]
     fn invalidate_forgets_only_the_answer_a_request_was_refused_with() {
-        let authorizer = Authorizer::new(None).unwrap();
+        let authorizer = Authorizer::new(None, None).unwrap();
         *authorizer.authorization.write().unwrap() =
-            Some(Authorization::bearer("fresh", Duration::from_secs(3600)).unwrap());
+            Some(Authorization::bearer("fresh", Some(Duration::from_secs(3600))).unwrap());
 
         authorizer.invalidate(&HeaderValue::from_static("Bearer stale"));
         let mut headers = HeaderMap::new();
