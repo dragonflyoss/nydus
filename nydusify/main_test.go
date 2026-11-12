@@ -107,6 +107,59 @@ func mockStallingRegistry(t *testing.T) (string, <-chan bool) {
 	return strings.TrimPrefix(server.URL, "http://"), abandoned
 }
 
+// mockSilentRegistry starts a registry that leaves every request unanswered,
+// creating the file at reached once the first one arrives. It returns its
+// host:port and a channel that reports, for each request, whether the client
+// gave it up.
+func mockSilentRegistry(t *testing.T, reached string) (string, <-chan bool) {
+	abandoned := make(chan bool, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := os.WriteFile(reached, nil, 0o600); err != nil {
+			t.Error(err)
+		}
+
+		select {
+		case <-r.Context().Done():
+			abandoned <- true
+		case <-time.After(5 * time.Second):
+			abandoned <- false
+		}
+
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+
+	return strings.TrimPrefix(server.URL, "http://"), abandoned
+}
+
+// mockBuilder writes a builder that turns each layer into a blob of nothing
+// but a valid footer, and runs the shell commands of merge as `nydus merge`.
+func mockBuilder(t *testing.T, merge string) string {
+	script := `#!/bin/sh
+command=$1
+blob=
+while [ $# -gt 0 ]; do
+	if [ "$1" = --blob ]; then blob=$2; fi
+	shift
+done
+case $command in
+build)
+	cat > /dev/null
+	{ printf 0123456789abcdef; printf NDFOOTER; head -c 64 /dev/zero; printf '\020'; head -c 4023 /dev/zero; } > "$blob"
+	;;
+merge)
+	` + merge + `
+	;;
+esac
+`
+	path := filepath.Join(t.TempDir(), "nydus")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
 func mockOCIImage(t *testing.T, reg *registrytest.Registry, repo, tag string, archs ...string) {
 	if len(archs) == 0 {
 		archs = []string{"amd64", "arm64"}
@@ -699,6 +752,31 @@ func TestRunConvert(t *testing.T) {
 				case gaveUp := <-abandoned:
 					assert.True(gaveUp)
 				case <-time.After(time.Second):
+				}
+			},
+		},
+		{
+			name: "failed conversion ends the blob uploads",
+			args: func(t *testing.T, reg *registrytest.Registry, dir string) []string {
+				reached := filepath.Join(dir, "reached")
+
+				var host string
+				host, abandoned = mockSilentRegistry(t, reached)
+
+				return []string{"--builder", mockBuilder(t, "while [ ! -e '"+reached+"' ]; do sleep 0.05; done; exit 1"), "--source", reg.Ref("oci", "v1"), "--target", host + "/nydus:v1"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "convert: ")
+				assert.ErrorContains(err, "nydus merge")
+
+				// The upload that reached the registry was given up, not left
+				// to run out.
+				select {
+				case gaveUp := <-abandoned:
+					assert.True(gaveUp)
+				case <-time.After(10 * time.Second):
+					assert.Fail("no blob upload reached the registry")
 				}
 			},
 		},

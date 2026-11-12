@@ -3223,7 +3223,10 @@ Pipeline (single image source):
    produce the overlaid bootstrap, which is written back as the final bootstrap
    layer (`internal/pipeline/hook.go`).
 4. Push the rewritten manifest and all new layers to `--target`
-   (`internal/remote`).
+   (`internal/remote`). Each layer blob is already uploaded as soon as it is
+   built, alongside the remaining conversions. Such an upload failing is only
+   logged, since this push uploads the blob again; a conversion that fails
+   stops the uploads still running.
 
 Pipeline (multiple and/or directory sources, `internal/pipeline/multi.go`):
 
