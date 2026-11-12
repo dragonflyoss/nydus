@@ -136,9 +136,7 @@ impl FanotifyCommand {
         )?;
 
         // Load the storage config and run the fanotify service until shutdown.
-        let result = Config::load(&self.config)
-            .map_err(Into::into)
-            .and_then(|config| self.run(signals, config));
+        let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
         crate::log_failure("fanotify", result)
     }
 

@@ -132,9 +132,7 @@ impl FileioCommand {
             self.console,
         )?;
 
-        let result = Config::load(&self.config)
-            .map_err(Into::into)
-            .and_then(|config| self.run(signals, config));
+        let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
         crate::log_failure("fileio", result)
     }
 
