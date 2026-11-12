@@ -1802,12 +1802,27 @@ impl BlobMetadata {
             )));
         }
 
+        // An entry names the chunk group holding the entry's first block. The
+        // lookup trusts it, so one naming another group would map reads onto
+        // a group that does not hold them, served as holes.
         for index in 0..self.chunk_group_indexes.len() {
             let chunk_group = self.chunk_group_indexes.get(&self.bytes, index).get();
             if chunk_group >= self.chunk_group_count {
                 return Err(Error::InvalidImage(format!(
                     "blob meta ChunkGroupIndexTable entry {index} names chunk group {chunk_group} of {}",
                     self.chunk_group_count
+                )));
+            }
+
+            let block = index as u64 * u64::from(self.blocks_per_chunk_group_index);
+            let chunk_group = chunk_group as usize;
+            let start = self.chunk_groups.get(&self.bytes, chunk_group);
+            let end = self.chunk_groups.get(&self.bytes, chunk_group + 1);
+            if block < u64::from(start.logical_block_offset)
+                || block >= u64::from(end.logical_block_offset)
+            {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta ChunkGroupIndexTable entry {index} names chunk group {chunk_group}, which does not hold block {block}"
                 )));
             }
         }
@@ -2606,6 +2621,11 @@ mod tests {
                 272,
                 5u32.to_le_bytes().to_vec(),
                 Err("blob meta ChunkGroupIndexTable entry 0 names chunk group 5 of 5"),
+            ),
+            (
+                272,
+                4u32.to_le_bytes().to_vec(),
+                Err("blob meta ChunkGroupIndexTable entry 0 names chunk group 4, which does not hold block 0"),
             ),
             (
                 394,
