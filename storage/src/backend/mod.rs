@@ -221,6 +221,31 @@ impl BackendError {
         false
     }
 
+    /// Returns true if the request found its connection shut down: the backend's filesystem was
+    /// unmounted, so every later request fails the same way and a retry only delays the error.
+    pub fn is_disconnected(&self) -> bool {
+        match self {
+            #[cfg(feature = "backend-registry")]
+            BackendError::Registry(self::registry::RegistryError::Request(
+                self::connection::ConnectionError::Disconnected,
+            )) => true,
+            #[cfg(feature = "backend-http-proxy")]
+            BackendError::HttpProxy(self::http_proxy::HttpProxyError::RemoteRequest(
+                self::connection::ConnectionError::Disconnected,
+            )) => true,
+            #[cfg(any(
+                feature = "backend-oss",
+                feature = "backend-registry",
+                feature = "backend-s3",
+                feature = "backend-http-proxy",
+            ))]
+            BackendError::Request(self::request::RequestError::Connection(
+                self::connection::ConnectionError::Disconnected,
+            )) => true,
+            _ => false,
+        }
+    }
+
     /// Returns true if this is a proxy SDK internal error.
     pub fn is_proxy_sdk_internal(&self) -> bool {
         #[cfg(all(
@@ -340,7 +365,11 @@ where
                 // 1. No remaining retry count
                 // 2. Proxy forbidden
                 // 3. Proxy limited + prefetch
-                if retry_count > 0 && !proxy_forbidden && !(proxy_limited && is_prefetch) {
+                // 4. A shut-down connection, which fails every retry too: retrying it only holds
+                //    the caller (and any lock it holds) through the QPS limiter's waits.
+                let final_error =
+                    proxy_forbidden || (proxy_limited && is_prefetch) || err.is_disconnected();
+                if retry_count > 0 && !final_error {
                     retry_count -= 1;
 
                     // Last retry or rate-limited on-demand: disable proxy, use QPS limiter
@@ -839,6 +868,27 @@ mod tests {
 
         assert_eq!(result.unwrap(), 99);
         assert_eq!(attempt, 3);
+    }
+
+    #[test]
+    #[cfg(feature = "backend-registry")]
+    fn test_retry_op_does_not_retry_a_shut_down_connection() {
+        let metrics = BackendMetrics::new("test-retry-disconnected", "test");
+        let mut ctx = BackendContext::default();
+
+        let mut attempt = 0;
+        let result: BackendResult<usize> = retry_op(&metrics, &mut ctx, 1024, |_ctx| {
+            attempt += 1;
+            Err(BackendError::Registry(
+                self::registry::RegistryError::Request(
+                    self::connection::ConnectionError::Disconnected,
+                ),
+            ))
+        });
+
+        assert!(result.unwrap_err().is_disconnected());
+        assert_eq!(attempt, 1);
+        assert!(!BackendError::Unsupported("test".to_string()).is_disconnected());
     }
 
     #[test]
