@@ -174,7 +174,7 @@ impl NbdCommand {
         // on top of it, so the daemon unmounts only while this holds: before
         // its mount, or after its own unmount, the path may carry a mount that
         // was there first.
-        let mounted = Arc::new(AtomicBool::new(false));
+        let owns_mount = Arc::new(AtomicBool::new(false));
 
         // Signal thread: the first termination signal performs the ordered
         // shutdown — unmount (if mounted) BEFORE `stop()` clears the socket,
@@ -183,14 +183,14 @@ impl NbdCommand {
         // A second signal forces immediate exit.
         let signal_service = service.clone();
         let signal_mountpoint = mountpoint.clone();
-        let signal_mounted = mounted.clone();
+        let signal_owns_mount = owns_mount.clone();
         let signal_thread = signal::spawn_signal_thread("nbd", signals, move || {
             if let Some(mp) = &signal_mountpoint {
-                if signal_mounted.swap(false, Ordering::SeqCst) {
+                if signal_owns_mount.swap(false, Ordering::SeqCst) {
                     if let Err(err) = unmount(mp, || {}) {
                         error!("{}", err.report());
                         // Still mounted: leave it to the attempt after the session.
-                        signal_mounted.store(true, Ordering::SeqCst);
+                        signal_owns_mount.store(true, Ordering::SeqCst);
                     }
                 }
             }
@@ -214,7 +214,7 @@ impl NbdCommand {
 
             match mounted {
                 Ok(()) => {
-                    mounted.store(true, Ordering::SeqCst);
+                    owns_mount.store(true, Ordering::SeqCst);
                     info!("mounted {device} at {}", mp.display());
                     // Block until the session ends (clean disconnect or `stop()`
                     // from the signal thread).
@@ -224,7 +224,7 @@ impl NbdCommand {
                     // The signal path already unmounted on a signal-driven
                     // shutdown; if the session self-exited the mount is still up
                     // over a dead device, so try a final best-effort umount.
-                    if mounted.swap(false, Ordering::SeqCst) {
+                    if owns_mount.swap(false, Ordering::SeqCst) {
                         if let Err(err) = umount2(&mp) {
                             debug!("post-join unmount of {}: {}", mp.display(), err.report());
                         }
