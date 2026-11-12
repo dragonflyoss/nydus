@@ -182,6 +182,7 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 	// mountpoint to become active. Keep its output buffered for startup errors;
 	// the check command itself owns the user-facing progress logs.
 	cmd := exec.Command(cmp.Or(r.builder, nydus.DefaultBuilder), args...)
+	nydus.DieWithParent(cmd)
 	var fuseLog bytes.Buffer
 	cmd.Stdout = &fuseLog
 	cmd.Stderr = &fuseLog

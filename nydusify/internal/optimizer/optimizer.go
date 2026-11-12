@@ -229,6 +229,7 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 		"--type", cmp.Or(o.opt.Type, nydus.DefaultOptimizeType),
 	}
 	cmd := exec.CommandContext(ctx, cmp.Or(o.opt.BuilderPath, nydus.DefaultBuilder), args...)
+	nydus.DieWithParent(cmd)
 	var output bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&output, os.Stderr)
 	cmd.Stderr = os.Stderr

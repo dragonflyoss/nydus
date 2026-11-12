@@ -195,6 +195,7 @@ func (m *Mounter) mountNydus(ctx context.Context, provider *remote.Provider, cs 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, cmp.Or(m.opt.BuilderPath, nydus.DefaultBuilder), args...)
+	nydus.DieWithParent(cmd)
 	cmd.Cancel = func() error { return cmd.Process.Signal(unix.SIGTERM) }
 	// Allow graceful unmounting, but do not wait forever for a stuck daemon.
 	cmd.WaitDelay = 5 * time.Second

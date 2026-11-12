@@ -3349,6 +3349,9 @@ Notes:
   directory is removed. A hangup is left ignored when the command was started
   that way (`nohup`), and `SIGQUIT` keeps the goroutine dump of the Go
   runtime.
+- On Linux the kernel sends `SIGTERM` to the `nydus` subprocesses once
+  `nydusify` itself is gone, so none is left behind, and a FUSE daemon
+  unmounts, when `nydusify` is killed outright (`SIGKILL`, the OOM killer).
 
 Examples:
 
