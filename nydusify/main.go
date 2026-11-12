@@ -196,14 +196,21 @@ func manifestAnnotationValues(c *cli.Context) []string {
 
 // setupCommand applies the --log-level flag and returns the logger-carrying
 // base context shared by every subcommand. The context is canceled on
-// SIGINT/SIGTERM so `nydus` subprocesses are terminated and deferred cleanups
-// (e.g. work dir removal) still run; the returned stop function releases the
-// signal registration and must be deferred by the caller.
+// SIGINT/SIGTERM/SIGHUP so `nydus` subprocesses are terminated and deferred
+// cleanups (e.g. work dir removal) still run; the returned stop function
+// releases the signal registration and must be deferred by the caller.
+// SIGQUIT keeps the goroutine dump of the Go runtime, which is what tells
+// where a hung command is stuck.
 func setupCommand(c *cli.Context) (context.Context, context.CancelFunc) {
 	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
 		logrus.SetLevel(level)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, unix.SIGTERM)
+	signals := []os.Signal{os.Interrupt, unix.SIGTERM}
+	// Listening for a hangup would take it from a command started with nohup.
+	if !signal.Ignored(unix.SIGHUP) {
+		signals = append(signals, unix.SIGHUP)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	return log.WithLogger(ctx, log.L), stop
 }
 
