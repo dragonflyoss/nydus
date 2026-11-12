@@ -13,7 +13,9 @@ use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor, BlobMetadataDiges
 use nydus_storage::cache::{self, BlobCache, BlobCaches, CacheOptions, LocalBlobCache};
 use nydus_test_utils::blob::uncompressed_data;
 use nydus_test_utils::fault::{Fault, FaultBackend, FaultRule};
-use nydus_test_utils::metadata::from_chunk_groups;
+use nydus_test_utils::metadata::{
+    from_chunk_groups, single_chunk_group, single_chunk_group_ondemand,
+};
 use tempfile::tempdir;
 
 const BLOB_ID: [u8; 32] = [0x5a; 32];
@@ -308,6 +310,36 @@ fn prefetch_open_waiting_on_the_backend_does_not_block_an_ondemand_open() {
     );
     assert!(start.elapsed() < delay / 2);
     assert!(Arc::ptr_eq(&prefetch.join().unwrap().unwrap(), &cached));
+}
+
+#[test]
+fn prefetch_of_an_ondemand_blob_tries_an_unopenable_source_blob_once() {
+    let payload = vec![0xabu8; 4096];
+    let (source_id, ondemand_id) = ([0x11; 32], [0x22; 32]);
+    let backend = Arc::new(
+        FaultBackend::in_memory()
+            .with_blob(source_id, payload.clone(), &single_chunk_group(&payload))
+            .with_blob(
+                ondemand_id,
+                payload.clone(),
+                &single_chunk_group_ondemand(&payload, 1),
+            ),
+    );
+    backend.inject(FaultRule::metadata(Fault::Error(io::ErrorKind::NotFound)).on_blob(source_id));
+    let cache_dir = tempdir().unwrap();
+    let caches = BlobCaches::new(
+        [(1, source_id), (2, ondemand_id)],
+        backend.clone(),
+        Some(cache_dir.path()),
+        None,
+        options(),
+    )
+    .unwrap();
+
+    caches.prefetch_blob(2, 1, Duration::ZERO).unwrap();
+
+    // The blob meta of the ondemand blob, and one attempt at its source's.
+    assert_eq!(backend.metadata_calls(), 2);
 }
 
 #[test]

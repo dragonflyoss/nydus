@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use prometheus::core::{Collector, Desc};
@@ -395,25 +395,39 @@ impl BlobCaches {
         filled: &AtomicU64,
         skipped: &AtomicU64,
     ) -> io::Result<(u64, u64)> {
+        // Each source blob is opened once for the stream, a failed open
+        // included: every group asks for its source several times, and a
+        // source that does not open would otherwise be tried, and warned
+        // about, for each of them.
+        type Source = Arc<OnceLock<Option<Arc<dyn BlobCache>>>>;
+        let sources: Mutex<HashMap<u16, Source>> = Mutex::new(HashMap::new());
         let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
-            let redirect = group.redirect()?;
-            match self.try_cache(redirect.source_blob_index(), ReadKind::Prefetch) {
-                Some(Ok(source)) => Some(source),
-                Some(Err(err)) => {
-                    warn!(
-                        "failed to open source blob {} of ondemand blob {blob_index}: {err}",
-                        redirect.source_blob_index()
-                    );
-                    None
-                }
-                None => {
-                    warn!(
-                        "ondemand blob {blob_index} redirects to unknown blob {}",
-                        redirect.source_blob_index()
-                    );
-                    None
-                }
-            }
+            let source_blob_index = group.redirect()?.source_blob_index();
+            let source = sources
+                .lock()
+                .unwrap()
+                .entry(source_blob_index)
+                .or_default()
+                .clone();
+            source
+                .get_or_init(
+                    || match self.try_cache(source_blob_index, ReadKind::Prefetch) {
+                        Some(Ok(source)) => Some(source),
+                        Some(Err(err)) => {
+                            warn!(
+                                "failed to open source blob {source_blob_index} of ondemand blob {blob_index}: {err}"
+                            );
+                            None
+                        }
+                        None => {
+                            warn!(
+                                "ondemand blob {blob_index} redirects to unknown blob {source_blob_index}"
+                            );
+                            None
+                        }
+                    },
+                )
+                .clone()
         };
         let skip = |group: &BlobMetadataChunkGroupExtent| -> bool {
             match (group.redirect(), source_of(group)) {
