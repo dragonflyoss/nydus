@@ -10,6 +10,8 @@
 //! baked in by its build script — the CLI version flag parser built on them,
 //! and the binary's default directories.
 
+mod redacted;
+
 use nydus_error::{Context, Error, Result};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
@@ -20,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use url::Url;
 use validator::{Validate, ValidationError, ValidationErrors};
+
+pub use redacted::RedactedString;
 
 /// The name of the package.
 pub const NAME: &str = "nydus";
@@ -185,31 +189,6 @@ impl fmt::Display for ReadKind {
     }
 }
 
-/// A credential whose `Debug` output hides the value.
-#[derive(Clone, Deserialize)]
-#[serde(transparent)]
-pub struct Secret(String);
-
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<redacted>")
-    }
-}
-
-impl std::ops::Deref for Secret {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for Secret {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
 /// The registry backend configuration, serving blobs from an OCI image
 /// registry.
 #[derive(Debug, Clone, Validate, Deserialize)]
@@ -226,13 +205,13 @@ pub struct RegistryConfig {
     /// The optional credentials: base64-encoded `username:password` for HTTP
     /// Basic auth (the value sent verbatim after `Basic `).
     #[serde(default)]
-    pub auth: Option<Secret>,
+    pub auth: Option<RedactedString>,
 
     /// The optional bearer token (the value sent verbatim after `Bearer `),
     /// sent before any challenge until the registry answers `401`. Keep
     /// `auth` to fetch a replacement once the token expires.
     #[serde(default)]
-    pub registry_token: Option<Secret>,
+    pub registry_token: Option<RedactedString>,
 
     /// The HTTP client configuration of requests to the origin registry:
     /// timeouts, retries, and TLS trust. Every origin request goes through
@@ -693,14 +672,20 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains("basic-secret"));
         assert!(!debug.contains("provided-secret"));
-        assert!(debug.contains("auth: Some(<redacted>)"));
-        assert!(debug.contains("registry_token: Some(<redacted>)"));
-        assert_eq!(format!("{:?}", config.auth), "Some(<redacted>)");
-        assert_eq!(format!("{:?}", config.registry_token), "Some(<redacted>)");
+        assert!(debug.contains("auth: Some([REDACTED])"));
+        assert!(debug.contains("registry_token: Some([REDACTED])"));
+        assert_eq!(format!("{:?}", config.auth), "Some([REDACTED])");
+        assert_eq!(format!("{:?}", config.registry_token), "Some([REDACTED])");
         assert!(debug.contains("registry.example"));
         assert!(debug.contains("library/ubuntu"));
-        assert_eq!(config.auth.as_deref(), Some("basic-secret"));
-        assert_eq!(config.registry_token.as_deref(), Some("provided-secret"));
+        assert_eq!(
+            config.auth.as_ref().map(RedactedString::expose),
+            Some("basic-secret")
+        );
+        assert_eq!(
+            config.registry_token.as_ref().map(RedactedString::expose),
+            Some("provided-secret")
+        );
     }
 
     #[cfg(feature = "dragonfly")]
@@ -715,10 +700,13 @@ mod tests {
         assert_eq!(registry.addr.as_str(), "http://127.0.0.1:5000/");
         assert_eq!(registry.repository, "library/nydus-demo");
         assert_eq!(
-            registry.auth.as_deref(),
+            registry.auth.as_ref().map(RedactedString::expose),
             Some("dGVzdHVzZXI6dGVzdHBhc3N3b3Jk")
         );
-        assert_eq!(registry.registry_token.as_deref(), Some("bearer-token"));
+        assert_eq!(
+            registry.registry_token.as_ref().map(RedactedString::expose),
+            Some("bearer-token")
+        );
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert_eq!(
@@ -792,8 +780,14 @@ config:
         };
         assert_eq!(registry.addr.as_str(), "http://127.0.0.1:5000/");
         assert_eq!(registry.repository, "library/ubuntu");
-        assert_eq!(registry.auth.as_deref(), Some("YWxpY2U6c2VjcmV0"));
-        assert_eq!(registry.registry_token.as_deref(), Some("bearer-token"));
+        assert_eq!(
+            registry.auth.as_ref().map(RedactedString::expose),
+            Some("YWxpY2U6c2VjcmV0")
+        );
+        assert_eq!(
+            registry.registry_token.as_ref().map(RedactedString::expose),
+            Some("bearer-token")
+        );
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
         assert_eq!(registry.http.max_retries, 5);
         assert!(registry.http.tls.skip_verify);
