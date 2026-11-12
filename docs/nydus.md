@@ -1458,7 +1458,9 @@ Cache (`nydus_cache_*`):
 	(corruption in transit or at rest); `decode`, it did not decompress to
 	its declared size, or on a `redirect` fill the redirect points past its
 	source blob's chunk groups (a stale optimize artifact); `io`, the cache
-	file refused the write; and on the `redirect` fills `unknown_source`,
+	file refused the write, a full disk for one, in which case a FUSE read is
+	still served from the backend, uncached, while the frontends that hand
+	the cache file to the kernel fail the read; and on the `redirect` fills `unknown_source`,
 	the redirect names a blob the image does not have. Normally zero. Summing `type="ondemand"` across the instances sharing a
 	cache directory shows how much duplicate fetching they do. After an
 	optimized mount's prefetch quiesces,
