@@ -3328,6 +3328,11 @@ Notes:
   `500`, `502`, `503` or `504` answer while resolving, pulling or pushing. A
   layer download that is tried again resumes after the bytes already stored.
   The pulls of `check`, `mount` and `optimize` behave the same.
+- A registry or token server that sends nothing for five minutes, while the
+  response headers or more of a download are awaited, fails the request with a
+  timeout, which is retried as above. The time of a whole transfer is not
+  limited. Uploads are not watched, since a registry may take minutes to answer
+  the commit of a large blob.
 
 Examples:
 
