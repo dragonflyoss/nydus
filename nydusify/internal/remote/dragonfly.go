@@ -30,12 +30,14 @@ type getter interface {
 // The SDK is used as nydus fuse's on-demand reads use it (nydus-backend's
 // registry/dragonfly.rs): requests are sent at Level6, the SDK's default
 // priority, and a transient failure is retried once on the next seed peer
-// after a jittered exponential backoff. The per-attempt timeout stays at the
-// SDK default of ten minutes, since a request here fetches a whole layer
-// rather than one chunk group.
+// after a jittered exponential backoff. The SDK's per-attempt timeout also
+// ends the response body, which here is a whole layer rather than one chunk
+// group, so it is set beyond any download and a silent seed peer is given up
+// by the stall timeout instead.
 const (
-	dragonflyPriority   = int32(commonv2.Priority_LEVEL6)
-	dragonflyMaxRetries = 1
+	dragonflyPriority       = int32(commonv2.Priority_LEVEL6)
+	dragonflyMaxRetries     = 1
+	dragonflyRequestTimeout = 24 * time.Hour
 )
 
 var (
@@ -112,20 +114,11 @@ func newResponse(req *http.Request, status int, header http.Header, body io.Read
 // error carrying a definitive HTTP status, are returned as a response so the
 // registry client settles it as usual, e.g. a 401 auth challenge or a 404. Any
 // other failure is returned as an error and sends the caller back to the
-// origin: a timeout, a connection failure, or a 5xx, 408 or 429.
+// origin: a timeout, a connection failure, or a 5xx, 408 or 429. So does a
+// seed peer that sends nothing for the stall timeout.
 func (t *dragonflyTransport) get(req *http.Request) (*http.Response, error) {
 	start := time.Now()
-	resp, err := t.getter.Get(req.Context(), request.NewGetRequest(req.URL.String(),
-		request.WithGetRequestHeader(req.Header),
-		request.WithGetRequestPriority(dragonflyPriority),
-	))
-	var out *http.Response
-	if err == nil {
-		out = newResponse(req, resp.StatusCode, resp.Header, resp.Body, -1)
-	} else if status, header, message, ok := definitiveAnswer(err); ok {
-		out, err = newResponse(req, status, header, io.NopCloser(bytes.NewReader(message)), int64(len(message))), nil
-	}
-
+	out, err := stallTransport{base: roundTripFunc(t.send), timeout: stallTimeout}.RoundTrip(req)
 	if err != nil {
 		logrus.Debugf("GET %s through dragonfly failed in %v: %v", req.URL, time.Since(start), err)
 		return nil, err
@@ -133,6 +126,27 @@ func (t *dragonflyTransport) get(req *http.Request) (*http.Response, error) {
 	logrus.Debugf("GET %s through dragonfly returned %d in %v", req.URL, out.StatusCode, time.Since(start))
 	return out, nil
 }
+
+// send asks the SDK for the URL of req.
+func (t *dragonflyTransport) send(req *http.Request) (*http.Response, error) {
+	resp, err := t.getter.Get(req.Context(), request.NewGetRequest(req.URL.String(),
+		request.WithGetRequestHeader(req.Header),
+		request.WithGetRequestPriority(dragonflyPriority),
+		request.WithGetRequestTimeout(dragonflyRequestTimeout),
+	))
+	if err == nil {
+		return newResponse(req, resp.StatusCode, resp.Header, resp.Body, -1), nil
+	}
+	if status, header, message, ok := definitiveAnswer(err); ok {
+		return newResponse(req, status, header, io.NopCloser(bytes.NewReader(message)), int64(len(message))), nil
+	}
+	return nil, err
+}
+
+// roundTripFunc makes a function an http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // definitiveAnswer extracts the HTTP answer of an SDK error, unless it marks
 // a transient failure (5xx, 408, 429) or carries no status at all.
