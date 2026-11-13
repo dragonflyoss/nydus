@@ -12,9 +12,10 @@ use tracing_subscriber::{
     EnvFilter, Registry,
 };
 
-/// Lines queued per appender before the writer thread drains them. The
-/// crate default of 128k lines pins about 4 MiB per appender at startup.
-const QUEUED_LOG_LINES: usize = 8192;
+/// Lines queued per appender before the writer thread drains them. The queue
+/// is allocated and written whole at startup, 40 bytes a line: the crate
+/// default of 128k lines pins 5 MiB per appender.
+const QUEUED_LOG_LINES: usize = 1024;
 
 fn non_blocking<T: Write + Send + 'static>(writer: T) -> (NonBlocking, WorkerGuard) {
     NonBlockingBuilder::default()

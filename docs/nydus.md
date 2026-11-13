@@ -220,11 +220,19 @@ their sockets:
 
 | Pool | Size | Lifetime and work |
 | ---- | ---- | ----------------- |
-| Async workers | Tokio's default, one per CPU | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Async workers | One per CPU, at most 4 | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
 | Blocking workers | Tokio's default | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`) and released when idle. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
-Every registry backend runs on a runtime of its own with tokio's default
-thread counts, the way dragonfly-client builds its runtimes.
+Every registry backend runs on a runtime of its own. Its async workers only
+drive sockets and timers, so they are capped at 4 rather than tokio's one per
+CPU, which would grow with the host and add a stack and allocator state per
+thread; the blocking pool keeps tokio's default.
+A range read streams: the runtime hands the body to the caller piece by piece
+through a channel at most 8 pieces deep, from the origin and the Dragonfly
+seed peers alike, so the caller decodes and caches chunk groups as they arrive
+instead of holding the whole range. A body that breaks off is asked for again
+from the first byte still missing, at most twice, each request going through
+the transport's usual retries and fallback.
 `nydus_backend::Backend::new(config, prefetch, netns, metrics)` takes an
 optional network namespace every runtime thread enters, so an embedder's
 registry sockets are created in it regardless of the caller's, and the
@@ -1110,7 +1118,7 @@ backend:
 storage:
   dir: /var/lib/nydus/cache
 prefetch:
-  concurrent_blob_count: 10
+  concurrent_blob_count: 4
   scope: auto
 ```
 
@@ -1161,8 +1169,12 @@ Fields:
 	is independent of the image's `--chunk-size`: the same image serves every
 	fetch size. See [Bootstrap plus blob-dir mount](#bootstrap-plus-blob-dir-mount)
 	for the trade-off.
-- `prefetch.concurrent_blob_count` (default `10`) caps how many blobs are
-	prefetched concurrently.
+- `prefetch.concurrent_blob_count` (default `4`) caps how many blobs are
+	prefetched concurrently. Every worker holds the chunk group it is
+	decoding, so the count bounds prefetch memory as well.
+- `prefetch.batch_size` (default `2097152`, 2 MiB) is how many compressed
+	bytes one prefetch backend read covers, whole chunk groups back to back,
+	independent of `storage.fetch_size`; `0` reads group by group.
 - `prefetch.request_timeout` (default `1h`, greater than `0s`) bounds how
 	long prefetching one whole blob may take, while `http.request_timeout`
 	bounds each backend request within it. A blob that exceeds it is aborted
@@ -2383,10 +2395,11 @@ A miss does not fetch its group alone. The cache splits the **compressed**
 data region into cells of `storage.fetch_size` bytes (default 2 MiB) and,
 on a miss, issues one range read for every group whose compressed range
 overlaps the missed group's cell — trimmed at groups that are already cached
-or already being fetched — then decodes each group as it comes and publishes
-it. The fetch size is a runtime choice, independent of the image's chunk
-size; groups tile the data region back to back, so a fetch is always one
-contiguous range, and because it is measured in compressed bytes it bounds
+or already being fetched — then streams it, decoding and publishing each
+group as soon as its bytes are in, before the next one arrives. The fetch
+size is a runtime choice, independent of the image's chunk size; groups
+tile the data region back to back, so a fetch is always one contiguous
+range, and because it is measured in compressed bytes it bounds
 the transfer rather than the decoded span. The fetch size sets the
 request/byte trade-off: the blobs compress several-fold, so a fetch of `W`
 compressed bytes decodes to a multiple of `W` in the cache, and every extra
@@ -2396,7 +2409,8 @@ links; smaller fetches transfer fewer unused bytes and help on
 bandwidth-bound links and small disks. The 2 MiB default takes about a third
 of the requests off the previous chunk-group format for a moderate byte and
 cache cost, where 4 MiB roughly doubles the cache. Deployments that are short
-on bandwidth or disk should lower `fetch_size`; latency-bound ones can
+on bandwidth or disk should lower `fetch_size`, down to `0` over Dragonfly
+seed peers, where a request costs about a millisecond; latency-bound ones can
 raise it. Optimized images (see [Optimize](#optimize)) sidestep the trade-off:
 their ondemand blob is prefetched whole into the source caches, so the fetch
 size only governs the residual misses.
@@ -2408,29 +2422,50 @@ read and `nydus optimize` copies exactly those (see [Optimize](#optimize)).
 External blob reads always go through the blob_meta-aware cache abstraction;
 the runtime never reads external blob data by direct mmap offsets.
 
-On-demand and diskless group reads own their temporary input/output buffers.
-Buffers of at least 1 MiB use private anonymous mappings, which are unmapped
-when the buffer owner is dropped instead of remaining in allocator arenas.
-On Linux, mappings of at least 2 MiB also receive a best-effort transparent
-huge-page hint to reduce page faults during decoding. This neither requires
-reserved huge pages nor changes system-wide settings; allocation still works
-if the kernel cannot provide huge pages. The mapping lifetime is unchanged.
-Smaller buffers use ordinary vectors. Zstandard decodes directly into the
-declared-size output slice, and an unexpected decoded length remains an error.
-This changes temporary memory management, not the persistent data cache or
-fetch concurrency. Prefetch workers continue to reuse their fetch buffers.
+On-demand, prefetch and diskless group reads own their temporary buffers,
+one chunk group at a time. Buffers of at least 64 KiB use private anonymous
+mappings, which are unmapped when the buffer owner is dropped: their sizes
+follow the chunk groups and vary at random, and in the allocator's heap they
+would leave many partly used pages behind. Smaller buffers use ordinary
+vectors. A Zstandard group is decompressed as its bytes arrive from the
+network, straight into its declared-size output buffer, which doubles as the
+decoder's window, so its compressed bytes are never gathered; an unexpected
+decoded length remains an error. Stored-plain and LZ4 groups are gathered
+whole first, LZ4 block data having no streaming form. The decoded payload
+itself is still held until it is validated and written: the group's CRC32C
+covers it whole, and a fill may race another fill of the same group, so
+partial bytes are never written over the cache. Zstandard decompression
+contexts (about 100 KiB of tables, plus a block-sized input buffer for a
+streamed frame) are reused across groups, with at most two kept between
+uses. Prefetch workers take fresh buffers for every batch. This changes
+temporary memory management, not the persistent data cache or fetch
+concurrency.
 
-Three further measures keep the idle footprint of a mount service small. The
-standalone bootstrap is mapped with a read-ahead hint (`MADV_WILLNEED`) rather
-than pre-faulted, so the whole file is pulled into the page cache but only the
-metadata actually touched counts toward RSS. The asynchronous log writers queue
-at most 8192 lines each instead of the crate default of 128k, which alone
-pinned about 4 MiB per appender. On glibc, the `nydus` binary caps malloc at
-two arenas and fixes the mmap threshold at 512 KiB (trim threshold 1 MiB) for
-the long-running services only; build, check, merge, export and optimize keep
-the allocator defaults. Explicit `MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_`,
-`MALLOC_TRIM_THRESHOLD_` or `GLIBC_TUNABLES` in the environment disable this
-built-in tuning.
+Further measures keep the footprint of a mount service small. The standalone
+bootstrap is mapped with a read-ahead hint (`MADV_WILLNEED`) rather than
+pre-faulted, so the whole file is pulled into the page cache but only the
+metadata actually touched counts toward RSS. Blob meta sidecars in the cache
+directory are mapped the same way rather than read into memory. The
+asynchronous log writers queue at most 1024 lines each instead of the crate default of 128k: a queue
+is allocated and written whole at startup, 40 bytes a line. The `nydus`
+binary allocates with mimalloc, tuned for the long-running services only,
+from an `.init_array` constructor that runs before the first allocation (the
+runtime and the argument parser allocate before `main`, and mimalloc reserves
+its first arena under the settings of that moment): transparent huge pages
+are disabled for the process (`PR_SET_THP_DISABLE`),
+freed pages go back to the OS at once (`purge_delay` 0), objects over 4 MiB
+are mapped from the OS (`arena_max_object_size`), arenas are reserved
+64 MiB at a time (`arena_reserve`), and a backend runtime thread that runs
+out of work takes back the blocks its readers freed, full pages included,
+at most every 20 ms, rather than only when it allocates again. A `MIMALLOC_ALLOW_THP`,
+`MIMALLOC_PURGE_DELAY`, `MIMALLOC_ARENA_MAX_OBJECT_SIZE` or
+`MIMALLOC_ARENA_RESERVE` in the environment takes precedence over the
+matching setting. On glibc, the `nydus` binary also caps C malloc at two
+arenas and fixes its mmap threshold at 512 KiB (trim threshold 1 MiB) for
+the long-running services; build, check, merge, export and optimize keep the
+allocator defaults. Explicit `MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_`,
+`MALLOC_TRIM_THRESHOLD_` or `GLIBC_TUNABLES` in the environment disable that
+tuning.
 
 The local backend opens source blob files lazily when read IO is first issued and
 caches the file descriptor for later `pread` calls. The persistent local cache
@@ -2502,20 +2537,24 @@ turns it on); the config's `prefetch` block also sizes the worker pool. See
 Per-blob prefetch streams chunk groups into the cache:
 
 - Prefetch reads the data region in batches of consecutive chunk groups
-	whose compressed bytes add up to `storage.fetch_size` (default 2 MiB),
-	so prefetch and on-demand reads issue backend requests of the same size;
-	a zero fetch size reads group by group.
-- For each batch it issues a single contiguous backend range read, then
-	decodes each contained chunk group (plain copy, zstd or LZ4), validates
-	the group's length and CRC32C, writes the decoded bytes to the cache file
-	at the chunks' padded blocks, and marks the group ready in the group map.
+	whose compressed bytes add up to `prefetch.batch_size` (default 2 MiB),
+	independent of the on-demand `storage.fetch_size`; a zero batch size
+	reads group by group.
+- For each batch it issues a single contiguous backend range read and
+	streams it: as soon as a chunk group's bytes are in, it decodes the group
+	(plain copy, zstd or LZ4; zstd as its bytes arrive), validates its
+	length and CRC32C, writes the
+	decoded bytes to the cache file at the chunks' padded blocks and marks
+	the group ready in the group map, before the next group arrives. A worker
+	thus holds one group, not the batch, and frees its buffers after every
+	batch.
 - A priority blob's batches are fetched by up to
-	`prefetch.concurrent_blob_count` workers (default 10), handed out in blob
+	`prefetch.concurrent_blob_count` workers (default 4), handed out in blob
 	order; the first batches are single groups (a "ramp") so the head of an
 	ondemand blob — the workload's first reads — lands within one round trip
 	while the rest streams in full batches. Blobs pulled by the phase-2 pool
 	use one worker each.
-- Prefetch uses its own decode buffer and takes no group locks. The group map
+- Prefetch uses its own decode buffers and takes no group locks. The group map
 	bits are updated atomically and `set_ready` is idempotent, so racing with a
 	FUSE read at worst decodes the same group twice into identical bytes at the
 	same offset. This keeps prefetch fully decoupled from, and non-blocking to,
@@ -2542,7 +2581,7 @@ way a classic nydusd mount would. The resolution is logged.
         filled in their caches are trimmed off their batches.
 2. Only when `prefetch.scope` is `all`, the remaining blob devices are then
         prefetched concurrently by a worker pool sized to
-        `min(prefetch.concurrent_blob_count, remaining)` (default `10`). Under
+        `min(prefetch.concurrent_blob_count, remaining)` (default `4`). Under
         `ondemand` and `auto` a pool of the same size instead opens every blob's
         cache (fetches and validates the blob metas, creates the sparse files)
         without pulling data, priority blobs first and running alongside phase 1

@@ -140,3 +140,7 @@ prefetch:
   # `auto` (default) behaves like `ondemand` when the image has an ondemand
   # blob and like `all` otherwise.
   scope: auto
+  # Compressed bytes one prefetch backend read covers, whole chunk groups
+  # back to back, independent of `storage.fetch_size`. 0 reads group by
+  # group. Default: 2097152 (2 MiB).
+  # batch_size: 2097152

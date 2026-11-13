@@ -7,6 +7,84 @@ use nydus_config::{default_log_dir, VersionValueParser, NAME};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// A mimalloc option the mount services change.
+struct MiOption {
+    /// Its entry in mimalloc v3's `mi_option_t`; the bindings name no
+    /// constants for these.
+    id: libmimalloc_sys::mi_option_t,
+
+    /// mimalloc's own default, which proves `id` still names the option
+    /// before it is changed.
+    default: std::ffi::c_long,
+
+    /// The environment variable that takes precedence.
+    env: &'static std::ffi::CStr,
+
+    /// The value of the mount services.
+    value: std::ffi::c_long,
+}
+
+/// The mimalloc options of the mount services, whose memory comes in bursts
+/// of chunk group buffers and network pieces.
+const DAEMON_MI_OPTIONS: [MiOption; 3] = [
+    // `purge_delay` (ms): freed pages go back to the OS at once rather than
+    // a second later, which kept a burst resident long after it was gone.
+    MiOption {
+        id: 15,
+        default: 1000,
+        env: c"MIMALLOC_PURGE_DELAY",
+        value: 0,
+    },
+    // `arena_max_object_size` (KiB): objects over 4 MiB, mimalloc's largest
+    // page, are mapped from the OS instead of carved from an arena. fuser
+    // zeroes a 16 MiB request buffer per FUSE thread, and mimalloc writes
+    // those zeros over arena memory it cannot prove clean, making the whole
+    // buffer resident; fresh OS pages are zero and stay untouched.
+    MiOption {
+        id: 45,
+        default: 2 * 1024 * 1024,
+        env: c"MIMALLOC_ARENA_MAX_OBJECT_SIZE",
+        value: 4 * 1024,
+    },
+    // `arena_reserve` (KiB): arenas of 64 MiB rather than 1 GiB. An arena
+    // keeps 120 bytes of page metadata per 64 KiB slice, and as pages come
+    // and go across a 1 GiB arena up to 2 MiB of it becomes resident; more
+    // arenas are added, each larger, as the heap grows.
+    MiOption {
+        id: 23,
+        default: 1024 * 1024,
+        env: c"MIMALLOC_ARENA_RESERVE",
+        value: 64 * 1024,
+    },
+];
+
+/// How long a backend runtime thread waits between two [`collect_freed_blocks`].
+const COLLECT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Has mimalloc take back into this thread's pages the blocks other threads
+/// have freed, full pages included, and release the pages left empty: run by
+/// a backend runtime thread each time it runs out of work, as the readers it
+/// fed free its network buffers. A plain collection skips full pages, whose
+/// network buffers the readers free last. A thread runs out of work every few milliseconds while
+/// it streams, and a collection costs a few microseconds, so it collects at
+/// most once per [`COLLECT_INTERVAL`].
+fn collect_freed_blocks() {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<std::time::Instant>> =
+            const { std::cell::Cell::new(None) };
+    }
+    let now = std::time::Instant::now();
+    if LAST
+        .get()
+        .is_some_and(|last| now.duration_since(last) < COLLECT_INTERVAL)
+    {
+        return;
+    }
+    LAST.set(Some(now));
+    // SAFETY: mi_collect only works on the calling thread's heap.
+    unsafe { libmimalloc_sys::mi_collect(true) }
+}
+
 pub use nydus::api_server;
 pub mod build;
 pub mod check;
@@ -205,12 +283,84 @@ impl Command {
     }
 }
 
+/// The subcommands that run a long-lived mount service, see
+/// [`Command::is_daemon`].
+const DAEMON_COMMANDS: [&[u8]; 6] = [b"fuse", b"ublk", b"uffd", b"fanotify", b"nbd", b"fileio"];
+
+/// The subcommands that run once and exit.
+#[cfg(test)]
+const ONESHOT_COMMANDS: [&str; 6] = ["build", "repack", "export", "check", "merge", "optimize"];
+
+/// The subcommand of a NUL-separated command line: its first argument that
+/// is not a flag.
+fn subcommand_of(cmdline: &[u8]) -> Option<&[u8]> {
+    cmdline
+        .split(|byte| *byte == 0)
+        .skip(1)
+        .find(|arg| !arg.is_empty() && !arg.starts_with(b"-"))
+}
+
+/// Whether this process runs a mount service, read from
+/// `/proc/self/cmdline` without allocating.
+#[cfg(target_os = "linux")]
+fn invoked_as_daemon() -> bool {
+    let mut cmdline = [0u8; 4096];
+    // SAFETY: plain syscalls on a stack buffer of the length given.
+    let len = unsafe {
+        let fd = libc::open(
+            c"/proc/self/cmdline".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        );
+        if fd < 0 {
+            return false;
+        }
+        let len = libc::read(fd, cmdline.as_mut_ptr().cast(), cmdline.len());
+        libc::close(fd);
+        len
+    };
+    usize::try_from(len)
+        .ok()
+        .and_then(|len| subcommand_of(&cmdline[..len]))
+        .is_some_and(|name| DAEMON_COMMANDS.contains(&name))
+}
+
+/// Tunes the allocator of a mount service before anything allocates: the
+/// runtime and the argument parser allocate before `main` could, and the first
+/// allocation reserves mimalloc's first arena under the settings of the
+/// moment. Applied later, transparent huge pages would already back the
+/// arena's metadata (2 MiB resident where they are `always` on) and the arena
+/// would already be 1 GiB. Runs from `.init_array`, ahead of constructors
+/// without a priority, and must not allocate.
+#[cfg(target_os = "linux")]
+extern "C" fn tune_before_first_allocation() {
+    if invoked_as_daemon() {
+        disable_transparent_huge_pages();
+        tune_mimalloc();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[used]
+#[link_section = ".init_array.00099"]
+static TUNE_BEFORE_FIRST_ALLOCATION: extern "C" fn() = tune_before_first_allocation;
+
+/// Whether the environment variable `name` is set, without allocating.
+fn env_is_set(name: &std::ffi::CStr) -> bool {
+    // SAFETY: getenv reads the environment; nothing here changes it.
+    unsafe { !libc::getenv(name.as_ptr()).is_null() }
+}
+
 fn main() -> std::process::ExitCode {
     // Parse command line arguments.
     let args = Args::parse();
 
     if args.command.is_daemon() {
         tune_daemon_allocator();
+        // Already done before the first allocation; these find the settings
+        // in place and only matter where that hook could not run.
+        disable_transparent_huge_pages();
+        tune_mimalloc();
+        nydus_backend::set_runtime_idle_hook(collect_freed_blocks);
     }
 
     // Execute the command.
@@ -283,6 +433,44 @@ fn tune_daemon_allocator() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn tune_daemon_allocator() {}
 
+/// Keeps the kernel from backing the mount services with transparent huge
+/// pages: where they are `always` on, a huge page makes a whole 2 MiB resident
+/// for a few small allocations or the head of a chunk group buffer, roughly
+/// doubling the daemon's anonymous memory. An explicit `MIMALLOC_ALLOW_THP`
+/// takes precedence.
+#[cfg(target_os = "linux")]
+fn disable_transparent_huge_pages() {
+    if env_is_set(c"MIMALLOC_ALLOW_THP") {
+        return;
+    }
+    // SAFETY: PR_SET_THP_DISABLE only sets a flag of this process; a kernel
+    // without it fails the call, which leaves huge pages as they were.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disable_transparent_huge_pages() {}
+
+/// Applies [`DAEMON_MI_OPTIONS`] in the mount services, each unless its
+/// environment variable is set. Must run before other threads exist, as
+/// mimalloc options are not thread safe, and does not allocate.
+fn tune_mimalloc() {
+    for option in &DAEMON_MI_OPTIONS {
+        if env_is_set(option.env) {
+            continue;
+        }
+        // SAFETY: no other thread runs yet, and an option is only changed
+        // while it holds mimalloc's own default, so the id names it.
+        unsafe {
+            if libmimalloc_sys::mi_option_get(option.id) == option.default {
+                libmimalloc_sys::mi_option_set(option.id, option.value);
+            }
+        }
+    }
+}
+
 /// Returns the default worker parallelism: the available CPU count clamped to
 /// `[min, max]`.
 pub fn default_parallelism(min: usize, max: usize) -> usize {
@@ -290,4 +478,63 @@ pub fn default_parallelism(min: usize, max: usize) -> usize {
         .map(|n| n.get())
         .unwrap_or(min)
         .clamp(min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_subcommand_is_either_a_daemon_or_oneshot() {
+        use clap::CommandFactory;
+        // Subcommands behind features are absent from other builds.
+        for command in Args::command().get_subcommands() {
+            let name = command.get_name();
+            assert!(
+                DAEMON_COMMANDS.contains(&name.as_bytes()) != ONESHOT_COMMANDS.contains(&name),
+                "classify subcommand {name} in DAEMON_COMMANDS or ONESHOT_COMMANDS"
+            );
+        }
+    }
+
+    #[test]
+    fn the_subcommand_is_the_first_argument_that_is_not_a_flag() {
+        assert_eq!(
+            subcommand_of(b"nydus\0fuse\0--bootstrap\0b\0"),
+            Some(&b"fuse"[..])
+        );
+        assert_eq!(
+            subcommand_of(b"/bin/nydus\0-V\0build\0dir\0"),
+            Some(&b"build"[..])
+        );
+        assert_eq!(subcommand_of(b"nydus\0"), None);
+        assert_eq!(subcommand_of(b"nydus"), None);
+        assert_eq!(subcommand_of(b""), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transparent_huge_pages_are_disabled_for_the_process() {
+        if env_is_set(c"MIMALLOC_ALLOW_THP") {
+            return;
+        }
+        disable_transparent_huge_pages();
+        // SAFETY: PR_GET_THP_DISABLE only reads a flag of this process.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
+            1
+        );
+    }
+
+    #[test]
+    fn daemon_mimalloc_option_ids_name_their_options() {
+        for option in &DAEMON_MI_OPTIONS {
+            if env_is_set(option.env) {
+                continue;
+            }
+            // SAFETY: reading an option has no preconditions.
+            let value = unsafe { libmimalloc_sys::mi_option_get(option.id) };
+            assert_eq!(value, option.default, "{:?}", option.env);
+        }
+    }
 }

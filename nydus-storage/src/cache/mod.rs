@@ -10,14 +10,20 @@ use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use nydus_config::StorageConfig;
+use nydus_backend::{Backend, ReadKind};
+use nydus_config::{Config, StorageConfig};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent, BlobMetadataCompressor};
+use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::WriteFailureReason;
 
 /// Default on-demand fetch size: the compressed bytes one backend read
 /// covers around a missed chunk group (see [`CacheOptions::fetch_size`]).
 /// 2 MiB.
 pub const DEFAULT_FETCH_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Default prefetch batch size: the compressed bytes one prefetch backend
+/// read covers (see [`CacheOptions::prefetch_batch_size`]). 2 MiB.
+pub const DEFAULT_PREFETCH_BATCH_SIZE: u64 = 2 * 1024 * 1024;
 
 /// The options of the blob caches of one image, the `storage` section of
 /// its configuration. Every image carries its own, so two images in one
@@ -33,24 +39,43 @@ pub struct CacheOptions {
     /// chunk group, extended to whole groups and trimmed at groups already
     /// cached or in flight. Zero fetches the missed group alone.
     pub fetch_size: u64,
+
+    /// Compressed bytes one prefetch backend read covers, whole groups of a
+    /// blob or an ondemand blob back to back; zero reads group by group.
+    pub prefetch_batch_size: u64,
 }
 
-/// Implements the default options: checksums verified, 2 MiB fetches.
+/// Implements the default options: checksums verified, 2 MiB on-demand
+/// fetches and prefetch batches.
 impl Default for CacheOptions {
     fn default() -> Self {
         Self {
             skip_verify_checksums: false,
             fetch_size: DEFAULT_FETCH_SIZE,
+            prefetch_batch_size: DEFAULT_PREFETCH_BATCH_SIZE,
         }
     }
 }
 
-/// Implements the conversion from the `storage` section of a configuration.
+/// Implements the conversion from the `storage` section of a configuration,
+/// the prefetch batch size left at its default.
 impl From<&StorageConfig> for CacheOptions {
     fn from(storage: &StorageConfig) -> Self {
         Self {
             skip_verify_checksums: storage.skip_verify_checksums,
             fetch_size: storage.fetch_size,
+            ..Self::default()
+        }
+    }
+}
+
+/// Implements the conversion from the `storage` and `prefetch` sections of
+/// a configuration.
+impl From<&Config> for CacheOptions {
+    fn from(config: &Config) -> Self {
+        Self {
+            prefetch_batch_size: config.prefetch.batch_size,
+            ..Self::from(&config.storage)
         }
     }
 }
@@ -316,7 +341,9 @@ pub fn decode_chunk_group_from_window<'a>(
     Ok(payload)
 }
 
-/// Job-owned fetch buffers. Large allocations are unmapped when the job ends.
+/// Job-owned buffers of one chunk group at a time: the encoded bytes of a
+/// group that arrived split across network pieces, and its decoded payload.
+/// Large allocations are unmapped when the job ends.
 #[derive(Default)]
 pub struct ChunkGroupBuffers {
     encoded: ChunkGroupBuffer,
@@ -324,40 +351,36 @@ pub struct ChunkGroupBuffers {
 }
 
 impl ChunkGroupBuffers {
-    /// Both buffers sized to `encoded_len` and `decoded_len`, borrowed
-    /// together so a caller can decode from one into the other.
-    pub(crate) fn resize_pair(
-        &mut self,
-        encoded_len: usize,
-        decoded_len: usize,
-    ) -> io::Result<(&mut [u8], &mut [u8])> {
-        let encoded = self.encoded.resize(encoded_len)?;
-        let decoded = self.decoded.resize(decoded_len)?;
-        Ok((encoded, decoded))
+    /// Both buffers, borrowed together so a caller can stream into one and
+    /// decode into the other.
+    pub(crate) fn split(&mut self) -> (&mut ChunkGroupBuffer, &mut ChunkGroupBuffer) {
+        (&mut self.encoded, &mut self.decoded)
     }
 }
 
-/// Large transient buffers bypass heap arenas and advise huge pages on Linux.
+/// Large transient buffers bypass heap arenas. They are never advised onto
+/// huge pages: a buffer touches only the group in hand, and a huge page would
+/// make the whole 2 MiB resident for it.
 #[derive(Default)]
-struct ChunkGroupBuffer {
+pub(crate) struct ChunkGroupBuffer {
     heap: Vec<u8>,
     mapping: Option<memmap2::MmapMut>,
 }
 
+/// Buffers of this many bytes or more are mapped from the OS and unmapped
+/// when dropped. Their sizes follow the chunk groups and vary at random; in
+/// the heap they would leave many partly used allocator pages behind.
+const MAPPED_BUFFER_SIZE: usize = 64 * 1024;
+
 impl ChunkGroupBuffer {
     fn resize(&mut self, len: usize) -> io::Result<&mut [u8]> {
-        if len >= 1024 * 1024 {
+        if len >= MAPPED_BUFFER_SIZE {
             if self
                 .mapping
                 .as_ref()
                 .is_none_or(|mapping| mapping.len() < len)
             {
-                let mapping = memmap2::MmapMut::map_anon(len)?;
-                #[cfg(target_os = "linux")]
-                if len >= 2 * 1024 * 1024 {
-                    let _ = mapping.advise(memmap2::Advice::HugePage);
-                }
-                self.mapping = Some(mapping);
+                self.mapping = Some(memmap2::MmapMut::map_anon(len)?);
             }
             self.heap = Vec::new();
             Ok(&mut self.mapping.as_mut().expect("mapping allocated above")[..len])
@@ -376,6 +399,332 @@ impl ChunkGroupBuffer {
             None => &self.heap[..len],
         }
     }
+
+    /// The first `len` bytes, writable, where `len` is at most the size
+    /// given to the last [`Self::resize`].
+    fn bytes_mut(&mut self, len: usize) -> &mut [u8] {
+        match &mut self.mapping {
+            Some(mapping) => &mut mapping[..len],
+            None => &mut self.heap[..len],
+        }
+    }
+}
+
+/// What [`stream_chunk_groups`] hands each wanted group to: the group and
+/// its validated payload, or why it could not be decoded. An error it returns
+/// stops the stream.
+pub(crate) type OnChunkGroup<'a> =
+    dyn FnMut(&BlobMetadataChunkGroupExtent, io::Result<&[u8]>) -> io::Result<()> + 'a;
+
+/// How [`stream_chunk_groups`] takes in the group in hand.
+enum Intake {
+    /// Not wanted: its bytes are skipped over.
+    Skip,
+    /// Gathered whole, then decoded: a stored-plain group, or an LZ4 block,
+    /// whose format cannot be decoded piecemeal.
+    Gather,
+    /// A zstd frame, decompressed straight into the decoded buffer as its
+    /// bytes arrive, `done` once the frame has ended.
+    Stream { done: bool },
+    /// Failed part way; the error is handed on with the group's last byte.
+    Failed(io::Error),
+}
+
+/// Streams the consecutive chunk groups `groups` of a blob from `backend` in
+/// one `kind` range read, handing each group `wanted` accepts to `on_group`
+/// as soon as its last byte is in: its validated payload, or why it could
+/// not be decoded. A zstd group is decompressed into `buffers` as its bytes
+/// arrive, so its compressed bytes are never held; a stored-plain or LZ4
+/// group is borrowed from the network piece that carried it whole, or
+/// gathered in `buffers` when it came split. A reader thus holds one group
+/// at a time rather than the range, and has decoded and cached a group
+/// before the next comes in. A group not wanted is skipped over without a
+/// copy. The crc32c check is skipped when `skip_verify_checksums`. Returns
+/// the bytes read.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stream_chunk_groups(
+    backend: &dyn Backend,
+    blob_id: &[u8; SHA256_DIGEST_SIZE],
+    blob_metadata: &BlobMetadata,
+    groups: Range<usize>,
+    kind: ReadKind,
+    buffers: &mut ChunkGroupBuffers,
+    skip_verify_checksums: bool,
+    wanted: &dyn Fn(usize) -> bool,
+    on_group: &mut OnChunkGroup<'_>,
+) -> io::Result<u64> {
+    if groups.is_empty() {
+        return Ok(0);
+    }
+    let extent = |index: usize| {
+        blob_metadata
+            .chunk_group(index)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blob chunk group not found"))
+    };
+    let base = extent(groups.start)?.compressed_offset();
+    let end = extent(groups.end - 1)?.compressed_range().end;
+    let (scratch, decoded) = buffers.split();
+    let mut zstd: Option<ZstdContext> = None;
+
+    // The group the next byte belongs to or precedes, how much of it is in,
+    // how it is taken in, and how much of a streamed one is decoded.
+    let mut next = groups.start;
+    let mut group = extent(next)?;
+    let mut want = wanted(next);
+    let mut gathered = 0usize;
+    let mut intake = Intake::Skip;
+    let mut decoded_len = 0usize;
+    let mut pos = base;
+    backend.read_range_with(blob_id, base, end - base, kind, &mut |mut piece| {
+        while !piece.is_empty() {
+            if next == groups.end {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "blob range read past its last chunk group",
+                ));
+            }
+            let start = group.compressed_offset();
+            if pos < start {
+                let gap = ((start - pos) as usize).min(piece.len());
+                piece = &piece[gap..];
+                pos += gap as u64;
+                continue;
+            }
+
+            let size = group.compressed_size() as usize;
+            let take = (size - gathered).min(piece.len());
+            let bytes = &piece[..take];
+            let whole = gathered == 0 && take == size;
+            if gathered == 0 {
+                decoded_len = 0;
+                intake = if !want {
+                    Intake::Skip
+                } else if group.is_uncompressed(blob_metadata)
+                    || blob_metadata.compressor() != BlobMetadataCompressor::Zstd
+                {
+                    Intake::Gather
+                } else {
+                    match start_zstd_group(&mut zstd, decoded, &group) {
+                        Ok(()) => Intake::Stream { done: false },
+                        Err(err) => Intake::Failed(err),
+                    }
+                };
+            }
+            match &mut intake {
+                Intake::Skip | Intake::Failed(_) => {}
+                Intake::Gather if whole => {}
+                Intake::Gather => {
+                    if gathered == 0 {
+                        scratch.resize(size)?;
+                    }
+                    scratch.bytes_mut(size)[gathered..gathered + take].copy_from_slice(bytes);
+                }
+                Intake::Stream { done } => {
+                    let dctx = zstd.as_mut().expect("context taken at the group start");
+                    let out = decoded.bytes_mut(group.uncompressed_size() as usize);
+                    if let Err(err) =
+                        feed_zstd_group(dctx.get(), out, &mut decoded_len, bytes, done)
+                    {
+                        intake = Intake::Failed(err);
+                    }
+                }
+            }
+            gathered += take;
+            piece = &piece[take..];
+            pos += take as u64;
+
+            if gathered == size {
+                match std::mem::replace(&mut intake, Intake::Skip) {
+                    Intake::Skip => {}
+                    Intake::Failed(err) => on_group(&group, Err(err))?,
+                    Intake::Gather => {
+                        let encoded = if whole { bytes } else { scratch.bytes(size) };
+                        let payload = decode_chunk_group(
+                            blob_metadata,
+                            &group,
+                            encoded,
+                            decoded,
+                            skip_verify_checksums,
+                        );
+                        on_group(&group, payload)?;
+                    }
+                    Intake::Stream { done } => {
+                        let len = group.uncompressed_size() as usize;
+                        let payload = if done && decoded_len == len {
+                            let payload = decoded.bytes(len);
+                            validate_decoded_chunk_group(&group, payload, skip_verify_checksums)
+                                .map(|()| payload)
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "zstd chunk group decompressed to an unexpected size",
+                            ))
+                        };
+                        on_group(&group, payload)?;
+                    }
+                }
+                next += 1;
+                gathered = 0;
+                if next < groups.end {
+                    group = extent(next)?;
+                    want = wanted(next);
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    if next != groups.end {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("blob range read ended before chunk group {next}"),
+        ));
+    }
+    Ok(end - base)
+}
+
+/// Make `decoded` the size of zstd `group`'s payload and start a frame on
+/// the stream's context, taken on its first zstd group.
+fn start_zstd_group(
+    zstd: &mut Option<ZstdContext>,
+    decoded: &mut ChunkGroupBuffer,
+    group: &BlobMetadataChunkGroupExtent,
+) -> io::Result<()> {
+    decoded.resize(group.uncompressed_size() as usize)?;
+    if zstd.is_none() {
+        *zstd = Some(ZstdContext::take()?);
+    }
+    let dctx = zstd.as_mut().expect("context taken above").get();
+    dctx.reset(zstd::zstd_safe::ResetDirective::SessionOnly)
+        .map_err(zstd_error)?;
+    Ok(())
+}
+
+/// Decompress the next `input` bytes of a zstd group into `out`, of which
+/// the first `decoded` bytes are already in. `out` is the same buffer on
+/// every call of a frame: the context decodes into it in place, its window,
+/// rather than into a buffer of its own.
+fn feed_zstd_group(
+    dctx: &mut zstd::zstd_safe::DCtx<'static>,
+    out: &mut [u8],
+    decoded: &mut usize,
+    input: &[u8],
+    done: &mut bool,
+) -> io::Result<()> {
+    let mut input = zstd::zstd_safe::InBuffer::around(input);
+    while input.pos < input.src.len() {
+        if *done {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zstd chunk group carries bytes past its frame",
+            ));
+        }
+        let consumed = input.pos;
+        let mut output = zstd::zstd_safe::OutBuffer::around_pos(&mut *out, *decoded);
+        let hint = dctx
+            .decompress_stream(&mut output, &mut input)
+            .map_err(zstd_error)?;
+        let progressed = output.pos() != *decoded || input.pos != consumed;
+        *decoded = output.pos();
+        if hint == 0 {
+            *done = true;
+        } else if !progressed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zstd chunk group decompresses past its declared size",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn zstd_error(code: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        zstd::zstd_safe::get_error_name(code),
+    )
+}
+
+/// zstd decompression contexts kept for the next chunk group. Creating one
+/// allocates and initializes about 100 KiB of tables, and a streaming one
+/// adds a block-sized input buffer, so a few are kept instead of one per
+/// group; a few rather than one per thread, so idle FUSE and prefetch
+/// threads do not each pin one.
+const KEPT_ZSTD_CONTEXTS: usize = 2;
+
+static ZSTD_CONTEXTS: std::sync::Mutex<Vec<zstd::zstd_safe::DCtx<'static>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// A zstd decompression context taken from the kept ones or created, set up
+/// to decode a streamed frame straight into its output buffer, and kept again
+/// when dropped while fewer than [`KEPT_ZSTD_CONTEXTS`] are.
+struct ZstdContext(Option<zstd::zstd_safe::DCtx<'static>>);
+
+impl ZstdContext {
+    fn take() -> io::Result<Self> {
+        let kept = ZSTD_CONTEXTS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .pop();
+        let dctx = match kept {
+            Some(dctx) => dctx,
+            None => {
+                let mut dctx = zstd::zstd_safe::DCtx::try_create().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::OutOfMemory, "cannot create a zstd context")
+                })?;
+                // The output of a streamed frame is the whole payload buffer,
+                // so the context decodes into it and keeps no window of its
+                // own.
+                dctx.set_parameter(zstd::zstd_safe::DParameter::StableOutBuffer(true))
+                    .map_err(zstd_error)?;
+                dctx
+            }
+        };
+        Ok(Self(Some(dctx)))
+    }
+
+    fn get(&mut self) -> &mut zstd::zstd_safe::DCtx<'static> {
+        self.0.as_mut().expect("present until dropped")
+    }
+}
+
+impl Drop for ZstdContext {
+    fn drop(&mut self) {
+        let Some(mut dctx) = self.0.take() else {
+            return;
+        };
+        if dctx
+            .reset(zstd::zstd_safe::ResetDirective::SessionOnly)
+            .is_err()
+        {
+            return;
+        }
+        let mut kept = ZSTD_CONTEXTS.lock().unwrap_or_else(|err| err.into_inner());
+        if kept.len() < KEPT_ZSTD_CONTEXTS {
+            kept.push(dctx);
+        }
+    }
+}
+
+/// Decodes and validates the encoded bytes of `group`: a stored-plain group
+/// is its own payload, a compressed one decodes into `decoded`. The crc32c
+/// check is skipped when `skip_verify_checksums`.
+pub(crate) fn decode_chunk_group<'a>(
+    blob_metadata: &BlobMetadata,
+    group: &BlobMetadataChunkGroupExtent,
+    encoded: &'a [u8],
+    decoded: &'a mut ChunkGroupBuffer,
+    skip_verify_checksums: bool,
+) -> io::Result<&'a [u8]> {
+    let payload: &[u8] = if group.is_uncompressed(blob_metadata) {
+        encoded
+    } else {
+        let out = decoded.resize(group.uncompressed_size() as usize)?;
+        decode_chunk_group_into(blob_metadata.compressor(), encoded, out)?;
+        out
+    };
+    validate_decoded_chunk_group(group, payload, skip_verify_checksums)?;
+    Ok(payload)
 }
 
 /// Read `[offset, offset + len)` through `cache.read_at` into a per-thread
@@ -412,9 +761,10 @@ pub(crate) fn decode_chunk_group_into(
     let decoded_len = decoded.len();
     match compressor {
         BlobMetadataCompressor::Zstd => {
-            let written = zstd::bulk::Decompressor::new()
-                .and_then(|mut decoder| decoder.decompress_to_buffer(encoded, decoded))
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            let written = ZstdContext::take()?
+                .get()
+                .decompress(decoded, encoded)
+                .map_err(zstd_error)?;
             if written != decoded_len {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -594,6 +944,10 @@ mod tests {
         assert!(buffer.resize(0).unwrap().is_empty());
         buffer.resize(4096).unwrap().fill(1);
         assert!(buffer.mapping.is_none());
+        buffer.resize(MAPPED_BUFFER_SIZE - 1).unwrap();
+        assert!(buffer.mapping.is_none());
+        buffer.resize(MAPPED_BUFFER_SIZE).unwrap();
+        assert!(buffer.mapping.is_some());
         let large = buffer.resize(2 * 1024 * 1024).unwrap();
         assert!(large.iter().all(|byte| *byte == 0));
         large.fill(2);
@@ -779,6 +1133,205 @@ mod tests {
             inflate_decoded_chunk_group(&metadata, &group1, payload1).unwrap(),
             image[3 * 4096..]
         );
+    }
+
+    /// A backend streaming an in-memory data region in pieces of `piece`
+    /// bytes, recording the ranges read.
+    struct Pieces {
+        data: Vec<u8>,
+        piece: usize,
+        ranges: std::sync::Mutex<Vec<Range<u64>>>,
+        metrics: std::sync::Arc<nydus_telemetry::metrics::Metrics>,
+    }
+
+    impl Pieces {
+        fn new(data: Vec<u8>, piece: usize) -> Self {
+            Self {
+                data,
+                piece,
+                ranges: Default::default(),
+                metrics: Default::default(),
+            }
+        }
+    }
+
+    impl Backend for Pieces {
+        fn metrics(&self) -> &std::sync::Arc<nydus_telemetry::metrics::Metrics> {
+            &self.metrics
+        }
+
+        fn read_blob_metadata(&self, _: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
+            unimplemented!()
+        }
+
+        fn read_range_into(
+            &self,
+            _: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            buf: &mut [u8],
+        ) -> io::Result<()> {
+            buf.copy_from_slice(&self.data[offset as usize..offset as usize + buf.len()]);
+            Ok(())
+        }
+
+        fn read_range_with(
+            &self,
+            _: &[u8; SHA256_DIGEST_SIZE],
+            offset: u64,
+            len: u64,
+            _: ReadKind,
+            sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+        ) -> io::Result<()> {
+            self.ranges.lock().unwrap().push(offset..offset + len);
+            let end = (offset + len).min(self.data.len() as u64) as usize;
+            for piece in self.data[offset as usize..end].chunks(self.piece) {
+                sink(piece)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Every wanted group with what it decoded to.
+    type Seen = Vec<(usize, io::Result<Vec<u8>>)>;
+
+    /// Stream groups `range` of `data` in pieces of `piece` bytes, wanting
+    /// all but `skipped`, and collect what every wanted group decoded to.
+    fn stream_all(
+        data: &[u8],
+        metadata: &BlobMetadata,
+        range: Range<usize>,
+        piece: usize,
+        skipped: usize,
+    ) -> (u64, Seen) {
+        let backend = Pieces::new(data.to_vec(), piece);
+        let mut seen = Vec::new();
+        let read = stream_chunk_groups(
+            &backend,
+            &[0; SHA256_DIGEST_SIZE],
+            metadata,
+            range,
+            ReadKind::Prefetch,
+            &mut ChunkGroupBuffers::default(),
+            false,
+            &|index| index != skipped,
+            &mut |group, payload| {
+                seen.push((group.index() as usize, payload.map(<[u8]>::to_vec)));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(backend.ranges.lock().unwrap().len(), 1);
+        (read, seen)
+    }
+
+    #[test]
+    fn stream_chunk_groups_hands_on_each_wanted_group_as_it_arrives() {
+        let groups: Vec<Vec<Vec<u8>>> = (0..5u8)
+            .map(|i| vec![(0..9000u32).map(|n| (n % 251) as u8 ^ i).collect()])
+            .collect();
+        // Pieces smaller than a group stream or gather it, larger ones carry
+        // it whole; either way every wanted group arrives once, decoded, in
+        // order, and the unwanted one is skipped.
+        for compressor in [
+            BlobMetadataCompressor::Zstd,
+            BlobMetadataCompressor::Lz4Block,
+            BlobMetadataCompressor::None,
+        ] {
+            let (data, metadata) = from_chunk_groups(compressor, 16384, &groups, None);
+            for piece in [1, 7, 512, 1 << 20] {
+                let (read, seen) = stream_all(&data, &metadata, 1..5, piece, 3);
+                let start = metadata.chunk_group(1).unwrap().compressed_offset();
+                let end = metadata.chunk_group(4).unwrap().compressed_range().end;
+                assert_eq!(read, end - start, "{compressor:?} {piece}");
+                let seen: Vec<_> = seen
+                    .into_iter()
+                    .map(|(index, payload)| (index, payload.unwrap()))
+                    .collect();
+                assert_eq!(
+                    seen,
+                    [1, 2, 4]
+                        .map(|index| (index, groups[index].concat()))
+                        .to_vec(),
+                    "{compressor:?} {piece}"
+                );
+            }
+        }
+        assert!(ZSTD_CONTEXTS.lock().unwrap().len() <= KEPT_ZSTD_CONTEXTS);
+    }
+
+    #[test]
+    fn stream_chunk_groups_hands_on_a_corrupt_zstd_group_as_an_error() {
+        let groups: Vec<Vec<Vec<u8>>> = (0..3u8)
+            .map(|i| vec![(0..9000u32).map(|n| (n % 251) as u8 ^ i).collect()])
+            .collect();
+        let (data, metadata) =
+            from_chunk_groups(BlobMetadataCompressor::Zstd, 16384, &groups, None);
+        let group = metadata.chunk_group(1).unwrap();
+        assert!(!group.is_uncompressed(&metadata));
+        let middle = (group.compressed_offset() + group.compressed_size() as u64 / 2) as usize;
+        let last = group.compressed_range().end as usize - 1;
+
+        // A corrupt frame fails its own group only, whether zstd notices
+        // within the frame or the payload then fails its length or crc32c.
+        for at in [group.compressed_offset() as usize, middle, last] {
+            let mut corrupt = data.clone();
+            corrupt[at] ^= 0x55;
+            for piece in [3, 1 << 20] {
+                let (_, seen) = stream_all(&corrupt, &metadata, 0..3, piece, usize::MAX);
+                assert_eq!(seen.len(), 3, "{at} {piece}");
+                assert_eq!(seen[0].1.as_deref().unwrap(), groups[0].concat());
+                let err = seen[1].1.as_ref().unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{at} {piece}");
+                assert_eq!(seen[2].1.as_deref().unwrap(), groups[2].concat());
+            }
+        }
+    }
+
+    #[test]
+    fn stream_chunk_groups_stops_on_a_group_error_and_a_short_range() {
+        let groups: Vec<Vec<Vec<u8>>> = (0..3u8).map(|i| vec![vec![i; 4096]]).collect();
+        let (data, metadata) = from_chunk_groups(BlobMetadataCompressor::None, 4096, &groups, None);
+
+        let backend = Pieces::new(data.clone(), 1000);
+        let mut calls = 0;
+        let err = stream_chunk_groups(
+            &backend,
+            &[0; SHA256_DIGEST_SIZE],
+            &metadata,
+            0..3,
+            ReadKind::Ondemand,
+            &mut ChunkGroupBuffers::default(),
+            false,
+            &|_| true,
+            &mut |_, _| {
+                calls += 1;
+                Err(io::Error::new(io::ErrorKind::InvalidData, "bad group"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(calls, 1);
+
+        let backend = Pieces::new(data[..2 * 4096 + 100].to_vec(), 1000);
+        let mut seen = 0;
+        let err = stream_chunk_groups(
+            &backend,
+            &[0; SHA256_DIGEST_SIZE],
+            &metadata,
+            0..3,
+            ReadKind::Ondemand,
+            &mut ChunkGroupBuffers::default(),
+            false,
+            &|_| true,
+            &mut |_, payload| {
+                payload?;
+                seen += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(seen, 2);
     }
 
     #[test]

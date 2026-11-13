@@ -9,7 +9,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use bytes::BytesMut;
+use futures::{StreamExt, TryStreamExt};
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use reqwest::StatusCode;
@@ -19,7 +19,7 @@ use tracing::{debug, error, warn};
 use dragonfly_api::common::v2::Priority;
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
 use dragonfly_client_request::{
-    ExponentialBuilder, GetRequest, ProxyWithSeedPeers, RequestWithSeedPeers as _,
+    ExponentialBuilder, GetRequest, GetResponse, ProxyWithSeedPeers, RequestWithSeedPeers as _,
 };
 
 use nydus_config::{BackendConfig, Config};
@@ -125,6 +125,59 @@ impl Dragonfly {
     }
 }
 
+/// Converts what the SDK answered into a response, its body still streaming:
+/// an error carrying a status is an answer like any other, whose message is
+/// the body.
+fn into_response(result: dragonfly_client_request::Result<GetResponse>) -> io::Result<Response> {
+    match result {
+        Ok(response) => Ok(Response {
+            status: response.status_code.unwrap_or(StatusCode::OK),
+            headers: response.header,
+            body: match response.body {
+                Some(body) => Body::Stream(
+                    body.map_err(|err| io::Error::other(format!("dragonfly body: {err}")))
+                        .boxed(),
+                ),
+                None => Body::Bytes(Default::default()),
+            },
+            source: Source::Dragonfly,
+        }),
+        Err(Error::ProxyError(ProxyError {
+            status_code: Some(status),
+            header,
+            message,
+        }))
+        | Err(Error::BackendError(BackendError {
+            status_code: Some(status),
+            header,
+            message,
+        }))
+        | Err(Error::DfdaemonError(DfdaemonError {
+            status_code: Some(status),
+            header,
+            message,
+        })) => Ok(Response {
+            status,
+            headers: header
+                .into_iter()
+                .filter_map(|(name, value)| {
+                    Some((
+                        HeaderName::from_bytes(name.as_bytes()).ok()?,
+                        HeaderValue::from_str(&value).ok()?,
+                    ))
+                })
+                .collect(),
+            body: Body::Bytes(message.unwrap_or_default().into()),
+            source: Source::Dragonfly,
+        }),
+        Err(Error::RequestTimeout(message)) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("dragonfly request timed out: {message}"),
+        )),
+        Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
+    }
+}
+
 /// Implements the blob transport over the Dragonfly SDK.
 #[async_trait]
 impl Transport for Dragonfly {
@@ -145,48 +198,7 @@ impl Transport for Dragonfly {
         };
 
         let start = Instant::now();
-        let mut body = BytesMut::new();
-        let result = match client.get_into(&request, &mut body).await {
-            Ok(response) => Ok(Response {
-                status: response.status_code.unwrap_or(StatusCode::OK),
-                headers: response.header,
-                body: Body::Bytes(body.freeze()),
-                source: Source::Dragonfly,
-            }),
-            Err(Error::ProxyError(ProxyError {
-                status_code: Some(status),
-                header,
-                message,
-            }))
-            | Err(Error::BackendError(BackendError {
-                status_code: Some(status),
-                header,
-                message,
-            }))
-            | Err(Error::DfdaemonError(DfdaemonError {
-                status_code: Some(status),
-                header,
-                message,
-            })) => Ok(Response {
-                status,
-                headers: header
-                    .into_iter()
-                    .filter_map(|(name, value)| {
-                        Some((
-                            HeaderName::from_bytes(name.as_bytes()).ok()?,
-                            HeaderValue::from_str(&value).ok()?,
-                        ))
-                    })
-                    .collect(),
-                body: Body::Bytes(message.unwrap_or_default().into()),
-                source: Source::Dragonfly,
-            }),
-            Err(Error::RequestTimeout(message)) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("dragonfly request timed out: {message}"),
-            )),
-            Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
-        };
+        let result = into_response(client.get(&request).await);
 
         // Fall back to the origin on an answer outside the range.
         let range = headers
@@ -239,48 +251,7 @@ impl Transport for Dragonfly {
         let mut retried = false;
         loop {
             let start = Instant::now();
-            let mut body = BytesMut::new();
-            let result = match client.get_into(&request, &mut body).await {
-                Ok(response) => Ok(Response {
-                    status: response.status_code.unwrap_or(StatusCode::OK),
-                    headers: response.header,
-                    body: Body::Bytes(body.freeze()),
-                    source: Source::Dragonfly,
-                }),
-                Err(Error::ProxyError(ProxyError {
-                    status_code: Some(status),
-                    header,
-                    message,
-                }))
-                | Err(Error::BackendError(BackendError {
-                    status_code: Some(status),
-                    header,
-                    message,
-                }))
-                | Err(Error::DfdaemonError(DfdaemonError {
-                    status_code: Some(status),
-                    header,
-                    message,
-                })) => Ok(Response {
-                    status,
-                    headers: header
-                        .into_iter()
-                        .filter_map(|(name, value)| {
-                            Some((
-                                HeaderName::from_bytes(name.as_bytes()).ok()?,
-                                HeaderValue::from_str(&value).ok()?,
-                            ))
-                        })
-                        .collect(),
-                    body: Body::Bytes(message.unwrap_or_default().into()),
-                    source: Source::Dragonfly,
-                }),
-                Err(Error::RequestTimeout(message)) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("dragonfly request timed out: {message}"),
-                )),
-                Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
-            };
+            let result = into_response(client.get(&request).await);
 
             match &result {
                 Ok(response) => debug!(
