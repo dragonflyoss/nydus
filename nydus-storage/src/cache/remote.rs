@@ -17,7 +17,7 @@ use nydus_backend::{Backend, ReadKind};
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-use super::{decode_chunk_group_into, validate_decoded_chunk_group, BlobCache, ChunkGroupBuffer};
+use super::{validate_decoded_chunk_group, BlobCache, ChunkGroupBuffer, ChunkGroupReader};
 
 /// Decoded bytes the diskless caches of one blob set keep in memory.
 const DECODED_GROUP_CACHE_BYTES: usize = 32 << 20;
@@ -201,41 +201,28 @@ impl BlobCache for RemoteBlobCache {
             return Ok(());
         };
 
-        // The missed groups lie between two table indexes, so one read covers
-        // them all (and any cached group in between, which is not decoded
-        // again); then each decodes into a buffer of its own that the cache
-        // keeps.
-        let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
-            .map_err(|_| {
+        // One read covers the missed groups, each decoded as its bytes arrive
+        // into a buffer the cache keeps.
+        let range = head.compressed_offset()..tail.compressed_range().end;
+        let len = usize::try_from(range.end - range.start).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "chunk group range exceeds usize",
             )
         })?;
-        let mut encoded = ChunkGroupBuffer::default();
-        let encoded = encoded.resize(encoded_len)?;
-        self.backend
-            .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?;
+        let mut scratch = ChunkGroupBuffer::default();
+        let stream = self.backend.read(&self.blob_id, range.start, len)?;
+        let mut reader = ChunkGroupReader::new(stream, range, &mut scratch);
 
         for group in &missed {
-            let start = (group.compressed_offset() - head.compressed_offset()) as usize;
-            let stop = start + group.compressed_size() as usize;
             let len = group.uncompressed_size() as usize;
             let mut decoded = ChunkGroupBuffer::default();
-            let payload: &[u8] = if group.is_uncompressed(meta) {
-                &encoded[start..stop]
-            } else {
-                let out = decoded.resize(len)?;
-                decode_chunk_group_into(meta.compressor(), &encoded[start..stop], out)?;
-                out
-            };
+            let payload = decoded.resize(len)?;
+            reader.decode_into(meta, group, payload)?;
             validate_decoded_chunk_group(group, payload, self.skip_verify_checksums)?;
             copy_group_chunks(meta, group, payload, offset, dst)?;
             if !self.decoded_groups.admits(len) {
                 continue;
-            }
-            if group.is_uncompressed(meta) {
-                decoded.resize(len)?.copy_from_slice(&encoded[start..stop]);
             }
             self.decoded_groups.insert(
                 (self.blob_id, group.index()),
@@ -271,7 +258,9 @@ mod tests {
     use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
     use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::{uncompressed_data, FullBlob};
+    use nydus_test_utils::fault::{Fault, FaultBackend, FaultRule};
     use nydus_test_utils::metadata::from_chunk_groups;
+    use std::io::BufRead;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::tempdir;
 
@@ -308,18 +297,21 @@ mod tests {
             self.inner.read_blob_metadata(blob_id)
         }
 
-        fn read_range_into(
+        fn read(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
-            dst: &mut [u8],
-        ) -> io::Result<()> {
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst)?;
+            let mut buf = vec![0; len];
+            self.inner
+                .read(blob_id, offset, len)?
+                .read_exact(&mut buf)?;
             if self.corrupt_next.swap(false, Ordering::SeqCst) {
-                dst[0] ^= 0xff;
+                buf[0] ^= 0xff;
             }
-            Ok(())
+            Ok(Box::new(io::Cursor::new(buf)))
         }
     }
 
@@ -398,6 +390,41 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".blob.data"))
             .collect();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn remote_keeps_the_groups_decoded_before_its_stream_breaks() {
+        let backend_dir = tempdir().unwrap();
+        let chunk_groups = groups(3);
+        let (data, meta) =
+            from_chunk_groups(BlobMetadataCompressor::None, 8192, &chunk_groups, None);
+        let blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let backend = Arc::new(FaultBackend::wrap(Arc::new(Local::new(
+            backend_dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ))));
+        backend.inject(FaultRule::read(Fault::Truncate { len: 8192 }).times(1));
+        let remote = RemoteBlobCache::open(
+            blob_id,
+            backend.clone(),
+            Arc::default(),
+            ReadKind::Ondemand,
+            false,
+        )
+        .unwrap();
+
+        let mut buf = vec![0u8; 3 * 8192];
+        let err = remote.read_at(0, &mut buf).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+        remote.read_at(0, &mut buf).unwrap();
+
+        assert_eq!(buf, uncompressed_data(&chunk_groups));
+        assert_eq!(backend.reads().last().unwrap().range(), 8192..3 * 8192);
     }
 
     #[test]

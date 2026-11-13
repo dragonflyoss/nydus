@@ -38,11 +38,10 @@
 //! shares with every process using the cache directory, so it is never
 //! stale across them.
 //!
-//! `source` is `local` for the local directory backend, `origin` for the
-//! registry backend reading the origin registry itself, `proxy` for it
-//! reading through an HTTP forward proxy, `dragonfly` for it reading the
-//! Dragonfly seed peers and `fallback` for a read Dragonfly could not serve
-//! that went back to the origin. `type` is `redirect` only on the cache
+//! `source` is `local` for the local directory backend, `http` for the
+//! registry backend reading the origin, directly or through a forward proxy,
+//! and `dragonfly` for the registry backend with Dragonfly, its reads that
+//! fell back to the origin included. `type` is `redirect` only on the cache
 //! writes, for a chunk group filled into its source blob from the ondemand
 //! blob. `reason` tells a corrupted chunk group (`checksum`, the
 //! crc32c mismatched; `decode`, it did not decompress to its declared
@@ -526,24 +525,18 @@ impl FsMetrics {
     }
 }
 
-/// Represents where a backend read fetched its bytes, the `source` label of
+/// Represents what a backend reads its bytes through, the `source` label of
 /// the backend metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// The local directory backend's blob files.
     Local,
 
-    /// The origin registry, reached directly.
-    Origin,
+    /// The registry backend without Dragonfly.
+    Http,
 
-    /// An HTTP forward proxy in front of the origin.
-    Proxy,
-
-    /// The Dragonfly seed peers.
+    /// The registry backend with Dragonfly, origin fallbacks included.
     Dragonfly,
-
-    /// The origin registry, reached after Dragonfly could not serve the read.
-    Fallback,
 }
 
 /// Implements the Display trait.
@@ -552,10 +545,8 @@ impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Source::Local => write!(f, "local"),
-            Source::Origin => write!(f, "origin"),
-            Source::Proxy => write!(f, "proxy"),
+            Source::Http => write!(f, "http"),
             Source::Dragonfly => write!(f, "dragonfly"),
-            Source::Fallback => write!(f, "fallback"),
         }
     }
 }
@@ -705,11 +696,10 @@ mod tests {
         let test_cases = vec![
             (ReadKind::Ondemand, Source::Local),
             (ReadKind::Prefetch, Source::Local),
-            (ReadKind::Ondemand, Source::Origin),
-            (ReadKind::Ondemand, Source::Proxy),
-            (ReadKind::Prefetch, Source::Proxy),
+            (ReadKind::Ondemand, Source::Http),
+            (ReadKind::Prefetch, Source::Http),
             (ReadKind::Ondemand, Source::Dragonfly),
-            (ReadKind::Ondemand, Source::Fallback),
+            (ReadKind::Prefetch, Source::Dragonfly),
         ];
 
         for (kind, source) in test_cases {
@@ -758,10 +748,8 @@ mod tests {
             ("ondemand", ReadKind::Ondemand.to_string()),
             ("prefetch", ReadKind::Prefetch.to_string()),
             ("local", Source::Local.to_string()),
-            ("origin", Source::Origin.to_string()),
-            ("proxy", Source::Proxy.to_string()),
+            ("http", Source::Http.to_string()),
             ("dragonfly", Source::Dragonfly.to_string()),
-            ("fallback", Source::Fallback.to_string()),
             ("decode", WriteFailureReason::Decode.to_string()),
             ("checksum", WriteFailureReason::Checksum.to_string()),
             ("io", WriteFailureReason::Io.to_string()),
@@ -884,7 +872,7 @@ mod tests {
         let metrics = Metrics::new();
         metrics.backend.collect_read_finished_metrics(
             ReadKind::Ondemand,
-            Source::Origin,
+            Source::Http,
             10,
             Duration::from_millis(1),
         );
@@ -907,9 +895,9 @@ mod tests {
         let text = String::from_utf8(buffer).unwrap();
 
         let test_cases = vec![
-            r#"nydus_backend_read_total{source="origin",type="ondemand"} 1"#,
-            r#"nydus_backend_read_bytes_total{source="origin",type="ondemand"} 10"#,
-            r#"nydus_backend_read_duration_milliseconds_count{source="origin",type="ondemand"} 1"#,
+            r#"nydus_backend_read_total{source="http",type="ondemand"} 1"#,
+            r#"nydus_backend_read_bytes_total{source="http",type="ondemand"} 10"#,
+            r#"nydus_backend_read_duration_milliseconds_count{source="http",type="ondemand"} 1"#,
             r#"nydus_storage_prefetch_task_total 1"#,
             r#"nydus_cache_read_total 1"#,
             r#"nydus_cache_read_bytes_total 10"#,

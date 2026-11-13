@@ -6,18 +6,21 @@ mod auth;
 mod dragonfly;
 mod http;
 mod range;
+mod reader;
 mod redirect;
 mod response;
 mod rt;
 
 use std::future::Future;
-use std::io;
+use std::io::{self, BufRead};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::{TryFutureExt, TryStreamExt};
 use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
+use tracing::debug;
 use url::Url;
 
 use nydus_config::{BackendConfig, Config, RedactedString};
@@ -32,6 +35,7 @@ use self::auth::{Authorizer, Challenge};
 use self::dragonfly::Dragonfly;
 use self::http::Http;
 use self::range::Range;
+use self::reader::StreamReader;
 use self::redirect::RedirectCache;
 use self::response::Response;
 pub use self::rt::Runtime;
@@ -49,7 +53,7 @@ trait Transport: Send + Sync {
 }
 
 /// The blob backend over an OCI registry, running the reads of [`Client`] on
-/// [`Runtime`] while the caller waits.
+/// [`Runtime`] and streaming each range to a [`StreamReader`].
 ///
 /// ```text
 /// Registry
@@ -142,11 +146,6 @@ impl Registry {
             &registry.http.tls,
             config.prefetch.retry_interval,
             None,
-            if registry.http.proxy.is_some() {
-                Source::Proxy
-            } else {
-                Source::Origin
-            },
         )?;
 
         let dragonfly: Option<Box<dyn Transport>> = match &registry.dragonfly {
@@ -175,13 +174,12 @@ impl Registry {
 
 /// Implements the registry requests.
 impl Client {
-    /// Returns the `source` label of a failed read: Dragonfly when configured,
-    /// otherwise the origin client's.
+    /// Returns the `source` label of the reads.
     fn source(&self) -> Source {
         if self.dragonfly.is_some() {
             Source::Dragonfly
         } else {
-            self.http.source()
+            Source::Http
         }
     }
 
@@ -442,80 +440,118 @@ impl Backend for Registry {
             .block_on_worker(async move { client.prefetch_blob_metadata(&blob_id).await })
     }
 
-    /// Fills `buf` with the blob bytes from `offset` for an on-demand read.
-    fn read_range_into(
+    /// Reads `len` blob bytes from `offset` for an on-demand read, streaming.
+    fn read(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        let start = Instant::now();
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        let now = Instant::now();
+        let end = offset.checked_add(len as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
+        })?;
+        let range = Range::try_from(offset..end)?;
+
         let client = self.client.clone();
         let blob_id = *blob_id;
-        let length = buf.len();
-        let result = self.runtime.block_on_worker(async move {
-            let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
-            let response = client.read_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
-        });
+        let response = self
+            .runtime
+            .block_on_worker(async move { client.read_range(&blob_id, &range).await })
+            .inspect_err(|_| {
+                self.metrics
+                    .backend
+                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source())
+            })?;
 
-        match result {
-            Ok((bytes, source)) => {
-                self.metrics.backend.collect_read_finished_metrics(
+        let source = self.client.source();
+        let metrics = self.metrics.clone();
+        let (tx, reader) = StreamReader::channel();
+        self.runtime.spawn(async move {
+            // Stream the range until it ends or the reader is dropped.
+            let result = tokio::select! {
+                result = response.bytes_stream(len).try_for_each(|chunk| {
+                    tx.send(Ok(chunk)).map_err(|_| io::ErrorKind::BrokenPipe.into())
+                }) => result,
+                _ = tx.closed() => Err(io::ErrorKind::BrokenPipe.into()),
+            };
+
+            match result {
+                Ok(()) => metrics.backend.collect_read_finished_metrics(
                     ReadKind::Ondemand,
                     source,
-                    length as u64,
-                    start.elapsed(),
-                );
-                buf.copy_from_slice(&bytes);
-                Ok(())
+                    len as u64,
+                    now.elapsed(),
+                ),
+                Err(err) => {
+                    metrics
+                        .backend
+                        .collect_read_failure_metrics(ReadKind::Ondemand, source);
+                    if tx.send(Err(err)).await.is_err() {
+                        debug!("range reader dropped before its read ended");
+                    }
+                }
             }
-            Err(err) => {
-                self.metrics
-                    .backend
-                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source());
-                Err(err)
-            }
-        }
+        });
+
+        Ok(Box::new(reader))
     }
 
-    /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
-    fn prefetch_range_into(
+    /// Reads `len` blob bytes from `offset` for a prefetch read, streaming.
+    fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        let start = Instant::now();
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        let now = Instant::now();
+        let end = offset.checked_add(len as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
+        })?;
+        let range = Range::try_from(offset..end)?;
+
         let client = self.client.clone();
         let blob_id = *blob_id;
-        let length = buf.len();
-        let result = self.runtime.block_on_worker(async move {
-            let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
-            let response = client.prefetch_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
-        });
-
-        match result {
-            Ok((bytes, source)) => {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Prefetch,
-                    source,
-                    length as u64,
-                    start.elapsed(),
-                );
-                buf.copy_from_slice(&bytes);
-                Ok(())
-            }
-            Err(err) => {
+        let response = self
+            .runtime
+            .block_on_worker(async move { client.prefetch_range(&blob_id, &range).await })
+            .inspect_err(|_| {
                 self.metrics
                     .backend
-                    .collect_read_failure_metrics(ReadKind::Prefetch, self.client.source());
-                Err(err)
+                    .collect_read_failure_metrics(ReadKind::Prefetch, self.client.source())
+            })?;
+
+        let source = self.client.source();
+        let metrics = self.metrics.clone();
+        let (tx, reader) = StreamReader::channel();
+        self.runtime.spawn(async move {
+            // Stream the range until it ends or the reader is dropped.
+            let result = tokio::select! {
+                result = response.bytes_stream(len).try_for_each(|chunk| {
+                    tx.send(Ok(chunk)).map_err(|_| io::ErrorKind::BrokenPipe.into())
+                }) => result,
+                _ = tx.closed() => Err(io::ErrorKind::BrokenPipe.into()),
+            };
+
+            match result {
+                Ok(()) => metrics.backend.collect_read_finished_metrics(
+                    ReadKind::Prefetch,
+                    source,
+                    len as u64,
+                    now.elapsed(),
+                ),
+                Err(err) => {
+                    metrics
+                        .backend
+                        .collect_read_failure_metrics(ReadKind::Prefetch, source);
+                    if tx.send(Err(err)).await.is_err() {
+                        debug!("range reader dropped before its read ended");
+                    }
+                }
             }
-        }
+        });
+
+        Ok(Box::new(reader))
     }
 }
 
@@ -524,14 +560,16 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::range::ContentRange;
-    use super::response::Body;
     use super::*;
+    use bytes::Bytes;
+    use futures::stream::{self, StreamExt};
     use nydus_config::{HttpConfig, PrefetchConfig};
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
     use reqwest::header::{CONTENT_RANGE, LOCATION};
     use std::collections::VecDeque;
     use std::fs;
+    use std::io::Read;
     use std::net::{SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -604,15 +642,13 @@ mod tests {
                     Ok(Response {
                         status: StatusCode::PARTIAL_CONTENT,
                         headers,
-                        body: Body::Stream(Box::new(io::Cursor::new(body))),
-                        source: Source::Dragonfly,
+                        body: stream::iter([Ok(Bytes::from(body))]).boxed(),
                     })
                 }
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
-                    body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
-                    source: Source::Dragonfly,
+                    body: stream::empty().boxed(),
                 }),
             }
         }
@@ -660,8 +696,7 @@ mod tests {
                 return Ok(Response {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers,
-                    body: Body::Stream(Box::new(io::Cursor::new(b"ok".to_vec()))),
-                    source: Source::Dragonfly,
+                    body: stream::iter([Ok(Bytes::from_static(b"ok"))]).boxed(),
                 });
             }
             self.challenges.fetch_add(1, Ordering::SeqCst);
@@ -673,8 +708,7 @@ mod tests {
             Ok(Response {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
-                body: Body::Stream(Box::new(io::Cursor::new(Vec::new()))),
-                source: Source::Dragonfly,
+                body: stream::empty().boxed(),
             })
         }
     }
@@ -766,7 +800,11 @@ mod tests {
                 body.len()
             )
             .into_bytes();
-            response.extend_from_slice(body);
+            if status.ends_with("Truncated") {
+                response.extend_from_slice(&body[..body.len() / 2]);
+            } else {
+                response.extend_from_slice(body);
+            }
             response
         }
 
@@ -809,7 +847,6 @@ mod tests {
                     &http.tls,
                     PrefetchConfig::default().retry_interval,
                     None,
-                    Source::Origin,
                 )
                 .unwrap(),
                 dragonfly: Some(Box::new(transport)),
@@ -827,7 +864,7 @@ mod tests {
         Registry::new(&config, netns, Arc::new(Metrics::new())).unwrap()
     }
 
-    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<Source> {
+    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<()> {
         registry.runtime.tokio().block_on(async {
             let client = &registry.client;
             let range = Range::Bounded(0..=buf.len() as u64 - 1);
@@ -835,9 +872,8 @@ mod tests {
                 ReadKind::Ondemand => client.read_range(&TEST_BLOB_ID, &range).await?,
                 ReadKind::Prefetch => client.prefetch_range(&TEST_BLOB_ID, &range).await?,
             };
-            let source = response.source;
             buf.copy_from_slice(&response.bytes(buf.len()).await?);
-            Ok(source)
+            Ok(())
         })
     }
 
@@ -861,9 +897,11 @@ mod tests {
             .unwrap();
             let mut data = vec![0u8; 16];
             match kind {
-                ReadKind::Ondemand => registry.read_range_into(&full_blob_id, 17, &mut data),
-                ReadKind::Prefetch => registry.prefetch_range_into(&full_blob_id, 17, &mut data),
+                ReadKind::Ondemand => registry.read(&full_blob_id, 17, data.len()),
+                ReadKind::Prefetch => registry.prefetch(&full_blob_id, 17, data.len()),
             }
+            .unwrap()
+            .read_exact(&mut data)
             .unwrap();
 
             assert_eq!(blob_metadata.chunk_group_count(), 1);
@@ -913,9 +951,11 @@ mod tests {
             .unwrap();
             let mut data = vec![0u8; 16];
             match kind {
-                ReadKind::Ondemand => registry.read_range_into(&full_blob_id, 17, &mut data),
-                ReadKind::Prefetch => registry.prefetch_range_into(&full_blob_id, 17, &mut data),
+                ReadKind::Ondemand => registry.read(&full_blob_id, 17, data.len()),
+                ReadKind::Prefetch => registry.prefetch(&full_blob_id, 17, data.len()),
             }
+            .unwrap()
+            .read_exact(&mut data)
             .unwrap();
 
             assert_eq!(blob_metadata.chunk_group_count(), 1);
@@ -929,20 +969,205 @@ mod tests {
     }
 
     #[test]
+    fn read_and_prefetch_reject_an_empty_or_overflowing_range() {
+        let test_cases = vec![(0, 0), (u64::MAX, 2)];
+
+        for (offset, len) in test_cases {
+            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let registry = origin_registry(origin.addr, None);
+
+            let read = registry.read(&TEST_BLOB_ID, offset, len);
+            let prefetch = registry.prefetch(&TEST_BLOB_ID, offset, len);
+
+            assert_eq!(read.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(prefetch.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(origin.hits(), 0);
+        }
+    }
+
+    #[test]
+    fn origin_body_that_breaks_off_fails_both_read_kinds() {
+        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+            let origin = OriginStub::serve(&["206 Truncated"], b"abcd".to_vec());
+            let registry = origin_registry(origin.addr, None);
+
+            let mut buf = [0u8; 4];
+            let result = match kind {
+                ReadKind::Ondemand => registry.read(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+            }
+            .and_then(|mut reader| reader.read_exact(&mut buf));
+
+            assert!(result.is_err());
+            assert_eq!(origin.ranges(), ["bytes=0-3"]);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn seed_peer_body_that_breaks_off_is_resumed_through_the_seed_peers() {
+        let test_cases: Vec<(&'static [&'static str], fn(io::Result<Vec<u8>>))> = vec![
+            (&["206 Truncated", "206 Partial Content"], |result| {
+                assert_eq!(result.unwrap(), b"abcd")
+            }),
+            (&["206 Truncated"], |result| assert!(result.is_err())),
+        ];
+
+        for (statuses, expect) in test_cases {
+            let runtime_dir = tempdir().unwrap();
+            let seed_peer = OriginStub::serve(statuses, b"abcd".to_vec());
+            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let cache_dir = runtime_dir.path().join("dragonfly");
+            fs::create_dir(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("e87f700bacfeed52.v1.json"),
+                serde_json::json!({
+                    "scheduler_endpoint": "http://127.0.0.1:1/",
+                    "next_refresh_at": humantime_serde::re::humantime::format_rfc3339(
+                        std::time::SystemTime::now() + Duration::from_secs(60)
+                    )
+                    .to_string(),
+                    "seed_peers": [{
+                        "id": "seed-peer-0",
+                        "name": "seed-peer-0",
+                        "hostname": "seed-peer-0",
+                        "ip": "127.0.0.1",
+                        "port": 1,
+                        "proxy_port": seed_peer.addr.port(),
+                        "healthy": true,
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n      max_retries: 1\n",
+                runtime_dir.path().display(),
+                origin.addr
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+            let result = registry.read(&TEST_BLOB_ID, 0, 4).and_then(|mut reader| {
+                let mut data = Vec::new();
+                reader.read_to_end(&mut data).map(|_| data)
+            });
+
+            expect(result);
+            assert_eq!(seed_peer.ranges(), ["bytes=0-3", "bytes=2-3"]);
+            assert_eq!(origin.hits(), 0);
+        }
+    }
+
+    #[test]
+    fn read_records_its_metrics_once_whether_its_reader_finishes_or_drops() {
+        let test_cases: Vec<(fn(Box<dyn BufRead + Send>), f64)> = vec![
+            (
+                |mut reader| {
+                    let mut data = Vec::new();
+                    reader.read_to_end(&mut data).unwrap();
+                    assert_eq!(data.len(), 1 << 20);
+                },
+                0.0,
+            ),
+            (drop, 1.0),
+        ];
+
+        for (consume, failures) in test_cases {
+            let origin = OriginStub::serve(&["206 Partial Content"], vec![7u8; 1 << 20]);
+            let registry = origin_registry(origin.addr, None);
+            let counter = |name: &str| -> f64 {
+                registry
+                    .metrics
+                    .registry()
+                    .gather()
+                    .iter()
+                    .filter(|family| family.get_name() == name)
+                    .flat_map(|family| family.get_metric())
+                    .map(|metric| metric.get_counter().get_value())
+                    .sum()
+            };
+
+            consume(registry.read(&TEST_BLOB_ID, 0, 1 << 20).unwrap());
+            let now = Instant::now();
+            while counter("nydus_backend_read_total") + counter("nydus_backend_read_failure_total")
+                < 1.0 + failures
+                && now.elapsed() < Duration::from_secs(5)
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            assert_eq!(counter("nydus_backend_read_total"), 1.0);
+            assert_eq!(counter("nydus_backend_read_failure_total"), failures);
+        }
+    }
+
+    #[test]
+    fn dropping_the_reader_ends_a_read_whose_body_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            use std::io::Write;
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\n\r\nab",
+                )
+                .unwrap();
+            let _ = stream.read(&mut byte);
+        });
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_timeout: 60s\n"
+        ))
+        .unwrap();
+        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let counter = |name: &str| -> f64 {
+            registry
+                .metrics
+                .registry()
+                .gather()
+                .iter()
+                .filter(|family| family.get_name() == name)
+                .flat_map(|family| family.get_metric())
+                .map(|metric| metric.get_counter().get_value())
+                .sum()
+        };
+
+        let mut reader = registry.read(&TEST_BLOB_ID, 0, 4).unwrap();
+        let mut buf = [0u8; 2];
+        reader.read_exact(&mut buf).unwrap();
+        drop(reader);
+        let now = Instant::now();
+        while counter("nydus_backend_read_failure_total") < 1.0
+            && now.elapsed() < Duration::from_secs(5)
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(&buf, b"ab");
+        assert_eq!(counter("nydus_backend_read_failure_total"), 1.0);
+    }
+
+    #[test]
     fn whole_blob_answers_from_the_origin_are_rejected_for_both_read_kinds() {
         let origin = OriginStub::serve(&["200 OK"], (0..64).collect());
         let registry = origin_registry(origin.addr, None);
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
-            let mut buf = [0u8; 4];
             let err = match kind {
-                ReadKind::Ondemand => registry.read_range_into(&TEST_BLOB_ID, 16, &mut buf),
-                ReadKind::Prefetch => registry.prefetch_range_into(&TEST_BLOB_ID, 16, &mut buf),
+                ReadKind::Ondemand => registry.read(&TEST_BLOB_ID, 16, 4),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 16, 4),
             }
-            .unwrap_err();
+            .err()
+            .unwrap();
 
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(buf, [0u8; 4]);
         }
         assert_eq!(origin.hits(), 2);
     }
@@ -1023,13 +1248,54 @@ mod tests {
         let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let mut buf = [0u8; 4];
-        let ondemand = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
         let prefetch = read(&registry, ReadKind::Prefetch, &mut [0u8; 4]);
 
-        assert_eq!(ondemand, Source::Fallback);
         assert_eq!(&buf, b"abcd");
         assert_eq!(prefetch.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_eq!(origin.hits(), 1);
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn fallback_reads_are_counted_under_the_dragonfly_source() {
+        let runtime_dir = tempdir().unwrap();
+        let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+        let config: Config = serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+            runtime_dir.path().display(),
+            origin.addr
+        ))
+        .unwrap();
+        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let sources = || -> Vec<String> {
+            registry
+                .metrics
+                .registry()
+                .gather()
+                .iter()
+                .filter(|family| family.get_name() == "nydus_backend_read_total")
+                .flat_map(|family| family.get_metric())
+                .flat_map(|metric| metric.get_label())
+                .filter(|label| label.get_name() == "source")
+                .map(|label| label.get_value().to_string())
+                .collect()
+        };
+
+        let mut buf = [0u8; 4];
+        registry
+            .read(&TEST_BLOB_ID, 0, buf.len())
+            .unwrap()
+            .read_exact(&mut buf)
+            .unwrap();
+        let now = Instant::now();
+        while sources().is_empty() && now.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(&buf, b"abcd");
+        assert_eq!(origin.hits(), 1);
+        assert_eq!(sources(), ["dragonfly"]);
     }
 
     #[cfg(feature = "dragonfly")]
@@ -1047,13 +1313,13 @@ mod tests {
         .unwrap();
         let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
-        let start = Instant::now();
+        let now = Instant::now();
         let mut buf = [0u8; 4];
-        let ondemand = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
 
-        assert_eq!(ondemand, Source::Fallback);
         assert_eq!(&buf, b"abcd");
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(origin.hits(), 1);
+        assert!(now.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -1108,7 +1374,7 @@ backend:
         registry.client.authorizer.authorize(&mut headers);
         assert_eq!(headers[AUTHORIZATION], "Bearer xyz");
         assert!(registry.client.dragonfly.is_none());
-        assert_eq!(registry.client.source(), Source::Origin);
+        assert_eq!(registry.client.source(), Source::Http);
     }
 
     #[test]
@@ -1176,7 +1442,9 @@ backend:
             let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let mut buf = [0u8; 4];
-            let result = registry.prefetch_range_into(&TEST_BLOB_ID, 0, &mut buf);
+            let result = registry
+                .prefetch(&TEST_BLOB_ID, 0, buf.len())
+                .and_then(|mut reader| reader.read_exact(&mut buf));
 
             expect(result, buf);
             assert_eq!(origin.ranges(), ["bytes=0-3", "bytes=0-3"]);
@@ -1330,7 +1598,9 @@ backend:
                 thread::spawn(move || {
                     let mut buf = [0u8; 2];
                     registry
-                        .read_range_into(&TEST_BLOB_ID, 0, &mut buf)
+                        .read(&TEST_BLOB_ID, 0, buf.len())
+                        .unwrap()
+                        .read_exact(&mut buf)
                         .unwrap();
                     buf
                 })
@@ -1356,9 +1626,8 @@ backend:
             .insert(&hex, "http://cdn.example.com/signed".to_string());
 
         let mut buf = vec![0u8; body.len()];
-        let source = read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
 
-        assert_eq!(source, Source::Dragonfly);
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);

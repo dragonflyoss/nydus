@@ -7,6 +7,7 @@ use nydus_backend::Backend;
 use nydus_format::blob::{BlobMetadataChunkGroup, BlobMetadataChunkLength};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use sha2::{Digest, Sha256};
+use std::io::{BufRead, Read};
 use std::ops::Range;
 
 const UNUSED: u64 = u64::MAX;
@@ -65,13 +66,13 @@ impl Backend for RepackBackend<'_> {
         self.inner.read_blob_metadata(blob_id)
     }
 
-    fn read_range_into(
+    fn read(
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> std::io::Result<()> {
-        self.inner.read_range_into(blob_id, offset, buf)
+        len: usize,
+    ) -> std::io::Result<Box<dyn BufRead + Send>> {
+        self.inner.read(blob_id, offset, len)
     }
 }
 
@@ -608,7 +609,8 @@ fn copy_encoded_range(
     while pos < range.end {
         let len = (range.end - pos).min(scratch.len() as u64) as usize;
         backend
-            .read_range_into(id, pos, &mut scratch[..len])
+            .read(id, pos, len)
+            .and_then(|mut reader| reader.read_exact(&mut scratch[..len]))
             .context("copy encoded compact groups")?;
         output.write_all(&scratch[..len])?;
         pos += len as u64;
@@ -641,17 +643,17 @@ mod tests {
             self.local.read_blob_metadata(id)
         }
 
-        fn read_range_into(
+        fn read(
             &self,
             id: &[u8; EROFS_BLOB_ID_SIZE],
             offset: u64,
-            buf: &mut [u8],
-        ) -> io::Result<()> {
-            self.largest_read.fetch_max(buf.len(), Ordering::Relaxed);
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
+            self.largest_read.fetch_max(len, Ordering::Relaxed);
             if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_after {
                 return Err(io::Error::other("injected compact read failure"));
             }
-            self.local.read_range_into(id, offset, buf)
+            self.local.read(id, offset, len)
         }
     }
 
@@ -707,7 +709,11 @@ mod tests {
         uncached.read_blob_metadata(&id).unwrap();
         assert_eq!(backend.metadata_reads.load(Ordering::Relaxed), 1);
         let mut bytes = [0; 16];
-        uncached.read_range_into(&id, 0, &mut bytes).unwrap();
+        uncached
+            .read(&id, 0, bytes.len())
+            .unwrap()
+            .read_exact(&mut bytes)
+            .unwrap();
         let source = fs::read(temp.path().join(crate::BlobId::from(id).to_string())).unwrap();
         assert_eq!(bytes, source[..16]);
     }

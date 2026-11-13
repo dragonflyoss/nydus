@@ -22,7 +22,7 @@ use nydus_telemetry::metrics::WriteKind;
 use super::chunk_group_lock::ChunkGroupLocks;
 use super::{
     cached_chunk_group_is_intact, plan_prefetch_batches, validate_decoded_chunk_group,
-    write_failure_reason, BlobCache, CacheOptions, ChunkGroupBuffers,
+    write_failure_reason, BlobCache, CacheOptions, ChunkGroupBuffers, ChunkGroupReader,
 };
 
 #[derive(Clone)]
@@ -480,67 +480,49 @@ impl LocalBlobCache {
         Ok(())
     }
 
-    /// One backend read for the encoded payloads of the groups of `window`
-    /// into `buffers`: the encoded bytes, a decode scratch the size of the
-    /// group span (no group's payload is larger), and the data-region offset
-    /// the encoded bytes start at.
+    /// One backend read for the groups of `window`: the reader of its groups
+    /// and a decode scratch the size of the group span.
     fn fetch_window<'b>(
         &self,
         window: &Range<usize>,
         kind: ReadKind,
         buffers: &'b mut ChunkGroupBuffers,
-    ) -> io::Result<(&'b mut [u8], &'b mut [u8], u64)> {
+    ) -> io::Result<(ChunkGroupReader<'b>, &'b mut [u8])> {
         let head = self.chunk_group(window.start);
         let tail = self.chunk_group(window.end - 1);
-        let encoded_len = usize::try_from(tail.compressed_range().end - head.compressed_offset())
-            .map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize")
-        })?;
+        let range = head.compressed_offset()..tail.compressed_range().end;
+        let len = usize::try_from(range.end - range.start)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "fetch size exceeds usize"))?;
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
-        let (encoded, decoded) = buffers.resize_pair(encoded_len, decoded_len)?;
-        match kind {
-            ReadKind::Ondemand => {
-                self.backend
-                    .read_range_into(&self.blob_id, head.compressed_offset(), encoded)?
-            }
-            ReadKind::Prefetch => self.backend.prefetch_range_into(
-                &self.blob_id,
-                head.compressed_offset(),
-                encoded,
-            )?,
-        }
-        Ok((encoded, decoded, head.compressed_offset()))
+        let (encoded, decoded) = buffers.split(decoded_len)?;
+        let stream = match kind {
+            ReadKind::Ondemand => self.backend.read(&self.blob_id, range.start, len)?,
+            ReadKind::Prefetch => self.backend.prefetch(&self.blob_id, range.start, len)?,
+        };
+        Ok((ChunkGroupReader::new(stream, range, encoded), decoded))
     }
 
-    /// Decode and validate `group` out of a fetched window whose encoded
-    /// bytes start at data-region offset `base`; a stored-plain group
-    /// borrows the window, a compressed one decodes into `decoded`.
+    /// Decode and validate `group` off the stream; a stored-plain group
+    /// borrows its bytes, a compressed one decodes into `decoded`.
     fn decode_group<'p>(
         &self,
         group: &BlobMetadataChunkGroupExtent,
-        base: u64,
-        encoded: &'p [u8],
+        reader: &'p mut ChunkGroupReader<'_>,
         decoded: &'p mut [u8],
     ) -> io::Result<&'p [u8]> {
-        let start = (group.compressed_offset() - base) as usize;
-        let end = start + group.compressed_size() as usize;
         let payload: &[u8] = if group.is_uncompressed(&self.blob_metadata) {
-            &encoded[start..end]
+            reader.read(group)?
         } else {
-            let out = &mut decoded[..u64::from(group.uncompressed_size()) as usize];
-            super::decode_chunk_group_into(
-                self.blob_metadata.compressor(),
-                &encoded[start..end],
-                out,
-            )?;
-            out
+            let decoded = &mut decoded[..u64::from(group.uncompressed_size()) as usize];
+            reader.decode_into(&self.blob_metadata, group, decoded)?;
+            decoded
         };
         validate_decoded_chunk_group(group, payload, self.options.skip_verify_checksums)?;
         Ok(payload)
     }
 
-    /// One backend read for the groups of `window`, then decode, validate,
-    /// write and publish each group that is still missing.
+    /// One backend read for the groups of `window`; each missing group is
+    /// decoded, validated, written and published as its bytes arrive.
     fn fill_chunk_group_window(
         &self,
         window: Range<usize>,
@@ -548,7 +530,7 @@ impl LocalBlobCache {
         buffers: &mut ChunkGroupBuffers,
         cache_file: &File,
     ) -> io::Result<()> {
-        let (encoded, decoded, base) = self.fetch_window(&window, kind, buffers)?;
+        let (mut reader, decoded) = self.fetch_window(&window, kind, buffers)?;
         let metrics = &self.backend.metrics().cache;
         for index in window {
             // Another process may have filled a group of the window since
@@ -558,8 +540,16 @@ impl LocalBlobCache {
                 continue;
             }
             let group = self.chunk_group(index);
-            self.decode_group(&group, base, encoded, decoded)
-                .and_then(|payload| self.write_chunk_group(&group, payload, cache_file))
+            let payload = self
+                .decode_group(&group, &mut reader, decoded)
+                .inspect_err(|err| {
+                    // Only a malformed group is a failed write.
+                    if err.kind() == io::ErrorKind::InvalidData {
+                        metrics
+                            .collect_write_failure_metrics(kind.into(), write_failure_reason(err))
+                    }
+                })?;
+            self.write_chunk_group(&group, payload, cache_file)
                 .inspect(|()| {
                     metrics.collect_write_finished_metrics(
                         kind.into(),
@@ -594,7 +584,9 @@ impl LocalBlobCache {
         if start == end {
             return Ok((0, 0));
         }
-        let (encoded, decoded, base) =
+        let range = self.chunk_group(start).compressed_offset()
+            ..self.chunk_group(end - 1).compressed_range().end;
+        let (mut reader, decoded) =
             self.fetch_window(&(start..end), ReadKind::Prefetch, buffers)?;
         let mut failed = 0;
         for index in start..end {
@@ -602,9 +594,10 @@ impl LocalBlobCache {
             if skip(&group) {
                 continue;
             }
-            match self.decode_group(&group, base, encoded, decoded) {
+            match self.decode_group(&group, &mut reader, decoded) {
                 Ok(payload) => cb(&group, payload)?,
-                Err(err) => {
+                // Skip a malformed group.
+                Err(err) if err.kind() == io::ErrorKind::InvalidData => {
                     failed += 1;
                     self.backend.metrics().cache.collect_write_failure_metrics(
                         WriteKind::Redirect,
@@ -615,9 +608,10 @@ impl LocalBlobCache {
                         self.blob_index
                     );
                 }
+                Err(err) => return Err(err),
             }
         }
-        Ok((encoded.len() as u64, failed))
+        Ok((range.end - range.start, failed))
     }
 
     /// Run `job` over `batches` in blob order, sequentially or through a
@@ -1316,10 +1310,12 @@ mod tests {
     use nydus_format::blob::{BlobMetadataCompressor, BlobMetadataDigester};
     use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::{uncompressed_data, FullBlob};
+    use nydus_test_utils::fault::{Fault, FaultBackend, FaultRule};
     use nydus_test_utils::metadata::{
         from_chunk_groups, single_chunk_group, with_wrong_chunk_group_digest,
     };
     use sha2::{Digest, Sha256};
+    use std::io::BufRead;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use tempfile::tempdir;
@@ -1426,6 +1422,87 @@ mod tests {
         assert_eq!(backend.reads(), 1);
         assert!(cached.chunk_group_map.is_all_ready());
         assert_eq!(fs::read(&cached.cache_data_path).unwrap(), image);
+    }
+
+    #[test]
+    fn window_keeps_the_groups_read_before_its_stream_breaks() {
+        let backend_dir = tempdir().unwrap();
+        let (data, meta, _, image) = groups_blob();
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let cache_dir = tempdir().unwrap();
+        let backend = Arc::new(FaultBackend::wrap(Arc::new(Local::new(
+            backend_dir.path().to_path_buf(),
+            Arc::new(Metrics::new()),
+        ))));
+        backend.inject(
+            FaultRule::read(Fault::Truncate {
+                len: meta.chunk_group(1).unwrap().compressed_range().end as usize,
+            })
+            .times(1),
+        );
+        let cached = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone(),
+            fetch(1 << 20),
+        )
+        .unwrap();
+
+        let mut buf = vec![0u8; 16];
+        let err = cached.read_at(0, &mut buf).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(cached.is_chunk_group_ready(0));
+        assert!(cached.is_chunk_group_ready(1));
+        assert!(!cached.is_chunk_group_ready(2));
+        assert!(!cached.is_chunk_group_ready(3));
+
+        cached.read_at(0, &mut buf).unwrap();
+
+        assert_eq!(buf, image[..16]);
+        assert_eq!(backend.read_calls(), 1);
+    }
+
+    #[test]
+    fn window_with_a_malformed_group_finishes_its_backend_read() {
+        let backend_dir = tempdir().unwrap();
+        let chunk_groups: Groups = (0..4u8).map(|group| vec![vec![group + 1; 16384]]).collect();
+        let (mut data, meta) =
+            from_chunk_groups(BlobMetadataCompressor::None, 16384, &chunk_groups, None);
+        data[meta.chunk_group(1).unwrap().compressed_offset() as usize] ^= 0xff;
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let cache_dir = tempdir().unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let backend = Arc::new(Local::new(
+            backend_dir.path().to_path_buf(),
+            metrics.clone(),
+        ));
+        let cached =
+            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend, fetch(1 << 20))
+                .unwrap();
+
+        let mut buf = vec![0u8; 16];
+        let err = cached.read_at(0, &mut buf).unwrap_err();
+        let failures: f64 = metrics
+            .registry()
+            .gather()
+            .iter()
+            .filter(|family| family.get_name() == "nydus_backend_read_failure_total")
+            .flat_map(|family| family.get_metric())
+            .map(|metric| metric.get_counter().get_value())
+            .sum();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(cached.is_chunk_group_ready(0));
+        assert!(!cached.is_chunk_group_ready(1));
+        assert_eq!(failures, 0.0);
     }
 
     /// The fetch size is measured in compressed bytes and aligned on the
@@ -1864,14 +1941,14 @@ mod tests {
             self.inner.read_blob_metadata(blob_id)
         }
 
-        fn read_range_into(
+        fn read(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
-            dst: &mut [u8],
-        ) -> io::Result<()> {
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range_into(blob_id, offset, dst)
+            self.inner.read(blob_id, offset, len)
         }
     }
 

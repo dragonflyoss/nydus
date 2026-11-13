@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -810,12 +810,17 @@ impl Backend for CountingBackend {
         self.local.is_raw_device(blob_id)
     }
 
-    fn read_range_into(&self, blob_id: &[u8; 32], offset: u64, dst: &mut [u8]) -> io::Result<()> {
+    fn read(
+        &self,
+        blob_id: &[u8; 32],
+        offset: u64,
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
         }
-        self.local.read_range_into(blob_id, offset, dst)
+        self.local.read(blob_id, offset, len)
     }
 }
 

@@ -26,9 +26,8 @@ func TestReadViaP2P(t *testing.T) {
 		t.FailNow()
 	}
 
-	for _, name := range []metric{originReads, originErrors, fallbackReads, proxyErrors} {
-		assert.Zero(t, d.of(name))
-	}
+	assert.Zero(t, d.of(proxyErrors))
+	assert.Zero(t, d.fallbacks)
 
 	t.Logf("%v; origin saw %d blob GETs (dfdaemon back-to-source)", d, origin.Faults.BlobGets())
 }
@@ -53,6 +52,6 @@ func TestServedFromSeedPeerCache(t *testing.T) {
 		t.FailNow()
 	}
 
-	assert.Zero(t, second.API.Metrics(t).Sum("nydus_backend_read_total", `source="fallback"`))
+	second.expectNoDirectOrigin(t)
 	assert.Zero(t, origin.Faults.Hits())
 }

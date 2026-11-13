@@ -4,7 +4,7 @@ pub mod local;
 pub mod raw;
 pub mod remote;
 
-use std::io;
+use std::io::{self, BufRead, Read};
 use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -13,6 +13,8 @@ use std::time::Instant;
 use nydus_config::StorageConfig;
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent, BlobMetadataCompressor};
 use nydus_telemetry::metrics::WriteFailureReason;
+use tracing::debug;
+use zstd::stream::raw::{Decoder, InBuffer, Operation, OutBuffer};
 
 /// Default on-demand fetch size: the compressed bytes one backend read
 /// covers around a missed chunk group (see [`CacheOptions::fetch_size`]).
@@ -324,22 +326,19 @@ pub struct ChunkGroupBuffers {
 }
 
 impl ChunkGroupBuffers {
-    /// Both buffers sized to `encoded_len` and `decoded_len`, borrowed
-    /// together so a caller can decode from one into the other.
-    pub(crate) fn resize_pair(
+    /// Returns the encoded buffer and the decoded one sized to `decoded_len`.
+    pub(crate) fn split(
         &mut self,
-        encoded_len: usize,
         decoded_len: usize,
-    ) -> io::Result<(&mut [u8], &mut [u8])> {
-        let encoded = self.encoded.resize(encoded_len)?;
+    ) -> io::Result<(&mut ChunkGroupBuffer, &mut [u8])> {
         let decoded = self.decoded.resize(decoded_len)?;
-        Ok((encoded, decoded))
+        Ok((&mut self.encoded, decoded))
     }
 }
 
 /// Large transient buffers bypass heap arenas and advise huge pages on Linux.
 #[derive(Default)]
-struct ChunkGroupBuffer {
+pub(crate) struct ChunkGroupBuffer {
     heap: Vec<u8>,
     mapping: Option<memmap2::MmapMut>,
 }
@@ -374,6 +373,174 @@ impl ChunkGroupBuffer {
         match &self.mapping {
             Some(mapping) => &mapping[..len],
             None => &self.heap[..len],
+        }
+    }
+}
+
+/// Reads the chunk groups of a backend read off its stream, in blob order.
+///
+/// ```text
+/// stream ──▶ chunk ──┬─ zstd group ──────────────────▶ decoded as the chunks arrive
+///                    └─ stored-plain or lz4 group
+///                         ├─ within one chunk ──▶ borrowed
+///                         └─ spans chunks ──────▶ copied to the scratch
+/// ```
+pub(crate) struct ChunkGroupReader<'b> {
+    /// The stream of the backend read.
+    reader: Box<dyn BufRead + Send>,
+
+    /// The data-region offset of the next byte of the stream.
+    offset: u64,
+
+    /// The data-region offset the stream ends at.
+    end: u64,
+
+    /// The buffer for a chunk group that spans chunks of the stream.
+    scratch: &'b mut ChunkGroupBuffer,
+}
+
+/// Implements the chunk group reader.
+impl<'b> ChunkGroupReader<'b> {
+    /// Creates a reader of a stream that covers data-region `range`.
+    pub(crate) fn new(
+        reader: Box<dyn BufRead + Send>,
+        range: Range<u64>,
+        scratch: &'b mut ChunkGroupBuffer,
+    ) -> Self {
+        Self {
+            reader,
+            offset: range.start,
+            end: range.end,
+            scratch,
+        }
+    }
+
+    /// Returns the encoded bytes of `group`, borrowed from the stream when
+    /// one chunk holds them all.
+    pub(crate) fn read(&mut self, group: &BlobMetadataChunkGroupExtent) -> io::Result<&[u8]> {
+        self.skip_to(group.compressed_offset())?;
+        let len = group.compressed_size() as usize;
+        if self.reader.fill_buf()?.len() >= len {
+            return Ok(&self.reader.fill_buf()?[..len]);
+        }
+
+        let encoded = self.scratch.resize(len)?;
+        self.reader.read_exact(encoded)?;
+        self.offset += len as u64;
+        Ok(encoded)
+    }
+
+    /// Decodes `group` into `decoded`, which is as long as its uncompressed
+    /// bytes.
+    pub(crate) fn decode_into(
+        &mut self,
+        blob_metadata: &BlobMetadata,
+        group: &BlobMetadataChunkGroupExtent,
+        decoded: &mut [u8],
+    ) -> io::Result<()> {
+        if !group.is_uncompressed(blob_metadata) {
+            return match blob_metadata.compressor() {
+                BlobMetadataCompressor::Zstd => self.decode_zstd_into(group, decoded),
+                compressor => decode_chunk_group_into(compressor, self.read(group)?, decoded),
+            };
+        }
+
+        if decoded.len() != group.compressed_size() as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stored-plain chunk group has an unexpected size",
+            ));
+        }
+
+        self.skip_to(group.compressed_offset())?;
+        self.reader.read_exact(decoded)?;
+        self.offset += decoded.len() as u64;
+        Ok(())
+    }
+
+    /// Decodes `group`, a zstd frame, into `decoded` while its bytes arrive.
+    fn decode_zstd_into(
+        &mut self,
+        group: &BlobMetadataChunkGroupExtent,
+        decoded: &mut [u8],
+    ) -> io::Result<()> {
+        self.skip_to(group.compressed_offset())?;
+        let end = group.compressed_range().end;
+        let mut decoder = Decoder::new()?;
+        let mut output = OutBuffer::around(decoded);
+        let mut hint = 0;
+        while self.offset < end {
+            let chunk = self.reader.fill_buf()?;
+            if chunk.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "backend read ended at offset {}, expected {end}",
+                        self.offset
+                    ),
+                ));
+            }
+
+            // Decode the part of the chunk that belongs to the group.
+            let len = (chunk.len() as u64).min(end - self.offset) as usize;
+            let mut input = InBuffer::around(&chunk[..len]);
+            while input.pos() < len {
+                let position = (input.pos(), output.pos());
+                hint = decoder
+                    .run(&mut input, &mut output)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                if (input.pos(), output.pos()) == position {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "zstd chunk group decompressed to an unexpected size",
+                    ));
+                }
+            }
+
+            self.reader.consume(len);
+            self.offset += len as u64;
+        }
+
+        // The frame must end with the group and fill `decoded` exactly.
+        if hint != 0 || output.pos() != output.capacity() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zstd chunk group decompressed to an unexpected size",
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Skips the stream forward to data-region `offset`.
+    fn skip_to(&mut self, offset: u64) -> io::Result<()> {
+        while self.offset < offset {
+            let available = self.reader.fill_buf()?.len() as u64;
+            if available == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "backend read ended at offset {}, expected {offset}",
+                        self.offset
+                    ),
+                ));
+            }
+
+            let len = available.min(offset - self.offset);
+            self.reader.consume(len as usize);
+            self.offset += len;
+        }
+
+        Ok(())
+    }
+}
+
+/// Implements [Drop] by reading the stream to its end.
+impl Drop for ChunkGroupReader<'_> {
+    /// Finishes the backend read, whatever became of its chunk groups.
+    fn drop(&mut self) {
+        if let Err(err) = self.skip_to(self.end) {
+            debug!("backend read ended before its range: {err}");
         }
     }
 }
@@ -582,11 +749,236 @@ pub(crate) fn write_failure_reason(err: &io::Error) -> WriteFailureReason {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::*;
     use nydus_format::blob::BlobMetadataDigester;
     use nydus_format::erofs::EROFS_BLOCK_SIZE;
     use nydus_test_utils::blob::uncompressed_data;
     use nydus_test_utils::metadata::{from_chunk_groups, with_wrong_chunk_group_digest};
+    use std::collections::VecDeque;
+
+    struct Chunks(VecDeque<Vec<u8>>);
+
+    impl Read for Chunks {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let len = self.fill_buf()?.read(buf)?;
+            self.consume(len);
+            Ok(len)
+        }
+    }
+
+    impl BufRead for Chunks {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            while self.0.front().is_some_and(|chunk| chunk.is_empty()) {
+                self.0.pop_front();
+            }
+
+            Ok(self.0.front().map_or(&[], |chunk| chunk.as_slice()))
+        }
+
+        fn consume(&mut self, amt: usize) {
+            if let Some(chunk) = self.0.front_mut() {
+                chunk.drain(..amt);
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_group_reader_borrows_a_group_in_one_chunk_and_copies_one_that_spans() {
+        let chunk_groups: Vec<Vec<Vec<u8>>> =
+            (0..4u8).map(|group| vec![vec![group + 1; 4096]]).collect();
+        let (data, metadata) =
+            from_chunk_groups(BlobMetadataCompressor::None, 4096, &chunk_groups, None);
+        let test_cases = vec![
+            (
+                vec![16384],
+                vec![(0, true), (1, true), (2, true), (3, true)],
+            ),
+            (
+                vec![4096; 4],
+                vec![(0, true), (1, true), (2, true), (3, true)],
+            ),
+            (
+                vec![6000, 6000, 4384],
+                vec![(0, true), (1, false), (2, false), (3, true)],
+            ),
+            (vec![16384], vec![(1, true), (3, true)]),
+            (vec![1024; 16], vec![(2, false)]),
+        ];
+
+        for (chunk_lens, groups) in test_cases {
+            let mut rest = data.as_slice();
+            let mut chunks = VecDeque::new();
+            for len in chunk_lens {
+                let (chunk, tail) = rest.split_at(len);
+                chunks.push_back(chunk.to_vec());
+                rest = tail;
+            }
+            let chunk_ranges: Vec<_> = chunks.iter().map(|chunk| chunk.as_ptr_range()).collect();
+            let mut scratch = ChunkGroupBuffer::default();
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
+
+            for (index, borrowed) in groups {
+                let group = metadata.chunk_group(index).unwrap();
+                let range = group.compressed_range();
+                let encoded = reader.read(&group).unwrap();
+
+                assert_eq!(encoded, &data[range.start as usize..range.end as usize]);
+                assert_eq!(
+                    chunk_ranges
+                        .iter()
+                        .any(|chunk_range| chunk_range.contains(&encoded.as_ptr())),
+                    borrowed
+                );
+            }
+            reader.skip_to(data.len() as u64).unwrap();
+        }
+    }
+
+    #[test]
+    fn chunk_group_reader_fails_on_a_stream_that_ends_early() {
+        let chunk_groups: Vec<Vec<Vec<u8>>> =
+            (0..4u8).map(|group| vec![vec![group + 1; 4096]]).collect();
+        let (data, metadata) =
+            from_chunk_groups(BlobMetadataCompressor::None, 4096, &chunk_groups, None);
+        let test_cases = vec![(vec![2000], 0), (vec![4096, 100], 1), (vec![4096], 2)];
+
+        for (chunk_lens, index) in test_cases {
+            let mut rest = data.as_slice();
+            let mut chunks = VecDeque::new();
+            for len in chunk_lens {
+                let (chunk, tail) = rest.split_at(len);
+                chunks.push_back(chunk.to_vec());
+                rest = tail;
+            }
+            let mut scratch = ChunkGroupBuffer::default();
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
+
+            let group = metadata.chunk_group(index).unwrap();
+            assert_eq!(
+                reader.read(&group).unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_group_reader_decodes_a_group_however_its_stream_is_chunked() {
+        let chunk_groups: Vec<Vec<Vec<u8>>> = (0..3u8)
+            .map(|group| vec![(0..8192u32).map(|i| (i % 251) as u8 ^ group).collect()])
+            .collect();
+        let test_cases = vec![
+            (BlobMetadataCompressor::Zstd, 1 << 20),
+            (BlobMetadataCompressor::Zstd, 7),
+            (BlobMetadataCompressor::Lz4Block, 1 << 20),
+            (BlobMetadataCompressor::Lz4Block, 7),
+            (BlobMetadataCompressor::None, 1 << 20),
+            (BlobMetadataCompressor::None, 1000),
+        ];
+
+        for (compressor, chunk_len) in test_cases {
+            let (data, metadata) = from_chunk_groups(compressor, 8192, &chunk_groups, None);
+            let chunks = data.chunks(chunk_len).map(<[u8]>::to_vec).collect();
+            let mut scratch = ChunkGroupBuffer::default();
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
+
+            for (index, chunk_group) in chunk_groups.iter().enumerate() {
+                let group = metadata.chunk_group(index).unwrap();
+                let mut decoded = vec![0u8; 8192];
+                reader.decode_into(&metadata, &group, &mut decoded).unwrap();
+
+                assert_eq!(decoded, chunk_group.concat());
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_group_reader_rejects_a_malformed_or_truncated_group() {
+        let chunk_groups: Vec<Vec<Vec<u8>>> =
+            vec![vec![(0..8192u32).map(|i| (i % 251) as u8).collect()]];
+        let test_cases: Vec<(
+            BlobMetadataCompressor,
+            usize,
+            fn(&mut Vec<u8>),
+            io::ErrorKind,
+        )> = vec![
+            (
+                BlobMetadataCompressor::Zstd,
+                8191,
+                |_| (),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                BlobMetadataCompressor::Zstd,
+                8193,
+                |_| (),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                BlobMetadataCompressor::Zstd,
+                8192,
+                |data| data[0] ^= 0xff,
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                BlobMetadataCompressor::Zstd,
+                8192,
+                |data| data.truncate(data.len() - 1),
+                io::ErrorKind::UnexpectedEof,
+            ),
+            (
+                BlobMetadataCompressor::Lz4Block,
+                8191,
+                |_| (),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                BlobMetadataCompressor::Lz4Block,
+                8193,
+                |_| (),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                BlobMetadataCompressor::Lz4Block,
+                8192,
+                |data| data.truncate(data.len() - 1),
+                io::ErrorKind::UnexpectedEof,
+            ),
+            (
+                BlobMetadataCompressor::None,
+                8191,
+                |_| (),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                BlobMetadataCompressor::None,
+                8192,
+                |data| data.truncate(data.len() - 1),
+                io::ErrorKind::UnexpectedEof,
+            ),
+        ];
+
+        for (compressor, decoded_len, corrupt, expected) in test_cases {
+            let (mut data, metadata) = from_chunk_groups(compressor, 8192, &chunk_groups, None);
+            corrupt(&mut data);
+            let chunks = data.chunks(7).map(<[u8]>::to_vec).collect();
+            let mut scratch = ChunkGroupBuffer::default();
+            let mut reader =
+                ChunkGroupReader::new(Box::new(Chunks(chunks)), 0..data.len() as u64, &mut scratch);
+
+            let group = metadata.chunk_group(0).unwrap();
+            let mut decoded = vec![0u8; decoded_len];
+            let err = reader
+                .decode_into(&metadata, &group, &mut decoded)
+                .unwrap_err();
+
+            assert_eq!(err.kind(), expected);
+        }
+    }
 
     #[test]
     fn group_buffer_reuses_and_releases_large_mappings() {

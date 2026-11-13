@@ -45,12 +45,9 @@ func TestForwardProxy(t *testing.T) {
 
 	assert.Positive(t, relayed.Load())
 
-	if !assert.Positive(t, m.backendReads(t, "ondemand", "proxy")) {
-		t.FailNow()
-	}
-	if !assert.Zero(t, m.backendReads(t, "ondemand", "origin")) {
+	if !assert.Positive(t, m.backendReads(t, "ondemand", "http")) {
 		t.FailNow()
 	}
 
-	assert.Zero(t, m.backendFailures(t, "ondemand", "proxy"))
+	assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 }

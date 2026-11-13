@@ -8,7 +8,7 @@ mod netns;
 mod registry;
 
 use std::fs::File;
-use std::io;
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -99,22 +99,22 @@ pub trait Backend: Send + Sync {
         self.read_blob_metadata(blob_id)
     }
 
-    /// Fills `buf` with the blob bytes from `offset` for an on-demand read.
-    fn read_range_into(
+    /// Reads `len` blob bytes from `offset` for an on-demand read, streaming.
+    fn read(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()>;
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>>;
 
-    /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
-    fn prefetch_range_into(
+    /// Reads `len` blob bytes from `offset` for a prefetch read, streaming.
+    fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        self.read_range_into(blob_id, offset, buf)
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        self.read(blob_id, offset, len)
     }
 }
 

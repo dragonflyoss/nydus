@@ -286,6 +286,7 @@ impl BlobPrefetcher {
 mod tests {
     use super::*;
     use crate::cache::CacheOptions;
+    use std::io::BufRead;
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
@@ -331,17 +332,17 @@ mod tests {
             self.inner.read_blob_metadata(blob_id)
         }
 
-        fn read_range_into(
+        fn read(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
-            dst: &mut [u8],
-        ) -> io::Result<()> {
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < self.failures {
                 return Err((self.error)());
             }
-            self.inner.read_range_into(blob_id, offset, dst)
+            self.inner.read(blob_id, offset, len)
         }
     }
 
@@ -453,14 +454,14 @@ mod tests {
             self.inner.read_blob_metadata(blob_id)
         }
 
-        fn read_range_into(
+        fn read(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
-            dst: &mut [u8],
-        ) -> io::Result<()> {
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.lock().unwrap().push(*blob_id);
-            self.inner.read_range_into(blob_id, offset, dst)
+            self.inner.read(blob_id, offset, len)
         }
     }
 

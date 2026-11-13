@@ -144,7 +144,7 @@ func (m *registryMount) expectFailure(t *testing.T, scope string) {
 	t.Helper()
 	if scope == "all" {
 		m.Daemon.WaitForLog(t, 10*time.Second, "failed to prefetch priority blob")
-		assert.Zero(t, m.backendReads(t, "ondemand", "origin"))
+		assert.Zero(t, m.backendReads(t, "ondemand", "http"))
 		return
 	}
 

@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::io;
-use std::ops::RangeInclusive;
+use std::ops::{self, RangeInclusive};
 use std::str::FromStr;
 
 /// The byte range of the `Range` header.
@@ -26,6 +26,24 @@ impl Range {
             Range::Bounded(range) => *range.start()..=(*range.end()).min(last),
             Range::Suffix(length) => complete_length.saturating_sub(*length)..=last,
         }
+    }
+}
+
+/// Implements TryFrom for a range of blob bytes that excludes its end.
+impl TryFrom<ops::Range<u64>> for Range {
+    type Error = io::Error;
+
+    /// Converts `start..end` to the bytes from `start` to `end - 1`, rejecting
+    /// an empty range.
+    fn try_from(range: ops::Range<u64>) -> io::Result<Self> {
+        if range.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("empty blob range {}..{}", range.start, range.end),
+            ));
+        }
+
+        Ok(Range::Bounded(range.start..=range.end - 1))
     }
 }
 
@@ -136,6 +154,20 @@ mod tests {
 
         for (range, expected) in test_cases {
             assert_eq!(range.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn range_try_from_converts_a_range_excluding_its_end() {
+        let test_cases = vec![
+            (0..1, Some(Range::Bounded(0..=0))),
+            (2..6, Some(Range::Bounded(2..=5))),
+            (3..3, None),
+            (ops::Range { start: 6, end: 2 }, None),
+        ];
+
+        for (range, expected) in test_cases {
+            assert_eq!(Range::try_from(range).ok(), expected);
         }
     }
 

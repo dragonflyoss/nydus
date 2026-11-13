@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io;
+use std::io::{self, BufRead, Read};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -47,6 +47,13 @@ pub enum Fault {
         len: usize,
     },
 
+    /// Serves only the first `len` bytes and ends the read there, matching
+    /// reads longer than `len`.
+    Truncate {
+        /// The number of bytes served.
+        len: usize,
+    },
+
     /// Flips bit `bit` of the byte at `offset`, matching reads covering it.
     FlipBit {
         /// The data region offset of the byte to corrupt.
@@ -71,7 +78,7 @@ impl Fault {
                 std::thread::sleep(*delay);
                 Ok(())
             }
-            Fault::ShortRead { .. } | Fault::FlipBit { .. } => Ok(()),
+            Fault::ShortRead { .. } | Fault::Truncate { .. } | Fault::FlipBit { .. } => Ok(()),
         }
     }
 }
@@ -83,6 +90,7 @@ impl fmt::Debug for Fault {
             Fault::Error(kind) => f.debug_tuple("Error").field(kind).finish(),
             Fault::ErrorWith(_) => f.write_str("ErrorWith(..)"),
             Fault::ShortRead { len } => f.debug_struct("ShortRead").field("len", len).finish(),
+            Fault::Truncate { len } => f.debug_struct("Truncate").field("len", len).finish(),
             Fault::FlipBit { offset, bit } => f
                 .debug_struct("FlipBit")
                 .field("offset", offset)
@@ -130,8 +138,8 @@ pub struct FaultRule {
 
 /// Implements the fault rule.
 impl FaultRule {
-    /// Creates a rule for data reads ([`Backend::read_range_into`] and
-    /// [`Backend::prefetch_range_into`]).
+    /// Creates a rule for data reads ([`Backend::read`] and
+    /// [`Backend::prefetch`]).
     pub fn read(fault: Fault) -> Self {
         Self::new(fault, Target::Read)
     }
@@ -220,7 +228,7 @@ impl FaultRule {
         }
 
         match self.fault {
-            Fault::ShortRead { len: short } => short < len,
+            Fault::ShortRead { len: short } | Fault::Truncate { len: short } => short < len,
             Fault::FlipBit { offset: flip, .. } => (offset..end).contains(&flip),
             _ => true,
         }
@@ -429,28 +437,30 @@ impl FaultBackend {
         fault
     }
 
-    /// Fills `buf` for a read of `kind`, faults applied.
-    fn read(
+    /// Serves `len` bytes from `offset` for a read of `kind`, faults applied.
+    fn serve(
         &self,
         blob_id: &BlobId,
         offset: u64,
-        buf: &mut [u8],
+        len: usize,
         kind: ReadKind,
-    ) -> io::Result<()> {
+    ) -> io::Result<Box<dyn BufRead + Send>> {
         let fault = self.admit(Call {
             target: Target::Read,
             blob_id: *blob_id,
-            read: Some((offset, buf.len(), kind)),
+            read: Some((offset, len, kind)),
         });
         if let Some(fault) = &fault {
             fault.fail_or_delay()?;
         }
 
+        let mut buf = vec![0; len];
         match &self.source {
             Source::Wrapped(inner) => match kind {
-                ReadKind::Ondemand => inner.read_range_into(blob_id, offset, buf)?,
-                ReadKind::Prefetch => inner.prefetch_range_into(blob_id, offset, buf)?,
-            },
+                ReadKind::Ondemand => inner.read(blob_id, offset, len)?,
+                ReadKind::Prefetch => inner.prefetch(blob_id, offset, len)?,
+            }
+            .read_exact(&mut buf)?,
             Source::Memory(blobs) => {
                 let blob = blobs.get(blob_id).ok_or_else(|| unknown_blob(blob_id))?;
                 let data = usize::try_from(offset)
@@ -466,16 +476,17 @@ impl FaultBackend {
             }
         }
 
-        // Corrupt the bytes served for a short read or a flipped bit.
+        // Apply the fault to the bytes served.
         match fault {
             Some(Fault::ShortRead { len }) => buf[len..].fill(0),
+            Some(Fault::Truncate { len }) => buf.truncate(len),
             Some(Fault::FlipBit { offset: flip, bit }) => {
                 buf[(flip - offset) as usize] ^= 1 << (bit % 8)
             }
             _ => {}
         }
 
-        Ok(())
+        Ok(Box::new(io::Cursor::new(buf)))
     }
 }
 
@@ -556,14 +567,24 @@ impl Backend for FaultBackend {
         }
     }
 
-    /// Fills `buf` for an on-demand read, faults applied.
-    fn read_range_into(&self, blob_id: &BlobId, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.read(blob_id, offset, buf, ReadKind::Ondemand)
+    /// Reads `len` bytes from `offset` for an on-demand read, faults applied.
+    fn read(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        self.serve(blob_id, offset, len, ReadKind::Ondemand)
     }
 
-    /// Fills `buf` for a prefetch read, faults applied.
-    fn prefetch_range_into(&self, blob_id: &BlobId, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.read(blob_id, offset, buf, ReadKind::Prefetch)
+    /// Reads `len` bytes from `offset` for a prefetch read, faults applied.
+    fn prefetch(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        self.serve(blob_id, offset, len, ReadKind::Prefetch)
     }
 }
 
@@ -588,14 +609,16 @@ mod tests {
     }
 
     fn read(backend: &FaultBackend, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        let mut buf = vec![0xeeu8; len];
-        backend.read_range_into(&BLOB_ID, offset, &mut buf)?;
+        let mut buf = Vec::new();
+        backend.read(&BLOB_ID, offset, len)?.read_to_end(&mut buf)?;
         Ok(buf)
     }
 
     fn prefetch(backend: &FaultBackend, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        let mut buf = vec![0xeeu8; len];
-        backend.prefetch_range_into(&BLOB_ID, offset, &mut buf)?;
+        let mut buf = Vec::new();
+        backend
+            .prefetch(&BLOB_ID, offset, len)?
+            .read_to_end(&mut buf)?;
         Ok(buf)
     }
 
@@ -607,8 +630,9 @@ mod tests {
         let data = read(&backend, 100, 50).unwrap();
         let eof_err = read(&backend, 4000, 200).unwrap_err();
         let unknown_err = backend
-            .read_range_into(&[0u8; SHA256_DIGEST_SIZE], 0, &mut [0u8; 1])
-            .unwrap_err();
+            .read(&[0u8; SHA256_DIGEST_SIZE], 0, 1)
+            .err()
+            .unwrap();
 
         assert_eq!(blob_metadata.chunk_count(), 1);
         assert_eq!(data, blob_data(100, 50));
@@ -664,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn read_range_into_corrupts_only_the_reads_a_fault_covers() {
+    fn read_corrupts_only_the_reads_a_fault_covers() {
         let mut flipped = blob_data(16, 8);
         flipped[4] ^= 1 << 3;
         let test_cases = vec![
@@ -675,6 +699,8 @@ mod tests {
                 [blob_data(10, 3), vec![0; 5]].concat(),
             ),
             (Fault::ShortRead { len: 8 }, 10, 8, blob_data(10, 8)),
+            (Fault::Truncate { len: 3 }, 10, 8, blob_data(10, 3)),
+            (Fault::Truncate { len: 8 }, 10, 8, blob_data(10, 8)),
             (Fault::FlipBit { offset: 20, bit: 3 }, 16, 8, flipped),
             (
                 Fault::FlipBit { offset: 20, bit: 3 },
@@ -693,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn read_range_into_serves_after_a_delay() {
+    fn read_serves_after_a_delay() {
         let backend = backend();
         backend.inject(FaultRule::read(Fault::Delay(Duration::from_millis(30))));
 

@@ -16,21 +16,12 @@ type metric struct {
 
 type delta struct {
 	before, after mount.Metrics
+	fallbacks     int
 }
 
 func (d delta) of(m metric) float64 {
 	label := `source="` + m.source + `"`
 	return d.after.Sum(m.name, label) - d.before.Sum(m.name, label)
-}
-
-func (d delta) backend() bool {
-	for _, name := range []metric{proxyReads, originReads, fallbackReads} {
-		if d.of(name) != 0 {
-			return true
-		}
-	}
-
-	return false
 }
 
 func (d delta) String() string {
@@ -57,19 +48,16 @@ func (d delta) String() string {
 
 func (d delta) expectFallback(t testing.TB) {
 	t.Helper()
-	if !assert.NotZero(t, d.of(fallbackReads)) {
+	if !assert.NotZero(t, d.fallbacks) {
 		t.FailNow()
 	}
 
+	assert.NotZero(t, d.of(proxyReads))
 	assert.Zero(t, d.of(proxyErrors))
-	assert.Zero(t, d.of(proxyReads))
 }
 
 var (
-	proxyReads    = metric{"nydus_backend_read_total", "dragonfly"}
-	proxyBytes    = metric{"nydus_backend_read_bytes_total", "dragonfly"}
-	proxyErrors   = metric{"nydus_backend_read_failure_total", "dragonfly"}
-	originReads   = metric{"nydus_backend_read_total", "origin"}
-	originErrors  = metric{"nydus_backend_read_failure_total", "origin"}
-	fallbackReads = metric{"nydus_backend_read_total", "fallback"}
+	proxyReads  = metric{"nydus_backend_read_total", "dragonfly"}
+	proxyBytes  = metric{"nydus_backend_read_bytes_total", "dragonfly"}
+	proxyErrors = metric{"nydus_backend_read_failure_total", "dragonfly"}
 )

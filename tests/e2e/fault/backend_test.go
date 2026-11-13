@@ -79,7 +79,7 @@ func backendNotFound(t *testing.T, a mount.Adapter, img image) {
 	m := img.mountRegistry(t, a, reg.Registry.URL, nil, false)
 	m.prime(t)
 	big := img.lookup(t, bigFile)
-	before := m.API.Metrics(t).Sum("nydus_backend_read_failure_total", `source="origin"`)
+	before := m.API.Metrics(t).Sum("nydus_backend_read_failure_total", `source="http"`)
 
 	reg.Registry.Faults.Set(registry.Fault{Status: http.StatusNotFound})
 	r := big.readOnce(t, m.Root)
@@ -93,7 +93,7 @@ func backendNotFound(t *testing.T, a mount.Adapter, img image) {
 			return false
 		}
 
-		failed := mount.ParseMetrics(string(body)).Sum("nydus_backend_read_failure_total", `source="origin"`) - before
+		failed := mount.ParseMetrics(string(body)).Sum("nydus_backend_read_failure_total", `source="http"`) - before
 
 		return failed > 0 && float64(reg.Registry.Faults.Hits()) <= failed
 	}, 5*time.Second, 100*time.Millisecond) {
