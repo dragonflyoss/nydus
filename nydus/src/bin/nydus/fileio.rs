@@ -130,10 +130,10 @@ impl FileioCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
-        let config = Config::load(&self.config)?;
-        self.run(signals, config)
+        let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
+        crate::log_failure("fileio", result)
     }
 
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {

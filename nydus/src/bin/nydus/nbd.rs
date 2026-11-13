@@ -7,6 +7,7 @@ use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn, Level};
 
@@ -124,13 +125,11 @@ impl NbdCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
-        // Load the storage config.
-        let config = Config::load(&self.config)?;
-
-        // Runs the NBD service until shutdown.
-        self.run(signals, config)
+        // Load the storage config and run the NBD service until shutdown.
+        let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
+        crate::log_failure("nbd", result)
     }
 
     /// Runs the NBD service: builds the core, attaches the device, spawns
@@ -170,6 +169,13 @@ impl NbdCommand {
         let mountpoint = self.mountpoint.clone();
         let device = self.device.clone();
 
+        // Whether the mount at the mountpoint is the one this daemon made and
+        // has not unmounted yet. Unmounting a path removes whatever is mounted
+        // on top of it, so the daemon unmounts only while this holds: before
+        // its mount, or after its own unmount, the path may carry a mount that
+        // was there first.
+        let owns_mount = Arc::new(AtomicBool::new(false));
+
         // Signal thread: the first termination signal performs the ordered
         // shutdown — unmount (if mounted) BEFORE `stop()` clears the socket,
         // because the kernel must keep serving the umount's own reads and tearing
@@ -177,10 +183,15 @@ impl NbdCommand {
         // A second signal forces immediate exit.
         let signal_service = service.clone();
         let signal_mountpoint = mountpoint.clone();
+        let signal_owns_mount = owns_mount.clone();
         let signal_thread = signal::spawn_signal_thread("nbd", signals, move || {
             if let Some(mp) = &signal_mountpoint {
-                if let Err(err) = unmount(mp, || {}) {
-                    error!("{}", err.report());
+                if signal_owns_mount.swap(false, Ordering::SeqCst) {
+                    if let Err(err) = unmount(mp, || {}) {
+                        error!("{}", err.report());
+                        // Still mounted: leave it to the attempt after the session.
+                        signal_owns_mount.store(true, Ordering::SeqCst);
+                    }
                 }
             }
             signal_service.stop();
@@ -203,6 +214,7 @@ impl NbdCommand {
 
             match mounted {
                 Ok(()) => {
+                    owns_mount.store(true, Ordering::SeqCst);
                     info!("mounted {device} at {}", mp.display());
                     // Block until the session ends (clean disconnect or `stop()`
                     // from the signal thread).
@@ -212,8 +224,10 @@ impl NbdCommand {
                     // The signal path already unmounted on a signal-driven
                     // shutdown; if the session self-exited the mount is still up
                     // over a dead device, so try a final best-effort umount.
-                    if let Err(err) = umount2(&mp) {
-                        debug!("post-join unmount of {}: {}", mp.display(), err.report());
+                    if owns_mount.swap(false, Ordering::SeqCst) {
+                        if let Err(err) = umount2(&mp) {
+                            debug!("post-join unmount of {}: {}", mp.display(), err.report());
+                        }
                     }
                     joined
                 }

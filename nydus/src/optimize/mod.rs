@@ -214,8 +214,10 @@ pub fn build_ondemand_blob(
             let len = usize::try_from(last.compressed_range().end - first.compressed_offset())
                 .map_err(|err| Error::Overflow(format!("copy read exceeds usize: {err}")))?;
             let mut window = vec![0u8; len];
+            // A foreground read: a prefetch read would wait out the prefetch
+            // retry interval, hours by default, on a failing registry.
             backend
-                .prefetch_range_into(&blob_id, first.compressed_offset(), &mut window)
+                .read_range_into(&blob_id, first.compressed_offset(), &mut window)
                 .with_context(|| {
                     format!(
                         "failed to read chunk groups {}..={} of blob {blob_index}",

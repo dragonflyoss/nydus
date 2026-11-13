@@ -231,6 +231,42 @@ mod tests {
     }
 
     #[test]
+    fn export_keeps_symlink_targets_as_they_are() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let blob = dir.path().join("layer.blob");
+        let tar_path = dir.path().join("layer.tar");
+        fs::create_dir(&source).unwrap();
+        let exact = format!("{}//b", "c".repeat(97));
+        let long = format!("{}./end", "a/".repeat(60));
+        let test_cases = vec![
+            ("dots", "a/./b"),
+            ("slashes", "a//b"),
+            ("trailing", "dir/."),
+            ("absolute", "/usr//bin/./sh"),
+            ("exact", exact.as_str()),
+            ("long", long.as_str()),
+        ];
+        for (name, target) in &test_cases {
+            std::os::unix::fs::symlink(target, source.join(name)).unwrap();
+        }
+        build_and_export(&source, &blob, &tar_path);
+
+        let mut targets = BTreeMap::new();
+        let mut archive = tar::Archive::new(File::open(&tar_path).unwrap());
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let target = entry.link_name_bytes().unwrap().into_owned();
+            targets.insert(path, String::from_utf8(target).unwrap());
+        }
+
+        for (name, target) in test_cases {
+            assert_eq!(targets[name], target, "{name}");
+        }
+    }
+
+    #[test]
     fn export_round_trips_a_large_sparse_file() {
         // Several times the 2 MiB export read buffer: all-zero chunks become
         // holes between data islands that straddle block and read buffer

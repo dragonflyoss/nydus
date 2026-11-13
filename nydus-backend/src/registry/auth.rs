@@ -156,7 +156,9 @@ impl Authorization {
     }
 
     /// Returns whether the authorization is still valid, a bearer token until
-    /// the leeway before it expires when its expiry is known.
+    /// the leeway before it expires when its expiry is known. A token that
+    /// lives no longer than the leeway would never be sent, so it is valid
+    /// for half its lifetime.
     fn is_valid(&self) -> bool {
         match self {
             Self::Basic(_) => true,
@@ -164,8 +166,14 @@ impl Authorization {
                 created_at,
                 expires_in,
                 ..
-            } => expires_in
-                .is_none_or(|expires_in| created_at.elapsed() + TOKEN_EXPIRY_LEEWAY < expires_in),
+            } => expires_in.is_none_or(|expires_in| {
+                let leeway = if expires_in > TOKEN_EXPIRY_LEEWAY {
+                    TOKEN_EXPIRY_LEEWAY
+                } else {
+                    expires_in / 2
+                };
+                created_at.elapsed() + leeway < expires_in
+            }),
         }
     }
 }
@@ -202,10 +210,12 @@ impl FetchTokenResponse {
             ));
         }
 
+        // Read a lifetime of 0 as none given, as the token spec does.
         Authorization::bearer(
             &token,
             Some(
                 self.expires_in
+                    .filter(|seconds| *seconds > 0)
                     .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs),
             ),
         )
@@ -472,6 +482,12 @@ mod tests {
 
     #[test]
     fn authorize_adds_the_header_until_the_token_nears_expiry() {
+        // A bearer token of `expires_in` seconds fetched `age` seconds ago.
+        let bearer = |expires_in: u64, age: u64| Authorization::Bearer {
+            value: HeaderValue::from_static("Bearer xyz"),
+            created_at: Instant::now() - Duration::from_secs(age),
+            expires_in: Some(Duration::from_secs(expires_in)),
+        };
         let test_cases = vec![
             (
                 Authorization::basic("YWxpY2U6c2VjcmV0").unwrap(),
@@ -481,18 +497,14 @@ mod tests {
                 Authorization::bearer("xyz", None).unwrap(),
                 Some("Bearer xyz"),
             ),
-            (
-                Authorization::bearer("xyz", Some(Duration::from_secs(3600))).unwrap(),
-                Some("Bearer xyz"),
-            ),
-            (
-                Authorization::bearer("xyz", Some(TOKEN_EXPIRY_LEEWAY)).unwrap(),
-                None,
-            ),
-            (
-                Authorization::bearer("xyz", Some(Duration::ZERO)).unwrap(),
-                None,
-            ),
+            (bearer(3600, 0), Some("Bearer xyz")),
+            (bearer(30, 9), Some("Bearer xyz")),
+            (bearer(30, 11), None),
+            (bearer(21, 2), None),
+            (bearer(20, 9), Some("Bearer xyz")),
+            (bearer(20, 11), None),
+            (bearer(1, 0), Some("Bearer xyz")),
+            (bearer(0, 0), None),
         ];
 
         for (authorization, expected) in test_cases {
@@ -634,7 +646,10 @@ mod tests {
                 assert!(authorization.is_valid());
             }),
             (r#"{"token":"abc","expires_in":1}"#, |authorization| {
-                assert!(!authorization.unwrap().is_valid());
+                assert!(authorization.unwrap().is_valid());
+            }),
+            (r#"{"token":"abc","expires_in":0}"#, |authorization| {
+                assert!(authorization.unwrap().is_valid());
             }),
             (r#"{"token":"","access_token":""}"#, |authorization| {
                 assert!(authorization.is_err());

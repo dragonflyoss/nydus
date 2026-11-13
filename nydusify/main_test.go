@@ -12,9 +12,15 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"flag"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +32,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/sys/unix"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/internal/registrytest"
@@ -66,9 +73,103 @@ func mockBlockedFile(t *testing.T) string {
 	return path
 }
 
-func mockOCIImage(t *testing.T, reg *registrytest.Registry, repo, tag string) {
+// mockStallingRegistry starts a registry that answers 403 for the first blob
+// it is asked about and leaves the requests for every other blob unanswered.
+// It returns its host:port and a channel that reports, for each request left
+// unanswered, whether the client gave it up.
+func mockStallingRegistry(t *testing.T) (string, <-chan bool) {
+	var (
+		mu       sync.Mutex
+		rejected string
+	)
+
+	abandoned := make(chan bool, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, blob, _ := strings.Cut(r.URL.Path, "/blobs/")
+
+		mu.Lock()
+		if rejected == "" {
+			rejected = blob
+		}
+		reject := rejected == blob
+		mu.Unlock()
+
+		if !reject {
+			select {
+			case <-r.Context().Done():
+				abandoned <- true
+			case <-time.After(5 * time.Second):
+				abandoned <- false
+			}
+		}
+
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+
+	return strings.TrimPrefix(server.URL, "http://"), abandoned
+}
+
+// mockSilentRegistry starts a registry that leaves every request unanswered,
+// creating the file at reached once the first one arrives. It returns its
+// host:port and a channel that reports, for each request, whether the client
+// gave it up.
+func mockSilentRegistry(t *testing.T, reached string) (string, <-chan bool) {
+	abandoned := make(chan bool, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := os.WriteFile(reached, nil, 0o600); err != nil {
+			t.Error(err)
+		}
+
+		select {
+		case <-r.Context().Done():
+			abandoned <- true
+		case <-time.After(5 * time.Second):
+			abandoned <- false
+		}
+
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+
+	return strings.TrimPrefix(server.URL, "http://"), abandoned
+}
+
+// mockBuilder writes a builder that turns each layer into a blob of nothing
+// but a valid footer, and runs the shell commands of merge as `nydus merge`.
+func mockBuilder(t *testing.T, merge string) string {
+	script := `#!/bin/sh
+command=$1
+blob=
+while [ $# -gt 0 ]; do
+	if [ "$1" = --blob ]; then blob=$2; fi
+	shift
+done
+case $command in
+build)
+	cat > /dev/null
+	{ printf 0123456789abcdef; printf NDFOOTER; head -c 64 /dev/zero; printf '\020'; head -c 4023 /dev/zero; } > "$blob"
+	;;
+merge)
+	` + merge + `
+	;;
+esac
+`
+	path := filepath.Join(t.TempDir(), "nydus")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+func mockOCIImage(t *testing.T, reg *registrytest.Registry, repo, tag string, archs ...string) {
+	if len(archs) == 0 {
+		archs = []string{"amd64", "arm64"}
+	}
+
 	index := ocispec.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageIndex}
-	for _, arch := range []string{"amd64", "arm64"} {
+	for _, arch := range archs {
 		var layer bytes.Buffer
 		tw := tar.NewWriter(&layer)
 		if err := tw.WriteHeader(&tar.Header{Name: "hello", Mode: 0o644, Uid: os.Getuid(), Gid: os.Getgid(), Size: int64(len(arch)), ModTime: time.Unix(1700000000, 0)}); err != nil {
@@ -316,6 +417,59 @@ func TestManifestAnnotationValues(t *testing.T) {
 	}
 }
 
+func TestSetupCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		ignored bool
+		expect  func(t *testing.T, ctx context.Context)
+	}{
+		{
+			name: "hangup cancels the context",
+			expect: func(t *testing.T, ctx context.Context) {
+				assert := assert.New(t)
+				select {
+				case <-ctx.Done():
+				case <-time.After(10 * time.Second):
+					assert.Fail("the hangup did not cancel the context")
+				}
+			},
+		},
+		{
+			name:    "hangup stays ignored under nohup",
+			ignored: true,
+			expect: func(t *testing.T, ctx context.Context) {
+				assert := assert.New(t)
+				select {
+				case <-ctx.Done():
+					assert.Fail("the ignored hangup canceled the context")
+				case <-time.After(200 * time.Millisecond):
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if signal.Ignored(unix.SIGHUP) {
+				t.Skip("the tests were started with hangups ignored")
+			}
+
+			if tc.ignored {
+				signal.Ignore(unix.SIGHUP)
+				t.Cleanup(func() { signal.Reset(unix.SIGHUP) })
+			}
+
+			ctx, stop := setupCommand(cli.NewContext(mockApp(), flag.NewFlagSet("nydusify", flag.ContinueOnError), nil))
+			defer stop()
+			if err := unix.Kill(os.Getpid(), unix.SIGHUP); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.expect(t, ctx)
+		})
+	}
+}
+
 func TestScratchWorkDir(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -453,6 +607,8 @@ func TestParseManifestAnnotations(t *testing.T) {
 
 func TestRunConvert(t *testing.T) {
 	blocked := mockBlockedFile(t)
+
+	var abandoned <-chan bool
 
 	tests := []struct {
 		name   string
@@ -628,6 +784,56 @@ func TestRunConvert(t *testing.T) {
 			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "push local artifact blob")
+			},
+		},
+		{
+			name: "one rejected local blob cancels the upload of the others",
+			args: func(t *testing.T, reg *registrytest.Registry, _ string) []string {
+				mockNydusImage(t, reg, "base", "v1")
+				bootstrap := mockBootstrap(t, reg, "base", "v1")
+
+				var host string
+				host, abandoned = mockStallingRegistry(t)
+
+				return []string{"--builder", builderPath(t), "--bootstrap", bootstrap, "--blob-dir", filepath.Dir(bootstrap), "--target", host + "/local:v1"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "push local artifact blob")
+				assert.ErrorContains(err, "403 Forbidden")
+
+				// An upload that reached the registry was given up, not left
+				// to run out; one cancelled before its request leaves no report.
+				select {
+				case gaveUp := <-abandoned:
+					assert.True(gaveUp)
+				case <-time.After(time.Second):
+				}
+			},
+		},
+		{
+			name: "failed conversion ends the blob uploads",
+			args: func(t *testing.T, reg *registrytest.Registry, dir string) []string {
+				reached := filepath.Join(dir, "reached")
+
+				var host string
+				host, abandoned = mockSilentRegistry(t, reached)
+
+				return []string{"--builder", mockBuilder(t, "while [ ! -e '"+reached+"' ]; do sleep 0.05; done; exit 1"), "--source", reg.Ref("oci", "v1"), "--target", host + "/nydus:v1"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "convert: ")
+				assert.ErrorContains(err, "nydus merge")
+
+				// The upload that reached the registry was given up, not left
+				// to run out.
+				select {
+				case gaveUp := <-abandoned:
+					assert.True(gaveUp)
+				case <-time.After(10 * time.Second):
+					assert.Fail("no blob upload reached the registry")
+				}
 			},
 		},
 		{
@@ -995,6 +1201,8 @@ func TestTotalLayerSize(t *testing.T) {
 func TestRunCheck(t *testing.T) {
 	blocked := mockBlockedFile(t)
 
+	var x86 *registrytest.Registry
+
 	tests := []struct {
 		name   string
 		args   func(t *testing.T, reg *registrytest.Registry, dir string) []string
@@ -1008,6 +1216,31 @@ func TestRunCheck(t *testing.T) {
 			expect: func(t *testing.T, _ string, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "at least one of --source or --target must be provided")
+			},
+		},
+		{
+			name: "pull only the requested platform",
+			args: func(t *testing.T, reg *registrytest.Registry, dir string) []string {
+				x86 = reg
+				mockOCIImage(t, reg, "x86", "v1", "386", "amd64")
+
+				return []string{"--target", reg.Ref("x86", "v1"), "--platform", "linux/amd64", "--work-dir", dir}
+			},
+			expect: func(t *testing.T, dir string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				data, err := os.ReadFile(filepath.Join(dir, "target", "config.json"))
+				assert.NoError(err)
+				assert.Contains(string(data), `"architecture":"amd64"`)
+
+				var index ocispec.Index
+				x86.LoadJSON(t, "x86", "v1", &index)
+				assert.Equal("386", index.Manifests[0].Platform.Architecture)
+
+				for _, req := range x86.Requests() {
+					assert.NotContains(req.URL, index.Manifests[0].Digest.String())
+				}
 			},
 		},
 		{

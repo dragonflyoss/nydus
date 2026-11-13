@@ -32,6 +32,7 @@ use nydus_test_utils::blob::FullBlob;
 struct CountingBackend {
     local: Local,
     reads: AtomicUsize,
+    prefetches: AtomicUsize,
     fail_next: AtomicBool,
 }
 
@@ -817,6 +818,16 @@ impl Backend for CountingBackend {
         }
         self.local.read_range_into(blob_id, offset, dst)
     }
+
+    fn prefetch_range_into(
+        &self,
+        blob_id: &[u8; 32],
+        offset: u64,
+        dst: &mut [u8],
+    ) -> io::Result<()> {
+        self.prefetches.fetch_add(1, Ordering::Relaxed);
+        self.local.prefetch_range_into(blob_id, offset, dst)
+    }
 }
 
 #[test]
@@ -867,6 +878,7 @@ fn z_fragments_reuse_decoded_pclusters_across_files_and_threads() {
         let backend = Arc::new(CountingBackend {
             local: Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new())),
             reads: AtomicUsize::new(0),
+            prefetches: AtomicUsize::new(0),
             fail_next: AtomicBool::new(true),
         });
         let reader = ErofsReader::open_bootstrap(
@@ -1087,6 +1099,7 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         let backend = Arc::new(CountingBackend {
             local: Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new())),
             reads: AtomicUsize::new(0),
+            prefetches: AtomicUsize::new(0),
             fail_next: AtomicBool::new(false),
         });
         let reader = ErofsReader::open_bootstrap(
@@ -1189,17 +1202,24 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
                 chunk_group_index: 0,
             })
             .collect();
+        let source_backend = Arc::new(CountingBackend {
+            local: Local::new(directory.path().to_path_buf(), Arc::new(Metrics::new())),
+            reads: AtomicUsize::new(0),
+            prefetches: AtomicUsize::new(0),
+            fail_next: AtomicBool::new(false),
+        });
         let optimized = build_ondemand_blob(
             &parent,
             &patterns,
-            Arc::new(Local::new(
-                directory.path().to_path_buf(),
-                Arc::new(Metrics::new()),
-            )),
+            source_backend.clone(),
             &directory.path().join("build-cache"),
             CacheOptions::default(),
         )
         .unwrap();
+        // The copy is a foreground read: a prefetch read would wait out the
+        // prefetch retry interval on a failing registry.
+        assert!(source_backend.reads.load(Ordering::Relaxed) > 0);
+        assert_eq!(source_backend.prefetches.load(Ordering::Relaxed), 0);
         let meta = &optimized.blob_metadata;
         assert_eq!(meta.max_bytes_per_chunk_group(), 16 << 20);
         assert_eq!(meta.chunk_group_count(), 2);
@@ -1241,6 +1261,7 @@ fn optimize_accepts_layers_with_different_chunk_and_group_sizes() {
         let backend = Arc::new(CountingBackend {
             local: Local::new(directory.path().to_path_buf(), Arc::new(Metrics::new())),
             reads: AtomicUsize::new(0),
+            prefetches: AtomicUsize::new(0),
             fail_next: AtomicBool::new(false),
         });
         let read_cache = directory.path().join(format!("read-cache-{}", order[0]));

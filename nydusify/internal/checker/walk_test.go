@@ -7,6 +7,8 @@
 package checker
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -56,9 +58,10 @@ func mockXattrFile(t *testing.T, path string, xattrs map[string][]byte) {
 
 func TestWalkRootfs(t *testing.T) {
 	tests := []struct {
-		name   string
-		root   func(t *testing.T) string
-		expect func(t *testing.T, nodes map[string]fsNode, err error)
+		name     string
+		canceled bool
+		root     func(t *testing.T) string
+		expect   func(t *testing.T, nodes map[string]fsNode, err error)
 	}{
 		{
 			name: "record files, directories and symlinks",
@@ -131,11 +134,31 @@ func TestWalkRootfs(t *testing.T) {
 				assert.Nil(nodes)
 			},
 		},
+		{
+			name:     "stop once canceled",
+			canceled: true,
+			root: func(t *testing.T) string {
+				root := t.TempDir()
+				mockXattrFile(t, filepath.Join(root, "file"), nil)
+				return root
+			},
+			expect: func(t *testing.T, nodes map[string]fsNode, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, context.Canceled)
+				assert.Nil(nodes)
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			nodes, err := walkRootfs(tc.root(t))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+
+			nodes, err := walkRootfs(ctx, tc.root(t))
 			tc.expect(t, nodes, err)
 		})
 	}
@@ -454,9 +477,10 @@ func TestGetXattr(t *testing.T) {
 
 func TestHashFile(t *testing.T) {
 	tests := []struct {
-		name   string
-		path   func(t *testing.T) string
-		expect func(t *testing.T, hash string, err error)
+		name     string
+		canceled bool
+		path     func(t *testing.T) string
+		expect   func(t *testing.T, hash string, err error)
 	}{
 		{
 			name: "regular file",
@@ -493,15 +517,71 @@ func TestHashFile(t *testing.T) {
 				assert.Empty(hash)
 			},
 		},
+		{
+			name:     "stop once canceled",
+			canceled: true,
+			path: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "file")
+				mockXattrFile(t, path, nil)
+				return path
+			},
+			expect: func(t *testing.T, hash string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, context.Canceled)
+				assert.Empty(hash)
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			hash, err := hashFile(tc.path(t))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+
+			hash, err := hashFile(ctx, tc.path(t))
 			tc.expect(t, hash, err)
 		})
 	}
 }
+
+func TestContextReader_Read(t *testing.T) {
+	tests := []struct {
+		name   string
+		expect func(t *testing.T, data []byte, err error)
+	}{
+		{
+			name: "stop between two reads",
+			expect: func(t *testing.T, data []byte, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, context.Canceled)
+				assert.Equal("first", string(data))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			// Each read cancels, so only the first one gets through.
+			reader := contextReader{ctx: ctx, Reader: mockReader(func(data []byte) (int, error) {
+				cancel()
+				return copy(data, "first"), nil
+			})}
+
+			data, err := io.ReadAll(reader)
+			tc.expect(t, data, err)
+		})
+	}
+}
+
+// mockReader makes a function an io.Reader.
+type mockReader func([]byte) (int, error)
+
+func (r mockReader) Read(data []byte) (int, error) { return r(data) }
 
 func TestErrIsXattrUnsupported(t *testing.T) {
 	tests := []struct {

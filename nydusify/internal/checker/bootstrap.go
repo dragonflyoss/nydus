@@ -83,6 +83,7 @@ func runNydusCheck(ctx context.Context, builder, bootstrapPath string) error {
 		"--bootstrap", bootstrapPath,
 	}
 	cmd := exec.CommandContext(ctx, cmp.Or(builder, nydus.DefaultBuilder), args...)
+	nydus.DieWithParent(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

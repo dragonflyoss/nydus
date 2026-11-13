@@ -17,6 +17,9 @@ use nydus_error::{Context, Error, Result};
 use super::core::{read_uffd_msg, UffdCore, UffdMsg};
 use super::proto::{Connection, FaultPolicy, Request, VmaRegion};
 
+/// The wait after a failed accept before the next one.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
 pub struct UffdService {
     core: Arc<UffdCore>,
     socket_path: PathBuf,
@@ -90,7 +93,20 @@ impl UffdService {
                 biased;
                 _ = shutdown.changed() => break,
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted.context("failed to accept uffd connection")?;
+                    let stream = match accepted {
+                        Ok((stream, _)) => stream,
+                        Err(err) => {
+                            // Keep the connections being served: a failure such
+                            // as EMFILE says nothing about them. Wait before
+                            // accepting again, it lasts while the peer stays queued.
+                            warn!("failed to accept uffd connection: {err}");
+                            tokio::select! {
+                                _ = shutdown.changed() => break,
+                                _ = tokio::time::sleep(ACCEPT_BACKOFF) => {}
+                            }
+                            continue;
+                        }
+                    };
                     let core = self.core.clone();
                     let conn_shutdown = self.shutdown.subscribe();
                     let stream = stream.into_std().context("failed to convert uffd stream to std")?;
@@ -237,7 +253,15 @@ impl UffdConn {
                 self.send_ranges(None, &ranges).await?;
             }
             Request::Probe => {
-                let ranges = self.core.probe_ranges()?;
+                // Probing opens the caches of the blobs it names, which reads
+                // their blob meta from the backend when the cache directory
+                // lacks it, so it must not run on a runtime thread.
+                let core = self.core.clone();
+                let ranges = tokio::task::spawn_blocking(move || core.probe_ranges())
+                    .await
+                    .map_err(|err| {
+                        Error::Runtime(format!("uffd PROBE blocking task failed: {err}"))
+                    })??;
                 self.send_ranges(None, &ranges).await?;
             }
         }
@@ -273,8 +297,16 @@ impl UffdConn {
         }
 
         // Keep prefault synchronous until Connection guarantees serialized concurrent writes.
+        // It opens blob caches like a probe, so it runs off the runtime threads too.
         if prefault && policy == FaultPolicy::Zerocopy {
-            let ranges = self.core.prefault_ranges(&regions)?;
+            let core = self.core.clone();
+            let prefault_regions = regions.clone();
+            let ranges =
+                tokio::task::spawn_blocking(move || core.prefault_ranges(&prefault_regions))
+                    .await
+                    .map_err(|err| {
+                        Error::Runtime(format!("uffd prefault blocking task failed: {err}"))
+                    })??;
             self.send_ranges(Some(&regions), &ranges).await?;
         }
 

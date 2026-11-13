@@ -246,7 +246,8 @@ pub struct HttpConfig {
     pub request_timeout: Duration,
 
     /// The maximum number of retry attempts per request, applied by the HTTP
-    /// client's retry middleware. A prefetch read still failing after them is
+    /// client's retry middleware, and of a read whose body fails after its
+    /// answer arrived. A prefetch read still failing after them is
     /// sent once more after `prefetch.retry_interval`.
     #[serde(default = "default_registry_http_max_retries")]
     pub max_retries: u32,

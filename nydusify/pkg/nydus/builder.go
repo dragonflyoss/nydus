@@ -93,6 +93,7 @@ func RunNydusBuild(ctx context.Context, opt BuildOption) error {
 		return err
 	}
 	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
+	DieWithParent(cmd)
 	cmd.Stdin = opt.Stdin
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -141,6 +142,7 @@ func RunNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 	)
 
 	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
+	DieWithParent(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -161,6 +163,7 @@ func RunNydusExport(ctx context.Context, opt ExportOption, dest io.Writer) error
 	}
 
 	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
+	DieWithParent(cmd)
 	cmd.Stdout = dest
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

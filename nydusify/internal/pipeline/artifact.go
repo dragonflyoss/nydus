@@ -481,6 +481,7 @@ type bootstrapCheckReport struct {
 
 func bootstrapBlobDigestsFromNydusCheck(ctx context.Context, builderPath string, bootstrapPath string) (map[digest.Digest]struct{}, error) {
 	cmd := exec.CommandContext(ctx, cmp.Or(builderPath, nydus.DefaultBuilder), "check", "--bootstrap", bootstrapPath, "--output", "json")
+	nydus.DieWithParent(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, errors.Errorf("inspect bootstrap %q with nydus check: %v: %s", bootstrapPath, err, strings.TrimSpace(string(out)))

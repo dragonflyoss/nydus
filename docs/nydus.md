@@ -220,7 +220,7 @@ their sockets:
 
 | Pool | Size | Lifetime and work |
 | ---- | ---- | ----------------- |
-| Async workers | Tokio's default, one per CPU | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Async workers | Tokio's default, one per CPU | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; the origin client resolves names with the system configuration and follows the changes of `/etc/resolv.conf` and `/etc/hosts`; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
 | Blocking workers | Tokio's default | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`) and released when idle. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
 Every registry backend runs on a runtime of its own with tokio's default
@@ -585,6 +585,8 @@ tar entry per inode, streaming file data straight out of the blob:
 	`trusted.nydus.*` attributes are dropped: they only drive the nydus runtime.
 - Hard links reuse the first path visited. That entry is a regular file and
 	every later path for the same inode becomes a tar hard link pointing at it.
+- Symlink targets are written byte for byte, `.` components and repeated
+	slashes included.
 - Sockets cannot be represented in tar and are skipped with a warning.
 - OCI whiteouts need no special handling. The tar builder retains `.wh.*` markers
 	verbatim when it builds a layer, so they are ordinary inodes in the blob and
@@ -1182,7 +1184,9 @@ Fields:
 - `prefetch.retry_interval` (default `6h`) is the interval before such a
 	prefetch read is sent once more, drawn at random between this and twice
 	this so retry load spreads out instead of stampeding: by default the retry
-	lands 6 to 12 hours later.
+	lands 6 to 12 hours later. A read the registry redirected to a signed
+	link finds the link expired by then (`401` or `403`), so the redirect is
+	resolved through the registry once more.
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
@@ -1252,7 +1256,9 @@ Fields under `backend.config`:
 		sharing the cache directory.
 	- `max_retries` (default `3`): maximum number of retry attempts per
 		request, applied with exponential backoff by the HTTP client's retry
-		middleware. A prefetch read still answered with a `429`, `5xx` or
+		middleware. A read whose answer arrived but whose body then fails, the
+		connection reset or `request_timeout` passed, is requested again as
+		many times. A prefetch read still answered with a `429`, `5xx` or
 		`408` after them is sent once more after `prefetch.retry_interval`,
 		like one Dragonfly answers so; an on-demand read, and a prefetch read
 		failing in transport, errors out.
@@ -1455,7 +1461,9 @@ Cache (`nydus_cache_*`):
 	(corruption in transit or at rest); `decode`, it did not decompress to
 	its declared size, or on a `redirect` fill the redirect points past its
 	source blob's chunk groups (a stale optimize artifact); `io`, the cache
-	file refused the write; and on the `redirect` fills `unknown_source`,
+	file refused the write, a full disk for one, in which case a FUSE read is
+	still served from the backend, uncached, while the frontends that hand
+	the cache file to the kernel fail the read; and on the `redirect` fills `unknown_source`,
 	the redirect names a blob the image does not have. Normally zero. Summing `type="ondemand"` across the instances sharing a
 	cache directory shows how much duplicate fetching they do. After an
 	optimized mount's prefetch quiesces,
@@ -1482,7 +1490,9 @@ Filesystem (`nydus_fs_*`):
 
 - `nydus_fs_op_total{operation}`, `nydus_fs_op_failure_total{operation}` — FUSE
 	operations by op (`read`, `lookup`, `getattr`, ...), failed ones
-	included, and the failed ones alone.
+	included, and the failed ones alone. A `lookup` of a name the directory
+	does not hold and a `getxattr` of an attribute the file does not carry
+	(`ENODATA`) are not failures.
 - `nydus_fs_op_duration_milliseconds{operation}` — duration histogram of the
 	successful FUSE operations by op.
 
@@ -1630,6 +1640,11 @@ Within the bootstrap region:
 - the metadata area starts at `superblock.meta_blkaddr` and contains inode
 	bodies, xattrs, chunk index arrays and directory data. This is block 1 for
 	up to 23 device slots; a larger device table occupies additional head blocks.
+- the first 32-byte slot of the metadata area stays empty, so the root inode
+	has nid 1 and no inode has nid 0. A kernel EROFS mount reports the nid as
+	`d_ino`, and glibc before 2.37 drops a `readdir` entry whose `d_ino` is 0:
+	with the root at nid 0, `.` and `..` of the root and `..` of its
+	subdirectories went missing from listings.
 - directories are laid out like `mkfs.erofs` does: the full 4KiB blocks of
 	dirent data go to the data area, and the partial last block is packed right
 	behind the inode header (`EROFS_INODE_FLAT_INLINE`, `i_size` is the exact
@@ -2366,9 +2381,10 @@ When mounting with `--bootstrap + --blob-dir`:
 5. `--cache-dir` selects the persistent local cache; otherwise runtime creates a
 	temporary local cache for the mount lifetime.
 6. Before chunk lookup, check the cache directory for `<full_blob_digest>.blob.meta`.
-	If it is absent, download the standalone blob meta from the local backend into
-	the cache directory. The cache verifies the blob meta header crc32c before
-	mmaping the cached file and using its tables.
+	If it is absent, or the copy there no longer parses (a crash or the disk
+	left it empty or damaged), download the standalone blob meta from the local
+	backend into the cache directory, replacing the copy. The cache verifies the
+	blob meta header crc32c before mmaping the cached file and using its tables.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
 	layer names the chunk groups covering the requested range with one cell
 	table lookup per end, ensures each is fetched, decoded
@@ -2591,7 +2607,10 @@ word at 24 whose bit 0 is `ALL_READY` and the `boot_tag` at 28 naming the
 boot the bits belong to; the rest of the header page is
 reserved and zero. Readers require the file to be at least header plus
 bitmap long and ignore any bytes past the bitmap, which a newer writer may
-append behind a compat feature bit. The whole file is mapped `MAP_SHARED`
+append behind a compat feature bit. The blocks of the whole file are reserved
+when it is created, so a store through the mapping never has to allocate one:
+on a full disk such a store would end the process with `SIGBUS`. The whole
+file is mapped `MAP_SHARED`
 and every bit access goes through atomic operations (`Acquire` loads,
 `fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
 are immediately observed by every other process sharing the cache directory
@@ -3204,7 +3223,10 @@ Pipeline (single image source):
    produce the overlaid bootstrap, which is written back as the final bootstrap
    layer (`internal/pipeline/hook.go`).
 4. Push the rewritten manifest and all new layers to `--target`
-   (`internal/remote`).
+   (`internal/remote`). Each layer blob is already uploaded as soon as it is
+   built, alongside the remaining conversions. Such an upload failing is only
+   logged, since this push uploads the blob again; a conversion that fails
+   stops the uploads still running.
 
 Pipeline (multiple and/or directory sources, `internal/pipeline/multi.go`):
 
@@ -3288,7 +3310,7 @@ Flags:
 | `--source-insecure`, `--target-insecure` | `false` | Skip TLS verification independently for the selected source/target registry. |
 | `--source-plain-http`, `--target-plain-http` | `false` | Use plain HTTP independently for the selected source/target registry. |
 | `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. Forwarded to the `nydus build`/`merge` subprocesses. |
-| `--dragonfly-scheduler` | empty | Global flag (also `NYDUSIFY_DRAGONFLY_SCHEDULER`), placed before the subcommand. Dragonfly scheduler endpoint, e.g. `http://127.0.0.1:8002`. Registry manifest and blob GETs (manifest, config, bootstrap layer, ...) go through the Dragonfly Go SDK like the Rust backend's on-demand reads: priority Level6 and one retry on the next seed peer after a jittered exponential backoff. A seed peer answer with a definitive status (the `401` auth challenge, a `404`) is settled as is; a `5xx`, `408`, `429`, timeout or connection failure falls back to the origin. The `HEAD` that resolves a digest-addressed manifest is answered through Dragonfly too. The generated `nydus fuse` config gets `backend.config.dragonfly.scheduler_endpoint` (check, mount, optimize) so on-demand reads use the Rust SDK. Pushes are not affected. |
+| `--dragonfly-scheduler` | empty | Global flag (also `NYDUSIFY_DRAGONFLY_SCHEDULER`), placed before the subcommand. Dragonfly scheduler endpoint, e.g. `http://127.0.0.1:8002`. Registry manifest and blob GETs (manifest, config, bootstrap layer, ...) go through the Dragonfly Go SDK like the Rust backend's on-demand reads: priority Level6 and one retry on the next seed peer after a jittered exponential backoff. A seed peer answer with a definitive status (the `401` auth challenge, a `404`) is settled as is; a `5xx`, `408`, `429`, timeout or connection failure falls back to the origin. A download through Dragonfly has no limit on its total time; a seed peer that sends nothing for five minutes is given up like a silent registry, with a fallback to the origin while the response headers are awaited and a retry that resumes the download afterwards. The `HEAD` that resolves a digest-addressed manifest is answered through Dragonfly too. The generated `nydus fuse` config gets `backend.config.dragonfly.scheduler_endpoint` (check, mount, optimize) so on-demand reads use the Rust SDK. A scheduler that cannot be reached at startup is logged as a warning and does not fail the command: the requests of `nydusify` go to the origin, and the endpoint is still written to the generated config, where the daemon keeps trying it. An endpoint that is not a URL is rejected. Pushes are not affected. |
 
 Notes:
 
@@ -3304,6 +3326,32 @@ Notes:
 - Image references are normalized like a container runtime: a bare name such as
   `mariadb` expands to `docker.io/library/mariadb:latest`, and a tagless
   reference defaults to `:latest`.
+- Registry requests that fail transiently are tried up to five times, waiting
+  longer before each new attempt: a connection failure or a `408`, `429`,
+  `500`, `502`, `503` or `504` answer while resolving, pulling or pushing. A
+  layer download that is tried again resumes after the bytes already stored.
+  The pulls of `check`, `mount` and `optimize` behave the same.
+- A registry or token server that sends nothing for five minutes, while the
+  response headers or more of a download are awaited, fails the request with a
+  timeout, which is retried as above. The time of a whole transfer is not
+  limited. Uploads are not watched, since a registry may take minutes to answer
+  the commit of a large blob.
+- `check`, `mount` and `optimize` hand the registry to a `nydus` process
+  through a generated config. That process does not read `HTTP_PROXY`,
+  `HTTPS_PROXY` and `NO_PROXY`, so the proxy these name for the registry, the
+  one the requests of `nydusify` itself go through, is written to
+  `backend.config.http.proxy.addr`. It then carries every registry request of
+  the process, the redirects of the registry included. A registry `NO_PROXY`
+  excludes, a loopback registry and a proxy that is not `http://` or
+  `https://` leave the config without a proxy.
+- `SIGINT`, `SIGTERM` and `SIGHUP` end every subcommand in order: the `nydus`
+  subprocesses are stopped, a mount is unmounted and a temporary work
+  directory is removed. A hangup is left ignored when the command was started
+  that way (`nohup`), and `SIGQUIT` keeps the goroutine dump of the Go
+  runtime.
+- On Linux the kernel sends `SIGTERM` to the `nydus` subprocesses once
+  `nydusify` itself is gone, so none is left behind, and a FUSE daemon
+  unmounts, when `nydusify` is killed outright (`SIGKILL`, the OOM killer).
 
 Examples:
 
@@ -3384,12 +3432,20 @@ vs nydus from the layer annotations), and runs the following rules in order
    - extended attributes (names and values, skipping the `system.*` namespace),
    - content (size + sha256) for regular files.
 
-   Missing, extra or mismatching entries fail the check.
+   Missing, extra or mismatching entries fail the check. An interrupted check
+   (`SIGINT`, `SIGTERM`, `SIGHUP`) stops the comparison at the next entry, or
+   at the next read of the file being hashed, and then unmounts and removes
+   what the rule set up.
 
 The filesystem rule requires **root privileges** (both the FUSE mount and the
 OCI layer ownership replay need root) and is skipped automatically when only one
 of `--source`/`--target` is given. Running non-root fails fast with a clear
 message instead of silently timing out on the mount.
+
+When the rule ends, each `nydus fuse` daemon is told to stop and its scratch
+directory is removed. A daemon that died on its own, or that is killed for not
+stopping within ten seconds, leaves its mount behind; the rule then unmounts it
+through `fusermount3`, `fusermount` or `umount`, whichever works first.
 
 Flags:
 

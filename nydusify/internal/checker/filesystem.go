@@ -75,11 +75,11 @@ func (r *filesystemRule) Validate(ctx context.Context) error {
 	}
 	defer cleanupTarget()
 
-	sourceNodes, err := walkRootfs(sourceRoot)
+	sourceNodes, err := walkRootfs(ctx, sourceRoot)
 	if err != nil {
 		return errors.Wrap(err, "walk source rootfs")
 	}
-	targetNodes, err := walkRootfs(targetRoot)
+	targetNodes, err := walkRootfs(ctx, targetRoot)
 	if err != nil {
 		return errors.Wrap(err, "walk target rootfs")
 	}
@@ -182,6 +182,7 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 	// mountpoint to become active. Keep its output buffered for startup errors;
 	// the check command itself owns the user-facing progress logs.
 	cmd := exec.Command(cmp.Or(r.builder, nydus.DefaultBuilder), args...)
+	nydus.DieWithParent(cmd)
 	var fuseLog bytes.Buffer
 	cmd.Stdout = &fuseLog
 	cmd.Stderr = &fuseLog
@@ -202,6 +203,14 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 		_ = cmd.Process.Signal(unix.SIGTERM)
 		select {
 		case <-done:
+			// A daemon that shut down in order has unmounted. One that died,
+			// before the signal or of it, left a dead mount, which answers a
+			// stat with an error.
+			if mounted, err := isMounted(mountpoint, filepath.Dir(mountpoint)); err != nil || mounted {
+				if err := unmountFuse(mountpoint); err != nil {
+					log.G(ctx).WithError(err).Warnf("unmount nydus fuse at %q", mountpoint)
+				}
+			}
 		case <-time.After(10 * time.Second):
 			// Helpers may issue FUSE requests, so disconnect an unresponsive daemon first.
 			_ = cmd.Process.Kill()

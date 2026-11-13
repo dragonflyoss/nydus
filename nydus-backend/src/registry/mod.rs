@@ -2,6 +2,7 @@
 //! served in byte ranges, over the origin or the Dragonfly seed peers.
 
 mod auth;
+mod dns;
 #[cfg(feature = "dragonfly")]
 mod dragonfly;
 mod http;
@@ -13,11 +14,13 @@ mod rt;
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
+use tracing::warn;
 use url::Url;
 
 use nydus_config::{BackendConfig, Config, RedactedString};
@@ -117,6 +120,9 @@ struct Client {
 
     /// The Dragonfly transport when configured.
     dragonfly: Option<Box<dyn Transport>>,
+
+    /// The times a read is requested again after its body failed.
+    max_retries: u32,
 }
 
 /// Implements the registry backend construction.
@@ -166,6 +172,7 @@ impl Registry {
                 redirects: RedirectCache::new(),
                 http,
                 dragonfly,
+                max_retries: registry.http.max_retries,
             }),
             runtime,
             metrics,
@@ -175,6 +182,10 @@ impl Registry {
 
 /// Implements the registry requests.
 impl Client {
+    /// The wait before a read whose body failed is requested again, doubled
+    /// at every retry.
+    const BODY_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
     /// Returns the `source` label of a failed read: Dragonfly when configured,
     /// otherwise the origin client's.
     fn source(&self) -> Source {
@@ -281,7 +292,7 @@ impl Client {
             return Err(response.into_io_error().await);
         }
 
-        let location = response.location()?;
+        let location = response.location(&url)?;
         let redirected = transport.get(&location, headers).await?;
         if !redirected.status.is_success() {
             return Err(redirected.into_io_error().await);
@@ -315,28 +326,79 @@ impl Client {
             }
         }
 
+        // A prefetch read that fails is sent once more after the retry
+        // interval, hours later, when the link the registry signed has
+        // expired: resolve the redirect once more when the link answers `401`
+        // or `403`.
         let url = self.blob_url(&hex);
-        let response = self
-            .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
-            .await?;
+        let mut resolved_again = false;
+        loop {
+            let response = self
+                .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
+                .await?;
 
-        if response.status.is_success() {
-            response.validate_range(range)?;
-            return Ok(response);
-        }
-        if !response.status.is_redirection() {
-            return Err(response.into_io_error().await);
-        }
+            if response.status.is_success() {
+                response.validate_range(range)?;
+                return Ok(response);
+            }
+            if !response.status.is_redirection() {
+                return Err(response.into_io_error().await);
+            }
 
-        let location = response.location()?;
-        let redirected = transport.prefetch(&location, headers).await?;
-        if !redirected.status.is_success() {
-            return Err(redirected.into_io_error().await);
-        }
-        redirected.validate_range(range)?;
+            let location = response.location(&url)?;
+            let redirected = transport.prefetch(&location, headers.clone()).await?;
+            if redirected.status.is_success() {
+                redirected.validate_range(range)?;
+                self.redirects.insert(&hex, location);
+                return Ok(redirected);
+            }
 
-        self.redirects.insert(&hex, location);
-        Ok(redirected)
+            let expired = matches!(
+                redirected.status,
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            );
+            if !expired || resolved_again {
+                return Err(redirected.into_io_error().await);
+            }
+            resolved_again = true;
+        }
+    }
+
+    /// Reads the `length` bytes of the `range` of a blob for a `kind` read,
+    /// returning them with the blob size and where they were fetched from.
+    ///
+    /// The transports retry a request until its answer arrives, the body still
+    /// streaming. A body that then fails, the connection reset or the request
+    /// timeout passed, is requested again here, `max_retries` times.
+    async fn read_bytes(
+        &self,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        range: &Range,
+        length: usize,
+        kind: ReadKind,
+    ) -> io::Result<(Bytes, u64, Source)> {
+        let mut retries = 0;
+        loop {
+            let response = match kind {
+                ReadKind::Ondemand => self.read_range(blob_id, range).await?,
+                ReadKind::Prefetch => self.prefetch_range(blob_id, range).await?,
+            };
+            let blob_size = response.content_range()?.complete_length;
+            let source = response.source;
+            let err = match response.bytes(length).await {
+                Ok(bytes) => return Ok((bytes, blob_size, source)),
+                Err(err) if retries < self.max_retries => err,
+                Err(err) => return Err(err),
+            };
+
+            let delay = Self::BODY_RETRY_INTERVAL.saturating_mul(1 << retries.min(16));
+            retries += 1;
+            warn!(
+                "body of range {range} of blob {} failed, retrying in {delay:?}: {err}",
+                hex::encode(blob_id)
+            );
+            tokio::time::sleep(delay).await;
+        }
     }
 
     /// Reads a blob's metadata for an on-demand read.
@@ -349,13 +411,16 @@ impl Client {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
-        let response = self
-            .read_range(blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
+        let (footer_bytes, blob_size, _) = self
+            .read_bytes(
+                blob_id,
+                &Range::Suffix(BlobFooter::SIZE as u64),
+                BlobFooter::SIZE,
+                ReadKind::Ondemand,
+            )
             .await?;
         let footer_offset =
-            BlobFooter::calculate_offset_by_blob_size(response.content_range()?.complete_length)
-                .map_err(io::Error::other)?;
-        let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
+            BlobFooter::calculate_offset_by_blob_size(blob_size).map_err(io::Error::other)?;
         let footer =
             BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
                 .map_err(io::Error::other)?;
@@ -367,13 +432,13 @@ impl Client {
             io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
         let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
-        let blob_metadata_bytes = self
-            .read_range(
+        let (blob_metadata_bytes, _, _) = self
+            .read_bytes(
                 blob_id,
                 &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
+                blob_metadata_size,
+                ReadKind::Ondemand,
             )
-            .await?
-            .bytes(blob_metadata_size)
             .await?;
 
         BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
@@ -385,13 +450,16 @@ impl Client {
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
-        let response = self
-            .prefetch_range(blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
+        let (footer_bytes, blob_size, _) = self
+            .read_bytes(
+                blob_id,
+                &Range::Suffix(BlobFooter::SIZE as u64),
+                BlobFooter::SIZE,
+                ReadKind::Prefetch,
+            )
             .await?;
         let footer_offset =
-            BlobFooter::calculate_offset_by_blob_size(response.content_range()?.complete_length)
-                .map_err(io::Error::other)?;
-        let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
+            BlobFooter::calculate_offset_by_blob_size(blob_size).map_err(io::Error::other)?;
         let footer =
             BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
                 .map_err(io::Error::other)?;
@@ -403,13 +471,13 @@ impl Client {
             io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
         })?;
         let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
-        let blob_metadata_bytes = self
-            .prefetch_range(
+        let (blob_metadata_bytes, _, _) = self
+            .read_bytes(
                 blob_id,
                 &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
+                blob_metadata_size,
+                ReadKind::Prefetch,
             )
-            .await?
-            .bytes(blob_metadata_size)
             .await?;
 
         BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
@@ -455,9 +523,10 @@ impl Backend for Registry {
         let length = buf.len();
         let result = self.runtime.block_on_worker(async move {
             let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
-            let response = client.read_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
+            let (bytes, _, source) = client
+                .read_bytes(&blob_id, &range, length, ReadKind::Ondemand)
+                .await?;
+            Ok((bytes, source))
         });
 
         match result {
@@ -493,9 +562,10 @@ impl Backend for Registry {
         let length = buf.len();
         let result = self.runtime.block_on_worker(async move {
             let range = Range::Bounded(offset..=(offset + length as u64).saturating_sub(1));
-            let response = client.prefetch_range(&blob_id, &range).await?;
-            let source = response.source;
-            Ok((response.bytes(length).await?, source))
+            let (bytes, _, source) = client
+                .read_bytes(&blob_id, &range, length, ReadKind::Prefetch)
+                .await?;
+            Ok((bytes, source))
         });
 
         match result {
@@ -813,6 +883,7 @@ mod tests {
                 )
                 .unwrap(),
                 dragonfly: Some(Box::new(transport)),
+                max_retries: http.max_retries,
             }),
             runtime: Arc::new(Runtime::new(None).unwrap()),
             metrics: Arc::new(Metrics::new()),
@@ -1183,6 +1254,74 @@ backend:
         }
     }
 
+    /// Serves `blob` in ranges, cutting the body of the first `truncated`
+    /// answers short.
+    fn truncating_origin(blob: Vec<u8>, truncated: u32) -> (SocketAddr, Arc<AtomicU32>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_in_thread = hits.clone();
+        thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                while !buf.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => buf.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                if !buf.ends_with(b"\r\n\r\n") {
+                    continue;
+                }
+                let request = String::from_utf8_lossy(&buf).into_owned();
+                let response = OriginStub::respond("206 Partial Content", &request, &blob);
+                let hit = hits_in_thread.fetch_add(1, Ordering::SeqCst);
+                let end = if hit < truncated {
+                    response.len() - 8
+                } else {
+                    response.len()
+                };
+                let _ = stream.write_all(&response[..end]);
+            }
+        });
+        (addr, hits)
+    }
+
+    #[test]
+    fn a_read_whose_body_fails_is_requested_again() {
+        let test_cases = vec![
+            (ReadKind::Ondemand, 3, 2, true, 3),
+            (ReadKind::Prefetch, 3, 2, true, 3),
+            (ReadKind::Ondemand, 1, 2, false, 2),
+            (ReadKind::Prefetch, 0, 1, false, 1),
+        ];
+
+        for (kind, max_retries, truncated, ok, hits) in test_cases {
+            let blob: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+            let (addr, origin_hits) = truncating_origin(blob.clone(), truncated);
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      max_retries: {max_retries}\n"
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+            let mut data = vec![0u8; 64];
+            let result = match kind {
+                ReadKind::Ondemand => registry.read_range_into(&TEST_BLOB_ID, 16, &mut data),
+                ReadKind::Prefetch => registry.prefetch_range_into(&TEST_BLOB_ID, 16, &mut data),
+            };
+
+            assert_eq!(result.is_ok(), ok, "{kind:?} {max_retries} {truncated}");
+            if ok {
+                assert_eq!(data, blob[16..80]);
+            }
+            assert_eq!(origin_hits.load(Ordering::SeqCst), hits);
+        }
+    }
+
     #[test]
     fn unauthorized_answer_triggers_the_auth_handshake() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
@@ -1362,6 +1501,68 @@ backend:
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
         assert_eq!(origin.hits(), 0);
+    }
+
+    #[test]
+    fn prefetch_resolves_a_redirect_once_more_when_the_link_expired() {
+        let redirect = |link: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(LOCATION, link.parse().unwrap());
+            Scripted::Status(StatusCode::TEMPORARY_REDIRECT, headers)
+        };
+        let expired = || Scripted::Status(StatusCode::FORBIDDEN, HeaderMap::new());
+        let body = b"fresh".to_vec();
+        let test_cases: Vec<(ReadKind, Vec<Scripted>, Option<&str>)> = vec![
+            (
+                ReadKind::Prefetch,
+                vec![
+                    redirect("http://cdn.example.com/expired"),
+                    expired(),
+                    redirect("http://cdn.example.com/fresh"),
+                    Scripted::Body(body.clone()),
+                ],
+                Some("http://cdn.example.com/fresh"),
+            ),
+            (
+                ReadKind::Prefetch,
+                vec![
+                    redirect("http://cdn.example.com/expired"),
+                    expired(),
+                    redirect("http://cdn.example.com/expired"),
+                    expired(),
+                ],
+                None,
+            ),
+            (
+                ReadKind::Ondemand,
+                vec![redirect("http://cdn.example.com/expired"), expired()],
+                None,
+            ),
+        ];
+
+        for (kind, script, link) in test_cases {
+            let calls = script.len() as u32;
+            let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
+            let transport = ScriptedTransport::new(script);
+            let registry = scripted_registry(origin.addr, None, None, transport.clone());
+
+            let mut buf = vec![0u8; body.len()];
+            let result = read(&registry, kind, &mut buf);
+
+            assert_eq!(result.is_ok(), link.is_some());
+            assert_eq!(transport.calls(), calls);
+            assert_eq!(
+                registry
+                    .client
+                    .redirects
+                    .get(&hex::encode(TEST_BLOB_ID))
+                    .as_deref(),
+                link
+            );
+            if link.is_some() {
+                assert_eq!(buf, body);
+            }
+        }
     }
 
     #[test]

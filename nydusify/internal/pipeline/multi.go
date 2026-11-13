@@ -233,7 +233,7 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 // and an existing bootstrap layer is dropped), then returns the blob layer
 // descriptors in stacking order together with the image's raw config JSON.
 func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOption, srcDesc ocispec.Descriptor) ([]ocispec.Descriptor, json.RawMessage, error) {
-	platformMC := platforms.Only(opt.Platform)
+	platformMC := platforms.OnlyStrict(opt.Platform)
 
 	layerFn := LayerConvertFunc(nydus.PackOption{
 		BuilderPath: opt.BuilderPath,
@@ -301,7 +301,7 @@ func buildImageConfig(base json.RawMessage, platform ocispec.Platform, diffIDs [
 		})
 	}
 
-	return patchImageConfig(base, diffIDs, func(_ []ocispec.History, _ bool) ([]ocispec.History, bool) {
+	return oci.PatchImageConfig(base, diffIDs, func(_ []ocispec.History, _ bool) ([]ocispec.History, bool) {
 		return history, true
 	})
 }

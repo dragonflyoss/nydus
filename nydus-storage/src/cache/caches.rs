@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use prometheus::core::{Collector, Desc};
@@ -54,19 +54,46 @@ struct BlobSlot {
     /// slot takes the write lock and re-checks before opening. A failed open
     /// leaves the slot empty, so it stays retryable.
     cache: RwLock<Option<Arc<dyn BlobCache>>>,
+    /// Serializes the cold opens of prefetch, which run outside `cache`.
+    prefetch_open: Mutex<()>,
 }
 
 impl BlobSlot {
     /// The blob's cache, `kind` attributing the blob metadata fetch a cold
     /// open may need.
+    ///
+    /// An on-demand open holds the slot's write lock, so the readers of a
+    /// cold blob wait for one open. A prefetch open may wait out the prefetch
+    /// retry interval on the backend, hours by default, so it runs outside
+    /// that lock: an on-demand read arriving meanwhile opens the blob itself,
+    /// and the prefetch open then adopts the cache the read installed.
     fn cache(&self, kind: ReadKind) -> io::Result<Arc<dyn BlobCache>> {
         if let Some(cache) = self.cache.read().unwrap().as_ref() {
             return Ok(cache.clone());
         }
-        let mut guard = self.cache.write().unwrap();
-        if let Some(cache) = guard.as_ref() {
-            return Ok(cache.clone());
+        match kind {
+            ReadKind::Ondemand => {
+                let mut guard = self.cache.write().unwrap();
+                if let Some(cache) = guard.as_ref() {
+                    return Ok(cache.clone());
+                }
+                let cache = self.open(kind)?;
+                *guard = Some(cache.clone());
+                Ok(cache)
+            }
+            ReadKind::Prefetch => {
+                let _open = self.prefetch_open.lock().unwrap();
+                if let Some(cache) = self.cache.read().unwrap().as_ref() {
+                    return Ok(cache.clone());
+                }
+                let cache = self.open(kind)?;
+                Ok(self.cache.write().unwrap().get_or_insert(cache).clone())
+            }
         }
+    }
+
+    /// Opens the blob's cache, `kind` attributing the blob metadata fetch.
+    fn open(&self, kind: ReadKind) -> io::Result<Arc<dyn BlobCache>> {
         // A native layer is read as-is from the backend; only layered blobs
         // carry the blob meta the caching implementations decode with.
         let cache: Arc<dyn BlobCache> = if self.backend.is_raw_device(&self.blob_id)? {
@@ -91,7 +118,6 @@ impl BlobSlot {
                 )?),
             }
         };
-        *guard = Some(cache.clone());
         Ok(cache)
     }
 }
@@ -226,6 +252,7 @@ impl BlobCaches {
                             ondemand_recorder: ondemand_recorder.clone(),
                             options,
                             cache: RwLock::new(None),
+                            prefetch_open: Mutex::new(()),
                         },
                     )
                 })
@@ -368,25 +395,39 @@ impl BlobCaches {
         filled: &AtomicU64,
         skipped: &AtomicU64,
     ) -> io::Result<(u64, u64)> {
+        // Each source blob is opened once for the stream, a failed open
+        // included: every group asks for its source several times, and a
+        // source that does not open would otherwise be tried, and warned
+        // about, for each of them.
+        type Source = Arc<OnceLock<Option<Arc<dyn BlobCache>>>>;
+        let sources: Mutex<HashMap<u16, Source>> = Mutex::new(HashMap::new());
         let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
-            let redirect = group.redirect()?;
-            match self.try_cache(redirect.source_blob_index(), ReadKind::Prefetch) {
-                Some(Ok(source)) => Some(source),
-                Some(Err(err)) => {
-                    warn!(
-                        "failed to open source blob {} of ondemand blob {blob_index}: {err}",
-                        redirect.source_blob_index()
-                    );
-                    None
-                }
-                None => {
-                    warn!(
-                        "ondemand blob {blob_index} redirects to unknown blob {}",
-                        redirect.source_blob_index()
-                    );
-                    None
-                }
-            }
+            let source_blob_index = group.redirect()?.source_blob_index();
+            let source = sources
+                .lock()
+                .unwrap()
+                .entry(source_blob_index)
+                .or_default()
+                .clone();
+            source
+                .get_or_init(
+                    || match self.try_cache(source_blob_index, ReadKind::Prefetch) {
+                        Some(Ok(source)) => Some(source),
+                        Some(Err(err)) => {
+                            warn!(
+                                "failed to open source blob {source_blob_index} of ondemand blob {blob_index}: {err}"
+                            );
+                            None
+                        }
+                        None => {
+                            warn!(
+                                "ondemand blob {blob_index} redirects to unknown blob {source_blob_index}"
+                            );
+                            None
+                        }
+                    },
+                )
+                .clone()
         };
         let skip = |group: &BlobMetadataChunkGroupExtent| -> bool {
             match (group.redirect(), source_of(group)) {

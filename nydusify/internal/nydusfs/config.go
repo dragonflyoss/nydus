@@ -8,10 +8,12 @@ package nydusfs
 
 import (
 	"encoding/base64"
+	"net/url"
 	"os"
 
 	"github.com/distribution/reference"
 	"github.com/pkg/errors"
+	"golang.org/x/net/http/httpproxy"
 	"gopkg.in/yaml.v3"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
@@ -35,7 +37,13 @@ type dragonflySection struct {
 }
 
 type httpSection struct {
-	TLS tlsSection `yaml:"tls"`
+	// Proxy is the forward proxy of every registry request of the daemon.
+	Proxy *proxySection `yaml:"proxy,omitempty"`
+	TLS   tlsSection    `yaml:"tls"`
+}
+
+type proxySection struct {
+	Addr string `yaml:"addr"`
 }
 
 type tlsSection struct {
@@ -105,6 +113,11 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 		dragonfly = &dragonflySection{SchedulerEndpoint: endpoint}
 	}
 
+	proxy, err := registryProxy(&url.URL{Scheme: scheme, Host: host})
+	if err != nil {
+		return "", err
+	}
+
 	cfg := storageConfig{
 		Backend: backendSection{
 			Type: "registry",
@@ -113,7 +126,8 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 				Repository: repo,
 				Auth:       auth,
 				HTTP: httpSection{
-					TLS: tlsSection{SkipVerify: provider.Insecure(reg)},
+					Proxy: proxy,
+					TLS:   tlsSection{SkipVerify: provider.Insecure(reg)},
 				},
 				Dragonfly: dragonfly,
 			},
@@ -130,6 +144,22 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 		return "", errors.Wrapf(err, "write storage config %q", configPath)
 	}
 	return string(out), nil
+}
+
+// registryProxy returns the proxy the environment names for registry, as the
+// requests of this process pick it (HTTP_PROXY, HTTPS_PROXY and NO_PROXY). The
+// daemon ignores these variables and connects directly unless its config
+// carries the proxy. It only takes an HTTP forward proxy, so any other kind
+// is left out.
+func registryProxy(registry *url.URL) (*proxySection, error) {
+	proxy, err := httpproxy.FromEnvironment().ProxyFunc()(registry)
+	if err != nil {
+		return nil, errors.Wrapf(err, "resolve the proxy of %q from the environment", registry)
+	}
+	if proxy == nil || (proxy.Scheme != "http" && proxy.Scheme != "https") {
+		return nil, nil
+	}
+	return &proxySection{Addr: proxy.String()}, nil
 }
 
 func basicAuthConfig(username, password string) string {

@@ -20,9 +20,11 @@ use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::WriteKind;
 
 use super::chunk_group_lock::ChunkGroupLocks;
+use super::remote::copy_group_chunks;
 use super::{
-    cached_chunk_group_is_intact, plan_prefetch_batches, validate_decoded_chunk_group,
-    write_failure_reason, BlobCache, CacheOptions, ChunkGroupBuffers,
+    cache_write_failure, cached_chunk_group_is_intact, is_cache_write_failure,
+    plan_prefetch_batches, validate_decoded_chunk_group, write_failure_reason, BlobCache,
+    CacheOptions, CacheWriteFailure, ChunkGroupBuffers,
 };
 
 #[derive(Clone)]
@@ -31,6 +33,9 @@ enum FlightResult {
     Failure {
         kind: io::ErrorKind,
         message: Arc<str>,
+        /// Whether the cache file refused the write, see
+        /// [`is_cache_write_failure`].
+        cache_write: bool,
     },
 }
 
@@ -61,6 +66,7 @@ impl Flight {
             Err(err) => FlightResult::Failure {
                 kind: err.kind(),
                 message: Arc::from(err.to_string()),
+                cache_write: is_cache_write_failure(err),
             },
         };
         *guard = Some(result);
@@ -74,7 +80,15 @@ impl Flight {
         }
         match result.as_ref().unwrap() {
             FlightResult::Success => Ok(()),
-            FlightResult::Failure { kind, message } => {
+            FlightResult::Failure {
+                kind,
+                message,
+                cache_write: true,
+            } => Err(io::Error::new(
+                *kind,
+                CacheWriteFailure(message.to_string()),
+            )),
+            FlightResult::Failure { kind, message, .. } => {
                 Err(io::Error::new(*kind, message.to_string()))
             }
         }
@@ -120,6 +134,9 @@ pub struct LocalBlobCache {
     chunk_group_locks: ChunkGroupLocks,
     /// The options of the image's caches: fetch size, checksum verification.
     options: CacheOptions,
+    /// Set once a read was served from the backend because the cache file
+    /// refused a write, so that the warning is logged once.
+    cache_write_failed: AtomicBool,
 }
 
 impl LocalBlobCache {
@@ -197,6 +214,7 @@ impl LocalBlobCache {
             cache_mmap: OnceLock::new(),
             chunk_group_locks,
             options,
+            cache_write_failed: AtomicBool::new(false),
         })
     }
 
@@ -683,11 +701,40 @@ impl LocalBlobCache {
             .chunks(&self.blob_metadata, payload)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
         {
-            batch.push(offset, bytes)?;
+            batch.push(offset, bytes).map_err(cache_write_failure)?;
         }
-        batch.flush()?;
+        batch.flush().map_err(cache_write_failure)?;
         self.ensure_data_file_linked(cache_file)?;
         self.chunk_group_map.set_ready(group.index() as usize)
+    }
+
+    /// Reads `[offset, offset + dst.len())` without writing the cache file:
+    /// the groups already in it from the file, each of the others from the
+    /// backend into memory. This is how a read is served while the cache file
+    /// takes no more data.
+    fn read_past_cache(&self, offset: u64, dst: &mut [u8], cache_file: &File) -> io::Result<()> {
+        let end = offset + dst.len() as u64;
+        // The padding between the chunks of a fetched group reads as zeros.
+        dst.fill(0);
+        let mut buffers = ChunkGroupBuffers::default();
+        for index in self.chunk_group_span(offset, end)? {
+            let group = self.chunk_group(index);
+            if self.chunk_group_ready(index)? {
+                let span = group.logical_range();
+                let start = span.start.max(offset);
+                let stop = span.end.min(end);
+                cache_file.read_exact_at(
+                    &mut dst[(start - offset) as usize..(stop - offset) as usize],
+                    start,
+                )?;
+                continue;
+            }
+            let (encoded, decoded, base) =
+                self.fetch_window(&(index..index + 1), ReadKind::Ondemand, &mut buffers)?;
+            let payload = self.decode_group(&group, base, encoded, decoded)?;
+            copy_group_chunks(&self.blob_metadata, &group, payload, offset, dst)?;
+        }
+        Ok(())
     }
 
     /// Ensure every group overlapping `[offset, offset + len)` is decoded and
@@ -824,12 +871,24 @@ impl BlobCache for LocalBlobCache {
         }
 
         let cache_file = self.cache_file()?;
-        self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref())?;
-
-        // The cache file mirrors the padded address space, so once the
-        // covering groups are decoded the absolute offset indexes straight
-        // into it for a single contiguous read.
-        cache_file.as_ref().read_exact_at(dst, offset)
+        match self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref()) {
+            // The cache file mirrors the padded address space, so once the
+            // covering groups are decoded the absolute offset indexes straight
+            // into it for a single contiguous read.
+            Ok(()) => cache_file.as_ref().read_exact_at(dst, offset),
+            // The cache file takes no more data, a full disk for one. The
+            // read does not need the file: serve it from the backend.
+            Err(err) if is_cache_write_failure(&err) => {
+                if !self.cache_write_failed.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "serving reads of blob {} from the backend, uncached: {err}",
+                        self.blob_index
+                    );
+                }
+                self.read_past_cache(offset, dst, cache_file.as_ref())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn write_data_to(&self, offset: u64, len: usize, writer: &mut dyn io::Write) -> io::Result<()> {
@@ -1152,6 +1211,9 @@ fn may_hold_data(file: &File, span: &Range<u64>) -> bool {
     (data as u64) < span.end
 }
 
+/// Loads the blob meta kept in the cache directory, fetching it from the
+/// backend when there is none or the kept one does not parse: a file a crash
+/// or the disk left empty or damaged is replaced, not failed on forever.
 fn load_or_fetch_blob_metadata(
     blob_id: [u8; SHA256_DIGEST_SIZE],
     cache_dir: &Path,
@@ -1159,23 +1221,31 @@ fn load_or_fetch_blob_metadata(
     backend: &Arc<dyn Backend>,
     kind: ReadKind,
 ) -> io::Result<BlobMetadata> {
-    if !blob_metadata_path.is_file() {
-        // `O_EXCL` creation keeps the name unique against other processes
-        // sharing this cache dir, and drops the file if we bail out early.
-        let tmp = tempfile::Builder::new()
-            .prefix(".blob-meta-")
-            .suffix(".tmp")
-            .tempfile_in(cache_dir)?;
-        let blob_metadata = match kind {
-            ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
-            ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
-        };
-        blob_metadata.save(tmp.path()).map_err(io::Error::other)?;
-        if let Err(err) = BlobMetadata::from_path(tmp.path()) {
-            return Err(io::Error::other(err));
+    if blob_metadata_path.is_file() {
+        match BlobMetadata::from_path(blob_metadata_path) {
+            Ok(blob_metadata) => return Ok(blob_metadata),
+            Err(err) => warn!(
+                "cached blob meta {} is invalid, fetching it again: {err}",
+                blob_metadata_path.display()
+            ),
         }
-        tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
     }
+
+    // `O_EXCL` creation keeps the name unique against other processes
+    // sharing this cache dir, and drops the file if we bail out early.
+    let tmp = tempfile::Builder::new()
+        .prefix(".blob-meta-")
+        .suffix(".tmp")
+        .tempfile_in(cache_dir)?;
+    let blob_metadata = match kind {
+        ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
+        ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
+    };
+    blob_metadata.save(tmp.path()).map_err(io::Error::other)?;
+    if let Err(err) = BlobMetadata::from_path(tmp.path()) {
+        return Err(io::Error::other(err));
+    }
+    tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
 
     BlobMetadata::from_path(blob_metadata_path).map_err(io::Error::other)
 }
@@ -2326,6 +2396,54 @@ mod tests {
         let mut buf = vec![0u8; 512];
         cached.read_at(0, &mut buf).unwrap();
         assert_eq!(buf, payload[..512]);
+    }
+
+    /// A cache file that takes no more data fails the fill but not the read:
+    /// the groups already in the file come from it, the others from the
+    /// backend at every read, and nothing is published as ready.
+    #[test]
+    fn reads_are_served_from_the_backend_when_the_cache_file_refuses_writes() {
+        let backend_dir = tempdir().unwrap();
+        let (data, meta, _, image) = groups_blob();
+        let full_blob_id = FullBlob::new(&data)
+            .with_blob_metadata(&meta)
+            .with_blob_metadata_file()
+            .save_in(backend_dir.path());
+        let cache_dir = tempdir().unwrap();
+        let backend = CountingBackend::new(backend_dir.path());
+        let mut cached = open(full_blob_id, cache_dir.path(), backend.clone(), fetch(0));
+
+        let mut buf = vec![0u8; 100];
+        cached.read_at(10, &mut buf).unwrap();
+        assert_eq!(backend.reads(), 1);
+
+        // A descriptor opened for reading refuses every write, as a full
+        // disk does.
+        cached.cache_file = Arc::new(File::open(&cached.cache_data_path).unwrap());
+        let mut all = vec![0u8; image.len()];
+        cached.read_at(0, &mut all).unwrap();
+        assert_eq!(all, image);
+        let mut streamed = Vec::new();
+        cached
+            .write_data_to(16384 + 10, 100, &mut streamed)
+            .unwrap();
+        assert_eq!(streamed, image[16394..16494]);
+
+        assert!((1..4).all(|index| !cached.is_chunk_group_ready(index)));
+        assert!(cached.ensure_range(16384, 4096).is_err());
+
+        let followers = AtomicUsize::new(0);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let mut buf = vec![0u8; 100];
+                    cached.read_at(2 * 16384 + 10, &mut buf).unwrap();
+                    assert_eq!(buf, image[2 * 16384 + 10..2 * 16384 + 110]);
+                    followers.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        });
+        assert_eq!(followers.into_inner(), 4);
     }
 
     #[test]

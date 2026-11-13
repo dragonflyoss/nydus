@@ -14,8 +14,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	schedulerv2 "d7y.io/api/v2/pkg/apis/scheduler/v2"
 	request "d7y.io/dragonfly-sdk/client-request/go"
@@ -27,6 +29,7 @@ type fakeGetter struct {
 	err    error
 	header http.Header
 	closed bool
+	onGet  func(ctx context.Context, req *request.GetRequest) (*request.GetResponse, error)
 }
 
 type closeRecorder struct {
@@ -36,8 +39,11 @@ type closeRecorder struct {
 
 func (c closeRecorder) Close() error { *c.closed = true; return nil }
 
-func (g *fakeGetter) Get(_ context.Context, _ *request.GetRequest) (*request.GetResponse, error) {
+func (g *fakeGetter) Get(ctx context.Context, req *request.GetRequest) (*request.GetResponse, error) {
 	g.calls++
+	if g.onGet != nil {
+		return g.onGet(ctx, req)
+	}
 	if g.err != nil {
 		return nil, g.err
 	}
@@ -157,6 +163,27 @@ func TestEnableDragonfly(t *testing.T) {
 		t.Fatal("an invalid endpoint must fail")
 	}
 
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreachable := "http://" + closed.Addr().String()
+	_ = closed.Close()
+	stop, err = EnableDragonfly(context.Background(), unreachable)
+	if err != nil {
+		t.Fatalf("an unreachable scheduler must not fail: %v", err)
+	}
+	if DragonflyEndpoint() != unreachable {
+		t.Fatalf("endpoint = %q, want %q for the daemons", DragonflyEndpoint(), unreachable)
+	}
+	if _, ok := newRegistryClient(false).Transport.(*dragonflyTransport); ok {
+		t.Fatal("the registry client must go straight to the origin while the scheduler is unreachable")
+	}
+	stop()
+	if DragonflyEndpoint() != "" {
+		t.Fatal("stop must forget the unreachable scheduler")
+	}
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +211,83 @@ func TestEnableDragonfly(t *testing.T) {
 	}
 	if _, ok := newRegistryClient(false).Transport.(*dragonflyTransport); ok {
 		t.Fatal("the registry client must go straight to the origin once disabled")
+	}
+}
+
+// attemptTimeout reads the per-attempt timeout of an SDK request, which the
+// SDK keeps to itself.
+func attemptTimeout(t *testing.T, req *request.GetRequest) time.Duration {
+	t.Helper()
+	field := reflect.ValueOf(req).Elem().FieldByName("timeout")
+	if !field.IsValid() {
+		t.Fatal("the SDK request no longer has a timeout field")
+	}
+	return time.Duration(field.Int())
+}
+
+func TestDragonflyTransportStalls(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("from-origin"))
+	}))
+	defer origin.Close()
+	mockStallTimeout(t, 100*time.Millisecond)
+	silent := func(ctx context.Context, _ *request.GetRequest) (*request.GetResponse, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	partial := func(ctx context.Context, _ *request.GetRequest) (*request.GetResponse, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte("partial"))
+			<-ctx.Done()
+			_ = pw.CloseWithError(ctx.Err())
+		}()
+		return &request.GetResponse{Success: true, StatusCode: http.StatusOK, Body: pr}, nil
+	}
+
+	tests := []struct {
+		name     string
+		onGet    func(ctx context.Context, req *request.GetRequest) (*request.GetResponse, error)
+		wantBody string
+		wantErr  error
+	}{
+		{"silent seed peer falls back", silent, "from-origin", nil},
+		{"seed peer that stops sending is a timeout", partial, "partial", stallError{100 * time.Millisecond}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &http.Client{Transport: &dragonflyTransport{base: http.DefaultTransport, getter: &fakeGetter{onGet: tt.onGet}}}
+			resp, err := client.Get(origin.URL + "/v2/library/busybox/blobs/sha256:abc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			if string(body) != tt.wantBody || !errors.Is(err, tt.wantErr) {
+				t.Fatalf("body=%q err=%v, want %q / %v", body, err, tt.wantBody, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDragonflyTransportOutlivesSDKDeadline(t *testing.T) {
+	var got time.Duration
+	g := &fakeGetter{}
+	g.onGet = func(_ context.Context, req *request.GetRequest) (*request.GetResponse, error) {
+		got = attemptTimeout(t, req)
+		return &request.GetResponse{Success: true, StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("layer"))}, nil
+	}
+	client := &http.Client{Transport: &dragonflyTransport{base: http.DefaultTransport, getter: g}}
+	resp, err := client.Get("http://registry.test/v2/library/busybox/blobs/sha256:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	// The SDK ends the body with the attempt, so its default would cut a
+	// layer that takes longer to download.
+	if sdk := attemptTimeout(t, request.NewGetRequest("http://registry.test")); got < 24*time.Hour || got <= sdk {
+		t.Fatalf("attempt timeout = %v, want at least a day and beyond the SDK default %v", got, sdk)
 	}
 }
 

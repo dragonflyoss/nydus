@@ -60,6 +60,7 @@ func executeArtifactRepack(ctx context.Context, opt ArtifactOption, blobs, outpu
 		args = append(args, "--prune")
 	}
 	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, nydus.DefaultBuilder), args...)
+	nydus.DieWithParent(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.StdoutPipe()

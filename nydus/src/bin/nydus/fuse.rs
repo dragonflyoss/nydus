@@ -169,8 +169,13 @@ impl FuseCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
+        crate::log_failure("fuse", self.serve(shutdown, api_socket))
+    }
+
+    /// Mounts the image and serves it until `shutdown` is set.
+    fn serve(&self, shutdown: Arc<AtomicBool>, api_socket: Option<PathBuf>) -> Result<()> {
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-dir/--cache-dir override the backend/cache directories.
         let storage_config = match &self.config {

@@ -11,13 +11,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
+	"github.com/containerd/platforms"
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
@@ -38,6 +42,9 @@ type ToOCIOption struct {
 	Compressor string
 	// LogLevel is the log level passed to the nydus binary.
 	LogLevel string
+	// PlatformMC selects the manifests of an index to convert, the ones the
+	// source was pulled for; the others are dropped. Nil converts them all.
+	PlatformMC platforms.MatchComparer
 }
 
 // ConvertToOCI turns a nydus image back into a plain OCI image.
@@ -72,6 +79,21 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 		return nil, errors.Wrap(err, "read index json")
 	}
 
+	// Keep the manifests of the requested platform: the others were not
+	// pulled, so they can be neither inspected nor carried over.
+	if opt.PlatformMC != nil {
+		index.Manifests = slices.DeleteFunc(index.Manifests, func(manifest ocispec.Descriptor) bool {
+			return manifest.Platform != nil && !opt.PlatformMC.Match(*manifest.Platform)
+		})
+		if len(index.Manifests) == 0 {
+			return nil, errors.New("no manifest matches the requested platform")
+		}
+
+		maps.DeleteFunc(labels, func(key, _ string) bool {
+			return strings.HasPrefix(key, "containerd.io/gc.ref.content.m.")
+		})
+	}
+
 	for i, manifest := range index.Manifests {
 		// Non-nydus manifests carried by the index (e.g. buildkit
 		// attestation manifests with in-toto JSON layers) are passed
@@ -91,6 +113,12 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 		newDesc.Platform = stripNydusOSFeature(manifest.Platform)
 		index.Manifests[i] = *newDesc
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.m.%d", i)] = newDesc.Digest.String()
+	}
+
+	// One platform was asked for and one manifest is left: return it rather
+	// than an index of one, as the forward conversion does.
+	if opt.PlatformMC != nil && len(index.Manifests) == 1 {
+		return &index.Manifests[0], nil
 	}
 
 	return oci.WriteJSON(ctx, cs, index, desc, labels)
@@ -204,12 +232,26 @@ func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descrip
 		return nil, err
 	}
 
+	// A layer repeated in the image is one blob: unpack it once and reuse the
+	// result, since its copies would stage the same scratch file and remove
+	// it under each other.
+	first := make(map[digest.Digest]int, len(blobs))
+	for i, blob := range blobs {
+		if _, ok := first[blob.Digest]; !ok {
+			first[blob.Digest] = i
+		}
+	}
+
 	unpacked := make([]unpackedLayer, len(blobs))
 	eg, egCtx := errgroup.WithContext(ctx)
 	// Concurrent layers each stage a full blob copy on disk, so the limit
 	// bounds scratch usage as well as CPU.
 	eg.SetLimit(min(runtime.GOMAXPROCS(0), len(blobs)))
 	for i, blob := range blobs {
+		if first[blob.Digest] != i {
+			continue
+		}
+
 		eg.Go(func() error {
 			desc, diffID, err := unpackLayer(egCtx, cs, blob, opt, algo)
 			if err != nil {
@@ -221,6 +263,10 @@ func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descrip
 	}
 	if err := eg.Wait(); err != nil {
 		return nil, err
+	}
+
+	for i, blob := range blobs {
+		unpacked[i] = unpacked[first[blob.Digest]]
 	}
 	return unpacked, nil
 }
@@ -304,7 +350,7 @@ func materializeBlob(ctx context.Context, cs content.Store, desc ocispec.Descrip
 // entries of the layers the reverse conversion removed, patching the raw JSON
 // so unrelated fields stay byte-for-byte intact.
 func rewriteOCIConfig(configJSON json.RawMessage, diffIDs []digest.Digest, droppedLayers int) (json.RawMessage, error) {
-	return patchImageConfig(configJSON, diffIDs, func(history []ocispec.History, present bool) ([]ocispec.History, bool) {
+	return oci.PatchImageConfig(configJSON, diffIDs, func(history []ocispec.History, present bool) ([]ocispec.History, bool) {
 		if !present {
 			return nil, false
 		}
