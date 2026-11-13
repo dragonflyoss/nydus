@@ -28,3 +28,40 @@ impl fmt::Debug for RedactedString {
         f.write_str(REDACTED)
     }
 }
+
+/// Implements the conversion from an owned string.
+impl From<String> for RedactedString {
+    /// Wraps the owned string as a redacted string.
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+/// Implements the conversion from a string slice.
+impl From<&str> for RedactedString {
+    /// Copies the string slice into a redacted string.
+    fn from(value: &str) -> Self {
+        Self::from(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_wraps_strings_and_keeps_debug_redacted() {
+        let test_cases: Vec<Option<RedactedString>> = vec![
+            Some("my-token".into()),
+            Some(String::from("my-token").into()),
+        ];
+
+        for redacted in test_cases {
+            assert_eq!(
+                redacted.as_ref().map(RedactedString::expose),
+                Some("my-token")
+            );
+            assert_eq!(format!("{redacted:?}"), "Some([REDACTED])");
+        }
+    }
+}
