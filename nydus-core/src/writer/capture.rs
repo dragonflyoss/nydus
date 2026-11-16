@@ -53,6 +53,8 @@ pub struct EncodeCacheOptions {
     pub compact_max_layers: usize,
     /// Parent backend and decoded-cache configuration; required only for compact.
     pub config: Option<nydus_config::Config>,
+    /// Existing snapshotter decoded cache; read-only, with remote miss fallback.
+    pub parent_cache_dir: Option<PathBuf>,
 }
 
 pub(super) struct CaptureState {
@@ -351,7 +353,7 @@ pub fn encode_cache<W: Write>(
             dir,
             data,
             sink,
-            options.config,
+            options,
             &reader,
             imported.expect("compact enabled"),
             pruned,
@@ -519,20 +521,27 @@ fn compact_capture<W: Write>(
     dir: &Path,
     data: Option<&File>,
     sink: W,
-    config: Option<nydus_config::Config>,
+    options: EncodeCacheOptions,
     reader: &ErofsReader,
     mut imported: IncrementalWriter,
     pruned: bool,
 ) -> Result<()> {
-    let config = config
+    let config = options
+        .config
         .ok_or_else(|| Error::InvalidParameter("capture compact requires config".to_string()))?;
+    let parent_cache_dir = options.parent_cache_dir;
     if config.storage.dir.is_none() {
         return Err(Error::InvalidConfig(
             "capture compact requires storage.dir for lazy parent reads".to_string(),
         ));
     }
     invalidate_result(dir)?;
-    let cache_options = crate::CacheOptions::from(&config.storage);
+    let mut cache_options = crate::CacheOptions::from(&config.storage);
+    if parent_cache_dir.is_some() {
+        // The temporary reader cannot see the external ready bitmap. Do not
+        // fetch adjacent groups that may already be served by that cache.
+        cache_options.fetch_size = 0;
+    }
     let fallback_reader = std::cell::OnceCell::<ErofsReader>::new();
     let parent_reader = || -> std::io::Result<&ErofsReader> {
         if fallback_reader.get().is_none() {
@@ -551,6 +560,7 @@ fn compact_capture<W: Write>(
         Ok(fallback_reader.get().expect("fallback reader initialized"))
     };
     let infos = reader.blob_infos()?;
+    let mut parent_cache = parent_cache_dir.map(nydus_storage::cache::ReadOnlyBlobCaches::new);
     let (cache_path, cache) = create_temp_file(dir, "compact-cache")?;
     let staged_cache = StagedCache(cache_path);
     let cache = Arc::new(cache);
@@ -587,6 +597,20 @@ fn compact_capture<W: Write>(
                     })?,
                 )?;
             return Ok(());
+        }
+        if let Some(cache) = &mut parent_cache {
+            use crate::reader::data::{locate_chunk, ChunkLocation};
+            if let ChunkLocation::Blob { index, offset } =
+                locate_chunk(infos, source.blkaddr, source.device_id)?
+            {
+                let info = infos.get(usize::from(index) - 1).ok_or_else(|| {
+                    Error::InvalidImage("compact parent blob index is missing".to_string())
+                })?;
+                cache.read_at(info.blob_id, offset, dst, |offset, dst| {
+                    parent_reader()?.blob_cache(index)?.read_at(offset, dst)
+                })?;
+                return Ok(());
+            }
         }
         let len = dst.len();
         let written =

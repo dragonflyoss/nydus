@@ -103,6 +103,31 @@ fn read(cache: &dyn BlobCache, range: Range<u64>) -> io::Result<Vec<u8>> {
 }
 
 #[test]
+fn readonly_parent_cache_fetches_only_the_missing_encoded_groups() {
+    let blob = Blob::new(false);
+    let backend = blob.backend();
+    let shared = tempdir().unwrap();
+    let source = open_local(&backend, shared.path());
+    for index in [0, 2] {
+        read(&source, blob.logical(index)).unwrap();
+    }
+    let before = backend.reads().len();
+    let scratch = tempdir().unwrap();
+    let fallback = open_local(&backend, scratch.path());
+    let mut caches = cache::ReadOnlyBlobCaches::new(shared.path().to_path_buf());
+    let mut actual = vec![0; blob.image.len()];
+    caches
+        .read_at(BLOB_ID, 0, &mut actual, |offset, dst| {
+            fallback.read_at(offset, dst)
+        })
+        .unwrap();
+    assert_eq!(actual, blob.image);
+    let reads = backend.reads();
+    let ranges: Vec<_> = reads[before..].iter().map(|read| read.range()).collect();
+    assert_eq!(ranges, vec![blob.compressed(1), blob.compressed(3)]);
+}
+
+#[test]
 fn read_at_fails_on_a_backend_error_and_leaves_the_group_cold() {
     let blob = Blob::new(false);
     let backend = blob.backend();

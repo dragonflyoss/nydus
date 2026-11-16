@@ -48,6 +48,12 @@ func mockApp() *cli.App {
 	}
 }
 
+func TestParentCacheRequiresCapture(t *testing.T) {
+	err := mockApp().Run([]string{"nydusify", "convert", "--source", mockSourceRef,
+		"--target", mockTargetRef, "--parent-cache-dir", t.TempDir()})
+	assert.EqualError(t, err, "--parent-cache-dir requires --cache")
+}
+
 func builderPath(t *testing.T) string {
 	builder := os.Getenv("NYDUS_TEST_BUILDER")
 	if builder == "" {
