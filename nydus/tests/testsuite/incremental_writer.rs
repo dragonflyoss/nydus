@@ -318,6 +318,7 @@ fn incremental_writer_capture_retry_protects_sidecar_and_invalidates_commit_mark
                 compact_max_layers: usize::from(compact),
                 prune: false,
                 config: Some(local_config(output, &output.join("source-cache"))),
+                parent_cache_dir: None,
             };
             let (result, _) = encode_cache_options(output, Some(&data), options());
             let digest = result["digest"]
@@ -423,6 +424,7 @@ fn incremental_writer_capture_prunes_before_limit_without_parent_backend() {
                 prune: true,
                 compact_max_layers: 1,
                 config: Some(local_config(&output.join("missing-backend"), &unused_cache)),
+                parent_cache_dir: None,
             },
         );
         assert_eq!(result["pruned"], true);
@@ -471,7 +473,8 @@ fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
         }
     }
     for parent_only in [false, true] {
-        for flattened in [false, true] {
+        for warmth in 0..3 {
+            let warm = warmth != 0;
             let temp = tempdir().unwrap();
             let output = temp.path();
             let mut expected = vec![b'P'; 8192];
@@ -497,6 +500,17 @@ fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
                 .unwrap();
             middle.commit().unwrap();
             expected[4096..8192].fill(b'B');
+            let cache_dir = output.join("parent-cache");
+            if warm {
+                let core = NydusCore::new(
+                    &output.join("image.boot"),
+                    local_config(output, &cache_dir),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(core.fs.open("memory").unwrap().read().unwrap(), expected);
+                core.fs.open("alias").unwrap().read().unwrap();
+            }
             let mut child = IncrementalWriter::open_metadata_only(
                 &output.join("image.boot"),
                 capture_options(output),
@@ -530,7 +544,7 @@ fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
                 })
                 .collect();
             let flatten = |mut entry: ErofsChunkAddr| {
-                if flattened && !entry.is_hole() && entry.device_id > 0 {
+                if warm && !entry.is_hole() && entry.device_id > 0 {
                     let info = &reader.blob_infos().unwrap()[usize::from(entry.device_id) - 1];
                     if info.blob_id != [0; 32] {
                         entry.blkaddr += mappings[usize::from(entry.device_id) - 1];
@@ -547,7 +561,7 @@ fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
                 + (alias_inode.header_size() + alias_inode.xattr_size())
                     .next_multiple_of(EROFS_CHUNK_INDEX_SIZE);
             let mut bytes = fs::read(&boot).unwrap();
-            if flattened {
+            if warm {
                 use nydus_format::erofs::{ErofsDeviceSlot, EROFS_DEVICESLOT_SIZE};
                 let base = reader.superblock().devt_slotoff() as usize * EROFS_DEVICESLOT_SIZE;
                 for (index, info) in reader.blob_infos().unwrap().iter().enumerate() {
@@ -576,6 +590,41 @@ fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
             bytes[offset..offset + EROFS_CHUNK_INDEX_SIZE]
                 .copy_from_slice(ErofsChunkIndex::new(source).unwrap().as_bytes());
             fs::write(&boot, bytes).unwrap();
+            if warm {
+                for info in reader.blob_infos().unwrap() {
+                    if info.blob_id != [0; 32] {
+                        // Poison only ready groups. A partial-cache fallback
+                        // must not extend its fetch window into these bytes.
+                        use std::os::unix::fs::FileExt;
+                        let id = hex::encode(info.blob_id);
+                        let metadata =
+                            BlobMetadata::from_path(&cache_dir.join(format!("{id}.blob.meta")))
+                                .unwrap();
+                        let map = nydus_storage::chunk_group_map::ChunkGroupMap::open(
+                            &cache_dir.join(format!("{id}.group.map")),
+                            metadata.chunk_group_count(),
+                        )
+                        .unwrap();
+                        if warmth == 1 {
+                            map.reset().unwrap();
+                        }
+                        let file = fs::OpenOptions::new()
+                            .write(true)
+                            .open(output.join(id))
+                            .unwrap();
+                        for group in metadata.chunk_groups() {
+                            if warmth == 2 || group.index() % 2 == 0 {
+                                map.set_ready(group.index() as usize).unwrap();
+                                file.write_all_at(
+                                    &vec![0; group.compressed_size() as usize],
+                                    group.compressed_offset(),
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                }
+            }
             let before: Vec<_> = ["capture.boot", "capture.json", "capture.data"]
                 .iter()
                 .map(|name| fs::read(output.join(name)).unwrap())
@@ -585,6 +634,7 @@ fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
                 prune: true,
                 compact_max_layers: 1,
                 config: Some(local_config(output, &output.join("compact-source-cache"))),
+                parent_cache_dir: warm.then(|| cache_dir.clone()),
             };
             let mut invalid_options = options();
             invalid_options.config.as_mut().unwrap().storage.dir = None;
@@ -620,7 +670,11 @@ fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
                 .starts_with(".nydus-")));
             let (result, stream) =
                 encode_cache_options(output, (!parent_only).then_some(data.as_ref()), options());
-            assert!(output.join("compact-source-cache").exists());
+            assert_eq!(
+                output.join("compact-source-cache").exists(),
+                warmth != 2,
+                "parent_only={parent_only}, warmth={warmth}"
+            );
             assert_eq!(result["compacted"], true);
             assert_eq!(result["data_file"], "compact.data");
             let digest = result["digest"]

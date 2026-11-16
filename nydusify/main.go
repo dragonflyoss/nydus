@@ -103,6 +103,10 @@ func convertCommand() *cli.Command {
 				Usage: "decoded cache capture.json to finalize and stream to the target registry",
 			},
 			&cli.StringFlag{
+				Name:  "parent-cache-dir",
+				Usage: "existing decoded blob cache to read during --cache compact; never modified",
+			},
+			&cli.StringFlag{
 				Name:  "bootstrap",
 				Usage: "existing nydus bootstrap path to package as image.boot instead of building from --source",
 			},
@@ -300,6 +304,9 @@ func runConvert(c *cli.Context) error {
 		return errors.Errorf("unsupported --compressor %q, expected none, zstd, lz4, erofs-none, erofs-lz4, erofs-zstd, oci-gzip, oci-zstd or oci-tar", compressor)
 	}
 	cacheCompressor := ""
+	if c.String("parent-cache-dir") != "" && c.String("cache") == "" {
+		return errors.New("--parent-cache-dir requires --cache")
+	}
 	if c.String("cache") != "" && c.IsSet("compressor") {
 		switch compressor {
 		case "none", "zstd", "lz4":
@@ -471,6 +478,7 @@ func runConvert(c *cli.Context) error {
 				compactMaxLayers: artifactOptions.CompactMaxLayers,
 				config:           config,
 				compressor:       cacheCompressor,
+				parentCacheDir:   c.String("parent-cache-dir"),
 			})
 			closeBackend()
 			if err != nil {

@@ -32,6 +32,11 @@ func TestCacheBuilderHelper(t *testing.T) {
 	}
 	dir := filepath.Dir(args[2])
 	mode := os.Getenv("NYDUS_CACHE_TEST_MODE")
+	if mode == "parent-cache" {
+		if len(args) != 5 || args[3] != "--parent-cache-dir" || args[4] != "/snapshotter/cache with spaces" {
+			os.Exit(30)
+		}
+	}
 	if mode == "compressor" {
 		expected := ""
 		if value := os.Getenv("NYDUS_CACHE_TEST_COMPRESSOR"); value != "" {
@@ -393,6 +398,22 @@ func TestCacheBuilderCompressorOverride(t *testing.T) {
 				t.Fatal("builder stream changed")
 			}
 		})
+	}
+}
+
+func TestCacheBuilderParentCacheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NYDUS_CACHE_TEST_MODE", "parent-cache")
+	capture := mockFile(t, filepath.Join(dir, "capture.json"), `{"version":1,"device_index":0}`)
+	mockFile(t, filepath.Join(dir, "capture.data"), "payload")
+	var output bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runCacheBuilder(ctx, cacheTestBuilder(t, dir), capture, &output, cancel, cacheRepackOptions{parentCacheDir: "/snapshotter/cache with spaces"}); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "compressed" {
+		t.Fatal("builder stream changed")
 	}
 }
 

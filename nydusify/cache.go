@@ -96,6 +96,9 @@ func runCacheBuilder(ctx context.Context, builder, capture string, output io.Wri
 	if options.compressor != "" {
 		args = append(args, "--compressor", options.compressor)
 	}
+	if options.parentCacheDir != "" {
+		args = append(args, "--parent-cache-dir", options.parentCacheDir)
+	}
 	cmd := exec.CommandContext(ctx, builder, args...)
 	cmd.WaitDelay = 2 * time.Second
 	stderr := &cacheStderr{}
@@ -180,6 +183,7 @@ type cacheRepackOptions struct {
 	compactMaxLayers uint
 	config           string
 	compressor       string
+	parentCacheDir   string
 }
 
 func encodeCache(ctx context.Context, builder, capture string, hasParent bool, newUpload func(context.Context) (cacheUpload, error), options cacheRepackOptions) (string, []pipeline.UploadedBlob, error) {

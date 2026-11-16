@@ -3148,9 +3148,10 @@ not supported for cache input.
 
 `--prune` removes unreferenced devices without reading payloads.
 `--compact-max-layers <limit>` compacts when the live blob count after pruning
-exceeds the limit. Compaction reads upper data directly from `capture.data`
-and parent data through the normal backend. It writes one final blob and a
-new `compact.data`, without uploading an intermediate upper blob.
+exceeds the limit. Compaction reads upper data directly from `capture.data`;
+optional `--parent-cache-dir` reuses verified, current-boot ready parent groups
+read-only, falling back to the normal backend on misses. It writes one final
+blob and a new `compact.data`, without uploading an intermediate upper blob.
 The original capture remains unchanged for retries; allow space for both
 decoded files during compaction.
 
@@ -3167,6 +3168,7 @@ Snapshotter syncs files before publishing ready state and uses same-filesystem
 hardlinks without overwriting existing cache files. Import failures do not
 invalidate successful publication; missing groups still use normal fetch. Imported
 files follow normal GC, so download-free restore is not guaranteed permanently.
+Parent-cache reuse during compaction is independent of local cache import.
 
 Run only one conversion per capture directory. Before a published image
 descriptor is recorded, failures can be retried with the sealed capture files

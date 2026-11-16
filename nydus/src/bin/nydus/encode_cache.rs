@@ -18,6 +18,8 @@ pub struct EncodeCacheCommand {
     config: Option<PathBuf>,
     #[arg(long, value_parser = ["none", "zstd", "lz4"])]
     compressor: Option<String>,
+    #[arg(long)]
+    parent_cache_dir: Option<PathBuf>,
 }
 
 impl EncodeCacheCommand {
@@ -34,6 +36,7 @@ impl EncodeCacheCommand {
         let stdout = std::io::stdout();
         let output = BufWriter::with_capacity(256 * 1024, stdout.lock());
         let options = nydus_core::EncodeCacheOptions {
+            parent_cache_dir: self.parent_cache_dir.clone(),
             compressor: self.compressor.as_deref().map(|name| match name {
                 "none" => BlobMetadataCompressor::None,
                 "zstd" => BlobMetadataCompressor::Zstd,

@@ -148,6 +148,40 @@ pub struct ChunkGroupMap {
     _file: File,
 }
 
+/// Readiness from an existing cache without creating, resetting or repairing it.
+/// Pread, rather than mmap, also makes a truncated sidecar a cache miss.
+pub(crate) struct ReadOnlyChunkGroupMap {
+    file: File,
+}
+
+impl ReadOnlyChunkGroupMap {
+    pub(crate) fn open(path: &Path, count: usize) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let mut header = [0; CHUNK_GROUP_MAP_HEADER_SIZE];
+        file.read_exact_at(&mut header, 0)?;
+        let word = |offset| u32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
+        if header[..8] != CHUNK_GROUP_MAP_MAGIC
+            || word(GROUP_MAP_FEATURE_INCOMPAT_OFFSET) != 0
+            || word(GROUP_MAP_CHUNK_GROUP_COUNT_OFFSET) as usize != count
+            || current_boot_tag().is_some_and(|tag| word(GROUP_MAP_BOOT_TAG_OFFSET) != tag)
+            || file.metadata()?.len() < (CHUNK_GROUP_MAP_HEADER_SIZE + count.div_ceil(8)) as u64
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid read-only group map",
+            ));
+        }
+        Ok(Self { file })
+    }
+
+    pub(crate) fn is_ready(&self, index: usize) -> io::Result<bool> {
+        let mut byte = [0];
+        self.file
+            .read_exact_at(&mut byte, (CHUNK_GROUP_MAP_HEADER_SIZE + index / 8) as u64)?;
+        Ok(byte[0] & (1 << (index % 8)) != 0)
+    }
+}
+
 impl ChunkGroupMap {
     /// Reserves the blocks of the first `len` bytes of `file` without changing
     /// its size, so a ready bit stored through the mapping never allocates.
