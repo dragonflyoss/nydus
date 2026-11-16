@@ -288,7 +288,9 @@ impl FuseService {
     }
 
     /// Serves until shutdown or connection exit, then tears down only the owned mount.
-    pub fn serve(self, shutdown: &AtomicBool) -> std::io::Result<()> {
+    /// Returns whether the session ended: not handed off, and its mount removed or
+    /// its connection closed.
+    pub fn serve(self, shutdown: &AtomicBool) -> std::io::Result<bool> {
         let FuseService {
             session: bg,
             mountpoint,
@@ -316,7 +318,10 @@ impl FuseService {
             origin,
             lifecycle.is_released(),
             mount_dev.as_deref(),
-        )
+        )?;
+        // A mount teardown could not identify may still be in place.
+        let unmounted = matches!(mount_dev_of(&mountpoint), Ok(current) if current != mount_dev);
+        Ok(!lifecycle.is_released() && (unmounted || connection_dead(devices[0].as_fd())))
     }
 }
 
