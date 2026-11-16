@@ -126,6 +126,13 @@ impl<I: Identity> Startup<I> {
                         "live instance does not match the recorded session".into(),
                     ));
                 }
+
+                // Refuse a successor that could never release the Holder retention.
+                if peer.session_id.is_some() && self.holder.is_none() {
+                    return Err(Error::Runtime(
+                        "the live session is protected by a Recovery Holder; provide its --supervisor-socket".into(),
+                    ));
+                }
                 frontend.prepare(&peer.info)?;
                 frontend.check_cancelled()?;
                 let session_id = peer.session_id;
@@ -140,11 +147,17 @@ impl<I: Identity> Startup<I> {
             }
             None => self.start_without_predecessor(&mut frontend)?,
         };
-        if let Err(err) = frontend
-            .check_cancelled()
+        // Retain a fresh protected session before activation and release it only
+        // after a failed start is stopped, in case a lost acknowledgement left it
+        // retained; keep a recovered one for retry.
+        let retained = self.holder.clone().zip(F::control(&session).session_id());
+        let fresh_retained = retained.as_ref().filter(|_| kind == Kind::Fresh);
+        if let Err(err) = self
+            .retain_fresh::<F>(&session, kind)
+            .and_then(|()| frontend.check_cancelled())
             .and_then(|()| F::activate(&session))
         {
-            return stop_failed_session::<F, _>(session, err);
+            return stop_failed_session::<F, _>(session, err, fresh_retained);
         }
         let control = match &self.api_socket {
             Some(path) => {
@@ -164,6 +177,7 @@ impl<I: Identity> Startup<I> {
                         return stop_failed_session::<F, _>(
                             session,
                             err.context("failed to publish the API endpoint"),
+                            fresh_retained,
                         )
                     }
                 }
@@ -172,7 +186,11 @@ impl<I: Identity> Startup<I> {
         };
         drop(startup_lock);
         info!(?kind, "session startup complete");
-        Ok(RunningSession { session, control })
+        Ok(RunningSession {
+            session,
+            control,
+            retained,
+        })
     }
 
     /// The record was validated before HANDOFF_BEGIN; after the point of no return only the owner wait remains.
@@ -244,7 +262,7 @@ impl<I: Identity> Startup<I> {
     ) -> Result<(F::Session, Kind)> {
         match setup(&mut session) {
             Ok(kind) => Ok((session, kind)),
-            Err(err) => stop_failed_session::<F, _>(session, err),
+            Err(err) => stop_failed_session::<F, _>(session, err, None),
         }
     }
 
@@ -320,16 +338,27 @@ impl<I: Identity> Startup<I> {
             F::set_owner(session, owner)?;
             recorded?;
             frontend.check_cancelled()?;
-            if let Some(socket) = &self.holder {
-                let transfer = F::control(session)
-                    .prepare(&self.info, HANDOFF_TIMEOUT)?
-                    .ok_or_else(|| {
-                        Error::Runtime("Holder retention requires a session transfer".into())
-                    })?;
-                holder::retain(socket, &transfer)?;
-            }
             Ok(Kind::Fresh)
         })
+    }
+
+    /// Retains a fresh session in the Holder while its workers stay parked.
+    fn retain_fresh<F: Frontend<Identity = I>>(
+        &self,
+        session: &F::Session,
+        kind: Kind,
+    ) -> Result<()> {
+        let Some(socket) = self.holder.as_deref().filter(|_| kind == Kind::Fresh) else {
+            return Ok(());
+        };
+        let control = F::control(session);
+        let session_id = control
+            .session_id()
+            .ok_or_else(|| Error::Runtime("Holder retention requires a session ID".into()))?;
+        let transfer = control
+            .prepare(&self.info, HANDOFF_TIMEOUT)?
+            .ok_or_else(|| Error::Runtime("Holder retention requires a session transfer".into()))?;
+        holder::retain(socket, session_id, &transfer)
     }
 
     fn adopt<F: Frontend<Identity = I>>(
@@ -369,19 +398,55 @@ impl<I: Identity> Startup<I> {
 pub struct RunningSession<S> {
     session: S,
     control: Option<ControlServer>,
+    /// The Holder and ID of a protected session.
+    retained: Option<(PathBuf, Uuid)>,
 }
 
 impl<S> RunningSession<S> {
-    pub fn serve<T>(self, serve: impl FnOnce(S) -> Result<T>) -> Result<T> {
-        let result = serve(self.session);
-        drop(self.control);
-        result
+    /// Serves until `serve` returns whether it ended the session itself, e.g. by
+    /// unmounting it; the Holder then releases an ended protected session. A
+    /// session handed to a successor, or abandoned by a crash, stays retained.
+    pub fn serve(self, serve: impl FnOnce(S) -> Result<bool>) -> Result<()> {
+        let RunningSession {
+            session,
+            control,
+            retained,
+        } = self;
+        let ended = serve(session);
+        drop(control);
+        if let (Ok(true), Some((socket, session_id))) = (&ended, retained) {
+            release_retained(&socket, session_id);
+        }
+        ended.map(|_| ())
     }
 }
 
-fn stop_failed_session<F: Frontend, T>(session: F::Session, cause: Error) -> Result<T> {
+/// Releases a session from the Holder on a best-effort basis; a stale retention
+/// only blocks a later fresh start, which reports it.
+fn release_retained(socket: &Path, session_id: Uuid) {
+    match holder::release(socket, session_id) {
+        Ok(()) => info!(%session_id, "released the session from the Recovery Holder"),
+        Err(err) => warn!(
+            %session_id,
+            "failed to release the session from the Recovery Holder: {}",
+            err.report()
+        ),
+    }
+}
+
+/// Stops a session that failed to start, releasing `retained` once it is stopped.
+fn stop_failed_session<F: Frontend, T>(
+    session: F::Session,
+    cause: Error,
+    retained: Option<&(PathBuf, Uuid)>,
+) -> Result<T> {
     match F::stop(session) {
-        Ok(()) => Err(cause).context("startup stood down"),
+        Ok(()) => {
+            if let Some((socket, session_id)) = retained {
+                release_retained(socket, *session_id);
+            }
+            Err(cause).context("startup stood down")
+        }
         Err(cleanup) => Err(Error::Runtime(format!(
             "{}; failed to stop unsuccessful startup: {}",
             cause.report(),
@@ -613,7 +678,7 @@ mod tests {
         assert!(handoff::probe(&path, &TestInfo::<KERNEL>::new())
             .unwrap()
             .is_some());
-        running.serve(|_| Ok(())).unwrap();
+        running.serve(|_| Ok(false)).unwrap();
         assert!(SessionOwner::acquire(&base, false).is_ok());
     }
 
@@ -637,17 +702,19 @@ mod tests {
         ]);
     }
 
-    fn reject_mismatch_before_begin<const KERNEL: bool>() {
+    fn reject_before_begin<const KERNEL: bool>(record: u64, session_id: Option<Uuid>) {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("state/session");
         prepare_state_directory(base.parent().unwrap()).unwrap();
         let path = dir.path().join("api.sock");
-        let backend = frontend::<KERNEL>(&base, true);
+        let mut backend = frontend::<KERNEL>(&base, true);
+        backend.session_id = session_id;
         let info = backend.info.clone();
         let events = backend.events.clone();
         let mut owner = SessionOwner::acquire(&base, true).unwrap();
-        owner.write(&2u64).unwrap();
+        owner.write(&record).unwrap();
         let source = TestSession::<KERNEL> {
+            session_id,
             events: events.clone(),
             ..Default::default()
         };
@@ -670,9 +737,11 @@ mod tests {
     }
 
     #[test]
-    fn record_mismatch_is_rejected_before_the_predecessor_is_touched() {
-        reject_mismatch_before_begin::<false>();
-        reject_mismatch_before_begin::<true>();
+    fn mismatched_records_and_unprotected_successors_are_rejected_before_the_predecessor_is_touched(
+    ) {
+        reject_before_begin::<false>(2, None);
+        reject_before_begin::<true>(2, None);
+        reject_before_begin::<false>(1, Some(Uuid::from_u128(1)));
     }
 
     #[test]
@@ -701,7 +770,7 @@ mod tests {
             if fail_recovery || fail_activation {
                 assert!(result.is_err());
             } else {
-                result.unwrap().serve(|_| Ok(())).unwrap();
+                result.unwrap().serve(|_| Ok(false)).unwrap();
             }
             assert_eq!(
                 *events.lock().unwrap(),
@@ -737,7 +806,7 @@ mod tests {
         assert_eq!(*events.lock().unwrap(), ["open", "owner", "activate"]);
         assert!(dir.path().join("api.sock").exists());
         assert!(SessionOwner::acquire(&base, false).is_err());
-        running.serve(|_| Ok(())).unwrap();
+        running.serve(|_| Ok(false)).unwrap();
         assert_eq!(
             SessionOwner::acquire(&base, false)
                 .unwrap()
@@ -763,48 +832,89 @@ mod tests {
     }
 
     #[test]
-    fn fresh_holder_protection_requires_complete_retention_before_activation() {
+    fn fresh_holder_protection_retains_before_activation_and_releases_ended_sessions() {
         use crate::continuity::test_support::test_deadline;
         use crate::continuity::wire::{read_frame_until, write_frame_until, Transfer};
         use std::os::unix::net::UnixListener;
 
-        for retained in [true, false] {
+        let session_id = Uuid::from_u128(1);
+        for (retained, fail_activation, ended, released, expected_events) in [
+            (
+                true,
+                false,
+                true,
+                true,
+                &["open", "owner", "prepare", "activate"][..],
+            ),
+            (
+                true,
+                false,
+                false,
+                false,
+                &["open", "owner", "prepare", "activate"],
+            ),
+            (
+                false,
+                false,
+                false,
+                true,
+                &["open", "owner", "prepare", "stop"],
+            ),
+            (
+                true,
+                true,
+                false,
+                true,
+                &["open", "owner", "prepare", "activate", "stop"],
+            ),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let base = dir.path().join("state/session");
             let socket = dir.path().join("holder.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             let recorded_base = base.clone();
-            let holder = std::thread::spawn(move || {
-                let (mut fetch, _) = listener.accept().unwrap();
-                let request: serde_json::Value = read_frame_until(&mut fetch, test_deadline())
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(request, serde_json::json!({"type":"fetch"}));
-                write_frame_until(
-                    &mut fetch,
-                    test_deadline(),
-                    &serde_json::json!({"type":"empty"}),
-                )
-                .unwrap();
-                let (mut retain, _) = listener.accept().unwrap();
-                let request: serde_json::Value = read_frame_until(&mut retain, test_deadline())
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(request, serde_json::json!({"type":"retain"}));
-                assert!(SessionOwner::acquire(&recorded_base, false).is_err());
-                let transfer = Transfer::receive(&mut retain, test_deadline()).unwrap();
-                assert_eq!(transfer.metadata, b"native state");
-                assert_eq!(transfer.fds.len(), 2);
-                let reply = if retained {
-                    serde_json::json!({"type":"retained"})
-                } else {
-                    serde_json::json!({"type":"error","message":"rejected"})
-                };
-                write_frame_until(&mut retain, test_deadline(), &reply).unwrap();
-            });
             let mut backend = frontend::<false>(&base, false);
-            backend.session_id = Some(Uuid::from_u128(1));
+            backend.session_id = Some(session_id);
+            backend.fail_activation = fail_activation;
             let events = backend.events.clone();
+            let released_events = events.clone();
+            let holder = std::thread::spawn(move || {
+                let request = |expected: serde_json::Value, reply: serde_json::Value| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request: serde_json::Value = read_frame_until(&mut stream, test_deadline())
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(request, expected);
+                    if request["type"] == "retain" {
+                        assert!(SessionOwner::acquire(&recorded_base, false).is_err());
+                        let transfer = Transfer::receive(&mut stream, test_deadline()).unwrap();
+                        assert_eq!(transfer.metadata, b"native state");
+                        assert_eq!(transfer.fds.len(), 2);
+                    }
+                    if request["type"] == "release" {
+                        assert_eq!(*released_events.lock().unwrap(), expected_events);
+                    }
+                    write_frame_until(&mut stream, test_deadline(), &reply).unwrap();
+                };
+                request(
+                    serde_json::json!({"type":"fetch"}),
+                    serde_json::json!({"type":"empty"}),
+                );
+                request(
+                    serde_json::json!({"type":"retain","session_id":session_id}),
+                    if retained {
+                        serde_json::json!({"type":"retained"})
+                    } else {
+                        serde_json::json!({"type":"error","message":"rejected"})
+                    },
+                );
+                if released {
+                    request(
+                        serde_json::json!({"type":"release","session_id":session_id}),
+                        serde_json::json!({"type":"released"}),
+                    );
+                }
+            });
             let result = Startup {
                 info: LiveInfo::new(),
                 api_socket: None,
@@ -814,20 +924,13 @@ mod tests {
                 ondemand: ondemand(),
             }
             .start(backend);
-            if retained {
-                result.unwrap().serve(|_| Ok(())).unwrap();
+            if retained && !fail_activation {
+                result.unwrap().serve(|_| Ok(ended)).unwrap();
             } else {
                 assert!(result.is_err());
             }
             holder.join().unwrap();
-            assert_eq!(
-                *events.lock().unwrap(),
-                if retained {
-                    vec!["open", "owner", "prepare", "activate"]
-                } else {
-                    vec!["open", "owner", "prepare", "stop"]
-                }
-            );
+            assert_eq!(*events.lock().unwrap(), expected_events);
             assert!(SessionOwner::acquire(&base, false).is_ok());
         }
     }
