@@ -986,6 +986,24 @@ func TestRunConvert(t *testing.T) {
 			},
 		},
 		{
+			name: "cache rejects native erofs compressor",
+			args: func(t *testing.T, _ *registrytest.Registry, dir string) []string {
+				return []string{"--target", mockTargetRef, "--cache", filepath.Join(dir, "capture.json"), "--compressor", "erofs-lz4"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert.ErrorContains(t, err, "--cache supports --compressor none, zstd or lz4")
+			},
+		},
+		{
+			name: "cache rejects oci compressor",
+			args: func(t *testing.T, _ *registrytest.Registry, dir string) []string {
+				return []string{"--target", mockTargetRef, "--cache", filepath.Join(dir, "capture.json"), "--compressor", "oci-tar"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert.ErrorContains(t, err, "--cache supports --compressor none, zstd or lz4")
+			},
+		},
+		{
 			name: "manifest annotation with oci compressor",
 			args: func(t *testing.T, _ *registrytest.Registry, dir string) []string {
 				return []string{"--target", mockTargetRef, "--source", dir, "--compressor", "oci-tar", "--manifest-annotation", "key=value"}

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,9 +14,56 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+// PrepareCaptureRepack reuses the artifact backend for parent range reads.
+// The provisional upper device is read directly from capture.data by Rust.
+func PrepareCaptureRepack(ctx context.Context, opt ArtifactOption) (string, func(), error) {
+	// A capture adds at most one upper blob. Pruning can only lower this
+	// bound, so do not stage metadata or require a reader when it fits.
+	sourceBlobCount := 1
+	for _, parent := range opt.ParentImages {
+		sourceBlobCount += len(parent.Blobs)
+	}
+	if opt.CompactMaxLayers == 0 || uint(sourceBlobCount) <= opt.CompactMaxLayers {
+		return "", func() {}, nil
+	}
+	if opt.OpenCompactBlob == nil {
+		return "", nil, fmt.Errorf("capture compact requires a parent blob reader")
+	}
+	if err := os.MkdirAll(opt.WorkDir, 0700); err != nil {
+		return "", nil, err
+	}
+	work, err := os.MkdirTemp(opt.WorkDir, "capture-repack-")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(work) }
+	blobs := filepath.Join(work, "blobs")
+	if err := os.Mkdir(blobs, 0700); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	var descs []ocispec.Descriptor
+	var metas []nydus.BlobMetaFile
+	for _, parent := range opt.ParentImages {
+		descs = append(descs, parent.Blobs...)
+		metas = append(metas, parent.BlobMetas...)
+	}
+	if err := stageRepackBlobs(opt, descs, nil, blobs, metas); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	config, closeBackend, err := startRepackBackend(ctx, opt, blobs, work)
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return config, func() { closeBackend(); cleanup() }, nil
+}
 
 // Serve only digests staged by the preparation callback. Auth and TLS stay in
 // containerd's resolver; Rust reuses its registry range reader over loopback.
