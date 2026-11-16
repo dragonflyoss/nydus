@@ -99,6 +99,13 @@ pub struct FuseCommand {
     apiserver: Option<String>,
 
     #[arg(
+        long,
+        env = "NYDUS_FUSE_SUPERVISOR_SOCKET",
+        help = "Specify the Recovery Holder Unix socket for automatic crash recovery and fresh-session protection, e.g. `unix:///run/nydus/supervisor.sock`, independently of --apiserver. When an API is configured, live hot upgrade is attempted first"
+    )]
+    supervisor_socket: Option<String>,
+
+    #[arg(
         short = 'l',
         long,
         default_value = "info",
@@ -158,6 +165,11 @@ impl FuseCommand {
     fn run(&self, shutdown: Arc<AtomicBool>) -> Result<()> {
         let api_socket = self
             .apiserver
+            .as_deref()
+            .map(nydus::parse_unix_address)
+            .transpose()?;
+        let holder_socket = self
+            .supervisor_socket
             .as_deref()
             .map(nydus::parse_unix_address)
             .transpose()?;
@@ -294,7 +306,8 @@ impl FuseCommand {
         ];
         config.n_threads = Some(self.threads);
         config.clone_fd = true;
-        let image_digest = api_socket.as_ref().map(|_| reader.image_digest());
+        let image_digest =
+            (api_socket.is_some() || holder_socket.is_some()).then(|| reader.image_digest());
         let runtime_dir = storage_config
             .as_ref()
             .map_or_else(default_runtime_dir, |config| config.runtime_dir.clone());
@@ -303,6 +316,7 @@ impl FuseCommand {
             &runtime_dir,
             api_socket,
             image_digest.as_ref().map(|digest| digest.as_slice()),
+            holder_socket,
             reader.metrics().clone(),
             ondemand_recorder,
         )?;
