@@ -320,12 +320,16 @@ Mount a converted image lazily from the registry with a YAML storage config
 nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountpoint /mnt/nydus
 ```
 
+Optional `--apiserver unix:///run/nydus/api.sock` enables metrics, tracing, and
+hot upgrade; independent `--supervisor-socket unix:///run/nydus/supervisor/image.sock` enables
+crash failover. See [FUSE hot upgrade and crash failover](docs/upgrade.md).
+
 ## Documentation
 
 | Document                             | Contents                                                                                                                                                   |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [docs/nydus.md](docs/nydus.md)       | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`                 |
-| [docs/upgrade.md](docs/upgrade.md) | FUSE hot upgrade: usage, startup selection, ownership, and the handoff protocol |
+| [docs/upgrade.md](docs/upgrade.md) | FUSE hot upgrade and crash failover: usage, startup selection, ownership, and the holder protocol |
 | [docs/uffd.md](docs/uffd.md)         | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem          |
 | [docs/ublk.md](docs/ublk.md)         | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths         |
 | [docs/erofs.md](docs/erofs.md)       | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                            |
@@ -380,7 +384,7 @@ make e2e-ga                      # every GA suite but dragonfly
 make e2e-dragonfly               # needs upstream Kind/Helm setup; see tests/e2e/README.md
 make e2e-experimental            # nbd, fanotify, ublk, uffd
 
-# FUSE hot upgrade, rollback, no-API operation and live-owner exclusion.
+# FUSE hot upgrade, rollback, crash failover, no-API operation and live-owner exclusion.
 make e2e-continuity
 # Optional separate, hot-upgrade-capable predecessor binary:
 NYDUS_E2E_FUSE_PREDECESSOR=/abs/path/to/nydus make e2e-continuity
