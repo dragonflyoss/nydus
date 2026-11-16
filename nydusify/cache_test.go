@@ -27,11 +27,25 @@ func TestCacheBuilderHelper(t *testing.T) {
 		args = args[1:]
 	}
 	args = args[1:]
-	if len(args) != 3 || args[0] != "encode-cache" || args[1] != "--cache" {
+	if len(args) < 3 || args[0] != "encode-cache" || args[1] != "--cache" {
 		os.Exit(20)
 	}
 	dir := filepath.Dir(args[2])
 	mode := os.Getenv("NYDUS_CACHE_TEST_MODE")
+	if mode == "compressor" {
+		expected := ""
+		if value := os.Getenv("NYDUS_CACHE_TEST_COMPRESSOR"); value != "" {
+			expected = "--compressor " + value
+		}
+		if strings.Join(args[3:], " ") != expected {
+			os.Exit(29)
+		}
+	}
+	if mode == "compact" || mode == "compact-parent" || mode == "pruned" || mode == "invalid-data-file" {
+		if strings.Join(args[3:], " ") != "--prune --compact-max-layers 2 --config parent-config" {
+			os.Exit(28)
+		}
+	}
 	if mode == "sleep" {
 		time.Sleep(time.Minute)
 		os.Exit(21)
@@ -41,7 +55,7 @@ func TestCacheBuilderHelper(t *testing.T) {
 		os.Exit(22)
 	}
 	result := cacheResult{}
-	if input.DeviceIndex != nil {
+	if input.DeviceIndex != nil || mode == "compact-parent" {
 		data, err := os.ReadFile(filepath.Join(dir, "capture.data"))
 		if err != nil {
 			os.Exit(23)
@@ -58,6 +72,19 @@ func TestCacheBuilderHelper(t *testing.T) {
 			groups = 0
 		}
 		result = cacheResult{Digest: digest.FromString("compressed").String(), Size: 10, Groups: groups, DataSize: int64(len(data)), MetaSize: 4096, MapSize: 4096 + (int64(groups)+7)/8}
+		if mode == "compact" || mode == "compact-parent" || mode == "invalid-data-file" {
+			result.Compacted = true
+			result.DataFile = "compact.data"
+			if os.WriteFile(filepath.Join(dir, "compact.data"), data, 0600) != nil {
+				os.Exit(27)
+			}
+			if mode == "invalid-data-file" {
+				result.DataFile = "../capture.data"
+			}
+		}
+		if mode == "pruned" {
+			result.Pruned = true
+		}
 		if mode == "mismatch" {
 			result.Size++
 		}
@@ -154,7 +181,7 @@ func TestEncodeCacheUsesFilesOnly(t *testing.T) {
 					t.Fatal("parent-only upload")
 				}
 				return upload, nil
-			})
+			}, cacheRepackOptions{})
 			if mode == "success" || mode == "empty-full" || mode == "parent" {
 				if err != nil {
 					t.Fatal(err)
@@ -204,7 +231,7 @@ func TestEncodeCacheUsesFilesOnly(t *testing.T) {
 				t.Fatal("source data modified")
 			}
 			if mode == "success" || mode == "parent" || mode == "empty-full" {
-				if _, _, err := encodeCache(ctx, cacheTestBuilder(t, dir), capture, true, func(context.Context) (cacheUpload, error) { t.Fatal("stale result accepted"); return nil, nil }); err == nil {
+				if _, _, err := encodeCache(ctx, cacheTestBuilder(t, dir), capture, true, func(context.Context) (cacheUpload, error) { t.Fatal("stale result accepted"); return nil, nil }, cacheRepackOptions{}); err == nil {
 					t.Fatal("stale result accepted")
 				}
 			}
@@ -232,7 +259,7 @@ func TestEncodeCacheRetriesUnpublishedResults(t *testing.T) {
 			if failure == "finish" {
 				first.finishErr = fmt.Errorf("injected Finish failure")
 			}
-			_, _, err := encodeCache(context.Background(), builder, capture, false, func(context.Context) (cacheUpload, error) { return first, nil })
+			_, _, err := encodeCache(context.Background(), builder, capture, false, func(context.Context) (cacheUpload, error) { return first, nil }, cacheRepackOptions{})
 			if failure == "publication" || failure == "bootstrap" {
 				if err != nil {
 					t.Fatal(err)
@@ -249,7 +276,7 @@ func TestEncodeCacheRetriesUnpublishedResults(t *testing.T) {
 			}
 			t.Setenv("NYDUS_CACHE_TEST_MODE", "success")
 			retry := &fakeCacheUpload{}
-			_, blobs, err := encodeCache(context.Background(), builder, capture, false, func(context.Context) (cacheUpload, error) { return retry, nil })
+			_, blobs, err := encodeCache(context.Background(), builder, capture, false, func(context.Context) (cacheUpload, error) { return retry, nil }, cacheRepackOptions{})
 			if err != nil || !retry.finished || len(blobs) != 1 {
 				t.Fatalf("retry failed: %v", err)
 			}
@@ -260,7 +287,7 @@ func TestEncodeCacheRetriesUnpublishedResults(t *testing.T) {
 			if _, _, err := encodeCache(context.Background(), builder, capture, false, func(context.Context) (cacheUpload, error) {
 				t.Fatal("published capture uploaded again")
 				return nil, nil
-			}); err == nil {
+			}, cacheRepackOptions{}); err == nil {
 				t.Fatal("published capture accepted")
 			}
 		})
@@ -343,6 +370,70 @@ func TestCompleteCachePublication(t *testing.T) {
 				if err != nil || string(data) != expected {
 					t.Fatalf("bootstrap %s: %q, %v", path, data, err)
 				}
+			}
+		})
+	}
+}
+
+func TestCacheBuilderCompressorOverride(t *testing.T) {
+	for _, compressor := range []string{"", "none", "zstd", "lz4"} {
+		t.Run("compressor="+compressor, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("NYDUS_CACHE_TEST_MODE", "compressor")
+			t.Setenv("NYDUS_CACHE_TEST_COMPRESSOR", compressor)
+			capture := mockFile(t, filepath.Join(dir, "capture.json"), `{"version":1,"device_index":0}`)
+			mockFile(t, filepath.Join(dir, "capture.data"), "payload")
+			var output bytes.Buffer
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := runCacheBuilder(ctx, cacheTestBuilder(t, dir), capture, &output, cancel, cacheRepackOptions{compressor: compressor}); err != nil {
+				t.Fatal(err)
+			}
+			if output.String() != "compressed" {
+				t.Fatal("builder stream changed")
+			}
+		})
+	}
+}
+
+func TestEncodeCacheRepack(t *testing.T) {
+	for _, mode := range []string{"compact", "compact-parent", "pruned", "parent", "invalid-data-file"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("NYDUS_CACHE_TEST_MODE", mode)
+			capture := filepath.Join(dir, "capture.json")
+			plan := `{"version":1,"device_index":0}`
+			if mode == "compact-parent" || mode == "parent" {
+				plan = `{"version":1,"device_index":null}`
+			}
+			mockFile(t, capture, plan)
+			original := bytes.Repeat([]byte{42}, 4096)
+			if err := os.WriteFile(filepath.Join(dir, "capture.data"), original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			upload := &fakeCacheUpload{}
+			_, blobs, err := encodeCache(context.Background(), cacheTestBuilder(t, dir), capture, true,
+				func(context.Context) (cacheUpload, error) { return upload, nil },
+				cacheRepackOptions{prune: true, compactMaxLayers: 2, config: "parent-config"})
+			if mode == "invalid-data-file" {
+				if err == nil {
+					t.Fatal("accepted unsafe data filename")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "parent" {
+				if len(blobs) != 0 || upload.finished || upload.aborted {
+					t.Fatal("parent-only no-op committed an upload")
+				}
+			} else if len(blobs) != 1 || !upload.finished {
+				t.Fatal("final repack blob was not uploaded")
+			}
+			actual, err := os.ReadFile(filepath.Join(dir, "capture.data"))
+			if err != nil || !bytes.Equal(actual, original) {
+				t.Fatal("repack changed immutable capture", err)
 			}
 		})
 	}

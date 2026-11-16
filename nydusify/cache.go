@@ -24,13 +24,16 @@ type cacheCapture struct {
 	DeviceIndex *uint32 `json:"device_index"`
 }
 type cacheResult struct {
-	Digest   string              `json:"digest"`
-	Size     int64               `json:"size"`
-	Groups   uint32              `json:"groups"`
-	DataSize int64               `json:"data_size"`
-	MetaSize int64               `json:"meta_size"`
-	MapSize  int64               `json:"map_size"`
-	Image    *ocispec.Descriptor `json:"image,omitempty"`
+	Digest    string              `json:"digest"`
+	Size      int64               `json:"size"`
+	Groups    uint32              `json:"groups"`
+	DataSize  int64               `json:"data_size"`
+	MetaSize  int64               `json:"meta_size"`
+	MapSize   int64               `json:"map_size"`
+	DataFile  string              `json:"data_file,omitempty"`
+	Pruned    bool                `json:"pruned,omitempty"`
+	Compacted bool                `json:"compacted,omitempty"`
+	Image     *ocispec.Descriptor `json:"image,omitempty"`
 }
 
 const maxCacheJSONSize = 64 << 20
@@ -77,10 +80,23 @@ func (b *cacheStderr) Write(p []byte) (int, error) {
 }
 
 // Reap a failed encoder even if the registry is blocking its output stream.
-func runCacheBuilder(ctx context.Context, builder, capture string, output io.Writer, cancelIO context.CancelFunc) error {
+func runCacheBuilder(ctx context.Context, builder, capture string, output io.Writer, cancelIO context.CancelFunc, options cacheRepackOptions) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, builder, "encode-cache", "--cache", capture)
+	args := []string{"encode-cache", "--cache", capture}
+	if options.prune {
+		args = append(args, "--prune")
+	}
+	if options.compactMaxLayers > 0 {
+		args = append(args, "--compact-max-layers", strconv.FormatUint(uint64(options.compactMaxLayers), 10))
+	}
+	if options.config != "" {
+		args = append(args, "--config", options.config)
+	}
+	if options.compressor != "" {
+		args = append(args, "--compressor", options.compressor)
+	}
+	cmd := exec.CommandContext(ctx, builder, args...)
 	cmd.WaitDelay = 2 * time.Second
 	stderr := &cacheStderr{}
 	cmd.Stderr = stderr
@@ -124,7 +140,49 @@ type cacheUpload interface {
 	Abort()
 }
 
-func encodeCache(ctx context.Context, builder, capture string, hasParent bool, newUpload func(context.Context) (cacheUpload, error)) (string, []pipeline.UploadedBlob, error) {
+// A metadata-only repack must not create a registry upload session. Start it
+// only when the builder emits the first bytes of a final blob.
+type lazyCacheUpload struct {
+	ctx    context.Context
+	open   func(context.Context) (cacheUpload, error)
+	upload cacheUpload
+}
+
+func (u *lazyCacheUpload) Write(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if u.upload == nil {
+		var err error
+		u.upload, err = u.open(u.ctx)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return u.upload.Write(data)
+}
+
+func (u *lazyCacheUpload) Finish() (ocispec.Descriptor, error) {
+	if u.upload == nil {
+		return ocispec.Descriptor{}, fmt.Errorf("builder emitted no blob bytes")
+	}
+	return u.upload.Finish()
+}
+
+func (u *lazyCacheUpload) Abort() {
+	if u.upload != nil {
+		u.upload.Abort()
+	}
+}
+
+type cacheRepackOptions struct {
+	prune            bool
+	compactMaxLayers uint
+	config           string
+	compressor       string
+}
+
+func encodeCache(ctx context.Context, builder, capture string, hasParent bool, newUpload func(context.Context) (cacheUpload, error), options cacheRepackOptions) (string, []pipeline.UploadedBlob, error) {
 	dir := filepath.Dir(capture)
 	var input cacheCapture
 	if err := readCacheJSON(capture, &input); err != nil {
@@ -160,16 +218,12 @@ func encodeCache(ctx context.Context, builder, capture string, hasParent bool, n
 	defer cancel()
 	var upload cacheUpload
 	output := io.Writer(rejectCacheOutput{})
-	if input.DeviceIndex != nil {
-		var err error
-		upload, err = newUpload(ctx)
-		if err != nil {
-			return "", nil, err
-		}
+	if input.DeviceIndex != nil || options.compactMaxLayers > 0 {
+		upload = &lazyCacheUpload{ctx: ctx, open: newUpload}
 		defer upload.Abort()
 		output = upload
 	}
-	if err := runCacheBuilder(ctx, builder, capture, output, cancel); err != nil {
+	if err := runCacheBuilder(ctx, builder, capture, output, cancel, options); err != nil {
 		return "", nil, err
 	}
 	var result cacheResult
@@ -177,11 +231,21 @@ func encodeCache(ctx context.Context, builder, capture string, hasParent bool, n
 		return "", nil, err
 	}
 	bootstrap := filepath.Join(dir, "image.boot")
-	if upload == nil {
-		if result != (cacheResult{}) {
+	if result.Digest == "" {
+		if result.Size != 0 || result.Groups != 0 || result.DataSize != 0 || result.MetaSize != 0 || result.MapSize != 0 || result.DataFile != "" || result.Compacted || input.DeviceIndex != nil {
 			return "", nil, fmt.Errorf("unexpected blob in parent-only cache result")
 		}
 		return bootstrap, nil, nil
+	}
+	if upload == nil {
+		return "", nil, fmt.Errorf("unexpected blob in parent-only cache result")
+	}
+	dataFile := "capture.data"
+	if result.DataFile != "" {
+		dataFile = result.DataFile
+	}
+	if dataFile != "capture.data" && dataFile != "compact.data" || result.Compacted != (dataFile == "compact.data") {
+		return "", nil, fmt.Errorf("invalid cache data file")
 	}
 	dgst, err := digest.Parse(result.Digest)
 	if err != nil || dgst.Algorithm() != digest.SHA256 || result.Size <= 0 || result.DataSize < 0 || result.DataSize%4096 != 0 || int64(result.Groups) > result.DataSize/4096 || result.MetaSize < 4096 || result.MetaSize%4096 != 0 || result.MapSize != 4096+(int64(result.Groups)+7)/8 {
@@ -194,7 +258,7 @@ func encodeCache(ctx context.Context, builder, capture string, hasParent bool, n
 	if desc.Digest != dgst || desc.Size != result.Size {
 		return "", nil, fmt.Errorf("cache upload digest/size mismatch")
 	}
-	for name, size := range map[string]int64{"capture.data": result.DataSize, dgst.Encoded() + ".blob.meta": result.MetaSize} {
+	for name, size := range map[string]int64{dataFile: result.DataSize, dgst.Encoded() + ".blob.meta": result.MetaSize} {
 		info, err := os.Lstat(filepath.Join(dir, name))
 		if err != nil {
 			return "", nil, err

@@ -1,6 +1,6 @@
 mod capture;
 mod compact;
-pub use capture::encode_cache;
+pub use capture::{encode_cache, EncodeCacheOptions};
 
 pub(crate) use compact::RepackBackend;
 pub use compact::RepackResult;

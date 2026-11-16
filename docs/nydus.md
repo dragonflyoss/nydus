@@ -3028,10 +3028,10 @@ VM checkpoints can defer compression and upload until after the VM resumes:
    Capture performs no compression or payload hashing. Complete writes before
    releasing mutable sources; capture does not guarantee fsync durability.
    The provisional bootstrap cannot be mounted or used as a parent.
-2. `nydus_core::encode_cache()` encodes the sealed capture into a
-   caller-provided sink. The CLI exposes this as
+2. `nydus_core::encode_cache()` takes `EncodeCacheOptions` and encodes the
+   sealed capture into a caller-provided sink. The CLI exposes this as
    `nydus encode-cache --cache <checkpoint>/capture.json`.
-   Decoded data and chunk addresses remain unchanged.
+   Without compaction, decoded data and chunk addresses remain unchanged.
 3. `nydusify convert --cache` invokes the encoder and streams its output to
    the registry without storing a compressed blob locally:
 
@@ -3042,12 +3042,22 @@ VM checkpoints can defer compression and upload until after the VM resumes:
 
 Omit `--parent-image` for the first capture. Cache input cannot be combined with
 source/bootstrap/blob inputs. Encoding inherits the capture's compressor;
-cache input cannot be compacted during conversion.
+`--compressor none|zstd|lz4` overrides it. Native EROFS and OCI compressors are
+not supported for cache input.
+
+`--prune` removes unreferenced devices without reading payloads.
+`--compact-max-layers <limit>` compacts when the live blob count after pruning
+exceeds the limit. Compaction reads upper data directly from `capture.data`
+and parent data through the normal backend. It writes one final blob and a
+new `compact.data`, without uploading an intermediate upper blob.
+The original capture remains unchanged for retries; allow space for both
+decoded files during compaction.
 
 Publication produces `image.boot`, `<digest>.blob.meta`, an all-ready
 `<digest>.group.map` and `cache-result.json`. After successful OCI publication
-the result records the final image descriptor. Decoded data remains in
-`capture.data`. Manifest/config/bootstrap content remains under
+and bootstrap export, the result records the final image descriptor. Its
+optional `data_file` selects the decoded file (default: `capture.data`;
+compacted: `compact.data`). Manifest/config/bootstrap content remains under
 `<work-dir>/content` (default work directory: `<checkpoint>/.nydusify`).
 
 The checkpoint owner, not Nydus, imports completed data/meta/map into snapshotter

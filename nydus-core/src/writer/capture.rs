@@ -7,6 +7,7 @@ use std::io::{BufReader, BufWriter, Read};
 
 pub(super) const CAPTURE_BLOB_ID: [u8; 32] = [0; 32];
 const MAX_PLAN_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_RESULT_SIZE: u64 = 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +36,23 @@ struct Finalized {
     data_size: u64,
     meta_size: u64,
     map_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_file: Option<&'static str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pruned: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    compacted: bool,
+}
+
+#[derive(Default)]
+pub struct EncodeCacheOptions {
+    /// Override the capture's chunk-group compressor; None preserves its plan.
+    pub compressor: Option<BlobMetadataCompressor>,
+    pub prune: bool,
+    /// Compact when the number of unique live blobs exceeds this nonzero limit.
+    pub compact_max_layers: usize,
+    /// Parent backend and decoded-cache configuration; required only for compact.
+    pub config: Option<nydus_config::Config>,
 }
 
 pub(super) struct CaptureState {
@@ -174,7 +192,15 @@ fn read_capture(path: &Path) -> Result<Capture> {
 /// decoded-cache file, not a guest mapping; it is never modified. No compressed
 /// blob is stored locally. Publish neither the cache nor OCI manifest until
 /// the caller has verified and committed the streamed upload.
-pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Result<()> {
+/// Finalize with metadata pruning and optional decoded compaction. The limit
+/// counts unique live blobs after pruning. Only compact needs a parent config;
+/// it streams one blob and atomically replaces `compact.data`, never capture.*.
+pub fn encode_cache<W: Write>(
+    path: &Path,
+    data: Option<&File>,
+    sink: W,
+    options: EncodeCacheOptions,
+) -> Result<()> {
     let plan = read_capture(path)?;
     if plan.version != 1 {
         return Err(Error::InvalidImage(
@@ -193,6 +219,8 @@ pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Resu
             ))
         }
     };
+    // This enum admits only chunk-group codecs, never native EROFS algorithms.
+    let compressor = options.compressor.unwrap_or(compressor);
     let digester = match plan.digester.as_deref() {
         None => None,
         Some("blake3") => Some(BlobMetadataDigester::Blake3),
@@ -202,7 +230,7 @@ pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Resu
         .parent()
         .ok_or_else(|| Error::InvalidParameter("capture has no directory".to_string()))?;
     let bootstrap_file = File::open(dir.join("capture.boot"))?;
-    let reader = ErofsReader::open_metadata_only(&dir.join("capture.boot"))?;
+    let reader = Arc::new(ErofsReader::open_metadata_only(&dir.join("capture.boot"))?);
     if reader.sb_offset != EROFS_SUPER_OFFSET as usize
         || bootstrap_file.metadata()?.len() != reader.mmap.len() as u64
     {
@@ -253,7 +281,7 @@ pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Resu
             .filter(|end| *end <= u32::MAX as u64)
             .ok_or_else(|| Error::InvalidImage("capture block count overflow".to_string()))?;
     }
-    let result = if let Some(index) = plan.device_index {
+    if let Some(index) = plan.device_index {
         let slot = slots
             .get(index)
             .ok_or_else(|| Error::InvalidImage("capture device missing".to_string()))?;
@@ -276,6 +304,63 @@ pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Resu
                 "decoded cache length differs from capture".to_string(),
             ));
         }
+    } else if !plan.groups.is_empty()
+        || slots
+            .iter()
+            .any(|slot| slot.blob_id().is_ok_and(|id| id == CAPTURE_BLOB_ID))
+    {
+        return Err(Error::InvalidImage(
+            "parent-only capture has upper data".to_string(),
+        ));
+    }
+    let mut writer_options = IncrementalWriterOptions::new(dir.to_path_buf());
+    writer_options.chunk_size = plan.chunk_size;
+    writer_options.chunk_group_min_size = plan.chunk_group_minimum_size;
+    writer_options.compressor = compressor;
+    writer_options.digester = digester;
+    let mut imported = if options.prune || options.compact_max_layers > 0 {
+        Some(IncrementalWriter::from_reader(
+            reader.clone(),
+            writer_options,
+            ParentMode::Compact,
+        )?)
+    } else {
+        None
+    };
+    let device_ids = if let Some(writer) = imported.as_mut() {
+        writer.prune_parent_devices(writer.device_slots.len())?
+    } else {
+        None
+    };
+    let pruned = device_ids.is_some();
+    if options.compact_max_layers > 0
+        && imported
+            .as_ref()
+            .expect("compact enabled")
+            .repack_blob_ids()?
+            .len()
+            > options.compact_max_layers
+    {
+        // Compaction uses the imported writer, not the original encoded layout.
+        drop(plan);
+        drop(bootstrap);
+        drop(bootstrap_file);
+        drop(slots);
+        drop(device_ids);
+        return compact_capture(
+            dir,
+            data,
+            sink,
+            options.config,
+            &reader,
+            imported.expect("compact enabled"),
+            pruned,
+        );
+    }
+    invalidate_result(dir)?;
+    let result = if let Some(index) = plan.device_index {
+        let data = data.expect("capture data validated");
+        let data_size = blocks * 4096;
         let mut writer = BlobWriter::new(
             sink,
             plan.chunk_size,
@@ -320,7 +405,7 @@ pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Resu
         slots[index].set_blob_id(&finished.full_blob_digest);
         patch_device_slots(&mut bootstrap, &slots)?;
         let digest = hex::encode(finished.full_blob_digest);
-        save_blob_metadata_sidecar(&finished.blob_metadata, &dir.join(&digest))?;
+        publish_sidecar(dir, &digest, &finished.blob_metadata)?;
         Finalized {
             digest: format!("sha256:{digest}"),
             size: finished.blob_size,
@@ -328,17 +413,11 @@ pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Resu
             data_size,
             meta_size: finished.blob_metadata.size(),
             map_size: 4096 + (plan.groups.len() as u64).div_ceil(8),
+            data_file: None,
+            pruned,
+            compacted: false,
         }
     } else {
-        if !plan.groups.is_empty()
-            || slots
-                .iter()
-                .any(|slot| slot.blob_id().is_ok_and(|id| id == CAPTURE_BLOB_ID))
-        {
-            return Err(Error::InvalidImage(
-                "parent-only capture has upper data".to_string(),
-            ));
-        }
         Finalized {
             digest: String::new(),
             size: 0,
@@ -346,19 +425,258 @@ pub fn encode_cache<W: Write>(path: &Path, data: Option<&File>, sink: W) -> Resu
             data_size: 0,
             meta_size: 0,
             map_size: 0,
+            data_file: None,
+            pruned,
+            compacted: false,
         }
     };
-    save_output_file(dir, "image.boot", &bootstrap, true)?;
-    let result = serde_json::to_vec(&result).map_err(|err| Error::Runtime(err.to_string()))?;
+    if pruned {
+        let mut imported = imported.expect("prune enabled");
+        if let Some(index) = plan.device_index {
+            for slot in &mut imported.device_slots {
+                if slot.blob_id()? == CAPTURE_BLOB_ID {
+                    slot.set_blob_id(&slots[index].blob_id()?);
+                }
+            }
+        }
+        let rendered = render_bootstrap_remapped(
+            &mut imported.inodes,
+            imported.epoch,
+            &imported.device_slots,
+            &imported.uuid,
+            device_ids.as_deref(),
+        )?;
+        return publish_result(dir, &rendered, &result);
+    }
+    publish_result(dir, &bootstrap, &result)
+}
+
+fn publish_result(dir: &Path, bootstrap: &[u8], result: &Finalized) -> Result<()> {
+    save_output_file(dir, "image.boot", bootstrap, true)?;
+    let result = serde_json::to_vec(result).map_err(|err| Error::Runtime(err.to_string()))?;
     save_output_file(dir, "cache-result.json", &result, true)?;
     File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+// The result is the import commit marker, not an output to retain across a
+// failed retry. Published images must instead remain immutable.
+fn invalidate_result(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join("cache-result.json");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(Error::InvalidImage(
+                "cache result is not a regular file".to_string(),
+            ))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_RESULT_SIZE {
+        return Err(Error::InvalidImage(
+            "invalid cache result size or type".to_string(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_RESULT_SIZE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RESULT_SIZE {
+        return Err(Error::InvalidImage(
+            "cache result exceeds size limit".to_string(),
+        ));
+    }
+    let previous: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes)
+        .map_err(|err| Error::InvalidImage(format!("invalid cache result: {err}")))?;
+    if previous.get("image").is_some_and(|image| !image.is_null()) {
+        return Err(Error::InvalidParameter(
+            "cache result already describes a published image".to_string(),
+        ));
+    }
+    fs::remove_file(path)?;
+    File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+fn publish_sidecar(dir: &Path, digest: &str, metadata: &BlobMetadata) -> Result<()> {
+    save_output_file_with(
+        dir,
+        &format!("{digest}{}", BlobMetadata::SUFFIX),
+        true,
+        |file| {
+            metadata.write_to(file)?;
+            Ok(())
+        },
+    )
+}
+
+fn compact_capture<W: Write>(
+    dir: &Path,
+    data: Option<&File>,
+    sink: W,
+    config: Option<nydus_config::Config>,
+    reader: &ErofsReader,
+    mut imported: IncrementalWriter,
+    pruned: bool,
+) -> Result<()> {
+    let config = config
+        .ok_or_else(|| Error::InvalidParameter("capture compact requires config".to_string()))?;
+    if config.storage.dir.is_none() {
+        return Err(Error::InvalidConfig(
+            "capture compact requires storage.dir for lazy parent reads".to_string(),
+        ));
+    }
+    invalidate_result(dir)?;
+    let cache_options = crate::CacheOptions::from(&config.storage);
+    let fallback_reader = std::cell::OnceCell::<ErofsReader>::new();
+    let parent_reader = || -> std::io::Result<&ErofsReader> {
+        if fallback_reader.get().is_none() {
+            let backend =
+                <dyn nydus_backend::Backend>::new(&config, None, Arc::new(crate::Metrics::new()))?;
+            let reader = ErofsReader::open_bootstrap(
+                &dir.join("capture.boot"),
+                backend,
+                config.storage.dir.as_deref(),
+                None,
+                cache_options,
+            )?;
+            // Single-threaded repack; no background prefetch or filesystem view.
+            assert!(fallback_reader.set(reader).is_ok());
+        }
+        Ok(fallback_reader.get().expect("fallback reader initialized"))
+    };
+    let infos = reader.blob_infos()?;
+    let (cache_path, cache) = create_temp_file(dir, "compact-cache")?;
+    let staged_cache = StagedCache(cache_path);
+    let cache = Arc::new(cache);
+    let cache_output = cache.clone();
+    imported.prepare_compact_chunk_size()?;
+    let mut output = BlobWriter::new(
+        sink,
+        imported.chunk_size,
+        imported.compressor,
+        imported.digester,
+        true,
+        BlobLayout::ChunkGroups {
+            chunk_group_min_size: imported.chunk_group_min_size,
+        },
+    )?;
+    output.set_decoded_group_callback(move |first, lengths, payload| {
+        nydus_storage::cache::write_decoded_group(&cache_output, first, lengths, payload)?;
+        Ok(())
+    });
+    imported.prepare_compact_output();
+    imported.compact_decoded(reader, &mut output, |nid, inode, source, offset, dst| {
+        // Capture always assigns its upper an explicit device. Device zero
+        // may instead refer to flattened parent data or bootstrap-local bytes.
+        if source.device_id > 0
+            && infos
+                .get(usize::from(source.device_id) - 1)
+                .is_some_and(|info| info.blob_id == CAPTURE_BLOB_ID)
+        {
+            data.ok_or_else(|| Error::InvalidImage("capture data missing".to_string()))?
+                .read_exact_at(
+                    dst,
+                    source.blkaddr.checked_mul(4096).ok_or_else(|| {
+                        Error::Overflow("capture chunk address overflow".to_string())
+                    })?,
+                )?;
+            return Ok(());
+        }
+        let len = dst.len();
+        let written =
+            parent_reader()?.write_file_data_to(nid, inode, offset, len as u32, &mut &mut *dst)?;
+        if written != len {
+            return Err(Error::InvalidImage("short compact parent read".to_string()));
+        }
+        Ok(())
+    })?;
+    let finished = finish_upper_blob(output)?;
+    cache.set_len(finished.blob_blocks * 4096)?;
+    cache.sync_all()?;
+    imported.device_slots.push(ErofsDeviceSlot::with_blob_id(
+        finished.blob_blocks,
+        &finished.full_blob_digest,
+    )?);
+    let bootstrap = render_bootstrap_remapped(
+        &mut imported.inodes,
+        imported.epoch,
+        &imported.device_slots,
+        &imported.uuid,
+        None,
+    )?;
+    let digest = hex::encode(finished.full_blob_digest);
+    publish_sidecar(dir, &digest, &finished.blob_metadata)?;
+    fs::rename(&staged_cache.0, dir.join("compact.data"))?;
+    let groups = finished.blob_metadata.chunk_group_count();
+    publish_result(
+        dir,
+        &bootstrap,
+        &Finalized {
+            digest: format!("sha256:{digest}"),
+            size: finished.blob_size,
+            groups,
+            data_size: finished.blob_blocks * 4096,
+            meta_size: finished.blob_metadata.size(),
+            map_size: 4096 + (groups as u64).div_ceil(8),
+            data_file: Some("compact.data"),
+            pruned,
+            compacted: true,
+        },
+    )
+}
+
+struct StagedCache(PathBuf);
+
+impl Drop for StagedCache {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn result_marker_requires_bounded_regular_unpublished_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cache-result.json");
+        invalidate_result(temp.path()).unwrap();
+        fs::write(&path, br#"{"digest":"sha256:old","image":null}"#).unwrap();
+        invalidate_result(temp.path()).unwrap();
+        assert!(!path.exists());
+        for bytes in [br#"{"image":{}}"#.as_slice(), b"invalid", b"[]"] {
+            fs::write(&path, bytes).unwrap();
+            assert!(invalidate_result(temp.path()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        File::create(&path)
+            .unwrap()
+            .set_len(MAX_RESULT_SIZE + 1)
+            .unwrap();
+        assert!(invalidate_result(temp.path()).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_RESULT_SIZE + 1);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(invalidate_result(temp.path()).is_err());
+        fs::remove_dir(&path).unwrap();
+        let target = temp.path().join("target");
+        fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(invalidate_result(temp.path()).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"{}");
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 
     struct CountCache(Arc<AtomicUsize>);
     impl ChunkGroupCache for CountCache {

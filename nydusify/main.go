@@ -142,7 +142,7 @@ func convertCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "compressor",
-				Usage: "OCI to nydus: none, zstd or lz4 (chunk-based layouts served on demand), erofs-none, erofs-lz4 or erofs-zstd (native EROFS layers without blob meta). nydus to OCI: oci-gzip, oci-zstd or oci-tar",
+				Usage: "OCI to nydus: none, zstd or lz4 (chunk-based layouts served on demand), erofs-none, erofs-lz4 or erofs-zstd (native EROFS layers without blob meta). nydus to OCI: oci-gzip, oci-zstd or oci-tar. Cache input: none, zstd or lz4; inherits the captured algorithm unless explicitly set",
 				Value: "zstd",
 			},
 			&cli.StringFlag{
@@ -287,15 +287,21 @@ func runConvert(c *cli.Context) error {
 	}
 	multiSource := len(sources) > 1
 
-	if c.String("cache") != "" && c.Uint("compact-max-layers") > 0 {
-		return errors.New("--cache cannot be combined with --compact-max-layers")
-	}
 	// The compressor picks the conversion direction, so reject unknown values
 	// instead of silently running the wrong one.
 	compressor := c.String("compressor")
 	toOCI := pipeline.IsOCICompressor(compressor)
 	if !toOCI && !nydus.IsNydusCompressor(compressor) {
 		return errors.Errorf("unsupported --compressor %q, expected none, zstd, lz4, erofs-none, erofs-lz4, erofs-zstd, oci-gzip, oci-zstd or oci-tar", compressor)
+	}
+	cacheCompressor := ""
+	if c.String("cache") != "" && c.IsSet("compressor") {
+		switch compressor {
+		case "none", "zstd", "lz4":
+			cacheCompressor = compressor
+		default:
+			return errors.New("--cache supports --compressor none, zstd or lz4")
+		}
 	}
 	if toOCI && len(manifestAnnotations) > 0 {
 		return errors.New("--manifest-annotation is only supported when converting to nydus")
@@ -423,13 +429,7 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("packaging nydus artifacts from bootstrap %s", bootstrapPath)
-		if cache := c.String("cache"); cache != "" {
-			bootstrapPath, uploadedBlobs, err = encodeCache(ctx, c.String("builder"), cache, len(parents) > 0, providerCacheUpload(provider, target))
-			if err != nil {
-				return err
-			}
-		}
-		artifact, err := pipeline.ConvertNydusArtifacts(ctx, provider.ContentStore(), pipeline.ArtifactOption{
+		artifactOptions := pipeline.ArtifactOption{
 			BuilderPath:       c.String("builder"),
 			CompactMaxLayers:  c.Uint("compact-max-layers"),
 			Prune:             c.Bool("prune"),
@@ -450,7 +450,29 @@ func runConvert(c *cli.Context) error {
 			AppendInBootstrap: appendFiles,
 			Annotations:       manifestAnnotations,
 			Platform:          platform,
-		})
+		}
+		if cache := c.String("cache"); cache != "" {
+			config, closeBackend, err := pipeline.PrepareCaptureRepack(ctx, artifactOptions)
+			if err != nil {
+				return errors.Wrap(err, "prepare cache compact sources")
+			}
+			bootstrapPath, uploadedBlobs, err = encodeCache(ctx, c.String("builder"), cache, len(parents) > 0, providerCacheUpload(provider, target), cacheRepackOptions{
+				prune:            artifactOptions.Prune,
+				compactMaxLayers: artifactOptions.CompactMaxLayers,
+				config:           config,
+				compressor:       cacheCompressor,
+			})
+			closeBackend()
+			if err != nil {
+				return err
+			}
+			artifactOptions.BootstrapPath = bootstrapPath
+			artifactOptions.UploadedBlobs = uploadedBlobs
+			// Capture finalization already pruned/compacted before streaming.
+			artifactOptions.Prune = false
+			artifactOptions.CompactMaxLayers = 0
+		}
+		artifact, err := pipeline.ConvertNydusArtifacts(ctx, provider.ContentStore(), artifactOptions)
 		if err != nil {
 			return errors.Wrap(err, "package nydus artifacts")
 		}
