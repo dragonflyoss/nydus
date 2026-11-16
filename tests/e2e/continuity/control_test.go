@@ -18,7 +18,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const controlUpgradeProtocol = "nydus-fuse-control/1"
+const (
+	controlUpgradePath     = "/fuse/handoff"
+	controlUpgradeProtocol = "nydus-fuse-control/1"
+
+	// maxTransferFDs bounds one Session Transfer: every FUSE device plus the
+	// inflight journal must fit a single SCM_RIGHTS message.
+	maxTransferFDs = 253
+)
 
 type control struct {
 	*net.UnixConn
@@ -80,7 +87,7 @@ func dialControl(path string, timeout time.Duration) (control, error) {
 }
 
 func (c control) upgrade() error {
-	if _, err := io.WriteString(c, "GET /fuse/handoff HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: "+controlUpgradeProtocol+"\r\n\r\n"); err != nil {
+	if _, err := io.WriteString(c, "GET "+controlUpgradePath+" HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: "+controlUpgradeProtocol+"\r\n\r\n"); err != nil {
 		return err
 	}
 
@@ -103,6 +110,39 @@ func (c control) upgrade() error {
 	}
 
 	return nil
+}
+
+// acceptHTTP plays the server side of the control upgrade handshake.
+func (c control) acceptHTTP() error {
+	header, err := c.readHTTPHeader()
+	if err != nil {
+		return err
+	}
+
+	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(header)))
+	if err != nil {
+		return err
+	}
+
+	if request.Proto != "HTTP/1.1" || request.Method != http.MethodGet ||
+		request.RequestURI != controlUpgradePath || request.Host != "localhost" ||
+		!hasHTTPToken(request.Header.Get("Connection"), "Upgrade") ||
+		request.Header.Get("Upgrade") != controlUpgradeProtocol {
+		return fmt.Errorf("invalid control HTTP upgrade request: %s", header)
+	}
+
+	_, err = io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: "+controlUpgradeProtocol+"\r\n\r\n")
+
+	return err
+}
+
+func controlOwnerPID(path string) (uint32, error) {
+	response, err := requestControlInfo(path)
+	if err != nil {
+		return 0, err
+	}
+
+	return response.Info.PID, nil
 }
 
 func requestControlInfo(path string) (controlResponse, error) {
@@ -137,6 +177,7 @@ type controlInstanceInfo struct {
 
 type controlResponse struct {
 	Type      string               `json:"type"`
+	Message   string               `json:"message,omitempty"`
 	Info      *controlInstanceInfo `json:"info,omitempty"`
 	SessionID *string              `json:"session_id,omitempty"`
 }
@@ -148,9 +189,11 @@ type controlSessionState struct {
 
 type controlTransferState struct {
 	Version          uint32              `json:"version"`
+	SessionID        *string             `json:"session_id"`
 	Mountpoint       string              `json:"mountpoint"`
 	ImageDigest      string              `json:"image_digest"`
 	FUSESessionState controlSessionState `json:"fuse_session_state"`
+	InflightJournal  bool                `json:"inflight_journal"`
 }
 
 func (c control) writeRaw(payload []byte) error {
@@ -208,9 +251,22 @@ func (c control) read() (controlResponse, error) {
 	return response, nil
 }
 
-func (c control) recvFDs(expected int) (fds []int, err error) {
-	if expected <= 0 {
-		return nil, fmt.Errorf("invalid expected fd count %d", expected)
+// recvFDsExact receives one descriptor transfer of exactly expected
+// descriptors.
+func (c control) recvFDsExact(expected int) ([]int, error) {
+	fds, err := c.recvFDs(expected)
+	if err == nil && len(fds) != expected {
+		closeFDs(fds)
+		return nil, fmt.Errorf("received %d descriptors, expected %d", len(fds), expected)
+	}
+
+	return fds, err
+}
+
+// recvFDs receives one descriptor transfer of 1 to maxCount descriptors.
+func (c control) recvFDs(maxCount int) (fds []int, err error) {
+	if maxCount <= 0 {
+		return nil, fmt.Errorf("invalid descriptor limit %d", maxCount)
 	}
 
 	defer func() {
@@ -233,7 +289,7 @@ func (c control) recvFDs(expected int) (fds []int, err error) {
 	}
 
 	payload := make([]byte, 1)
-	oob := make([]byte, unix.CmsgSpace((expected+1)*4))
+	oob := make([]byte, unix.CmsgSpace((maxCount+1)*4))
 	var n, oobn, flags int
 
 	var recvErr error
@@ -287,8 +343,8 @@ func (c control) recvFDs(expected int) (fds []int, err error) {
 	if invalidControl || len(messages) != 1 {
 		return fds, errors.New("descriptor transfer requires one SCM_RIGHTS message")
 	}
-	if len(fds) != expected {
-		return fds, fmt.Errorf("received %d descriptors, expected %d", len(fds), expected)
+	if len(fds) == 0 || len(fds) > maxCount {
+		return fds, fmt.Errorf("received %d descriptors, expected 1 to %d", len(fds), maxCount)
 	}
 
 	for _, fd := range fds {

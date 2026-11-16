@@ -20,9 +20,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// runProtectionMatrix runs a continuity scenario for a standalone session and
+// for a Failover-Protected Session backed by a Recovery Holder.
+func runProtectionMatrix(t *testing.T, run func(t *testing.T, protected bool)) {
+	t.Helper()
+	t.Run("Standalone", func(t *testing.T) { run(t, false) })
+
+	t.Run("Protected", func(t *testing.T) { run(t, true) })
+}
+
 func TestHotUpgrade(t *testing.T) {
 	t.Parallel()
-	h, _ := setup(t)
+	runProtectionMatrix(t, hotUpgrade)
+}
+
+func hotUpgrade(t *testing.T, protected bool) {
+	h, _ := setup(t, protected)
+	holder := h.holder
 	heldSource, err := os.ReadFile(filepath.Join(h.sourceDir, heldFileRel))
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -51,7 +65,13 @@ func TestHotUpgrade(t *testing.T) {
 
 	old := predecessor.spawn(t, "old")
 	h.waitMounted(t)
-	h.waitServing(t, old, 10*time.Second)
+
+	var sessionID *string
+	if holder != nil {
+		sessionID = holder.requireStoredBundle().SessionID
+	}
+
+	h.waitServing(t, old, sessionID, 10*time.Second)
 
 	if !assert.FileExists(t, h.stateBase()+".owner") {
 		t.FailNow()
@@ -93,8 +113,22 @@ func TestHotUpgrade(t *testing.T) {
 
 	stress := h.startStress(t, stressSource)
 
+	if holder == nil {
+		h.supervisorSocket = filepath.Join(filepath.Dir(h.controlSocket), "absent-holder.sock")
+	}
+
 	successor := h.spawn(t, "new")
-	h.waitServing(t, successor, 30*time.Second)
+	h.waitServing(t, successor, sessionID, 30*time.Second)
+
+	if holder == nil {
+		assert.NoFileExists(t, h.supervisorSocket)
+	} else {
+		assert.Equal(t, sessionID, holder.requireStoredBundle().SessionID,
+			"hot upgrade replaced the Holder's retained Session Transfer")
+		assert.Equal(t, []string{"fetch", "retain"}, holder.receivedCommands(),
+			"protected hot upgrade contacted the Holder")
+	}
+
 	h.expectMountIdentity(t, devOld)
 
 	if !assert.True(t, successor.Alive()) {
@@ -163,6 +197,14 @@ func TestHotUpgrade(t *testing.T) {
 
 	assert.Zero(t, successor.ExitCode())
 	h.waitUnmounted(t)
+
+	// The Holder's release ends the detached connection before the client
+	// handle closes; otherwise its FUSE RELEASE has no serving daemon and can
+	// block indefinitely.
+	if holder != nil {
+		holder.requireReleased()
+		assert.Equal(t, []string{"fetch", "retain", "release"}, holder.receivedCommands())
+	}
 }
 
 func TestPreReadyRollback(t *testing.T) {
@@ -172,15 +214,25 @@ func TestPreReadyRollback(t *testing.T) {
 		return
 	}
 
-	h, stressSource := setup(t)
+	runProtectionMatrix(t, preReadyRollback)
+}
+
+func preReadyRollback(t *testing.T, protected bool) {
+	h, stressSource := setup(t, protected)
 
 	old := h.spawn(t, "old")
 	h.waitMounted(t)
-	h.waitServing(t, old, 10*time.Second)
+
+	var sessionID *string
+	if h.holder != nil {
+		sessionID = h.holder.requireStoredBundle().SessionID
+	}
+
+	h.waitServing(t, old, sessionID, 10*time.Second)
 	devOld := mountDev(t, h.mountpoint)
 	stress := h.startStress(t, stressSource)
 
-	fakeSuccessor := h.startFakeHotUpgradeSuccessor(t)
+	fakeSuccessor := h.startFakeHotUpgradeSuccessor(t, sessionID)
 
 	time.Sleep(2 * time.Second)
 	fakeSuccessor.Kill()
@@ -190,7 +242,7 @@ func TestPreReadyRollback(t *testing.T) {
 		t.FailNow()
 	}
 
-	h.waitServing(t, old, 10*time.Second)
+	h.waitServing(t, old, sessionID, 10*time.Second)
 	h.expectMountIdentity(t, devOld)
 
 	resumed := stress.count()
@@ -206,7 +258,14 @@ func TestPreReadyRollback(t *testing.T) {
 	fstest.VerifyMount(t, h.mountpoint, fstest.ScanSource(t, h.sourceDir), fstest.CompareOptions{Nlink: true})
 
 	successor := h.spawn(t, "new")
-	h.waitServing(t, successor, 30*time.Second)
+	h.waitServing(t, successor, sessionID, 30*time.Second)
+
+	if h.holder != nil {
+		assert.Equal(t, sessionID, h.holder.requireStoredBundle().SessionID,
+			"upgrade after rollback replaced the Holder's retained Session Transfer")
+		assert.Equal(t, []string{"fetch", "retain"}, h.holder.receivedCommands(),
+			"protected hot upgrade contacted the Holder")
+	}
 
 	if !assert.True(t, old.WaitExit(30*time.Second)) {
 		t.FailNow()
@@ -229,9 +288,10 @@ func TestFDTransfer(t *testing.T) {
 		sent     int
 		expected int
 	}{
-		{name: "Connection", tag: 'F', sent: 1, expected: 1},
+		{name: "Standalone", tag: 'F', sent: 1, expected: 1},
+		{name: "Protected", tag: 'F', sent: 2, expected: 2},
 		{name: "WrongTag", tag: 'X', sent: 1, expected: 1},
-		{name: "WrongCount", tag: 'F', sent: 2, expected: 1},
+		{name: "WrongCount", tag: 'F', sent: 1, expected: 2},
 		{name: "TruncatedRights", tag: 'F', sent: 64, expected: 1},
 	}
 
@@ -273,7 +333,7 @@ func TestFDTransfer(t *testing.T) {
 				t.FailNow()
 			}
 
-			fds, err := receiver.recvFDs(tc.expected)
+			fds, err := receiver.recvFDsExact(tc.expected)
 
 			if tc.tag == 'F' && tc.sent == tc.expected {
 				assert.NoError(t, err)
@@ -321,7 +381,10 @@ func newControlChannel(t *testing.T) (control, *os.File) {
 	return control{unixConn}, childFile
 }
 
-const preReadyHelperEnv = "NYDUS_E2E_FUSE_PRE_READY_HELPER"
+const (
+	preReadyHelperEnv  = "NYDUS_E2E_FUSE_PRE_READY_HELPER"
+	preReadySessionEnv = "NYDUS_E2E_FUSE_SESSION_ID"
+)
 
 func runPreReadyHelper(t *testing.T) {
 	mountpoint, err := filepath.EvalSymlinks(os.Getenv("NYDUS_E2E_FUSE_MOUNTPOINT"))
@@ -341,6 +404,12 @@ func runPreReadyHelper(t *testing.T) {
 	}
 
 	defer func() { _ = conn.Close() }()
+
+	var sessionID *string
+	if !assert.NoError(t, json.Unmarshal([]byte(os.Getenv(preReadySessionEnv)), &sessionID)) {
+		t.FailNow()
+	}
+
 	conn.mustWrite(t, map[string]string{"type": "info"})
 	info := conn.mustRead(t)
 	if !assert.Equal(t, "info", info.Type) {
@@ -356,7 +425,7 @@ func runPreReadyHelper(t *testing.T) {
 		t.FailNow()
 	}
 
-	assert.Nil(t, info.SessionID)
+	assert.Equal(t, sessionID, info.SessionID)
 	conn.setDeadline(t)
 
 	conn.mustWrite(t, map[string]any{
@@ -383,7 +452,7 @@ func runPreReadyHelper(t *testing.T) {
 	if !assert.NoError(t, json.Unmarshal(metadata, &state)) {
 		t.FailNow()
 	}
-	if !assert.Equal(t, uint32(1), state.Version) {
+	if !assert.Equal(t, sessionID, state.SessionID) {
 		t.FailNow()
 	}
 	if !assert.Equal(t, mountpoint, state.Mountpoint) {
@@ -397,24 +466,48 @@ func runPreReadyHelper(t *testing.T) {
 	}
 
 	assert.NotZero(t, state.FUSESessionState.ProtoMinor)
-	fds, err := conn.recvFDs(1)
+	fds, err := conn.recvFDs(maxTransferFDs)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
 
 	defer closeFDs(fds)
-	var receivedFUSE, fuseDevice unix.Stat_t
-	if !assert.NoError(t, unix.Fstat(fds[0], &receivedFUSE)) {
-		t.FailNow()
+
+	// Every descriptor is a FUSE device, except the inflight journal that a
+	// protected session may append last.
+	devices := fds
+	if sessionID == nil {
+		assert.False(t, state.InflightJournal)
+
+		if !assert.Len(t, devices, 1) {
+			t.FailNow()
+		}
+	} else if state.InflightJournal {
+		if !assert.GreaterOrEqual(t, len(fds), 2) {
+			t.FailNow()
+		}
+
+		devices = fds[:len(fds)-1]
+		journal := mapInflightJournal(t, fds[len(fds)-1], unix.PROT_READ)
+		assert.NoError(t, unix.Munmap(journal))
 	}
+
+	var fuseDevice unix.Stat_t
 	if !assert.NoError(t, unix.Stat("/dev/fuse", &fuseDevice)) {
 		t.FailNow()
 	}
-	if !assert.Equal(t, uint32(unix.S_IFCHR), receivedFUSE.Mode&unix.S_IFMT) {
-		t.FailNow()
-	}
 
-	assert.Equal(t, fuseDevice.Rdev, receivedFUSE.Rdev)
+	for _, fd := range devices {
+		var received unix.Stat_t
+		if !assert.NoError(t, unix.Fstat(fd, &received)) {
+			t.FailNow()
+		}
+		if !assert.Equal(t, uint32(unix.S_IFCHR), received.Mode&unix.S_IFMT) {
+			t.FailNow()
+		}
+
+		assert.Equal(t, fuseDevice.Rdev, received.Rdev)
+	}
 
 	_, err = fmt.Fprintln(os.Stdout, "TRANSFERRED")
 	assert.NoError(t, err)
