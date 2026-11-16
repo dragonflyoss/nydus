@@ -3,7 +3,7 @@
 mod payload;
 mod state;
 
-pub(crate) use payload::{validate_fuse_connection, SessionTransfer};
+pub(crate) use payload::{SessionProtection, SessionTransfer};
 pub(crate) use state::FuseInitState;
 
 #[cfg(test)]
