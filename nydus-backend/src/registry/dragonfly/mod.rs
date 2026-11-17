@@ -233,7 +233,7 @@ impl Transport for Dragonfly {
 
         // Serve a definitive answer, fall back to the origin on anything else.
         let err = match result {
-            Ok(response) if response.needs_fallback() => response.into_io_error().await,
+            Ok(response) if response.is_transient() => response.into_io_error().await,
             Ok(response) => {
                 return Ok(Response {
                     fallback: true,
@@ -276,7 +276,7 @@ impl Transport for Dragonfly {
 
             // Serve a definitive answer, or the second transient one.
             let response = result?;
-            if !response.needs_retry() || retried {
+            if !response.is_transient() || retried {
                 return Ok(response);
             }
 

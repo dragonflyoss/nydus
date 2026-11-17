@@ -184,21 +184,20 @@ impl Response {
         io::Error::other(format!("unexpected status {status}: {body}"))
     }
 
-    /// Returns whether an on-demand read falls back to the origin, on a `429`,
-    /// `5xx` or `408`.
-    #[cfg(feature = "dragonfly")]
-    pub(crate) fn needs_fallback(&self) -> bool {
+    /// Returns whether the answer is a transient failure, a `429`, `5xx` or
+    /// `408`.
+    pub(crate) fn is_transient(&self) -> bool {
         self.status.is_server_error()
             || self.status == StatusCode::REQUEST_TIMEOUT
             || self.status == StatusCode::TOO_MANY_REQUESTS
     }
 
-    /// Returns whether a prefetch read is sent once more, on a `429`, `5xx` or
-    /// `408`.
-    pub(crate) fn needs_retry(&self) -> bool {
-        self.status.is_server_error()
-            || self.status == StatusCode::REQUEST_TIMEOUT
-            || self.status == StatusCode::TOO_MANY_REQUESTS
+    /// Returns whether a cached redirect has expired, answering a `4xx` but
+    /// `408`, `416` and `429`.
+    pub(crate) fn is_redirect_expired(&self) -> bool {
+        self.status.is_client_error()
+            && self.status != StatusCode::RANGE_NOT_SATISFIABLE
+            && !self.is_transient()
     }
 }
 
@@ -338,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn needs_fallback_and_needs_retry_mark_the_statuses_the_transport_failed_with() {
+    fn is_transient_marks_the_statuses_the_transport_failed_with() {
         let test_cases = vec![
             (StatusCode::INTERNAL_SERVER_ERROR, true),
             (StatusCode::BAD_GATEWAY, true),
@@ -362,9 +361,34 @@ mod tests {
                 body: stream::empty().boxed(),
                 fallback: false,
             };
-            #[cfg(feature = "dragonfly")]
-            assert_eq!(response.needs_fallback(), expected);
-            assert_eq!(response.needs_retry(), expected);
+            assert_eq!(response.is_transient(), expected);
+        }
+    }
+
+    #[test]
+    fn is_redirect_expired_marks_the_client_errors_an_expired_link_answers() {
+        let test_cases = vec![
+            (StatusCode::BAD_REQUEST, true),
+            (StatusCode::UNAUTHORIZED, true),
+            (StatusCode::FORBIDDEN, true),
+            (StatusCode::NOT_FOUND, true),
+            (StatusCode::GONE, true),
+            (StatusCode::REQUEST_TIMEOUT, false),
+            (StatusCode::RANGE_NOT_SATISFIABLE, false),
+            (StatusCode::TOO_MANY_REQUESTS, false),
+            (StatusCode::PARTIAL_CONTENT, false),
+            (StatusCode::TEMPORARY_REDIRECT, false),
+            (StatusCode::INTERNAL_SERVER_ERROR, false),
+        ];
+
+        for (status, expected) in test_cases {
+            let response = Response {
+                status,
+                headers: HeaderMap::new(),
+                body: stream::empty().boxed(),
+                fallback: false,
+            };
+            assert_eq!(response.is_redirect_expired(), expected);
         }
     }
 

@@ -156,7 +156,7 @@ impl Transport for Http {
 
             // Serve a definitive answer, or the second transient one.
             let response = result?;
-            if !response.needs_retry() || retried {
+            if !response.is_transient() || retried {
                 return Ok(response);
             }
 

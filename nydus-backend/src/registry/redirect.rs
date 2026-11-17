@@ -29,7 +29,7 @@ impl RedirectCache {
     const DEFAULT_CAPACITY: usize = 1000;
 
     /// The default time a redirect is trusted, an expired link also evicted
-    /// once it answers `401` or `403`.
+    /// once it rejects a request.
     const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
 
     /// Creates an empty cache.
@@ -69,7 +69,7 @@ impl RedirectCache {
         );
     }
 
-    /// Forgets the redirect of `hex`, after the link answered `401` or `403`.
+    /// Forgets the redirect of `hex`, after the link rejected a request.
     pub(crate) fn remove(&self, hex: &str) {
         debug!("evicting cached redirect for blob {hex}");
         self.redirects.lock().unwrap().pop(hex);

@@ -100,7 +100,7 @@ pub(crate) struct Registry {
 ///
 /// the reads that follow
 ///   1. redirect cache ──▶ hit ──▶ GET the cached location ─────────▶ 206 bytes
-///                                  └─ 401 / 403, the link expired ──▶ evicted, step 4
+///                                  └─ rejected, the link expired ───▶ evicted, step 4
 ///
 /// a read once the token expired, or the registry refuses it
 ///   4. GET blob URL ──▶ 401 ──▶ the token is forgotten ────────────▶ step 2
@@ -289,7 +289,7 @@ impl Client {
                     response.validate_range(range)?;
                     return Ok(response);
                 }
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
+                _ if response.is_redirect_expired() => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
         }
@@ -337,7 +337,7 @@ impl Client {
                     response.validate_range(range)?;
                     return Ok(response);
                 }
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.redirects.remove(&hex),
+                _ if response.is_redirect_expired() => self.redirects.remove(&hex),
                 _ => return Err(response.into_io_error().await),
             }
         }
@@ -1740,25 +1740,42 @@ backend:
     }
 
     #[test]
-    fn forbidden_cached_redirect_is_evicted_and_re_resolved() {
-        let body = b"fresh".to_vec();
-        let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
-        let transport = ScriptedTransport::new(vec![
-            Scripted::Status(StatusCode::FORBIDDEN, HeaderMap::new()),
-            Scripted::Body(body.clone()),
-        ]);
-        let registry = scripted_registry(origin.addr, None, None, transport.clone());
-        let hex = hex::encode(TEST_BLOB_ID);
-        registry
-            .client
-            .redirects
-            .insert(&hex, "http://cdn.example.com/expired".to_string());
+    fn rejected_cached_redirect_is_evicted_and_re_resolved() {
+        let test_cases = vec![
+            (StatusCode::UNAUTHORIZED, true),
+            (StatusCode::FORBIDDEN, true),
+            (StatusCode::BAD_REQUEST, true),
+            (StatusCode::NOT_FOUND, true),
+            (StatusCode::GONE, true),
+            (StatusCode::REQUEST_TIMEOUT, false),
+            (StatusCode::RANGE_NOT_SATISFIABLE, false),
+            (StatusCode::TOO_MANY_REQUESTS, false),
+            (StatusCode::INTERNAL_SERVER_ERROR, false),
+        ];
 
-        let mut buf = vec![0u8; body.len()];
-        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        for (status, evicted) in test_cases {
+            for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+                let body = b"fresh".to_vec();
+                let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
+                let mut script = vec![Scripted::Status(status, HeaderMap::new())];
+                if evicted {
+                    script.push(Scripted::Body(body.clone()));
+                }
+                let transport = ScriptedTransport::new(script);
+                let registry = scripted_registry(origin.addr, None, None, transport.clone());
+                let hex = hex::encode(TEST_BLOB_ID);
+                registry
+                    .client
+                    .redirects
+                    .insert(&hex, "http://cdn.example.com/expired".to_string());
 
-        assert_eq!(buf, body);
-        assert_eq!(transport.calls(), 2);
-        assert!(registry.client.redirects.get(&hex).is_none());
+                let mut buf = vec![0u8; body.len()];
+                let result = read(&registry, kind, &mut buf);
+
+                assert_eq!(result.is_ok(), evicted);
+                assert_eq!(transport.calls(), if evicted { 2 } else { 1 });
+                assert_eq!(registry.client.redirects.get(&hex).is_none(), evicted);
+            }
+        }
     }
 }
