@@ -15,7 +15,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::thread;
 
 use tracing::{debug, warn};
@@ -29,6 +29,7 @@ use super::core::{
 };
 use super::proto::{EventIter, PreContentEvent, FAN_PRE_ACCESS};
 use super::response::{FdResponseWriter, PendingPermission, Response, ResponseWriter};
+pub use crate::pool::FetchPool;
 
 // 256 KiB holds ~5400 minimum-size events per read(2)
 // (24-byte fanotify_event_metadata + 24-byte RANGE record).
@@ -224,50 +225,6 @@ pub(crate) fn create_eventfd() -> io::Result<OwnedFd> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-// ---- thread pool ----
-
-/// Pre-warmed thread pool. `max` worker threads are created once and
-/// live for the daemon's lifetime, consuming work from an mpsc channel.
-/// `execute` never blocks — when all workers are busy, work queues in
-/// memory (bounded by the fanotify event rate, ~16K items max per 64MB file).
-pub struct FetchPool {
-    tx: mpsc::Sender<Box<dyn FnOnce() + Send + 'static>>,
-}
-
-impl FetchPool {
-    pub fn new(max: usize) -> Result<Self> {
-        let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send + 'static>>();
-        let rx = Arc::new(Mutex::new(rx));
-        for _ in 0..max {
-            let rx = Arc::clone(&rx);
-            thread::Builder::new()
-                .name("nydus_fanotify_fetch".to_string())
-                .spawn(move || loop {
-                    let work: Box<dyn FnOnce() + Send> = {
-                        let guard = rx.lock().unwrap();
-                        match guard.recv() {
-                            Ok(w) => w,
-                            Err(_) => return,
-                        }
-                    };
-                    work();
-                })
-                .with_context(|| "failed to spawn fetch worker".to_string())?;
-        }
-        Ok(FetchPool { tx })
-    }
-
-    pub fn execute<F>(&self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        // Non-blocking: the mpsc channel is unbounded and send never
-        // blocks. If the channel is disconnected (pool dropped) the send
-        // fails silently.
-        let _ = self.tx.send(Box::new(f));
-    }
 }
 
 // ---- service ----

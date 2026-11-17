@@ -1,11 +1,12 @@
 use nydus_error::{Context, Error, Result};
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, IoSlice, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -15,6 +16,7 @@ use super::proto::{
 };
 use super::{mount_nbd, netlink, NbdCore};
 use crate::mount::unmount;
+use crate::pool::FetchPool;
 use crate::signal;
 
 /// The largest read a request may ask for.
@@ -94,14 +96,22 @@ pub(crate) struct NbdSession {
     /// The image the workers read from.
     core: Arc<NbdCore>,
 
+    /// The threads that serve the reads of every connection concurrently.
+    pool: Arc<FetchPool>,
+
     /// The worker threads not joined yet.
     workers: Vec<JoinHandle<Result<()>>>,
 }
 
 /// Implements the worker pool.
 impl NbdSession {
-    /// Creates a pool without connections.
-    pub(crate) fn new(core: Arc<NbdCore>, index: u32, options: NbdOptions) -> Result<Self> {
+    /// Creates a pool without connections, whose reads run on `pool`.
+    pub(crate) fn new(
+        core: Arc<NbdCore>,
+        pool: Arc<FetchPool>,
+        index: u32,
+        options: NbdOptions,
+    ) -> Result<Self> {
         // SAFETY: eventfd accepts integer arguments and the returned fd is checked.
         let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if wake < 0 {
@@ -119,6 +129,7 @@ impl NbdSession {
             index,
             options,
             core,
+            pool,
             workers: Vec::new(),
         })
     }
@@ -130,8 +141,12 @@ impl NbdSession {
                 let (kernel, user) =
                     UnixStream::pair().context("failed to create NBD socket pair")?;
                 let user = Arc::new(user);
-                self.workers
-                    .push(NbdWorker::spawn(&self.core, &self.service, user.clone())?);
+                self.workers.push(NbdWorker::spawn(
+                    &self.core,
+                    &self.pool,
+                    &self.service,
+                    user.clone(),
+                )?);
                 Ok((kernel.into(), user))
             })
             .collect()
@@ -212,16 +227,17 @@ impl Drop for NbdSession {
 }
 
 /// Attaches a fresh netlink session on `device`, optionally mounts it as EROFS
-/// and serves it until a termination signal or a worker failure.
+/// and serves reads on `pool` until a termination signal or a worker failure.
 pub fn serve(
     core: Arc<NbdCore>,
     device: &str,
     mountpoint: Option<&Path>,
     options: &NbdOptions,
+    pool: Arc<FetchPool>,
     signals: signal::Signals,
 ) -> Result<()> {
     let index = device_index(device)?;
-    let mut session = NbdSession::new(core.clone(), index, options.clone())?;
+    let mut session = NbdSession::new(core.clone(), pool, index, options.clone())?;
     session.connect(core.device_size())?;
     info!(
         "nydus nbd service attached to {} ({} connections)",
@@ -307,8 +323,11 @@ struct NbdWorker {
     /// The user end of the connection.
     socket: Arc<UnixStream>,
 
-    /// The read buffer reused across requests.
-    buf: Vec<u8>,
+    /// The threads that serve this connection's reads.
+    pool: Arc<FetchPool>,
+
+    /// The replies of the requests this worker read.
+    replies: Arc<Replies>,
 }
 
 /// Implements the per-connection worker.
@@ -316,6 +335,7 @@ impl NbdWorker {
     /// Spawns a worker that serves `socket`.
     fn spawn(
         core: &Arc<NbdCore>,
+        pool: &Arc<FetchPool>,
         service: &Arc<NbdService>,
         socket: Arc<UnixStream>,
     ) -> Result<JoinHandle<Result<()>>> {
@@ -323,8 +343,9 @@ impl NbdWorker {
         let worker = Self {
             service: service.clone(),
             core: core.clone(),
+            pool: pool.clone(),
+            replies: Arc::new(Replies::new(socket.clone())),
             socket,
-            buf: Vec::new(),
         };
         std::thread::Builder::new()
             .name("nydus_nbd_worker".into())
@@ -371,7 +392,10 @@ impl NbdWorker {
         }
     }
 
-    /// Reads and answers one request; returns `false` on a disconnect request.
+    /// Reads and dispatches one request; returns `false` on a disconnect request.
+    ///
+    /// Reads run on the pool, so a slow backend fetch does not hold up the requests
+    /// queued behind it on this connection.
     fn serve_one(&mut self, header: &mut [u8; NBD_REQUEST_HEADER_SIZE]) -> Result<bool> {
         self.socket
             .as_ref()
@@ -391,40 +415,21 @@ impl NbdWorker {
             ));
         }
         let length = usize::try_from(request.len).unwrap_or(usize::MAX);
-        let mut code = NBD_OK;
-        let mut payload: &[u8] = &[];
         if !request.is_read() {
             warn!("nbd: unsupported request type {}", request.ty);
-            code = NBD_EINVAL;
+            self.replies.send(request.handle, NBD_EINVAL, &[]);
         } else if length > MAX_READ_LEN || !request.is_block_aligned() {
             warn!(
                 "nbd: invalid read offset {} length {}",
                 request.offset, request.len
             );
-            code = NBD_EINVAL;
+            self.replies.send(request.handle, NBD_EINVAL, &[]);
         } else {
-            if self.buf.len() < length {
-                self.buf.resize(length, 0);
-            }
-            match self.core.read_at(request.offset, &mut self.buf[..length]) {
-                Ok(()) => payload = &self.buf[..length],
-                Err(err) => {
-                    warn!(
-                        "nbd: read [{:#x}, +{}) failed: {}",
-                        request.offset,
-                        request.len,
-                        err.report()
-                    );
-                    code = NBD_EIO;
-                }
-            }
+            let core = self.core.clone();
+            let replies = self.replies.clone();
+            self.pool
+                .execute(move || read_and_reply(&core, &replies, &request, length));
         }
-        writev_all(
-            &mut self.socket.as_ref(),
-            &encode_reply(code, request.handle),
-            payload,
-        )
-        .context("failed to write NBD reply")?;
         Ok(true)
     }
 }
@@ -433,8 +438,8 @@ impl NbdWorker {
 impl Drop for NbdWorker {
     /// Closes the connection and records the worker exit.
     fn drop(&mut self) {
-        // Shut the socket down, because the kernel retires the slot only once the reply
-        // stream ends.
+        // Shut the socket down: reads still in flight keep it open, but the kernel retires
+        // the slot only once the reply stream ends.
         if let Err(err) = self.socket.shutdown(std::net::Shutdown::Both) {
             if err.kind() != io::ErrorKind::NotConnected {
                 warn!(
@@ -444,6 +449,73 @@ impl Drop for NbdWorker {
             }
         }
         self.service.live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Serves one validated read on a pool thread and replies to it.
+fn read_and_reply(core: &NbdCore, replies: &Replies, request: &Request, length: usize) {
+    thread_local! {
+        /// The reply buffer each pool thread reuses.
+        static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+    BUF.with_borrow_mut(|buf| {
+        if buf.len() < length {
+            buf.resize(length, 0);
+        }
+        match core.read_at(request.offset, &mut buf[..length]) {
+            Ok(()) => replies.send(request.handle, NBD_OK, &buf[..length]),
+            Err(err) => {
+                warn!(
+                    "nbd: read [{:#x}, +{}) failed: {}",
+                    request.offset,
+                    request.len,
+                    err.report()
+                );
+                replies.send(request.handle, NBD_EIO, &[]);
+            }
+        }
+    });
+}
+
+/// The replies of one connection, shared by its worker and the reads it dispatched.
+struct Replies {
+    /// The user end of the connection.
+    socket: Arc<UnixStream>,
+
+    /// The lock that serializes reply frames; the kernel matches out-of-order replies by
+    /// handle.
+    writer: Mutex<()>,
+}
+
+/// Implements the connection replies.
+impl Replies {
+    /// Creates the replies of a connection.
+    fn new(socket: Arc<UnixStream>) -> Self {
+        Self {
+            socket,
+            writer: Mutex::new(()),
+        }
+    }
+
+    /// Writes the reply of a request.
+    ///
+    /// A reply that cannot be written closes the connection: the kernel then retries the
+    /// requests it had sent on it.
+    fn send(&self, handle: u64, code: u32, payload: &[u8]) {
+        let _frame = self.writer.lock().unwrap();
+        let written = writev_all(
+            &mut self.socket.as_ref(),
+            &encode_reply(code, handle),
+            payload,
+        );
+        if let Err(err) = &written {
+            // Shut the connection down before the lock lets another reply follow the
+            // partial frame, which desyncs the stream. This also stops the worker's intake.
+            debug!("nbd: failed to write a reply: {}", err);
+            if let Err(err) = self.socket.shutdown(std::net::Shutdown::Both) {
+                debug!("nbd: failed to close a connection after its reply: {}", err);
+            }
+        }
     }
 }
 
@@ -496,12 +568,16 @@ mod tests {
     use crate::nbd::proto::{NBD_CMD_DISC, NBD_CMD_READ, NBD_REPLY_HEADER_SIZE, NBD_REQUEST_MAGIC};
     use std::time::Instant;
 
-    fn test_session(root: &std::path::Path) -> NbdSession {
+    fn test_pool() -> Arc<FetchPool> {
+        Arc::new(FetchPool::new(4).unwrap())
+    }
+
+    fn test_session(root: &std::path::Path, pool: Arc<FetchPool>) -> NbdSession {
         let options = NbdOptions {
             connections: 2,
             timeout_secs: 15,
         };
-        NbdSession::new(empty_core(root), u32::MAX, options).unwrap()
+        NbdSession::new(empty_core(root), pool, u32::MAX, options).unwrap()
     }
 
     fn empty_core(root: &std::path::Path) -> Arc<NbdCore> {
@@ -567,6 +643,16 @@ mod tests {
         u64::from_be_bytes(reply[8..16].try_into().unwrap())
     }
 
+    fn request_pending(socket: &UnixStream) -> io::Result<bool> {
+        let mut fd = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: fd is initialized and borrows a live socket for this poll.
+        Ok(unsafe { libc::poll(&mut fd, 1, 0) } > 0)
+    }
+
     fn wait_for_live(session: &NbdSession, live: usize) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while session.service.live.load(Ordering::SeqCst) != live {
@@ -576,9 +662,43 @@ mod tests {
     }
 
     #[test]
+    fn later_requests_are_read_before_earlier_reads_are_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(FetchPool::new(1).unwrap());
+        let (release, busy) = std::sync::mpsc::channel::<()>();
+        pool.execute(move || busy.recv().unwrap());
+        let mut session = test_session(dir.path(), pool);
+        let (kernel, user) = session.start(1).unwrap().remove(0);
+        let mut kernel = UnixStream::from(kernel);
+        kernel.write_all(&request(NBD_CMD_READ, 7)).unwrap();
+        kernel.write_all(&request(NBD_CMD_READ, 8)).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while request_pending(&user).unwrap() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        kernel.set_nonblocking(true).unwrap();
+        assert_eq!(
+            kernel.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        kernel.set_nonblocking(false).unwrap();
+        kernel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        release.send(()).unwrap();
+        let mut handles = [read_reply(&mut kernel), read_reply(&mut kernel)];
+        handles.sort();
+        assert_eq!(handles, [7, 8]);
+        session.cancel().unwrap();
+    }
+
+    #[test]
     fn invalid_requests_get_an_errno_and_keep_the_stream_in_sync() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = test_session(dir.path());
+        let mut session = test_session(dir.path(), test_pool());
         let bootstrap = std::fs::read(dir.path().join("bootstrap")).unwrap();
         let device_size = session.core.device_size();
         let mut kernel = kernel_ends(&mut session, 1).remove(0);
@@ -609,7 +729,7 @@ mod tests {
     #[test]
     fn malformed_requests_close_the_connection_without_a_reply() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = test_session(dir.path());
+        let mut session = test_session(dir.path(), test_pool());
         let mut bad_magic = request(NBD_CMD_READ, 7);
         bad_magic[0] ^= 1;
         let test_cases = vec![
@@ -632,7 +752,7 @@ mod tests {
 
         for pending_reply in test_cases {
             let dir = tempfile::tempdir().unwrap();
-            let mut session = test_session(dir.path());
+            let mut session = test_session(dir.path(), test_pool());
             let mut kernels = kernel_ends(&mut session, 2);
             let mut healthy = kernels.remove(1);
             let mut closed = kernels.remove(0);
@@ -652,7 +772,7 @@ mod tests {
     #[test]
     fn kernel_disconnect_is_distinct_from_connection_loss() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = test_session(dir.path());
+        let mut session = test_session(dir.path(), test_pool());
         let mut kernel = kernel_ends(&mut session, 1).remove(0);
         kernel.write_all(&request(NBD_CMD_DISC, 0)).unwrap();
         assert_eq!(kernel.read(&mut [0]).unwrap(), 0);
@@ -663,7 +783,7 @@ mod tests {
     #[test]
     fn protocol_failure_is_not_treated_as_connection_loss() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = test_session(dir.path());
+        let mut session = test_session(dir.path(), test_pool());
         let mut kernel = kernel_ends(&mut session, 1).remove(0);
         kernel.write_all(&[0; NBD_REQUEST_HEADER_SIZE]).unwrap();
         wait_for_live(&session, 0);

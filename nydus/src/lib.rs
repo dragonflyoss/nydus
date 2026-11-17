@@ -29,6 +29,8 @@ pub mod mount;
 #[cfg(feature = "nbd")]
 pub mod nbd;
 pub mod optimize;
+#[cfg(any(feature = "fanotify", feature = "nbd"))]
+pub mod pool;
 #[cfg(any(
     feature = "fanotify",
     feature = "fileio",

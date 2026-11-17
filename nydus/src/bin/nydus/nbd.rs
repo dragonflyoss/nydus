@@ -1,6 +1,7 @@
 use clap::Parser;
 use nydus::error::{Context, Result};
 use nydus::nbd::{service, NbdCore, NbdOptions};
+use nydus::pool::FetchPool;
 use nydus::signal;
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
@@ -11,9 +12,9 @@ use tracing::Level;
 
 use super::{default_log_dir, default_parallelism, NAME};
 
-/// Default worker-thread cap: connection-level parallelism saturates well
-/// before this, and every worker costs a kernel connection (one blk-mq
-/// hardware queue each). An explicit `--threads` is not capped.
+/// The default connection cap: connection-level parallelism saturates well
+/// before this, and every connection costs a blk-mq hardware queue and a
+/// request reader thread. An explicit `--threads` is not capped.
 const DEFAULT_MAX_THREADS: usize = 16;
 
 /// The subcommand of nbd.
@@ -43,9 +44,17 @@ pub struct NbdCommand {
     #[arg(
         long,
         env = "NYDUS_NBD_THREADS",
-        help = "Specify the number of worker threads servicing the NBD socket, each with its own socket pair so concurrent backend fetches overlap. Defaults to the available CPU count, capped at 16"
+        help = "Specify the number of kernel connections (blk-mq hardware queues), each with its own socket pair and request reader; reads run on the --fetch-concurrency pool. Defaults to the available CPU count, capped at 16"
     )]
     threads: Option<NonZeroUsize>,
+
+    #[arg(
+        long,
+        default_value_t = default_fetch_concurrency(),
+        env = "NYDUS_NBD_FETCH_CONCURRENCY",
+        help = "Specify the maximum number of reads served concurrently across all connections, so a slow backend fetch does not hold up later requests on the same connection. Defaults to max(ncpu, 64)"
+    )]
+    fetch_concurrency: NonZeroUsize,
 
     #[arg(
         long,
@@ -97,9 +106,14 @@ pub struct NbdCommand {
     console: bool,
 }
 
-/// Determine the default number of worker threads for the NBD socket.
+/// Returns the default number of kernel connections.
 fn default_nbd_threads() -> NonZeroUsize {
     NonZeroUsize::new(default_parallelism(1, DEFAULT_MAX_THREADS)).unwrap()
+}
+
+/// Returns the default maximum number of concurrent reads.
+fn default_fetch_concurrency() -> NonZeroUsize {
+    NonZeroUsize::new(default_parallelism(64, usize::MAX)).unwrap()
 }
 
 /// Implement the execute for NbdCommand.
@@ -141,6 +155,7 @@ impl NbdCommand {
                 connections: self.threads.unwrap_or_else(default_nbd_threads).get(),
                 timeout_secs: self.timeout.get(),
             },
+            Arc::new(FetchPool::new(self.fetch_concurrency.get())?),
             signals,
         )
     }

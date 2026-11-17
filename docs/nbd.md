@@ -157,10 +157,15 @@ retains the session configuration independently of the daemon.
 
 ## Service Lifecycle
 
-Each worker thread reads requests off the user end of its socket pair and
-replies serially; concurrency comes from running multiple workers. A worker
-keeps a reuse buffer that grows to the largest request seen, so the
-steady-state read path performs no allocation.
+Each connection has one worker thread that reads requests off the user end of
+its socket pair and dispatches reads to a fetch pool shared by all connections
+(`--fetch-concurrency` threads). A cold read waiting on the backend therefore
+does not hold up the requests queued behind it on the same connection, which
+matters when one CPU issues most I/O and the kernel maps it to one connection.
+Replies are written whole under a per-connection lock in completion order; the
+kernel matches them to requests by handle. Pool threads keep a reuse buffer
+that grows to the largest request seen. A reply that cannot be written closes
+its connection, and the kernel retries the requests it had sent on it.
 
 When `--mountpoint` is given, the daemon mounts the device as EROFS
 (`MS_RDONLY | MS_NODEV | MS_NOSUID`, no `device=` options) once the capacity
@@ -211,8 +216,13 @@ Options:
 - `--device` is the NBD device node to attach. A busy device is refused.
 - `--mountpoint` optionally mounts the device as EROFS and unmounts it on
   shutdown.
-- `--threads` sets the worker count; default is the available CPU count
-  capped at 16. Every worker is an independent kernel connection.
+- `--threads` sets the connection count; default is the available CPU count
+  capped at 16. Every connection is a kernel blk-mq hardware queue.
+- `--fetch-concurrency` bounds the reads served at once across all connections;
+  default max(ncpu, 64). Like the fanotify option, it sizes a thread pool. Each
+  pool thread keeps a buffer as large as the largest read it served, so a busy
+  daemon holds up to this many read buffers; lower it to bound the memory of
+  many devices on one host.
 - `--timeout` (seconds, default 60, nonzero) is handed to `NBD_ATTR_TIMEOUT`:
   how long the kernel waits for one reply before retiring that connection and
   retrying the request. Size it above the worst-case cold fetch of a
@@ -234,8 +244,8 @@ Options:
 - Requests must be 4096-aligned in offset and length; the advertised block
   size guarantees this for kernel-issued requests.
 - One daemon owns one `/dev/nbdX`; attaching to a busy device is refused.
-- Requests on one connection are served serially; parallelism scales with
-  `--threads`.
+- Concurrency is bounded by `--fetch-concurrency` and the kernel queue depth
+  (128 per connection), not by the connection count.
 - If the daemon dies without a clean shutdown, reads on the mount fail after
   the kernel's request timeout; the mount must then be unmounted manually
   (`umount -l` as a last resort). Use a netlink-capable `nbd-client -d /dev/nbdN`

@@ -1078,9 +1078,11 @@ Options:
 - `--mountpoint` optionally mounts the device as EROFS once the session is
   live and unmounts it on shutdown; when omitted, only the device is attached
   and the caller mounts it.
-- `--threads` sets the worker count (default: available CPU count, capped at
-  16). Each worker is an independent kernel NBD connection, so backend
-  fetches for concurrent reads overlap.
+- `--threads` sets the connection count (default: available CPU count, capped
+  at 16). Every connection is a kernel blk-mq hardware queue.
+- `--fetch-concurrency` bounds the reads served at once across all connections
+  (default: max(ncpu, 64)), so a slow backend fetch does not hold up later
+  requests on the same connection.
 - `--timeout` (seconds, default 60, nonzero) is how long the kernel waits for
   one reply before failing the request; size it above the worst-case cold
   fetch from the backend.
