@@ -48,7 +48,8 @@ func (NBD) Require(t testing.TB) {
 // Supports reports Cold and Warm: the flattened device needs a bootstrap.
 func (NBD) Supports(m mount.Mode) bool { return m != mount.Blob }
 
-// Traits reports that the daemon mounts EROFS itself but serves no apiserver.
+// Traits reports that the daemon mounts EROFS itself; the shared suites do not
+// use its optional apiserver.
 func (NBD) Traits() mount.Traits { return mount.Traits{API: false, OwnsMount: true} }
 
 func (NBD) Start(t testing.TB, req mount.Request) (string, *mount.Daemon, func()) {
@@ -81,9 +82,24 @@ func (NBD) Start(t testing.TB, req mount.Request) (string, *mount.Daemon, func()
 		// The daemon unmounts before it disconnects the device; the fallback
 		// only matters when it died without running its shutdown path.
 		d.Stop()
+		if !dev.free() && mount.IsMountpoint(mnt) {
+			discard(t, req, args, dev)
+		}
 		mount.Unmount(mnt)
 		dev.release(t)
 	}
+}
+
+// discard tears down a session its daemon left connected, as after a kill or
+// a busy unmount, by recovering it with a fresh daemon and stopping that.
+func discard(t testing.TB, req mount.Request, args []string, dev *device) {
+	t.Helper()
+	name := daemonName + "-discard"
+	d := mount.StartDaemon(t, req.Dir, name, env.Nydus(t), mount.DaemonArgs(args, req, name)...)
+	assert.Eventually(t, func() bool {
+		return !d.Alive() || strings.Contains(d.Log(), "nydus nbd service attached to "+dev.path)
+	}, mountTimeout, 100*time.Millisecond)
+	d.Stop()
 }
 
 // loadModule loads the nbd module unless its devices already exist.

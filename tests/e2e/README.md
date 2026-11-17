@@ -10,6 +10,8 @@ make e2e PKG=./conformance/...         # one suite
 make e2e PKG='./build/... ./export/...' E2E_RUN=TestMerge
 CI=1 make e2e-ga                       # every GA suite but dragonfly and compatibility
 make e2e-experimental                  # nbd, fanotify, ublk, uffd
+make e2e-fuse-continuity               # FUSE hot upgrade and rollback
+make e2e-nbd-continuity                # NBD hot upgrade and crash recovery
 ```
 
 The targets build `nydus` with `--profile ci` and point the tests at it
@@ -80,7 +82,7 @@ requests by itself; nothing is called from `ci.yml`.
   not an equivalent amount of exploration. FUSE runs its complete conformance suite in
   one job; Fileio keeps semantics/lifecycle, zstd data and other-layout data separate,
   retaining every case and mount mode. Backend faults run separately; API, registry and FUSE continuity
-  share the image-tools job. `make e2e-continuity` runs it locally;
+  share the image-tools job. `make e2e-fuse-continuity` runs it locally;
   `NYDUS_E2E_FUSE_PREDECESSOR=/absolute/path/to/nydus` selects a separate
   hot-upgrade-capable predecessor (not the older image-format baseline).
   The image-tools job checks that the real GA CLI includes all required

@@ -381,9 +381,11 @@ make e2e-dragonfly               # needs upstream Kind/Helm setup; see tests/e2e
 make e2e-experimental            # nbd, fanotify, ublk, uffd
 
 # FUSE hot upgrade, rollback, no-API operation and live-owner exclusion.
-make e2e-continuity
+make e2e-fuse-continuity
 # Optional separate, hot-upgrade-capable predecessor binary:
-NYDUS_E2E_FUSE_PREDECESSOR=/abs/path/to/nydus make e2e-continuity
+NYDUS_E2E_FUSE_PREDECESSOR=/abs/path/to/nydus make e2e-fuse-continuity
+# NBD hot upgrade and crash recovery (needs the nbd module).
+make e2e-nbd-continuity
 
 # Unified cold-start performance benchmark: FUSE / fileio / NBD / ublk /
 # fanotify (requires root and fio; unavailable modes are left out).

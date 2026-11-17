@@ -100,9 +100,16 @@ e2e-ga: PKG = ./conformance/... ./api/... ./continuity/... ./build/... ./tar/...
 e2e-ga: e2e
 .PHONY: e2e-ga
 
-e2e-continuity: PKG = ./continuity/...
-e2e-continuity: e2e
-.PHONY: e2e-continuity
+e2e-fuse-continuity: PKG = ./continuity/...
+e2e-fuse-continuity: e2e
+.PHONY: e2e-fuse-continuity
+
+e2e-nbd-continuity: E2E_FEATURES = cli,nbd
+e2e-nbd-continuity: PKG = ./experimental/nbd/...
+# Exported so that the sub-make of e2e picks the continuity cases out of the NBD package.
+e2e-nbd-continuity: export E2E_RUN = ^Test(HotUpgrade|HotUpgradeUnderLoad|Failover|RestartAfterBusyShutdown)$$
+e2e-nbd-continuity: e2e
+.PHONY: e2e-nbd-continuity
 
 e2e-dragonfly: PKG = ./dragonfly/...
 e2e-dragonfly: e2e
