@@ -325,12 +325,12 @@ nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountp
 | Document                             | Contents                                                                                                                                                   |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [docs/nydus.md](docs/nydus.md)       | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`                 |
-| [docs/upgrade.md](docs/upgrade.md) | FUSE hot upgrade: usage, startup selection, ownership, and the handoff protocol |
+| [docs/upgrade.md](docs/upgrade.md) | Hot upgrade and crash recovery shared by FUSE and NBD: usage, startup selection, ownership, and the handoff protocol |
 | [docs/uffd.md](docs/uffd.md)         | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem          |
 | [docs/ublk.md](docs/ublk.md)         | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths         |
 | [docs/erofs.md](docs/erofs.md)       | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                            |
 | [docs/fanotify.md](docs/fanotify.md) | Fanotify pre-content service: multi-device EROFS model, event ABI, event processing, response protocol, service lifecycle, and fail-open behavior on crash |
-| [docs/nbd.md](docs/nbd.md)           | NBD service: flattened block device, kernel socket protocol framing, ioctl session setup, request validation, and mount lifecycle                          |
+| [docs/nbd.md](docs/nbd.md)           | NBD service: flattened block device, netlink setup, automatic hot upgrade/failover, request validation, and mount lifecycle                                |
 
 ## Building from Source
 

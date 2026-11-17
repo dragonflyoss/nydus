@@ -824,7 +824,7 @@ Current implementation notes:
 	through the storage config. See [Blob prefetch](#blob-prefetch).
 - Optionally pass `--apiserver unix:///path/to/api.sock` for `/metrics`, `/trace`,
 	and direct hot upgrade over one Unix HTTP listener. Without it no HTTP socket
-	is created. See [Metrics](#metrics) and [FUSE continuity](upgrade.md).
+	is created. See [Metrics](#metrics) and [hot upgrade](upgrade.md).
 - The control plane constructs the launch command and supplies the session's
 	resources, without selecting a startup mode. Nydus first attempts direct hot
 	upgrade when an API address is configured, then validates lifetime ownership
@@ -874,10 +874,10 @@ The fuse command rejects mixed or partial image input combinations outside
 these forms. No startup-mode argument is needed. The API socket path must be
 absolute, outside the mountpoint, and contain neither `..` nor symlink
 components. All launches share
-[mount-scoped ownership state](upgrade.md#mount-scoped-ownership-state);
+[mount-scoped ownership state](upgrade.md#ownership-state);
 never delete or replace those lock files to force startup.
 
-See [FUSE hot upgrade](upgrade.md) for readiness, handoff, and
+See [hot upgrade](upgrade.md) for readiness, handoff, and
 [cleanup](upgrade.md#cleanup).
 
 `--cache-dir` is optional; without it (and without a cache directory from
@@ -1052,8 +1052,8 @@ into the local cache files on demand. The bootstrap keeps its device table, so
 mounting the device as EROFS without `device=` options enables the kernel's
 flatdev mode and every chunk resolves on the one device. This is the
 block-device counterpart to `nydus fanotify`: it works on kernels without
-`FAN_PRE_ACCESS` (Linux < 6.15) and needs only the `nbd` module and EROFS
-support.
+`FAN_PRE_ACCESS` (Linux < 6.15). It uses NBD netlink sessions with backend
+identity (Linux 5.14+) and EROFS flatdev support (Linux 6.4+).
 
 The NBD command is available only when Nydus is built with both the `cli` and
 `nbd` features.
@@ -1073,28 +1073,42 @@ Options:
 - `--bootstrap` is the EROFS bootstrap served at the head of the device.
 - `--config` selects the regular Nydus backend, cache, and prefetch
   configuration.
-- `--device` is the NBD device node to attach. A device already serving
-  another client (nonzero capacity) is refused.
+- `--device` identifies the NBD device to create or continue. Startup selects
+  a fresh attach, live handoff or crash recovery using the shared continuity
+  coordinator; unrelated or unrecorded sessions are refused.
 - `--mountpoint` optionally mounts the device as EROFS once the session is
   live and unmounts it on shutdown; when omitted, only the device is attached
   and the caller mounts it.
-- `--threads` sets the connection count (default: available CPU count, capped
-  at 16). Every connection is a kernel blk-mq hardware queue.
+- `--threads` sets the connection count, 1 to 16 (default: available CPU
+  count, capped at 16). Every connection is a kernel blk-mq hardware queue.
 - `--fetch-concurrency` bounds the reads served at once across all connections
   (default: max(ncpu, 64)), so a slow backend fetch does not hold up later
   requests on the same connection.
 - `--timeout` (seconds, default 60, nonzero) is how long the kernel waits for
-  one reply before failing the request; size it above the worst-case cold
+  one reply before retrying the request; size it above the worst-case cold
   fetch from the backend.
+- `--dead-conn-timeout` (seconds, default 60) bounds how long the kernel
+  queues I/O while all connections are dead, as until a crashed daemon is
+  restarted; afterwards I/O fails until a daemon reattaches. Connection count
+  and both timeouts are inherited from the original session's record during
+  upgrade/recovery.
+- `--apiserver` optionally exposes `/metrics`, `/trace` and HTTP upgrade at
+  `/nbd/handoff` on one Unix socket. Without it automatic crash recovery still
+  works, but live handoff is unavailable. No `--upgrade` or `--recover` flag
+  is needed, and NBD does not require an external Holder.
 - `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
 
-On shutdown, the first termination signal unmounts **before** tearing down
-the NBD session — the unmount's own reads still need a live device — and a
-second signal forces immediate exit. Requires root (NBD ioctls plus mount)
-and the `nbd` kernel module.
+On shutdown, the first termination signal unmounts **before** tearing down the
+NBD session — the unmount's own reads still need a live device. A mount that
+stays busy keeps the session, and the daemon exits with an error for a restart
+to recover it. A second signal forces immediate exit, leaving a session not yet
+disconnected to be recovered by a restart as after a crash, provided its
+filesystem is still mounted. A signal while the daemon is still starting only
+cancels the startup and never tears down a session it takes over or recovers.
+Requires root (NBD netlink plus mount) and the `nbd` kernel module.
 
-See [Nydus NBD Service](nbd.md) for the wire framing, ioctl session setup,
-request validation, and lifecycle details.
+See [Nydus NBD Service](nbd.md) for wire framing, netlink reconnect, ownership
+records, request validation and lifecycle details.
 
 ### Storage config
 
@@ -1122,9 +1136,10 @@ Fields:
 	holding the state shared between the nydus processes on the host, each
 	component in
 	a subdirectory of its own: `dragonfly` holds the Dragonfly seed peer
-	cache files (see [Registry backend](#registry-backend)) and `fuse` the
-	FUSE hot upgrade ownership state (see [upgrade](upgrade.md)), so an old
-	and a new daemon hand a mount over only under the same `runtime_dir`.
+	cache files (see [Registry backend](#registry-backend)), and `fuse` and
+	`nbd` the hot upgrade ownership state (see [upgrade](upgrade.md) and
+	[NBD](nbd.md#ownership-and-recovery-identity)), so an old and a new daemon
+	hand a mount or device over only under the same `runtime_dir`.
 - `backend.type` selects the blob backend, either `local` or `registry`.
 	- `local`: `config.dir` is the directory holding nydus blob files
 		(equivalent to `--blob-dir`).
@@ -1337,14 +1352,15 @@ Fields under `backend.config`:
 
 ## Metrics
 
-When `nydus fuse`, `nydus fileio`, or `nydus ublk` is started with
+When `nydus fuse`, `nydus fileio`, `nydus ublk`, or `nydus nbd` is started with
 `--apiserver unix:///path/to/api.sock`, a small HTTP server is bound to that
 Unix socket and serves the Prometheus text exposition at `GET /metrics` and
-the recorded chunk access order at `GET /trace`. For `nydus fuse` the same
-listener also serves the [control upgrade](upgrade.md#optional-unified-api-endpoint)
-at `GET /fuse/handoff` and the socket is `0600`, so monitoring may need the
-daemon's user; metrics may briefly reconnect during hot upgrade. Any other path
-returns `404`. Each service owns one image and serves that image's `Metrics`, so the
+the recorded chunk access order at `GET /trace`. For `nydus fuse` and
+`nydus nbd` the same listener also serves the
+[control upgrade](upgrade.md#optional-unified-api-endpoint), at
+`GET /fuse/handoff` and `GET /nbd/handoff` respectively. Their socket is `0600`,
+so monitoring may need the daemon's user, and metrics may briefly reconnect
+during hot upgrade. Any other path returns `404`. Each service owns one image and serves that image's `Metrics`, so the
 endpoint reports only that image. The server is torn down and the socket
 unlinked when the service exits. Scrape it with, e.g.:
 

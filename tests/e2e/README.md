@@ -36,7 +36,7 @@ and run through `sudo -E`.
 | `soak/`                     | Long parallel reads and mount cycles leak no fd, thread, mount or process.                                                              |
 | `dragonfly/`                | Reads through Dragonfly P2P, and fallback to the origin when it fails.                                                                  |
 | `registry/`                 | Origin reads, Basic/Bearer auth, redirects, HTTP retries/proxies, TLS trust and prefetch retries. |
-| `experimental/<transport>/` | The nbd, fanotify and ublk adapters and their transport specifics; the uffd page-fault protocol.                                        |
+| `experimental/<transport>/` | The nbd, fanotify and ublk adapters and their transport specifics; NBD hot upgrade and crash recovery; the uffd page-fault protocol. |
 | `bench/`                    | Go benchmarks (`BenchmarkMount/<mode>`); they run only with `-bench`, as `make benchmark` does.                                                                    |
 
 ### Case boundaries and inventory
