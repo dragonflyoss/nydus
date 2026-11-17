@@ -2,6 +2,8 @@
 
 use std::future::Future;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{self, BoxStream};
@@ -22,8 +24,9 @@ pub(crate) struct Response {
     /// The body, streaming in the chunks it arrives in.
     pub(crate) body: Body,
 
-    /// Whether the transport can still fall back for the body.
-    pub(crate) fallback: bool,
+    /// Whether the transport can still fall back for the body, cleared once
+    /// the body has resumed.
+    pub(crate) fallback: Arc<AtomicBool>,
 }
 
 /// The body of a response, the chunks it arrives in.
@@ -96,13 +99,14 @@ impl Response {
     {
         let remaining = self.content_range()?.range;
         let body = stream::try_unfold(
-            (self.body, remaining, Some(resume)),
-            |(mut body, remaining, mut resume)| async move {
+            (self.body, remaining, Some(resume), self.fallback.clone()),
+            |(mut body, remaining, mut resume, fallback)| async move {
                 loop {
                     let err = match body.try_next().await {
                         Ok(Some(chunk)) => {
                             let start = remaining.start().saturating_add(chunk.len() as u64);
-                            return Ok(Some((chunk, (body, start..=*remaining.end(), resume))));
+                            let remaining = start..=*remaining.end();
+                            return Ok(Some((chunk, (body, remaining, resume, fallback))));
                         }
                         Ok(None) if remaining.is_empty() => return Ok(None),
                         Ok(None) => io::Error::new(
@@ -119,7 +123,9 @@ impl Response {
                     let Some(resume) = resume.take().filter(|_| !remaining.is_empty()) else {
                         return Err(err);
                     };
+
                     body = resume(err, Range::Bounded(remaining.clone())).await?.body;
+                    fallback.store(false, Ordering::Relaxed);
                 }
             },
         )
@@ -208,7 +214,7 @@ mod tests {
     use super::*;
     use futures::stream::{self, StreamExt};
     use std::future;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     #[tokio::test]
     async fn resumable_resumes_the_body_once_while_bytes_are_left() {
@@ -258,7 +264,7 @@ mod tests {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers,
                     body: stream::iter(chunks).map_ok(Bytes::from_static).boxed(),
-                    fallback: false,
+                    fallback: Arc::default(),
                 }
             };
             let resumed_range = Arc::new(Mutex::new(None));
@@ -271,6 +277,8 @@ mod tests {
                     }
                 })
                 .unwrap();
+            let fallback = response.fallback.clone();
+            fallback.store(true, Ordering::Relaxed);
 
             let result = response
                 .body
@@ -282,6 +290,7 @@ mod tests {
 
             expect(result);
             assert_eq!(*resumed_range.lock().unwrap(), expected_range);
+            assert_eq!(fallback.load(Ordering::Relaxed), expected_range.is_none());
         }
     }
 
@@ -300,7 +309,7 @@ mod tests {
                 status,
                 headers,
                 body: stream::iter([Ok(Bytes::from_static(b"abcd"))]).boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
@@ -327,7 +336,7 @@ mod tests {
                 status: StatusCode::PARTIAL_CONTENT,
                 headers,
                 body: stream::iter([Ok(Bytes::from_static(b"abcd"))]).boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
@@ -359,7 +368,7 @@ mod tests {
                 status,
                 headers: HeaderMap::new(),
                 body: stream::empty().boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             };
             assert_eq!(response.is_transient(), expected);
         }
@@ -386,7 +395,7 @@ mod tests {
                 status,
                 headers: HeaderMap::new(),
                 body: stream::empty().boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             };
             assert_eq!(response.is_redirect_expired(), expected);
         }
@@ -420,7 +429,7 @@ mod tests {
                         .map(|chunk| Ok(Bytes::from_static(chunk))),
                 )
                 .boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             };
             assert_fn(response.bytes(4).await);
         }
@@ -460,7 +469,7 @@ mod tests {
                         .map(|chunk| chunk.map(Bytes::from_static)),
                 )
                 .boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             };
 
             let mut bytes = Vec::new();
@@ -482,7 +491,7 @@ mod tests {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
             body: stream::iter([Ok(Bytes::from_static(b"no such blob"))]).boxed(),
-            fallback: false,
+            fallback: Arc::default(),
         };
         assert_eq!(
             response.into_io_error().await.to_string(),

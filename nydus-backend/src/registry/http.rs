@@ -2,6 +2,7 @@
 
 use std::io;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -111,7 +112,7 @@ impl Http {
                 status: response.status(),
                 headers: response.headers().clone(),
                 body: response.bytes_stream().map_err(io::Error::other).boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             })
             .map_err(io::Error::other)
     }

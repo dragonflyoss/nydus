@@ -1282,8 +1282,8 @@ Fields under `backend.config`:
 	to the origin registry through `http`. Only available when the
 	binary is built with the `dragonfly` feature; a build without it rejects
 	the block when the config is loaded. Omit to talk to the origin directly.
-	Every read of a daemon with this block is counted under the `source`
-	`dragonfly`, the ones that fell back to the origin included (see
+	A read of a daemon with this block is counted under the `source`
+	`dragonfly`, or `dragonfly_fallback` once it fell back to the origin (see
 	[Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
@@ -1415,7 +1415,7 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 | Label | Meaning | Values |
 | --- | --- | --- |
 | `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `redirect` |
-| `source` | what the backend reads its bytes through | `local`, `http`, `dragonfly` |
+| `source` | what the backend reads its bytes through | `local`, `http`, `dragonfly`, `dragonfly_fallback` |
 | `reason` | why the cache write failed | `decode`, `checksum`, `io`, `unknown_source` |
 | `status` | whether the image bytes are in the local cache | `cached`, `uncached` |
 | `operation` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
@@ -1423,10 +1423,11 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 `source` follows the backend configuration: `local` for the local directory
 backend, `http` for the registry backend reading the origin, directly or
 through `http.proxy`, and `dragonfly` for the registry backend with
-`dragonfly` configured. A Dragonfly daemon counts every read under
-`dragonfly`, whether the seed peers served it or it fell back to the origin
-under `dragonfly.fallback_rate_limit`; each fallback is in the logs as
-`dragonfly request failed, falling back to the origin`.
+`dragonfly` configured. A Dragonfly daemon counts a read the seed peers
+served under `dragonfly`, and an on-demand read the origin answered or
+finished, under `dragonfly.fallback_rate_limit`, under `dragonfly_fallback`.
+A read that fails before any answer stays under `dragonfly`. Each fallback
+is also in the logs as `dragonfly request failed, falling back to the origin`.
 
 Backend (`nydus_backend_*`):
 

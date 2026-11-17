@@ -6,6 +6,8 @@ use std::fs::DirBuilder;
 use std::io;
 use std::ops::RangeInclusive;
 use std::os::unix::fs::DirBuilderExt;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -144,7 +146,7 @@ impl Dragonfly {
                         .boxed(),
                     None => stream::empty().boxed(),
                 },
-                fallback: false,
+                fallback: Arc::default(),
             }),
             Err(Error::ProxyError(ProxyError {
                 status_code: Some(status),
@@ -172,7 +174,7 @@ impl Dragonfly {
                     })
                     .collect(),
                 body: stream::iter([Ok(Bytes::from(message.unwrap_or_default()))]).boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -237,7 +239,7 @@ impl Transport for Dragonfly {
             Ok(response) if response.is_transient() => response.into_io_error().await,
             Ok(response) => {
                 return Ok(Response {
-                    fallback: true,
+                    fallback: Arc::new(AtomicBool::new(true)),
                     ..response
                 })
             }

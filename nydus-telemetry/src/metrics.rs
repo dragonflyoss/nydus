@@ -421,7 +421,6 @@ impl CacheMetrics {
     /// [`collect_write_finished_metrics`]: Self::collect_write_finished_metrics
     pub fn collect_read_metrics(&self, length: u64) {
         self.read_count.with_label_values(&[]).inc();
-
         self.read_bytes.with_label_values(&[]).inc_by(length);
     }
 
@@ -509,7 +508,6 @@ impl FsMetrics {
     /// Collects the filesystem operation finished metrics.
     pub fn collect_op_finished_metrics(&self, op: FsOp, cost: Duration) {
         self.op_count.with_label_values(&[&op.to_string()]).inc();
-
         self.op_duration
             .with_label_values(&[&op.to_string()])
             .observe(cost.as_millis() as f64);
@@ -518,7 +516,6 @@ impl FsMetrics {
     /// Collects the filesystem operation failure metrics.
     pub fn collect_op_failure_metrics(&self, op: FsOp) {
         self.op_count.with_label_values(&[&op.to_string()]).inc();
-
         self.op_failure_count
             .with_label_values(&[&op.to_string()])
             .inc();
@@ -535,8 +532,12 @@ pub enum Source {
     /// The registry backend without Dragonfly.
     Http,
 
-    /// The registry backend with Dragonfly, origin fallbacks included.
+    /// The registry backend with Dragonfly, served by the seed peers.
     Dragonfly,
+
+    /// The registry backend with Dragonfly, served by the origin a read fell
+    /// back to.
+    DragonflyFallback,
 }
 
 /// Implements the Display trait.
@@ -547,6 +548,7 @@ impl fmt::Display for Source {
             Source::Local => write!(f, "local"),
             Source::Http => write!(f, "http"),
             Source::Dragonfly => write!(f, "dragonfly"),
+            Source::DragonflyFallback => write!(f, "dragonfly_fallback"),
         }
     }
 }
@@ -700,6 +702,7 @@ mod tests {
             (ReadKind::Prefetch, Source::Http),
             (ReadKind::Ondemand, Source::Dragonfly),
             (ReadKind::Prefetch, Source::Dragonfly),
+            (ReadKind::Ondemand, Source::DragonflyFallback),
         ];
 
         for (kind, source) in test_cases {
@@ -750,6 +753,7 @@ mod tests {
             ("local", Source::Local.to_string()),
             ("http", Source::Http.to_string()),
             ("dragonfly", Source::Dragonfly.to_string()),
+            ("dragonfly_fallback", Source::DragonflyFallback.to_string()),
             ("decode", WriteFailureReason::Decode.to_string()),
             ("checksum", WriteFailureReason::Checksum.to_string()),
             ("io", WriteFailureReason::Io.to_string()),

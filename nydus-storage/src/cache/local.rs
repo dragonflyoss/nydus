@@ -752,7 +752,10 @@ impl LocalBlobCache {
                 index += 1;
                 continue;
             }
+            // Look for the end of the run from the next group: reading the bit
+            // of `start` again may find it published since, and the run empty.
             let start = index;
+            index += 1;
             while index < groups.end && !self.chunk_group_ready(index)? {
                 index += 1;
             }

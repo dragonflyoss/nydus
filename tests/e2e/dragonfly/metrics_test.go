@@ -52,7 +52,7 @@ func (d delta) expectFallback(t testing.TB) {
 		t.FailNow()
 	}
 
-	assert.NotZero(t, d.of(proxyReads))
+	assert.NotZero(t, d.of(fallbackReads))
 	assert.Zero(t, d.of(proxyErrors))
 }
 
@@ -60,4 +60,6 @@ var (
 	proxyReads  = metric{"nydus_backend_read_total", "dragonfly"}
 	proxyBytes  = metric{"nydus_backend_read_bytes_total", "dragonfly"}
 	proxyErrors = metric{"nydus_backend_read_failure_total", "dragonfly"}
+
+	fallbackReads = metric{"nydus_backend_read_total", "dragonfly_fallback"}
 )

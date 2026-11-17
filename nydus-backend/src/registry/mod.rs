@@ -13,6 +13,7 @@ mod rt;
 
 use std::future::Future;
 use std::io::{self, BufRead};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -260,7 +261,7 @@ impl Client {
         range: &Range,
     ) -> io::Result<Response> {
         let response = self.get_from(self.transport(), blob_id, range).await?;
-        if !response.fallback {
+        if !response.fallback.load(Ordering::Relaxed) {
             return Ok(response);
         }
 
@@ -488,6 +489,7 @@ impl Backend for Registry {
             })?;
 
         let source = self.client.source();
+        let fallback = response.fallback.clone();
         let metrics = self.metrics.clone();
         let (tx, reader) = StreamReader::channel();
         self.runtime.spawn(async move {
@@ -497,6 +499,12 @@ impl Backend for Registry {
                     tx.send(Ok(chunk)).map_err(|_| io::ErrorKind::BrokenPipe.into())
                 }) => result,
                 _ = tx.closed() => Err(io::ErrorKind::BrokenPipe.into()),
+            };
+
+            // A read the seed peers did not serve to its end went to the origin.
+            let source = match source {
+                Source::Dragonfly if !fallback.load(Ordering::Relaxed) => Source::DragonflyFallback,
+                source => source,
             };
 
             match result {
@@ -670,14 +678,14 @@ mod tests {
                         status: StatusCode::PARTIAL_CONTENT,
                         headers,
                         body: stream::iter([Ok(Bytes::from(body))]).boxed(),
-                        fallback: false,
+                        fallback: Arc::default(),
                     })
                 }
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
                     body: stream::empty().boxed(),
-                    fallback: false,
+                    fallback: Arc::default(),
                 }),
             }
         }
@@ -726,7 +734,7 @@ mod tests {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers,
                     body: stream::iter([Ok(Bytes::from_static(b"ok"))]).boxed(),
-                    fallback: false,
+                    fallback: Arc::default(),
                 });
             }
             self.challenges.fetch_add(1, Ordering::SeqCst);
@@ -739,7 +747,7 @@ mod tests {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
                 body: stream::empty().boxed(),
-                fallback: false,
+                fallback: Arc::default(),
             })
         }
     }
@@ -1238,6 +1246,82 @@ mod tests {
 
     #[cfg(feature = "dragonfly")]
     #[test]
+    fn ondemand_read_is_counted_under_the_source_that_served_it() {
+        let test_cases: Vec<(&'static [&'static str], &str)> = vec![
+            (&["206 Partial Content"], "dragonfly"),
+            (&["503 Service Unavailable"], "dragonfly_fallback"),
+            (&["206 Truncated"], "dragonfly_fallback"),
+        ];
+
+        for (seed_peer_statuses, source) in test_cases {
+            let runtime_dir = tempdir().unwrap();
+            let seed_peer = OriginStub::serve(seed_peer_statuses, b"abcd".to_vec());
+            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let cache_dir = runtime_dir.path().join("dragonfly");
+            fs::create_dir(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("e87f700bacfeed52.v1.json"),
+                serde_json::json!({
+                    "scheduler_endpoint": "http://127.0.0.1:1/",
+                    "next_refresh_at": humantime_serde::re::humantime::format_rfc3339(
+                        std::time::SystemTime::now() + Duration::from_secs(60)
+                    )
+                    .to_string(),
+                    "seed_peers": [{
+                        "id": "seed-peer-0",
+                        "name": "seed-peer-0",
+                        "hostname": "seed-peer-0",
+                        "ip": "127.0.0.1",
+                        "port": 1,
+                        "proxy_port": seed_peer.addr.port(),
+                        "healthy": true,
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n      max_retries: 0\n",
+                runtime_dir.path().display(),
+                origin.addr
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let reads = || -> f64 {
+                registry
+                    .metrics
+                    .registry()
+                    .gather()
+                    .iter()
+                    .filter(|family| family.get_name() == "nydus_backend_read_total")
+                    .flat_map(|family| family.get_metric())
+                    .filter(|metric| {
+                        metric.get_label().iter().any(|label| {
+                            label.get_name() == "source" && label.get_value() == source
+                        })
+                    })
+                    .map(|metric| metric.get_counter().get_value())
+                    .sum()
+            };
+
+            let mut data = Vec::new();
+            registry
+                .get(&TEST_BLOB_ID, 0, 4)
+                .unwrap()
+                .read_to_end(&mut data)
+                .unwrap();
+            let now = Instant::now();
+            while reads() < 1.0 && now.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            assert_eq!(data, b"abcd");
+            assert_eq!(reads(), 1.0);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
     fn seed_peer_body_that_breaks_off_is_resumed_through_the_seed_peers_then_the_origin() {
         let test_cases: Vec<(
             ReadKind,
@@ -1557,7 +1641,7 @@ mod tests {
 
     #[cfg(feature = "dragonfly")]
     #[test]
-    fn fallback_reads_are_counted_under_the_dragonfly_source() {
+    fn ondemand_read_without_a_seed_peer_is_counted_under_the_dragonfly_fallback_source() {
         let runtime_dir = tempdir().unwrap();
         let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
         let config: Config = serde_yaml::from_str(&format!(
@@ -1594,7 +1678,7 @@ mod tests {
 
         assert_eq!(&buf, b"abcd");
         assert_eq!(origin.hits(), 1);
-        assert_eq!(sources(), ["dragonfly"]);
+        assert_eq!(sources(), ["dragonfly_fallback"]);
     }
 
     #[cfg(feature = "dragonfly")]
