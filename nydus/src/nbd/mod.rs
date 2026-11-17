@@ -17,9 +17,10 @@
 
 pub mod core;
 pub mod mount;
+mod netlink;
 pub mod proto;
 pub mod service;
 
 pub use core::NbdCore;
 pub use mount::mount_nbd;
-pub use service::NbdService;
+pub use service::NbdOptions;

@@ -1,21 +1,15 @@
 use clap::Parser;
-use nydus::error::{Context, Error, Result};
-use nydus::mount::{umount2, unmount};
-use nydus::nbd::{mount_nbd, NbdCore, NbdService};
+use nydus::error::{Context, Result};
+use nydus::nbd::{service, NbdCore, NbdOptions};
 use nydus::signal;
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn, Level};
+use tracing::Level;
 
-use super::*;
-
-/// How long to wait for the kernel to commit the NBD device geometry after
-/// `NBD_DO_IT` starts before giving up on the mount; the commit normally
-/// lands within microseconds.
-const CAPACITY_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+use super::{default_log_dir, default_parallelism, NAME};
 
 /// Default worker-thread cap: connection-level parallelism saturates well
 /// before this, and every worker costs a kernel connection (one blk-mq
@@ -57,7 +51,7 @@ pub struct NbdCommand {
         long,
         default_value_t = NonZeroU64::new(60).unwrap(),
         env = "NYDUS_NBD_TIMEOUT",
-        help = "Specify the seconds the kernel NBD driver waits for one reply before failing the request and tearing the session down. Must exceed the worst-case cold fetch of a single read from the backend (registry latency included). Zero is rejected: the kernel would silently keep its own default"
+        help = "Specify the seconds the kernel NBD driver waits for one reply before retrying the request. Must exceed the worst-case cold fetch of a single read from the backend (registry latency included). Zero is rejected: the kernel would silently keep its own default"
     )]
     timeout: NonZeroU64,
 
@@ -139,115 +133,15 @@ impl NbdCommand {
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         let core =
             Arc::new(NbdCore::new(&self.bootstrap, config).context("failed to build nbd core")?);
-        let service = Arc::new(NbdService::new(
-            core.clone(),
+        service::serve(
+            core,
             &self.device,
-            self.timeout.get(),
-        )?);
-        let threads = self.threads.unwrap_or_else(default_nbd_threads);
-
-        info!(
-            "nydus nbd service attached to {} ({} blocks, {} bytes, {} worker thread(s))",
-            self.device,
-            core.block_count(),
-            core.device_size(),
-            threads
-        );
-
-        // Each worker owns its own socket pair; the kernel dispatches requests
-        // across them once `NBD_DO_IT` runs.
-        let mut worker_handles = Vec::new();
-        for i in 0..threads.get() {
-            let worker = service.create_worker()?;
-            worker_handles.push(
-                std::thread::Builder::new()
-                    .name(format!("nydus_nbd_worker_{i}"))
-                    .spawn(move || worker.run())
-                    .context("failed to spawn nbd worker thread")?,
-            );
-        }
-
-        let mountpoint = self.mountpoint.clone();
-        let device = self.device.clone();
-
-        // Signal thread: the first termination signal performs the ordered
-        // shutdown — unmount (if mounted) BEFORE `stop()` clears the socket,
-        // because the kernel must keep serving the umount's own reads and tearing
-        // the session down first would leave a live mount backed by a dead device.
-        // A second signal forces immediate exit.
-        let signal_service = service.clone();
-        let signal_mountpoint = mountpoint.clone();
-        let signal_thread = signal::spawn_signal_thread("nbd", signals, move || {
-            if let Some(mp) = &signal_mountpoint {
-                if let Err(err) = unmount(mp, || {}) {
-                    error!("{}", err.report());
-                }
-            }
-            signal_service.stop();
-        })?;
-
-        let outcome = if let Some(mp) = mountpoint {
-            // `NBD_DO_IT` blocks its thread, so run it on a dedicated one and
-            // mount from here once the kernel has committed the device geometry
-            // (deferred into `NBD_DO_IT` since ~6.13, see `wait_for_capacity`).
-            let doit_service = service.clone();
-            let doit_handle = std::thread::Builder::new()
-                .name("nydus_nbd_loop".to_string())
-                .spawn(move || doit_service.run())
-                .context("failed to spawn nbd event loop thread")?;
-
-            let mounted = service
-                .wait_for_capacity(core.device_size(), CAPACITY_WAIT_TIMEOUT)
-                .context("nbd device did not reach the expected capacity")
-                .and_then(|()| mount_nbd(&device, &mp, "erofs"));
-
-            match mounted {
-                Ok(()) => {
-                    info!("mounted {device} at {}", mp.display());
-                    // Block until the session ends (clean disconnect or `stop()`
-                    // from the signal thread).
-                    let joined = doit_handle
-                        .join()
-                        .map_err(|_| Error::Runtime("nbd event loop thread panicked".to_string()));
-                    // The signal path already unmounted on a signal-driven
-                    // shutdown; if the session self-exited the mount is still up
-                    // over a dead device, so try a final best-effort umount.
-                    if let Err(err) = umount2(&mp) {
-                        debug!("post-join unmount of {}: {}", mp.display(), err.report());
-                    }
-                    joined
-                }
-                Err(err) => {
-                    // The session is live but nothing got mounted: stop it so the
-                    // event loop and the workers drain through the joins below.
-                    warn!(
-                        "failed to mount {device} at {}: {}",
-                        mp.display(),
-                        err.report()
-                    );
-                    service.stop();
-                    let _ = doit_handle.join();
-                    // Both `wait_for_capacity` and `mount_nbd` already attach
-                    // self-sufficient context — no extra layer needed.
-                    Err(err)
-                }
-            }
-        } else {
-            // Pure NBD: no mount to own. Block on `NBD_DO_IT` on this thread; the
-            // signal thread's `stop()` (clear-sock) unblocks it.
-            service.run();
-            Ok(())
-        };
-
-        // Workers see the inactive flag / closed socket and exit; join them so a
-        // stuck worker is surfaced rather than left dangling.
-        for handle in worker_handles {
-            if handle.join().is_err() {
-                warn!("nbd worker thread panicked during join");
-            }
-        }
-
-        signal_thread.shutdown()?;
-        outcome
+            self.mountpoint.as_deref(),
+            &NbdOptions {
+                connections: self.threads.unwrap_or_else(default_nbd_threads).get(),
+                timeout_secs: self.timeout.get(),
+            },
+            signals,
+        )
     }
 }

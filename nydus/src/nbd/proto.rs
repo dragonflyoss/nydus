@@ -9,7 +9,7 @@
 //! `event`/`response` modules.
 //!
 //! Keeping the framing here leaves [`super::service`] free to deal only with
-//! the ioctl handshake, the socket pair, and the control loop.
+//! the socket pairs, the worker loop and netlink session control.
 
 /// Request magic. A header whose first four bytes differ is rejected with
 /// [`ParseError::BadMagic`].
@@ -25,8 +25,8 @@ pub const NBD_REPLY_HEADER_SIZE: usize = 16;
 /// `NBD_CMD_READ` — the only command a read-only daemon serves with data.
 pub const NBD_CMD_READ: u32 = 0;
 /// `NBD_CMD_WRITE` — never legitimate here (the device is read-only); it
-/// carries a data payload, so the service drops the session rather than
-/// replying and desyncing on the unconsumed payload.
+/// carries a data payload, so the service closes the connection and stops
+/// the daemon rather than replying and desyncing on the unconsumed payload.
 pub const NBD_CMD_WRITE: u32 = 1;
 /// `NBD_CMD_DISC` — the kernel is tearing down the session; the loop exits.
 pub const NBD_CMD_DISC: u32 = 2;

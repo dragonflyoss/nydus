@@ -35,7 +35,7 @@ const (
 	concurrencyTimeout = 2 * time.Minute
 )
 
-var transportFailure = regexp.MustCompile(`nbd: (invalid request magic|read .* failed:|read length .* exceeds cap|unsupported request type)|fanotify: (immediate deny|fstat event fd failed|ready-range lookup failed|denying and skipping unusable event)|unknown event fd|InvalidRange|fanotify fetch (backend failure|worker panicked)`)
+var transportFailure = regexp.MustCompile(`nbd: (invalid read offset|read .* failed:|unsupported request type)|invalid NBD request|write request on read-only NBD device|fanotify: (immediate deny|fstat event fd failed|ready-range lookup failed|denying and skipping unusable event)|unknown event fd|InvalidRange|fanotify fetch (backend failure|worker panicked)`)
 
 // expectHealthy fails t when the daemon logged protocol errors, failed
 // reads or denied fanotify events.

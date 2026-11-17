@@ -4,7 +4,7 @@
 
 This document describes the current NBD service: how a flattened nydus image
 is exposed as a read-only block device through the Linux Network Block Device
-driver, the kernel socket protocol the daemon serves, the ioctl session setup,
+driver, the kernel socket protocol the daemon serves, the netlink session setup,
 and the mount lifecycle.
 
 See the [documentation index](../README.md#documentation) and
@@ -13,7 +13,7 @@ The NBD wire protocol is unchanged by chunk-table `.blob.meta` v1. This
 flattened EROFS layout requires flatdev support (Linux 6.4+).
 
 The service uses the classic NBD kernel transport: a Unix socket pair per
-connection, configured over ioctls on `/dev/nbdX`. There is no TCP listener
+connection, configured through the kernel's NBD generic-netlink family. There is no TCP listener
 and no NBD newstyle negotiation; the daemon is the only peer the kernel talks
 to.
 
@@ -141,28 +141,19 @@ are zero-filled, while source data is fetched before completion. The reply heade
 
 ## Device Setup and Session
 
-`NbdService` opens `/dev/nbdX` read-write and programs the session:
-
-1. `BLKGETSIZE64` — a nonzero capacity means another client is already
-   serving the device; the daemon refuses instead of hijacking the session.
-2. `NBD_CLEAR_SOCK` — clear any stale session state.
-3. `NBD_SET_BLOCK_SIZE` 4096, `NBD_SET_BLOCKS` (device size / 4096),
-   `NBD_SET_TIMEOUT` (`--timeout`), `NBD_SET_FLAGS`
-   (`HAS_FLAGS | READ_ONLY | CAN_MULTI_CONN`).
-4. One `NBD_SET_SOCK` per worker, each with its own `socketpair(2)`. The
-   kernel distributes requests across the connections (blk-mq, one hardware
-   queue per connection), so backend fetches for concurrent reads overlap.
-5. `NBD_DO_IT` on a dedicated thread — blocks for the whole session.
+`NbdSession` starts one worker per connection, each on its own socket pair,
+then resolves the `nbd` generic-netlink family and sends
+`NBD_CMD_CONNECT` with the device index, capacity, 4096-byte block size,
+request timeout, `HAS_FLAGS | READ_ONLY | CAN_MULTI_CONN`, and all socket
+descriptors. The kernel rejects an occupied device instead of clearing its
+existing session.
 
 The read-only flag makes the kernel reject writes at the block layer, so
 `NBD_CMD_WRITE` never arrives from a healthy kernel.
 
-Kernels since ~6.13 commit the queue geometry and device capacity inside
-`NBD_DO_IT` (older kernels did it at `NBD_SET_SOCK` time), so the device
-stays zero-sized until the event-loop thread has entered the kernel, and
-mounting before that fails with EINVAL. The daemon polls `BLKGETSIZE64`
-until the expected capacity appears (the same readiness check `nbd-client`
-uses) before mounting.
+CONNECT commits the device geometry before returning, so no blocking
+`NBD_DO_IT` thread or capacity polling is needed before mounting. The kernel
+retains the session configuration independently of the daemon.
 
 ## Service Lifecycle
 
@@ -183,13 +174,16 @@ Termination signals trigger the ordered shutdown:
    the socket first would leave a live mount backed by a dead device. `EBUSY`
    is retried for a bounded window (40 x 250 ms); "not mounted"
    (EINVAL/ENOENT) stops the retries immediately.
-2. `NBD_CLEAR_SOCK` unblocks `NBD_DO_IT`; the kernel shuts the session
-   sockets down, which unblocks every worker's header read; workers drain and
-   are joined.
+2. Issue `NBD_CMD_DISCONNECT`, then stop and join any remaining workers. The
+   kernel closes the connections and completes outstanding I/O without waiting
+   for a daemon acknowledgement.
 3. A second signal forces immediate exit.
 
-If the session ends on its own (client disconnect), the daemon performs a
-final best-effort unmount after `NBD_DO_IT` returns.
+A kernel `NBD_CMD_DISC` request also triggers normal unmount and cleanup.
+Losing one connection retires only its worker while other workers continue
+serving. If all workers exit or a worker reports a fatal failure, the daemon
+reports the failure and tears the session down; this standalone path does not
+yet support recovery of a retained session.
 
 ## Running the Service
 
@@ -219,20 +213,18 @@ Options:
   shutdown.
 - `--threads` sets the worker count; default is the available CPU count
   capped at 16. Every worker is an independent kernel connection.
-- `--timeout` (seconds, default 60, nonzero) is handed to `NBD_SET_TIMEOUT`:
-  how long the kernel waits for one reply before failing the request and
-  tearing the session down. Size it above the worst-case cold fetch of a
+- `--timeout` (seconds, default 60, nonzero) is handed to `NBD_ATTR_TIMEOUT`:
+  how long the kernel waits for one reply before retiring that connection and
+  retrying the request. Size it above the worst-case cold fetch of a
   single read from the backend, registry latency included.
 - `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
 
 ## Requirements
 
-- Root (`CAP_SYS_ADMIN`): NBD ioctls and `mount(2)`.
+- Root (`CAP_SYS_ADMIN`): NBD netlink configuration and `mount(2)`.
 - The `nbd` kernel module (`modprobe nbd`) and a free `/dev/nbdX`.
 - Kernel EROFS support for the mount path. No fanotify pre-content support is
   needed, so any distribution kernel with `nbd` and `erofs` works.
-- A 64-bit target: the hardcoded `BLKGETSIZE64` encoding assumes an 8-byte
-  `size_t`.
 
 ## Constraints
 
@@ -246,7 +238,8 @@ Options:
   `--threads`.
 - If the daemon dies without a clean shutdown, reads on the mount fail after
   the kernel's request timeout; the mount must then be unmounted manually
-  (`umount -l` as a last resort).
+  (`umount -l` as a last resort). Use a netlink-capable `nbd-client -d /dev/nbdN`
+  to disconnect the retained device before starting a fresh daemon.
 
 ## Verification
 
@@ -254,6 +247,6 @@ Options:
 (`tests/e2e/experimental/nbd`): the filesystem contract shared by every
 mount mode, plus demand-paging cache-growth bounds, concurrency and cache
 persistence across restarts, against an in-process registry. It requires
-root, the `nbd` module, and EROFS support. Protocol framing and ioctl
+root, the `nbd` module, and EROFS support. Protocol framing and netlink
 encodings are covered by unit tests (`cargo test -p nydus --features cli,nbd
 --lib nbd`).

@@ -52,11 +52,6 @@ impl NbdCore {
         self.image.size()
     }
 
-    /// Total block count (4 KiB units) reported to the NBD driver.
-    pub fn block_count(&self) -> u64 {
-        self.image.block_count()
-    }
-
     /// Borrow the underlying core.
     pub fn core(&self) -> &Arc<NydusCore> {
         self.image.core()
