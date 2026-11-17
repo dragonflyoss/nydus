@@ -8,6 +8,9 @@ use std::time::Duration;
 use nydus_error::{Context, Error, Result};
 use tracing::{debug, info};
 
+#[cfg(feature = "fuse")]
+pub(crate) mod table;
+
 /// Shutdown unmount retry window: EBUSY is expected while readers still hold
 /// files open, so keep trying for a bounded window (10 s) before giving up.
 const UNMOUNT_RETRY_ATTEMPTS: u32 = 40;
