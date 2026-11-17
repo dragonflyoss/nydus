@@ -1,10 +1,11 @@
 //! The answer a transport hands back.
 
+use std::future::Future;
 use std::io;
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{self, BoxStream};
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use reqwest::header::{HeaderMap, CONTENT_RANGE, LOCATION};
 use reqwest::StatusCode;
 
@@ -20,6 +21,9 @@ pub(crate) struct Response {
 
     /// The body, streaming in the chunks it arrives in.
     pub(crate) body: Body,
+
+    /// Whether the transport can still fall back for the body.
+    pub(crate) fallback: bool,
 }
 
 /// The body of a response, the chunks it arrives in.
@@ -76,6 +80,51 @@ impl Response {
                 return Ok(Some((chunk, (body, offset))));
             }
         })
+    }
+
+    /// Makes the body of a `206` resume once through `resume`, for the bytes
+    /// left when it breaks off.
+    ///
+    /// ```text
+    /// 206 bytes 0-14/15 ──▶ chunk ──▶ breaks off at byte 6
+    /// resume(err, bytes=6-14) ──▶ 206 bytes 6-14/15 ──▶ chunk ──▶ end
+    /// ```
+    pub(crate) fn resumable<F, Fut>(self, resume: F) -> io::Result<Self>
+    where
+        F: FnOnce(io::Error, Range) -> Fut + Send + 'static,
+        Fut: Future<Output = io::Result<Response>> + Send + 'static,
+    {
+        let remaining = self.content_range()?.range;
+        let body = stream::try_unfold(
+            (self.body, remaining, Some(resume)),
+            |(mut body, remaining, mut resume)| async move {
+                loop {
+                    let err = match body.try_next().await {
+                        Ok(Some(chunk)) => {
+                            let start = remaining.start().saturating_add(chunk.len() as u64);
+                            return Ok(Some((chunk, (body, start..=*remaining.end(), resume))));
+                        }
+                        Ok(None) if remaining.is_empty() => return Ok(None),
+                        Ok(None) => io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "response body ended without {}",
+                                Range::Bounded(remaining.clone())
+                            ),
+                        ),
+                        Err(err) => err,
+                    };
+
+                    // Resume the body once, while bytes are left.
+                    let Some(resume) = resume.take().filter(|_| !remaining.is_empty()) else {
+                        return Err(err);
+                    };
+                    body = resume(err, Range::Bounded(remaining.clone())).await?.body;
+                }
+            },
+        )
+        .boxed();
+        Ok(Self { body, ..self })
     }
 
     /// Reads exactly `length` bytes of the body.
@@ -160,6 +209,82 @@ mod tests {
     use super::*;
     use futures::stream::{self, StreamExt};
     use std::future;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn resumable_resumes_the_body_once_while_bytes_are_left() {
+        let test_cases: Vec<(
+            Vec<io::Result<&'static [u8]>>,
+            Vec<io::Result<&'static [u8]>>,
+            fn(io::Result<Vec<u8>>),
+            Option<Range>,
+        )> = vec![
+            (
+                vec![Ok(b"ab"), Ok(b"cd")],
+                vec![],
+                |result| assert_eq!(result.unwrap(), b"abcd"),
+                None,
+            ),
+            (
+                vec![Ok(b"ab"), Err(io::Error::other("reset"))],
+                vec![Ok(b"cd")],
+                |result| assert_eq!(result.unwrap(), b"abcd"),
+                Some(Range::Bounded(2..=3)),
+            ),
+            (
+                vec![Ok(b"abc")],
+                vec![Ok(b"d")],
+                |result| assert_eq!(result.unwrap(), b"abcd"),
+                Some(Range::Bounded(3..=3)),
+            ),
+            (
+                vec![Ok(b"ab"), Err(io::Error::other("reset"))],
+                vec![Ok(b"c"), Err(io::Error::other("reset again"))],
+                |result| assert_eq!(result.unwrap_err().to_string(), "reset again"),
+                Some(Range::Bounded(2..=3)),
+            ),
+            (
+                vec![Ok(b"abcd"), Err(io::Error::other("reset"))],
+                vec![],
+                |result| assert_eq!(result.unwrap_err().to_string(), "reset"),
+                None,
+            ),
+        ];
+
+        for (chunks, resumed_chunks, expect, expected_range) in test_cases {
+            let response = |chunks: Vec<io::Result<&'static [u8]>>| {
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_RANGE, "bytes 0-3/4".parse().unwrap());
+                Response {
+                    status: StatusCode::PARTIAL_CONTENT,
+                    headers,
+                    body: stream::iter(chunks).map_ok(Bytes::from_static).boxed(),
+                    fallback: false,
+                }
+            };
+            let resumed_range = Arc::new(Mutex::new(None));
+            let response = response(chunks)
+                .resumable({
+                    let resumed_range = resumed_range.clone();
+                    move |_, range| async move {
+                        *resumed_range.lock().unwrap() = Some(range);
+                        Ok(response(resumed_chunks))
+                    }
+                })
+                .unwrap();
+
+            let result = response
+                .body
+                .try_fold(Vec::new(), |mut bytes, chunk| async move {
+                    bytes.extend_from_slice(&chunk);
+                    Ok(bytes)
+                })
+                .await;
+
+            expect(result);
+            assert_eq!(*resumed_range.lock().unwrap(), expected_range);
+        }
+    }
 
     #[test]
     fn validate_range_accepts_only_a_206() {
@@ -176,6 +301,7 @@ mod tests {
                 status,
                 headers,
                 body: stream::iter([Ok(Bytes::from_static(b"abcd"))]).boxed(),
+                fallback: false,
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
@@ -202,6 +328,7 @@ mod tests {
                 status: StatusCode::PARTIAL_CONTENT,
                 headers,
                 body: stream::iter([Ok(Bytes::from_static(b"abcd"))]).boxed(),
+                fallback: false,
             };
             assert_eq!(
                 response.validate_range(&Range::Bounded(2..=5)).is_ok(),
@@ -233,6 +360,7 @@ mod tests {
                 status,
                 headers: HeaderMap::new(),
                 body: stream::empty().boxed(),
+                fallback: false,
             };
             #[cfg(feature = "dragonfly")]
             assert_eq!(response.needs_fallback(), expected);
@@ -268,6 +396,7 @@ mod tests {
                         .map(|chunk| Ok(Bytes::from_static(chunk))),
                 )
                 .boxed(),
+                fallback: false,
             };
             assert_fn(response.bytes(4).await);
         }
@@ -307,6 +436,7 @@ mod tests {
                         .map(|chunk| chunk.map(Bytes::from_static)),
                 )
                 .boxed(),
+                fallback: false,
             };
 
             let mut bytes = Vec::new();
@@ -328,6 +458,7 @@ mod tests {
             status: StatusCode::NOT_FOUND,
             headers: HeaderMap::new(),
             body: stream::iter([Ok(Bytes::from_static(b"no such blob"))]).boxed(),
+            fallback: false,
         };
         assert_eq!(
             response.into_io_error().await.to_string(),

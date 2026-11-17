@@ -43,7 +43,7 @@ impl Backend for RepackBackend<'_> {
         self.inner.metrics()
     }
 
-    fn read_blob_metadata(
+    fn get_blob_metadata(
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     ) -> std::io::Result<nydus_format::blob::BlobMetadata> {
@@ -63,16 +63,16 @@ impl Backend for RepackBackend<'_> {
                 Err(err) => return Err(err),
             }
         }
-        self.inner.read_blob_metadata(blob_id)
+        self.inner.get_blob_metadata(blob_id)
     }
 
-    fn read(
+    fn get(
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         offset: u64,
         len: usize,
     ) -> std::io::Result<Box<dyn BufRead + Send>> {
-        self.inner.read(blob_id, offset, len)
+        self.inner.get(blob_id, offset, len)
     }
 }
 
@@ -301,7 +301,7 @@ impl IncrementalWriter {
                 })?;
                 if source.is_none() {
                     let metadata = backend
-                        .read_blob_metadata(&infos[index].blob_id)
+                        .get_blob_metadata(&infos[index].blob_id)
                         .context("read compact source metadata")?;
                     if metadata.is_ondemand()
                         || (self.digester.is_some() && metadata.digester()? != self.digester)
@@ -609,7 +609,7 @@ fn copy_encoded_range(
     while pos < range.end {
         let len = (range.end - pos).min(scratch.len() as u64) as usize;
         backend
-            .read(id, pos, len)
+            .get(id, pos, len)
             .and_then(|mut reader| reader.read_exact(&mut scratch[..len]))
             .context("copy encoded compact groups")?;
         output.write_all(&scratch[..len])?;
@@ -638,12 +638,12 @@ mod tests {
             self.local.metrics()
         }
 
-        fn read_blob_metadata(&self, id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMetadata> {
+        fn get_blob_metadata(&self, id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMetadata> {
             self.metadata_reads.fetch_add(1, Ordering::Relaxed);
-            self.local.read_blob_metadata(id)
+            self.local.get_blob_metadata(id)
         }
 
-        fn read(
+        fn get(
             &self,
             id: &[u8; EROFS_BLOB_ID_SIZE],
             offset: u64,
@@ -653,7 +653,7 @@ mod tests {
             if self.reads.fetch_add(1, Ordering::Relaxed) >= self.fail_after {
                 return Err(io::Error::other("injected compact read failure"));
             }
-            self.local.read(id, offset, len)
+            self.local.get(id, offset, len)
         }
     }
 
@@ -676,7 +676,7 @@ mod tests {
             fail_after: usize::MAX,
             largest_read: AtomicUsize::new(0),
         };
-        let metadata = backend.local.read_blob_metadata(&id).unwrap();
+        let metadata = backend.local.get_blob_metadata(&id).unwrap();
         for (name, contents, expected_reads) in [
             ("missing", None, 1),
             ("cached", Some(true), 0),
@@ -697,7 +697,7 @@ mod tests {
             backend.metadata_reads.store(0, Ordering::Relaxed);
             let cached = RepackBackend::new(&backend, Some(&cache));
             assert_eq!(
-                cached.read_blob_metadata(&id).is_ok(),
+                cached.get_blob_metadata(&id).is_ok(),
                 contents != Some(false)
             );
             assert_eq!(
@@ -706,11 +706,11 @@ mod tests {
             );
         }
         let uncached = RepackBackend::new(&backend, None);
-        uncached.read_blob_metadata(&id).unwrap();
+        uncached.get_blob_metadata(&id).unwrap();
         assert_eq!(backend.metadata_reads.load(Ordering::Relaxed), 1);
         let mut bytes = [0; 16];
         uncached
-            .read(&id, 0, bytes.len())
+            .get(&id, 0, bytes.len())
             .unwrap()
             .read_exact(&mut bytes)
             .unwrap();

@@ -131,7 +131,7 @@ impl RemoteBlobCache {
         skip_verify_checksums: bool,
     ) -> io::Result<Self> {
         let blob_metadata = match kind {
-            ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
+            ReadKind::Ondemand => backend.get_blob_metadata(&blob_id)?,
             ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
         };
         Ok(Self {
@@ -211,7 +211,7 @@ impl BlobCache for RemoteBlobCache {
             )
         })?;
         let mut scratch = ChunkGroupBuffer::default();
-        let stream = self.backend.read(&self.blob_id, range.start, len)?;
+        let stream = self.backend.get(&self.blob_id, range.start, len)?;
         let mut reader = ChunkGroupReader::new(stream, range, &mut scratch);
 
         for group in &missed {
@@ -290,14 +290,14 @@ mod tests {
             self.inner.metrics()
         }
 
-        fn read_blob_metadata(
+        fn get_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
         ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id)
+            self.inner.get_blob_metadata(blob_id)
         }
 
-        fn read(
+        fn get(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
@@ -305,9 +305,7 @@ mod tests {
         ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             let mut buf = vec![0; len];
-            self.inner
-                .read(blob_id, offset, len)?
-                .read_exact(&mut buf)?;
+            self.inner.get(blob_id, offset, len)?.read_exact(&mut buf)?;
             if self.corrupt_next.swap(false, Ordering::SeqCst) {
                 buf[0] ^= 0xff;
             }

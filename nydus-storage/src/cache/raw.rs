@@ -50,7 +50,7 @@ impl BlobCache for RawDeviceBlobCache {
             return Ok(());
         }
         self.backend
-            .read(&self.blob_id, offset, dst.len())?
+            .get(&self.blob_id, offset, dst.len())?
             .read_exact(dst)
     }
 
@@ -125,7 +125,7 @@ mod tests {
             Arc::new(Metrics::new()),
         ));
         assert!(backend.is_raw_device(&blob_id).unwrap());
-        assert!(backend.read_blob_metadata(&blob_id).is_err());
+        assert!(backend.get_blob_metadata(&blob_id).is_err());
 
         let cache = RawDeviceBlobCache::new(blob_id, backend);
         let mut out = vec![0u8; 100];
@@ -179,20 +179,20 @@ mod tests {
             self.0.metrics()
         }
 
-        fn read_blob_metadata(
+        fn get_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
         ) -> io::Result<BlobMetadata> {
-            self.0.read_blob_metadata(blob_id)
+            self.0.get_blob_metadata(blob_id)
         }
 
-        fn read(
+        fn get(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             len: usize,
         ) -> io::Result<Box<dyn BufRead + Send>> {
-            self.0.read(blob_id, offset, len)
+            self.0.get(blob_id, offset, len)
         }
     }
 

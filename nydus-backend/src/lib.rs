@@ -89,18 +89,18 @@ pub trait Backend: Send + Sync {
     }
 
     /// Reads the blob's metadata for an on-demand read.
-    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
+    fn get_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
 
     /// Reads the blob's metadata for a prefetch read.
     fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
-        self.read_blob_metadata(blob_id)
+        self.get_blob_metadata(blob_id)
     }
 
     /// Reads `len` blob bytes from `offset` for an on-demand read, streaming.
-    fn read(
+    fn get(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
@@ -114,7 +114,7 @@ pub trait Backend: Send + Sync {
         offset: u64,
         len: usize,
     ) -> io::Result<Box<dyn BufRead + Send>> {
-        self.read(blob_id, offset, len)
+        self.get(blob_id, offset, len)
     }
 }
 

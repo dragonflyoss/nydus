@@ -802,15 +802,15 @@ impl Backend for CountingBackend {
         self.local.metrics()
     }
 
-    fn read_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
-        self.local.read_blob_metadata(blob_id)
+    fn get_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
+        self.local.get_blob_metadata(blob_id)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; 32]) -> io::Result<bool> {
         self.local.is_raw_device(blob_id)
     }
 
-    fn read(
+    fn get(
         &self,
         blob_id: &[u8; 32],
         offset: u64,
@@ -820,7 +820,7 @@ impl Backend for CountingBackend {
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
         }
-        self.local.read(blob_id, offset, len)
+        self.local.get(blob_id, offset, len)
     }
 }
 

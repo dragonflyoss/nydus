@@ -107,6 +107,7 @@ impl Http {
                 status: response.status(),
                 headers: response.headers().clone(),
                 body: response.bytes_stream().map_err(io::Error::other).boxed(),
+                fallback: false,
             })
             .map_err(io::Error::other)
     }

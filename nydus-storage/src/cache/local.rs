@@ -496,7 +496,7 @@ impl LocalBlobCache {
         let decoded_len = self.blob_metadata.max_bytes_per_chunk_group() as usize;
         let (encoded, decoded) = buffers.split(decoded_len)?;
         let stream = match kind {
-            ReadKind::Ondemand => self.backend.read(&self.blob_id, range.start, len)?,
+            ReadKind::Ondemand => self.backend.get(&self.blob_id, range.start, len)?,
             ReadKind::Prefetch => self.backend.prefetch(&self.blob_id, range.start, len)?,
         };
         Ok((ChunkGroupReader::new(stream, range, encoded), decoded))
@@ -1161,7 +1161,7 @@ fn load_or_fetch_blob_metadata(
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
         let blob_metadata = match kind {
-            ReadKind::Ondemand => backend.read_blob_metadata(&blob_id)?,
+            ReadKind::Ondemand => backend.get_blob_metadata(&blob_id)?,
             ReadKind::Prefetch => backend.prefetch_blob_metadata(&blob_id)?,
         };
         blob_metadata.save(tmp.path()).map_err(io::Error::other)?;
@@ -1934,21 +1934,21 @@ mod tests {
             self.inner.metrics()
         }
 
-        fn read_blob_metadata(
+        fn get_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
         ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id)
+            self.inner.get_blob_metadata(blob_id)
         }
 
-        fn read(
+        fn get(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             len: usize,
         ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read(blob_id, offset, len)
+            self.inner.get(blob_id, offset, len)
         }
     }
 

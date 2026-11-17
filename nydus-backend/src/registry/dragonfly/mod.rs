@@ -37,7 +37,7 @@ use self::seed_peer_resolver::SeedPeerResolver;
 ///
 /// ```text
 /// GET ──▶ wait for the client ──▶ seed peer ──▶ 2xx / 3xx / 4xx ──────▶ handed back as is
-///           │                      │            └─ on-demand body breaks off ─▶ SDK: the next seed peer
+///           │                      │            └─ on-demand body breaks off ─▶ SDK: the next seed peer ─▶ origin
 ///           │ no seed peer         │ 429 / 5xx / 408 / transport failure
 ///           │                      ├─ on-demand ─▶ next seed peer, max_retries times ─▶ origin
 ///           │                      └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more ─▶ error
@@ -143,6 +143,7 @@ impl Dragonfly {
                         .boxed(),
                     None => stream::empty().boxed(),
                 },
+                fallback: false,
             }),
             Err(Error::ProxyError(ProxyError {
                 status_code: Some(status),
@@ -170,6 +171,7 @@ impl Dragonfly {
                     })
                     .collect(),
                 body: stream::iter([Ok(Bytes::from(message.unwrap_or_default()))]).boxed(),
+                fallback: false,
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -197,10 +199,7 @@ impl Transport for Dragonfly {
         // Fall back to the origin while there is no seed peer.
         let client = match self.ondemand_client.ready().await {
             Ok(client) => client,
-            Err(err) => {
-                warn!("dragonfly request failed, falling back to the origin: {err}");
-                return self.fallback_http_client.get(url, headers).await;
-            }
+            Err(err) => return self.fallback(err)?.get(url, headers).await,
         };
 
         let now = Instant::now();
@@ -235,11 +234,15 @@ impl Transport for Dragonfly {
         // Serve a definitive answer, fall back to the origin on anything else.
         let err = match result {
             Ok(response) if response.needs_fallback() => response.into_io_error().await,
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                return Ok(Response {
+                    fallback: true,
+                    ..response
+                })
+            }
             Err(err) => err,
         };
-        warn!("dragonfly request failed, falling back to the origin: {err}");
-        self.fallback_http_client.get(url, headers).await
+        self.fallback(err)?.get(url, headers).await
     }
 
     /// Fetches `url` through the prefetch client at `Level3`, below normal
@@ -284,6 +287,12 @@ impl Transport for Dragonfly {
             tokio::time::sleep(delay).await;
             retried = true;
         }
+    }
+
+    /// Returns the origin client an on-demand read falls back to after `err`.
+    fn fallback(&self, err: io::Error) -> io::Result<&dyn Transport> {
+        warn!("dragonfly request failed, falling back to the origin: {err}");
+        Ok(&self.fallback_http_client)
     }
 }
 

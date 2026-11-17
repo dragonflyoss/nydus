@@ -138,7 +138,7 @@ pub struct FaultRule {
 
 /// Implements the fault rule.
 impl FaultRule {
-    /// Creates a rule for data reads ([`Backend::read`] and
+    /// Creates a rule for data reads ([`Backend::get`] and
     /// [`Backend::prefetch`]).
     pub fn read(fault: Fault) -> Self {
         Self::new(fault, Target::Read)
@@ -457,7 +457,7 @@ impl FaultBackend {
         let mut buf = vec![0; len];
         match &self.source {
             Source::Wrapped(inner) => match kind {
-                ReadKind::Ondemand => inner.read(blob_id, offset, len)?,
+                ReadKind::Ondemand => inner.get(blob_id, offset, len)?,
                 ReadKind::Prefetch => inner.prefetch(blob_id, offset, len)?,
             }
             .read_exact(&mut buf)?,
@@ -514,7 +514,7 @@ impl Backend for FaultBackend {
     }
 
     /// Reads the blob's metadata for an on-demand read, faults applied.
-    fn read_blob_metadata(&self, blob_id: &BlobId) -> io::Result<BlobMetadata> {
+    fn get_blob_metadata(&self, blob_id: &BlobId) -> io::Result<BlobMetadata> {
         if let Some(fault) = self.admit(Call {
             target: Target::Metadata,
             blob_id: *blob_id,
@@ -524,7 +524,7 @@ impl Backend for FaultBackend {
         }
 
         match &self.source {
-            Source::Wrapped(inner) => inner.read_blob_metadata(blob_id),
+            Source::Wrapped(inner) => inner.get_blob_metadata(blob_id),
             Source::Memory(blobs) => {
                 let blob = blobs.get(blob_id).ok_or_else(|| unknown_blob(blob_id))?;
                 BlobMetadata::from_bytes(blob.metadata.clone()).map_err(io::Error::other)
@@ -568,7 +568,7 @@ impl Backend for FaultBackend {
     }
 
     /// Reads `len` bytes from `offset` for an on-demand read, faults applied.
-    fn read(
+    fn get(
         &self,
         blob_id: &BlobId,
         offset: u64,
@@ -610,7 +610,7 @@ mod tests {
 
     fn read(backend: &FaultBackend, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         let mut buf = Vec::new();
-        backend.read(&BLOB_ID, offset, len)?.read_to_end(&mut buf)?;
+        backend.get(&BLOB_ID, offset, len)?.read_to_end(&mut buf)?;
         Ok(buf)
     }
 
@@ -626,13 +626,10 @@ mod tests {
     fn in_memory_serves_blobs_and_logs_every_call() {
         let backend = backend();
 
-        let blob_metadata = backend.read_blob_metadata(&BLOB_ID).unwrap();
+        let blob_metadata = backend.get_blob_metadata(&BLOB_ID).unwrap();
         let data = read(&backend, 100, 50).unwrap();
         let eof_err = read(&backend, 4000, 200).unwrap_err();
-        let unknown_err = backend
-            .read(&[0u8; SHA256_DIGEST_SIZE], 0, 1)
-            .err()
-            .unwrap();
+        let unknown_err = backend.get(&[0u8; SHA256_DIGEST_SIZE], 0, 1).err().unwrap();
 
         assert_eq!(blob_metadata.chunk_count(), 1);
         assert_eq!(data, blob_data(100, 50));
@@ -732,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn read_blob_metadata_suffers_only_lookup_faults() {
+    fn get_blob_metadata_suffers_only_lookup_faults() {
         let backend = backend();
         backend.inject(
             FaultRule::metadata(Fault::ErrorWith(Arc::new(|| {
@@ -743,8 +740,8 @@ mod tests {
         );
         backend.inject(FaultRule::metadata(Fault::ShortRead { len: 0 }));
 
-        let err = backend.read_blob_metadata(&BLOB_ID).unwrap_err();
-        let blob_metadata = backend.read_blob_metadata(&BLOB_ID);
+        let err = backend.get_blob_metadata(&BLOB_ID).unwrap_err();
+        let blob_metadata = backend.get_blob_metadata(&BLOB_ID);
 
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(blob_metadata.is_ok());

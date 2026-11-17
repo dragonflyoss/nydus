@@ -325,14 +325,14 @@ mod tests {
             self.inner.metrics()
         }
 
-        fn read_blob_metadata(
+        fn get_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
         ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id)
+            self.inner.get_blob_metadata(blob_id)
         }
 
-        fn read(
+        fn get(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
@@ -342,7 +342,7 @@ mod tests {
             if attempt < self.failures {
                 return Err((self.error)());
             }
-            self.inner.read(blob_id, offset, len)
+            self.inner.get(blob_id, offset, len)
         }
     }
 
@@ -447,21 +447,21 @@ mod tests {
             self.inner.metrics()
         }
 
-        fn read_blob_metadata(
+        fn get_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
         ) -> io::Result<BlobMetadata> {
-            self.inner.read_blob_metadata(blob_id)
+            self.inner.get_blob_metadata(blob_id)
         }
 
-        fn read(
+        fn get(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             len: usize,
         ) -> io::Result<Box<dyn BufRead + Send>> {
             self.reads.lock().unwrap().push(*blob_id);
-            self.inner.read(blob_id, offset, len)
+            self.inner.get(blob_id, offset, len)
         }
     }
 

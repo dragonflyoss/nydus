@@ -50,6 +50,11 @@ trait Transport: Send + Sync {
     /// Sends the `GET` of a prefetch read, once more after the retry interval
     /// on a `429`, `5xx` or `408`.
     async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
+
+    /// Returns the transport to fall back to after `err`, or `err` without one.
+    fn fallback(&self, err: io::Error) -> io::Result<&dyn Transport> {
+        Err(err)
+    }
 }
 
 /// The blob backend over an OCI registry, running the reads of [`Client`] on
@@ -82,7 +87,7 @@ pub(crate) struct Registry {
 /// `GET`s to a CDN:
 ///
 /// ```text
-/// the first read, read_range(blob_id, range)
+/// the first read, get(blob_id, range)
 ///   1. redirect cache ───────────────────────────────────────────▶ miss
 ///   2. GET blob URL, no token kept ────────────────────────────────▶ 401 WWW-Authenticate
 ///   3. fetch a token from the challenge's realm, keep it until it expires
@@ -99,6 +104,9 @@ pub(crate) struct Registry {
 ///
 /// a read once the token expired, or the registry refuses it
 ///   4. GET blob URL ──▶ 401 ──▶ the token is forgotten ────────────▶ step 2
+///
+/// a read through Dragonfly whose body breaks off, see [`Response::resumable`]
+///   the same steps from the origin, for the bytes left
 ///
 /// any other status ends the read as an error, a 2xx at any GET as the bytes
 /// ```
@@ -243,17 +251,37 @@ impl Client {
         request(headers).await
     }
 
-    /// Fetches the `range` of a blob for an on-demand read, through the cached
+    /// Fetches the `range` of a blob for an on-demand read, its body resumed
+    /// through the fallback of the transport when it breaks off.
+    async fn get(
+        self: &Arc<Self>,
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+        range: &Range,
+    ) -> io::Result<Response> {
+        let response = self.get_from(self.transport(), blob_id, range).await?;
+        if !response.fallback {
+            return Ok(response);
+        }
+
+        let client = self.clone();
+        let blob_id = *blob_id;
+        response.resumable(move |err, range| async move {
+            let transport = client.transport().fallback(err)?;
+            client.get_from(transport, &blob_id, &range).await
+        })
+    }
+
+    /// Fetches the `range` of a blob from `transport`, through the cached
     /// redirect when there is one.
-    async fn read_range(
+    async fn get_from(
         &self,
+        transport: &(impl Transport + ?Sized),
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         range: &Range,
     ) -> io::Result<Response> {
         let hex = hex::encode(blob_id);
         let mut headers = HeaderMap::new();
         headers.insert(RANGE, range.to_string().parse().map_err(io::Error::other)?);
-        let transport = self.transport();
         if let Some(redirect) = self.redirects.get(&hex) {
             let response = transport.get(&redirect, headers.clone()).await?;
             match response.status {
@@ -275,6 +303,7 @@ impl Client {
             response.validate_range(range)?;
             return Ok(response);
         }
+
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
         }
@@ -292,7 +321,7 @@ impl Client {
 
     /// Fetches the `range` of a blob for a prefetch read, through the cached
     /// redirect when there is one.
-    async fn prefetch_range(
+    async fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         range: &Range,
@@ -322,6 +351,7 @@ impl Client {
             response.validate_range(range)?;
             return Ok(response);
         }
+
         if !response.status.is_redirection() {
             return Err(response.into_io_error().await);
         }
@@ -336,82 +366,6 @@ impl Client {
         self.redirects.insert(&hex, location);
         Ok(redirected)
     }
-
-    /// Reads a blob's metadata for an on-demand read.
-    ///
-    /// ```text
-    /// GET bytes=-<footer size> ──▶ footer, Content-Range: bytes .../<blob size>
-    /// GET bytes=<blob meta range in the footer> ──▶ blob meta
-    /// ```
-    async fn read_blob_metadata(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-    ) -> io::Result<BlobMetadata> {
-        let response = self
-            .read_range(blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
-            .await?;
-        let footer_offset =
-            BlobFooter::calculate_offset_by_blob_size(response.content_range()?.complete_length)
-                .map_err(io::Error::other)?;
-        let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
-        let footer =
-            BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
-                .map_err(io::Error::other)?;
-        footer
-            .validate_layout(footer_offset)
-            .map_err(io::Error::other)?;
-
-        let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
-        })?;
-        let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
-        let blob_metadata_bytes = self
-            .read_range(
-                blob_id,
-                &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
-            )
-            .await?
-            .bytes(blob_metadata_size)
-            .await?;
-
-        BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
-    }
-
-    /// Reads a blob's metadata for a prefetch read, like
-    /// [`Client::read_blob_metadata`].
-    async fn prefetch_blob_metadata(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-    ) -> io::Result<BlobMetadata> {
-        let response = self
-            .prefetch_range(blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
-            .await?;
-        let footer_offset =
-            BlobFooter::calculate_offset_by_blob_size(response.content_range()?.complete_length)
-                .map_err(io::Error::other)?;
-        let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
-        let footer =
-            BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
-                .map_err(io::Error::other)?;
-        footer
-            .validate_layout(footer_offset)
-            .map_err(io::Error::other)?;
-
-        let blob_metadata_size = usize::try_from(footer.blob_metadata_size()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
-        })?;
-        let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
-        let blob_metadata_bytes = self
-            .prefetch_range(
-                blob_id,
-                &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
-            )
-            .await?
-            .bytes(blob_metadata_size)
-            .await?;
-
-        BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
-    }
 }
 
 /// Implements the blob backend over the registry.
@@ -422,26 +376,94 @@ impl Backend for Registry {
     }
 
     /// Reads the blob's metadata for an on-demand read.
-    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
+    ///
+    /// ```text
+    /// GET bytes=-<footer size> ──▶ footer, Content-Range: bytes .../<blob size>
+    /// GET bytes=<blob meta range in the footer> ──▶ blob meta
+    /// ```
+    fn get_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
-        self.runtime
-            .block_on_worker(async move { client.read_blob_metadata(&blob_id).await })
+        self.runtime.block_on_worker(async move {
+            let response = client
+                .get(&blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
+                .await?;
+            let footer_offset = BlobFooter::calculate_offset_by_blob_size(
+                response.content_range()?.complete_length,
+            )
+            .map_err(io::Error::other)?;
+
+            let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
+            let footer =
+                BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
+                    .map_err(io::Error::other)?;
+            footer
+                .validate_layout(footer_offset)
+                .map_err(io::Error::other)?;
+
+            let blob_metadata_size =
+                usize::try_from(footer.blob_metadata_size()).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
+                })?;
+            let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
+            let blob_metadata_bytes = client
+                .get(
+                    &blob_id,
+                    &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
+                )
+                .await?
+                .bytes(blob_metadata_size)
+                .await?;
+
+            BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
+        })
     }
 
-    /// Reads the blob's metadata for a prefetch read.
+    /// Reads the blob's metadata for a prefetch read, like
+    /// [`Registry::get_blob_metadata`].
     fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
-        self.runtime
-            .block_on_worker(async move { client.prefetch_blob_metadata(&blob_id).await })
+        self.runtime.block_on_worker(async move {
+            let response = client
+                .prefetch(&blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
+                .await?;
+            let footer_offset = BlobFooter::calculate_offset_by_blob_size(
+                response.content_range()?.complete_length,
+            )
+            .map_err(io::Error::other)?;
+
+            let footer_bytes = response.bytes(BlobFooter::SIZE).await?;
+            let footer =
+                BlobFooter::from_bytes(footer_bytes.as_ref().try_into().map_err(io::Error::other)?)
+                    .map_err(io::Error::other)?;
+            footer
+                .validate_layout(footer_offset)
+                .map_err(io::Error::other)?;
+
+            let blob_metadata_size =
+                usize::try_from(footer.blob_metadata_size()).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
+                })?;
+            let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
+            let blob_metadata_bytes = client
+                .prefetch(
+                    &blob_id,
+                    &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
+                )
+                .await?
+                .bytes(blob_metadata_size)
+                .await?;
+
+            BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
+        })
     }
 
     /// Reads `len` blob bytes from `offset` for an on-demand read, streaming.
-    fn read(
+    fn get(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
@@ -457,7 +479,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let response = self
             .runtime
-            .block_on_worker(async move { client.read_range(&blob_id, &range).await })
+            .block_on_worker(async move { client.get(&blob_id, &range).await })
             .inspect_err(|_| {
                 self.metrics
                     .backend
@@ -514,7 +536,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let response = self
             .runtime
-            .block_on_worker(async move { client.prefetch_range(&blob_id, &range).await })
+            .block_on_worker(async move { client.prefetch(&blob_id, &range).await })
             .inspect_err(|_| {
                 self.metrics
                     .backend
@@ -588,6 +610,10 @@ mod tests {
         async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
             (**self).prefetch(url, headers).await
         }
+
+        fn fallback(&self, err: io::Error) -> io::Result<&dyn Transport> {
+            (**self).fallback(err)
+        }
     }
 
     enum Scripted {
@@ -643,12 +669,14 @@ mod tests {
                         status: StatusCode::PARTIAL_CONTENT,
                         headers,
                         body: stream::iter([Ok(Bytes::from(body))]).boxed(),
+                        fallback: false,
                     })
                 }
                 Scripted::Status(status, headers) => Ok(Response {
                     status,
                     headers,
                     body: stream::empty().boxed(),
+                    fallback: false,
                 }),
             }
         }
@@ -697,6 +725,7 @@ mod tests {
                     status: StatusCode::PARTIAL_CONTENT,
                     headers,
                     body: stream::iter([Ok(Bytes::from_static(b"ok"))]).boxed(),
+                    fallback: false,
                 });
             }
             self.challenges.fetch_add(1, Ordering::SeqCst);
@@ -709,6 +738,7 @@ mod tests {
                 status: StatusCode::UNAUTHORIZED,
                 headers: challenge,
                 body: stream::empty().boxed(),
+                fallback: false,
             })
         }
     }
@@ -795,8 +825,18 @@ mod tests {
                 None => (String::new(), blob),
             };
 
+            let host = request
+                .lines()
+                .find_map(|line| line.strip_prefix("host: "))
+                .unwrap_or_default();
+            let header = match status {
+                "307 Temporary Redirect" => format!("Location: http://{host}/redirected\r\n"),
+                "401 Unauthorized" => "WWW-Authenticate: Basic realm=\"registry\"\r\n".to_string(),
+                _ => String::new(),
+            };
+
             let mut response = format!(
-                "HTTP/1.1 {status}\r\n{content_range}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\n{content_range}{header}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )
             .into_bytes();
@@ -869,8 +909,8 @@ mod tests {
             let client = &registry.client;
             let range = Range::Bounded(0..=buf.len() as u64 - 1);
             let response = match kind {
-                ReadKind::Ondemand => client.read_range(&TEST_BLOB_ID, &range).await?,
-                ReadKind::Prefetch => client.prefetch_range(&TEST_BLOB_ID, &range).await?,
+                ReadKind::Ondemand => client.get(&TEST_BLOB_ID, &range).await?,
+                ReadKind::Prefetch => client.prefetch(&TEST_BLOB_ID, &range).await?,
             };
             buf.copy_from_slice(&response.bytes(buf.len()).await?);
             Ok(())
@@ -891,13 +931,13 @@ mod tests {
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let blob_metadata = match kind {
-                ReadKind::Ondemand => registry.read_blob_metadata(&full_blob_id),
+                ReadKind::Ondemand => registry.get_blob_metadata(&full_blob_id),
                 ReadKind::Prefetch => registry.prefetch_blob_metadata(&full_blob_id),
             }
             .unwrap();
             let mut data = vec![0u8; 16];
             match kind {
-                ReadKind::Ondemand => registry.read(&full_blob_id, 17, data.len()),
+                ReadKind::Ondemand => registry.get(&full_blob_id, 17, data.len()),
                 ReadKind::Prefetch => registry.prefetch(&full_blob_id, 17, data.len()),
             }
             .unwrap()
@@ -945,13 +985,13 @@ mod tests {
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let blob_metadata = match kind {
-                ReadKind::Ondemand => registry.read_blob_metadata(&full_blob_id),
+                ReadKind::Ondemand => registry.get_blob_metadata(&full_blob_id),
                 ReadKind::Prefetch => registry.prefetch_blob_metadata(&full_blob_id),
             }
             .unwrap();
             let mut data = vec![0u8; 16];
             match kind {
-                ReadKind::Ondemand => registry.read(&full_blob_id, 17, data.len()),
+                ReadKind::Ondemand => registry.get(&full_blob_id, 17, data.len()),
                 ReadKind::Prefetch => registry.prefetch(&full_blob_id, 17, data.len()),
             }
             .unwrap()
@@ -976,7 +1016,7 @@ mod tests {
             let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
             let registry = origin_registry(origin.addr, None);
 
-            let read = registry.read(&TEST_BLOB_ID, offset, len);
+            let read = registry.get(&TEST_BLOB_ID, offset, len);
             let prefetch = registry.prefetch(&TEST_BLOB_ID, offset, len);
 
             assert_eq!(read.err().unwrap().kind(), io::ErrorKind::InvalidInput);
@@ -993,7 +1033,7 @@ mod tests {
 
             let mut buf = [0u8; 4];
             let result = match kind {
-                ReadKind::Ondemand => registry.read(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
                 ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
             }
             .and_then(|mut reader| reader.read_exact(&mut buf));
@@ -1005,18 +1045,79 @@ mod tests {
 
     #[cfg(feature = "dragonfly")]
     #[test]
-    fn seed_peer_body_that_breaks_off_is_resumed_through_the_seed_peers() {
-        let test_cases: Vec<(&'static [&'static str], fn(io::Result<Vec<u8>>))> = vec![
-            (&["206 Truncated", "206 Partial Content"], |result| {
-                assert_eq!(result.unwrap(), b"abcd")
-            }),
-            (&["206 Truncated"], |result| assert!(result.is_err())),
+    fn seed_peer_body_that_breaks_off_is_resumed_through_the_seed_peers_then_the_origin() {
+        let test_cases: Vec<(
+            ReadKind,
+            &'static [&'static str],
+            &'static [&'static str],
+            fn(io::Result<Vec<u8>>),
+            Vec<&str>,
+            Vec<&str>,
+        )> = vec![
+            (
+                ReadKind::Ondemand,
+                &["206 Truncated", "206 Partial Content"],
+                &["206 Partial Content"],
+                |result| assert_eq!(result.unwrap(), b"abcd"),
+                vec!["bytes=0-3", "bytes=2-3"],
+                vec![],
+            ),
+            (
+                ReadKind::Ondemand,
+                &["206 Truncated"],
+                &["206 Partial Content"],
+                |result| assert_eq!(result.unwrap(), b"abcd"),
+                vec!["bytes=0-3", "bytes=2-3"],
+                vec!["bytes=3-3"],
+            ),
+            (
+                ReadKind::Ondemand,
+                &["206 Truncated"],
+                &["307 Temporary Redirect", "206 Partial Content"],
+                |result| assert_eq!(result.unwrap(), b"abcd"),
+                vec!["bytes=0-3", "bytes=2-3"],
+                vec!["bytes=3-3", "bytes=3-3"],
+            ),
+            (
+                ReadKind::Ondemand,
+                &["206 Truncated"],
+                &["401 Unauthorized", "206 Partial Content"],
+                |result| assert_eq!(result.unwrap(), b"abcd"),
+                vec!["bytes=0-3", "bytes=2-3"],
+                vec!["bytes=3-3", "bytes=3-3"],
+            ),
+            (
+                ReadKind::Ondemand,
+                &["206 Truncated"],
+                &["206 Truncated"],
+                |result| assert!(result.is_err()),
+                vec!["bytes=0-3", "bytes=2-3"],
+                vec!["bytes=3-3"],
+            ),
+            (
+                ReadKind::Ondemand,
+                &["503 Service Unavailable"],
+                &["206 Truncated"],
+                |result| assert!(result.is_err()),
+                vec!["bytes=0-3", "bytes=0-3"],
+                vec!["bytes=0-3"],
+            ),
+            (
+                ReadKind::Prefetch,
+                &["206 Truncated"],
+                &["206 Partial Content"],
+                |result| assert!(result.is_err()),
+                vec!["bytes=0-3"],
+                vec![],
+            ),
         ];
 
-        for (statuses, expect) in test_cases {
+        for (kind, seed_peer_statuses, origin_statuses, expect, seed_peer_ranges, origin_ranges) in
+            test_cases
+        {
             let runtime_dir = tempdir().unwrap();
-            let seed_peer = OriginStub::serve(statuses, b"abcd".to_vec());
-            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let seed_peer = OriginStub::serve(seed_peer_statuses, b"abcd".to_vec());
+            let origin = OriginStub::serve(origin_statuses, b"abcd".to_vec());
             let cache_dir = runtime_dir.path().join("dragonfly");
             fs::create_dir(&cache_dir).unwrap();
             fs::write(
@@ -1041,21 +1142,26 @@ mod tests {
             )
             .unwrap();
             let config: Config = serde_yaml::from_str(&format!(
-                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n      max_retries: 1\n",
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    auth: dXNlcjpwYXNz\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n      max_retries: 1\n",
                 runtime_dir.path().display(),
                 origin.addr
             ))
             .unwrap();
             let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
-            let result = registry.read(&TEST_BLOB_ID, 0, 4).and_then(|mut reader| {
+            let result = match kind {
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, 4),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, 4),
+            }
+            .and_then(|mut reader| {
                 let mut data = Vec::new();
                 reader.read_to_end(&mut data).map(|_| data)
             });
 
             expect(result);
-            assert_eq!(seed_peer.ranges(), ["bytes=0-3", "bytes=2-3"]);
-            assert_eq!(origin.hits(), 0);
+            assert_eq!(seed_peer.ranges(), seed_peer_ranges);
+            assert_eq!(origin.ranges(), origin_ranges);
+            assert_eq!(origin.hits() as usize, origin_ranges.len());
         }
     }
 
@@ -1088,7 +1194,7 @@ mod tests {
                     .sum()
             };
 
-            consume(registry.read(&TEST_BLOB_ID, 0, 1 << 20).unwrap());
+            consume(registry.get(&TEST_BLOB_ID, 0, 1 << 20).unwrap());
             let now = Instant::now();
             while counter("nydus_backend_read_total") + counter("nydus_backend_read_failure_total")
                 < 1.0 + failures
@@ -1139,7 +1245,7 @@ mod tests {
                 .sum()
         };
 
-        let mut reader = registry.read(&TEST_BLOB_ID, 0, 4).unwrap();
+        let mut reader = registry.get(&TEST_BLOB_ID, 0, 4).unwrap();
         let mut buf = [0u8; 2];
         reader.read_exact(&mut buf).unwrap();
         drop(reader);
@@ -1161,7 +1267,7 @@ mod tests {
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let err = match kind {
-                ReadKind::Ondemand => registry.read(&TEST_BLOB_ID, 16, 4),
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 16, 4),
                 ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 16, 4),
             }
             .err()
@@ -1284,7 +1390,7 @@ mod tests {
 
         let mut buf = [0u8; 4];
         registry
-            .read(&TEST_BLOB_ID, 0, buf.len())
+            .get(&TEST_BLOB_ID, 0, buf.len())
             .unwrap()
             .read_exact(&mut buf)
             .unwrap();
@@ -1557,7 +1663,7 @@ backend:
     }
 
     #[test]
-    fn read_blob_metadata_fetches_the_footer_through_the_transport() {
+    fn get_blob_metadata_fetches_the_footer_through_the_transport() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport = ScriptedTransport::new(vec![Scripted::Status(
@@ -1567,7 +1673,7 @@ backend:
             let registry = scripted_registry(origin.addr, None, None, transport.clone());
 
             let err = match kind {
-                ReadKind::Ondemand => registry.read_blob_metadata(&TEST_BLOB_ID),
+                ReadKind::Ondemand => registry.get_blob_metadata(&TEST_BLOB_ID),
                 ReadKind::Prefetch => registry.prefetch_blob_metadata(&TEST_BLOB_ID),
             }
             .unwrap_err();
@@ -1598,7 +1704,7 @@ backend:
                 thread::spawn(move || {
                     let mut buf = [0u8; 2];
                     registry
-                        .read(&TEST_BLOB_ID, 0, buf.len())
+                        .get(&TEST_BLOB_ID, 0, buf.len())
                         .unwrap()
                         .read_exact(&mut buf)
                         .unwrap();

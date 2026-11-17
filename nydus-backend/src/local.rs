@@ -204,7 +204,7 @@ impl Backend for Local {
 
     /// Reads the blob's metadata for an on-demand read, from the sidecar file
     /// when present.
-    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
+    fn get_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let full_blob = self.full_blob(blob_id)?;
         let blob_metadata_path = self.blob_metadata_path(&full_blob.path)?;
         let buf = if blob_metadata_path.is_file() {
@@ -242,7 +242,7 @@ impl Backend for Local {
     }
 
     /// Reads `len` bytes of the data region from `offset` for an on-demand read.
-    fn read(
+    fn get(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
@@ -384,7 +384,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn read_blob_metadata_uses_the_sidecar_file_or_the_embedded_region() {
+    fn get_blob_metadata_uses_the_sidecar_file_or_the_embedded_region() {
         let test_cases = vec![true, false];
 
         for sidecar in test_cases {
@@ -399,17 +399,17 @@ mod tests {
             let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
             let backend = Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new()));
 
-            let blob_metadata = backend.read_blob_metadata(&full_blob_id).unwrap();
+            let blob_metadata = backend.get_blob_metadata(&full_blob_id).unwrap();
             let mut data = vec![0u8; 4096];
             backend
-                .read(&full_blob_id, 0, data.len())
+                .get(&full_blob_id, 0, data.len())
                 .unwrap()
                 .read_exact(&mut data)
                 .unwrap();
 
             assert_eq!(blob_metadata.chunk_count(), 1);
             assert_eq!(data, payload);
-            assert!(backend.read_blob_metadata(&data_blob_id).is_err());
+            assert!(backend.get_blob_metadata(&data_blob_id).is_err());
         }
     }
 
@@ -447,7 +447,7 @@ mod tests {
                     .sum()
             };
 
-            consume(backend.read(&full_blob_id, 0, 4096).unwrap());
+            consume(backend.get(&full_blob_id, 0, 4096).unwrap());
 
             assert_eq!(counter("nydus_backend_read_total"), 1.0);
             assert_eq!(counter("nydus_backend_read_failure_total"), failures);
