@@ -20,6 +20,7 @@ pub mod mount;
 mod netlink;
 pub mod proto;
 pub mod service;
+pub mod upgrade;
 
 pub use core::NbdCore;
 pub use mount::mount_nbd;

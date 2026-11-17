@@ -29,6 +29,8 @@ const CONNECT_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const NBD_CMD_CONNECT: u8 = 1;
 /// The generic netlink command that tears down an NBD session.
 const NBD_CMD_DISCONNECT: u8 = 2;
+/// The generic netlink command that attaches sockets to the dead slots of a session.
+const NBD_CMD_RECONFIGURE: u8 = 3;
 /// The attribute carrying the `/dev/nbdN` index.
 const NBD_ATTR_INDEX: u16 = 1;
 /// The attribute carrying the device capacity in bytes.
@@ -41,6 +43,10 @@ const NBD_ATTR_TIMEOUT: u16 = 4;
 const NBD_ATTR_SERVER_FLAGS: u16 = 5;
 /// The nested attribute listing the connection sockets.
 const NBD_ATTR_SOCKETS: u16 = 7;
+/// The attribute carrying how long new I/O waits for a reconnect, in seconds.
+const NBD_ATTR_DEAD_CONN_TIMEOUT: u16 = 8;
+/// The attribute carrying the session identity shown in sysfs `backend`.
+const NBD_ATTR_BACKEND_IDENTIFIER: u16 = 10;
 /// The nested attribute wrapping one socket of the list.
 const NBD_SOCK_ITEM: u16 = 1;
 /// The attribute carrying one socket descriptor.
@@ -63,9 +69,15 @@ pub(crate) fn connect_device(
     index: u32,
     size: u64,
     options: &NbdOptions,
+    backend: &str,
     sockets: &[BorrowedFd<'_>],
 ) -> Result<()> {
-    let mut attrs = connection_attrs(index, options, sockets)?;
+    if sockets.len() != options.connections {
+        return Err(Error::InvalidParameter(
+            "NBD CONNECT needs one socket per connection".into(),
+        ));
+    }
+    let mut attrs = connection_attrs(index, options, backend, sockets)?;
     attrs.push(attr(NBD_ATTR_SIZE_BYTES, size)?);
     attrs.push(attr(NBD_ATTR_BLOCK_SIZE_BYTES, NBD_BLOCK_SIZE)?);
     attrs.push(attr(
@@ -95,6 +107,20 @@ fn is_busy(err: &Error) -> bool {
         .is_some_and(|err| err.raw_os_error() == Some(libc::EBUSY))
 }
 
+/// Attaches sockets to the dead slots of the session on `/dev/nbd<index>`.
+///
+/// The ACK alone does not prove acceptance: the kernel silently ignores sockets when no slot is dead.
+pub(crate) fn reconfigure_device(
+    index: u32,
+    options: &NbdOptions,
+    backend: &str,
+    sockets: &[BorrowedFd<'_>],
+) -> Result<()> {
+    let attrs = connection_attrs(index, options, backend, sockets)?;
+    transact(NBD_CMD_RECONFIGURE, attrs)
+        .with_context(|| format!("NBD_CMD_RECONFIGURE for /dev/nbd{index} failed"))
+}
+
 /// Tears down the session on `/dev/nbd<index>`.
 pub(crate) fn disconnect_device(index: u32) -> Result<()> {
     let attrs = [attr(NBD_ATTR_INDEX, index)?].into_iter().collect();
@@ -102,12 +128,24 @@ pub(crate) fn disconnect_device(index: u32) -> Result<()> {
         .with_context(|| format!("NBD_CMD_DISCONNECT for /dev/nbd{index} failed"))
 }
 
-/// Encodes the index, request timeout and sockets of a CONNECT request.
-fn connection_attrs(index: u32, options: &NbdOptions, sockets: &[BorrowedFd<'_>]) -> Result<Attrs> {
+/// Encodes the index, timeouts, backend identity and sockets shared by CONNECT and RECONFIGURE.
+fn connection_attrs(
+    index: u32,
+    options: &NbdOptions,
+    backend: &str,
+    sockets: &[BorrowedFd<'_>],
+) -> Result<Attrs> {
     options.validate()?;
-    if sockets.len() != options.connections {
+
+    // Accept fewer sockets than connections: RECONFIGURE replaces only the slots a previous
+    // attempt left dead.
+    if sockets.is_empty()
+        || sockets.len() > options.connections
+        || backend.is_empty()
+        || backend.as_bytes().contains(&0)
+    {
         return Err(Error::InvalidParameter(
-            "invalid NBD connection count".into(),
+            "invalid NBD backend or connection count".into(),
         ));
     }
     let mut list = attr(NBD_ATTR_SOCKETS, Buffer::new())?;
@@ -121,7 +159,9 @@ fn connection_attrs(index: u32, options: &NbdOptions, sockets: &[BorrowedFd<'_>]
     }
     Ok([
         attr(NBD_ATTR_TIMEOUT, options.timeout_secs)?,
+        attr(NBD_ATTR_DEAD_CONN_TIMEOUT, options.dead_conn_timeout_secs)?,
         attr(NBD_ATTR_INDEX, index)?,
+        attr(NBD_ATTR_BACKEND_IDENTIFIER, backend)?,
         list,
     ]
     .into_iter()
@@ -276,12 +316,19 @@ mod tests {
         let options = NbdOptions {
             connections: 2,
             timeout_secs: 15,
+            dead_conn_timeout_secs: 60,
         };
-        let attrs = connection_attrs(3, &options, &[one.as_fd(), two.as_fd()]).unwrap();
+        let attrs = connection_attrs(3, &options, "session", &[one.as_fd(), two.as_fd()]).unwrap();
         let handle = attrs.get_attr_handle();
         assert_eq!(
             handle.get_attr_payload_as::<u32>(NBD_ATTR_INDEX).unwrap(),
             3
+        );
+        assert_eq!(
+            handle
+                .get_attr_payload_as_with_len::<String>(NBD_ATTR_BACKEND_IDENTIFIER)
+                .unwrap(),
+            "session"
         );
         let sockets = handle
             .get_nested_attributes::<u16>(NBD_ATTR_SOCKETS)
@@ -296,13 +343,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(fds, [one.as_raw_fd() as u32, two.as_raw_fd() as u32]);
-        let test_cases = vec![
-            vec![one.as_fd()],
-            vec![one.as_fd(), two.as_fd(), one.as_fd()],
-        ];
+        let test_cases = vec![vec![], vec![one.as_fd(), two.as_fd(), one.as_fd()]];
 
         for sockets in test_cases {
-            assert!(connection_attrs(3, &options, &sockets).is_err());
+            assert!(connection_attrs(3, &options, "session", &sockets).is_err());
         }
+        assert!(connection_attrs(3, &options, "session", &[one.as_fd()]).is_ok());
     }
 }

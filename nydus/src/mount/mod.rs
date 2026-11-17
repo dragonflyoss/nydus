@@ -8,7 +8,7 @@ use std::time::Duration;
 use nydus_error::{Context, Error, Result};
 use tracing::{debug, info};
 
-#[cfg(feature = "fuse")]
+#[cfg(any(feature = "fuse", feature = "nbd"))]
 pub(crate) mod table;
 
 /// Shutdown unmount retry window: EBUSY is expected while readers still hold

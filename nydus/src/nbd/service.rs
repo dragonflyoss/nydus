@@ -1,41 +1,50 @@
 use nydus_error::{Context, Error, Result};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, IoSlice, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use super::proto::{
     encode_reply, Request, NBD_CMD_WRITE, NBD_EINVAL, NBD_EIO, NBD_OK, NBD_REQUEST_HEADER_SIZE,
 };
-use super::{mount_nbd, netlink, NbdCore};
-use crate::mount::unmount;
+use super::{netlink, NbdCore};
+use crate::continuity::ownership::SessionOwner;
+use crate::continuity::wire::MAX_TRANSFER_FDS;
 use crate::pool::FetchPool;
-use crate::signal;
 
 /// The largest read a request may ask for.
 const MAX_READ_LEN: usize = 4 * 1024 * 1024;
 
-/// The most connections whose socket list fits one netlink attribute.
-const MAX_CONNECTIONS: usize = (u16::MAX as usize - 4) / 12;
+/// The most connections of one session: a hot upgrade passes them all in one transfer.
+const MAX_CONNECTIONS: usize = MAX_TRANSFER_FDS;
 
 /// How often a waiting loop checks its condition again.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// The kernel session settings.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// How long a repair waits after a failed attachment before trying again.
+const REPAIR_RETRY: Duration = Duration::from_secs(5);
+
+/// How long a release waits for the parked workers to exit.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The kernel session settings, persisted and inherited instead of reconstructed from restart flags.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NbdOptions {
     /// The number of kernel connections, one worker each.
     pub connections: usize,
 
     /// The seconds the kernel waits for one reply before retrying the request.
     pub timeout_secs: u64,
+
+    /// The seconds new I/O waits for a replacement connection when none is alive.
+    pub dead_conn_timeout_secs: u64,
 }
 
 /// Implements the kernel session settings.
@@ -54,12 +63,39 @@ impl NbdOptions {
                 self.timeout_secs
             )));
         }
+        if self.dead_conn_timeout_secs > u32::MAX.into() {
+            return Err(Error::InvalidParameter(format!(
+                "NBD dead-connection timeout {} must be at most {} seconds",
+                self.dead_conn_timeout_secs,
+                u32::MAX
+            )));
+        }
         Ok(())
     }
 }
 
-/// The state shared by one pool and its workers.
+/// The lifecycle of a worker pool.
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+enum Mode {
+    /// The workers serve requests.
+    Running,
+
+    /// The workers hold their connections without reading them, for a handoff.
+    Paused,
+
+    /// The workers exit and leave their connections open for the daemon that took them over.
+    Detached,
+
+    /// The workers exit and close their connections.
+    Stopped,
+}
+
+/// The state shared by the workers of one pool and the session control.
 pub(crate) struct NbdService {
+    /// The current [Mode] of the pool.
+    mode: AtomicU8,
+
     /// The eventfd that interrupts every worker waiting for a request.
     wake: File,
 
@@ -68,15 +104,98 @@ pub(crate) struct NbdService {
 
     /// Whether the kernel explicitly requested session disconnect.
     disconnect_requested: AtomicBool,
+
+    /// The lifetime ownership, held until the workers of a released pool have exited.
+    pub(crate) owner: Mutex<Option<SessionOwner>>,
+
+    /// A duplicate of the connection of every worker a pause parked.
+    parked: Mutex<Vec<OwnedFd>>,
+
+    /// The condition signalled when the pool leaves [Mode::Paused].
+    resumed: Condvar,
 }
 
 /// Implements the shared worker state.
 impl NbdService {
-    /// Stops every worker by waking it while it waits for a request.
-    fn stop(&self) -> Result<()> {
-        (&self.wake)
-            .write_all(&1u64.to_ne_bytes())
-            .context("failed to wake NBD workers")
+    /// Returns whether the pool is in `mode`.
+    fn is(&self, mode: Mode) -> bool {
+        self.mode.load(Ordering::SeqCst) == mode as u8
+    }
+
+    /// Moves the pool to `mode` and wakes every worker, whether it waits for a request or
+    /// is parked.
+    fn enter(&self, mode: Mode) -> Result<()> {
+        // Change the mode under the lock a parking worker holds, so that it cannot miss the
+        // change.
+        let mut parked = self.parked.lock().unwrap();
+        self.mode.store(mode as u8, Ordering::SeqCst);
+        self.resumed.notify_all();
+        if !matches!(mode, Mode::Paused) {
+            parked.clear();
+        }
+        if !matches!(mode, Mode::Running) {
+            return (&self.wake)
+                .write_all(&1u64.to_ne_bytes())
+                .context("failed to wake NBD workers");
+        }
+
+        // Rearm the wakeup, so that the resumed workers wait for requests again.
+        match (&self.wake).read(&mut [0; 8]) {
+            Err(err) if err.kind() != io::ErrorKind::WouldBlock => {
+                Err(err).context("failed to rearm the NBD worker wakeup")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Parks every worker once the reads it dispatched are answered, and returns a
+    /// duplicate of each parked connection.
+    ///
+    /// The kernel keeps queueing requests on a parked connection, so neither a request nor
+    /// a reply is lost: whoever reads the connection next continues both streams. The
+    /// caller resumes the pool when this fails.
+    pub(crate) fn pause(&self, timeout: Duration) -> Result<Vec<OwnedFd>> {
+        self.enter(Mode::Paused)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut parked = self.parked.lock().unwrap();
+            if parked.len() == self.live.load(Ordering::SeqCst) {
+                return Ok(std::mem::take(&mut *parked));
+            }
+            drop(parked);
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "NBD reads in flight did not finish in time to pause the connections",
+                )
+                .into());
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    /// Lets the parked workers serve again.
+    pub(crate) fn resume(&self) -> Result<()> {
+        self.enter(Mode::Running)
+    }
+
+    /// Leaves the parked connections to the successor that took them over, then gives up
+    /// lifetime ownership.
+    pub(crate) fn release(&self) -> Result<()> {
+        self.enter(Mode::Detached)?;
+        let deadline = Instant::now() + RELEASE_TIMEOUT;
+        while self.live.load(Ordering::SeqCst) != 0 {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "NBD workers did not exit after handing their connections over",
+                )
+                .into());
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        self.owner.lock().unwrap().take();
+        Ok(())
     }
 }
 
@@ -84,7 +203,7 @@ impl NbdService {
 ///
 /// Dropping it closes only this process's connections, never the device.
 pub(crate) struct NbdSession {
-    /// The state shared with the workers.
+    /// The state shared with the workers and the session control.
     pub(crate) service: Arc<NbdService>,
 
     /// The `/dev/nbd<N>` index.
@@ -92,6 +211,9 @@ pub(crate) struct NbdSession {
 
     /// The connection count and timeouts of the kernel session.
     options: NbdOptions,
+
+    /// The backend identity registered with the kernel.
+    backend: String,
 
     /// The image the workers read from.
     core: Arc<NbdCore>,
@@ -101,6 +223,30 @@ pub(crate) struct NbdSession {
 
     /// The worker threads not joined yet.
     workers: Vec<JoinHandle<Result<()>>>,
+
+    /// The repair attachment whose netlink call has not been settled yet.
+    attachment: Option<Attachment>,
+
+    /// When the next repair may start.
+    retry_at: Instant,
+}
+
+/// A repair attachment whose RECONFIGURE runs off the serve loop.
+///
+/// The kernel call cannot be cancelled, so a call blocked in the kernel only delays the
+/// repair; the serve loop keeps answering signals and releases meanwhile.
+struct Attachment {
+    /// The netlink call, which hands back the kernel ends once the kernel answered.
+    call: JoinHandle<(Vec<OwnedFd>, Result<()>)>,
+
+    /// The user ends of the offered connections.
+    users: Vec<Arc<UnixStream>>,
+
+    /// When the call started.
+    started: Instant,
+
+    /// Whether a slow call was reported.
+    reported: bool,
 }
 
 /// Implements the worker pool.
@@ -111,6 +257,7 @@ impl NbdSession {
         pool: Arc<FetchPool>,
         index: u32,
         options: NbdOptions,
+        backend: String,
     ) -> Result<Self> {
         // SAFETY: eventfd accepts integer arguments and the returned fd is checked.
         let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
@@ -122,15 +269,22 @@ impl NbdSession {
         let wake = unsafe { File::from_raw_fd(wake) };
         Ok(Self {
             service: Arc::new(NbdService {
+                mode: AtomicU8::new(Mode::Running as u8),
                 wake,
                 live: AtomicUsize::new(0),
                 disconnect_requested: AtomicBool::new(false),
+                owner: Mutex::new(None),
+                parked: Mutex::new(Vec::new()),
+                resumed: Condvar::new(),
             }),
             index,
             options,
+            backend,
             core,
             pool,
             workers: Vec::new(),
+            attachment: None,
+            retry_at: Instant::now(),
         })
     }
 
@@ -152,6 +306,21 @@ impl NbdSession {
             .collect()
     }
 
+    /// Takes over the connections a predecessor parked, holding them parked until the pool
+    /// resumes.
+    pub(crate) fn adopt(&mut self, sockets: Vec<OwnedFd>) -> Result<()> {
+        self.service.enter(Mode::Paused)?;
+        for socket in sockets {
+            self.workers.push(NbdWorker::spawn(
+                &self.core,
+                &self.pool,
+                &self.service,
+                Arc::new(socket.into()),
+            )?);
+        }
+        Ok(())
+    }
+
     /// Creates the kernel session over fresh connections.
     ///
     /// The workers start first, because the kernel may use a connection before CONNECT returns.
@@ -161,26 +330,132 @@ impl NbdSession {
             .iter()
             .map(|(kernel, _)| kernel.as_fd())
             .collect();
-        netlink::connect_device(self.index, size, &self.options, &kernels)
+        netlink::connect_device(self.index, size, &self.options, &self.backend, &kernels)
     }
 
-    /// Joins the workers that exited, failing once a worker failed or no connection is left.
+    /// Attaches up to `count` fresh connections to dead kernel slots, returning how many the
+    /// kernel kept.
     ///
-    /// The kernel closes a connection when a request times out. That retires only its
-    /// worker: the kernel retries the request on the remaining connections.
-    fn reap(&mut self) -> Result<()> {
-        let (exited, serving): (Vec<_>, Vec<_>) = std::mem::take(&mut self.workers)
-            .into_iter()
-            .partition(JoinHandle::is_finished);
-        self.workers = serving;
-        Self::join(exited)?;
+    /// The kernel silently ignores a socket when no slot is dead. Dropping our copy of the
+    /// kernel end then closes the connection, which tells the two outcomes apart.
+    pub(crate) fn attach(&mut self, count: usize) -> Result<usize> {
+        let (kernels, users): (Vec<_>, Vec<_>) = self.start(count)?.into_iter().unzip();
 
-        if self.service.live.load(Ordering::SeqCst) == 0 {
-            return Err(Error::Runtime(
-                "the kernel closed every NBD connection".into(),
-            ));
+        // Check the mode only now that the workers count as live, so that a concurrent
+        // handoff either stops the attachment here or parks the workers it started.
+        if self.service.is(Mode::Running) {
+            reconfigure(self.index, &self.options, &self.backend, &kernels)?;
+        }
+        kept(kernels, &users)
+    }
+
+    /// Joins the workers that exited and reattaches the connections the kernel closed.
+    ///
+    /// The kernel closes a connection when a request times out, and a retired kernel
+    /// receiver can also close the connection that replaced it: Linux `recv_work` marks its
+    /// slot dead again on exit without checking which socket the slot now holds. No process
+    /// can observe that receiver, so every loss is repaired instead of assuming it exited.
+    /// A replacement the kernel ignores because its slot is not dead yet is retried by the
+    /// next call.
+    ///
+    /// The RECONFIGURE runs on its own thread, because netlink runs the command inside the
+    /// sending call and the kernel can block it on a lock no deadline interrupts. A failed
+    /// attachment only defers the next one: the remaining connections keep
+    /// serving, so only a worker failure is an error.
+    pub(crate) fn repair(&mut self) -> Result<()> {
+        if self.workers.iter().any(JoinHandle::is_finished) {
+            let (exited, serving): (Vec<_>, Vec<_>) = std::mem::take(&mut self.workers)
+                .into_iter()
+                .partition(JoinHandle::is_finished);
+            self.workers = serving;
+            Self::join(exited)?;
+        }
+
+        if let Some(attachment) = self.attachment.as_mut().filter(|a| !a.call.is_finished()) {
+            if !attachment.reported && attachment.started.elapsed() >= netlink::NETLINK_TIMEOUT {
+                attachment.reported = true;
+                warn!(
+                    "nbd: NBD_CMD_RECONFIGURE has not returned after {:?}; serving on the remaining connections",
+                    netlink::NETLINK_TIMEOUT
+                );
+            }
+            return Ok(());
+        }
+        if let Some(attachment) = self.attachment.take() {
+            self.settle(attachment)?;
+        }
+
+        let live = self.service.live.load(Ordering::SeqCst);
+        let missing = self.options.connections.saturating_sub(live);
+        if missing == 0
+            || !self.service.is(Mode::Running)
+            || self.disconnect_requested()
+            || Instant::now() < self.retry_at
+        {
+            return Ok(());
+        }
+        let (kernels, users): (Vec<_>, Vec<_>) = match self.start(missing) {
+            Ok(connections) => connections.into_iter().unzip(),
+            Err(err) => {
+                self.defer(missing, err);
+                return Ok(());
+            }
+        };
+
+        // As in `attach`, a handoff that began after the workers started stops the attachment;
+        // dropping the kernel ends closes their connections.
+        if !self.service.is(Mode::Running) {
+            return Ok(());
+        }
+        let (index, options, backend) = (self.index, self.options.clone(), self.backend.clone());
+        let call = std::thread::Builder::new()
+            .name("nydus_nbd_attach".into())
+            .spawn(move || {
+                let called = reconfigure(index, &options, &backend, &kernels);
+                (kernels, called)
+            })
+            .context("failed to spawn NBD attachment");
+        match call {
+            Ok(call) => {
+                self.attachment = Some(Attachment {
+                    call,
+                    users,
+                    started: Instant::now(),
+                    reported: false,
+                })
+            }
+            Err(err) => self.defer(users.len(), err),
         }
         Ok(())
+    }
+
+    /// Counts the connections a finished repair attachment kept, deferring a retry after a failure.
+    fn settle(&mut self, attachment: Attachment) -> Result<()> {
+        let (kernels, called) = attachment.call.join().unwrap_or_else(|_| {
+            (
+                Vec::new(),
+                Err(Error::Runtime("NBD attachment panicked".into())),
+            )
+        });
+        let kept = kept(kernels, &attachment.users)?;
+        if kept != 0 {
+            info!("nbd: reattached {} connections the kernel closed", kept);
+        }
+        if let Err(err) = called {
+            self.defer(attachment.users.len(), err);
+        }
+        Ok(())
+    }
+
+    /// Defers the next repair after failing to attach `count` connections.
+    fn defer(&mut self, count: usize, err: Error) {
+        self.retry_at = Instant::now() + REPAIR_RETRY;
+        warn!(
+            "nbd: failed to reattach {} lost connections, retrying in {:?}: {}",
+            count,
+            REPAIR_RETRY,
+            err.report()
+        );
     }
 
     /// Waits for `workers` and returns the first failure.
@@ -202,15 +477,27 @@ impl NbdSession {
         failure.map_or(Ok(()), Err)
     }
 
-    /// Stops the workers and waits for them.
+    /// Stops the workers, closing their connections, and waits for them.
     pub(crate) fn cancel(&mut self) -> Result<()> {
-        let stopped = self.service.stop();
+        let stopped = self.service.enter(Mode::Stopped);
         combine(stopped, Self::join(self.workers.drain(..)))
+    }
+
+    /// Stops the workers without closing connections another daemon still holds, and waits
+    /// for them.
+    pub(crate) fn detach(&mut self) -> Result<()> {
+        let detached = self.service.enter(Mode::Detached);
+        combine(detached, Self::join(self.workers.drain(..)))
     }
 
     /// Returns whether the kernel requested disconnect.
     pub(crate) fn disconnect_requested(&self) -> bool {
         self.service.disconnect_requested.load(Ordering::Acquire)
+    }
+
+    /// Returns whether a release handed every connection over.
+    pub(crate) fn is_released(&self) -> bool {
+        self.service.is(Mode::Detached) && self.service.live.load(Ordering::SeqCst) == 0
     }
 }
 
@@ -226,79 +513,31 @@ impl Drop for NbdSession {
     }
 }
 
-/// Attaches a fresh netlink session on `device`, optionally mounts it as EROFS
-/// and serves reads on `pool` until a termination signal or a worker failure.
-pub fn serve(
-    core: Arc<NbdCore>,
-    device: &str,
-    mountpoint: Option<&Path>,
-    options: &NbdOptions,
-    pool: Arc<FetchPool>,
-    signals: signal::Signals,
-) -> Result<()> {
-    let index = device_index(device)?;
-    let mut session = NbdSession::new(core.clone(), pool, index, options.clone())?;
-    session.connect(core.device_size())?;
-    info!(
-        "nydus nbd service attached to {} ({} connections)",
-        device, options.connections
-    );
-    let stop = Arc::new(AtomicBool::new(false));
-    let requested = stop.clone();
-    let signal = match signal::spawn_signal_thread("nbd", signals, move || {
-        requested.store(true, Ordering::Release);
-    }) {
-        Ok(signal) => signal,
-        Err(err) => return combine(Err(err), teardown(&mut session, None)),
-    };
-    let mounted: Result<Option<&Path>> = mountpoint
-        .map(|path| {
-            mount_nbd(device, path, "erofs")?;
-            info!("mounted {} at {}", device, path.display());
-            Ok(path)
-        })
-        .transpose();
-    let served = match mounted {
-        Ok(mounted) => loop {
-            // Reap before reading the disconnect flag: a worker sets it before it exits,
-            // so the connections a kernel disconnect closes never hide the request.
-            let reaped = session.reap();
-            if stop.load(Ordering::Acquire) || session.disconnect_requested() {
-                break teardown(&mut session, mounted);
-            }
-            if let Err(err) = reaped {
-                break combine(Err(err), teardown(&mut session, mounted));
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        },
-        Err(err) => combine(Err(err), teardown(&mut session, None)),
-    };
-    combine(served, signal.shutdown())
+/// Offers the kernel ends of fresh connections to the dead slots of the session.
+///
+/// Unit tests fail it as a kernel without the session would, so they never configure the
+/// host's NBD.
+fn reconfigure(index: u32, options: &NbdOptions, backend: &str, kernels: &[OwnedFd]) -> Result<()> {
+    if cfg!(test) {
+        return Err(Error::Runtime(
+            "unit tests do not send NBD_CMD_RECONFIGURE".into(),
+        ));
+    }
+    let sockets: Vec<_> = kernels.iter().map(AsFd::as_fd).collect();
+    netlink::reconfigure_device(index, options, backend, &sockets)
 }
 
-/// Unmounts while workers still serve, then disconnects and stops any remaining workers.
-fn teardown(session: &mut NbdSession, mountpoint: Option<&Path>) -> Result<()> {
-    let unmounted = mountpoint.map_or(Ok(()), |path| unmount(path, || {}));
-    let disconnected = netlink::disconnect_device(session.index);
-    combine(combine(unmounted, disconnected), session.cancel())
-}
-
-/// Returns the `/dev/nbd<N>` index of a device path, resolving aliases.
-fn device_index(device: &str) -> Result<u32> {
-    let device = std::fs::canonicalize(device)
-        .with_context(|| format!("failed to resolve NBD device {device}"))?;
-    device
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix("nbd"))
-        .filter(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|index| index.parse::<u32>().ok())
-        .ok_or_else(|| {
-            Error::InvalidParameter(format!(
-                "NBD device {} must name /dev/nbd<N>",
-                device.display()
-            ))
-        })
+/// Closes our copy of each kernel end and returns how many connections the kernel kept.
+///
+/// The kernel silently ignores a socket when no slot is dead, so a connection the kernel
+/// did not keep closes with our copy.
+fn kept(kernels: Vec<OwnedFd>, users: &[Arc<UnixStream>]) -> Result<usize> {
+    drop(kernels);
+    let mut kept = 0;
+    for user in users {
+        kept += usize::from(!peer_closed(user)?);
+    }
+    Ok(kept)
 }
 
 /// Combines two results, keeping the first error and attaching the second to it.
@@ -379,17 +618,47 @@ impl NbdWorker {
         })
     }
 
-    /// Serves requests until the pool stops or the kernel disconnects.
+    /// Serves requests until the pool stops or the kernel disconnects, parking while the
+    /// pool is paused.
     fn run_loop(&mut self) -> Result<()> {
         let mut header = [0; NBD_REQUEST_HEADER_SIZE];
         loop {
             if wait_for_request(&self.socket, &self.service.wake)? {
-                return Ok(());
-            }
-            if !self.serve_one(&mut header)? {
+                if !self.park()? {
+                    return Ok(());
+                }
+            } else if !self.serve_one(&mut header)? {
                 return Ok(());
             }
         }
+    }
+
+    /// Holds the connection without reading it while the pool is paused; returns whether
+    /// to serve again.
+    ///
+    /// The worker stops between two requests and waits for the reads it dispatched, so the
+    /// request and reply streams are whole when another daemon continues them.
+    fn park(&self) -> Result<bool> {
+        while self.service.is(Mode::Paused) {
+            if !self.replies.idle_within(POLL_INTERVAL) {
+                continue;
+            }
+            if peer_closed(&self.socket)? {
+                return Ok(false);
+            }
+            let socket = self
+                .socket
+                .try_clone()
+                .context("failed to duplicate an NBD connection")?;
+            let mut parked = self.service.parked.lock().unwrap();
+            if self.service.is(Mode::Paused) {
+                parked.push(socket.into());
+            }
+            while self.service.is(Mode::Paused) {
+                parked = self.service.resumed.wait(parked).unwrap();
+            }
+        }
+        Ok(self.service.is(Mode::Running))
     }
 
     /// Reads and dispatches one request; returns `false` on a disconnect request.
@@ -414,6 +683,7 @@ impl NbdWorker {
                 "write request on read-only NBD device".into(),
             ));
         }
+        self.replies.begin();
         let length = usize::try_from(request.len).unwrap_or(usize::MAX);
         if !request.is_read() {
             warn!("nbd: unsupported request type {}", request.ty);
@@ -438,14 +708,17 @@ impl NbdWorker {
 impl Drop for NbdWorker {
     /// Closes the connection and records the worker exit.
     fn drop(&mut self) {
-        // Shut the socket down: reads still in flight keep it open, but the kernel retires
-        // the slot only once the reply stream ends.
-        if let Err(err) = self.socket.shutdown(std::net::Shutdown::Both) {
-            if err.kind() != io::ErrorKind::NotConnected {
-                warn!(
-                    "nbd: failed to close an exited worker's connection: {}",
-                    err
-                );
+        // Shut the socket down unless the daemon that took it over continues it: reads still
+        // in flight keep it open, but the kernel retires the slot only once the reply stream
+        // ends.
+        if !self.service.is(Mode::Detached) {
+            if let Err(err) = self.socket.shutdown(std::net::Shutdown::Both) {
+                if err.kind() != io::ErrorKind::NotConnected {
+                    warn!(
+                        "nbd: failed to close an exited worker's connection: {}",
+                        err
+                    );
+                }
             }
         }
         self.service.live.fetch_sub(1, Ordering::SeqCst);
@@ -485,6 +758,12 @@ struct Replies {
     /// The lock that serializes reply frames; the kernel matches out-of-order replies by
     /// handle.
     writer: Mutex<()>,
+
+    /// The requests read but not yet answered.
+    pending: Mutex<usize>,
+
+    /// The condition signalled whenever a request is answered.
+    answered: Condvar,
 }
 
 /// Implements the connection replies.
@@ -494,7 +773,14 @@ impl Replies {
         Self {
             socket,
             writer: Mutex::new(()),
+            pending: Mutex::new(0),
+            answered: Condvar::new(),
         }
+    }
+
+    /// Counts a request that will be answered.
+    fn begin(&self) {
+        *self.pending.lock().unwrap() += 1;
     }
 
     /// Writes the reply of a request.
@@ -508,7 +794,7 @@ impl Replies {
             &encode_reply(code, handle),
             payload,
         );
-        if let Err(err) = &written {
+        if let Err(err) = written {
             // Shut the connection down before the lock lets another reply follow the
             // partial frame, which desyncs the stream. This also stops the worker's intake.
             debug!("nbd: failed to write a reply: {}", err);
@@ -516,6 +802,18 @@ impl Replies {
                 debug!("nbd: failed to close a connection after its reply: {}", err);
             }
         }
+        *self.pending.lock().unwrap() -= 1;
+        self.answered.notify_all();
+    }
+
+    /// Returns whether every request is answered, waiting at most `timeout`.
+    fn idle_within(&self, timeout: Duration) -> bool {
+        let pending = self.pending.lock().unwrap();
+        let (pending, _) = self
+            .answered
+            .wait_timeout_while(pending, timeout, |pending| *pending != 0)
+            .unwrap();
+        *pending == 0
     }
 }
 
@@ -562,25 +860,57 @@ fn wait_for_request(socket: &UnixStream, wake: &File) -> io::Result<bool> {
     }
 }
 
+/// Returns the ready events of the socket without blocking.
+fn poll_socket(socket: &UnixStream, events: i16) -> io::Result<i16> {
+    let mut fd = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: fd is initialized and borrows a live socket for this poll.
+        if unsafe { libc::poll(&mut fd, 1, 0) } >= 0 {
+            return Ok(fd.revents);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+/// Returns whether the connection is closed in both directions, by the kernel end or by a
+/// local shutdown of both; shutting down only the read side does not count.
+fn peer_closed(socket: &UnixStream) -> io::Result<bool> {
+    Ok(poll_socket(socket, 0)? & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::nbd::proto::{NBD_CMD_DISC, NBD_CMD_READ, NBD_REPLY_HEADER_SIZE, NBD_REQUEST_MAGIC};
-    use std::time::Instant;
 
-    fn test_pool() -> Arc<FetchPool> {
+    pub(crate) fn test_pool() -> Arc<FetchPool> {
         Arc::new(FetchPool::new(4).unwrap())
     }
 
-    fn test_session(root: &std::path::Path, pool: Arc<FetchPool>) -> NbdSession {
+    pub(crate) fn test_session(root: &std::path::Path, pool: Arc<FetchPool>) -> NbdSession {
         let options = NbdOptions {
             connections: 2,
             timeout_secs: 15,
+            dead_conn_timeout_secs: 60,
         };
-        NbdSession::new(empty_core(root), pool, u32::MAX, options).unwrap()
+        NbdSession::new(
+            empty_core(root),
+            pool,
+            u32::MAX,
+            options,
+            "nydus:test".into(),
+        )
+        .unwrap()
     }
 
-    fn empty_core(root: &std::path::Path) -> Arc<NbdCore> {
+    pub(crate) fn empty_core(root: &std::path::Path) -> Arc<NbdCore> {
         use crate::build::{build_image, BuildImageOptions};
         use nydus_format::blob::BlobMetadataCompressor;
         use nydus_format::erofs::EROFS_BLOCK_SIZE;
@@ -643,16 +973,6 @@ mod tests {
         u64::from_be_bytes(reply[8..16].try_into().unwrap())
     }
 
-    fn request_pending(socket: &UnixStream) -> io::Result<bool> {
-        let mut fd = libc::pollfd {
-            fd: socket.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: fd is initialized and borrows a live socket for this poll.
-        Ok(unsafe { libc::poll(&mut fd, 1, 0) } > 0)
-    }
-
     fn wait_for_live(session: &NbdSession, live: usize) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while session.service.live.load(Ordering::SeqCst) != live {
@@ -674,7 +994,7 @@ mod tests {
         kernel.write_all(&request(NBD_CMD_READ, 8)).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        while request_pending(&user).unwrap() {
+        while unread(&user) {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -763,6 +1083,7 @@ mod tests {
             drop(closed);
             wait_for_live(&session, 1);
             assert!(!session.disconnect_requested());
+            assert!(!session.is_released());
             healthy.write_all(&request(NBD_CMD_READ, 8)).unwrap();
             assert_eq!(read_reply(&mut healthy), 8);
             session.cancel().unwrap();
@@ -781,6 +1102,33 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_reattachment_is_retried_later_instead_of_failing_the_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = test_session(dir.path(), test_pool());
+        let _kernel = kernel_ends(&mut session, 1);
+
+        session.repair().unwrap();
+        let deadline = Instant::now() + netlink::NETLINK_TIMEOUT + Duration::from_secs(1);
+        while !session.attachment.as_ref().unwrap().call.is_finished() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        session.repair().unwrap();
+        assert!(session.attachment.is_none());
+        assert!(session.retry_at > Instant::now());
+        wait_for_live(&session, 1);
+
+        session.repair().unwrap();
+        assert!(session.attachment.is_none());
+        assert_eq!(session.service.live.load(Ordering::SeqCst), 1);
+
+        session.retry_at = Instant::now();
+        session.repair().unwrap();
+        assert!(session.attachment.is_some());
+        session.cancel().unwrap();
+    }
+
+    #[test]
     fn protocol_failure_is_not_treated_as_connection_loss() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = test_session(dir.path(), test_pool());
@@ -788,6 +1136,105 @@ mod tests {
         kernel.write_all(&[0; NBD_REQUEST_HEADER_SIZE]).unwrap();
         wait_for_live(&session, 0);
         assert!(session.cancel().is_err());
+    }
+
+    fn unread(socket: &UnixStream) -> bool {
+        poll_socket(socket, libc::POLLIN).unwrap() & libc::POLLIN != 0
+    }
+
+    fn assert_unanswered(kernel: &UnixStream) {
+        kernel.set_nonblocking(true).unwrap();
+        assert_eq!(
+            (&*kernel).read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        kernel.set_nonblocking(false).unwrap();
+    }
+
+    #[test]
+    fn a_paused_connection_is_continued_by_the_session_that_adopts_it() {
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let base = dirs[0].path().join("owner");
+        let mut predecessor = test_session(dirs[0].path(), test_pool());
+        *predecessor.service.owner.lock().unwrap() =
+            Some(SessionOwner::acquire(&base, true).unwrap());
+        let mut kernel = kernel_ends(&mut predecessor, 1).remove(0);
+        kernel.write_all(&request(NBD_CMD_READ, 7)).unwrap();
+        assert_eq!(read_reply(&mut kernel), 7);
+
+        let sockets = predecessor.service.pause(Duration::from_secs(2)).unwrap();
+        assert_eq!(sockets.len(), 1);
+        kernel.write_all(&request(NBD_CMD_READ, 8)).unwrap();
+
+        let mut successor = test_session(dirs[1].path(), test_pool());
+        successor.adopt(sockets).unwrap();
+        predecessor.service.release().unwrap();
+        assert!(predecessor.is_released());
+        assert!(SessionOwner::acquire(&base, false).is_ok());
+        assert_unanswered(&kernel);
+
+        successor.service.resume().unwrap();
+        assert_eq!(read_reply(&mut kernel), 8);
+        kernel.write_all(&request(NBD_CMD_READ, 9)).unwrap();
+        assert_eq!(read_reply(&mut kernel), 9);
+        successor.cancel().unwrap();
+        predecessor.cancel().unwrap();
+    }
+
+    #[test]
+    fn a_pause_waits_for_reads_in_flight_and_serving_resumes_when_it_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(FetchPool::new(1).unwrap());
+        let (unblock, busy) = std::sync::mpsc::channel::<()>();
+        pool.execute(move || busy.recv().unwrap());
+        let mut session = test_session(dir.path(), pool);
+        let (kernel, user) = session.start(1).unwrap().remove(0);
+        let mut kernel = UnixStream::from(kernel);
+        kernel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        kernel.write_all(&request(NBD_CMD_READ, 7)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unread(&user) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let paused = session.service.pause(Duration::from_millis(50));
+        assert_eq!(
+            paused.unwrap_err().io_error().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+        session.service.resume().unwrap();
+        unblock.send(()).unwrap();
+        assert_eq!(read_reply(&mut kernel), 7);
+        kernel.write_all(&request(NBD_CMD_READ, 8)).unwrap();
+        assert_eq!(read_reply(&mut kernel), 8);
+        session.cancel().unwrap();
+    }
+
+    #[test]
+    fn detaching_an_adopted_session_leaves_the_connection_to_the_resumed_predecessor() {
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let mut predecessor = test_session(dirs[0].path(), test_pool());
+        let mut kernel = kernel_ends(&mut predecessor, 1).remove(0);
+        let sockets = predecessor.service.pause(Duration::from_secs(2)).unwrap();
+
+        let mut successor = test_session(dirs[1].path(), test_pool());
+        successor.adopt(sockets).unwrap();
+        successor.detach().unwrap();
+        predecessor.service.resume().unwrap();
+        kernel.write_all(&request(NBD_CMD_READ, 7)).unwrap();
+        assert_eq!(read_reply(&mut kernel), 7);
+        predecessor.cancel().unwrap();
+    }
+
+    #[test]
+    fn unaccepted_socket_is_detected_after_dropping_the_kernel_endpoint() {
+        let (user, kernel) = UnixStream::pair().unwrap();
+        assert!(!peer_closed(&user).unwrap());
+        drop(kernel);
+        assert!(peer_closed(&user).unwrap());
     }
 
     #[test]

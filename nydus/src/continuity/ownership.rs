@@ -166,8 +166,8 @@ impl SessionOwner {
         }
     }
 
-    /// Reads the record without the lifetime lock. Callers must hold the startup lock,
-    /// which excludes fresh startup, the only writer.
+    /// Reads the record without the lifetime lock, which a live owner may still hold.
+    /// Callers must hold the startup lock.
     pub(crate) fn peek<T: DeserializeOwned>(base: &Path) -> Result<T> {
         let path = state_path(base, ".owner");
         let file = File::options()

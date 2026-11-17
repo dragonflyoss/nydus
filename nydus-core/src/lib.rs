@@ -298,6 +298,11 @@ impl NydusCore {
         &self.ondemand_recorder
     }
 
+    /// Returns the identity of the opened image metadata for frontend continuity.
+    pub fn image_digest(&self) -> [u8; 32] {
+        self.reader.image_digest()
+    }
+
     /// Return the size of the flattened device view.
     pub fn flat_size(&self) -> u64 {
         self.address_layout.size()

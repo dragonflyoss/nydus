@@ -1,12 +1,13 @@
 use clap::Parser;
 use nydus::error::{Context, Result};
-use nydus::nbd::{service, NbdCore, NbdOptions};
+use nydus::nbd::{upgrade::Startup, NbdCore, NbdOptions};
 use nydus::pool::FetchPool;
 use nydus::signal;
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::Level;
 
@@ -44,7 +45,7 @@ pub struct NbdCommand {
     #[arg(
         long,
         env = "NYDUS_NBD_THREADS",
-        help = "Specify the number of kernel connections (blk-mq hardware queues), each with its own socket pair and request reader; reads run on the --fetch-concurrency pool. Defaults to the available CPU count, capped at 16"
+        help = "Specify the number of kernel connections (blk-mq hardware queues), 1 to 16, each with its own socket pair and request reader; reads run on the --fetch-concurrency pool. Defaults to the available CPU count, capped at 16; inherited during takeover and recovery"
     )]
     threads: Option<NonZeroUsize>,
 
@@ -60,9 +61,24 @@ pub struct NbdCommand {
         long,
         default_value_t = NonZeroU64::new(60).unwrap(),
         env = "NYDUS_NBD_TIMEOUT",
-        help = "Specify the seconds the kernel NBD driver waits for one reply before retrying the request. Must exceed the worst-case cold fetch of a single read from the backend (registry latency included). Zero is rejected: the kernel would silently keep its own default"
+        help = "Specify the seconds the kernel NBD driver waits for one reply before retrying the request. Must exceed the worst-case cold fetch of a single read from the backend (registry latency included). Zero is rejected: the kernel would silently keep its own default. Inherited during takeover and recovery"
     )]
     timeout: NonZeroU64,
+
+    #[arg(
+        long,
+        default_value_t = 60,
+        env = "NYDUS_NBD_DEAD_CONN_TIMEOUT",
+        help = "Specify the seconds I/O stays queued while no connection is alive, as until a crashed daemon is restarted; once it expires, I/O fails until a daemon reattaches. Applied when a session is created and inherited during takeover and recovery"
+    )]
+    dead_conn_timeout: u64,
+
+    #[arg(
+        long,
+        env = "NYDUS_NBD_APISERVER",
+        help = "Specify an optional Unix HTTP endpoint for metrics, tracing and automatic hot upgrade, e.g. unix:///run/nydus/nbd0.sock"
+    )]
+    apiserver: Option<String>,
 
     #[arg(
         long,
@@ -121,8 +137,14 @@ impl NbdCommand {
     /// Executes the nbd sub command, exporting the nydus image as a block
     /// device through the NBD protocol until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
-        // Register the termination signals (TERM set + SIGHUP).
+        // Register the termination signals (TERM set + SIGHUP) and handle them from the start,
+        // so a signal during startup cancels it instead of waiting for the session to serve.
         let signals = signal::register_termination_signals()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let requested = stop.clone();
+        let signal_thread = signal::spawn_signal_thread("nbd", signals, move || {
+            requested.store(true, Ordering::Release);
+        })?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -134,29 +156,37 @@ impl NbdCommand {
             self.console,
         );
 
-        // Load the storage config.
-        let config = Config::load(&self.config)?;
-
-        // Runs the NBD service until shutdown.
-        self.run(signals, config)
+        // Load the storage config and run the NBD service until shutdown.
+        let result = Config::load(&self.config).and_then(|config| self.run(stop, config));
+        signal_thread.shutdown()?;
+        result
     }
 
-    /// Runs the NBD service: builds the core, attaches the device, spawns
-    /// the workers, optionally mounts the device, and serves until a
-    /// termination signal stops it.
-    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
+    /// Runs the NBD service: builds the core, then attaches, takes over or
+    /// recovers the session on the device and serves it until a termination
+    /// signal, a release to a successor or a failure.
+    fn run(&self, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
+        let runtime_dir = config.runtime_dir.clone();
         let core =
             Arc::new(NbdCore::new(&self.bootstrap, config).context("failed to build nbd core")?);
-        service::serve(
-            core,
-            &self.device,
+        let api_socket = self
+            .apiserver
+            .as_deref()
+            .map(nydus::parse_unix_address)
+            .transpose()?;
+        let startup = Startup::new(
+            std::path::Path::new(&self.device),
             self.mountpoint.as_deref(),
-            &NbdOptions {
+            &runtime_dir,
+            api_socket,
+            NbdOptions {
                 connections: self.threads.unwrap_or_else(default_nbd_threads).get(),
                 timeout_secs: self.timeout.get(),
+                dead_conn_timeout_secs: self.dead_conn_timeout,
             },
-            Arc::new(FetchPool::new(self.fetch_concurrency.get())?),
-            signals,
-        )
+            core.core(),
+        )?;
+        let pool = Arc::new(FetchPool::new(self.fetch_concurrency.get())?);
+        startup.start(core, pool, stop.clone())?.serve(stop)
     }
 }
