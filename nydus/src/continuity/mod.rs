@@ -49,7 +49,11 @@
 //! | Handoff | opaque [`wire::Transfer`] over the control socket | predecessor releases at `HANDOFF_BEGIN` |
 //! | Rollback | until READY | none |
 //! | Crash protection | a Recovery Holder retains the transfer; needs a session ID | the kernel keeps the resource; always |
-//! | Example | FUSE | NBD |
+//! | Example | FUSE, NBD | none yet |
+//!
+//! [`Identity::RETAINED`] is independent of the handoff: a transfer frontend
+//! whose resource the kernel keeps across a crash, such as NBD, hands over
+//! by transfer but recovers by reopening the resource, without a Holder.
 //!
 //! # Reading order
 //!
@@ -96,15 +100,18 @@ pub trait Identity:
 {
     const CONTROL: crate::api_server::ControlProtocol;
     const MODE: Mode;
+    /// Whether the kernel keeps the resource when its owner crashes, so that a restart
+    /// reopens it without a transfer from a Recovery Holder.
+    const RETAINED: bool = matches!(Self::MODE, Mode::Kernel);
 
     fn pid(&self) -> u32;
     fn version(&self) -> &str;
     fn check(&self, peer: &Self) -> Result<()>;
 
-    /// Whether a crash leaves the session recoverable. A transfer session is protected
-    /// only when it has a Holder session ID.
+    /// Whether a crash leaves the session recoverable. A session the kernel does not
+    /// retain is protected only when it has a Holder session ID.
     fn protected(session_id: Option<uuid::Uuid>) -> bool {
-        Self::MODE == Mode::Kernel || session_id.is_some()
+        Self::RETAINED || session_id.is_some()
     }
 
     fn check_pid(&self, authenticated: u32) -> Result<()> {

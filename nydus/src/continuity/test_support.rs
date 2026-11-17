@@ -1,7 +1,9 @@
 //! Minimal frontends for exercising the framework without FUSE or NBD.
 //!
-//! `TestInfo<KERNEL>` selects the mode: `false` behaves like FUSE
-//! ([`Mode::Transfer`]), `true` like NBD ([`Mode::Kernel`]). `TestSession`
+//! `TestInfo<KERNEL>` selects the mode: `false` hands over by transfer
+//! ([`Mode::Transfer`]), `true` by release and reopen ([`Mode::Kernel`]).
+//! `RETAINED` defaults to `KERNEL`; `TestInfo<false, true>` is a transfer
+//! frontend whose resource the kernel retains, like NBD. `TestSession`
 //! and the `TestFrontend` in `startup.rs` push one word per framework callback
 //! into a shared `events` list, so tests assert ordering by comparing lists.
 
@@ -21,10 +23,10 @@ use crate::continuity::ownership::SessionOwner;
 use crate::continuity::wire::{ProtocolDeadline, Transfer};
 use crate::continuity::{Identity, Mode, SessionLifecycle};
 
-/// A test identity whose mode is selected by `KERNEL`.
+/// A test identity whose mode is selected by `KERNEL` and whose crash recovery by `RETAINED`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TestInfo<const KERNEL: bool> {
+pub(crate) struct TestInfo<const KERNEL: bool, const RETAINED: bool = KERNEL> {
     pub(crate) pid: u32,
     pub(crate) resource: String,
 }
@@ -32,7 +34,7 @@ pub(crate) struct TestInfo<const KERNEL: bool> {
 pub(crate) type LiveInfo = TestInfo<false>;
 pub(crate) type KernelInfo = TestInfo<true>;
 
-impl<const KERNEL: bool> TestInfo<KERNEL> {
+impl<const KERNEL: bool, const RETAINED: bool> TestInfo<KERNEL, RETAINED> {
     pub(crate) fn new() -> Self {
         Self {
             pid: std::process::id(),
@@ -41,12 +43,13 @@ impl<const KERNEL: bool> TestInfo<KERNEL> {
     }
 }
 
-impl<const KERNEL: bool> Identity for TestInfo<KERNEL> {
+impl<const KERNEL: bool, const RETAINED: bool> Identity for TestInfo<KERNEL, RETAINED> {
     const CONTROL: crate::api_server::ControlProtocol = crate::api_server::ControlProtocol {
         path: "/resource/control",
         token: "nydus-resource-control/1",
     };
     const MODE: Mode = if KERNEL { Mode::Kernel } else { Mode::Transfer };
+    const RETAINED: bool = RETAINED;
     fn pid(&self) -> u32 {
         self.pid
     }
@@ -62,7 +65,7 @@ impl<const KERNEL: bool> Identity for TestInfo<KERNEL> {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct TestSession<const KERNEL: bool> {
+pub(crate) struct TestSession<const KERNEL: bool, const RETAINED: bool = KERNEL> {
     pub(crate) lifecycle: SessionLifecycle,
     pub(crate) session_id: Option<Uuid>,
     pub(crate) events: Arc<Mutex<Vec<&'static str>>>,
@@ -70,15 +73,19 @@ pub(crate) struct TestSession<const KERNEL: bool> {
     pub(crate) fail_release: bool,
 }
 
-impl<const KERNEL: bool> SessionControl for TestSession<KERNEL> {
-    type Identity = TestInfo<KERNEL>;
+impl<const KERNEL: bool, const RETAINED: bool> SessionControl for TestSession<KERNEL, RETAINED> {
+    type Identity = TestInfo<KERNEL, RETAINED>;
     fn lifecycle(&self) -> SessionLifecycle {
         self.lifecycle.clone()
     }
     fn session_id(&self) -> Option<Uuid> {
         self.session_id
     }
-    fn prepare(&self, _info: &TestInfo<KERNEL>, _timeout: Duration) -> Result<Option<Transfer>> {
+    fn prepare(
+        &self,
+        _info: &TestInfo<KERNEL, RETAINED>,
+        _timeout: Duration,
+    ) -> Result<Option<Transfer>> {
         self.events.lock().unwrap().push("prepare");
         if KERNEL {
             return Ok(None);

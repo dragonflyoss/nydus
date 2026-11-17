@@ -15,8 +15,8 @@ use super::{holder, Identity, Mode, HANDOFF_TIMEOUT};
 
 pub enum Open<R> {
     Fresh,
-    /// `transfer` is present only in [`Mode::Transfer`]; `record` is absent while a live
-    /// predecessor still owns it.
+    /// `transfer` is absent when a resource the kernel retained is reopened; `record` is
+    /// absent while a live predecessor still owns it.
     Adopt {
         transfer: Option<Transfer>,
         record: Option<R>,
@@ -283,7 +283,7 @@ impl<I: Identity> Startup<I> {
             }
             return self.start_fresh(frontend, owner);
         };
-        if I::MODE == Mode::Transfer && transfer.is_none() {
+        if !I::RETAINED && transfer.is_none() {
             return Err(Error::Runtime(
                 "an existing resource has no recovery available; refusing fresh startup".into(),
             ));
@@ -461,9 +461,9 @@ mod tests {
         metrics, ondemand, KernelInfo, LiveInfo, TestInfo, TestSession,
     };
 
-    struct TestFrontend<const KERNEL: bool> {
+    struct TestFrontend<const KERNEL: bool, const RETAINED: bool = KERNEL> {
         base: PathBuf,
-        info: TestInfo<KERNEL>,
+        info: TestInfo<KERNEL, RETAINED>,
         session_id: Option<Uuid>,
         mounted: Arc<AtomicBool>,
         events: Arc<Mutex<Vec<&'static str>>>,
@@ -471,29 +471,29 @@ mod tests {
         fail_activation: bool,
     }
 
-    struct TestRunning<const KERNEL: bool> {
-        control: TestSession<KERNEL>,
+    struct TestRunning<const KERNEL: bool, const RETAINED: bool = KERNEL> {
+        control: TestSession<KERNEL, RETAINED>,
         fail_recovery: bool,
         fail_activation: bool,
     }
 
-    impl<const KERNEL: bool> Frontend for TestFrontend<KERNEL> {
-        type Identity = TestInfo<KERNEL>;
+    impl<const KERNEL: bool, const RETAINED: bool> Frontend for TestFrontend<KERNEL, RETAINED> {
+        type Identity = TestInfo<KERNEL, RETAINED>;
         type Resource = u64;
         type Record = u64;
-        type Session = TestRunning<KERNEL>;
-        type Control = TestSession<KERNEL>;
+        type Session = TestRunning<KERNEL, RETAINED>;
+        type Control = TestSession<KERNEL, RETAINED>;
 
         fn inspect(&self) -> Result<Option<u64>> {
             Ok(self.mounted.load(Ordering::SeqCst).then_some(1))
         }
-        fn prepare(&mut self, _peer: &TestInfo<KERNEL>) -> Result<()> {
+        fn prepare(&mut self, _peer: &TestInfo<KERNEL, RETAINED>) -> Result<()> {
             self.events.lock().unwrap().push("local-prepare");
             Ok(())
         }
         fn validate_record(
             &self,
-            _info: &TestInfo<KERNEL>,
+            _info: &TestInfo<KERNEL, RETAINED>,
             record: &u64,
             resource: &u64,
         ) -> Result<Option<Uuid>> {
@@ -505,7 +505,7 @@ mod tests {
         fn validate_fresh(&self, _previous: Option<&u64>) -> Result<()> {
             Ok(())
         }
-        fn open(&mut self, how: Open<u64>) -> Result<TestRunning<KERNEL>> {
+        fn open(&mut self, how: Open<u64>) -> Result<TestRunning<KERNEL, RETAINED>> {
             assert!(SessionOwner::acquire(&self.base, false).is_err());
             if let Open::Adopt {
                 transfer: None,
@@ -513,7 +513,7 @@ mod tests {
                 ..
             } = how
             {
-                assert!(KERNEL);
+                assert!(RETAINED);
                 assert_eq!(record, Some(1));
             }
             self.events.lock().unwrap().push("open");
@@ -530,21 +530,24 @@ mod tests {
         }
         fn record(
             &self,
-            _info: &TestInfo<KERNEL>,
+            _info: &TestInfo<KERNEL, RETAINED>,
             resource: &u64,
-            _session: &TestRunning<KERNEL>,
+            _session: &TestRunning<KERNEL, RETAINED>,
         ) -> u64 {
             *resource
         }
-        fn control(session: &TestRunning<KERNEL>) -> TestSession<KERNEL> {
+        fn control(session: &TestRunning<KERNEL, RETAINED>) -> TestSession<KERNEL, RETAINED> {
             session.control.clone()
         }
-        fn set_owner(session: &mut TestRunning<KERNEL>, owner: SessionOwner) -> Result<()> {
+        fn set_owner(
+            session: &mut TestRunning<KERNEL, RETAINED>,
+            owner: SessionOwner,
+        ) -> Result<()> {
             *session.control.owner.lock().unwrap() = Some(owner);
             session.control.events.lock().unwrap().push("owner");
             Ok(())
         }
-        fn recover(session: &TestRunning<KERNEL>) -> Result<()> {
+        fn recover(session: &TestRunning<KERNEL, RETAINED>) -> Result<()> {
             assert!(session.control.owner.lock().unwrap().is_some());
             session.control.events.lock().unwrap().push("recover");
             if session.fail_recovery {
@@ -552,7 +555,7 @@ mod tests {
             }
             Ok(())
         }
-        fn activate(session: &TestRunning<KERNEL>) -> Result<()> {
+        fn activate(session: &TestRunning<KERNEL, RETAINED>) -> Result<()> {
             assert!(session.control.owner.lock().unwrap().is_some());
             session.control.events.lock().unwrap().push("activate");
             if session.fail_activation {
@@ -560,13 +563,20 @@ mod tests {
             }
             Ok(())
         }
-        fn stop(session: TestRunning<KERNEL>) -> Result<()> {
+        fn stop(session: TestRunning<KERNEL, RETAINED>) -> Result<()> {
             session.control.events.lock().unwrap().push("stop");
             Ok(())
         }
     }
 
     fn frontend<const KERNEL: bool>(base: &Path, mounted: bool) -> TestFrontend<KERNEL> {
+        frontend_of(base, mounted)
+    }
+
+    fn frontend_of<const KERNEL: bool, const RETAINED: bool>(
+        base: &Path,
+        mounted: bool,
+    ) -> TestFrontend<KERNEL, RETAINED> {
         TestFrontend {
             base: base.into(),
             info: TestInfo::new(),
@@ -676,7 +686,12 @@ mod tests {
     }
 
     #[test]
-    fn kernel_recovery_and_failures_preserve_the_resource_without_early_activation() {
+    fn retained_recovery_and_failures_preserve_the_resource_without_early_activation() {
+        recover_retained_resource::<true>();
+        recover_retained_resource::<false>();
+    }
+
+    fn recover_retained_resource<const KERNEL: bool>() {
         for (fail_recovery, fail_activation) in [(false, false), (true, false), (false, true)] {
             let dir = tempfile::tempdir().unwrap();
             let base = dir.path().join("state/session");
@@ -684,13 +699,13 @@ mod tests {
             let mut owner = SessionOwner::acquire(&base, true).unwrap();
             owner.write(&1u64).unwrap();
             drop(owner);
-            let mut backend = frontend::<true>(&base, true);
+            let mut backend = frontend_of::<KERNEL, true>(&base, true);
             backend.fail_recovery = fail_recovery;
             backend.fail_activation = fail_activation;
             let events = backend.events.clone();
             let resource = backend.mounted.clone();
             let result = Startup {
-                info: KernelInfo::new(),
+                info: TestInfo::<KERNEL, true>::new(),
                 api_socket: None,
                 state_base: base.clone(),
                 holder: None,

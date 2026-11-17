@@ -17,7 +17,7 @@ const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 const FD_TAG: u8 = b'F';
 
 /// The most descriptors one transfer may carry; frontends validate the exact layout.
-const MAX_TRANSFER_FDS: usize = 16;
+pub(crate) const MAX_TRANSFER_FDS: usize = 16;
 
 /// The absolute expiry shared by every step of one protocol transaction.
 #[derive(Clone, Copy)]
