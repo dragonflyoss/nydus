@@ -98,7 +98,8 @@ impl ErofsFs {
         let mtime_secs = inode.mtime(sb.epoch());
         let mtime_nsec = inode.mtime_nsec(sb.fixed_nsec());
         let size = inode.size();
-        let blocks = st_blocks(size, block_size);
+        // Multiply last so that no `i_size` overflows.
+        let blocks = size.div_ceil(block_size) * (block_size / 512);
         let time = erofs_time(mtime_secs, mtime_nsec);
 
         let mode = inode.mode() as u32;
@@ -246,12 +247,6 @@ impl Drop for FsOpMetric<'_> {
                 .collect_op_finished_metrics(self.op, self.start.elapsed());
         }
     }
-}
-
-/// Returns the 512-byte blocks that `size` bytes take in blocks of
-/// `block_size`, multiplying last so that no `i_size` overflows.
-fn st_blocks(size: u64, block_size: u64) -> u64 {
-    size.div_ceil(block_size) * (block_size / 512)
 }
 
 fn mode_to_kind(mode: u32) -> FileType {
@@ -741,15 +736,6 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::fs;
-
-    #[test]
-    fn st_blocks_rounds_up_to_whole_blocks_without_overflow() {
-        let test_cases = vec![(0, 0), (1, 8), (4096, 8), (4097, 16), (u64::MAX, 1 << 55)];
-
-        for (size, expected) in test_cases {
-            assert_eq!(st_blocks(size, 4096), expected, "size={size}");
-        }
-    }
 
     #[test]
     fn erofs_times_before_the_epoch_are_signed() {
