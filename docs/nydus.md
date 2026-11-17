@@ -890,6 +890,13 @@ the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
 `--blob-dir`/`--cache-dir` flags take precedence over the config. See
 [Storage config](#storage-config).
 
+The mount supports file handles (`FUSE_EXPORT_SUPPORT`): `name_to_handle_at`
+and `open_by_handle_at` work on it, and a handle stays valid after the kernel
+evicted the inode under memory pressure, since the inode numbers come from
+the image. An overlayfs on top of
+the mount, or a virtiofsd that keeps file handles instead of open files,
+would otherwise fail with `ESTALE` on files chosen at random.
+
 ### Ublk
 
 `nydus ublk [OPTIONS]`

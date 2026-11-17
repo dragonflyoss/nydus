@@ -140,6 +140,24 @@ impl ErofsFs {
         }
     }
 
+    /// Returns the nid `name` resolves to under the inode `parent_nid`.
+    ///
+    /// "." is the inode itself whatever its type: with FUSE_EXPORT_SUPPORT
+    /// the kernel looks it up on the inode a file handle names, a regular
+    /// file or a symlink included, to get back an inode it evicted. Any other
+    /// name is a dirent, ".." among them, which the kernel looks up to
+    /// reconnect a directory it got from a handle.
+    fn lookup_nid(&self, parent_nid: u64, name: &[u8]) -> io::Result<Option<u64>> {
+        if name == b"." {
+            return Ok(Some(parent_nid));
+        }
+        let parent = self.reader.inode(parent_nid)?;
+        if (parent.mode() as u32 & libc::S_IFMT) != libc::S_IFDIR {
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+        }
+        self.reader.lookup_dir_entry(parent_nid, &parent, name)
+    }
+
     /// Iterate a readdir(plus) page straight from the mapped directory blocks.
     /// Cookies are directory byte offsets, valid for every handle and across
     /// process replacement. The callback receives the next cookie; returning
@@ -278,6 +296,13 @@ impl Filesystem for ErofsFs {
         // following stat of every entry becomes one LOOKUP round trip each.
         let _ = config.add_capabilities(InitFlags::FUSE_PARALLEL_DIROPS);
         let _ = config.add_capabilities(InitFlags::FUSE_CACHE_SYMLINKS);
+        // A file handle names an inode by its number, which the image fixes.
+        // Without this the kernel resolves a handle only while the inode is
+        // in its cache, and fails with ESTALE once memory pressure evicted
+        // it: an overlayfs on top, or anything else that opens by handle,
+        // then loses files at random. With it the kernel asks for the inode
+        // again by looking up "." on it, see lookup.
+        let _ = config.add_capabilities(InitFlags::FUSE_EXPORT_SUPPORT);
         if config
             .add_capabilities(InitFlags::FUSE_NO_OPEN_SUPPORT)
             .is_ok()
@@ -304,11 +329,7 @@ impl Filesystem for ErofsFs {
             return;
         }
         let parent_nid = self.ino_to_nid(parent.0);
-        let found = match self
-            .reader
-            .inode(parent_nid)
-            .and_then(|vi| self.reader.lookup_dir_entry(parent_nid, &vi, target))
-        {
+        let found = match self.lookup_nid(parent_nid, target) {
             Ok(found) => found,
             Err(err) => {
                 m.fail();
@@ -851,6 +872,55 @@ mod tests {
             filesystem.restore_init_flags(negotiated);
             assert_eq!(filesystem.no_open.load(Ordering::Relaxed), no_open);
             assert_eq!(filesystem.no_opendir.load(Ordering::Relaxed), no_opendir);
+        }
+    }
+
+    #[test]
+    fn lookup_nid_resolves_dot_on_every_inode_and_names_only_in_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join("dir")).unwrap();
+        fs::write(source.join("file"), b"data").unwrap();
+        fs::write(source.join("dir/child"), b"").unwrap();
+        std::os::unix::fs::symlink("file", source.join("link")).unwrap();
+        let mut writer = crate::build::plain_blob_writer(
+            fs::File::create(directory.path().join("data")).unwrap(),
+            EROFS_BLOCK_SIZE,
+        );
+        let mut inodes =
+            build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        writer.finish().unwrap();
+        resolve_chunk_addrs(&mut inodes, &writer).unwrap();
+        let bootstrap = directory.path().join("bootstrap");
+        fs::write(
+            &bootstrap,
+            render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap(),
+        )
+        .unwrap();
+        let filesystem = ErofsFs::new(Arc::new(
+            ErofsReader::open_metadata_only(&bootstrap).unwrap(),
+        ))
+        .unwrap();
+        let root = filesystem.reader.superblock().root_nid();
+        let nid = |parent, name: &str| {
+            filesystem
+                .lookup_nid(parent, name.as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        let (file, dir, link) = (nid(root, "file"), nid(root, "dir"), nid(root, "link"));
+
+        for inode in [root, file, dir, link, nid(dir, "child")] {
+            assert_eq!(nid(inode, "."), inode);
+        }
+        assert_eq!(nid(dir, ".."), root);
+        assert_eq!(nid(root, ".."), root);
+        assert_eq!(filesystem.lookup_nid(root, b"missing").unwrap(), None);
+        for inode in [file, link] {
+            for name in ["..", "child"] {
+                let err = filesystem.lookup_nid(inode, name.as_bytes()).unwrap_err();
+                assert_eq!(err.raw_os_error(), Some(libc::ENOTDIR), "{name}");
+            }
         }
     }
 

@@ -78,6 +78,7 @@ var ownCases = []struct {
 }{
 	{name: "BackendFailure", test: testBackendFailure},
 	{name: "Lifecycle", test: testLifecycle},
+	{name: "FileHandle", test: testFileHandle},
 }
 
 func semanticImage(t *testing.T) fixture.Image {
