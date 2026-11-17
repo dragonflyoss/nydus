@@ -4,7 +4,7 @@ use nydus::mount::{umount2, unmount};
 use nydus::nbd::{mount_nbd, NbdCore, NbdService};
 use nydus::signal;
 use nydus_config::Config;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_tracing, log_failure};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,7 +129,7 @@ impl NbdCommand {
 
         // Load the storage config and run the NBD service until shutdown.
         let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        crate::log_failure("nbd", result)
+        log_failure("nbd", result)
     }
 
     /// Runs the NBD service: builds the core, attaches the device, spawns

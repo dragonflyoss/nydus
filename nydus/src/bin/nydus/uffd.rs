@@ -3,7 +3,7 @@ use nydus::error::{Context, Result};
 use nydus::signal;
 use nydus::uffd::{UffdCore, UffdService};
 use nydus_config::Config;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_tracing, log_failure};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,7 +97,7 @@ impl UffdCommand {
 
         // Load the storage config and run the userfaultfd service until shutdown.
         let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        crate::log_failure("uffd", result)
+        log_failure("uffd", result)
     }
 
     /// Runs the userfaultfd service: builds the core, spawns the signal

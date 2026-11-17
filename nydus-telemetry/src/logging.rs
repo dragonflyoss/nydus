@@ -1,8 +1,10 @@
 use rolling_file::*;
+use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
+use std::iter;
 use std::path::PathBuf;
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 pub use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder};
 use tracing_subscriber::{
@@ -120,6 +122,19 @@ pub fn init_tracing(
     Ok(guards)
 }
 
+/// Logs the error the daemon `name` stops with, its causes included, and
+/// returns `result` as it is. Call it while the guards of [`init_tracing`]
+/// are alive: the error is otherwise printed only on stderr, which whoever
+/// starts a daemon in the background drops.
+pub fn log_failure<T, E: Error + 'static>(name: &str, result: Result<T, E>) -> Result<T, E> {
+    result.inspect_err(|err| {
+        let causes: Vec<String> = iter::successors(Some(err as &dyn Error), |&err| err.source())
+            .map(ToString::to_string)
+            .collect();
+        error!("nydus {name} failed: {}", causes.join(": "));
+    })
+}
+
 /// Initializes the tracing system for command line tools, which logs to
 /// stderr and does not log to files. Diagnostics stay off stdout so command
 /// payloads and reports (tar streams, tables) remain clean.
@@ -192,5 +207,42 @@ mod tests {
             .unwrap();
 
         assert!(err.to_string().contains("failed to create log directory"));
+    }
+
+    #[test]
+    fn log_failure_logs_an_error_with_its_causes_and_returns_the_result() {
+        #[derive(Debug)]
+        struct Failure(&'static str, Option<Box<Failure>>);
+        impl std::fmt::Display for Failure {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl Error for Failure {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                self.1.as_deref().map(|cause| cause as _)
+            }
+        }
+
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.reopen().unwrap())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(log_failure("fuse", Ok::<_, Failure>(())).is_ok());
+            assert!(fs::read_to_string(log.path()).unwrap().is_empty());
+
+            let cause = Failure("device busy", None);
+            let err = Failure("failed to mount", Some(Box::new(cause)));
+            assert!(log_failure("fuse", Err::<(), _>(err)).is_err());
+        });
+
+        let logged = fs::read_to_string(log.path()).unwrap();
+        assert!(
+            logged.contains("ERROR")
+                && logged.contains("nydus fuse failed: failed to mount: device busy"),
+            "{logged}"
+        );
     }
 }

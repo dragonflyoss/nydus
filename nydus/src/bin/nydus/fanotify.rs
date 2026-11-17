@@ -4,7 +4,7 @@ use nydus::fanotify::{deny_queued_events, mount_erofs, FanotifyCore, FanotifySer
 use nydus::mount::unmount;
 use nydus::signal;
 use nydus_config::Config;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_tracing, log_failure};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -137,7 +137,7 @@ impl FanotifyCommand {
 
         // Load the storage config and run the fanotify service until shutdown.
         let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        crate::log_failure("fanotify", result)
+        log_failure("fanotify", result)
     }
 
     /// Runs the fanotify service: builds the core, spawns the event loop,

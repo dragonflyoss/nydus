@@ -5,7 +5,7 @@ use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
 use nydus_config::Config;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_tracing, log_failure};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn, Level};
@@ -137,7 +137,7 @@ impl UblkCommand {
 
         // Load the storage config and run the ublk service until shutdown.
         let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        crate::log_failure("ublk", result)
+        log_failure("ublk", result)
     }
 
     /// Runs the ublk service: builds the core, attaches the device, prints

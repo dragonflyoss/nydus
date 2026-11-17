@@ -11,7 +11,7 @@ use nydus_config::{
 };
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_tracing, log_failure};
 use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -171,7 +171,7 @@ impl FuseCommand {
             self.console,
         )?;
 
-        crate::log_failure("fuse", self.serve(shutdown, api_socket))
+        log_failure("fuse", self.serve(shutdown, api_socket))
     }
 
     /// Mounts the image and serves it until `shutdown` is set.

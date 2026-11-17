@@ -4,7 +4,7 @@ use nydus::fileio::{image_path, mount_image_file, warm_bootstrap, FileioService,
 use nydus::signal;
 use nydus_config::Config;
 use nydus_core::flat::{FlatImage, BLOCK_SIZE};
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_tracing, log_failure};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -133,7 +133,7 @@ impl FileioCommand {
         )?;
 
         let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        crate::log_failure("fileio", result)
+        log_failure("fileio", result)
     }
 
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
