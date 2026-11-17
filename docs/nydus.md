@@ -866,6 +866,10 @@ Options:
 		Specify the max number of log files [env: NYDUS_FUSE_LOG_MAX_FILES=] [default: 6]
 ```
 
+Every daemon subcommand logs to a file under `--log-dir`. The file is rolled
+every hour and when it reaches 10 MiB, and `--log-max-files` rolled files are
+kept, so a daemon that logs a line per failed request cannot fill the disk.
+
 Supported forms:
 
 - `nydus fuse --blob <blob> --mountpoint <mountpoint>`
