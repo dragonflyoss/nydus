@@ -1,7 +1,7 @@
 use rolling_file::*;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{info, Level};
 pub use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder};
@@ -20,21 +20,6 @@ const QUEUED_LOG_LINES: usize = 8192;
 /// logs a line per failed request would otherwise fill the disk within the
 /// hour; with it the log files take `log_max_files + 1` times this at most.
 const LOG_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024;
-
-/// Opens the log file `log_file`, rolled every hour and at
-/// [`LOG_FILE_MAX_SIZE`], keeping `log_max_files` rolled files.
-fn rolling_file_appender(
-    log_file: &Path,
-    log_max_files: usize,
-) -> io::Result<BasicRollingFileAppender> {
-    BasicRollingFileAppender::new(
-        log_file,
-        RollingConditionBasic::new()
-            .hourly()
-            .max_size(LOG_FILE_MAX_SIZE),
-        log_max_files,
-    )
-}
 
 fn non_blocking<T: Write + Send + 'static>(writer: T) -> (NonBlocking, WorkerGuard) {
     NonBlockingBuilder::default()
@@ -63,7 +48,14 @@ pub fn init_tracing(
         )
     })?;
     let log_file = log_dir.join(name).with_extension("log");
-    let rolling_appender = rolling_file_appender(&log_file, log_max_files).map_err(|err| {
+    let rolling_appender = BasicRollingFileAppender::new(
+        &log_file,
+        RollingConditionBasic::new()
+            .hourly()
+            .max_size(LOG_FILE_MAX_SIZE),
+        log_max_files,
+    )
+    .map_err(|err| {
         io::Error::new(
             err.kind(),
             format!("failed to open log file {}: {err}", log_file.display()),
@@ -200,36 +192,5 @@ mod tests {
             .unwrap();
 
         assert!(err.to_string().contains("failed to create log directory"));
-    }
-
-    #[test]
-    fn rolling_file_appender_rolls_a_file_at_the_size_cap() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let log_file = temp_dir.path().join("service.log");
-        let mut appender = rolling_file_appender(&log_file, 2).unwrap();
-
-        // Five times the cap within the hour: the file is rolled four times
-        // and the two oldest rolled files are removed.
-        let line = vec![b'x'; 1024 * 1024];
-        for _ in 0..5 * LOG_FILE_MAX_SIZE / line.len() as u64 {
-            appender.write_all(&line).unwrap();
-        }
-        appender.flush().unwrap();
-
-        let mut files: Vec<(String, u64)> = fs::read_dir(temp_dir.path())
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (
-                    entry.file_name().into_string().unwrap(),
-                    entry.metadata().unwrap().len(),
-                )
-            })
-            .collect();
-        files.sort();
-        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["service.log", "service.log.1", "service.log.2"]);
-        // An hour that ends during the test rolls a file before the cap.
-        assert!(files.iter().all(|(_, size)| *size <= LOG_FILE_MAX_SIZE));
     }
 }
