@@ -1216,14 +1216,16 @@ backend:
     # base64-encoded `username:password`
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     http:
-      request_timeout: 5s
+      request_timeout: 1m
+      request_read_timeout: 5s
       max_retries: 3
       tls:
         skip_verify: false
         ca_cert: /etc/nydus/certs/registry-ca.pem
     # dragonfly:
     #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
-    #   request_timeout: 5s
+    #   request_timeout: 1m
+    #   request_read_timeout: 5s
     #   max_retries: 1
     #   fallback_rate_limit: 1
 ```
@@ -1244,9 +1246,14 @@ Fields under `backend.config`:
 - `http` (optional, defaults apply): the HTTP client settings of every
 	request to the origin registry — timeouts, retries, and TLS trust — the
 	reads a Dragonfly backend falls back to the origin with included.
-	- `request_timeout` (default `5s`): the timeout of a request to the origin
-		registry in humantime format (e.g. `5s`, `1m`), greater than zero. Kept
-		short because a read holds the
+	- `request_timeout` (default `1m`): the timeout of a request to the origin
+		registry, from connecting to the end of its body, in humantime format
+		(e.g. `30s`, `1m`), greater than zero. It counts the time the cache
+		takes to decode and write the body as it arrives.
+	- `request_read_timeout` (default `5s`): the read timeout of a request to
+		the origin registry, the longest wait for the connection, the response
+		and each part of its body, greater than zero. The time the cache takes
+		between two parts does not count. Kept short because a read holds the
 		chunk group's cross-process fetch claim for its whole duration, and what
 		queues up behind that claim are reader threads in the other instances
 		sharing the cache directory.
@@ -1303,8 +1310,12 @@ Fields under `backend.config`:
 		with the scheme, e.g. `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
 		It is parsed as a URL, so spellings of one address, such as with a
 		trailing `/` or an uppercase host, share one seed peer cache file.
-	- `request_timeout` (default `5s`): the timeout of each attempt of a
-		request through the seed peers, one chunk group per request.
+	- `request_timeout` (default `1m`): the timeout of each attempt of a
+		request through the seed peers, from connecting to the end of its body,
+		greater than zero.
+	- `request_read_timeout` (default `5s`): the read timeout of each attempt,
+		the longest wait for the connection, the response and each part of its
+		body, greater than zero.
 	- `max_retries` (default `1`, at most `3`): Dragonfly retries of an
 		on-demand read on a transient failure, each on the next seed peer after
 		an exponential backoff. Prefetch reads never retry.
@@ -1333,7 +1344,7 @@ Fields under `backend.config`:
 	still read from its replica seed peers only: from the healthy one when
 	the other fails, and when both do, an on-demand read goes to the origin
 	while a prefetch read fails. Without a seed peer, an on-demand read
-	waits at most `request_timeout` before going to the origin, and a
+	waits at most `request_read_timeout` before going to the origin, and a
 	prefetch read waits at most `prefetch.request_timeout` before failing.
 	nydus creates the subdirectory with mode `0o755` at startup and fails to
 	start when it cannot. A process that cannot open the cache file, such as
@@ -2681,7 +2692,7 @@ than one per instance.
 - Waiting blocks in the kernel rather than polling, so the handover follows the
 	release immediately. What bounds the wait is the fetcher, not the waiter:
 	every backend read carries a timeout (hence the short registry
-	`request_timeout` default), so a claim is always released. **A claim must never be held across
+	`request_read_timeout` default, with `request_timeout` above it), so a claim is always released. **A claim must never be held across
 	an operation that cannot time out** — what queues up behind it are reader
 	threads. The wait is interruptible, so shutdown still works.
 - The in-process fetch flight elects a single fetcher per group before any of

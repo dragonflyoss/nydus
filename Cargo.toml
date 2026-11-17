@@ -6,6 +6,8 @@ members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error"
 # (Zephyrcf/fuser branch session-handoff-and-recovery).
 [patch.crates-io]
 fuser = { git = "https://github.com/Zephyrcf/fuser.git", rev = "675d99605556c609079d23c5600222cd5e569922" }
+# Use the local dragonfly-sdk until dragonfly-client-request 1.15.0 is published.
+dragonfly-client-request = { path = "../dragonfly-sdk/client-request/rust" }
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env", "string"] }

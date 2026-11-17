@@ -513,6 +513,7 @@ mod tests {
     async fn authenticate_answers_a_basic_challenge_from_the_config() {
         let http = Http::new(
             Duration::from_secs(5),
+            Duration::from_secs(5),
             3,
             None,
             &TlsConfig::default(),
@@ -572,6 +573,7 @@ mod tests {
             }
         });
         let http = Http::new(
+            Duration::from_secs(5),
             Duration::from_secs(5),
             3,
             None,

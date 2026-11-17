@@ -46,6 +46,7 @@ impl Http {
     /// given.
     pub(crate) fn new(
         request_timeout: Duration,
+        request_read_timeout: Duration,
         max_retries: u32,
         proxy: Option<&ProxyConfig>,
         tls: &TlsConfig,
@@ -69,9 +70,12 @@ impl Http {
             None => builder.no_proxy(),
         };
 
+        // Bound the whole request, and each wait within it: for the
+        // connection, the response and every part of the body.
         builder = builder
             .timeout(request_timeout)
-            .connect_timeout(request_timeout);
+            .read_timeout(request_read_timeout)
+            .connect_timeout(request_read_timeout);
 
         if tls.skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
@@ -231,6 +235,7 @@ mod tests {
         let retry_interval = Duration::from_secs(60 * 60);
         let http = Http::new(
             Duration::from_secs(5),
+            Duration::from_secs(5),
             0,
             None,
             &TlsConfig::default(),
@@ -250,6 +255,7 @@ mod tests {
         let tls = TlsConfig::default();
         assert!(Http::new(
             Duration::from_secs(5),
+            Duration::from_secs(5),
             3,
             None,
             &tls,
@@ -258,6 +264,7 @@ mod tests {
         )
         .is_ok());
         assert!(Http::new(
+            Duration::from_secs(5),
             Duration::from_secs(5),
             3,
             None,
@@ -339,6 +346,7 @@ mod tests {
         let url = start_https_server(cert).await;
         for (skip_verify, ca_cert, expected) in test_cases {
             let http = Http::new(
+                Duration::from_secs(5),
                 Duration::from_secs(5),
                 0,
                 None,

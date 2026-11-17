@@ -44,11 +44,18 @@ backend:
     # timeouts, retries, and TLS trust, the reads Dragonfly falls back to the
     # origin with included. The whole block and every field are optional.
     http:
-      # Timeout of a request to the origin registry (connect + read), e.g.
-      # `5s` or `1m`, greater than zero. Default: 5s. Kept short because a
-      # read holds its chunk group's fetch claim for its whole duration, and
-      # the readers waiting behind that claim are FUSE worker threads.
-      request_timeout: 5s
+      # Timeout of a request to the origin registry, from connecting to the
+      # end of its body, e.g. `30s` or `1m`, greater than zero. It counts the
+      # time the cache takes to decode and write the body as it arrives.
+      # Default: 1m.
+      request_timeout: 1m
+
+      # Read timeout of a request to the origin registry: the longest wait
+      # for the connection, the response and each part of its body, e.g.
+      # `5s`, greater than zero. Default: 5s. Kept short because a read holds
+      # its chunk group's fetch claim for its whole duration, and the readers
+      # waiting behind that claim are FUSE worker threads.
+      request_read_timeout: 5s
 
       # Maximum number of retry attempts per request, applied by the HTTP
       # client's retry middleware on direct origin requests and on origin
@@ -89,9 +96,16 @@ backend:
     #   # The Dragonfly scheduler service address with the scheme.
     #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
     #
-    #   # Timeout of each attempt of a request through the seed peers, e.g.
-    #   # `5s` or `1m`. Default: 5s.
-    #   request_timeout: 5s
+    #   # Timeout of each attempt of a request through the seed peers, from
+    #   # connecting to the end of its body, e.g. `30s` or `1m`, greater than
+    #   # zero. Default: 1m.
+    #   request_timeout: 1m
+    #
+    #   # Read timeout of each attempt: the longest wait for the connection,
+    #   # the response and each part of its body, e.g. `5s`, greater than
+    #   # zero. An on-demand read waits that long for a seed peer before going
+    #   # to the origin. Default: 5s.
+    #   request_read_timeout: 5s
     #
     #   # Retries of an on-demand read on a transient failure (timeout,
     #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer

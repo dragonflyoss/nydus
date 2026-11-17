@@ -55,11 +55,18 @@ pub fn default_runtime_dir() -> PathBuf {
     PathBuf::from("/run/nydus/")
 }
 
-/// Returns the default timeout of a request to the origin registry. Kept
+/// Returns the default timeout of a request to the origin registry, its body
+/// included.
+#[inline]
+fn default_registry_http_request_timeout() -> Duration {
+    Duration::from_secs(60)
+}
+
+/// Returns the default read timeout of a request to the origin registry. Kept
 /// short because a read holds the chunk group's fetch claim for its whole duration,
 /// and the readers waiting behind that claim are FUSE worker threads.
 #[inline]
-fn default_registry_http_request_timeout() -> Duration {
+fn default_registry_http_request_read_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
@@ -92,9 +99,16 @@ pub fn default_prefetch_retry_interval() -> Duration {
 }
 
 /// Returns the default timeout of each attempt of a request through the
-/// Dragonfly seed peers.
+/// Dragonfly seed peers, its body included.
 #[inline]
 fn default_registry_dragonfly_request_timeout() -> Duration {
+    Duration::from_secs(60)
+}
+
+/// Returns the default read timeout of each attempt of a request through the
+/// Dragonfly seed peers.
+#[inline]
+fn default_registry_dragonfly_request_read_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
@@ -235,15 +249,26 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
-    /// The timeout of a request to the origin registry (connect + read), e.g.
-    /// `5s` or `1m`, greater than zero. A request fetches one chunk group, so
-    /// this bounds a single chunk group download.
+    /// The timeout of a request to the origin registry, from connecting to the
+    /// end of its body, e.g. `30s` or `1m`, greater than zero. It counts the
+    /// time the cache takes to decode and write the body as it arrives.
     #[serde(
         default = "default_registry_http_request_timeout",
         with = "humantime_serde"
     )]
     #[validate(custom(function = "Self::validate_request_timeout"))]
     pub request_timeout: Duration,
+
+    /// The read timeout of a request to the origin registry: the longest wait
+    /// for the connection, the response and each part of its body, e.g. `5s`,
+    /// greater than zero. The time the cache takes between two parts does not
+    /// count.
+    #[serde(
+        default = "default_registry_http_request_read_timeout",
+        with = "humantime_serde"
+    )]
+    #[validate(custom(function = "Self::validate_request_timeout"))]
+    pub request_read_timeout: Duration,
 
     /// The maximum number of retry attempts per request, applied by the HTTP
     /// client's retry middleware. A prefetch read still failing after them is
@@ -292,6 +317,7 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             request_timeout: default_registry_http_request_timeout(),
+            request_read_timeout: default_registry_http_request_read_timeout(),
             max_retries: default_registry_http_max_retries(),
             proxy: None,
             tls: TlsConfig::default(),
@@ -398,14 +424,28 @@ pub struct DragonflyConfig {
     #[validate(custom(function = "Self::validate_scheduler_endpoint"))]
     pub scheduler_endpoint: Url,
 
-    /// The timeout of each attempt of a request through the seed peers, e.g.
-    /// `5s` or `1m`. A request fetches one chunk group, so this bounds a
-    /// single chunk group download from a seed peer.
+    /// The timeout of each attempt of a request through the seed peers, from
+    /// connecting to the end of its body, e.g. `30s` or `1m`, greater than
+    /// zero. It counts the time the cache takes to decode and write the body
+    /// as it arrives.
     #[serde(
         default = "default_registry_dragonfly_request_timeout",
         with = "humantime_serde"
     )]
+    #[validate(custom(function = "HttpConfig::validate_request_timeout"))]
     pub request_timeout: Duration,
+
+    /// The read timeout of each attempt of a request through the seed peers:
+    /// the longest wait for the connection, the response and each part of its
+    /// body, e.g. `5s`, greater than zero. The time the cache takes between
+    /// two parts does not count. An on-demand read waits that long for a seed
+    /// peer before going to the origin.
+    #[serde(
+        default = "default_registry_dragonfly_request_read_timeout",
+        with = "humantime_serde"
+    )]
+    #[validate(custom(function = "HttpConfig::validate_request_timeout"))]
+    pub request_read_timeout: Duration,
 
     /// The maximum number of retries of an on-demand blob `GET` through
     /// Dragonfly on a transient failure (timeout, connection, dfdaemon, `5xx`,
@@ -708,6 +748,7 @@ mod tests {
             Some("bearer-token")
         );
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_read_timeout, Duration::from_secs(3));
         assert_eq!(registry.http.max_retries, 5);
         assert_eq!(
             registry.http.proxy.as_ref().unwrap().addr,
@@ -724,6 +765,7 @@ mod tests {
             "http://127.0.0.1:8002/"
         );
         assert_eq!(dragonfly.request_timeout, Duration::from_secs(10));
+        assert_eq!(dragonfly.request_read_timeout, Duration::from_secs(2));
         assert_eq!(dragonfly.max_retries, 2);
         assert_eq!(dragonfly.fallback_rate_limit, 2);
 
@@ -766,6 +808,7 @@ config:
   registry_token: bearer-token
   http:
     request_timeout: 30s
+    request_read_timeout: 3s
     max_retries: 5
     tls:
       skip_verify: true
@@ -789,6 +832,7 @@ config:
             Some("bearer-token")
         );
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_read_timeout, Duration::from_secs(3));
         assert_eq!(registry.http.max_retries, 5);
         assert!(registry.http.tls.skip_verify);
         assert_eq!(
@@ -832,6 +876,10 @@ config:
             default_registry_dragonfly_request_timeout()
         );
         assert_eq!(
+            defaults.request_read_timeout,
+            default_registry_dragonfly_request_read_timeout()
+        );
+        assert_eq!(
             defaults.max_retries,
             default_registry_dragonfly_max_retries()
         );
@@ -843,11 +891,13 @@ config:
         let yaml = r#"
 scheduler_endpoint: http://127.0.0.1:8002
 request_timeout: 5s
+request_read_timeout: 3s
 max_retries: 0
 fallback_rate_limit: 3
 "#;
         let dragonfly: DragonflyConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(dragonfly.request_timeout, Duration::from_secs(5));
+        assert_eq!(dragonfly.request_read_timeout, Duration::from_secs(3));
         assert_eq!(dragonfly.max_retries, 0);
         assert_eq!(dragonfly.fallback_rate_limit, 3);
     }
@@ -868,6 +918,10 @@ config:
         assert_eq!(
             registry.http.request_timeout,
             default_registry_http_request_timeout()
+        );
+        assert_eq!(
+            registry.http.request_read_timeout,
+            default_registry_http_request_read_timeout()
         );
         assert_eq!(
             registry.http.max_retries,
@@ -1143,6 +1197,16 @@ storage:
                 },
             ),
             (
+                Box::new(HttpConfig {
+                    request_read_timeout: Duration::ZERO,
+                    ..Default::default()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "request_read_timeout: must be greater than 0s");
+                },
+            ),
+            (
                 Box::new(Config {
                     prefetch: PrefetchConfig {
                         concurrent_blob_count: 0,
@@ -1186,6 +1250,26 @@ storage:
                 |result| {
                     let err = result.unwrap_err().to_string();
                     assert!(err.starts_with("max_retries: Validation error: range"));
+                },
+            ),
+            (
+                Box::new(DragonflyConfig {
+                    request_timeout: Duration::ZERO,
+                    ..dragonfly.clone()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "request_timeout: must be greater than 0s");
+                },
+            ),
+            (
+                Box::new(DragonflyConfig {
+                    request_read_timeout: Duration::ZERO,
+                    ..dragonfly.clone()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "request_read_timeout: must be greater than 0s");
                 },
             ),
             (

@@ -34,10 +34,11 @@ type RegistryConfig struct {
 
 // HTTPConfig is the registry backend's HTTP client config.
 type HTTPConfig struct {
-	RequestTimeout string       `json:"request_timeout,omitempty"`
-	MaxRetries     *int         `json:"max_retries,omitempty"`
-	Proxy          *ProxyConfig `json:"proxy,omitempty"`
-	TLS            *TLSConfig   `json:"tls,omitempty"`
+	RequestTimeout     string       `json:"request_timeout,omitempty"`
+	RequestReadTimeout string       `json:"request_read_timeout,omitempty"`
+	MaxRetries         *int         `json:"max_retries,omitempty"`
+	Proxy              *ProxyConfig `json:"proxy,omitempty"`
+	TLS                *TLSConfig   `json:"tls,omitempty"`
 }
 
 // TLSConfig is the registry backend's TLS trust config.
@@ -53,10 +54,11 @@ type ProxyConfig struct {
 
 // DragonflyConfig routes registry reads through the Dragonfly SDK.
 type DragonflyConfig struct {
-	SchedulerEndpoint string `json:"scheduler_endpoint"`
-	RequestTimeout    string `json:"request_timeout,omitempty"`
-	MaxRetries        *int   `json:"max_retries,omitempty"`
-	FallbackRateLimit *int   `json:"fallback_rate_limit,omitempty"`
+	SchedulerEndpoint  string `json:"scheduler_endpoint"`
+	RequestTimeout     string `json:"request_timeout,omitempty"`
+	RequestReadTimeout string `json:"request_read_timeout,omitempty"`
+	MaxRetries         *int   `json:"max_retries,omitempty"`
+	FallbackRateLimit  *int   `json:"fallback_rate_limit,omitempty"`
 }
 
 // RegistryBackend serves blobs from an OCI registry.

@@ -149,6 +149,7 @@ impl Registry {
         let runtime = Arc::new(Runtime::new(netns)?);
         let http = Http::new(
             registry.http.request_timeout,
+            registry.http.request_read_timeout,
             registry.http.max_retries,
             registry.http.proxy.as_ref(),
             &registry.http.tls,
@@ -882,6 +883,7 @@ mod tests {
                 redirects: RedirectCache::new(),
                 http: Http::new(
                     http.request_timeout,
+                    http.request_read_timeout,
                     http.max_retries,
                     None,
                     &http.tls,
@@ -1026,6 +1028,73 @@ mod tests {
     }
 
     #[test]
+    fn origin_read_times_out_a_slow_reader_by_the_request_timeout_only() {
+        let test_cases: Vec<(&str, fn(io::Result<usize>))> = vec![
+            ("request_read_timeout: 1s", |result| {
+                assert_eq!(result.unwrap(), (32 << 20) - 1)
+            }),
+            ("request_timeout: 1s", |result| assert!(result.is_err())),
+        ];
+
+        for (timeout, expect) in test_cases {
+            let blob = vec![7u8; 32 << 20];
+            let origin = OriginStub::serve(&["206 Partial Content"], blob.clone());
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      {timeout}\n",
+                origin.addr
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+            let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
+            let mut head = [0u8; 1];
+            reader.read_exact(&mut head).unwrap();
+            thread::sleep(Duration::from_millis(1500));
+            let mut tail = Vec::new();
+            expect(reader.read_to_end(&mut tail));
+        }
+    }
+
+    #[test]
+    fn origin_read_times_out_once_the_origin_stalls() {
+        let test_cases: Vec<&'static [u8]> = vec![
+            b"",
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\n\r\nab",
+        ];
+
+        for answer in test_cases {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            thread::spawn(move || {
+                use std::io::Write;
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                stream.write_all(answer).unwrap();
+                let _ = stream.read(&mut byte);
+            });
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_read_timeout: 1s\n      max_retries: 0\n"
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+            let mut buf = [0u8; 4];
+            let now = Instant::now();
+            let result = registry
+                .get(&TEST_BLOB_ID, 0, buf.len())
+                .and_then(|mut reader| reader.read_exact(&mut buf));
+
+            assert!(result.is_err());
+            assert!(now.elapsed() >= Duration::from_secs(1));
+        }
+    }
+
+    #[test]
     fn origin_body_that_breaks_off_fails_both_read_kinds() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let origin = OriginStub::serve(&["206 Truncated"], b"abcd".to_vec());
@@ -1040,6 +1109,130 @@ mod tests {
 
             assert!(result.is_err());
             assert_eq!(origin.ranges(), ["bytes=0-3"]);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn seed_peer_read_times_out_a_slow_reader_by_the_request_timeout_only() {
+        let test_cases = vec![("request_read_timeout: 1s", 1), ("request_timeout: 1s", 2)];
+
+        for (timeout, seed_peer_hits) in test_cases {
+            let blob = vec![7u8; 32 << 20];
+            let runtime_dir = tempdir().unwrap();
+            let seed_peer = OriginStub::serve(&["206 Partial Content"], blob.clone());
+            let origin = OriginStub::serve(&["206 Partial Content"], blob.clone());
+            let cache_dir = runtime_dir.path().join("dragonfly");
+            fs::create_dir(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("e87f700bacfeed52.v1.json"),
+                serde_json::json!({
+                    "scheduler_endpoint": "http://127.0.0.1:1/",
+                    "next_refresh_at": humantime_serde::re::humantime::format_rfc3339(
+                        std::time::SystemTime::now() + Duration::from_secs(60)
+                    )
+                    .to_string(),
+                    "seed_peers": [{
+                        "id": "seed-peer-0",
+                        "name": "seed-peer-0",
+                        "hostname": "seed-peer-0",
+                        "ip": "127.0.0.1",
+                        "port": 1,
+                        "proxy_port": seed_peer.addr.port(),
+                        "healthy": true,
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n      {timeout}\n      max_retries: 1\n",
+                runtime_dir.path().display(),
+                origin.addr
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+            let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
+            let mut head = [0u8; 1];
+            reader.read_exact(&mut head).unwrap();
+            thread::sleep(Duration::from_millis(1500));
+            let mut tail = Vec::new();
+            reader.read_to_end(&mut tail).unwrap();
+
+            assert_eq!(tail.len(), blob.len() - 1);
+            assert_eq!(seed_peer.hits(), seed_peer_hits);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn seed_peer_that_stalls_falls_back_to_the_origin_after_the_request_read_timeout() {
+        let test_cases: Vec<&'static [u8]> = vec![
+            b"",
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\n\r\nab",
+        ];
+
+        for answer in test_cases {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let seed_peer_port = listener.local_addr().unwrap().port();
+            thread::spawn(move || {
+                use std::io::Write;
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                stream.write_all(answer).unwrap();
+                let _ = stream.read(&mut byte);
+            });
+            let runtime_dir = tempdir().unwrap();
+            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let cache_dir = runtime_dir.path().join("dragonfly");
+            fs::create_dir(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("e87f700bacfeed52.v1.json"),
+                serde_json::json!({
+                    "scheduler_endpoint": "http://127.0.0.1:1/",
+                    "next_refresh_at": humantime_serde::re::humantime::format_rfc3339(
+                        std::time::SystemTime::now() + Duration::from_secs(60)
+                    )
+                    .to_string(),
+                    "seed_peers": [{
+                        "id": "seed-peer-0",
+                        "name": "seed-peer-0",
+                        "hostname": "seed-peer-0",
+                        "ip": "127.0.0.1",
+                        "port": 1,
+                        "proxy_port": seed_peer_port,
+                        "healthy": true,
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n      request_read_timeout: 1s\n      max_retries: 0\n",
+                runtime_dir.path().display(),
+                origin.addr
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+
+            let now = Instant::now();
+            let mut data = Vec::new();
+            registry
+                .get(&TEST_BLOB_ID, 0, 4)
+                .unwrap()
+                .read_to_end(&mut data)
+                .unwrap();
+
+            assert_eq!(data, b"abcd");
+            assert_eq!(origin.hits(), 1);
+            assert!(now.elapsed() >= Duration::from_secs(1));
+            assert!(now.elapsed() < Duration::from_secs(10));
         }
     }
 
@@ -1229,7 +1422,7 @@ mod tests {
             let _ = stream.read(&mut byte);
         });
         let config: Config = serde_yaml::from_str(&format!(
-            "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_timeout: 60s\n"
+            "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_timeout: 60s\n      request_read_timeout: 60s\n"
         ))
         .unwrap();
         let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
@@ -1406,12 +1599,12 @@ mod tests {
 
     #[cfg(feature = "dragonfly")]
     #[test]
-    fn ondemand_reads_fall_back_within_the_request_timeout_while_the_scheduler_hangs() {
+    fn ondemand_reads_fall_back_within_the_request_read_timeout_while_the_scheduler_hangs() {
         let runtime_dir = tempdir().unwrap();
         let scheduler = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
         let config: Config = serde_yaml::from_str(&format!(
-            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://{}\n      request_timeout: 100ms\n",
+            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://{}\n      request_read_timeout: 100ms\n",
             runtime_dir.path().display(),
             origin.addr,
             scheduler.local_addr().unwrap()

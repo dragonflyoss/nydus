@@ -123,6 +123,7 @@ func TestBearerPrefetchRefresh(t *testing.T) {
 
 	config := image.config(addr)
 	config.HTTP.RequestTimeout = "20s"
+	config.HTTP.RequestReadTimeout = "20s"
 	config.prefetch.Scope = "all"
 	m := image.mount(t, config)
 	m.Daemon.WaitFor(t, 10*time.Second, "stalled prefetch", func() bool { return proxy.faults.Hits() > 0 })

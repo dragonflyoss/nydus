@@ -101,7 +101,7 @@ impl Dragonfly {
             runtime,
             SeedPeerResolver::new(&dir, dragonfly.scheduler_endpoint.to_string()),
             dragonfly.max_retries as u8,
-            dragonfly.request_timeout,
+            dragonfly.request_read_timeout,
             config.prefetch.request_timeout,
         );
         Ok(Self {
@@ -109,6 +109,7 @@ impl Dragonfly {
             prefetch_client,
             fallback_http_client: Http::new(
                 http.request_timeout,
+                http.request_read_timeout,
                 http.max_retries,
                 http.proxy.as_ref(),
                 &http.tls,
@@ -333,12 +334,14 @@ struct SeedPeerClient {
 impl SeedPeerClient {
     /// Creates the on-demand client, failing fast without a seed peer, and the
     /// prefetch client, waiting for one, sharing one resolve task on `runtime`.
+    /// Both read under `request_read_timeout`. The on-demand client waits that
+    /// long for the proxy, the prefetch client `prefetch_request_timeout`.
     fn clients(
         runtime: &Runtime,
         seed_peer_resolver: SeedPeerResolver,
         max_retries: u8,
-        ondemand_ready_timeout: Duration,
-        prefetch_ready_timeout: Duration,
+        request_read_timeout: Duration,
+        prefetch_request_timeout: Duration,
     ) -> (Self, Self) {
         let (ondemand_tx, ondemand_rx) = watch::channel(ConnectivityState::Connecting);
         let (prefetch_tx, prefetch_rx) = watch::channel(ConnectivityState::Connecting);
@@ -369,6 +372,7 @@ impl SeedPeerClient {
                                 match ProxyWithSeedPeers::builder()
                                     .seed_peers(seed_peers.clone())
                                     .max_retries(*max_retries)
+                                    .read_timeout(request_read_timeout)
                                     .backoff(ExponentialBuilder::default().with_jitter())
                                     .build()
                                     .await
@@ -416,12 +420,12 @@ impl SeedPeerClient {
         (
             Self {
                 state: ondemand_rx,
-                ready_timeout: ondemand_ready_timeout,
+                ready_timeout: request_read_timeout,
                 wait_for_ready: false,
             },
             Self {
                 state: prefetch_rx,
-                ready_timeout: prefetch_ready_timeout,
+                ready_timeout: prefetch_request_timeout,
                 wait_for_ready: true,
             },
         )
