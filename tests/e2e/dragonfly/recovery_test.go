@@ -161,7 +161,7 @@ func TestOutageRecovery(t *testing.T) {
 					if !assert.ErrorIs(t, err, unix.EIO) {
 						t.FailNow()
 					}
-					if !assert.Positive(t, d.of(proxyErrors)) {
+					if !assert.Positive(t, d.of(fallbackErrors)) {
 						t.FailNow()
 					}
 

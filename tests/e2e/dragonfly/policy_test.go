@@ -16,18 +16,23 @@ func TestErrorCodePolicy(t *testing.T) {
 
 	for _, status := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
+			wantFallback := status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+			wantErrors := proxyErrors
+			if wantFallback {
+				wantErrors = fallbackErrors
+			}
+
 			m := c.mountFaulted(t, status)
 			d, err := m.readMeasured(t, status)
 			if !assert.ErrorIs(t, err, unix.EIO) {
 				t.FailNow()
 			}
-			if !assert.NotZero(t, d.of(proxyErrors)) {
+			if !assert.NotZero(t, d.of(wantErrors)) {
 				t.FailNow()
 			}
 
 			m.Daemon.WaitForLog(t, 5*time.Second, "read failed:")
 
-			wantFallback := status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
 			got := strings.Contains(m.Daemon.FileLog(), "falling back to the origin")
 			assert.Equal(t, wantFallback, got)
 		})
