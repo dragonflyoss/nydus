@@ -498,8 +498,10 @@ with kernel read-ahead disabled, so coalescing cannot turn it into a single GET.
 
 - Build the GA binary with `cli,fuse,fileio,dragonfly`. Registry timeouts
   use `http.request_timeout` and `http.request_read_timeout`; Dragonfly uses
-  `request_timeout`, `request_read_timeout`, `max_retries` and
-  `fallback_rate_limit`. Prefetch retries use `prefetch.retry_interval`, not
+  `request_timeout`, `request_read_timeout` and `max_retries`, and the origin
+  fallback uses its own `fallback.request_timeout`,
+  `fallback.request_read_timeout`, `fallback.max_retries` and
+  `fallback.rate_limit`. Prefetch retries use `prefetch.retry_interval`, not
   the old min/max delay pair.
 - Dragonfly prefetch retries transient HTTP statuses once, but transport
   errors terminate the task without origin fallback. Recovery after a

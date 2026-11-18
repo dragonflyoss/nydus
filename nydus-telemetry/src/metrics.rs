@@ -21,7 +21,7 @@
 //! ```text
 //! type      what triggered the backend read        ondemand | prefetch
 //!           or what wrote the chunk group           ondemand | prefetch | redirect
-//! source    where the backend read the bytes       local | origin | proxy | dragonfly | fallback
+//! source    where the backend read the bytes       local | http | http_proxy | dragonfly | fallback
 //! reason    why the cache write failed             decode | checksum | io | unknown_source
 //! status    whether the image bytes are cached     cached | uncached
 //! operation the FUSE operation                     lookup | read | getattr | ...
@@ -39,15 +39,16 @@
 //! stale across them.
 //!
 //! `source` is `local` for the local directory backend, `http` for the
-//! registry backend reading the origin, directly or through a forward proxy,
-//! and `dragonfly` for the registry backend with Dragonfly, its reads that
-//! fell back to the origin included. `type` is `redirect` only on the cache
+//! registry backend reading the origin directly, `http_proxy` for it reading
+//! through a forward proxy, `dragonfly` for it reading the Dragonfly seed
+//! peers and `fallback` for a read the proxy or the seed peers could not
+//! serve that fell back to the origin. `type` is `redirect` only on the cache
 //! writes, for a chunk group filled into its source blob from the ondemand
-//! blob. `reason` tells a corrupted chunk group (`checksum`, the
-//! crc32c mismatched; `decode`, it did not decompress to its declared
-//! size, or a redirect points past its source blob's chunk groups) from a
-//! cache that cannot be written (`io`) and, on the redirect fills, from a
-//! redirect naming a blob the image does not have (`unknown_source`).
+//! blob. `reason` tells a corrupted chunk group (`checksum`, the crc32c
+//! mismatched; `decode`, it did not decompress to its declared size, or a
+//! redirect points past its source blob's chunk groups) from a cache that
+//! cannot be written (`io`) and, on the redirect fills, from a redirect
+//! naming a blob the image does not have (`unknown_source`).
 
 use std::fmt;
 use std::time::Duration;
@@ -192,7 +193,15 @@ pub struct BackendMetrics {
     /// Used to count the backend read bytes.
     read_bytes: IntCounterVec,
 
-    /// Used to record the backend read duration.
+    /// Used to record the backend read duration, from the request until the
+    /// reader took the last byte.
+    ///
+    /// The reader's own pace is part of it: a registry read buffers four body
+    /// chunks ahead of its reader and then waits for it, and a local read is
+    /// timed until its reader is dropped. Slow decompression, verification or
+    /// cache writes behind the reader therefore raise it the way a slow
+    /// backend does, so it bounds the backend's latency from above and is
+    /// not the network's alone.
     read_duration: HistogramVec,
 }
 
@@ -538,9 +547,9 @@ pub enum Source {
     /// The registry backend with Dragonfly, served by the seed peers.
     Dragonfly,
 
-    /// The registry backend with Dragonfly, served by the origin a read fell
-    /// back to.
-    DragonflyFallback,
+    /// The registry backend, served by the origin a read through `http.proxy`
+    /// or Dragonfly fell back to.
+    Fallback,
 }
 
 /// Implements the Display trait.
@@ -552,7 +561,7 @@ impl fmt::Display for Source {
             Source::Http => write!(f, "http"),
             Source::HttpProxy => write!(f, "http_proxy"),
             Source::Dragonfly => write!(f, "dragonfly"),
-            Source::DragonflyFallback => write!(f, "dragonfly_fallback"),
+            Source::Fallback => write!(f, "fallback"),
         }
     }
 }
@@ -708,7 +717,7 @@ mod tests {
             (ReadKind::Prefetch, Source::HttpProxy),
             (ReadKind::Ondemand, Source::Dragonfly),
             (ReadKind::Prefetch, Source::Dragonfly),
-            (ReadKind::Ondemand, Source::DragonflyFallback),
+            (ReadKind::Ondemand, Source::Fallback),
         ];
 
         for (kind, source) in test_cases {
@@ -760,7 +769,7 @@ mod tests {
             ("http", Source::Http.to_string()),
             ("http_proxy", Source::HttpProxy.to_string()),
             ("dragonfly", Source::Dragonfly.to_string()),
-            ("dragonfly_fallback", Source::DragonflyFallback.to_string()),
+            ("fallback", Source::Fallback.to_string()),
             ("decode", WriteFailureReason::Decode.to_string()),
             ("checksum", WriteFailureReason::Checksum.to_string()),
             ("io", WriteFailureReason::Io.to_string()),

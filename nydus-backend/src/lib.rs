@@ -49,8 +49,9 @@ pub struct RawDeviceFile {
 /// Backend
 ///   ├─ Local      full blobs in a directory, named by digest
 ///   └─ Registry   an OCI registry
-///        ├─ Http        the origin
-///        └─ Dragonfly   the seed peers, falling back to the origin
+///        ├─ dragonfly ───▶ the Dragonfly seed peers, falling back to the origin
+///        ├─ http.proxy ──▶ the proxy, falling back to the origin
+///        └─ neither ─────▶ the origin
 /// ```
 pub trait Backend: Send + Sync {
     /// Returns the metrics of the image, shared with the layers above.
@@ -130,7 +131,9 @@ impl dyn Backend {
         match &config.backend {
             BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone(), metrics))),
             #[cfg(feature = "registry")]
-            BackendConfig::Registry(_) => Ok(Arc::new(Registry::new(config, netns, metrics)?)),
+            BackendConfig::Registry(registry) => {
+                Ok(Arc::new(Registry::new(config, registry, netns, metrics)?))
+            }
             #[cfg(not(feature = "registry"))]
             BackendConfig::Registry(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

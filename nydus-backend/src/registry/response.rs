@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -24,8 +24,8 @@ pub(crate) struct Response {
     /// The body, streaming in the chunks it arrives in.
     pub(crate) body: Body,
 
-    /// Whether the transport can still fall back for the body, cleared once
-    /// the body has resumed.
+    /// Whether the read fell back: the fallback of its transport answered it
+    /// or took over its body.
     pub(crate) fallback: Arc<AtomicBool>,
 }
 
@@ -98,22 +98,23 @@ impl Response {
         Fut: Future<Output = io::Result<Response>> + Send + 'static,
     {
         let remaining = self.content_range()?.range;
+        let (offset, length) = (*remaining.start(), remaining.end() - remaining.start() + 1);
         let body = stream::try_unfold(
-            (self.body, remaining, Some(resume), self.fallback.clone()),
-            |(mut body, remaining, mut resume, fallback)| async move {
+            (self.body, remaining, Some(resume)),
+            move |(mut body, remaining, mut resume)| async move {
                 loop {
                     let err = match body.try_next().await {
                         Ok(Some(chunk)) => {
                             let start = remaining.start().saturating_add(chunk.len() as u64);
                             let remaining = start..=*remaining.end();
-                            return Ok(Some((chunk, (body, remaining, resume, fallback))));
+                            return Ok(Some((chunk, (body, remaining, resume))));
                         }
                         Ok(None) if remaining.is_empty() => return Ok(None),
                         Ok(None) => io::Error::new(
                             io::ErrorKind::UnexpectedEof,
                             format!(
-                                "response body ended without {}",
-                                Range::Bounded(remaining.clone())
+                                "registry returned {} bytes, expected {length}",
+                                remaining.start() - offset
                             ),
                         ),
                         Err(err) => err,
@@ -125,7 +126,6 @@ impl Response {
                     };
 
                     body = resume(err, Range::Bounded(remaining.clone())).await?.body;
-                    fallback.store(false, Ordering::Relaxed);
                 }
             },
         )
@@ -254,6 +254,17 @@ mod tests {
                 |result| assert_eq!(result.unwrap_err().to_string(), "reset"),
                 None,
             ),
+            (
+                vec![Ok(b"ab")],
+                vec![Ok(b"c")],
+                |result| {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "registry returned 3 bytes, expected 4"
+                    )
+                },
+                Some(Range::Bounded(2..=3)),
+            ),
         ];
 
         for (chunks, resumed_chunks, expect, expected_range) in test_cases {
@@ -277,8 +288,6 @@ mod tests {
                     }
                 })
                 .unwrap();
-            let fallback = response.fallback.clone();
-            fallback.store(true, Ordering::Relaxed);
 
             let result = response
                 .body
@@ -290,7 +299,6 @@ mod tests {
 
             expect(result);
             assert_eq!(*resumed_range.lock().unwrap(), expected_range);
-            assert_eq!(fallback.load(Ordering::Relaxed), expected_range.is_none());
         }
     }
 

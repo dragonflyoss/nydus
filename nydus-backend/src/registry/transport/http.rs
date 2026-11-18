@@ -19,8 +19,11 @@ use tracing::{debug, warn};
 
 use nydus_config::{ProxyConfig, TlsConfig};
 
-use super::response::Response;
-use super::Transport;
+use crate::Source;
+
+use crate::registry::response::Response;
+
+use super::Fetcher;
 
 /// The HTTP client of the origin registry.
 ///
@@ -41,7 +44,7 @@ pub(crate) struct Http {
     prefetch_retry_interval: RangeInclusive<Duration>,
 
     /// The proxy the requests go through.
-    pub(crate) proxy: Option<ProxyConfig>,
+    proxy: Option<ProxyConfig>,
 }
 
 /// Implements the origin HTTP client.
@@ -91,8 +94,8 @@ impl Http {
                     .add_root_certificate(Certificate::from_der(&cert).map_err(io::Error::other)?);
             }
         }
-        let client = builder.build().map_err(io::Error::other)?;
 
+        let client = builder.build().map_err(io::Error::other)?;
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(max_retries);
         let mut client = ClientBuilder::new(client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy));
@@ -122,9 +125,9 @@ impl Http {
     }
 }
 
-/// Implements the blob transport over the origin HTTP client.
+/// Implements the fetcher over the origin HTTP client.
 #[async_trait]
-impl Transport for Http {
+impl Fetcher for Http {
     /// Sends the `GET` of an on-demand read, the body left streaming.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let now = Instant::now();
@@ -177,6 +180,14 @@ impl Transport for Http {
             retried = true;
         }
     }
+
+    /// Returns the `source` label of the reads, `http_proxy` through a proxy.
+    fn source(&self) -> Source {
+        match &self.proxy {
+            Some(_) => Source::HttpProxy,
+            None => Source::Http,
+        }
+    }
 }
 
 /// A fair leaky bucket of one slot per attempt, inside the retry middleware.
@@ -189,7 +200,6 @@ pub(crate) struct RateLimit {
 impl RateLimit {
     /// Creates a limit of `request_rate_limit` requests per `interval`, both
     /// at least one.
-    #[cfg(feature = "dragonfly")]
     pub(crate) fn new(request_rate_limit: u64, interval: Duration) -> Self {
         Self {
             limiter: RateLimiter::builder()

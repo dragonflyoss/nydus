@@ -30,6 +30,7 @@ type RegistryConfig struct {
 	Auth       string           `json:"auth,omitempty"`
 	HTTP       *HTTPConfig      `json:"http,omitempty"`
 	Dragonfly  *DragonflyConfig `json:"dragonfly,omitempty"`
+	Fallback   *FallbackConfig  `json:"fallback,omitempty"`
 }
 
 // HTTPConfig is the registry backend's HTTP client config.
@@ -58,7 +59,15 @@ type DragonflyConfig struct {
 	RequestTimeout     string `json:"request_timeout,omitempty"`
 	RequestReadTimeout string `json:"request_read_timeout,omitempty"`
 	MaxRetries         *int   `json:"max_retries,omitempty"`
-	FallbackRateLimit  *int   `json:"fallback_rate_limit,omitempty"`
+}
+
+// FallbackConfig is the HTTP client on-demand reads fall back to the origin
+// with.
+type FallbackConfig struct {
+	RequestTimeout     string `json:"request_timeout,omitempty"`
+	RequestReadTimeout string `json:"request_read_timeout,omitempty"`
+	MaxRetries         *int   `json:"max_retries,omitempty"`
+	RateLimit          *int   `json:"rate_limit,omitempty"`
 }
 
 // RegistryBackend serves blobs from an OCI registry.

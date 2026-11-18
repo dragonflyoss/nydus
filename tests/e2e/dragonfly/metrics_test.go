@@ -61,5 +61,5 @@ var (
 	proxyBytes  = metric{"nydus_backend_read_bytes_total", "dragonfly"}
 	proxyErrors = metric{"nydus_backend_read_failure_total", "dragonfly"}
 
-	fallbackReads = metric{"nydus_backend_read_total", "dragonfly_fallback"}
+	fallbackReads = metric{"nydus_backend_read_total", "fallback"}
 )

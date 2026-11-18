@@ -1,62 +1,46 @@
 //! The OCI registry backend: blobs addressed by their full blob digest and
-//! served in byte ranges, over the origin or the Dragonfly seed peers.
+//! served in byte ranges, over the origin, a proxy or the Dragonfly seed
+//! peers.
+//!
+//! ```text
+//! mod.rs       Registry    the blob backend: runs the reads on the runtime, streams them, counts them
+//! client.rs    Client      the registry protocol: the blob URL, the auth handshake, the redirects
+//! transport/   Transport   how one `GET` is sent: the origin, a proxy, the seed peers, the fallback
+//! ```
 
 mod auth;
-#[cfg(feature = "dragonfly")]
-mod dragonfly;
-mod http;
+mod client;
 mod range;
 mod reader;
 mod redirect;
 mod response;
 mod rt;
+mod transport;
 
-use std::future::Future;
 use std::io::{self, BufRead};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use futures::{TryFutureExt, TryStreamExt};
-use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
-use reqwest::StatusCode;
 use tracing::debug;
-use url::Url;
 
-use nydus_config::{BackendConfig, Config, RedactedString};
+use nydus_config::{Config, RedactedString, RegistryConfig};
 use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
 
 use crate::{Backend, Netns, ReadKind, Source};
 
-use self::auth::{Authorizer, Challenge};
-#[cfg(feature = "dragonfly")]
-use self::dragonfly::Dragonfly;
-use self::http::Http;
+use self::auth::Authorizer;
+use self::client::Client;
 use self::range::Range;
 use self::reader::StreamReader;
 use self::redirect::RedirectCache;
-use self::response::Response;
 pub use self::rt::Runtime;
-
-/// The transport of blob `GET`s, the origin or the Dragonfly seed peers, each
-/// call returning after the transport's own retries.
-#[async_trait]
-trait Transport: Send + Sync {
-    /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
-
-    /// Sends the `GET` of a prefetch read, once more after the retry interval
-    /// on a `429`, `5xx` or `408`.
-    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
-
-    /// Returns the transport to fall back to after `err`, or `err` without one.
-    fn fallback(&self, err: io::Error) -> io::Result<&dyn Transport> {
-        Err(err)
-    }
-}
+#[cfg(feature = "dragonfly")]
+use self::transport::Dragonfly;
+use self::transport::{Fetcher, Http, RateLimit, Transport};
 
 /// The blob backend over an OCI registry, running the reads of [`Client`] on
 /// [`Runtime`] and streaming each range to a [`StreamReader`].
@@ -68,8 +52,11 @@ trait Transport: Send + Sync {
 ///   └─ Client
 ///        ├─ Authorizer      the challenge and the token that answers it
 ///        ├─ RedirectCache   the signed URLs blob GETs were redirected to
-///        ├─ Http            the origin, token fetches included
-///        └─ Dragonfly       the seed peers, with a rate-limited Http back to the origin
+///        ├─ Http            the origin, through `http.proxy` when set, for token fetches
+///        └─ Transport       the transport of blob GETs, by the configuration
+///             ├─ dragonfly ───▶ the seed peers, then the origin
+///             ├─ http.proxy ──▶ the proxy, then the origin
+///             └─ neither ─────▶ the origin
 /// ```
 pub(crate) struct Registry {
     /// The registry client, shared with the task of each read.
@@ -82,87 +69,93 @@ pub(crate) struct Registry {
     metrics: Arc<Metrics>,
 }
 
-/// The client of one repository on one registry.
-///
-/// The reads of a blob from a registry with bearer auth that redirects blob
-/// `GET`s to a CDN:
-///
-/// ```text
-/// the first read, get(blob_id, range)
-///   1. redirect cache ───────────────────────────────────────────▶ miss
-///   2. GET blob URL, no token kept ────────────────────────────────▶ 401 WWW-Authenticate
-///   3. fetch a token from the challenge's realm, keep it until it expires
-///   4. GET blob URL again, with the token ─────────────────────────▶ 307 Location
-///   5. GET the location, the signed CDN URL ───────────────────────▶ 206 bytes
-///   6. cache the location for the blob, 10 minutes
-///
-/// the first read with a `registry_token` in the config, kept as the token
-///   1. redirect cache ───────────────────────────────────────────▶ miss, step 4
-///
-/// the reads that follow
-///   1. redirect cache ──▶ hit ──▶ GET the cached location ─────────▶ 206 bytes
-///                                  └─ rejected, the link expired ───▶ evicted, step 4
-///
-/// a read once the token expired, or the registry refuses it
-///   4. GET blob URL ──▶ 401 ──▶ the token is forgotten ────────────▶ step 2
-///
-/// a read through Dragonfly whose body breaks off, see [`Response::resumable`]
-///   the same steps from the origin, for the bytes left
-///
-/// any other status ends the read as an error, a 2xx at any GET as the bytes
-/// ```
-struct Client {
-    /// The registry origin, `scheme://host[:port]/`.
-    addr: Url,
-
-    /// The image repository, such as `library/ubuntu`.
-    repository: String,
-
-    /// The credentials and the `Authorization` kept from the config or the
-    /// last challenge.
-    authorizer: Authorizer,
-
-    /// The signed URLs blob `GET`s were redirected to, by blob hex digest.
-    redirects: RedirectCache,
-
-    /// The direct client to the origin.
-    http: Http,
-
-    /// The Dragonfly transport when configured.
-    dragonfly: Option<Box<dyn Transport>>,
-}
-
 /// Implements the registry backend construction.
 impl Registry {
-    /// Creates a registry backend from the `backend` section of `config`.
+    /// Creates the registry backend `registry` configures.
     pub(crate) fn new(
         config: &Config,
+        registry: &RegistryConfig,
         netns: Option<Netns>,
         metrics: Arc<Metrics>,
     ) -> io::Result<Self> {
-        let BackendConfig::Registry(registry) = &config.backend else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "backend is not a registry",
-            ));
-        };
-
         let runtime = Arc::new(Runtime::new(netns)?);
-        let http = Http::new(
-            registry.http.request_timeout,
-            registry.http.request_read_timeout,
-            registry.http.max_retries,
-            registry.http.proxy.as_ref(),
-            &registry.http.tls,
-            config.prefetch.retry_interval,
-            None,
-        )?;
 
-        let dragonfly: Option<Box<dyn Transport>> = match &registry.dragonfly {
-            #[cfg(feature = "dragonfly")]
-            Some(_) => Some(Box::new(Dragonfly::new(config, &runtime)?)),
-            _ => None,
-        };
+        // Read through Dragonfly when configured, else through the proxy when
+        // configured, both falling back to the origin, else from the origin.
+        let (http_client, transport): (Http, Transport) =
+            match (&registry.dragonfly, &registry.http.proxy) {
+                #[cfg(feature = "dragonfly")]
+                (Some(dragonfly), _) => {
+                    let http_client = Http::new(
+                        registry.http.request_timeout,
+                        registry.http.request_read_timeout,
+                        registry.http.max_retries,
+                        None,
+                        &registry.http.tls,
+                        config.prefetch.retry_interval,
+                        None,
+                    )?;
+
+                    let fallback_http_client = Http::new(
+                        registry.fallback.request_timeout,
+                        registry.fallback.request_read_timeout,
+                        registry.fallback.max_retries,
+                        None,
+                        &registry.http.tls,
+                        config.prefetch.retry_interval,
+                        Some(RateLimit::new(
+                            registry.fallback.rate_limit,
+                            Duration::from_secs(1),
+                        )),
+                    )?;
+
+                    let dragonfly = Dragonfly::new(config, dragonfly, &runtime)?;
+                    let transport = Transport::new(Box::new(dragonfly), Some(fallback_http_client));
+                    (http_client, transport)
+                }
+                (None, Some(proxy)) => {
+                    let http_client = Http::new(
+                        registry.http.request_timeout,
+                        registry.http.request_read_timeout,
+                        registry.http.max_retries,
+                        Some(proxy),
+                        &registry.http.tls,
+                        config.prefetch.retry_interval,
+                        None,
+                    )?;
+
+                    let fallback_http_client = Http::new(
+                        registry.fallback.request_timeout,
+                        registry.fallback.request_read_timeout,
+                        registry.fallback.max_retries,
+                        None,
+                        &registry.http.tls,
+                        config.prefetch.retry_interval,
+                        Some(RateLimit::new(
+                            registry.fallback.rate_limit,
+                            Duration::from_secs(1),
+                        )),
+                    )?;
+
+                    let transport =
+                        Transport::new(Box::new(http_client.clone()), Some(fallback_http_client));
+                    (http_client, transport)
+                }
+                _ => {
+                    let http_client = Http::new(
+                        registry.http.request_timeout,
+                        registry.http.request_read_timeout,
+                        registry.http.max_retries,
+                        None,
+                        &registry.http.tls,
+                        config.prefetch.retry_interval,
+                        None,
+                    )?;
+
+                    let transport = Transport::new(Box::new(http_client.clone()), None);
+                    (http_client, transport)
+                }
+            };
 
         Ok(Self {
             client: Arc::new(Client {
@@ -173,200 +166,12 @@ impl Registry {
                     registry.registry_token.as_ref().map(RedactedString::expose),
                 )?,
                 redirects: RedirectCache::new(),
-                http,
-                dragonfly,
+                http_client,
+                transport,
             }),
             runtime,
             metrics,
         })
-    }
-}
-
-/// Implements the registry requests.
-impl Client {
-    /// Returns the `source` label of the reads.
-    fn source(&self) -> Source {
-        match (&self.dragonfly, &self.http.proxy) {
-            (Some(_), _) => Source::Dragonfly,
-            (None, Some(_)) => Source::HttpProxy,
-            (None, None) => Source::Http,
-        }
-    }
-
-    /// Returns the URL of blob `hex`, `<addr>/v2/<repository>/blobs/sha256:<hex>`.
-    fn blob_url(&self, hex: &str) -> String {
-        format!(
-            "{}/v2/{}/blobs/sha256:{hex}",
-            self.addr.as_str().trim_end_matches('/'),
-            self.repository
-        )
-    }
-
-    /// Returns the transport of blob `GET`s, Dragonfly when configured.
-    fn transport(&self) -> &dyn Transport {
-        match &self.dragonfly {
-            Some(dragonfly) => dragonfly.as_ref(),
-            None => &self.http,
-        }
-    }
-
-    /// Executes `request` with the kept token, answering a `401` with the auth
-    /// handshake.
-    ///
-    /// ```text
-    /// request with the kept token, none when it expired
-    ///   ├─ not 401 ────────────────────────────────────────────────────────▶ answer
-    ///   └─ 401 ─▶ sent with a token? it is forgotten, request again without
-    ///              ├─ no WWW-Authenticate ─────────────────────────────────▶ answer
-    ///              └─ WWW-Authenticate ─▶ fetch a token, keep it ─▶ request again ─▶ answer
-    /// ```
-    async fn execute<F, Fut>(&self, mut headers: HeaderMap, request: F) -> io::Result<Response>
-    where
-        F: Fn(HeaderMap) -> Fut,
-        Fut: Future<Output = io::Result<Response>>,
-    {
-        self.authorizer.authorize(&mut headers);
-        let response = request(headers.clone()).await?;
-        if response.status != StatusCode::UNAUTHORIZED {
-            return Ok(response);
-        }
-
-        let challenge_response = match headers.remove(AUTHORIZATION) {
-            Some(stale) => {
-                self.authorizer.invalidate(&stale);
-                request(headers.clone()).await?
-            }
-            None => response,
-        };
-
-        let challenge = challenge_response
-            .headers
-            .get(WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<Challenge>().ok());
-        let Some(challenge) = challenge else {
-            return Ok(challenge_response);
-        };
-
-        self.authorizer.authenticate(&self.http, challenge).await?;
-        self.authorizer.authorize(&mut headers);
-        request(headers).await
-    }
-
-    /// Fetches the `range` of a blob for an on-demand read, its body resumed
-    /// through the fallback of the transport when it breaks off.
-    async fn get(
-        self: &Arc<Self>,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        range: &Range,
-    ) -> io::Result<Response> {
-        let response = self.get_from(self.transport(), blob_id, range).await?;
-        if !response.fallback.load(Ordering::Relaxed) {
-            return Ok(response);
-        }
-
-        let client = self.clone();
-        let blob_id = *blob_id;
-        response.resumable(move |err, range| async move {
-            let transport = client.transport().fallback(err)?;
-            client.get_from(transport, &blob_id, &range).await
-        })
-    }
-
-    /// Fetches the `range` of a blob from `transport`, through the cached
-    /// redirect when there is one.
-    async fn get_from(
-        &self,
-        transport: &(impl Transport + ?Sized),
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        range: &Range,
-    ) -> io::Result<Response> {
-        let hex = hex::encode(blob_id);
-        let mut headers = HeaderMap::new();
-        headers.insert(RANGE, range.to_string().parse().map_err(io::Error::other)?);
-        if let Some(redirect) = self.redirects.get(&hex) {
-            let response = transport.get(&redirect, headers.clone()).await?;
-            match response.status {
-                status if status.is_success() => {
-                    response.validate_range(range)?;
-                    return Ok(response);
-                }
-                _ if response.is_redirect_expired() => self.redirects.remove(&hex),
-                _ => return Err(response.into_io_error().await),
-            }
-        }
-
-        let url = self.blob_url(&hex);
-        let response = self
-            .execute(headers.clone(), |headers| transport.get(&url, headers))
-            .await?;
-
-        if response.status.is_success() {
-            response.validate_range(range)?;
-            return Ok(response);
-        }
-
-        if !response.status.is_redirection() {
-            return Err(response.into_io_error().await);
-        }
-
-        let location = response.location()?;
-        let redirected = transport.get(&location, headers).await?;
-        if !redirected.status.is_success() {
-            return Err(redirected.into_io_error().await);
-        }
-        redirected.validate_range(range)?;
-
-        self.redirects.insert(&hex, location);
-        Ok(redirected)
-    }
-
-    /// Fetches the `range` of a blob for a prefetch read, through the cached
-    /// redirect when there is one.
-    async fn prefetch(
-        &self,
-        blob_id: &[u8; SHA256_DIGEST_SIZE],
-        range: &Range,
-    ) -> io::Result<Response> {
-        let hex = hex::encode(blob_id);
-        let mut headers = HeaderMap::new();
-        headers.insert(RANGE, range.to_string().parse().map_err(io::Error::other)?);
-        let transport = self.transport();
-        if let Some(redirect) = self.redirects.get(&hex) {
-            let response = transport.prefetch(&redirect, headers.clone()).await?;
-            match response.status {
-                status if status.is_success() => {
-                    response.validate_range(range)?;
-                    return Ok(response);
-                }
-                _ if response.is_redirect_expired() => self.redirects.remove(&hex),
-                _ => return Err(response.into_io_error().await),
-            }
-        }
-
-        let url = self.blob_url(&hex);
-        let response = self
-            .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
-            .await?;
-
-        if response.status.is_success() {
-            response.validate_range(range)?;
-            return Ok(response);
-        }
-
-        if !response.status.is_redirection() {
-            return Err(response.into_io_error().await);
-        }
-
-        let location = response.location()?;
-        let redirected = transport.prefetch(&location, headers).await?;
-        if !redirected.status.is_success() {
-            return Err(redirected.into_io_error().await);
-        }
-        redirected.validate_range(range)?;
-
-        self.redirects.insert(&hex, location);
-        Ok(redirected)
     }
 }
 
@@ -390,6 +195,10 @@ impl Backend for Registry {
             let response = client
                 .get(&blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
                 .await?;
+            if !response.status.is_success() {
+                return Err(response.into_io_error().await);
+            }
+
             let footer_offset = BlobFooter::calculate_offset_by_blob_size(
                 response.content_range()?.complete_length,
             )
@@ -408,15 +217,17 @@ impl Backend for Registry {
                     io::Error::new(io::ErrorKind::InvalidData, "blob meta size exceeds usize")
                 })?;
             let blob_metadata_end = footer.offset().map_err(io::Error::other)?.saturating_sub(1);
-            let blob_metadata_bytes = client
+            let response = client
                 .get(
                     &blob_id,
                     &Range::Bounded(footer.blob_metadata_offset()..=blob_metadata_end),
                 )
-                .await?
-                .bytes(blob_metadata_size)
                 .await?;
+            if !response.status.is_success() {
+                return Err(response.into_io_error().await);
+            }
 
+            let blob_metadata_bytes = response.bytes(blob_metadata_size).await?;
             BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
         })
     }
@@ -483,12 +294,29 @@ impl Backend for Registry {
             .runtime
             .block_on_worker(async move { client.get(&blob_id, &range).await })
             .inspect_err(|_| {
-                self.metrics
-                    .backend
-                    .collect_read_failure_metrics(ReadKind::Ondemand, self.client.source())
+                self.metrics.backend.collect_read_failure_metrics(
+                    ReadKind::Ondemand,
+                    self.client.transport.source(),
+                )
             })?;
 
-        let source = self.client.source();
+        // Fail on an answer that is not the range.
+        if !response.status.is_success() {
+            let source = if response.fallback.load(Ordering::Relaxed) {
+                Source::Fallback
+            } else {
+                self.client.transport.source()
+            };
+
+            self.metrics
+                .backend
+                .collect_read_failure_metrics(ReadKind::Ondemand, source);
+            return self
+                .runtime
+                .block_on_worker(async move { Err(response.into_io_error().await) });
+        }
+
+        let source = self.client.transport.source();
         let fallback = response.fallback.clone();
         let metrics = self.metrics.clone();
         let (tx, reader) = StreamReader::channel();
@@ -501,10 +329,10 @@ impl Backend for Registry {
                 _ = tx.closed() => Err(io::ErrorKind::BrokenPipe.into()),
             };
 
-            // A read the seed peers did not serve to its end went to the origin.
-            let source = match source {
-                Source::Dragonfly if !fallback.load(Ordering::Relaxed) => Source::DragonflyFallback,
-                source => source,
+            let source = if fallback.load(Ordering::Relaxed) {
+                Source::Fallback
+            } else {
+                source
             };
 
             match result {
@@ -547,12 +375,13 @@ impl Backend for Registry {
             .runtime
             .block_on_worker(async move { client.prefetch(&blob_id, &range).await })
             .inspect_err(|_| {
-                self.metrics
-                    .backend
-                    .collect_read_failure_metrics(ReadKind::Prefetch, self.client.source())
+                self.metrics.backend.collect_read_failure_metrics(
+                    ReadKind::Prefetch,
+                    self.client.transport.source(),
+                )
             })?;
 
-        let source = self.client.source();
+        let source = self.client.transport.source();
         let metrics = self.metrics.clone();
         let (tx, reader) = StreamReader::channel();
         self.runtime.spawn(async move {
@@ -591,13 +420,16 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::range::ContentRange;
+    use super::response::Response;
     use super::*;
+    use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::{self, StreamExt};
-    use nydus_config::{HttpConfig, PrefetchConfig};
+    use nydus_config::{BackendConfig, HttpConfig, PrefetchConfig};
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
-    use reqwest::header::{CONTENT_RANGE, LOCATION};
+    use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_RANGE, LOCATION, WWW_AUTHENTICATE};
+    use reqwest::StatusCode;
     use std::collections::VecDeque;
     use std::fs;
     use std::io::Read;
@@ -611,7 +443,7 @@ mod tests {
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
     #[async_trait]
-    impl<T: Transport> Transport for Arc<T> {
+    impl<T: Fetcher> Fetcher for Arc<T> {
         async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
             (**self).get(url, headers).await
         }
@@ -620,8 +452,8 @@ mod tests {
             (**self).prefetch(url, headers).await
         }
 
-        fn fallback(&self, err: io::Error) -> io::Result<&dyn Transport> {
-            (**self).fallback(err)
+        fn source(&self) -> Source {
+            (**self).source()
         }
     }
 
@@ -692,7 +524,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Transport for ScriptedTransport {
+    impl Fetcher for ScriptedTransport {
         async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.headers.lock().unwrap().push(headers);
             self.play()
@@ -701,6 +533,10 @@ mod tests {
         async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.headers.lock().unwrap().push(headers);
             self.play()
+        }
+
+        fn source(&self) -> Source {
+            Source::Dragonfly
         }
     }
 
@@ -753,13 +589,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl Transport for AuthGate {
+    impl Fetcher for AuthGate {
         async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
         }
 
         async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
+        }
+
+        fn source(&self) -> Source {
+            Source::Dragonfly
         }
     }
 
@@ -880,7 +720,7 @@ mod tests {
         addr: SocketAddr,
         auth: Option<&str>,
         registry_token: Option<&str>,
-        transport: impl Transport + 'static,
+        transport: impl Fetcher + 'static,
     ) -> Registry {
         let http = HttpConfig::default();
         Registry {
@@ -889,7 +729,7 @@ mod tests {
                 repository: "library/ubuntu".to_string(),
                 authorizer: Authorizer::new(auth, registry_token).unwrap(),
                 redirects: RedirectCache::new(),
-                http: Http::new(
+                http_client: Http::new(
                     http.request_timeout,
                     http.request_read_timeout,
                     http.max_retries,
@@ -899,11 +739,18 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                dragonfly: Some(Box::new(transport)),
+                transport: Transport::new(Box::new(transport), None),
             }),
             runtime: Arc::new(Runtime::new(None).unwrap()),
             metrics: Arc::new(Metrics::new()),
         }
+    }
+
+    fn configured_registry(config: &Config, netns: Option<Netns>) -> Registry {
+        let BackendConfig::Registry(registry) = &config.backend else {
+            panic!("expected a registry backend, got {:?}", config.backend);
+        };
+        Registry::new(config, registry, netns, Arc::new(Metrics::new())).unwrap()
     }
 
     fn origin_registry(addr: SocketAddr, netns: Option<Netns>) -> Registry {
@@ -911,7 +758,7 @@ mod tests {
             "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n"
         ))
         .unwrap();
-        Registry::new(&config, netns, Arc::new(Metrics::new())).unwrap()
+        configured_registry(&config, netns)
     }
 
     fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<()> {
@@ -922,6 +769,10 @@ mod tests {
                 ReadKind::Ondemand => client.get(&TEST_BLOB_ID, &range).await?,
                 ReadKind::Prefetch => client.prefetch(&TEST_BLOB_ID, &range).await?,
             };
+            if !response.status.is_success() {
+                return Err(response.into_io_error().await);
+            }
+
             buf.copy_from_slice(&response.bytes(buf.len()).await?);
             Ok(())
         })
@@ -1052,7 +903,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
 
             let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
             let mut head = [0u8; 1];
@@ -1089,7 +940,7 @@ mod tests {
                 "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_read_timeout: 1s\n      max_retries: 0\n"
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
 
             let mut buf = [0u8; 4];
             let now = Instant::now();
@@ -1159,7 +1010,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
 
             let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
             let mut head = [0u8; 1];
@@ -1227,7 +1078,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
 
             let now = Instant::now();
             let mut data = Vec::new();
@@ -1247,16 +1098,61 @@ mod tests {
     #[cfg(feature = "dragonfly")]
     #[test]
     fn ondemand_read_is_counted_under_the_source_that_served_it() {
-        let test_cases: Vec<(&'static [&'static str], &str)> = vec![
-            (&["206 Partial Content"], "dragonfly"),
-            (&["503 Service Unavailable"], "dragonfly_fallback"),
-            (&["206 Truncated"], "dragonfly_fallback"),
+        let test_cases: Vec<(
+            &'static [&'static str],
+            &'static [&'static str],
+            &str,
+            Option<Vec<u8>>,
+            u32,
+        )> = vec![
+            (
+                &["206 Partial Content"],
+                &["206 Partial Content"],
+                "dragonfly",
+                Some(b"abcd".to_vec()),
+                0,
+            ),
+            (
+                &["503 Service Unavailable"],
+                &["206 Partial Content"],
+                "fallback",
+                Some(b"abcd".to_vec()),
+                1,
+            ),
+            (
+                &["206 Truncated"],
+                &["206 Partial Content"],
+                "fallback",
+                Some(b"abcd".to_vec()),
+                1,
+            ),
+            (
+                &["404 Not Found"],
+                &["206 Partial Content"],
+                "dragonfly",
+                None,
+                0,
+            ),
+            (
+                &["503 Service Unavailable"],
+                &["503 Service Unavailable"],
+                "fallback",
+                None,
+                1,
+            ),
+            (
+                &["206 Truncated"],
+                &["503 Service Unavailable"],
+                "fallback",
+                None,
+                1,
+            ),
         ];
 
-        for (seed_peer_statuses, source) in test_cases {
+        for (seed_peer_statuses, origin_statuses, source, expected, origin_hits) in test_cases {
             let runtime_dir = tempdir().unwrap();
             let seed_peer = OriginStub::serve(seed_peer_statuses, b"abcd".to_vec());
-            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let origin = OriginStub::serve(origin_statuses, b"abcd".to_vec());
             let cache_dir = runtime_dir.path().join("dragonfly");
             fs::create_dir(&cache_dir).unwrap();
             fs::write(
@@ -1286,7 +1182,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
             let reads = || -> f64 {
                 registry
                     .metrics
@@ -1305,18 +1201,17 @@ mod tests {
             };
 
             let mut data = Vec::new();
-            registry
+            let result = registry
                 .get(&TEST_BLOB_ID, 0, 4)
-                .unwrap()
-                .read_to_end(&mut data)
-                .unwrap();
+                .and_then(|mut reader| reader.read_to_end(&mut data));
             let now = Instant::now();
             while reads() < 1.0 && now.elapsed() < Duration::from_secs(5) {
                 thread::sleep(Duration::from_millis(10));
             }
 
-            assert_eq!(data, b"abcd");
+            assert_eq!(result.ok().map(|_| data), expected);
             assert_eq!(reads(), 1.0);
+            assert_eq!(origin.hits(), origin_hits);
         }
     }
 
@@ -1424,7 +1319,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
 
             let result = match kind {
                 ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, 4),
@@ -1509,7 +1404,7 @@ mod tests {
             "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_timeout: 60s\n      request_read_timeout: 60s\n"
         ))
         .unwrap();
-        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = configured_registry(&config, None);
         let counter = |name: &str| -> f64 {
             registry
                 .metrics
@@ -1628,7 +1523,7 @@ mod tests {
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = configured_registry(&config, None);
 
         let mut buf = [0u8; 4];
         read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
@@ -1641,44 +1536,57 @@ mod tests {
 
     #[cfg(feature = "dragonfly")]
     #[test]
-    fn ondemand_read_without_a_seed_peer_is_counted_under_the_dragonfly_fallback_source() {
-        let runtime_dir = tempdir().unwrap();
-        let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
-        let config: Config = serde_yaml::from_str(&format!(
-            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
-            runtime_dir.path().display(),
-            origin.addr
-        ))
-        .unwrap();
-        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
-        let sources = || -> Vec<String> {
-            registry
-                .metrics
-                .registry()
-                .gather()
-                .iter()
-                .filter(|family| family.get_name() == "nydus_backend_read_total")
-                .flat_map(|family| family.get_metric())
-                .flat_map(|metric| metric.get_label())
-                .filter(|label| label.get_name() == "source")
-                .map(|label| label.get_value().to_string())
-                .collect()
-        };
-
-        let mut buf = [0u8; 4];
-        registry
-            .get(&TEST_BLOB_ID, 0, buf.len())
-            .unwrap()
-            .read_exact(&mut buf)
+    fn ondemand_read_without_a_seed_peer_falls_back_to_the_origin_bypassing_the_proxy() {
+        for proxied in [false, true] {
+            let runtime_dir = tempdir().unwrap();
+            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let proxy = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let http = if proxied {
+                format!(
+                    "    http:\n      proxy:\n        addr: http://{}\n",
+                    proxy.addr
+                )
+            } else {
+                String::new()
+            };
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n{http}    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+                runtime_dir.path().display(),
+                origin.addr
+            ))
             .unwrap();
-        let now = Instant::now();
-        while sources().is_empty() && now.elapsed() < Duration::from_secs(5) {
-            thread::sleep(Duration::from_millis(10));
-        }
+            let registry = configured_registry(&config, None);
+            let sources = || -> Vec<String> {
+                registry
+                    .metrics
+                    .registry()
+                    .gather()
+                    .iter()
+                    .filter(|family| family.get_name() == "nydus_backend_read_total")
+                    .flat_map(|family| family.get_metric())
+                    .flat_map(|metric| metric.get_label())
+                    .filter(|label| label.get_name() == "source")
+                    .map(|label| label.get_value().to_string())
+                    .collect()
+            };
 
-        assert_eq!(&buf, b"abcd");
-        assert_eq!(origin.hits(), 1);
-        assert_eq!(sources(), ["dragonfly_fallback"]);
+            let mut buf = [0u8; 4];
+            registry
+                .get(&TEST_BLOB_ID, 0, buf.len())
+                .unwrap()
+                .read_exact(&mut buf)
+                .unwrap();
+            let now = Instant::now();
+            while sources().is_empty() && now.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            assert_eq!(&buf, b"abcd");
+            assert_eq!(origin.hits(), 1);
+            assert_eq!(proxy.hits(), 0);
+            assert_eq!(sources(), ["fallback"]);
+            assert_eq!(registry.client.http_client.source(), Source::Http);
+        }
     }
 
     #[cfg(feature = "dragonfly")]
@@ -1694,7 +1602,7 @@ mod tests {
             scheduler.local_addr().unwrap()
         ))
         .unwrap();
-        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = configured_registry(&config, None);
 
         let now = Instant::now();
         let mut buf = [0u8; 4];
@@ -1731,7 +1639,7 @@ mod tests {
                 "backend:\n  type: registry\n  config:\n    addr: {addr}\n    repository: library/ubuntu\n"
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
             assert_eq!(registry.client.blob_url("abc123"), expected);
         }
     }
@@ -1748,7 +1656,7 @@ backend:
     registry_token: xyz
 ";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = configured_registry(&config, None);
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
@@ -1756,7 +1664,132 @@ backend:
         let mut headers = HeaderMap::new();
         registry.client.authorizer.authorize(&mut headers);
         assert_eq!(headers[AUTHORIZATION], "Bearer xyz");
-        assert!(registry.client.dragonfly.is_none());
+        assert_eq!(registry.client.transport.source(), Source::Http);
+    }
+
+    #[test]
+    fn proxied_read_is_counted_under_the_source_that_served_it() {
+        let test_cases: Vec<(
+            &'static [&'static str],
+            &'static [&'static str],
+            &str,
+            Option<Vec<u8>>,
+            u32,
+        )> = vec![
+            (
+                &["206 Partial Content"],
+                &["206 Partial Content"],
+                "http_proxy",
+                Some(b"abcd".to_vec()),
+                0,
+            ),
+            (
+                &["503 Service Unavailable"],
+                &["206 Partial Content"],
+                "fallback",
+                Some(b"abcd".to_vec()),
+                1,
+            ),
+            (
+                &["206 Truncated"],
+                &["206 Partial Content"],
+                "fallback",
+                Some(b"abcd".to_vec()),
+                1,
+            ),
+            (
+                &["404 Not Found"],
+                &["206 Partial Content"],
+                "http_proxy",
+                None,
+                0,
+            ),
+            (
+                &["503 Service Unavailable"],
+                &["503 Service Unavailable"],
+                "fallback",
+                None,
+                1,
+            ),
+            (
+                &["206 Truncated"],
+                &["503 Service Unavailable"],
+                "fallback",
+                None,
+                1,
+            ),
+        ];
+
+        for (proxy_statuses, origin_statuses, source, expected, origin_hits) in test_cases {
+            let proxy = OriginStub::serve(proxy_statuses, b"abcd".to_vec());
+            let origin = OriginStub::serve(origin_statuses, b"abcd".to_vec());
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\n      proxy:\n        addr: http://{}\n",
+                origin.addr, proxy.addr
+            ))
+            .unwrap();
+            let registry = configured_registry(&config, None);
+            let reads = || -> f64 {
+                registry
+                    .metrics
+                    .registry()
+                    .gather()
+                    .iter()
+                    .filter(|family| family.get_name() == "nydus_backend_read_total")
+                    .flat_map(|family| family.get_metric())
+                    .filter(|metric| {
+                        metric.get_label().iter().any(|label| {
+                            label.get_name() == "source" && label.get_value() == source
+                        })
+                    })
+                    .map(|metric| metric.get_counter().get_value())
+                    .sum()
+            };
+
+            let mut data = Vec::new();
+            let result = registry
+                .get(&TEST_BLOB_ID, 0, 4)
+                .and_then(|mut reader| reader.read_to_end(&mut data));
+            let now = Instant::now();
+            while reads() < 1.0 && now.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            assert_eq!(result.ok().map(|_| data), expected);
+            assert_eq!(reads(), 1.0);
+            assert_eq!(proxy.hits(), 1);
+            assert_eq!(origin.hits(), origin_hits);
+        }
+    }
+
+    #[test]
+    fn proxied_read_is_counted_under_the_fallback_source_when_the_origin_is_unreachable() {
+        let proxy = OriginStub::serve(&["503 Service Unavailable"], b"abcd".to_vec());
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:1\n    repository: library/ubuntu\n    http:\n      max_retries: 0\n      proxy:\n        addr: http://{}\n",
+            proxy.addr
+        ))
+        .unwrap();
+        let registry = configured_registry(&config, None);
+        let failures = || -> Vec<String> {
+            registry
+                .metrics
+                .registry()
+                .gather()
+                .iter()
+                .filter(|family| family.get_name() == "nydus_backend_read_failure_total")
+                .flat_map(|family| family.get_metric())
+                .flat_map(|metric| metric.get_label())
+                .filter(|label| label.get_name() == "source")
+                .map(|label| label.get_value().to_string())
+                .collect()
+        };
+
+        let err = registry.get(&TEST_BLOB_ID, 0, 4).err().unwrap();
+
+        assert!(err.to_string().contains("502 Bad Gateway"));
+        assert_eq!(proxy.hits(), 1);
+        assert_eq!(failures(), ["fallback"]);
     }
 
     #[test]
@@ -1774,8 +1807,129 @@ backend:
                 "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n{http}"
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
-            assert_eq!(registry.client.source(), source);
+            let registry = configured_registry(&config, None);
+            assert_eq!(registry.client.transport.source(), source);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn new_names_the_source_after_dragonfly_with_or_without_the_http_proxy() {
+        let test_cases = vec![
+            "",
+            "    http:\n      proxy:\n        addr: http://127.0.0.1:65001\n",
+        ];
+
+        for http in test_cases {
+            let runtime_dir = tempdir().unwrap();
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n{http}    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+                runtime_dir.path().display()
+            ))
+            .unwrap();
+            let registry = configured_registry(&config, None);
+
+            assert_eq!(registry.client.transport.source(), Source::Dragonfly);
+            assert!(runtime_dir.path().join("dragonfly").is_dir());
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn new_fails_when_the_dragonfly_transport_cannot_be_built() {
+        let test_cases: Vec<(fn(&std::path::Path) -> (std::path::PathBuf, String), &str)> = vec![
+            (
+                |dir| {
+                    fs::write(dir.join("runtime"), b"").unwrap();
+                    (dir.join("runtime"), String::new())
+                },
+                "failed to create dragonfly runtime directory",
+            ),
+            (
+                |dir| {
+                    (
+                        dir.to_path_buf(),
+                        format!(
+                            "    http:\n      tls:\n        ca_cert: {}\n",
+                            dir.join("missing.pem").display()
+                        ),
+                    )
+                },
+                "failed to read CA cert",
+            ),
+        ];
+
+        for (prepare, expected) in test_cases {
+            let dir = tempdir().unwrap();
+            let (runtime_dir, http) = prepare(dir.path());
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n{http}    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+                runtime_dir.display()
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry) = &config.backend else {
+                panic!("expected a registry backend, got {:?}", config.backend);
+            };
+
+            let err = Registry::new(&config, registry, None, Arc::new(Metrics::new()))
+                .err()
+                .unwrap();
+
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn dragonfly_fallback_retries_by_the_fallback_max_retries_not_the_http_max_retries() {
+        let test_cases = vec![(2, 0, 1), (0, 1, 2)];
+
+        for (http_max_retries, fallback_max_retries, origin_hits) in test_cases {
+            let runtime_dir = tempdir().unwrap();
+            let origin = OriginStub::serve(&["503 Service Unavailable"], b"abcd".to_vec());
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: {http_max_retries}\n    fallback:\n      max_retries: {fallback_max_retries}\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+                runtime_dir.path().display(),
+                origin.addr
+            ))
+            .unwrap();
+            let registry = configured_registry(&config, None);
+
+            let err = read(&registry, ReadKind::Ondemand, &mut [0u8; 4]).unwrap_err();
+
+            assert!(err.to_string().contains("503"));
+            assert_eq!(origin.hits(), origin_hits);
+        }
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn dragonfly_fallback_reads_wait_for_a_slot_of_the_fallback_rate_limit() {
+        let test_cases: Vec<(u64, fn(Duration) -> bool)> = vec![
+            (1, |elapsed| elapsed >= Duration::from_secs(1)),
+            (100, |elapsed| elapsed < Duration::from_secs(1)),
+        ];
+
+        for (rate_limit, expected) in test_cases {
+            let runtime_dir = tempdir().unwrap();
+            let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
+            let config: Config = serde_yaml::from_str(&format!(
+                "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    fallback:\n      rate_limit: {rate_limit}\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
+                runtime_dir.path().display(),
+                origin.addr
+            ))
+            .unwrap();
+
+            let now = Instant::now();
+            let registry = configured_registry(&config, None);
+            for _ in 0..2 {
+                let mut buf = [0u8; 4];
+                read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+                assert_eq!(&buf, b"abcd");
+            }
+
+            assert!(expected(now.elapsed()), "{:?}", now.elapsed());
+            assert_eq!(origin.hits(), 2);
         }
     }
 
@@ -1810,7 +1964,7 @@ backend:
             origin.addr
         ))
         .unwrap();
-        let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = configured_registry(&config, None);
 
         let mut buf = vec![0u8; 4];
         let err = read(&registry, ReadKind::Ondemand, &mut buf).unwrap_err();
@@ -1841,7 +1995,7 @@ backend:
                 origin.addr
             ))
             .unwrap();
-            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = configured_registry(&config, None);
 
             let mut buf = [0u8; 4];
             let result = registry

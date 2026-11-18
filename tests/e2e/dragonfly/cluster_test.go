@@ -136,7 +136,12 @@ func (c *cluster) mount(t testing.TB, img fixture.Image, addr string, o options)
 					RequestTimeout:     o.timeout,
 					RequestReadTimeout: o.timeout,
 					MaxRetries:         mount.Ptr(1),
-					FallbackRateLimit:  mount.Ptr(o.fallbackRateLimit),
+				},
+				Fallback: &mount.FallbackConfig{
+					RequestTimeout:     o.timeout,
+					RequestReadTimeout: o.timeout,
+					MaxRetries:         mount.Ptr(1),
+					RateLimit:          mount.Ptr(o.fallbackRateLimit),
 				},
 			})
 

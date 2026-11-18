@@ -6,7 +6,6 @@ use std::fs::DirBuilder;
 use std::io;
 use std::ops::RangeInclusive;
 use std::os::unix::fs::DirBuilderExt;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -14,7 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
 use rand::Rng;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
@@ -25,26 +24,28 @@ use dragonfly_client_request::{
     ExponentialBuilder, GetRequest, GetResponse, ProxyWithSeedPeers, RequestWithSeedPeers as _,
 };
 
-use nydus_config::{BackendConfig, Config};
+use nydus_config::{Config, DragonflyConfig};
 
-use super::http::{Http, RateLimit};
-use super::range::Range;
-use super::response::Response;
-use super::rt::Runtime;
-use super::Transport;
+use crate::Source;
+
+use crate::registry::response::Response;
+use crate::registry::rt::Runtime;
+
+use super::Fetcher;
 
 use self::seed_peer_resolver::SeedPeerResolver;
 
-/// The Dragonfly transport, one [`SeedPeerClient`] per read kind.
+/// The Dragonfly transport, one [`SeedPeerClient`] per read kind. What it
+/// fails of an on-demand read falls back to the origin in `Transport`.
 ///
 /// ```text
 /// GET ──▶ wait for the client ──▶ seed peer ──▶ 2xx / 3xx / 4xx ──────▶ handed back as is
-///           │                      │            └─ on-demand body breaks off ─▶ SDK: the next seed peer ─▶ origin
+///           │                      │            └─ on-demand body breaks off ─▶ SDK: the next seed peer ─▶ error
 ///           │ no seed peer         │ 429 / 5xx / 408 / transport failure
-///           │                      ├─ on-demand ─▶ next seed peer, max_retries times ─▶ origin
+///           │                      ├─ on-demand ─▶ next seed peer, max_retries times ─▶ error
 ///           │                      └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more ─▶ error
 ///           │                                    └─ transport failure ──────────▶ error
-///           ├─ on-demand ─▶ origin
+///           ├─ on-demand ─▶ error
 ///           └─ prefetch ──▶ wait for a seed peer, within the prefetch request timeout
 /// ```
 pub(crate) struct Dragonfly {
@@ -53,10 +54,6 @@ pub(crate) struct Dragonfly {
 
     /// The seed peer client of prefetch reads, never retrying at once.
     prefetch_client: SeedPeerClient,
-
-    /// The origin client of on-demand fallbacks, limited by
-    /// `fallback_rate_limit`.
-    fallback_http_client: Http,
 
     /// The random wait before a prefetch read is sent once more.
     prefetch_retry_interval: RangeInclusive<Duration>,
@@ -67,9 +64,13 @@ pub(crate) struct Dragonfly {
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Creates the transport the registry backend of `config` configures,
-    /// sharing the seed peers under `<runtime_dir>/dragonfly`.
-    pub(crate) fn new(config: &Config, runtime: &Runtime) -> io::Result<Self> {
+    /// Creates the transport `dragonfly` configures, sharing the seed peers
+    /// under `<runtime_dir>/dragonfly`.
+    pub(crate) fn new(
+        config: &Config,
+        dragonfly: &DragonflyConfig,
+        runtime: &Runtime,
+    ) -> io::Result<Self> {
         let dir = config.runtime_dir.join("dragonfly");
         DirBuilder::new()
             .recursive(true)
@@ -85,20 +86,6 @@ impl Dragonfly {
                 )
             })?;
 
-        let (http, dragonfly) = match &config.backend {
-            BackendConfig::Registry(registry) => registry
-                .dragonfly
-                .as_ref()
-                .map(|dragonfly| (&registry.http, dragonfly)),
-            BackendConfig::Local(_) => None,
-        }
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "backend has no dragonfly configuration",
-            )
-        })?;
-
         let (ondemand_client, prefetch_client) = SeedPeerClient::clients(
             runtime,
             SeedPeerResolver::new(&dir, dragonfly.scheduler_endpoint.to_string()),
@@ -109,18 +96,6 @@ impl Dragonfly {
         Ok(Self {
             ondemand_client,
             prefetch_client,
-            fallback_http_client: Http::new(
-                http.request_timeout,
-                http.request_read_timeout,
-                http.max_retries,
-                http.proxy.as_ref(),
-                &http.tls,
-                config.prefetch.retry_interval,
-                Some(RateLimit::new(
-                    dragonfly.fallback_rate_limit,
-                    Duration::from_secs(1),
-                )),
-            )?,
             request_timeout: dragonfly.request_timeout,
             prefetch_retry_interval: config.prefetch.retry_interval
                 ..=config.prefetch.retry_interval.saturating_mul(2),
@@ -185,43 +160,22 @@ impl Dragonfly {
     }
 }
 
-/// Implements the blob transport over the Dragonfly SDK.
+/// Implements the fetcher over the Dragonfly SDK.
 #[async_trait]
-impl Transport for Dragonfly {
-    /// Fetches `url` through the on-demand client at `Level6`, falling back to
-    /// the origin.
+impl Fetcher for Dragonfly {
+    /// Fetches `url` through the on-demand client at `Level6`.
     async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
-            header: headers.clone(),
+            header: headers,
             priority: Some(Priority::Level6 as i32),
             timeout: self.request_timeout,
             ..Default::default()
         };
 
-        // Fall back to the origin while there is no seed peer.
-        let client = match self.ondemand_client.ready().await {
-            Ok(client) => client,
-            Err(err) => return self.fallback(err)?.get(url, headers).await,
-        };
-
+        let client = self.ondemand_client.ready().await?;
         let now = Instant::now();
         let result = Self::response(client.get(&request).await);
-
-        // Fall back to the origin on an answer outside the range.
-        let range = headers
-            .get(RANGE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::parse::<Range>)
-            .transpose()?;
-
-        let result = match (result, &range) {
-            (Ok(response), Some(range)) if response.status.is_success() => {
-                response.validate_range(range).map(|()| response)
-            }
-            (result, _) => result,
-        };
-
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) through dragonfly returned {} in {:?}",
@@ -233,19 +187,7 @@ impl Transport for Dragonfly {
                 now.elapsed()
             ),
         }
-
-        // Serve a definitive answer, fall back to the origin on anything else.
-        let err = match result {
-            Ok(response) if response.is_transient() => response.into_io_error().await,
-            Ok(response) => {
-                return Ok(Response {
-                    fallback: Arc::new(AtomicBool::new(true)),
-                    ..response
-                })
-            }
-            Err(err) => err,
-        };
-        self.fallback(err)?.get(url, headers).await
+        result
     }
 
     /// Fetches `url` through the prefetch client at `Level3`, below normal
@@ -292,10 +234,9 @@ impl Transport for Dragonfly {
         }
     }
 
-    /// Returns the origin client an on-demand read falls back to after `err`.
-    fn fallback(&self, err: io::Error) -> io::Result<&dyn Transport> {
-        warn!("dragonfly request failed, falling back to the origin: {err}");
-        Ok(&self.fallback_http_client)
+    /// Returns the `source` label of the reads the seed peers serve.
+    fn source(&self) -> Source {
+        Source::Dragonfly
     }
 }
 
@@ -485,14 +426,6 @@ mod tests {
         }])
     }
 
-    fn dragonfly_config(runtime_dir: &Path) -> Config {
-        serde_yaml::from_str(&format!(
-            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
-            runtime_dir.display()
-        ))
-        .unwrap()
-    }
-
     fn write_cache_file(dir: &Path, seed_peers: serde_json::Value, due_in: Duration) {
         let next_refresh_at =
             humantime_serde::re::humantime::format_rfc3339(SystemTime::now() + due_in);
@@ -513,8 +446,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let runtime_dir = dir.path().join("run");
         let runtime = Runtime::new(None).unwrap();
+        let config: Config = serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: local\n  config:\n    dir: /blobs\n",
+            runtime_dir.display()
+        ))
+        .unwrap();
+        let dragonfly: DragonflyConfig =
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:1\n").unwrap();
 
-        Dragonfly::new(&dragonfly_config(&runtime_dir), &runtime).unwrap();
+        Dragonfly::new(&config, &dragonfly, &runtime).unwrap();
 
         for dir in [runtime_dir.clone(), runtime_dir.join("dragonfly")] {
             let metadata = fs::metadata(dir).unwrap();
@@ -529,10 +469,15 @@ mod tests {
         let runtime_dir = dir.path().join("run");
         fs::write(&runtime_dir, b"").unwrap();
         let runtime = Runtime::new(None).unwrap();
+        let config: Config = serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: local\n  config:\n    dir: /blobs\n",
+            runtime_dir.display()
+        ))
+        .unwrap();
+        let dragonfly: DragonflyConfig =
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:1\n").unwrap();
 
-        let err = Dragonfly::new(&dragonfly_config(&runtime_dir), &runtime)
-            .err()
-            .unwrap();
+        let err = Dragonfly::new(&config, &dragonfly, &runtime).err().unwrap();
 
         assert!(err.to_string().contains("dragonfly runtime directory"));
     }

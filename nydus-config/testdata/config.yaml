@@ -24,7 +24,11 @@ backend:
       request_timeout: 10s
       request_read_timeout: 2s
       max_retries: 2
-      fallback_rate_limit: 2
+    fallback:
+      request_timeout: 20s
+      request_read_timeout: 4s
+      max_retries: 1
+      rate_limit: 2
 
 storage:
   dir: /var/lib/nydus/cache
